@@ -864,8 +864,8 @@ class TestFinanceAgentSchema:
             })
 
     def test_schema_count_updated(self):
-        # finance_record is schema #23; asset_archive_record is #25
-        assert len(SCHEMA_NAMES) == 25
+        # finance_record is schema #23; signal_record is #26
+        assert len(SCHEMA_NAMES) == 26
 
     def test_finance_record_in_schema_names(self):
         assert "finance_record" in SCHEMA_NAMES

@@ -19,6 +19,8 @@ Public API:
     insert_cost(...)                 -> None
     insert_thumbnail_candidate(...)  -> None
     insert_title(...)                -> None
+    insert_kg_seed(...)              -> None
+    insert_signal_record(...)        -> None
 
 All write functions accept an open sqlite3.Connection. Callers are
 responsible for commit() and close(). Use get_connection() to obtain
@@ -414,5 +416,115 @@ def insert_title(
         (
             title_id, run_id, episode_id, title_text,
             int(selected), created_at, metadata_version,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# kg_seeds table
+# ---------------------------------------------------------------------------
+
+def insert_kg_seed(
+    conn: sqlite3.Connection,
+    kg_seed_id: str,
+    episode_id: str,
+    run_id: str,
+    extracted_at: str,
+    entity_count: int = 0,
+    relationship_count: int = 0,
+    source_count: int = 0,
+    full_record: Optional[dict] = None,
+    metadata_version: str = "v1",
+) -> None:
+    """
+    Insert or replace a knowledge graph seed record.
+
+    Uses INSERT OR REPLACE so that re-extraction (idempotent writes) updates
+    the existing row rather than raising a uniqueness error.
+
+    Args:
+        conn:               Open connection.
+        kg_seed_id:         Deterministic ID from generate_kg_seed_id().
+        episode_id:         Episode identifier.
+        run_id:             Run UUID4 string (not FK-constrained — kg_seeds
+                            may be written independently of the run lifecycle).
+        extracted_at:       ISO 8601 UTC timestamp of extraction.
+        entity_count:       Number of entities extracted.
+        relationship_count: Number of relationships extracted.
+        source_count:       Number of source entities.
+        full_record:        Complete kg_seed dict. Serialized to JSON.
+        metadata_version:   Schema version tag.
+    """
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO kg_seeds
+            (kg_seed_id, episode_id, run_id, extracted_at,
+             entity_count, relationship_count, source_count,
+             full_record, metadata_version)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            kg_seed_id, episode_id, run_id, extracted_at,
+            entity_count, relationship_count, source_count,
+            json.dumps(full_record) if full_record is not None else None,
+            metadata_version,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# signal_records table
+# ---------------------------------------------------------------------------
+
+def insert_signal_record(
+    conn: sqlite3.Connection,
+    signal_id: str,
+    episode_id: str,
+    run_id: str,
+    ingested_at: str,
+    youtube_video_id: str = "",
+    window_days: int = 0,
+    data_quality: str = "no_data",
+    views: Optional[float] = None,
+    watch_minutes: Optional[float] = None,
+    full_record: Optional[dict] = None,
+    metadata_version: str = "v1",
+) -> None:
+    """
+    Insert or replace a signal record.
+
+    Uses INSERT OR REPLACE so re-ingestion (idempotent writes) updates the
+    existing row without raising a uniqueness error.
+
+    Args:
+        conn:              Open connection.
+        signal_id:         Deterministic ID from generate_signal_id().
+        episode_id:        Episode identifier.
+        run_id:            Run UUID4 string.
+        ingested_at:       ISO 8601 UTC timestamp of ingestion.
+        youtube_video_id:  YouTube video ID.
+        window_days:       Analytics window in days.
+        data_quality:      "captured" | "error" | "no_data".
+        views:             Total views in window (None if no data).
+        watch_minutes:     Total estimated minutes watched (None if no data).
+        full_record:       Complete signal_record dict. Serialized to JSON.
+        metadata_version:  Schema version tag.
+    """
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO signal_records
+            (signal_id, episode_id, run_id, ingested_at,
+             youtube_video_id, window_days, data_quality,
+             views, watch_minutes, full_record, metadata_version)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signal_id, episode_id, run_id, ingested_at,
+            youtube_video_id, window_days, data_quality,
+            views, watch_minutes,
+            json.dumps(full_record) if full_record is not None else None,
+            metadata_version,
         ),
     )

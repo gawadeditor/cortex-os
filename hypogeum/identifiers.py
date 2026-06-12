@@ -187,6 +187,69 @@ def generate_thumbnail_candidate_id(
 
 
 # ---------------------------------------------------------------------------
+# KG Seed ID — deterministic
+# ---------------------------------------------------------------------------
+
+def generate_kg_seed_id(episode_id: str, run_id: str) -> str:
+    """
+    Return a 14-character hex ID for a knowledge graph seed record.
+
+    Deterministic from episode_id and run_id. Two extractions from the
+    same run always produce the same kg_seed_id, enabling idempotent writes.
+
+    Args:
+        episode_id: Episode identifier (e.g. "ep_000").
+        run_id:     Run UUID4 string from generate_run_id().
+
+    Returns:
+        14-character lowercase hexadecimal string.
+    """
+    raw = f"{episode_id.strip().lower()}|{run_id.strip().lower()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:14]
+
+
+def generate_signal_id(episode_id: str, run_id: str) -> str:
+    """
+    Return a 14-character hex ID for a signal record.
+
+    Deterministic from episode_id and run_id. Two ingestions from the same
+    run produce the same signal_id, enabling idempotent writes.
+
+    Args:
+        episode_id: Episode identifier (e.g. "ep_000").
+        run_id:     Run UUID4 string from generate_run_id().
+
+    Returns:
+        14-character lowercase hexadecimal string.
+    """
+    raw = f"signal|{episode_id.strip().lower()}|{run_id.strip().lower()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:14]
+
+
+def generate_entity_id(name: str, entity_type: str, episode_id: str) -> str:
+    """
+    Return an 8-character hex ID for a KG entity.
+
+    Deterministic: same name, type, and episode always produce the same ID.
+    Names are normalized (stripped + lowercased) before hashing.
+
+    Args:
+        name:       Entity name (e.g. "The Antikythera Mechanism").
+        entity_type: Entity class (e.g. "topic", "source", "section").
+        episode_id: Episode identifier — scopes entity IDs per episode.
+
+    Returns:
+        8-character lowercase hexadecimal string.
+    """
+    normalized = "|".join([
+        name.strip().lower(),
+        entity_type.strip().lower(),
+        episode_id.strip().lower(),
+    ])
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

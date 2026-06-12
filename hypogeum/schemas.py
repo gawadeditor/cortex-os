@@ -4,7 +4,7 @@ hypogeum/schemas.py — Schema validators for all pipeline output packages
 Every agent calls validate(schema_name, package) before sealing its output.
 Validation is fail-fast: the first structural problem raises SchemaError immediately.
 
-Validated schemas (24 total):
+Validated schemas (25 total):
   1.  validation_scorecard          — Executive Producer topic validation result
   2.  topic_brief                   — Executive Producer topic brief
   3.  package_deficiency_report     — PDR issued by any agent
@@ -29,6 +29,7 @@ Validated schemas (24 total):
   22. archive_record                  — Archive Agent (R49) post-publish record; ARCHIVED/WARNING/FAILED
   23. finance_record                  — Finance Agent (R50) budget gate + cost ledger; AUTHORIZED/WARNING/BLOCKED/RECORDED
   24. bga_compliance_report           — Brand Guardian Agent (v1A) Pass 1/2 audit report; APPROVED/APPROVED_WITH_FLAGS/REJECTED
+  25. signal_record                   — Phase 5B normalized analytics signal; ingested from analytics_snapshot
 
 Design principles:
   - Stdlib only; no external JSON Schema library
@@ -824,6 +825,26 @@ def _validate_bga_compliance_report(p: dict) -> None:
     _req(summary, s, "flag_count", int, path="summary")
 
 
+def _validate_signal_record(p: dict) -> None:
+    s = "signal_record"
+    _req_str(p, s, "signal_id")
+    _req_str(p, s, "episode_id")
+    _req_str(p, s, "run_id")
+    _req_str(p, s, "ingested_at")
+    _req_str(p, s, "metadata_version")
+    _req_str(p, s, "youtube_video_id")
+    _req_str(p, s, "published_at")
+    _req(p, s, "window_days", int)
+    _req_in(p, s, "data_quality", ("captured", "error", "no_data"))
+    _req_dict(p, s, "metrics")
+    _req_dict(p, s, "normalized_metrics")
+    summary = _req_dict(p, s, "signal_summary")
+    _req(summary, s, "metric_count", int, path="signal_summary")
+    _req_in(summary, s, "data_quality", ("captured", "error", "no_data"),
+            path="signal_summary")
+    _req(summary, s, "has_views", bool, path="signal_summary")
+
+
 def _validate_audio_qa_verdict(p: dict) -> None:
     s = "audio_qa_verdict"
     _req_str(p, s, "verdict_id")
@@ -876,6 +897,7 @@ _VALIDATORS = {
     "finance_record":            _validate_finance_record,
     "bga_compliance_report":     _validate_bga_compliance_report,
     "asset_archive_record":      _validate_asset_archive_record,
+    "signal_record":             _validate_signal_record,
 }
 
 # Expose schema names for discovery and testing

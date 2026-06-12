@@ -123,3 +123,45 @@ CREATE TABLE IF NOT EXISTS titles (
     metadata_version    TEXT    NOT NULL DEFAULT 'v1',
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- kg_seeds
+-- One row per knowledge graph seed extraction per episode.
+-- kg_seed_id is deterministic from episode_id + run_id.
+-- entity_count / relationship_count / source_count mirror extraction_summary.
+-- full_record stores the complete kg_seed JSON for replay/audit.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS kg_seeds (
+    kg_seed_id          TEXT    NOT NULL PRIMARY KEY,
+    episode_id          TEXT    NOT NULL,
+    run_id              TEXT    NOT NULL,
+    extracted_at        TEXT    NOT NULL,
+    entity_count        INTEGER NOT NULL DEFAULT 0,
+    relationship_count  INTEGER NOT NULL DEFAULT 0,
+    source_count        INTEGER NOT NULL DEFAULT 0,
+    full_record         TEXT,
+    metadata_version    TEXT    NOT NULL DEFAULT 'v1'
+);
+
+-- ---------------------------------------------------------------------------
+-- signal_records
+-- One row per analytics signal ingestion per episode.
+-- signal_id is deterministic from episode_id + run_id.
+-- views / watch_minutes / data_quality are indexed summary columns.
+-- full_record stores the complete signal_record JSON for replay/audit.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS signal_records (
+    signal_id           TEXT    NOT NULL PRIMARY KEY,
+    episode_id          TEXT    NOT NULL,
+    run_id              TEXT    NOT NULL,
+    ingested_at         TEXT    NOT NULL,
+    youtube_video_id    TEXT,
+    window_days         INTEGER NOT NULL DEFAULT 0,
+    data_quality        TEXT    NOT NULL DEFAULT 'no_data',
+    views               REAL,
+    watch_minutes       REAL,
+    full_record         TEXT,
+    metadata_version    TEXT    NOT NULL DEFAULT 'v1'
+);

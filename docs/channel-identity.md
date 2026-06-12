@@ -7,6 +7,28 @@
 
 ---
 
+## 0. Enforcement Status (Governance Note)
+
+The rules in this document are the authoritative identity specification. Not all rules
+are enforced in code. The current enforcement coverage is **partial**.
+
+| Rule Category | Enforcement Status |
+|---|---|
+| No human face (thumbnail) | **Enforced** — BGA Pass 2 (text scan) + TIG (vision gate) |
+| No bright/high-key background (thumbnail) | **Enforced** — BGA Pass 2 (text scan) + TIG (vision, 0–40% brightness) |
+| No neon/cyberpunk/sci-fi | **Enforced** — BGA Pass 1/2 (text scan) + TIG (vision) |
+| No talking head / direct-to-camera | **Enforced** — BGA Pass 1 (text scan) |
+| Wordmark present and legible | **Enforced** — BGA Pass 2 (text scan) + TIG (vision) |
+| Warm earth tone palette (video/thumbnail) | **Prompt-only** — VPD + TD system prompts; BGA catches obvious violations in text |
+| Color palette hex values (#080C0E, etc.) | **Not enforced** — hex validation in generated output is deferred |
+| Typography: Cinzel SemiBold / Raleway Regular | **Prompt-only when font is named** — BGA blocks wrong fonts only if explicitly named in prompt; actual rendered font is never validated |
+| Font weights, hierarchy, line spacing | **Not enforced** — acknowledged unenforceable at generation time |
+| BGA Pass 3 (post-render pixel audit) | **Deferred** — no implementation timeline |
+
+For the complete gap register, see `docs/factory-governance-gaps.md`.
+
+---
+
 ## 1. Visual Palette
 
 Seven-swatch palette. Warm earth and gold tones only. No cool colors. No bright colors.

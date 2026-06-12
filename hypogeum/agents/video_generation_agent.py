@@ -29,18 +29,27 @@ Public API:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import hypogeum.asset_registry as _asset_registry
 from hypogeum.agents.provider_router import build_scene_spec
 from hypogeum.config import Config
 from hypogeum.muapi import (
+    MUAPIAuthFailure,
+    MUAPIBudgetExhausted,
     MUAPIBudgetGuard,
+    MUAPIQuotaExhausted,
     submit_scene,
 )
 
 # Attribution passed to MUAPI — generation is driven by the Visual Package Director.
 _AGENT_NAME = "visual_package_director"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -119,15 +128,39 @@ def generate_scene_video(
         short_id=scene.get("short_id"),
     )
 
-    # MUAPIAuthFailure / MUAPIQuotaExhausted / MUAPIBudgetExhausted propagate — halt
-    manifest_entry = submit_scene(
-        scene_spec,
-        config,
-        episode_id,
-        output_dir,
-        agent=_AGENT_NAME,
-        budget_guard=budget_guard,
+    attempted_at = _now_iso()
+    asset_slot_id = _asset_registry.compute_asset_slot_id(
+        episode_id, "video_clip", "muapi", variant=scene_id,
     )
+    version_id = _asset_registry.register_asset_attempt(
+        asset_slot_id=asset_slot_id,
+        asset_type="video_clip",
+        provider="muapi",
+        attempt_number=1,
+        version_index=0,
+        attempted_at=attempted_at,
+    )
+
+    try:
+        manifest_entry = submit_scene(
+            scene_spec,
+            config,
+            episode_id,
+            output_dir,
+            agent=_AGENT_NAME,
+            budget_guard=budget_guard,
+        )
+    except (MUAPIAuthFailure, MUAPIQuotaExhausted, MUAPIBudgetExhausted) as exc:
+        _asset_registry.register_asset_failure(
+            asset_slot_id=asset_slot_id,
+            version_id=version_id,
+            asset_type="video_clip",
+            provider="muapi",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            attempted_at=attempted_at,
+        )
+        raise
 
     gen_status = manifest_entry.get("generation_status", "generation_failed")
 
@@ -140,11 +173,30 @@ def generate_scene_video(
             fallback_used=manifest_entry.get("fallback_used"),
             reused=gen_status == "reused",
         )
+        _asset_registry.register_asset_success(
+            asset_slot_id=asset_slot_id,
+            version_id=version_id,
+            asset_id=manifest_entry.get("asset_id", ""),
+            asset_type="video_clip",
+            provider=manifest_entry.get("provider", "muapi"),
+            attempted_at=attempted_at,
+            model=manifest_entry.get("model_used"),
+            reuse_eligible=True,
+        )
     else:
         log.warn(
             "vpd_scene_failed",
             scene_id=scene_id,
             failure_reason=manifest_entry.get("failure_reason"),
+        )
+        _asset_registry.register_asset_failure(
+            asset_slot_id=asset_slot_id,
+            version_id=version_id,
+            asset_type="video_clip",
+            provider="muapi",
+            error_type="generation_failed",
+            error_message=manifest_entry.get("failure_reason", ""),
+            attempted_at=attempted_at,
         )
 
     # Update existing entry or append new one

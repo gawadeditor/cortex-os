@@ -71,7 +71,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from hypogeum.db import get_connection, initialize_schema
+import hypogeum.asset_registry as _asset_registry
+from hypogeum.db import initialize_schema
 from hypogeum.identifiers import METADATA_VERSION
 from hypogeum.schemas import validate
 
@@ -761,30 +762,21 @@ def run_asset_archive(
             ]
             if new_records:
                 initialize_schema(db_path)
-                conn = get_connection(db_path)
-                try:
-                    for r in new_records:
-                        conn.execute(
-                            """
-                            INSERT OR IGNORE INTO assets
-                                (asset_id, run_id, episode_id, asset_type, provider,
-                                 file_path, created_at, metadata_version)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                r["asset_id"],
-                                _run_id,
-                                episode_id,
-                                r.get("asset_type", ""),
-                                r.get("provider", ""),
-                                r.get("file_path"),
-                                r.get("indexed_at", now),
-                                METADATA_VERSION,
-                            ),
-                        )
-                    conn.commit()
-                finally:
-                    conn.close()
+                for r in new_records:
+                    _asset_registry.register_existing_asset(
+                        asset_id=r["asset_id"],
+                        asset_type=r.get("asset_type", ""),
+                        provider=r.get("provider", ""),
+                        source_stage=_asset_registry.infer_source_stage(
+                            r.get("asset_type", "")
+                        ),
+                        run_id=_run_id,
+                        episode_id=episode_id,
+                        file_path=r.get("file_path"),
+                        model=r.get("model"),
+                        reuse_eligible=bool(r.get("reusable", True)),
+                        db_path=db_path,
+                    )
         except Exception:
             pass  # Asset archive DB writes must never halt the pipeline
 

@@ -31,9 +31,11 @@ Public API:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import hypogeum.asset_registry as _asset_registry
 from hypogeum.config import Config
 from hypogeum.muapi import (
     MUAPIAuthFailure,
@@ -42,6 +44,10 @@ from hypogeum.muapi import (
     MUAPIQuotaExhausted,
     generate_thumbnail,
 )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -149,6 +155,7 @@ def _generate_for_deliverable(
     immediately (halt conditions).
     """
     sorted_candidates = sorted(ranked_candidates, key=lambda c: c.get("rank", 999))
+    version_index = 0
 
     for candidate in sorted_candidates:
         candidate_id = candidate.get("candidate_id", "unknown")
@@ -162,6 +169,18 @@ def _generate_for_deliverable(
                 deliverable_id=deliverable_id,
                 candidate_id=candidate_id,
                 attempt=attempt + 1,
+            )
+            attempted_at = _now_iso()
+            asset_slot_id = _asset_registry.compute_asset_slot_id(
+                episode_id, "thumbnail", "muapi", variant=deliverable_id,
+            )
+            version_id = _asset_registry.register_asset_attempt(
+                asset_slot_id=asset_slot_id,
+                asset_type="thumbnail",
+                provider="muapi",
+                attempt_number=attempt + 1,
+                version_index=version_index,
+                attempted_at=attempted_at,
             )
             try:
                 result = generate_thumbnail(
@@ -181,9 +200,27 @@ def _generate_for_deliverable(
                     candidate_id=candidate_id,
                     asset_id=result.asset_id,
                 )
+                _asset_registry.register_asset_success(
+                    asset_slot_id=asset_slot_id,
+                    version_id=version_id,
+                    asset_id=result.asset_id,
+                    asset_type="thumbnail",
+                    provider="muapi",
+                    attempted_at=attempted_at,
+                    reuse_eligible=True,
+                )
                 return result.asset_id, True
 
-            except (MUAPIAuthFailure, MUAPIQuotaExhausted, MUAPIBudgetExhausted):
+            except (MUAPIAuthFailure, MUAPIQuotaExhausted, MUAPIBudgetExhausted) as exc:
+                _asset_registry.register_asset_failure(
+                    asset_slot_id=asset_slot_id,
+                    version_id=version_id,
+                    asset_type="thumbnail",
+                    provider="muapi",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    attempted_at=attempted_at,
+                )
                 raise  # halt conditions — propagate immediately
 
             except Exception as exc:
@@ -194,6 +231,16 @@ def _generate_for_deliverable(
                     attempt=attempt + 1,
                     error=str(exc),
                 )
+                _asset_registry.register_asset_failure(
+                    asset_slot_id=asset_slot_id,
+                    version_id=version_id,
+                    asset_type="thumbnail",
+                    provider="muapi",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    attempted_at=attempted_at,
+                )
+                version_index += 1
                 # Continue — try next attempt or next candidate
 
     # All candidates exhausted

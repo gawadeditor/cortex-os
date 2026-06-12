@@ -29,9 +29,11 @@ Public API:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import hypogeum.asset_registry as _asset_registry
 from hypogeum.agents.entity_continuity_manager import (
     build_visual_spec_text,
     is_ref_image_eligible,
@@ -46,6 +48,10 @@ from hypogeum.muapi import (
 
 # Attribution passed to MUAPI — generation is driven by the Visual Package Director.
 _AGENT_NAME = "visual_package_director"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def generate_entity_reference_images(
@@ -98,6 +104,19 @@ def generate_entity_reference_images(
             lock_state="final",
         )
 
+        attempted_at = _now_iso()
+        asset_slot_id = _asset_registry.compute_asset_slot_id(
+            episode_id, "reference_image", "muapi", variant=entity_id,
+        )
+        version_id = _asset_registry.register_asset_attempt(
+            asset_slot_id=asset_slot_id,
+            asset_type="reference_image",
+            provider="muapi",
+            attempt_number=1,
+            version_index=0,
+            attempted_at=attempted_at,
+        )
+
         try:
             result = generate_reference_image(
                 entity_id=entity_id,
@@ -114,13 +133,40 @@ def generate_entity_reference_images(
                 entity_id=entity_id,
                 asset_id=result.asset_id,
             )
-        except (MUAPIAuthFailure, MUAPIQuotaExhausted):
+            _asset_registry.register_asset_success(
+                asset_slot_id=asset_slot_id,
+                version_id=version_id,
+                asset_id=result.asset_id,
+                asset_type="reference_image",
+                provider="muapi",
+                attempted_at=attempted_at,
+                reuse_eligible=True,
+            )
+        except (MUAPIAuthFailure, MUAPIQuotaExhausted) as exc:
+            _asset_registry.register_asset_failure(
+                asset_slot_id=asset_slot_id,
+                version_id=version_id,
+                asset_type="reference_image",
+                provider="muapi",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                attempted_at=attempted_at,
+            )
             raise  # halt conditions — propagate immediately
         except Exception as exc:
             log.warn(
                 "vpd_ref_image_failed",
                 entity_id=entity_id,
                 error=str(exc),
+            )
+            _asset_registry.register_asset_failure(
+                asset_slot_id=asset_slot_id,
+                version_id=version_id,
+                asset_type="reference_image",
+                provider="muapi",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                attempted_at=attempted_at,
             )
             # Continue — scene generation proceeds without conditioning for this entity
 

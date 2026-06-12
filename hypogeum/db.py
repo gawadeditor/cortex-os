@@ -31,6 +31,7 @@ Public API:
     update_stage_execution_skipped(...)    -> None
     insert_gate_verdict(...)               -> None
     insert_asset_version(...)              -> None
+    update_asset_version_outcome(...)      -> None
     insert_budget_authorization(...)       -> None
     insert_short(...)                      -> None
     update_short_complete(...)             -> None
@@ -749,6 +750,60 @@ def insert_gate_verdict(
 # ---------------------------------------------------------------------------
 # asset_versions table
 # ---------------------------------------------------------------------------
+
+def update_asset_version_outcome(
+    conn: sqlite3.Connection,
+    version_id: str,
+    status: str,
+    asset_id: Optional[str] = None,
+    error_type: Optional[str] = None,
+    error_message: Optional[str] = None,
+    cost_usd: Optional[float] = None,
+    cost_id: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+) -> None:
+    """
+    Update an asset_versions row written by insert_asset_version().
+
+    Called by asset_registry to close an "attempted" record with the
+    final status ("succeeded" or "failed") and any available fields.
+    COALESCE ensures NULL arguments never overwrite existing non-null values.
+
+    Args:
+        conn:          Open connection.
+        version_id:    UUID4 string from the matching insert_asset_version() call.
+        status:        "succeeded" | "failed".
+        asset_id:      Asset ID (set only on success).
+        error_type:    Exception class name (set only on failure).
+        error_message: Error description (truncated at 4096 chars if set).
+        cost_usd:      Cost incurred for this attempt.
+        cost_id:       FK to costs table record (if available).
+        duration_ms:   Wall-clock generation time in milliseconds.
+    """
+    conn.execute(
+        """
+        UPDATE asset_versions
+        SET status        = ?,
+            asset_id      = COALESCE(?, asset_id),
+            error_type    = COALESCE(?, error_type),
+            error_message = COALESCE(?, error_message),
+            cost_usd      = COALESCE(?, cost_usd),
+            cost_id       = COALESCE(?, cost_id),
+            duration_ms   = COALESCE(?, duration_ms)
+        WHERE version_id = ?
+        """,
+        (
+            status,
+            asset_id,
+            error_type,
+            error_message[:4096] if error_message else None,
+            cost_usd,
+            cost_id,
+            duration_ms,
+            version_id,
+        ),
+    )
+
 
 def insert_asset_version(
     conn: sqlite3.Connection,

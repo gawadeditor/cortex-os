@@ -198,7 +198,7 @@ class TestRunAssetArchiveDB:
         # Should have at least clip, thumbnail, narration, music types
         assert len(asset_types) > 0
         for at in asset_types:
-            assert at in ("clip", "thumbnail", "narration", "music", "caption", "")
+            assert at in ("clip", "video_clip", "thumbnail", "narration", "music", "caption", "")
 
     def test_clip_written_to_db(self, store):
         db_path, catalog_dir, output_dir = store

@@ -1,10 +1,10 @@
 """
 hypogeum/agents/thumbnail_director.py — Thumbnail Director agent (M2.5)
 
-Two-phase execution:
+Three-phase execution:
 
-  Phase 1 — Claude planning:
-    run_agent() sends the Thumbnail Handoff Brief to Claude Sonnet 4.6. Claude returns
+  Phase 1 — GPT planning (config.TD_PLANNING_MODEL, default: openai/gpt-5.5-pro):
+    run_agent() sends the Thumbnail Handoff Brief to the configured model. It returns
     a thumbnail_generation_plan: for each deliverable (main + 3 Shorts), an ordered
     list of candidates ranked by CTR priority, each with a provider-ready image prompt.
 
@@ -15,9 +15,19 @@ Two-phase execution:
         On first success: record asset_id and move to next deliverable.
         If all candidates exhaust all attempts: log error, mark deliverable as failed.
 
-  After Phase 2:
+  Phase 3 — TIG vision gate (config.TIG_ENABLED, default: True):
+    Thumbnail Identity Guardian inspects the actual generated main thumbnail image
+    using Claude vision (config.TIG_MODEL, default: anthropic/claude-sonnet-4.6).
+    Verdict outcomes:
+        APPROVED — no violations; production_ready unaffected.
+        WARNING  — advisory; production_ready unaffected; recorded in package.
+        BLOCKED  — hard violation; production_ready=False unless TIG_FAIL_OPEN=True.
+        error    — TIG call failed; treated as BLOCKED unless TIG_FAIL_OPEN=True.
+
+  After Phase 3:
     Build and validate the thumbnail_package. production_ready = True only if every
-    deliverable succeeded. Write thumbnail_package_{episode_id}.json to disk.
+    deliverable succeeded AND TIG did not BLOCK (unless fail-open).
+    Write thumbnail_package_{episode_id}.json to disk.
 
 Integration boundary:
   TD reads only the Thumbnail Handoff Brief — never the full Visual Package.
@@ -29,25 +39,25 @@ Public API:
         → dict  (final Thumbnail Package)
 
 Integration contracts (must not be violated):
-  - All Claude calls go through run_agent() — never call_claude() directly
+  - All Claude calls go through run_agent() or call_claude() — never requests directly
   - System prompt loaded from disk — never hardcoded inline
   - Output validated by run_agent() via schemas.py for the plan; TD validates the final package
   - No environment access — all settings via Config
   - All logging via get_logger() — never print() or stdlib logging
   - MUAPI calls go through muapi.generate_thumbnail()
-
-Model: Claude Sonnet 4.6 (frozen — TD governance decision)
-Max tokens: 4,096 (generation plan is compact — candidate rankings + prompts only)
+  - TIG calls go through thumbnail_identity_guardian.run_thumbnail_identity_guardian()
 
 Logging events emitted:
-  td_planning_started          — info  — before run_agent() call
-  td_planning_completed        — info  — after run_agent() returns
-  td_muapi_phase_started       — info  — before image generation loop
+  td_planning_started           — info  — before run_agent() call
+  td_planning_completed         — info  — after run_agent() returns
+  td_muapi_phase_started        — info  — before image generation loop
   td_thumbnail_generation_start — info  — before each generate_thumbnail() attempt
-  td_thumbnail_generated       — info  — thumbnail successfully generated
-  td_thumbnail_attempt_failed  — warn  — one attempt failed; will retry or move to next candidate
-  td_all_candidates_failed     — error — all candidates exhausted for a deliverable
-  td_package_finalized         — info  — thumbnail_package written to disk
+  td_thumbnail_generated        — info  — thumbnail successfully generated
+  td_thumbnail_attempt_failed   — warn  — one attempt failed; will retry or move to next candidate
+  td_all_candidates_failed      — error — all candidates exhausted for a deliverable
+  td_tig_completed              — info  — TIG verdict logged (APPROVED/WARNING/BLOCKED/error)
+  td_tig_blocked                — error — TIG verdict is BLOCKED or error (fail-closed)
+  td_package_finalized          — info  — thumbnail_package written to disk
 """
 
 from __future__ import annotations
@@ -180,9 +190,41 @@ def run_thumbnail_director(
     )
 
     # ------------------------------------------------------------------
+    # Phase 3 — TIG vision gate (post-generation identity check)
+    # ------------------------------------------------------------------
+    thumbnail_identity_report = None
+    tig_blocks = False
+    if getattr(config, "TIG_ENABLED", True):
+        from hypogeum.agents.thumbnail_identity_guardian import (
+            run_thumbnail_identity_guardian,
+        )
+        thumbnail_identity_report = run_thumbnail_identity_guardian(
+            episode_id=episode_id,
+            image_path=main_thumb_local,
+            config=config,
+            output_dir=_resolve_output_dir,
+        )
+        tig_verdict = thumbnail_identity_report.get("verdict", "error")
+        log.info(
+            "td_tig_completed",
+            verdict=tig_verdict,
+            blocking_count=thumbnail_identity_report.get("blocking_count", 0),
+            warning_count=thumbnail_identity_report.get("warning_count", 0),
+        )
+        if tig_verdict in ("BLOCKED", "error"):
+            if not getattr(config, "TIG_FAIL_OPEN", False):
+                tig_blocks = True
+                log.error(
+                    "td_tig_blocked",
+                    verdict=tig_verdict,
+                    blocking_count=thumbnail_identity_report.get("blocking_count", 0),
+                    fail_open=False,
+                )
+
+    # ------------------------------------------------------------------
     # Build and validate Thumbnail Package
     # ------------------------------------------------------------------
-    production_ready = main_ok and all(ok for _, _, ok in short_results)
+    production_ready = main_ok and all(ok for _, _, ok in short_results) and not tig_blocks
 
     thumbnail_package = {
         "thumbnail_package_id": f"tp_{episode_id}",
@@ -205,6 +247,7 @@ def run_thumbnail_director(
             "quality": config.THUMBNAIL_IMAGE_QUALITY,
         },
         "thumbnail_qa_report": thumbnail_qa_report,
+        "thumbnail_identity_report": thumbnail_identity_report,
     }
 
     try:

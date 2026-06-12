@@ -237,8 +237,9 @@ def _default_tig_call(image_path: Path, episode_id: str, config) -> str:
         },
     ]
 
+    model_slug = getattr(config, "TIG_MODEL", _TIG_MODEL) if config is not None else _TIG_MODEL
     result = call_claude(
-        model_slug=_TIG_MODEL,
+        model_slug=model_slug,
         messages=messages,
         max_tokens=_TIG_MAX_TOKENS,
         config=config,

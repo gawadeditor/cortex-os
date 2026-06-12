@@ -420,6 +420,16 @@ class Config:
         # --- Brand Guardian Agent ---
         self.BGA_ENABLED = _get_bool("BGA_ENABLED", default=False)
 
+        # --- Thumbnail Identity Guardian ---
+        self.TIG_ENABLED = _get_bool("TIG_ENABLED", default=True)
+        self.TIG_MODEL = _get_optional(
+            "TIG_MODEL", default="anthropic/claude-sonnet-4.6"
+        )
+        # TIG_FAIL_OPEN=false (default) → BLOCKED/error verdict makes production_ready=False.
+        # TIG_FAIL_OPEN=true  → BLOCKED/error is logged but does not block production_ready.
+        # Default is fail-closed for ep_000.
+        self.TIG_FAIL_OPEN = _get_bool("TIG_FAIL_OPEN", default=False)
+
         # --- Per-agent text reasoning model assignments ---
         self.RD_MODEL = _get_optional(
             "RD_MODEL", default="anthropic/claude-opus-4.6"

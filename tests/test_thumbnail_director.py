@@ -1,7 +1,7 @@
 """
 tests/test_thumbnail_director.py — Unit tests for the Thumbnail Director agent (M2.5)
 
-All Claude calls (run_agent) and MUAPI calls (generate_thumbnail) are mocked.
+All Claude calls (run_agent), MUAPI calls (generate_thumbnail), and TIG calls are mocked.
 No network calls. No real API credits consumed.
 
 Test coverage:
@@ -19,6 +19,7 @@ Test coverage:
   TestTDGenerateThumbnailArgs  — correct aspect_ratio and prompt passed to generate_thumbnail
   TestThumbnailGenerationPlanSchema — schema validator unit tests
   TestTDSmokeTestMode          — SMOKE_TEST_MODE caps main_episode to 1 candidate
+  TestTDTIG                    — TIG vision gate: enabled/disabled, verdicts, fail-open/closed
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ _ALL_ENV_VARS = [
     "TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_ACCESS_TOKEN", "TIKTOK_OPEN_ID",
     "META_APP_ID", "META_APP_SECRET", "META_ACCESS_TOKEN", "META_INSTAGRAM_ACCOUNT_ID",
     "META_FACEBOOK_PAGE_ID", "META_GRAPH_API_VERSION", "META_STAGING_BASE_URL",
+    "TIG_ENABLED", "TIG_MODEL", "TIG_FAIL_OPEN",
 ]
 
 
@@ -992,3 +994,179 @@ class TestTDSmokeTestMode:
 
         result_plan = self._run_td(cfg, plan, tmp_path)
         assert len(result_plan["main_episode"]["ranked_candidates"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# TIG (Thumbnail Identity Guardian) fixtures and helpers
+# ---------------------------------------------------------------------------
+
+_TIG_TARGET = "hypogeum.agents.thumbnail_identity_guardian.run_thumbnail_identity_guardian"
+
+
+def _approved_tig_report(episode_id: str = "ep_001") -> dict:
+    return {
+        "episode_id": episode_id, "verdict": "APPROVED",
+        "violations": [], "blocking_count": 0, "warning_count": 0,
+    }
+
+
+def _warning_tig_report(episode_id: str = "ep_001") -> dict:
+    return {
+        "episode_id": episode_id, "verdict": "WARNING",
+        "violations": [
+            {"rule_id": "TIG-W01", "severity": "WARNING",
+             "description": "Background brightness elevated."},
+        ],
+        "blocking_count": 0, "warning_count": 1,
+    }
+
+
+def _blocked_tig_report(episode_id: str = "ep_001") -> dict:
+    return {
+        "episode_id": episode_id, "verdict": "BLOCKED",
+        "violations": [
+            {"rule_id": "TIG-02", "severity": "BLOCKING",
+             "description": "Bright background detected."},
+        ],
+        "blocking_count": 1, "warning_count": 0,
+    }
+
+
+def _error_tig_report(episode_id: str = "ep_001") -> dict:
+    return {
+        "episode_id": episode_id, "verdict": "error",
+        "violations": [], "blocking_count": 0, "warning_count": 0,
+        "error": "Simulated API call failure",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _patch_tig_approved():
+    """
+    Patch TIG to APPROVED for every test in this module.
+
+    Without this, any test that calls run_thumbnail_director() with TIG_ENABLED=True
+    (the default) would attempt to read main_thumb_local which doesn't exist in
+    tmp_path, causing TIG to return BLOCKED and make production_ready=False.
+
+    TIG-specific tests override by adding their own patch(_TIG_TARGET, ...) inside
+    their test body — the innermost patch wins.
+    """
+    with patch(_TIG_TARGET, return_value=_approved_tig_report()):
+        yield
+
+
+# ---------------------------------------------------------------------------
+# TestTDTIG — Thumbnail Identity Guardian integration in TD
+# ---------------------------------------------------------------------------
+
+class TestTDTIG:
+
+    def _run_full_td(self, config, tmp_path, **gen_kwargs):
+        """Run TD with full generate_thumbnail side_effect returning all 4 results."""
+        plan = _make_generation_plan()
+        side_effect = gen_kwargs.pop(
+            "side_effect",
+            lambda deliverable_id, **kw: _make_thumbnail_result(deliverable_id),
+        )
+        with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
+             patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
+                   side_effect=side_effect):
+            return run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
+
+    def test_tig_called_when_enabled(self, tmp_path):
+        config = make_config()  # TIG_ENABLED=True by default
+        with patch(_TIG_TARGET, return_value=_approved_tig_report()) as mock_tig:
+            self._run_full_td(config, tmp_path)
+        mock_tig.assert_called_once()
+
+    def test_tig_skipped_when_disabled(self, tmp_path):
+        config = make_config()
+        config.TIG_ENABLED = False
+        with patch(_TIG_TARGET, return_value=_approved_tig_report()) as mock_tig:
+            self._run_full_td(config, tmp_path)
+        mock_tig.assert_not_called()
+
+    def test_tig_approved_production_ready_true(self, tmp_path):
+        config = make_config()
+        with patch(_TIG_TARGET, return_value=_approved_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        assert result["package_integrity"]["production_ready"] is True
+
+    def test_tig_warning_production_ready_true(self, tmp_path):
+        """TIG WARNING is advisory only — production_ready must remain True."""
+        config = make_config()
+        with patch(_TIG_TARGET, return_value=_warning_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        assert result["package_integrity"]["production_ready"] is True
+
+    def test_tig_warning_recorded_in_package(self, tmp_path):
+        config = make_config()
+        with patch(_TIG_TARGET, return_value=_warning_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        report = result["thumbnail_identity_report"]
+        assert report["verdict"] == "WARNING"
+        assert report["warning_count"] == 1
+
+    def test_tig_blocked_production_ready_false_fail_closed(self, tmp_path):
+        """TIG BLOCKED + TIG_FAIL_OPEN=False (default) → production_ready=False."""
+        config = make_config()  # TIG_FAIL_OPEN=False by default
+        with patch(_TIG_TARGET, return_value=_blocked_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        assert result["package_integrity"]["production_ready"] is False
+
+    def test_tig_blocked_recorded_in_package(self, tmp_path):
+        config = make_config()
+        with patch(_TIG_TARGET, return_value=_blocked_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        report = result["thumbnail_identity_report"]
+        assert report["verdict"] == "BLOCKED"
+        assert report["blocking_count"] == 1
+
+    def test_tig_error_fail_closed_production_ready_false(self, tmp_path):
+        """TIG error verdict + TIG_FAIL_OPEN=False → production_ready=False."""
+        config = make_config()  # TIG_FAIL_OPEN=False by default
+        with patch(_TIG_TARGET, return_value=_error_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        assert result["package_integrity"]["production_ready"] is False
+
+    def test_tig_error_fail_open_production_ready_true(self, tmp_path):
+        """TIG error verdict + TIG_FAIL_OPEN=True → production_ready not blocked by TIG."""
+        config = make_config()
+        config.TIG_FAIL_OPEN = True
+        with patch(_TIG_TARGET, return_value=_error_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        assert result["package_integrity"]["production_ready"] is True
+
+    def test_tig_blocked_fail_open_production_ready_true(self, tmp_path):
+        """TIG BLOCKED + TIG_FAIL_OPEN=True → production_ready not blocked by TIG."""
+        config = make_config()
+        config.TIG_FAIL_OPEN = True
+        with patch(_TIG_TARGET, return_value=_blocked_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        assert result["package_integrity"]["production_ready"] is True
+
+    def test_package_includes_thumbnail_identity_report_key(self, tmp_path):
+        config = make_config()
+        result = self._run_full_td(config, tmp_path)
+        assert "thumbnail_identity_report" in result
+
+    def test_thumbnail_identity_report_none_when_tig_disabled(self, tmp_path):
+        config = make_config()
+        config.TIG_ENABLED = False
+        result = self._run_full_td(config, tmp_path)
+        assert result["thumbnail_identity_report"] is None
+
+    def test_thumbnail_identity_report_has_verdict_when_tig_runs(self, tmp_path):
+        config = make_config()
+        with patch(_TIG_TARGET, return_value=_approved_tig_report()):
+            result = self._run_full_td(config, tmp_path)
+        assert "verdict" in result["thumbnail_identity_report"]
+        assert result["thumbnail_identity_report"]["verdict"] == "APPROVED"
+
+    def test_tig_receives_episode_id(self, tmp_path):
+        config = make_config()
+        with patch(_TIG_TARGET, return_value=_approved_tig_report()) as mock_tig:
+            self._run_full_td(config, tmp_path)
+        call_kwargs = mock_tig.call_args[1]
+        assert call_kwargs.get("episode_id") == "ep_001"

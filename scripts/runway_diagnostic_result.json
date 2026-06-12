@@ -1,0 +1,175 @@
+{
+  "diagnostic_run_at": "2026-06-06T06:15:13Z",
+  "t2v": {
+    "test": "runway-text-to-video",
+    "model": "runway-text-to-video",
+    "prompt": "A slow cinematic shot of an ancient bronze astronomical device on a dark museum table, no people, no text, no dialogue.",
+    "endpoint": "https://api.muapi.ai/api/v1/runway-text-to-video",
+    "payload_shape": {
+      "prompt": "<string>",
+      "aspect_ratio": "16:9",
+      "duration": 5
+    },
+    "budget_cap": 0.3,
+    "estimated_cost": 0.15,
+    "request_id": "e33e7d09-d538-47d1-a4bf-81018f8c55b3",
+    "submission_http_status": 200,
+    "submission_error_body": null,
+    "poll_history": [
+      {
+        "attempt": 1,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 2,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 3,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 4,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 5,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 6,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 7,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 8,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 9,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 10,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 11,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 12,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 13,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 14,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 15,
+        "http_status": 200,
+        "status": "completed"
+      }
+    ],
+    "final_status": "completed",
+    "final_error_body": null,
+    "output_url": "https://cdn.muapi.ai/outputs/0f8f08425df14bfdbc6f929070b919f2.mp4",
+    "credits_charged": 0.15,
+    "outcome": "success",
+    "failure_category": null
+  },
+  "i2v": {
+    "test": "runway-image-to-video",
+    "model": "runway-image-to-video",
+    "prompt": "A slow cinematic shot of an ancient bronze astronomical device on a dark museum table, no people, no text, no dialogue.",
+    "endpoint": "https://api.muapi.ai/api/v1/runway-image-to-video",
+    "reference_image_url": "https://cdn.muapi.ai/outputs/1f4a0ff3dace43c598f2b2ba5b8ee333.jpg",
+    "payload_shape": {
+      "prompt": "<string>",
+      "aspect_ratio": "16:9",
+      "duration": 5,
+      "image_url": "<muapi_cdn_url>"
+    },
+    "budget_cap": 0.3,
+    "estimated_cost": 0.15,
+    "request_id": "c1ea52bc-56f8-4b3d-ba9f-446764db4214",
+    "submission_http_status": 200,
+    "submission_error_body": null,
+    "poll_history": [
+      {
+        "attempt": 1,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 2,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 3,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 4,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 5,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 6,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 7,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 8,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 9,
+        "http_status": 200,
+        "status": "completed"
+      }
+    ],
+    "final_status": "completed",
+    "final_error_body": null,
+    "output_url": "https://cdn.muapi.ai/outputs/f1c669b6471344d49aa355374361cc8f.mp4",
+    "credits_charged": 0.15,
+    "outcome": "success",
+    "failure_category": null
+  },
+  "diagnosis": "runway-text-to-video: WORKING. T2V submissions succeed. The ep_000_lite T2V failures (s02, s04) were transient provider-side job failures, not a payload or config error. I2V (runway-image-to-video) also confirmed working \u2014 images_list fix is correct.",
+  "runway_usable_for_episode_zero": true
+}

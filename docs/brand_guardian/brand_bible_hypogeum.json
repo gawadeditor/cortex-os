@@ -1,0 +1,669 @@
+{
+  "_meta": {
+    "schema_version": "1.0",
+    "schema_status": "defined",
+    "content_status": "extracted_v1",
+    "_global_status": "inactive",
+    "_note": "Content extracted from approved visual reference docs/brand_guardian/bible.png. _global_status remains 'inactive' until human review and approval. Set to 'active' only after gap report items are resolved.",
+    "last_updated": "2026-06-06",
+    "approved_by": null,
+    "bible_version": "v1",
+    "source_reference": "docs/brand_guardian/bible.png — approved Version 2 visual direction reference",
+    "extraction_notes": "Hex values extracted from image swatches. Exact precision limited by image resolution — verify by eyedropping from the original source file before activation.",
+    "audit_notes": "Extraction audit performed 2026-06-06. See docs/brand_guardian/extraction_audit.md. Items marked REQUIRES_HUMAN_APPROVAL are not binding BGA rules until explicitly approved. motion_language._binding set to false (static image — no motion evidence). Pre-existing policy items marked with _source field."
+  },
+
+  "identity": {
+    "_status": "extracted",
+    "_binding": true,
+    "_description": "The foundational character of the channel's visual presence.",
+    "channel_name": "The Hypogeum Chronicles",
+    "wordmark": "THE HYPOGEUM CHRONICLES",
+    "wordmark_structure": {
+      "line_1": "THE",
+      "line_1_treatment": "small caps, wide tracking, subordinate weight",
+      "line_2": "HYPOGEUM",
+      "line_2_treatment": "primary display, full weight, dominant scale",
+      "line_3": "— CHRONICLES —",
+      "line_3_treatment": "medium scale, em-dash decorators flanking text, equal visual weight to line 1"
+    },
+    "tagline": "UNEARTHING THE STORY BENEATH OUR FEET",
+    "tagline_treatment": "sentence case or caps, Raleway Regular, small scale, subordinate to wordmark",
+    "visual_personality": "Ancient authority. Archaeological gravitas. Measured mystery. The visual language of a serious excavation, not a sensationalist spectacle.",
+    "emotional_register": {
+      "primary": "awe",
+      "secondary": ["curiosity", "unease", "reverence", "discovery"],
+      "forbidden_registers": ["sensationalism", "horror", "comedy", "sentimentality", "celebration", "brightness"]
+    },
+    "content_pillars": [
+      "ARCHAEOLOGY",
+      "HISTORY",
+      "MYSTERY",
+      "DISCOVERY",
+      "HERITAGE",
+      "LEGACY"
+    ],
+    "audience_expectation": "REQUIRES_HUMAN_APPROVAL — not in image; invented editorial copy",
+    "visual_positioning": "REQUIRES_HUMAN_APPROVAL — not in image; invented editorial characterisation",
+    "brand_promise": "Unearthing the story beneath our feet.",
+    "_brand_promise_note": "Restated from tagline. Tagline is directly observed (HIGH). The reframing as 'brand_promise' is an interpretation."
+  },
+
+  "color_system": {
+    "_status": "extracted",
+    "_binding": true,
+    "_description": "Seven-swatch palette from near-black to parchment cream. Verified 2026-06-08 from approved Style Board provided by channel owner. All 7 values are human-approved and canonical. Initial image extraction produced 8 values (all NOT_VERIFIED) — approved Style Board collapses to 7 swatches (burnished_bronze removed as resolution artefact).",
+    "_extraction_confidence": "VERIFIED — all 7 hex values confirmed from approved Style Board 2026-06-08.",
+    "primary_palette": {
+      "void_black": {
+        "hex": "#080C0E",
+        "role": "primary background",
+        "usage": "base background for all primary surfaces, episode renders, title cards"
+      },
+      "deep_stone": {
+        "hex": "#1A1D20",
+        "role": "secondary background / depth layer",
+        "usage": "background variant, shadow fills, panel backgrounds, overlay bases"
+      },
+      "charcoal_earth": {
+        "hex": "#2B2E33",
+        "role": "surface / mid-depth layer",
+        "usage": "card surfaces, hover states, secondary panel fills"
+      },
+      "ancient_soil": {
+        "hex": "#5C4A2F",
+        "role": "warm dark accent / depth highlight",
+        "usage": "border elements, separation lines, low-level accent fills"
+      },
+      "antique_gold": {
+        "hex": "#C49A42",
+        "role": "primary accent",
+        "usage": "icon fills, key text accents, decorative graphic elements, logo secondary color"
+      },
+      "warm_gold": {
+        "hex": "#E7D6B3",
+        "role": "primary text accent / highlight gold",
+        "usage": "primary accent text on dark backgrounds, logo principal color, headline highlight, graphic element outlines"
+      },
+      "parchment_cream": {
+        "hex": "#F5F3EE",
+        "role": "primary light text / parchment surface",
+        "usage": "body text on dark backgrounds, subtitle text, light text elements, texture highlight"
+      }
+    },
+    "thumbnail_palette": {
+      "_note": "Thumbnail color may depart from primary palette for CTR, but must remain within these bounds.",
+      "allowed_range": "Dark to warm-gold. High contrast between background and foreground. Stone and earth tones only for backgrounds.",
+      "dominant_background": "void_black or deep_stone",
+      "accent_color": "warm_gold or antique_gold",
+      "text_color": "warm_gold (title) + parchment_cream (subtitle)",
+      "forbidden_colors": ["bright white (#FFFFFF)", "pure red", "neon any hue", "cool blue", "green", "purple", "pink", "bright orange"],
+      "contrast_minimum": "WCAG AA minimum. Gold text on near-black background."
+    },
+    "text_on_dark": "warm_gold (#E7D6B3) for display/titles. parchment_cream (#F5F3EE) for body.",
+    "text_on_light": "TBD — no light surfaces appear in reference. Avoid until defined.",
+    "overlay_opacity_range": "REQUIRES_HUMAN_APPROVAL — not in image; invented value with no visual basis",
+    "period_palette_constraints": {
+      "_note": "Episode-specific period palettes must harmonise with the brand color system.",
+      "global_forbidden_colors": ["bright white", "neon hues", "cool blues", "greens", "pinks", "purples", "bright oranges"]
+    }
+  },
+
+  "typography": {
+    "_status": "extracted",
+    "_binding": true,
+    "_description": "Two-typeface system. Extracted directly from the typography specimen in bible.png. Font names are legible and certain.",
+    "_extraction_confidence": "VERY HIGH — font names are clearly printed in the reference.",
+    "primary_typeface": {
+      "family": "Cinzel",
+      "weight": "SemiBold",
+      "full_name": "Cinzel SemiBold",
+      "classification": "Classical serif — Roman inscriptional letterform",
+      "use_case": "All display text: channel name, episode titles, thumbnail headlines, section headers, graphic element labels",
+      "case_rule": "ALL CAPS only. Cinzel is a caps-only Roman typeface — lowercase forms are small caps.",
+      "character_set_confirmed": "A-Z, a-z (small caps), 0-9",
+      "_note": "Google Font. Freely available. Modelled on classical Roman inscriptions."
+    },
+    "secondary_typeface": {
+      "family": "Raleway",
+      "weight": "Regular",
+      "full_name": "Raleway Regular",
+      "classification": "Geometric sans-serif",
+      "use_case": "All body text: subtitles, taglines, captions, Shorts overlays, metadata copy, supporting text in thumbnails and title cards",
+      "case_rule": "Sentence case for body copy. ALL CAPS with wide tracking for navigation/label uses (as shown in footer categories).",
+      "character_set_confirmed": "A-Z, a-z, 0-9",
+      "_note": "Google Font. Freely available."
+    },
+    "thumbnail_type": {
+      "primary_font": "Cinzel SemiBold",
+      "secondary_font": "Raleway Regular",
+      "max_words_headline": "REQUIRES_HUMAN_APPROVAL — counted from examples (observed range: 1–4 words), not a stated rule",
+      "max_characters_headline": "REQUIRES_HUMAN_APPROVAL — estimated from examples, not a stated rule",
+      "headline_case": "ALL CAPS",
+      "headline_tracking": "wide",
+      "subtitle_case": "ALL CAPS or sentence case — consistent with example thumbnails",
+      "subtitle_max_words": "REQUIRES_HUMAN_APPROVAL — counted from examples, not a stated rule",
+      "hierarchy": "THE (small Cinzel) / HYPOGEUM (large Cinzel) / CHRONICLES (medium Cinzel with em-dashes) / episode title or tagline (Raleway, smaller)"
+    },
+    "shorts_overlay_type": {
+      "_source": "pre-existing Shorts spec — not from bible.png",
+      "font": "Raleway Regular",
+      "_font_note": "Inferred from two-font system. No Shorts context shown in visual reference.",
+      "max_words": 7,
+      "case_rule": "ALL CAPS",
+      "weight": "Regular — do not use Bold for overlays",
+      "weight_note": "REQUIRES_HUMAN_APPROVAL — not in image; inferred from pre-existing spec",
+      "safe_zone_margin": "TBD — specify in pixels or percentage after format locked"
+    },
+    "wordmark_treatment": {
+      "line_1_THE": "Cinzel SemiBold, tracked wide, approximately 40-50% scale of HYPOGEUM",
+      "line_2_HYPOGEUM": "Cinzel SemiBold, full display scale, primary visual anchor",
+      "line_3_CHRONICLES": "Cinzel SemiBold with em-dash (—) flanking text on both sides",
+      "tagline": "Raleway Regular, small scale, wide tracking",
+      "icon_placement": "Small architectural/columnar icon centred between HYPOGEUM and CHRONICLES"
+    },
+    "nav_label_treatment": "Raleway Regular, ALL CAPS, wide tracking, ornament separator between categories (as in footer: ARCHAEOLOGY — HISTORY — MYSTERY)",
+    "forbidden_typefaces": {
+      "_source": "Directly derived from two-font system (HIGH confidence). Specific named examples below are editorial additions not in image.",
+      "rule": "Any typeface not in the two-font system (Cinzel SemiBold, Raleway Regular) is forbidden.",
+      "examples_not_exhaustive": ["Comic Sans", "Impact", "Arial", "Helvetica as display font", "script/handwriting fonts"],
+      "_examples_note": "REQUIRES_HUMAN_APPROVAL — specific named examples not in image. Rule is binding; example list is advisory."
+    },
+    "forbidden_treatments": {
+      "_source": "Inferred from font system and common typographic conventions. Not stated in image.",
+      "_status": "REQUIRES_HUMAN_APPROVAL — not directly observed; common-sense additions",
+      "items": ["Bold Raleway for overlays", "Lowercase Cinzel (small caps only)", "Mixed case in display text", "Drop shadows on text", "Outlined text strokes", "Gradient fills on text"]
+    }
+  },
+
+  "thumbnail_language": {
+    "_status": "extracted",
+    "_binding": true,
+    "_description": "Rules governing main episode thumbnail composition. Extracted from four thumbnail examples in bible.png.",
+    "_extraction_confidence": "HIGH — four distinct thumbnail variants are clearly visible.",
+    "required_elements": [
+      "Channel wordmark (THE HYPOGEUM CHRONICLES) with full hierarchical treatment",
+      "Background: atmospheric stone, architectural, or environmental image",
+      "Episode-specific title or subtitle in Raleway beneath the wordmark (optional but present in 3 of 4 examples)"
+    ],
+    "composition_model": "Wordmark-dominant. The channel identity is the primary compositional anchor. Episode-specific imagery is background context, not foreground subject.",
+    "curiosity_gap_requirement": "REQUIRES_HUMAN_APPROVAL — not in image; inferred editorial characterisation of thumbnail intent",
+    "wordmark_placement": "Centred, upper-to-mid frame. THE / HYPOGEUM / CHRONICLES hierarchy preserved in all thumbnail variants.",
+    "background_treatment": "Full-bleed atmospheric image. Dark treatment — void_black or deep_stone as dominant tone. Stone, ruins, underground architecture, maps, carvings. Slight vignette or darkening at edges to anchor the wordmark.",
+    "text_placement": "Wordmark centred. Episode subtitle below wordmark, same horizontal axis.",
+    "text_hierarchy": "THE (small) → HYPOGEUM (dominant) → — CHRONICLES — (medium) → episode title (Raleway, subordinate)",
+    "face_rules": {
+      "allowed": false,
+      "conditions": "No human faces in thumbnails. The brand uses environmental, architectural, and artefact imagery — not portraiture.",
+      "_note": "None of the four thumbnail examples in the reference contain human faces."
+    },
+    "aspect_ratio": "16:9",
+    "thumbnail_variants": {
+      "tagline_variant": "Channel wordmark + tagline 'UNEARTHING THE STORY BENEATH OUR FEET'. Atmospheric background.",
+      "episode_subtitle_variant": "Channel wordmark + 'EPISODE N: [EPISODE TITLE]' in Raleway. Stone background.",
+      "statement_variant": "Channel wordmark + short declarative statement ('THE PAST IS NOT SILENT'). High-contrast stone background.",
+      "wordmark_only_variant": "Channel wordmark only. No subtitle. Strongest atmospheric background."
+    },
+    "brightness_contrast_range": "REQUIRES_HUMAN_APPROVAL — 0–40% brightness is an invented quantification with no stated basis in image. Observable fact: backgrounds are dark and high-contrast, but no numeric range is defined.",
+    "forbidden_compositions": [
+      "Human face as primary subject",
+      "Bright or high-key backgrounds",
+      "Horizontal text layout that disrupts wordmark hierarchy",
+      "Subtitle text that dominates over HYPOGEUM scale",
+      "Any composition that buries or reduces the channel wordmark"
+    ],
+    "forbidden_elements": [
+      "Human faces",
+      "Modern objects or architecture",
+      "Bright or saturated colors",
+      "Decorative borders or frames that compete with content",
+      "Emoji or symbols outside the defined graphic element vocabulary"
+    ],
+    "approval_threshold": "REQUIRES_HUMAN_APPROVAL — not in image; invented editorial copy"
+  },
+
+  "documentary_visual_grammar": {
+    "_status": "defined",
+    "_binding": true,
+    "_description": "Permanent rules governing scene composition for this documentary-format channel. Confirmed by and consistent with the visual reference.",
+    "default_visual_modes": [
+      "environmental",
+      "architectural",
+      "artefact_detail",
+      "historical_reconstruction_action_based",
+      "observational",
+      "atmospheric_establishing",
+      "underground_chamber",
+      "stone_surface_closeup",
+      "cartographic_overhead",
+      "single_figure_silhouette_in_environment"
+    ],
+    "visual_reference_confirms": [
+      "Underground chamber with dramatic light shaft — on-register",
+      "Ancient stone carvings and inscriptions — on-register",
+      "Mountainous landscape with dramatic atmosphere — on-register",
+      "Antique maps and cartographic materials — on-register",
+      "Single human silhouette against architectural scale — on-register",
+      "Arched stone corridors and ruins — on-register"
+    ],
+    "forbidden_visual_modes": {
+      "_binding": true,
+      "_source": "pre-existing VPD system prompt — NOT derived from bible.png. Confirmed absent in visual reference (consistent), but these rules predate this Bible.",
+      "modes": [
+        "talking_head",
+        "interview_framing",
+        "visible_lip_sync",
+        "direct_address_to_camera",
+        "mouth_movement_synchronized_with_narration",
+        "characters_visibly_speaking_under_narration"
+      ]
+    },
+    "motion_rule": "All figures derive motion from physical action, not from speech or facial expression.",
+    "_motion_rule_source": "pre-existing VPD system prompt",
+    "narration_model": "Voice-over only. Visuals support narration; they do not depict it.",
+    "_narration_model_source": "pre-existing VPD system prompt",
+    "person_speaking_substitution_rule": "When a narration beat references a person speaking, substitute with: the artefact they referenced, the environment where they spoke, or their physical action. Document as CAPABILITY_LIMITED only if narrative intent is materially lost.",
+    "_person_speaking_rule_source": "pre-existing VPD system prompt",
+    "lighting_grammar": {
+      "_source": "Inferred from visual style board imagery in bible.png. Directional light and high contrast are directly observable. Quantifications are invented.",
+      "primary_source": "Single strong directional source — shaft of light, torch, candle, opening in ceiling or wall",
+      "_primary_source_confidence": "HIGH — directly observable in multiple style board images",
+      "character": "Warm amber or cool natural daylight. Never flat studio lighting.",
+      "_character_confidence": "HIGH — directly observable",
+      "shadow_depth": "REQUIRES_HUMAN_APPROVAL — 'approximately 70-90%' is an invented quantification. Observable fact: deep shadow is present throughout. No numeric value is stated in the reference.",
+      "highlight_ratio": "High contrast. Light source is the story element. Darkness is the context.",
+      "_highlight_ratio_confidence": "MEDIUM — inferred from observation, not stated",
+      "forbidden_lighting": {
+        "_source": "Inferred from absent lighting types in visual reference",
+        "_status": "REQUIRES_HUMAN_APPROVAL — inferred from what is absent; not stated as explicit rules",
+        "items": ["Flat even lighting", "Overexposed bright scenes", "Neon or artificial colored lighting", "Ring light aesthetics"]
+      }
+    }
+  },
+
+  "motion_language": {
+    "_status": "inferred",
+    "_binding": false,
+    "_binding_note": "Changed to false by extraction audit 2026-06-06. bible.png is a static image — no motion is shown. Every value in this section was inferred from still photographs. This section requires human review and explicit approval before becoming binding.",
+    "_description": "Motion vocabulary inferred from the visual style reference imagery and mood board. bible.png contains no motion content — all values below are inference from static images, not extracted facts.",
+    "_all_fields_status": "REQUIRES_HUMAN_APPROVAL — all values inferred from static images in bible.png",
+    "on_register_motion_types": [
+      "slow_pan",
+      "slow_push_in",
+      "slow_pull_out",
+      "static_with_atmosphere",
+      "slow_aerial_drift",
+      "slow_tracking_along_surface",
+      "environmental_motion_only"
+    ],
+    "off_register_motion_types": [
+      "fast_cut_whip_pan",
+      "handheld_shake",
+      "zoom_burst",
+      "speed_ramp",
+      "jitter_or_vibration",
+      "social_media_snap_cut"
+    ],
+    "motion_speed_register": "Slow. Deliberate. All camera movement is measured and purposeful. Nothing is frantic.",
+    "preferred_motion_by_scene_type": {
+      "establishing": "slow_push_in or slow_pan — reveal the space gradually",
+      "detail_shot": "static or very slow_push_in — hold on the artefact or surface",
+      "revelation": "slow_push_in toward key subject — the camera acknowledges significance",
+      "transition": "static cut or slow_pull_out — exit as slowly as entry",
+      "atmospheric": "environmental_motion_only — let the world move, not the camera",
+      "underground_chamber": "slow_pan revealing architecture — single light source as focal anchor"
+    },
+    "camera_movement_vocabulary": [
+      "slow pan left",
+      "slow pan right",
+      "slow push in",
+      "slow pull back",
+      "slow overhead drift",
+      "static hold",
+      "slow tracking along stone surface",
+      "slow tilt up to reveal scale"
+    ],
+    "forbidden_motion_patterns": [
+      "Rapid cuts or montage sequences",
+      "Camera shake or instability",
+      "Speed variations (slow-mo to fast-mo transitions)",
+      "Character-driven camera (POV unless explicitly archaeological — first-person discovery moment)"
+    ]
+  },
+
+  "logo_system": {
+    "_status": "extracted",
+    "_binding": true,
+    "_description": "Channel wordmark and icon system extracted from bible.png.",
+    "primary_mark": {
+      "wordmark": "THE HYPOGEUM CHRONICLES",
+      "wordmark_typeface": "Cinzel SemiBold",
+      "icon": "Architectural columnar/temple icon — small, centred between HYPOGEUM and CHRONICLES in full wordmark treatment",
+      "icon_style": "Line art, minimal, archaeological — consistent with the graphic element vocabulary",
+      "primary_color": "warm_gold (#E7D6B3) on dark backgrounds",
+      "permitted_placements": {
+        "_directly_observed": ["thumbnail centred"],
+        "_requires_human_approval": ["end card centred", "lower third left-anchored"],
+        "_note": "Thumbnail centred is directly observed (HIGH). End card and lower third placements are not shown in bible.png."
+      },
+      "minimum_size": "TBD — specify after resolution testing",
+      "clear_space": "TBD — minimum clear space around wordmark to be defined",
+      "color_variants_permitted": {
+        "_directly_observed": ["warm_gold on void_black (primary)"],
+        "_requires_human_approval": ["parchment_cream on void_black (alternate)", "warm_gold on deep_stone (secondary surface)"],
+        "_note": "Primary variant (warm gold on near-black) is directly observable. Alternates are not shown in the reference."
+      }
+    },
+    "em_dash_decorator": "Em-dash (—) flanking CHRONICLES on both sides is a mandatory wordmark element. Never omit. Never substitute with hyphen.",
+    "forbidden_treatments": {
+      "_source": "Partially inferred. Items 3 and 5 have direct image evidence. Others are common-sense extensions.",
+      "_directly_supported": [
+        "Removing the em-dash decorators from CHRONICLES — directly observed: em-dashes are present in all wordmark instances",
+        "Placing the wordmark on a light background — directly supported: no light surface instances in reference"
+      ],
+      "_requires_human_approval": [
+        "Rotating or distorting the wordmark",
+        "Substituting a different font",
+        "Using the wordmark in bright or saturated colors",
+        "Scaling CHRONICLES larger than HYPOGEUM"
+      ]
+    },
+    "watermark_rules": "TBD — lower third or corner placement to be defined",
+    "end_card_rules": "TBD — end card layout to be defined"
+  },
+
+  "iconography": {
+    "_status": "extracted",
+    "_binding": true,
+    "_description": "Five graphic elements confirmed in bible.png. Line art style in warm_gold on dark backgrounds.",
+    "_extraction_confidence": "HIGH — five elements clearly visible in the graphic elements section.",
+    "confirmed_graphic_elements": [
+      {
+        "name": "compass_rose",
+        "description": "Multi-point wind rose / navigation compass. Eight or sixteen directional points. Archaeological navigation reference.",
+        "style": "Fine line art, warm_gold, circular with radiating points",
+        "usage": "REQUIRES_HUMAN_APPROVAL — usage not specified in image; this is an invented assignment"
+      },
+      {
+        "name": "ouroboros",
+        "description": "Snake consuming its own tail. Circular form. Ancient symbol of cyclicality, eternal return, hidden knowledge.",
+        "_description_note": "Visual identification: HIGH. Symbolic meaning interpretation: MEDIUM (standard art-historical convention).",
+        "style": "Fine line art, warm_gold, circular",
+        "usage": "REQUIRES_HUMAN_APPROVAL — usage not specified in image; this is an invented assignment"
+      },
+      {
+        "name": "classical_columns",
+        "description": "Architectural column section — capital and shaft detail. Classical Greco-Roman reference.",
+        "style": "Fine line art, warm_gold",
+        "usage": "REQUIRES_HUMAN_APPROVAL — usage not specified in image; this is an invented assignment"
+      },
+      {
+        "name": "drafting_compass",
+        "description": "Technical drawing compass/dividers. Archaeological survey and measurement reference.",
+        "style": "Fine line art, warm_gold",
+        "usage": "REQUIRES_HUMAN_APPROVAL — usage not specified in image; this is an invented assignment"
+      },
+      {
+        "name": "circle_medallion",
+        "description": "Simple geometric circle. Minimal. Can be used as framing element or mark.",
+        "style": "Fine line art, warm_gold, thin stroke",
+        "usage": "REQUIRES_HUMAN_APPROVAL — usage not specified in image; this is an invented assignment"
+      }
+    ],
+    "icon_style_rules": {
+      "rendering": "Fine line art only. No fills other than the line itself.",
+      "color": "warm_gold (#E7D6B3) on dark backgrounds only",
+      "weight": "Consistent thin-to-medium stroke weight across all elements",
+      "background": "Always on void_black or deep_stone — never on light backgrounds",
+      "forbidden_treatments": ["Filled solid icons", "Drop shadows", "3D rendering", "Color fills other than warm_gold/antique_gold", "Icons on light backgrounds"]
+    },
+    "preferred_symbolic_vocabulary": [
+      "Navigation and cartography",
+      "Archaeological tools and instruments",
+      "Classical architecture",
+      "Ancient symbols (ouroboros, compass rose)",
+      "Measurement and precision instruments"
+    ],
+    "forbidden_symbolic_vocabulary": {
+      "_status": "REQUIRES_HUMAN_APPROVAL — not stated in image; inferred as logical inverse of observed symbolic vocabulary",
+      "items": [
+        "Modern technology references",
+        "Contemporary iconography (social media icons, app-style icons)",
+        "Supernatural or occult symbols",
+        "Tribal or culturally appropriative symbols",
+        "Emoji"
+      ]
+    },
+    "period_accuracy_override": "Period-accurate artefact depictions in scene content take precedence over the iconographic vocabulary. This system governs branded graphic elements only — not historical content."
+  },
+
+  "texture_system": {
+    "_status": "extracted",
+    "_binding": false,
+    "_binding_note": "Textures section directly observed in bible.png (TEXTURES panel, 6 swatches). Usage rules are REQUIRES_HUMAN_APPROVAL — the image shows the texture types but does not specify where or how they are applied. Binding status can be elevated once usage rules are approved.",
+    "_description": "Six texture categories observed in the TEXTURES panel of bible.png. Two rows of three swatches, running dark-to-light, consistent with the primary color palette. These textures establish the material vocabulary of the channel's visual language.",
+    "_extraction_confidence": "HIGH — 6 swatches clearly visible. Category identification: MEDIUM (swatch appearance matches these categories but labels are not printed). Ordering: top-left to bottom-right, dark to light.",
+    "observed_textures": [
+      {
+        "name": "black_stone_obsidian",
+        "description": "Near-black smooth stone surface. Minimal texture variation. Primary surface darkness.",
+        "position_in_panel": "top-left (darkest)",
+        "_confidence": "HIGH — clearly the darkest swatch, consistent with void_black color role"
+      },
+      {
+        "name": "carved_stone_relief",
+        "description": "Stone surface with carved or incised markings. Suggests ancient inscribed surfaces — consistent with visual style board imagery (inscribed stone panels).",
+        "position_in_panel": "top-centre",
+        "_confidence": "MEDIUM — surface has visible textural markings consistent with carved relief"
+      },
+      {
+        "name": "archaeological_surface_detail",
+        "description": "Worn stone or excavated surface. Aged, eroded quality. The material of dig sites and ruins.",
+        "position_in_panel": "top-right",
+        "_confidence": "MEDIUM — appears to show a textured aged stone surface"
+      },
+      {
+        "name": "dark_map_line_texture",
+        "description": "Darker surface with map-like or parchment-with-line-work quality. Suggests aged cartographic material.",
+        "position_in_panel": "bottom-left",
+        "_confidence": "MEDIUM — surface shows fine linear detail consistent with map or aged document texture"
+      },
+      {
+        "name": "cracked_earth_aged_plaster",
+        "description": "Medium-tone surface with cracking or aging pattern. Dried earth or aged plaster — the material of ancient walls and floors.",
+        "position_in_panel": "bottom-centre",
+        "_confidence": "MEDIUM — surface appears to show cracking or desiccation pattern"
+      },
+      {
+        "name": "parchment_aged_paper",
+        "description": "Lightest texture swatch. Warm cream-to-tan surface with aged paper or parchment quality. Consistent with parchment_cream color role.",
+        "position_in_panel": "bottom-right (lightest)",
+        "_confidence": "HIGH — lightest swatch, clearly a paper/parchment material tone"
+      }
+    ],
+    "usage_rules": {
+      "_status": "REQUIRES_HUMAN_APPROVAL — the image shows the texture vocabulary but does not specify usage contexts",
+      "inferred_usage": "These textures appear to function as background surface overlays for title cards, chapter cards, thumbnail backgrounds, and UI elements — consistent with their appearance in the visual style board imagery.",
+      "approved_usage": "TBD — define which textures apply to which production contexts"
+    },
+    "style_rules": {
+      "palette_alignment": "All textures are consistent with the warm earth palette (void_black through parchment_cream). No cool-toned or saturated textures observed.",
+      "_palette_alignment_confidence": "HIGH — directly observable",
+      "application_opacity": "REQUIRES_HUMAN_APPROVAL — no opacity guidance in image",
+      "layering_rules": "REQUIRES_HUMAN_APPROVAL — no layering specification in image"
+    }
+  },
+
+  "forbidden_patterns": {
+    "_status": "partial",
+    "_binding": true,
+    "_description": "All known forbidden visual patterns. Add to this list; never remove. Items marked with _source indicate their origin.",
+    "visual_patterns": {
+      "_source": "pre-existing VPD system prompt — confirmed absent in bible.png but rules predate this Bible",
+      "items": [
+        "talking_heads",
+        "visible_lip_sync",
+        "interview_framing",
+        "characters_speaking_to_camera",
+        "mouth_movement_as_primary_motion"
+      ]
+    },
+    "composition_patterns": {
+      "_source": "MEDIUM — inferred from consistent observation across 4 thumbnail examples",
+      "_status": "REQUIRES_HUMAN_APPROVAL — these are inferred rules, not stated rules",
+      "items": [
+        "Human faces as primary thumbnail subject",
+        "Bright high-key backgrounds in any branded material",
+        "Horizontal layouts that destroy the wordmark hierarchy",
+        "Any composition that minimises or subordinates the channel wordmark in thumbnails"
+      ]
+    },
+    "content_patterns": {
+      "_source": "pre-existing channel policy — NOT from bible.png",
+      "items": [
+        "Fabricated historical footage presented as authentic",
+        "Synthesized voice or likeness of named historical or living individuals",
+        "Disputed interpretation presented as settled historical fact"
+      ]
+    },
+    "thumbnail_patterns": {
+      "_directly_supported": [
+        "Human faces as primary subject — 0/4 examples contain faces (HIGH)",
+        "Missing em-dash decorators on CHRONICLES — em-dashes present in all instances (HIGH)",
+        "Non-Cinzel/Raleway typography — only these fonts observed (HIGH)"
+      ],
+      "_requires_human_approval": [
+        "Bright or saturated color palette — inferred from absent colors (MEDIUM)",
+        "Episode imagery dominating over channel wordmark — inferred from composition pattern (MEDIUM)",
+        "Light or neutral backgrounds — inferred from absent treatment (MEDIUM)"
+      ]
+    },
+    "typography_patterns": {
+      "_directly_supported": [
+        "Any typeface outside Cinzel SemiBold and Raleway Regular — directly derived from two-font system (HIGH)"
+      ],
+      "_requires_human_approval": [
+        "Bold Raleway in overlays — not in image; common-sense extension",
+        "Mixed case in Cinzel display text — inferred from ALL CAPS usage",
+        "Drop shadows on text — not in image; common convention",
+        "Outlined text strokes — not in image; common convention",
+        "Gradient fills on text — not in image; common convention",
+        "Decorative or script typefaces — inferred from two-font system"
+      ]
+    },
+    "colour_patterns": {
+      "_source": "Inferred from colors absent in the visual reference. MEDIUM confidence. No colors are explicitly prohibited by name in the image.",
+      "_status": "REQUIRES_HUMAN_APPROVAL — complete list",
+      "items": [
+        "Bright white (#FFFFFF) as any surface",
+        "Pure red",
+        "Neon hues (any)",
+        "Cool blues as primary color",
+        "Greens",
+        "Pinks or purples",
+        "Bright or warm oranges outside the burnished_bronze range"
+      ]
+    },
+    "motion_patterns": {
+      "_source": "Inferred from static images — bible.png contains no motion",
+      "_status": "REQUIRES_HUMAN_APPROVAL — entire list inferred; no motion content in reference",
+      "items": [
+        "Rapid cuts or montage sequences",
+        "Camera shake or handheld instability",
+        "Speed ramps or velocity variations",
+        "Whip pans",
+        "Zoom bursts",
+        "Social-media style snap cuts"
+      ]
+    },
+    "atmosphere_patterns": {
+      "_source": "Inferred from mood board imagery in bible.png. MEDIUM confidence.",
+      "_status": "REQUIRES_HUMAN_APPROVAL — inferred from what is absent, not stated",
+      "items": [
+        "Comic or lighthearted register",
+        "Bright, cheerful, or optimistic visual treatment",
+        "Flat even lighting (studio look)",
+        "Overexposed or blown-out highlights",
+        "Neon or synthetic colored lighting"
+      ]
+    }
+  },
+
+  "social_media_rules": {
+    "_status": "partial",
+    "_binding": false,
+    "_description": "Platform-specific rules. YouTube is extracted from reference. Instagram and TikTok formatting TBD.",
+    "youtube": {
+      "thumbnail_rules": "See thumbnail_language section. Wordmark-dominant. Atmospheric dark background. No faces.",
+      "title_card_rules": "Cinzel SemiBold for title. Raleway Regular for episode number/subtitle. Gold on dark.",
+      "end_card_rules": "TBD",
+      "chapter_card_rules": "TBD"
+    },
+    "instagram": {
+      "story_format_rules": "TBD",
+      "feed_format_rules": "TBD"
+    },
+    "tiktok": {
+      "caption_overlay_rules": "TBD",
+      "format_rules": "TBD"
+    }
+  },
+
+  "shorts_rules": {
+    "_status": "partial",
+    "_binding": true,
+    "_source": "Overlay structure (required_beats, max_words_per_overlay, redirect_text_rule) from pre-existing Shorts spec — NOT from bible.png. Visual treatment (typography, colors) inferred from two-font system and color palette.",
+    "_description": "Shorts/vertical format rules. Overlay structure from pre-existing Shorts spec. No Shorts-specific visual content appears in bible.png.",
+    "aspect_ratio": "9:16",
+    "text_safe_zone_margin": "TBD",
+    "typography": "Raleway Regular for all text overlays. Cinzel SemiBold for hook text only if used.",
+    "text_color": "warm_gold (#E7D6B3) or parchment_cream (#F5F3EE) on dark video frame",
+    "overlay_structure": {
+      "required_beats": [
+        "opening_hook",
+        "key_information",
+        "payoff_curiosity"
+      ],
+      "max_words_per_overlay": 7,
+      "overlay_position_options": ["top_third", "bottom_third", "top", "bottom"]
+    },
+    "redirect_text_rule": "Silent text overlay only. Maximum 7 words. Drive to full episode. Not promotional copy.",
+    "background_treatment": "All Shorts background imagery follows the same documentary_visual_grammar as main episode. No bright backgrounds. No talking heads.",
+    "forbidden_patterns": [
+      "Generic engagement bait text",
+      "Episode central answer revealed in Short",
+      "Bright or saturated backgrounds",
+      "Human faces as primary subject",
+      "Talking head format"
+    ],
+    "generation_model": "disabled",
+    "_generation_model_note": "ENABLE_DEDICATED_SHORT_GENERATION=false. Shorts extraction architecture (M6) will set this to 'extracted'."
+  },
+
+  "publishing_rules": {
+    "_status": "partial",
+    "_binding": true,
+    "_source": "pre-existing channel policy — NOT from bible.png. No publishing metadata rules appear in the visual reference.",
+    "_description": "Publishing metadata brand rules. All items in this section are pre-existing channel policy, not extracted from bible.png.",
+    "ai_disclosure": {
+      "required": true,
+      "placement": "End of YouTube description",
+      "required_text": "TBD — exact disclosure text to be approved",
+      "forbidden_to_omit": true
+    },
+    "title_rules": {
+      "max_characters": "TBD",
+      "preferred_structure": "[Episode Title] | The Hypogeum Chronicles",
+      "forbidden_patterns": ["Clickbait superlatives", "ALL CAPS episode title", "Emoji in title", "Numbers as primary hook (Top 10...)"],
+      "required_elements": ["Episode-specific title that reflects the curiosity gap"]
+    },
+    "description_rules": {
+      "required_sections": ["logline", "chapters", "sources", "ai_disclosure"],
+      "forbidden_patterns": ["Generic SEO stuffing", "Off-brand promotional language", "Claims not supported by the research package"]
+    },
+    "tag_rules": {
+      "forbidden_tags": ["Unrelated viral tags", "Celebrity or person names not featured in episode"],
+      "required_tag_categories": ["history", "archaeology", "mystery", "documentary"]
+    }
+  }
+}

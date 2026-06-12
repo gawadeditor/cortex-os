@@ -1,0 +1,275 @@
+{
+  "_meta": {
+    "schema_version": "1.0",
+    "schema_status": "defined",
+    "content_status": "TBD",
+    "_global_status": "inactive",
+    "_note": "Set _global_status to 'active' only after all binding sections are populated and approved. While 'inactive', BGA runs in advisory-only mode and never blocks the pipeline.",
+    "last_updated": null,
+    "approved_by": null,
+    "bible_version": null,
+    "source_reference": "TBD — populate from approved Version 2 visual direction reference"
+  },
+
+  "identity": {
+    "_status": "TBD",
+    "_binding": true,
+    "_description": "The foundational character of the channel's visual presence. All other sections derive from this.",
+    "channel_name": "TBD",
+    "visual_personality": "TBD",
+    "emotional_register": {
+      "primary": "TBD",
+      "secondary": ["TBD"],
+      "forbidden_registers": ["TBD"]
+    },
+    "audience_expectation": "TBD",
+    "visual_positioning": "TBD",
+    "brand_promise": "TBD"
+  },
+
+  "color_system": {
+    "_status": "TBD",
+    "_binding": true,
+    "_description": "The definitive color palette for all visual outputs. Period palettes (defined per-episode by VPD) must harmonise with this system — they cannot contradict it.",
+    "primary_palette": {
+      "background": "TBD",
+      "foreground": "TBD",
+      "accent_1": "TBD",
+      "accent_2": "TBD",
+      "negative_space": "TBD"
+    },
+    "thumbnail_palette": {
+      "_note": "Thumbnail color may diverge from primary palette for CTR — but must remain within these bounds.",
+      "allowed_range": "TBD",
+      "forbidden_colors": ["TBD"],
+      "contrast_minimum": "TBD"
+    },
+    "text_on_dark": "TBD",
+    "text_on_light": "TBD",
+    "overlay_opacity_range": "TBD",
+    "period_palette_constraints": {
+      "_note": "Episode-specific period palettes (Hellenistic, Victorian, etc.) must not use colors in the forbidden list.",
+      "global_forbidden_colors": ["TBD"]
+    }
+  },
+
+  "typography": {
+    "_status": "TBD",
+    "_binding": true,
+    "_description": "Font system for all text elements: thumbnails, Shorts overlays, chapter cards, lower thirds. No font outside this system may appear in any output.",
+    "primary_typeface": {
+      "family": "TBD",
+      "weights_permitted": ["TBD"],
+      "use_case": "TBD"
+    },
+    "secondary_typeface": {
+      "family": "TBD",
+      "weights_permitted": ["TBD"],
+      "use_case": "TBD"
+    },
+    "thumbnail_type": {
+      "max_words": "TBD",
+      "max_characters": "TBD",
+      "weight": "TBD",
+      "case_rule": "TBD",
+      "tracking": "TBD",
+      "leading": "TBD"
+    },
+    "shorts_overlay_type": {
+      "max_words": "TBD",
+      "weight": "TBD",
+      "case_rule": "TBD",
+      "safe_zone_margin": "TBD"
+    },
+    "forbidden_typefaces": ["TBD"],
+    "forbidden_treatments": ["TBD"]
+  },
+
+  "thumbnail_language": {
+    "_status": "TBD",
+    "_binding": true,
+    "_description": "Rules governing how main episode thumbnails must be composed. Thumbnail Director is bound by these rules. CTR-based overrides require explicit per-episode approval.",
+    "required_elements": ["TBD"],
+    "composition_model": "TBD",
+    "curiosity_gap_requirement": "TBD",
+    "subject_placement": "TBD",
+    "background_treatment": "TBD",
+    "text_placement": "TBD",
+    "text_hierarchy": "TBD",
+    "face_rules": {
+      "_note": "Whether human faces appear in thumbnails, and if so, under what conditions.",
+      "allowed": "TBD",
+      "conditions": "TBD"
+    },
+    "brightness_contrast_range": "TBD",
+    "aspect_ratio": "16:9",
+    "forbidden_compositions": ["TBD"],
+    "forbidden_elements": ["TBD"],
+    "approval_threshold": "TBD"
+  },
+
+  "documentary_visual_grammar": {
+    "_status": "defined",
+    "_binding": true,
+    "_description": "Permanent rules governing how scenes are composed for this documentary-format channel. These rules are already active in the VPD system prompt. This section formalises them in the Bible for BGA enforcement.",
+    "default_visual_modes": [
+      "environmental",
+      "architectural",
+      "artefact_detail",
+      "historical_reconstruction_action_based",
+      "observational",
+      "atmospheric_establishing"
+    ],
+    "forbidden_visual_modes": {
+      "_binding": true,
+      "_note": "These are permanent and cannot be overridden by any agent, prompt, or config flag.",
+      "modes": [
+        "talking_head",
+        "interview_framing",
+        "visible_lip_sync",
+        "direct_address_to_camera",
+        "mouth_movement_synchronized_with_narration",
+        "characters_visibly_speaking_under_narration"
+      ]
+    },
+    "motion_rule": "All figures must derive motion from physical action, not from speech or facial expression.",
+    "narration_model": "Voice-over only. Narration is always audio-only. Visuals support narration; they never depict it.",
+    "person_speaking_substitution_rule": "When a narration beat references a person speaking, substitute with: the artefact they referenced, the environment where they spoke, or their physical action. Document substitution as CAPABILITY_LIMITED only if narrative intent is materially lost."
+  },
+
+  "motion_language": {
+    "_status": "TBD",
+    "_binding": true,
+    "_description": "The vocabulary of camera and subject motion that is on-register for this channel. VPD must assign motion_type values from this vocabulary.",
+    "on_register_motion_types": ["TBD"],
+    "off_register_motion_types": ["TBD"],
+    "preferred_motion_by_scene_type": {
+      "establishing": "TBD",
+      "detail_shot": "TBD",
+      "revelation": "TBD",
+      "transition": "TBD",
+      "atmospheric": "TBD"
+    },
+    "motion_speed_register": "TBD",
+    "camera_movement_vocabulary": ["TBD"],
+    "forbidden_motion_patterns": ["TBD"]
+  },
+
+  "logo_system": {
+    "_status": "TBD",
+    "_binding": true,
+    "_description": "Channel mark and logo usage rules. Applies to thumbnails, end cards, channel art, and any branded element in video output.",
+    "primary_mark": {
+      "asset_path": "TBD",
+      "permitted_placements": ["TBD"],
+      "minimum_size": "TBD",
+      "clear_space": "TBD",
+      "color_variants_permitted": ["TBD"]
+    },
+    "forbidden_treatments": ["TBD"],
+    "watermark_rules": "TBD",
+    "end_card_rules": "TBD"
+  },
+
+  "iconography": {
+    "_status": "TBD",
+    "_binding": false,
+    "_description": "Visual iconography and symbolic language on-register for this channel. Not binding until populated — current episodes derive iconography from historical period accuracy.",
+    "preferred_symbolic_vocabulary": ["TBD"],
+    "preferred_artefact_categories": ["TBD"],
+    "forbidden_symbolic_vocabulary": ["TBD"],
+    "period_accuracy_override": "TBD"
+  },
+
+  "forbidden_patterns": {
+    "_status": "partial",
+    "_binding": true,
+    "_description": "Exhaustive list of visual patterns permanently prohibited across all agents and all outputs. These cannot be overridden by any flag, prompt, or config. Add to this list; never remove.",
+    "visual_patterns": [
+      "talking_heads",
+      "visible_lip_sync",
+      "interview_framing",
+      "characters_speaking_to_camera",
+      "mouth_movement_as_primary_motion"
+    ],
+    "composition_patterns": ["TBD"],
+    "content_patterns": [
+      "fabricated_historical_footage",
+      "synthesized_voice_of_named_individual",
+      "disputed_interpretation_presented_as_fact"
+    ],
+    "thumbnail_patterns": ["TBD"],
+    "typography_patterns": ["TBD"],
+    "colour_patterns": ["TBD"],
+    "motion_patterns": ["TBD"]
+  },
+
+  "social_media_rules": {
+    "_status": "TBD",
+    "_binding": false,
+    "_description": "Platform-specific visual rules for YouTube, Instagram, TikTok. Governs aspect ratio handling, title card design, and platform-specific forbidden elements.",
+    "youtube": {
+      "thumbnail_rules": "TBD",
+      "title_card_rules": "TBD",
+      "end_card_rules": "TBD",
+      "chapter_card_rules": "TBD"
+    },
+    "instagram": {
+      "story_format_rules": "TBD",
+      "feed_format_rules": "TBD"
+    },
+    "tiktok": {
+      "caption_overlay_rules": "TBD",
+      "format_rules": "TBD"
+    }
+  },
+
+  "shorts_rules": {
+    "_status": "partial",
+    "_binding": true,
+    "_description": "Visual rules specific to Shorts/vertical format content. These apply regardless of whether Shorts are generated as dedicated scenes or extracted from the main episode master.",
+    "aspect_ratio": "9:16",
+    "text_safe_zone_margin": "TBD",
+    "overlay_structure": {
+      "required_beats": [
+        "opening_hook",
+        "key_information",
+        "payoff_curiosity"
+      ],
+      "max_words_per_overlay": 7,
+      "overlay_position_options": ["top_third", "bottom_third", "top", "bottom"]
+    },
+    "redirect_text_rule": "Silent text overlay only. Maximum 7 words. Drive to full episode. Not promotional copy.",
+    "forbidden_patterns": [
+      "generic_engagement_bait",
+      "episode_central_answer_revealed"
+    ],
+    "generation_model": "TBD",
+    "_generation_model_note": "Will be set to 'extracted' once Shorts extraction architecture (M6) is implemented. Until then, 'disabled' (ENABLE_DEDICATED_SHORT_GENERATION=false)."
+  },
+
+  "publishing_rules": {
+    "_status": "partial",
+    "_binding": true,
+    "_description": "Brand compliance rules for publishing metadata and disclosures.",
+    "ai_disclosure": {
+      "required": true,
+      "placement": "TBD",
+      "required_text": "TBD",
+      "forbidden_to_omit": true
+    },
+    "title_rules": {
+      "max_characters": "TBD",
+      "forbidden_patterns": ["TBD"],
+      "required_elements": ["TBD"]
+    },
+    "description_rules": {
+      "required_sections": ["logline", "chapters", "sources", "ai_disclosure"],
+      "forbidden_patterns": ["TBD"]
+    },
+    "tag_rules": {
+      "forbidden_tags": ["TBD"],
+      "required_tag_categories": ["TBD"]
+    }
+  }
+}

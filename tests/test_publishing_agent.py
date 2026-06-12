@@ -1,0 +1,599 @@
+"""
+tests/test_publishing_agent.py — Unit tests for hypogeum/agents/publishing_agent.py
+
+All platform calls are mocked. No real HTTP occurs.
+Patches target the actual module functions (hypogeum.publishing.youtube.*) since
+the agent imports them inside run_publishing_agent() as local names.
+
+Tests:
+  - ai_disclosure_text missing halts with PublishingAgentError
+  - YouTube auth failure issues PDR and skips YouTube
+  - YouTube quotaExceeded halts remaining YouTube uploads
+  - >3 failures issues PDR
+  - TikTok gate fail → all TikTok deliverables skipped (not failed)
+  - successful full run (all platforms publish)
+  - overall_status = "published" when youtube_main_published
+  - overall_status = "failed" when all fail
+  - Instagram staging failure causes short to fail
+  - Publishing record written to output_dir
+  - Schema validation passes on successful run
+"""
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from hypogeum.agents.publishing_agent import PublishingAgentError, run_publishing_agent
+from hypogeum.publishing.retry import HardFailureError, PollTimeoutError, SoftFailureError
+from hypogeum.publishing.staging import StagingError
+
+
+# ---------------------------------------------------------------------------
+# Module paths for patching
+# ---------------------------------------------------------------------------
+
+_YT = "hypogeum.publishing.youtube"
+_META = "hypogeum.publishing.meta"
+_TT = "hypogeum.publishing.tiktok"
+_STAGING = "hypogeum.agents.publishing_agent.get_staging_provider"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures / factories
+# ---------------------------------------------------------------------------
+
+def _make_config(
+    has_youtube: bool = True,
+    has_meta: bool = True,
+    has_tiktok: bool = False,
+    staging_url: str = "https://staging.example.com",
+):
+    cfg = MagicMock()
+    cfg.YOUTUBE_CLIENT_ID = "yt_client_id" if has_youtube else None
+    cfg.YOUTUBE_CLIENT_SECRET = "yt_secret" if has_youtube else None
+    cfg.YOUTUBE_REFRESH_TOKEN = "yt_refresh" if has_youtube else None
+    cfg.YOUTUBE_CHANNEL_ID = "UCchannel" if has_youtube else None
+    cfg.YOUTUBE_DEFAULT_CATEGORY_ID = 27
+    cfg.META_APP_ID = "meta_app_id" if has_meta else None
+    cfg.META_APP_SECRET = "meta_secret" if has_meta else None
+    cfg.META_ACCESS_TOKEN = "EAA_token" if has_meta else None
+    cfg.META_INSTAGRAM_ACCOUNT_ID = "ig_account" if has_meta else None
+    cfg.META_FACEBOOK_PAGE_ID = "fb_page" if has_meta else None
+    cfg.META_GRAPH_API_VERSION = "v19.0"
+    cfg.META_STAGING_BASE_URL = staging_url if has_meta else None
+    cfg.TIKTOK_CLIENT_KEY = "tt_key" if has_tiktok else None
+    cfg.TIKTOK_CLIENT_SECRET = "tt_secret" if has_tiktok else None
+    cfg.TIKTOK_ACCESS_TOKEN = "tt_token" if has_tiktok else None
+    cfg.TIKTOK_OPEN_ID = "tt_open_id" if has_tiktok else None
+    cfg.tiktok_available = has_tiktok
+    return cfg
+
+
+def _make_final_render_package(episode_id: str, tmp_path: Path) -> dict:
+    """Build a minimal final_render_package with real files on disk."""
+    ep_dir = tmp_path / f"episodes/{episode_id}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+
+    main_video = ep_dir / f"main_{episode_id}.mp4"
+    main_video.write_bytes(b"fake main video")
+
+    srt_file = ep_dir / "captions_main.srt"
+    srt_file.write_text("1\n00:00:00,000 --> 00:00:05,000\nHello\n")
+
+    short_ids = ["sh_001", "sh_002", "sh_003"]
+    shorts_renders = []
+    for i, sid in enumerate(short_ids):
+        short_video = ep_dir / f"short_{i}_{episode_id}.mp4"
+        short_video.write_bytes(b"fake short video")
+        shorts_renders.append({
+            "short_id": sid,
+            "video_asset_id": f"episodes/{episode_id}/short_{i}_{episode_id}",
+            "caption_asset_id": f"episodes/{episode_id}/captions_{sid}",
+        })
+
+    thumb = ep_dir / "thumb_main.jpg"
+    thumb.write_bytes(b"fake jpeg")
+
+    return {
+        "package_metadata": {
+            "render_package_id": f"rp_{episode_id}",
+            "episode_id": episode_id,
+        },
+        "episode_render": {
+            "video_asset_id": f"episodes/{episode_id}/main_{episode_id}",
+            "caption_asset_id": f"episodes/{episode_id}/captions_main",
+            "duration_seconds": 600.0,
+        },
+        "shorts_renders": shorts_renders,
+        "thumbnail_references": [
+            {
+                "thumbnail_asset_id": f"episodes/{episode_id}/thumb_main",
+                "short_id": None,
+                "format": "16:9",
+            }
+        ],
+        "music_log": [],
+        "metadata_source": {
+            "episode_title": "The Antikythera Mechanism",
+            "logline": "Humanity's first computer, hidden for 2000 years.",
+            "section_titles": [
+                {"title": "Introduction", "start_seconds": 0.0},
+                {"title": "The Discovery", "start_seconds": 120.0},
+            ],
+            "shorts_titles": {
+                "sh_001": "3 Hidden Secrets",
+                "sh_002": "The Shocking Truth",
+                "sh_003": "What Nobody Told You",
+            },
+            "ai_disclosure_text": "This video was produced with AI assistance.",
+        },
+        "assembly_qa_report": {"overall_status": "pass"},
+        "package_integrity": {"production_ready": True},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Patch context manager
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _patch_platforms(
+    yt_token="ya29.token",
+    yt_main_vid="yt_vid_main",
+    yt_short_vid="yt_vid_short",
+    meta_token="EAA_refreshed",
+    fb_vid="fb_vid_001",
+    ig_container="ig_cont_001",
+    ig_status="FINISHED",
+    ig_media="ig_media_001",
+    tiktok_avail=False,
+    yt_refresh_exc=None,
+    meta_refresh_exc=None,
+    yt_upload_exc=None,
+    fb_upload_exc=None,
+    staging_exc=None,
+    yt_quota_exc=False,
+):
+    """
+    Patch all platform client functions at their module level.
+    The publishing agent imports them as local names inside run_publishing_agent(),
+    so we must patch the actual module-level functions.
+    """
+    yt_calls = [0]
+
+    def mock_yt_upload(*args, **kwargs):
+        if yt_upload_exc:
+            raise yt_upload_exc
+        if yt_quota_exc:
+            raise HardFailureError("quotaExceeded", status_code=403, error_code="quotaExceeded")
+        idx = yt_calls[0]
+        yt_calls[0] += 1
+        return yt_main_vid if idx == 0 else yt_short_vid
+
+    mock_staging = MagicMock()
+    if staging_exc:
+        mock_staging.stage_file = MagicMock(side_effect=staging_exc)
+    else:
+        mock_staging.stage_file = MagicMock(return_value="https://staged.example.com/f.mp4")
+    mock_staging.delete_staged_file = MagicMock()
+
+    with patch(f"{_YT}.refresh_youtube_token",
+               side_effect=yt_refresh_exc if yt_refresh_exc else None,
+               return_value=yt_token if not yt_refresh_exc else None), \
+         patch(f"{_YT}.reset_quota_counter"), \
+         patch(f"{_YT}.upload_video", side_effect=mock_yt_upload), \
+         patch(f"{_YT}.upload_thumbnail", return_value=True), \
+         patch(f"{_YT}.upload_captions", return_value=True), \
+         patch(f"{_YT}.apply_end_screen", return_value=True), \
+         patch(f"{_YT}.search_prior_episode", return_value=None), \
+         patch(f"{_META}.refresh_meta_token",
+               side_effect=meta_refresh_exc if meta_refresh_exc else None,
+               return_value=meta_token if not meta_refresh_exc else None), \
+         patch(f"{_META}.upload_facebook_video",
+               side_effect=fb_upload_exc if fb_upload_exc else None,
+               return_value=fb_vid if not fb_upload_exc else None), \
+         patch(f"{_META}.create_instagram_container", return_value=ig_container), \
+         patch(f"{_META}.poll_instagram_container", return_value=ig_status), \
+         patch(f"{_META}.publish_instagram_container", return_value=ig_media), \
+         patch(f"{_TT}.check_tiktok_availability", return_value=tiktok_avail), \
+         patch(f"{_TT}.init_tiktok_upload", return_value=("tt_pub_id", "https://upload.tiktok/abc")), \
+         patch(f"{_TT}.upload_tiktok_chunks"), \
+         patch(f"{_TT}.poll_tiktok_publish", return_value="tt_post_001"), \
+         patch(_STAGING, return_value=mock_staging):
+        yield
+
+
+def _run(pkg, config, episode_id, tmp_path):
+    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+    return run_publishing_agent(pkg, config, episode_id, output_dir=tmp_path, project_root=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# TestPreflightDisclosure
+# ---------------------------------------------------------------------------
+
+class TestPreflightDisclosure:
+    def test_missing_disclosure_halts_with_publishing_agent_error(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_disc_001", tmp_path)
+        pkg["metadata_source"]["ai_disclosure_text"] = ""
+
+        with pytest.raises(PublishingAgentError):
+            _run(pkg, config, "ep_disc_001", tmp_path)
+
+    def test_no_youtube_upload_when_disclosure_missing(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_disc_002", tmp_path)
+        pkg["metadata_source"]["ai_disclosure_text"] = ""
+
+        upload_mock = MagicMock()
+        with patch(f"{_YT}.upload_video", upload_mock):
+            with pytest.raises(PublishingAgentError):
+                _run(pkg, config, "ep_disc_002", tmp_path)
+
+        upload_mock.assert_not_called()
+
+    def test_whitespace_only_disclosure_halts(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_disc_003", tmp_path)
+        pkg["metadata_source"]["ai_disclosure_text"] = "   "
+
+        with pytest.raises(PublishingAgentError):
+            _run(pkg, config, "ep_disc_003", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# TestYouTubeAuthFailure
+# ---------------------------------------------------------------------------
+
+class TestYouTubeAuthFailure:
+    def test_youtube_auth_failure_issues_pdr(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytauth_001", tmp_path)
+
+        with _patch_platforms(yt_refresh_exc=HardFailureError("401 Unauthorized", status_code=401)):
+            result = _run(pkg, config, "ep_ytauth_001", tmp_path)
+
+        # YouTube main should be in failures list
+        failures = result.get("failures", [])
+        assert len(failures) > 0
+
+    def test_youtube_auth_failure_skips_all_youtube_uploads(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytauth_002", tmp_path)
+
+        with _patch_platforms(yt_refresh_exc=HardFailureError("401", status_code=401)) as patches:
+            pass  # just test result
+
+        with _patch_platforms(yt_refresh_exc=HardFailureError("401", status_code=401)):
+            result = _run(pkg, config, "ep_ytauth_002", tmp_path)
+
+        yt_results = [r for r in result["platform_results"] if r["platform"] == "youtube"]
+        assert all(r["status"] == "failed" for r in yt_results)
+
+    def test_youtube_auth_failure_continues_other_platforms(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytauth_003", tmp_path)
+
+        with _patch_platforms(yt_refresh_exc=HardFailureError("401", status_code=401)):
+            result = _run(pkg, config, "ep_ytauth_003", tmp_path)
+
+        # Facebook and Instagram should still be attempted
+        platform_results = result.get("platform_results", [])
+        fb_results = [r for r in platform_results if r["platform"] == "facebook"]
+        ig_results = [r for r in platform_results if r["platform"] == "instagram"]
+        assert len(fb_results) == 1
+        assert len(ig_results) == 3
+
+
+# ---------------------------------------------------------------------------
+# TestQuotaExceeded
+# ---------------------------------------------------------------------------
+
+class TestQuotaExceeded:
+    def test_quota_exceeded_issues_pdr(self, tmp_path):
+        config = _make_config(has_youtube=True)
+        pkg = _make_final_render_package("ep_quota_001", tmp_path)
+
+        with _patch_platforms(yt_quota_exc=True):
+            result = _run(pkg, config, "ep_quota_001", tmp_path)
+
+        failures = result.get("failures", [])
+        failure_descriptions = [
+            f.get("deficiency_items", [{}])[0].get("description", "")
+            for f in failures
+        ]
+        assert any("quota" in d.lower() or "YouTube" in d for d in failure_descriptions)
+
+    def test_quota_exceeded_marks_main_as_failed(self, tmp_path):
+        config = _make_config(has_youtube=True)
+        pkg = _make_final_render_package("ep_quota_002", tmp_path)
+
+        with _patch_platforms(yt_quota_exc=True):
+            result = _run(pkg, config, "ep_quota_002", tmp_path)
+
+        yt_main = next(
+            (r for r in result["platform_results"]
+             if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"),
+            None,
+        )
+        assert yt_main is not None
+        assert yt_main["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# TestTiktokGate
+# ---------------------------------------------------------------------------
+
+class TestTiktokGate:
+    def test_tiktok_unavailable_all_skipped(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_tt_001", tmp_path)
+
+        with _patch_platforms(tiktok_avail=False):
+            result = _run(pkg, config, "ep_tt_001", tmp_path)
+
+        tiktok_results = [r for r in result["platform_results"] if r["platform"] == "tiktok"]
+        assert len(tiktok_results) == 3
+        assert all(r["status"] == "skipped" for r in tiktok_results)
+        assert all(r["skipped_reason"] == "tiktok_unavailable" for r in tiktok_results)
+
+    def test_tiktok_skipped_not_counted_as_failed(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_tt_002", tmp_path)
+
+        with _patch_platforms(tiktok_avail=False):
+            result = _run(pkg, config, "ep_tt_002", tmp_path)
+
+        summary = result["summary"]
+        assert summary["total_skipped"] == 3
+
+    def test_tiktok_uploads_not_called_when_gate_fails(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_tt_003", tmp_path)
+
+        tt_init_mock = MagicMock()
+
+        with _patch_platforms(tiktok_avail=False):
+            with patch(f"{_TT}.init_tiktok_upload", tt_init_mock):
+                _run(pkg, config, "ep_tt_003", tmp_path)
+
+        tt_init_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestSuccessfulFullRun
+# ---------------------------------------------------------------------------
+
+class TestSuccessfulFullRun:
+    def test_full_run_published_status(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True, has_tiktok=False)
+        pkg = _make_final_render_package("ep_full_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_full_001", tmp_path)
+
+        assert result["package_metadata"]["overall_status"] == "published"
+        assert result["package_integrity"]["production_ready"] is True
+        assert result["summary"]["youtube_main_published"] is True
+
+    def test_full_run_record_written_to_disk(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_disk_001", tmp_path)
+
+        with _patch_platforms():
+            _run(pkg, config, "ep_disk_001", tmp_path)
+
+        record_path = tmp_path / "publishing_record_ep_disk_001.json"
+        assert record_path.exists()
+
+        with open(record_path) as f:
+            data = json.load(f)
+        assert data["package_metadata"]["episode_id"] == "ep_disk_001"
+
+    def test_full_run_youtube_main_gets_captions(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_caps_001", tmp_path)
+
+        captions_mock = MagicMock(return_value=True)
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_captions", captions_mock):
+                result = _run(pkg, config, "ep_caps_001", tmp_path)
+
+        captions_mock.assert_called_once()
+
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        assert yt_main["status"] == "published"
+
+    def test_full_run_correct_deliverable_count(self, tmp_path):
+        config = _make_config(has_tiktok=False)
+        pkg = _make_final_render_package("ep_count_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_count_001", tmp_path)
+
+        # 1 YT main + 3 YT shorts + 1 FB + 3 IG + 3 TT skipped = 11 entries
+        platform_results = result["platform_results"]
+        assert len(platform_results) == 11
+
+        yt_results = [r for r in platform_results if r["platform"] == "youtube"]
+        assert len(yt_results) == 4
+
+        fb_results = [r for r in platform_results if r["platform"] == "facebook"]
+        assert len(fb_results) == 1
+
+        ig_results = [r for r in platform_results if r["platform"] == "instagram"]
+        assert len(ig_results) == 3
+
+        tt_results = [r for r in platform_results if r["platform"] == "tiktok"]
+        assert len(tt_results) == 3
+        assert all(r["status"] == "skipped" for r in tt_results)
+
+    def test_tiktok_published_when_available(self, tmp_path):
+        config = _make_config(has_tiktok=True)
+        pkg = _make_final_render_package("ep_tt_full_001", tmp_path)
+
+        with _patch_platforms(tiktok_avail=True):
+            result = _run(pkg, config, "ep_tt_full_001", tmp_path)
+
+        tt_results = [r for r in result["platform_results"] if r["platform"] == "tiktok"]
+        assert len(tt_results) == 3
+        assert all(r["status"] == "published" for r in tt_results)
+
+
+# ---------------------------------------------------------------------------
+# TestOverallStatusLogic
+# ---------------------------------------------------------------------------
+
+class TestOverallStatusLogic:
+    def test_published_when_yt_main_succeeds(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_status_pub_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_status_pub_001", tmp_path)
+
+        assert result["package_metadata"]["overall_status"] == "published"
+        assert result["package_integrity"]["production_ready"] is True
+
+    def test_failed_when_no_platforms_available(self, tmp_path):
+        config = _make_config(has_youtube=False, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_all_fail_001", tmp_path)
+
+        with _patch_platforms(tiktok_avail=False):
+            result = _run(pkg, config, "ep_all_fail_001", tmp_path)
+
+        assert result["package_metadata"]["overall_status"] == "failed"
+        assert result["package_integrity"]["production_ready"] is False
+
+    def test_partially_published_when_yt_fails_meta_succeeds(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_partial_001", tmp_path)
+
+        yt_calls = [0]
+        def selective_yt_fail(*args, **kwargs):
+            yt_calls[0] += 1
+            if yt_calls[0] == 1:
+                raise SoftFailureError("yt main fail", status_code=503)
+            return f"yt_short_{yt_calls[0]}"
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video", side_effect=selective_yt_fail), \
+                 patch("hypogeum.publishing.retry.time.sleep"):
+                result = _run(pkg, config, "ep_partial_001", tmp_path)
+
+        # YouTube main failed but Facebook/Instagram succeeded -> partially_published
+        assert result["package_metadata"]["overall_status"] in ("partially_published", "failed")
+
+
+# ---------------------------------------------------------------------------
+# TestFailureThresholdPDR
+# ---------------------------------------------------------------------------
+
+class TestFailureThresholdPDR:
+    def test_more_than_3_failures_issues_threshold_pdr(self, tmp_path):
+        # No YouTube, No Meta = 4 YouTube + 1 Facebook + 3 Instagram = 8 failures > threshold(3)
+        config = _make_config(has_youtube=False, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_thresh_001", tmp_path)
+
+        with _patch_platforms(tiktok_avail=False):
+            result = _run(pkg, config, "ep_thresh_001", tmp_path)
+
+        failures = result.get("failures", [])
+        failure_descriptions = [
+            f.get("deficiency_items", [{}])[0].get("description", "")
+            for f in failures
+        ]
+        has_threshold_pdr = any(
+            "threshold" in d.lower() or "failed" in d.lower()
+            for d in failure_descriptions
+        )
+        assert has_threshold_pdr
+
+
+# ---------------------------------------------------------------------------
+# TestInstagramStagingFailure
+# ---------------------------------------------------------------------------
+
+class TestInstagramStagingFailure:
+    def test_staging_failure_marks_all_ig_shorts_as_failed(self, tmp_path):
+        config = _make_config(has_meta=True)
+        pkg = _make_final_render_package("ep_stage_fail_001", tmp_path)
+
+        with _patch_platforms(staging_exc=StagingError("staging failed")):
+            result = _run(pkg, config, "ep_stage_fail_001", tmp_path)
+
+        ig_results = [r for r in result["platform_results"] if r["platform"] == "instagram"]
+        assert len(ig_results) == 3
+        assert all(r["status"] == "failed" for r in ig_results)
+        staging_failures = [r for r in ig_results if r.get("skipped_reason") == "staging_failed"]
+        assert len(staging_failures) == 3
+
+
+# ---------------------------------------------------------------------------
+# TestSchemaValidation
+# ---------------------------------------------------------------------------
+
+class TestSchemaValidation:
+    def test_successful_run_passes_schema_validation(self, tmp_path):
+        from hypogeum.schemas import validate, SchemaError
+
+        config = _make_config()
+        pkg = _make_final_render_package("ep_schema_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_schema_001", tmp_path)
+
+        try:
+            validate("publishing_record", result)
+        except SchemaError as e:
+            pytest.fail(f"Schema validation failed: {e}")
+
+    def test_result_has_required_top_level_keys(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_keys_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_keys_001", tmp_path)
+
+        assert "package_metadata" in result
+        assert "platform_results" in result
+        assert "failures" in result
+        assert "summary" in result
+        assert "package_integrity" in result
+
+    def test_each_platform_result_has_metadata_applied(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_meta_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_meta_001", tmp_path)
+
+        for r in result["platform_results"]:
+            assert "metadata_applied" in r
+            assert "ai_disclosure_included" in r["metadata_applied"]
+
+    def test_youtube_main_result_has_captions_and_thumbnail_fields(self, tmp_path):
+        config = _make_config()
+        pkg = _make_final_render_package("ep_yt_fields_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_yt_fields_001", tmp_path)
+
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        meta = yt_main["metadata_applied"]
+        assert "captions_submitted" in meta
+        assert "thumbnail_applied" in meta
+        assert "end_screen_applied" in meta

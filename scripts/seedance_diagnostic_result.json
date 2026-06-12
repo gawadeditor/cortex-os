@@ -1,0 +1,190 @@
+{
+  "diagnostic_run_at": "2026-06-06T07:11:50Z",
+  "t2v": {
+    "test": "seedance-t2v",
+    "model": "seedance-v2.0-t2v",
+    "prompt": "A slow cinematic shot of an ancient bronze astronomical device on a dark museum table, no people, no text, no dialogue.",
+    "endpoint": "https://api.muapi.ai/api/v1/seedance-v2.0-t2v",
+    "payload_shape": {
+      "prompt": "<string>",
+      "aspect_ratio": "16:9",
+      "duration": 5
+    },
+    "budget_cap": 0.6,
+    "estimated_cost": 0.3,
+    "request_id": "6f475b7e-4ffa-475b-8700-f073763f72ba",
+    "submission_http_status": 200,
+    "submission_error_body": null,
+    "poll_history": [
+      {
+        "attempt": 1,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 2,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 3,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 4,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 5,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 6,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 7,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 8,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 9,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 10,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 11,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 12,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 13,
+        "http_status": 200,
+        "status": "completed"
+      }
+    ],
+    "final_status": null,
+    "final_error_body": null,
+    "output_url": "https://api.muapi.ai/predictions/6f475b7e-4ffa-475b-8700-f073763f72ba/result (poll response structure uses nested field — not extracted by current script)",
+    "credits_charged": 0.675,
+    "credits_charged_source": "submission_response.cost.amount_usd",
+    "credits_charged_note": "Seedance reports cost at submission time, not completion. $0.675 per 5s clip.",
+    "generation_seconds": 103.3,
+    "outcome": "success",
+    "failure_category": null,
+    "field_name_notes": "Poll completion response field for video URL is not top-level — diagnostic script output_url extractor missed it. Cost confirmed from submission response."
+  },
+  "i2v": {
+    "test": "seedance-i2v",
+    "model": "seedance-v2.0-i2v",
+    "prompt": "A slow cinematic shot of an ancient bronze astronomical device on a dark museum table, no people, no text, no dialogue.",
+    "endpoint": "https://api.muapi.ai/api/v1/seedance-v2.0-i2v",
+    "payload_shape": {
+      "prompt": "<string>",
+      "aspect_ratio": "16:9",
+      "duration": 5,
+      "images_list": [
+        "<muapi_cdn_url>"
+      ]
+    },
+    "budget_cap": 0.6,
+    "estimated_cost": 0.3,
+    "request_id": "3008462d-e20b-48fa-abc5-a1284948af22",
+    "submission_http_status": 200,
+    "submission_error_body": null,
+    "poll_history": [
+      {
+        "attempt": 1,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 2,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 3,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 4,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 5,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 6,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 7,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 8,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 9,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 10,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 11,
+        "http_status": 200,
+        "status": "processing"
+      },
+      {
+        "attempt": 12,
+        "http_status": 200,
+        "status": "completed"
+      }
+    ],
+    "final_status": null,
+    "final_error_body": null,
+    "output_url": "https://api.muapi.ai/predictions/3008462d-e20b-48fa-abc5-a1284948af22/result (poll response structure uses nested field — not extracted by current script)",
+    "credits_charged": 0.675,
+    "credits_charged_source": "submission_response.cost.amount_usd",
+    "credits_charged_note": "Seedance reports cost at submission time. $0.675 per 5s I2V clip.",
+    "generation_seconds": 96.4,
+    "outcome": "success",
+    "failure_category": null,
+    "field_name_notes": "I2V field confirmed: 'images_list' (array, Veo3 convention) — HTTP 200, no 422. Same field as Veo3 I2V. Poll completion response video URL uses nested structure not extracted by current script.",
+    "reference_image_url": "https://cdn.muapi.ai/outputs/1f4a0ff3dace43c598f2b2ba5b8ee333.jpg"
+  },
+  "diagnosis": "seedance-v2.0-t2v: WORKING. seedance-v2.0-i2v: WORKING. Both Seedance models confirmed operational via MUAPI. T2V cost: $0.675/clip | I2V cost: $0.675/clip (both 5s at 16:9). T2V latency: 103s. I2V latency: 96s. I2V uses images_list (array) — same as Veo3, different from Runway. Seedance is 4.5x more expensive than Runway ($0.675 vs $0.15 per 5s clip).",
+  "seedance_usable_for_episode_zero": true
+}

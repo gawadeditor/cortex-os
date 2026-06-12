@@ -1,0 +1,30 @@
+# Generated assets — never commit
+.hypogeum-assets/
+.hypogeum-assets-backup-*/
+
+# Secrets
+.env
+client_secret*.json
+client_secrets.json
+
+# Claude Code session data
+.claude/
+
+# Octogent integration
+.octogent/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Test artifacts
+.pytest_cache/
+tests/__pycache__/
+hypogeum/__pycache__/

@@ -48,11 +48,9 @@ def _now_iso() -> str:
 # Individual checks
 # ---------------------------------------------------------------------------
 
-_KNOWN_INVALID_SLUGS = {
-    "anthropic/claude-fable-5",
-    "openai/gpt-5.5-pro",
-    "openai/gpt-5-pro",
-}
+# Slugs confirmed absent from the live OpenRouter /models list (checked 2026-06-12).
+# anthropic/claude-fable-5 and openai/gpt-5.5-pro are both live — not in this set.
+_KNOWN_INVALID_SLUGS: set[str] = set()
 
 
 def check_model_slugs(config) -> dict:

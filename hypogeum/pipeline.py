@@ -752,11 +752,11 @@ def run_pipeline(
 # the names below so tests can mock individual agents independently.
 #
 # Model assignments (current — see .env for overrides):
-#   EP → claude-opus-4.6 (config.EP_MODEL)
+#   EP → claude-fable-5 (config.EP_MODEL)
 #   RD → claude-opus-4.6 (config.RD_MODEL)
-#   TD planning → claude-sonnet-4.6 (config.TD_PLANNING_MODEL)
+#   TD planning → openai/gpt-5.5-pro (config.TD_PLANNING_MODEL)
 #   BGA Pass 1 → claude-sonnet-4.6 (config.BGA_PASS1_MODEL)
-#   BGA Pass 2 → claude-sonnet-4.6 (config.BGA_PASS2_MODEL)
+#   BGA Pass 2 → openai/gpt-5.5-pro (config.BGA_PASS2_MODEL)
 #   SE, VPD, Audio, Assembly, Publishing → claude-sonnet-4.6
 #
 # Each stub documents its expected return type and which milestone implements it.

@@ -396,11 +396,9 @@ _MINIMAL_ENV = {
 
 
 class TestModelSlugConfig:
-    _KNOWN_INVALID = {
-        "anthropic/claude-fable-5",
-        "openai/gpt-5.5-pro",
-        "openai/gpt-5-pro",
-    }
+    # Both claude-fable-5 and gpt-5.5-pro confirmed live on OpenRouter 2026-06-12.
+    # This set is now empty; kept as a hook for future delist events.
+    _KNOWN_INVALID: set = set()
 
     def _load_config(self):
         import os
@@ -410,22 +408,26 @@ class TestModelSlugConfig:
         with patch.dict(os.environ, env):
             return Config()
 
-    def test_ep_model_not_invalid(self):
+    def test_ep_model_is_fable5_or_opus(self):
+        # claude-fable-5 confirmed live on OpenRouter 2026-06-12
         cfg = self._load_config()
-        assert cfg.EP_MODEL not in self._KNOWN_INVALID, (
-            f"EP_MODEL={cfg.EP_MODEL!r} is a known-invalid model slug"
+        assert cfg.EP_MODEL in (
+            "anthropic/claude-fable-5", "anthropic/claude-opus-4.6",
+        ), f"EP_MODEL={cfg.EP_MODEL!r} is not the expected EP model"
+
+    def test_td_planning_model_is_gpt_based(self):
+        # openai/gpt-5.5-pro confirmed live on OpenRouter 2026-06-12;
+        # thumbnail reasoning stack must remain GPT-based
+        cfg = self._load_config()
+        assert cfg.TD_PLANNING_MODEL.startswith("openai/"), (
+            f"TD_PLANNING_MODEL={cfg.TD_PLANNING_MODEL!r} must be GPT-based"
         )
 
-    def test_td_planning_model_not_invalid(self):
+    def test_bga_pass2_model_is_gpt_based(self):
+        # openai/gpt-5.5-pro confirmed live; BGA Pass2 must remain GPT-based
         cfg = self._load_config()
-        assert cfg.TD_PLANNING_MODEL not in self._KNOWN_INVALID, (
-            f"TD_PLANNING_MODEL={cfg.TD_PLANNING_MODEL!r} is a known-invalid model slug"
-        )
-
-    def test_bga_pass2_model_not_invalid(self):
-        cfg = self._load_config()
-        assert cfg.BGA_PASS2_MODEL not in self._KNOWN_INVALID, (
-            f"BGA_PASS2_MODEL={cfg.BGA_PASS2_MODEL!r} is a known-invalid model slug"
+        assert cfg.BGA_PASS2_MODEL.startswith("openai/"), (
+            f"BGA_PASS2_MODEL={cfg.BGA_PASS2_MODEL!r} must be GPT-based"
         )
 
     def test_ep_model_non_empty(self):

@@ -63,24 +63,18 @@ class TestModelSlugChecks:
         assert result["ok"] is True
         assert result["issues"] == []
 
-    def test_invalid_ep_model_fails(self):
-        result = check_model_slugs(
-            self._make_config(EP_MODEL="anthropic/claude-fable-5")
-        )
+    def test_empty_ep_model_fails_check(self):
+        result = check_model_slugs(self._make_config(EP_MODEL=""))
         assert result["ok"] is False
         assert any("EP_MODEL" in i for i in result["issues"])
 
-    def test_invalid_td_planning_model_fails(self):
-        result = check_model_slugs(
-            self._make_config(TD_PLANNING_MODEL="openai/gpt-5.5-pro")
-        )
+    def test_empty_td_planning_model_fails_check(self):
+        result = check_model_slugs(self._make_config(TD_PLANNING_MODEL=""))
         assert result["ok"] is False
         assert any("TD_PLANNING_MODEL" in i for i in result["issues"])
 
-    def test_invalid_bga_pass2_model_fails(self):
-        result = check_model_slugs(
-            self._make_config(BGA_PASS2_MODEL="openai/gpt-5.5-pro")
-        )
+    def test_empty_bga_pass2_model_fails_check(self):
+        result = check_model_slugs(self._make_config(BGA_PASS2_MODEL=""))
         assert result["ok"] is False
         assert any("BGA_PASS2_MODEL" in i for i in result["issues"])
 
@@ -89,20 +83,20 @@ class TestModelSlugChecks:
         assert result["ok"] is False
         assert any("EP_MODEL" in i for i in result["issues"])
 
-    def test_all_three_invalid_produces_three_issues(self):
+    def test_three_empty_slugs_produces_three_issues(self):
         result = check_model_slugs(self._make_config(
-            EP_MODEL="anthropic/claude-fable-5",
-            TD_PLANNING_MODEL="openai/gpt-5.5-pro",
-            BGA_PASS2_MODEL="openai/gpt-5.5-pro",
+            EP_MODEL="",
+            TD_PLANNING_MODEL="",
+            BGA_PASS2_MODEL="",
         ))
         assert result["ok"] is False
         assert len(result["issues"]) == 3
 
-    def test_known_invalid_set_contains_fable5(self):
-        assert "anthropic/claude-fable-5" in _KNOWN_INVALID_SLUGS
-
-    def test_known_invalid_set_contains_gpt55pro(self):
-        assert "openai/gpt-5.5-pro" in _KNOWN_INVALID_SLUGS
+    def test_known_invalid_set_is_empty_after_verification(self):
+        # Both anthropic/claude-fable-5 and openai/gpt-5.5-pro confirmed live
+        # on OpenRouter 2026-06-12 — the set is empty until a slug is delisted
+        assert "anthropic/claude-fable-5" not in _KNOWN_INVALID_SLUGS
+        assert "openai/gpt-5.5-pro" not in _KNOWN_INVALID_SLUGS
 
 
 # ---------------------------------------------------------------------------

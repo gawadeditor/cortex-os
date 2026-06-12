@@ -425,17 +425,17 @@ class Config:
             "RD_MODEL", default="anthropic/claude-opus-4.6"
         )
         self.TD_PLANNING_MODEL = _get_optional(
-            "TD_PLANNING_MODEL", default="openai/gpt-5.5-pro"
+            "TD_PLANNING_MODEL", default="anthropic/claude-sonnet-4.6"
         )
         self.TD_PLANNING_MAX_TOKENS = _get_int("TD_PLANNING_MAX_TOKENS", default=16384)
         self.BGA_PASS1_MODEL = _get_optional(
             "BGA_PASS1_MODEL", default="anthropic/claude-sonnet-4.6"
         )
         self.BGA_PASS2_MODEL = _get_optional(
-            "BGA_PASS2_MODEL", default="openai/gpt-5.5-pro"
+            "BGA_PASS2_MODEL", default="anthropic/claude-sonnet-4.6"
         )
         self.EP_MODEL = _get_optional(
-            "EP_MODEL", default="anthropic/claude-fable-5"
+            "EP_MODEL", default="anthropic/claude-opus-4.6"
         )
 
         # --- Finance Agent ---

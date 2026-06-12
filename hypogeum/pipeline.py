@@ -69,6 +69,7 @@ from hypogeum.agents.visual_package_director import (
 )
 from hypogeum.config import Config
 from hypogeum.finance import clear_run_context, set_run_context, write_episode_rollup
+from hypogeum.post_run_intelligence import run_post_run_intelligence
 from hypogeum.production_metadata import write_analytics_pending, write_production_metadata
 from hypogeum.logger import get_logger
 from hypogeum.run_registry import complete_run, fail_run, register_run
@@ -81,7 +82,6 @@ from hypogeum.startup import StartupReport, run_startup_checks
 
 _SONNET = "anthropic/claude-sonnet-4.6"
 _OPUS   = "anthropic/claude-opus-4.6"
-_FABLE5 = "anthropic/claude-fable-5"
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +677,16 @@ def run_pipeline(
         model_assignments=_model_assignments,
     )
 
+    # Phase 5 — post-run intelligence (non-blocking)
+    _source_registry = research_package.get("source_registry", []) if research_package else []
+    run_post_run_intelligence(
+        episode_id=episode_id,
+        production_metadata=production_metadata_record,
+        source_registry=_source_registry,
+        run_id=run_id,
+        analytics_snapshot=None,  # not available at this stage; signal flow skipped
+    )
+
     # analytics_pending — only after confirmed YouTube publish
     analytics_pending_record = None
     _yt_id = publishing_record.get("summary", {}).get("youtube_main_video_id", "") if publishing_record else ""
@@ -742,11 +752,11 @@ def run_pipeline(
 # the names below so tests can mock individual agents independently.
 #
 # Model assignments (current — see .env for overrides):
-#   EP → claude-fable-5 (config.EP_MODEL)
+#   EP → claude-opus-4.6 (config.EP_MODEL)
 #   RD → claude-opus-4.6 (config.RD_MODEL)
-#   TD planning → gpt-5.5-pro (config.TD_PLANNING_MODEL)
+#   TD planning → claude-sonnet-4.6 (config.TD_PLANNING_MODEL)
 #   BGA Pass 1 → claude-sonnet-4.6 (config.BGA_PASS1_MODEL)
-#   BGA Pass 2 → gpt-5.5-pro (config.BGA_PASS2_MODEL)
+#   BGA Pass 2 → claude-sonnet-4.6 (config.BGA_PASS2_MODEL)
 #   SE, VPD, Audio, Assembly, Publishing → claude-sonnet-4.6
 #
 # Each stub documents its expected return type and which milestone implements it.

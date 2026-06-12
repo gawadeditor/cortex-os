@@ -1,5 +1,5 @@
 """
-hypogeum/agents/asset_archive_agent.py — Asset Archive Agent (M7.2)
+hypogeum/agents/asset_archive_agent.py — Asset Catalog Agent (M7.2)
 
 Cross-episode asset catalog. Indexes all pipeline-produced assets from one
 episode run into shared, append-only JSONL catalogs that span all episodes.

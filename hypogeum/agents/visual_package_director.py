@@ -48,6 +48,12 @@ Integration contracts (must not be violated):
 Model: Claude Sonnet 4.6 (frozen — VPD governance decision)
 Max tokens: 12,288 (Visual Package is large — many scenes with full prompts)
 
+# TODO (future — M6+ design): Split VPD into two agents:
+#   visual_package_planner   — Phase 1: Claude planning only; returns planned Visual Package
+#   visual_package_executor  — Phase 2: MUAPI execution only; reads planned package, runs generation
+# This split enables retry/resume on execution failures without re-running the planning pass.
+# Do not refactor until planning + executor have separate test suites and contracts defined.
+
 Logging events emitted:
   vpd_planning_started        — info  — before run_agent() call
   vpd_planning_completed      — info  — after run_agent() returns

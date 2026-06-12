@@ -1,5 +1,5 @@
 """
-hypogeum/agents/archive_agent.py — Archive Agent (R49)
+hypogeum/agents/archive_agent.py — Publishing Archive Agent (R49)
 
 Post-publish archival recorder. Validates publishing outcomes and assembles
 a durable episode_summary from the final_render_package and publishing_record.

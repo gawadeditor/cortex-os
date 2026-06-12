@@ -164,7 +164,7 @@ LIGHTING CONSTRAINT: All scenes must use one of these lighting registers:
 PALETTE CONSTRAINT: The channel color bible requires warm earth tones as the DOMINANT palette.
 Any cool tone must be subordinate and transitional — NEVER dominant, primary, or the headline
 descriptor. "Pre-dawn blue-to-gold" is permitted only when the gold phase is what defines the
-scene. "Cool blue-white" is ALWAYS a blocking BGA violation (E-C04).
+scene. "Cool blue-white" is ALWAYS a blocking BGA violation (E-C05: no cool blues).
 
 NEVER use the following in any prompt:
 - Fluorescent, diffuse even, studio flat, bright-key, institutional, museum, clinical

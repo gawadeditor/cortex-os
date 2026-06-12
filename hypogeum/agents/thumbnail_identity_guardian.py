@@ -73,6 +73,7 @@ _TIG_MAX_TOKENS = 2048
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_TIG_DIR = _PROJECT_ROOT / ".hypogeum-assets" / "tig"
+_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "thumbnail_identity_guardian.txt"
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
 
@@ -93,42 +94,9 @@ _WARNING_RULES = {
     "TIG-W04": "Image subject competes with wordmark",
 }
 
-# System prompt sent to Claude for vision evaluation
-_SYSTEM_PROMPT = """\
-You are the Thumbnail Identity Guardian for The Hypogeum Chronicles, a cinematic archaeology documentary channel.
-
-Your task: inspect the provided thumbnail image for compliance with the channel's visual identity.
-
-Channel identity rules:
-- Background: dark (void_black #080C0E or deep_stone #1A1D20). Must be 0–40% brightness. Never bright, high-key, or light.
-- Wordmark: THE HYPOGEUM CHRONICLES must be present and legible. Three-line hierarchy.
-- No human faces as primary subject.
-- No neon, cyberpunk, sci-fi, or modern visual language.
-- No talking-head or interview framing.
-- Expected dimensions: 1280×720 (16:9 aspect ratio).
-- Typography: Cinzel SemiBold for headline, Raleway Regular for subtitle.
-- Forbidden colors: bright white, neon, cool blues, greens, pinks, purples, bright oranges.
-
-Respond ONLY with valid JSON in exactly this format:
-{
-  "violations": [
-    {
-      "rule_id": "TIG-01",
-      "severity": "BLOCKING",
-      "description": "One sentence describing what was observed."
-    }
-  ]
-}
-
-If no violations are found, respond with: {"violations": []}
-
-Available BLOCKING rule_ids: TIG-01 (human face), TIG-02 (bright background), TIG-03 (neon/cyberpunk),
-TIG-04 (talking-head), TIG-05 (missing overlay), TIG-06 (wrong dimensions), TIG-07 (wordmark absent).
-
-Available WARNING rule_ids: TIG-W01 (elevated brightness), TIG-W02 (weak subtitle), TIG-W03 (small wordmark), TIG-W04 (subject competes).
-
-Do not invent rule_ids. Only use the listed ones.
-"""
+# System prompt loaded from disk — consistent with all other agent prompts.
+# Source: hypogeum/prompts/thumbnail_identity_guardian.txt
+_SYSTEM_PROMPT: str = _PROMPT_FILE.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

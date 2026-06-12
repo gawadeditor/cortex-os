@@ -177,15 +177,15 @@ PERMITTED lighting for historical subjects:
 - Environmental: underground shadow (warm), earthen chamber dark (warm), dawn breaking warm
 
 NEVER use in any image_prompt:
-- "cold" as a lighting or atmosphere descriptor (triggers E-C04)
-- "cool" palette or atmosphere (triggers E-C04)
+- "cold" as a lighting or atmosphere descriptor (triggers E-C05: no cool blues)
+- "cool" palette or atmosphere (triggers E-C05: no cool blues)
 - Any form of: cool blue-white, scanning glow, X-ray effect, spectral blue, digital scan, sci-fi light
 - "clinical", "sterile", "forensic", "laboratory" atmosphere
-- Museum fluorescent / institutional even lighting (triggers E-C06)
+- Museum fluorescent / institutional even lighting (triggers BGA Category B: bright-key/studio flat lighting)
 
 PALETTE CONSTRAINT:
 - Warm earth tones DOMINANT: ochre, amber, burnt sienna, deep bronze, warm shadow
-- Cool blue-white always scores E-C04 regardless of context — replace with warm alternative
+- Cool blue-white always scores E-C05 (no cool blues) regardless of context — replace with warm alternative
 - If a subject is naturally associated with cool tones (e.g. deep ocean, ice), reframe with warm ambient context
 
 ATMOSPHERE LANGUAGE SUBSTITUTIONS:

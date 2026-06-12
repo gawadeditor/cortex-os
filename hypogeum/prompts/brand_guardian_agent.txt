@@ -85,7 +85,9 @@ For each candidate in the input, evaluate:
 
 ## WHAT NOT TO FLAG
 
-- Specific hex color values (not enforceable — all hex values are unverified)
+- Specific hex color values (not enforceable — hex values are verified from the approved Style Board
+  but exact hex matching in generated JPEG/bitmap output is not reliable due to compression and
+  rendering variation; enforcement remains character-based by intentional policy decision)
 - Historical battle scenes, violence, death (content policy — not brand)
 - Music, audio, narration (not visual — out of scope for BGA)
 - AI disclosure text or YouTube metadata

@@ -1330,7 +1330,7 @@ class TestVPDPromptConstraints:
     Verify the VPD system prompt explicitly prohibits the patterns that caused
     BGA blocking violations in ep_val_01 (2026-06-09):
       E-VG06: Egyptologist/presenter in investigative pose facing viewer
-      E-C06:  Museum fluorescent lighting / modern institutional interior
+      BGA Category B: Museum fluorescent lighting / modern institutional interior
 
     These are content-of-prompt tests — they do NOT call Claude.
     They fail if the prompt is weakened or the constraints are removed.
@@ -1408,7 +1408,7 @@ class TestVPDPromptConstraints:
     # ------------------------------------------------------------------
 
     def test_prompt_forbids_museum_fluorescent_lighting(self):
-        """Prompt must explicitly forbid fluorescent lighting (BGA rule E-C06)."""
+        """Prompt must explicitly forbid fluorescent lighting (BGA Category B: bright-key/studio flat)."""
         assert "fluorescent" in self.prompt.lower(), (
             "VPD prompt must explicitly forbid fluorescent lighting"
         )
@@ -1525,13 +1525,13 @@ class TestVPDPromptConstraints:
         )
 
     # ------------------------------------------------------------------
-    # Palette / cool-blue / scanning prohibition (BGA rule E-C04)
+    # Palette / cool-blue / scanning prohibition (BGA rule E-C05)
     # ------------------------------------------------------------------
 
     def test_prompt_forbids_cool_blue_white_palette(self):
-        """Prompt must explicitly forbid 'cool blue-white' dominant palette (BGA E-C04)."""
+        """Prompt must explicitly forbid 'cool blue-white' dominant palette (BGA E-C05: no cool blues)."""
         assert "cool blue-white" in self.prompt.lower() or "cool blue" in self.prompt.lower(), (
-            "VPD prompt must explicitly forbid cool blue-white palette (BGA rule E-C04)"
+            "VPD prompt must explicitly forbid cool blue-white palette (BGA rule E-C05)"
         )
         lines = self.prompt.lower().split('\n')
         cool_blue_forbidden = any(

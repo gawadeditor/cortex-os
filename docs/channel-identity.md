@@ -27,6 +27,19 @@ are enforced in code. The current enforcement coverage is **partial**.
 
 For the complete gap register, see `docs/factory-governance-gaps.md`.
 
+## Document Hierarchy
+
+This document is the **single authoritative operational identity source** for The Hypogeum Chronicles production pipeline. The other identity documents exist for specific subordinate purposes:
+
+| Document | Role | Status |
+|---|---|---|
+| `docs/channel-identity.md` ← **this file** | **Operational identity source.** The canonical definition of all visual, typographic, and content identity rules. All agents and enforcement gates derive from this document. | Operational |
+| `docs/brand_guardian/brand_spec_executable.md` | **Enforcement mapping.** Defines which rules in this document are enforceable in code/LLM, which are INFERRED, and which are NOT_IN_IMAGE. Consumed when designing or updating enforcement gates. | Enforcement reference |
+| `docs/brand_guardian/brand_bible_hypogeum.md` | **Historical extraction artifact.** The original visual extraction from `bible.png`. Activation checklist is not complete. Not independently enforced — superseded by this document for all operational purposes. | Inactive (historical) |
+| Agent system prompts (`hypogeum/prompts/*.txt`) | **Derived runtime artifacts.** Written based on this document. Not independent sources of truth. When this document changes, the relevant prompt(s) must be updated manually until single-source injection is built. | Derived |
+
+> **Important:** As of 2026-06-12, no agent reads this file at runtime. All enforcement derives from the agent system prompt files, which were written based on this document. Single-source runtime injection is a planned future capability (see `docs/factory-governance-gaps.md`).
+
 ---
 
 ## 1. Visual Palette

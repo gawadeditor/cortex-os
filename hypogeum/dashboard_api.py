@@ -1,0 +1,1036 @@
+"""
+hypogeum/dashboard_api.py — Phase C: Real Dashboard Foundation
+
+Typed data contracts, state model, and permission definitions for the
+factory dashboard. This is the backend API layer that any frontend
+(web, CLI, or agent) calls to inspect factory state.
+
+Architecture:
+    - All reads. No writes. No network. Non-blocking.
+    - Every function returns a typed dataclass or a safe default.
+    - Lazy table access: tables that may not exist (reuse_decisions,
+      evolution_adjustments) are queried inside try/except.
+    - Permission model is pure data — no authentication implementation.
+      Phase G (Operations Center) will enforce permissions.
+
+Public API:
+    # Summaries (individual sections)
+    get_channel_summaries(db_path=None) -> list[ChannelSummary]
+    get_run_health(db_path=None)        -> RunHealthSummary
+    get_agent_health(db_path=None)      -> list[AgentHealthSummary]
+    get_model_usage(db_path=None)       -> list[ModelUsageSummary]
+    get_provider_health(db_path=None)   -> list[ProviderHealthSummary]
+    get_archive_summary(db_path=None)   -> ArchiveSummary
+    get_recall_summary(db_path=None)    -> RecallSummary
+    get_learning_summary(db_path=None)  -> LearningSummary
+    get_cost_summary(db_path=None)      -> CostSummary
+    get_audit_summary(db_path=None)     -> AuditSummary
+    get_notifications(db_path=None)     -> list[Notification]
+
+    # Aggregated factory state
+    get_factory_state(db_path=None, factory_id="hypogeum") -> FactoryState
+
+    # Permission model (pure data)
+    get_permission(action)  -> Optional[Permission]
+    list_permissions()      -> list[Permission]
+
+    # Text formatter
+    format_factory_state(state) -> str
+
+Data contracts (dataclasses):
+    ChannelSummary, RunHealthSummary, AgentHealthSummary, ModelUsageSummary,
+    ProviderHealthSummary, ArchiveSummary, RecallSummary, LearningSummary,
+    CostSummary, AuditSummary, Notification, Permission, FactoryState
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from hypogeum.db import get_connection, initialize_schema
+from hypogeum.channel_config import list_channel_profiles, load_channel_config
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_PROJECT_ROOT    = Path(__file__).resolve().parent.parent
+_DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
+METADATA_VERSION = "v1"
+SCHEMA_VERSION   = "v2"
+
+_PASS_VERDICTS = {"APPROVED", "APPROVED_WITH_FLAGS"}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_db_path(db_path: Optional[Path]) -> Path:
+    return Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_rate(num: int, denom: int) -> float:
+    return round(num / denom, 4) if denom > 0 else 0.0
+
+
+# ===========================================================================
+# Data Contracts
+# ===========================================================================
+
+@dataclass
+class ChannelSummary:
+    """Profile completeness and status for one channel."""
+    channel_id:           str
+    name:                 str
+    status:               str          # active | paused | archived
+    brand_complete:       bool
+    publishing_complete:  bool
+    models_complete:      bool
+    profile_completeness: float        # 0.0–1.0 (fraction of sub-profiles filled)
+    created_at:           str
+
+
+@dataclass
+class RunHealthSummary:
+    """Aggregate health across all pipeline runs."""
+    total_runs:     int
+    complete_count: int
+    failed_count:   int
+    running_count:  int
+    success_rate:   float          # complete / (complete + failed); excludes running
+    last_run_at:    Optional[str]
+
+
+@dataclass
+class AgentHealthSummary:
+    """Per-stage execution health, read from v_stage_performance."""
+    stage_name:      str
+    total_runs:      int
+    success_count:   int
+    failure_count:   int
+    skip_count:      int
+    success_rate:    float         # success / (total - skips)
+    avg_duration_ms: Optional[float]
+    avg_cost_usd:    Optional[float]
+
+
+@dataclass
+class ModelUsageSummary:
+    """Usage and cost for a single model slug across all runs."""
+    model_id:       str
+    usage_count:    int
+    total_cost_usd: float
+
+
+@dataclass
+class ProviderHealthSummary:
+    """Asset generation health and cost for a single provider."""
+    provider:       str
+    total_attempts: int
+    failure_count:  int
+    failure_rate:   float
+    total_cost_usd: float
+
+
+@dataclass
+class ArchiveSummary:
+    """State of the archive_index table."""
+    total_archived:       int
+    reuse_eligible_count: int
+    asset_types:          dict     # {asset_type: count}
+    oldest_at:            Optional[str]
+    newest_at:            Optional[str]
+
+
+@dataclass
+class RecallSummary:
+    """Reuse decision statistics from the reuse_decisions lazy table."""
+    total_decisions: int
+    reuse_count:     int
+    generate_count:  int
+    reuse_rate:      float
+
+
+@dataclass
+class LearningSummary:
+    """Aggregate learning signal stats from learning_records."""
+    total_records:          int
+    signal_types:           dict     # {signal_type: count}
+    recent_recommendations: list     # up to 5 most recent recommendation strings
+
+
+@dataclass
+class CostSummary:
+    """Cost breakdown across all episodes and providers."""
+    total_usd:    float
+    by_provider:  dict    # {provider: total_usd}
+    by_model:     dict    # {model: total_usd}
+    by_episode:   dict    # {episode_id: total_usd}
+    run_count:    int
+    episode_count: int
+
+
+@dataclass
+class AuditSummary:
+    """Result of the most recent acceptance audit check."""
+    last_run_at:   Optional[str]
+    ready:         bool
+    blocker_count: int
+    warning_count: int
+    detail:        str
+
+
+@dataclass
+class Notification:
+    """A dashboard alert surfaced from factory state analysis."""
+    level:      str           # "info" | "warning" | "critical"
+    category:   str
+    message:    str
+    channel_id: Optional[str]
+    created_at: str
+
+
+@dataclass
+class Permission:
+    """
+    Definition of one factory action and who may perform it.
+
+    Levels (in ascending authority):
+        operator  — day-to-day: approve runs, pause channels
+        admin     — structural: clone factory, override budgets, deactivate
+        emergency — irreversible: emergency stop
+
+    Phase G (Operations Center) will enforce these at runtime.
+    """
+    action:                str
+    description:           str
+    requires_level:        str    # "operator" | "admin" | "emergency"
+    requires_confirmation: bool = False
+
+
+@dataclass
+class FactoryState:
+    """
+    Snapshot of the complete factory state at a point in time.
+
+    All sections are populated from the local DB. No external API calls.
+    overall_health: "healthy" | "warning" | "degraded" | "unknown"
+    """
+    factory_id:      str
+    schema_version:  str
+    checked_at:      str
+    overall_health:  str
+    run_health:      RunHealthSummary
+    channels:        list
+    agent_health:    list
+    model_usage:     list
+    provider_health: list
+    archive:         ArchiveSummary
+    recall:          RecallSummary
+    learning:        LearningSummary
+    costs:           CostSummary
+    audit:           AuditSummary
+    notifications:   list
+    metadata_version: str = METADATA_VERSION
+
+
+# ===========================================================================
+# Permission Model (pure data)
+# ===========================================================================
+
+PERMISSION_TABLE: dict[str, Permission] = {
+    "approve_run": Permission(
+        action="approve_run",
+        description="Approve an episode run to proceed",
+        requires_level="operator",
+    ),
+    "pause_channel": Permission(
+        action="pause_channel",
+        description="Pause a channel — stops new runs from being scheduled",
+        requires_level="operator",
+    ),
+    "resume_channel": Permission(
+        action="resume_channel",
+        description="Resume a paused channel",
+        requires_level="operator",
+    ),
+    "approve_evolution": Permission(
+        action="approve_evolution",
+        description="Approve an evolution engine recommendation",
+        requires_level="operator",
+    ),
+    "import_package": Permission(
+        action="import_package",
+        description="Import a brand or identity package into the factory",
+        requires_level="operator",
+    ),
+    "clone_factory": Permission(
+        action="clone_factory",
+        description="Create a new channel clone from an existing channel",
+        requires_level="admin",
+    ),
+    "override_model": Permission(
+        action="override_model",
+        description="Override the model assignment for a stage",
+        requires_level="admin",
+    ),
+    "override_cost_ceiling": Permission(
+        action="override_cost_ceiling",
+        description="Override the budget ceiling for a run",
+        requires_level="admin",
+        requires_confirmation=True,
+    ),
+    "deactivate_channel": Permission(
+        action="deactivate_channel",
+        description="Archive (permanently deactivate) a channel",
+        requires_level="admin",
+        requires_confirmation=True,
+    ),
+    "emergency_stop": Permission(
+        action="emergency_stop",
+        description="Emergency stop — halts all running and queued runs",
+        requires_level="emergency",
+        requires_confirmation=True,
+    ),
+}
+
+
+def get_permission(action: str) -> Optional[Permission]:
+    """Return the Permission for an action, or None if not defined."""
+    return PERMISSION_TABLE.get(action)
+
+
+def list_permissions() -> list:
+    """Return all defined permissions ordered by requires_level then action."""
+    order = {"operator": 0, "admin": 1, "emergency": 2}
+    return sorted(
+        PERMISSION_TABLE.values(),
+        key=lambda p: (order.get(p.requires_level, 99), p.action),
+    )
+
+
+# ===========================================================================
+# Channel Summaries
+# ===========================================================================
+
+def get_channel_summaries(db_path: Optional[Path] = None) -> list:
+    """
+    Return a ChannelSummary for every channel profile in the DB.
+
+    Profile completeness = (brand_present + publishing_present + models_present) / 3.
+    Non-blocking: returns [] on any error.
+    """
+    try:
+        profiles = list_channel_profiles(db_path=db_path)
+        summaries = []
+        for cp in profiles:
+            try:
+                cfg = load_channel_config(cp.channel_id, db_path=db_path)
+                brand_ok     = cfg is not None and cfg.brand      is not None
+                pub_ok       = cfg is not None and cfg.publishing is not None
+                models_ok    = cfg is not None and cfg.models     is not None
+                completeness = _safe_rate(
+                    int(brand_ok) + int(pub_ok) + int(models_ok), 3
+                )
+                summaries.append(ChannelSummary(
+                    channel_id           = cp.channel_id,
+                    name                 = cp.name,
+                    status               = cp.status,
+                    brand_complete       = brand_ok,
+                    publishing_complete  = pub_ok,
+                    models_complete      = models_ok,
+                    profile_completeness = completeness,
+                    created_at           = cp.created_at,
+                ))
+            except Exception:
+                pass
+        return summaries
+    except Exception:
+        return []
+
+
+# ===========================================================================
+# Run Health
+# ===========================================================================
+
+def get_run_health(db_path: Optional[Path] = None) -> RunHealthSummary:
+    """
+    Aggregate health across all pipeline runs.
+
+    success_rate = complete / (complete + failed); excludes running rows.
+    Non-blocking: returns zeroed summary on any error.
+    """
+    _empty = RunHealthSummary(0, 0, 0, 0, 0.0, None)
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*)                                         AS total,
+                    SUM(CASE WHEN status='complete' THEN 1 ELSE 0 END) AS complete,
+                    SUM(CASE WHEN status='failed'   THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status='running'  THEN 1 ELSE 0 END) AS running,
+                    MAX(started_at)                                  AS last_run_at
+                FROM runs
+            """).fetchone()
+        finally:
+            conn.close()
+
+        if row is None or row["total"] == 0:
+            return _empty
+
+        complete = row["complete"] or 0
+        failed   = row["failed"]   or 0
+        running  = row["running"]  or 0
+        return RunHealthSummary(
+            total_runs     = row["total"],
+            complete_count = complete,
+            failed_count   = failed,
+            running_count  = running,
+            success_rate   = _safe_rate(complete, complete + failed),
+            last_run_at    = row["last_run_at"],
+        )
+    except Exception:
+        return _empty
+
+
+# ===========================================================================
+# Agent Health
+# ===========================================================================
+
+def get_agent_health(db_path: Optional[Path] = None) -> list:
+    """
+    Per-stage success rates from the v_stage_performance view.
+
+    success_rate = successes / (total - skips).
+    Non-blocking: returns [] on any error or if no stage data exists.
+    """
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            rows = conn.execute("""
+                SELECT stage_name, total_executions, successes, failures,
+                       skips, avg_duration_ms, avg_cost_usd
+                FROM v_stage_performance
+                ORDER BY stage_name
+            """).fetchall()
+        finally:
+            conn.close()
+
+        result = []
+        for r in rows:
+            non_skip = (r["total_executions"] or 0) - (r["skips"] or 0)
+            result.append(AgentHealthSummary(
+                stage_name      = r["stage_name"],
+                total_runs      = r["total_executions"] or 0,
+                success_count   = r["successes"] or 0,
+                failure_count   = r["failures"]  or 0,
+                skip_count      = r["skips"]     or 0,
+                success_rate    = _safe_rate(r["successes"] or 0, non_skip),
+                avg_duration_ms = r["avg_duration_ms"],
+                avg_cost_usd    = r["avg_cost_usd"],
+            ))
+        return result
+    except Exception:
+        return []
+
+
+# ===========================================================================
+# Model Usage
+# ===========================================================================
+
+def get_model_usage(db_path: Optional[Path] = None) -> list:
+    """
+    Usage count and total cost per model slug from the costs table.
+
+    Non-blocking: returns [] on any error.
+    """
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            rows = conn.execute("""
+                SELECT model, COUNT(*) AS usage_count, SUM(cost_usd) AS total_cost
+                FROM costs
+                WHERE model IS NOT NULL
+                GROUP BY model
+                ORDER BY total_cost DESC
+            """).fetchall()
+        finally:
+            conn.close()
+
+        return [
+            ModelUsageSummary(
+                model_id       = r["model"],
+                usage_count    = r["usage_count"] or 0,
+                total_cost_usd = round(r["total_cost"] or 0.0, 6),
+            )
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+# ===========================================================================
+# Provider Health
+# ===========================================================================
+
+def get_provider_health(db_path: Optional[Path] = None) -> list:
+    """
+    Attempt count, failure rate, and total cost per provider from asset_versions.
+
+    Non-blocking: returns [] on any error.
+    """
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            rows = conn.execute("""
+                SELECT
+                    provider,
+                    COUNT(*)                                              AS total,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)    AS failures,
+                    SUM(COALESCE(cost_usd, 0))                          AS total_cost
+                FROM asset_versions
+                GROUP BY provider
+                ORDER BY total DESC
+            """).fetchall()
+        finally:
+            conn.close()
+
+        return [
+            ProviderHealthSummary(
+                provider       = r["provider"],
+                total_attempts = r["total"]      or 0,
+                failure_count  = r["failures"]   or 0,
+                failure_rate   = _safe_rate(r["failures"] or 0, r["total"] or 0),
+                total_cost_usd = round(r["total_cost"] or 0.0, 6),
+            )
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+# ===========================================================================
+# Archive Summary
+# ===========================================================================
+
+def get_archive_summary(db_path: Optional[Path] = None) -> ArchiveSummary:
+    """
+    State of the archive_index table: total, eligible, type breakdown, age.
+
+    Non-blocking: returns zeroed summary on any error.
+    """
+    _empty = ArchiveSummary(0, 0, {}, None, None)
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            totals = conn.execute("""
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN reuse_eligible=1 THEN 1 ELSE 0 END) AS eligible,
+                       MIN(archived_at) AS oldest,
+                       MAX(archived_at) AS newest
+                FROM archive_index
+            """).fetchone()
+
+            type_rows = conn.execute("""
+                SELECT asset_type, COUNT(*) AS cnt
+                FROM archive_index
+                GROUP BY asset_type
+            """).fetchall()
+        finally:
+            conn.close()
+
+        if totals is None or totals["total"] == 0:
+            return _empty
+
+        asset_types = {r["asset_type"]: r["cnt"] for r in type_rows}
+        return ArchiveSummary(
+            total_archived       = totals["total"]    or 0,
+            reuse_eligible_count = totals["eligible"] or 0,
+            asset_types          = asset_types,
+            oldest_at            = totals["oldest"],
+            newest_at            = totals["newest"],
+        )
+    except Exception:
+        return _empty
+
+
+# ===========================================================================
+# Recall Summary
+# ===========================================================================
+
+def get_recall_summary(db_path: Optional[Path] = None) -> RecallSummary:
+    """
+    Reuse decision statistics from the reuse_decisions lazy table.
+
+    The table may not exist (created only when should_reuse() is called).
+    Non-blocking: returns zeroed summary on any error or missing table.
+    """
+    _empty = RecallSummary(0, 0, 0, 0.0)
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            row = conn.execute("""
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN decision='reuse'    THEN 1 ELSE 0 END) AS reuse,
+                       SUM(CASE WHEN decision='generate' THEN 1 ELSE 0 END) AS generate
+                FROM reuse_decisions
+            """).fetchone()
+        finally:
+            conn.close()
+
+        if row is None or row["total"] == 0:
+            return _empty
+
+        reuse    = row["reuse"]    or 0
+        generate = row["generate"] or 0
+        total    = row["total"]    or 0
+        return RecallSummary(
+            total_decisions = total,
+            reuse_count     = reuse,
+            generate_count  = generate,
+            reuse_rate      = _safe_rate(reuse, total),
+        )
+    except Exception:
+        return _empty
+
+
+# ===========================================================================
+# Learning Summary
+# ===========================================================================
+
+def get_learning_summary(db_path: Optional[Path] = None) -> LearningSummary:
+    """
+    Aggregate learning signal stats from the learning_records table.
+
+    Non-blocking: returns zeroed summary on any error.
+    """
+    _empty = LearningSummary(0, {}, [])
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM learning_records"
+            ).fetchone()
+
+            type_rows = conn.execute("""
+                SELECT signal_type, COUNT(*) AS cnt
+                FROM learning_records
+                GROUP BY signal_type
+                ORDER BY cnt DESC
+            """).fetchall()
+
+            rec_rows = conn.execute("""
+                SELECT recommendation
+                FROM learning_records
+                WHERE recommendation IS NOT NULL
+                ORDER BY recorded_at DESC
+                LIMIT 5
+            """).fetchall()
+        finally:
+            conn.close()
+
+        total = total_row["cnt"] if total_row else 0
+        if total == 0:
+            return _empty
+
+        signal_types = {r["signal_type"]: r["cnt"] for r in type_rows}
+        recent_recs  = [r["recommendation"] for r in rec_rows if r["recommendation"]]
+        return LearningSummary(
+            total_records          = total,
+            signal_types           = signal_types,
+            recent_recommendations = recent_recs,
+        )
+    except Exception:
+        return _empty
+
+
+# ===========================================================================
+# Cost Summary
+# ===========================================================================
+
+def get_cost_summary(db_path: Optional[Path] = None) -> CostSummary:
+    """
+    Cost breakdown by provider, model, and episode from the costs table.
+
+    Non-blocking: returns zeroed summary on any error.
+    """
+    _empty = CostSummary(0.0, {}, {}, {}, 0, 0)
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            total_row = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM costs"
+            ).fetchone()
+
+            provider_rows = conn.execute("""
+                SELECT provider, SUM(cost_usd) AS total
+                FROM costs GROUP BY provider ORDER BY total DESC
+            """).fetchall()
+
+            model_rows = conn.execute("""
+                SELECT model, SUM(cost_usd) AS total
+                FROM costs WHERE model IS NOT NULL
+                GROUP BY model ORDER BY total DESC
+            """).fetchall()
+
+            episode_rows = conn.execute("""
+                SELECT episode_id, SUM(cost_usd) AS total
+                FROM costs GROUP BY episode_id ORDER BY total DESC
+            """).fetchall()
+
+            run_count = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM runs"
+            ).fetchone()["cnt"]
+
+            episode_count = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM episodes"
+            ).fetchone()["cnt"]
+        finally:
+            conn.close()
+
+        return CostSummary(
+            total_usd     = round(total_row["total"] or 0.0, 6),
+            by_provider   = {r["provider"]: round(r["total"] or 0.0, 6) for r in provider_rows},
+            by_model      = {r["model"]: round(r["total"] or 0.0, 6) for r in model_rows if r["model"]},
+            by_episode    = {r["episode_id"]: round(r["total"] or 0.0, 6) for r in episode_rows},
+            run_count     = run_count     or 0,
+            episode_count = episode_count or 0,
+        )
+    except Exception:
+        return _empty
+
+
+# ===========================================================================
+# Audit Summary
+# ===========================================================================
+
+def get_audit_summary(db_path: Optional[Path] = None) -> AuditSummary:
+    """
+    Run the acceptance audit and return a typed summary.
+
+    Non-blocking: returns a failed summary on any import or runtime error.
+    """
+    try:
+        from hypogeum.acceptance_audit import run_acceptance_audit
+        report = run_acceptance_audit(db_path=db_path)
+        return AuditSummary(
+            last_run_at   = report.checked_at,
+            ready         = report.ready,
+            blocker_count = len(report.blockers),
+            warning_count = len(report.warnings),
+            detail        = "ACCEPTED" if report.ready else "REJECTED",
+        )
+    except Exception as exc:
+        return AuditSummary(
+            last_run_at   = _now_iso(),
+            ready         = False,
+            blocker_count = 1,
+            warning_count = 0,
+            detail        = f"audit import failed: {exc}",
+        )
+
+
+# ===========================================================================
+# Notifications
+# ===========================================================================
+
+def get_notifications(
+    db_path:      Optional[Path]   = None,
+    run_health:   Optional[RunHealthSummary] = None,
+    audit:        Optional[AuditSummary]     = None,
+    provider_health: Optional[list]          = None,
+    agent_health: Optional[list]             = None,
+    channels:     Optional[list]             = None,
+) -> list:
+    """
+    Derive actionable notifications from factory state.
+
+    Pre-computed summaries can be passed in to avoid redundant DB queries.
+    Non-blocking: returns [] on any error.
+
+    Notification levels:
+        "critical" — factory cannot function or is actively failing
+        "warning"  — degraded state requiring attention
+        "info"     — informational, no action required
+    """
+    try:
+        now = _now_iso()
+        notes: list[Notification] = []
+
+        rh = run_health   or get_run_health(db_path)
+        au = audit         or get_audit_summary(db_path)
+        ph = provider_health or get_provider_health(db_path)
+        ah = agent_health  or get_agent_health(db_path)
+        ch = channels      or get_channel_summaries(db_path)
+
+        # --- Run health ---
+        if rh.total_runs > 0:
+            if rh.success_rate < 0.5:
+                notes.append(Notification(
+                    level="critical", category="run_health",
+                    message=f"Run success rate critically low: {rh.success_rate:.0%} "
+                            f"({rh.complete_count}/{rh.complete_count+rh.failed_count})",
+                    channel_id=None, created_at=now,
+                ))
+            elif rh.success_rate < 0.8:
+                notes.append(Notification(
+                    level="warning", category="run_health",
+                    message=f"Run success rate below target: {rh.success_rate:.0%} "
+                            f"({rh.complete_count}/{rh.complete_count+rh.failed_count})",
+                    channel_id=None, created_at=now,
+                ))
+
+        # --- Audit ---
+        if au.blocker_count > 0:
+            notes.append(Notification(
+                level="critical", category="audit",
+                message=f"Acceptance audit has {au.blocker_count} blocker(s) — "
+                        "factory not ready for any run",
+                channel_id=None, created_at=now,
+            ))
+        elif au.warning_count > 0:
+            notes.append(Notification(
+                level="warning", category="audit",
+                message=f"Acceptance audit has {au.warning_count} warning(s)",
+                channel_id=None, created_at=now,
+            ))
+
+        # --- Provider health ---
+        for p in ph:
+            if p.failure_rate > 0.30:
+                notes.append(Notification(
+                    level="warning", category="provider_health",
+                    message=f"Provider '{p.provider}' failure rate: "
+                            f"{p.failure_rate:.0%} ({p.failure_count}/{p.total_attempts})",
+                    channel_id=None, created_at=now,
+                ))
+
+        # --- Agent health ---
+        for a in ah:
+            non_skip = a.total_runs - a.skip_count
+            if non_skip > 0 and a.success_rate < 0.7:
+                notes.append(Notification(
+                    level="warning", category="agent_health",
+                    message=f"Stage '{a.stage_name}' success rate: "
+                            f"{a.success_rate:.0%} ({a.success_count}/{non_skip})",
+                    channel_id=None, created_at=now,
+                ))
+
+        # --- Channels ---
+        if not ch:
+            notes.append(Notification(
+                level="info", category="channels",
+                message="No channels configured — use create_channel() or clone_factory() to get started",
+                channel_id=None, created_at=now,
+            ))
+        else:
+            incomplete = [c for c in ch if c.profile_completeness < 1.0]
+            for c in incomplete:
+                notes.append(Notification(
+                    level="info", category="channels",
+                    message=f"Channel '{c.name}' profile incomplete "
+                            f"({c.profile_completeness:.0%} — missing: "
+                            + _missing_profiles(c) + ")",
+                    channel_id=c.channel_id, created_at=now,
+                ))
+
+        return notes
+    except Exception:
+        return []
+
+
+def _missing_profiles(ch: ChannelSummary) -> str:
+    missing = []
+    if not ch.brand_complete:      missing.append("brand")
+    if not ch.publishing_complete: missing.append("publishing")
+    if not ch.models_complete:     missing.append("models")
+    return ", ".join(missing) if missing else "none"
+
+
+# ===========================================================================
+# Overall Health
+# ===========================================================================
+
+def _compute_overall_health(
+    run_health: RunHealthSummary,
+    audit:      AuditSummary,
+) -> str:
+    if run_health.total_runs == 0:
+        return "unknown"
+    if run_health.success_rate < 0.5:
+        return "degraded"
+    if run_health.success_rate < 0.8 or audit.blocker_count > 0:
+        return "warning"
+    return "healthy"
+
+
+# ===========================================================================
+# Factory State (aggregated)
+# ===========================================================================
+
+def get_factory_state(
+    db_path:    Optional[Path] = None,
+    factory_id: str            = "hypogeum",
+) -> FactoryState:
+    """
+    Assemble a complete snapshot of factory state from all data sources.
+
+    All sub-queries are non-blocking. A partial failure in any section
+    returns an empty/zeroed section rather than aborting the whole snapshot.
+
+    Args:
+        db_path:    Override SQLite path.
+        factory_id: Stable identifier for this factory instance.
+
+    Returns:
+        FactoryState dataclass.
+    """
+    checked_at = _now_iso()
+
+    run_health      = get_run_health(db_path)
+    channels        = get_channel_summaries(db_path)
+    agent_health    = get_agent_health(db_path)
+    model_usage     = get_model_usage(db_path)
+    provider_health = get_provider_health(db_path)
+    archive         = get_archive_summary(db_path)
+    recall          = get_recall_summary(db_path)
+    learning        = get_learning_summary(db_path)
+    costs           = get_cost_summary(db_path)
+    audit           = get_audit_summary(db_path)
+    notifications   = get_notifications(
+        db_path=db_path,
+        run_health=run_health,
+        audit=audit,
+        provider_health=provider_health,
+        agent_health=agent_health,
+        channels=channels,
+    )
+
+    overall_health = _compute_overall_health(run_health, audit)
+
+    return FactoryState(
+        factory_id      = factory_id,
+        schema_version  = SCHEMA_VERSION,
+        checked_at      = checked_at,
+        overall_health  = overall_health,
+        run_health      = run_health,
+        channels        = channels,
+        agent_health    = agent_health,
+        model_usage     = model_usage,
+        provider_health = provider_health,
+        archive         = archive,
+        recall          = recall,
+        learning        = learning,
+        costs           = costs,
+        audit           = audit,
+        notifications   = notifications,
+    )
+
+
+# ===========================================================================
+# Text Formatter
+# ===========================================================================
+
+def format_factory_state(state: FactoryState) -> str:
+    """
+    Render a FactoryState to a terminal-friendly text report.
+
+    No network calls. No DB access. Pure formatting.
+    """
+    lines = [
+        f"Factory State — {state.factory_id}",
+        f"  Checked at:   {state.checked_at}",
+        f"  Schema:       {state.schema_version}",
+        f"  Health:       {state.overall_health.upper()}",
+        "",
+        "Run Health",
+        f"  Total runs:   {state.run_health.total_runs}",
+        f"  Complete:     {state.run_health.complete_count}",
+        f"  Failed:       {state.run_health.failed_count}",
+        f"  Running:      {state.run_health.running_count}",
+        f"  Success rate: {state.run_health.success_rate:.0%}",
+        f"  Last run:     {state.run_health.last_run_at or 'never'}",
+        "",
+        f"Channels ({len(state.channels)})",
+    ]
+    if state.channels:
+        for ch in state.channels:
+            lines.append(
+                f"  [{ch.status:8s}] {ch.channel_id:30s} "
+                f"{ch.profile_completeness:.0%} complete"
+            )
+    else:
+        lines.append("  (none configured)")
+
+    lines += ["", f"Agent Health ({len(state.agent_health)} stages)"]
+    for a in state.agent_health[:10]:
+        lines.append(
+            f"  {a.stage_name:28s}  {a.success_rate:5.0%}  "
+            f"({a.success_count}/{a.total_runs - a.skip_count})"
+        )
+    if len(state.agent_health) > 10:
+        lines.append(f"  … {len(state.agent_health) - 10} more")
+
+    lines += ["", f"Provider Health ({len(state.provider_health)} providers)"]
+    for p in state.provider_health:
+        lines.append(
+            f"  {p.provider:20s}  fail={p.failure_rate:.0%}  "
+            f"cost=${p.total_cost_usd:.4f}"
+        )
+
+    lines += [
+        "",
+        "Costs",
+        f"  Total:        ${state.costs.total_usd:.4f}",
+        f"  Episodes:     {state.costs.episode_count}",
+        f"  Runs:         {state.costs.run_count}",
+    ]
+    for prov, cost in sorted(state.costs.by_provider.items()):
+        lines.append(f"  {prov:22s}  ${cost:.4f}")
+
+    lines += [
+        "",
+        "Archive",
+        f"  Total:        {state.archive.total_archived}",
+        f"  Reuse eligible: {state.archive.reuse_eligible_count}",
+    ]
+
+    lines += [
+        "",
+        "Recall",
+        f"  Decisions:    {state.recall.total_decisions}",
+        f"  Reuse rate:   {state.recall.reuse_rate:.0%}",
+    ]
+
+    lines += [
+        "",
+        "Learning",
+        f"  Records:      {state.learning.total_records}",
+    ]
+
+    lines += [
+        "",
+        "Audit",
+        f"  Ready:        {'YES' if state.audit.ready else 'NO'}",
+        f"  Blockers:     {state.audit.blocker_count}",
+        f"  Warnings:     {state.audit.warning_count}",
+        f"  Detail:       {state.audit.detail}",
+    ]
+
+    if state.notifications:
+        lines += ["", f"Notifications ({len(state.notifications)})"]
+        for n in state.notifications:
+            lines.append(f"  [{n.level.upper():8s}] [{n.category}] {n.message}")
+    else:
+        lines += ["", "Notifications: none"]
+
+    return "\n".join(lines)

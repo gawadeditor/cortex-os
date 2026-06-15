@@ -840,3 +840,36 @@ CREATE INDEX IF NOT EXISTS idx_ep_topics_channel_status
 CREATE INDEX IF NOT EXISTS idx_ep_topics_claim_order
     ON episode_topics(channel_id, priority ASC, created_at ASC)
     WHERE status = 'queued';
+
+-- ===========================================================================
+-- P3-02: Factory Entity System
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- factories
+-- One row per factory instance. A factory hosts one or more channels.
+-- owner_id references users(user_id) when P1-03 user record exists; nullable
+-- to allow bootstrap before owner user is created.
+-- status: "active" | "maintenance" | "suspended"
+-- factory_policies: reserved for P3-05 policy cascade (JSON blob, added via
+--   _V2_COLUMN_MIGRATIONS["factories"] when P3-05 is implemented).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS factories (
+    factory_id       TEXT NOT NULL PRIMARY KEY,
+    factory_name     TEXT NOT NULL,
+    factory_slug     TEXT NOT NULL UNIQUE,
+    owner_id         TEXT REFERENCES users(user_id),
+    default_language TEXT NOT NULL DEFAULT 'en',
+    default_timezone TEXT NOT NULL DEFAULT 'UTC',
+    status           TEXT NOT NULL DEFAULT 'active'
+                         CHECK(status IN ('active','maintenance','suspended')),
+    dashboard_title  TEXT,
+    support_email    TEXT,
+    primary_color    TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_factories_slug   ON factories(factory_slug);
+CREATE INDEX IF NOT EXISTS idx_factories_status ON factories(status);

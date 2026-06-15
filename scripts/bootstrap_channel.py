@@ -38,12 +38,16 @@ from hypogeum.channel_config import (
 )
 from hypogeum.config import Config
 from hypogeum.dashboard_api import get_notifications
+from hypogeum.factory_entity import FactoryExistsError, create_factory, get_factory
 
 # ---------------------------------------------------------------------------
-# Hypogeum channel ID (stable slug — never change after bootstrap)
+# Stable IDs — never change after bootstrap
 # ---------------------------------------------------------------------------
 
-CHANNEL_ID = "hypogeum"
+FACTORY_ID   = "hypogeum"
+FACTORY_NAME = "Hypogeum Media Factory"
+FACTORY_SLUG = "hypogeum"
+CHANNEL_ID   = "hypogeum"
 
 
 def _build_config_dict(config: Config) -> dict:
@@ -133,8 +137,45 @@ def _build_config_dict(config: Config) -> dict:
     }
 
 
+def _run_factory_bootstrap() -> bool:
+    """
+    P3-02: Bootstrap the factory record. Returns True on success.
+
+    Idempotent — if the factory already exists the function prints a note
+    and returns True without modifying the existing record.
+    """
+    existing = get_factory(factory_id=FACTORY_ID)
+    if existing:
+        print(
+            f"  Factory already exists "
+            f"(factory_id={existing.factory_id!r}  status={existing.status!r}) "
+            f"— skipping insert."
+        )
+        return True
+
+    try:
+        factory = create_factory(
+            factory_id   = FACTORY_ID,
+            factory_name = FACTORY_NAME,
+            factory_slug = FACTORY_SLUG,
+        )
+        print(f"  Created factory_id={factory.factory_id!r}  name={factory.factory_name!r}")
+        return True
+    except FactoryExistsError as exc:
+        # Race condition: created between the get_factory check and create_factory.
+        print(f"  Factory already exists (concurrent write) — {exc}")
+        return True
+    except Exception as exc:
+        print(f"  ERROR bootstrapping factory: {exc}")
+        return False
+
+
 def _run_bootstrap(config: Config) -> bool:
-    """Bootstrap the channel. Returns True on success."""
+    """Bootstrap the factory and channel. Returns True on success."""
+    print(f"Bootstrapping factory: {FACTORY_ID!r}")
+    if not _run_factory_bootstrap():
+        return False
+
     config_dict = _build_config_dict(config)
 
     print(f"Bootstrapping channel: {CHANNEL_ID!r}")
@@ -243,7 +284,7 @@ def main() -> int:
         print("\nVerification FAILED — check errors above.")
         return 1
 
-    print("\nP1-01 complete. Hypogeum channel is in the DB.")
+    print("\nP1-01 + P3-02-core complete. Factory and channel are in the DB.")
     return 0
 
 

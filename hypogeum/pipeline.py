@@ -45,9 +45,11 @@ Logging events emitted:
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from hypogeum.agents.asset_archive_agent import run_asset_archive
 from hypogeum.agents.assembly_agent import run_assembly_agent
@@ -68,6 +70,13 @@ from hypogeum.agents.visual_package_director import (
     run_visual_package_director_from_plan,
 )
 from hypogeum.config import Config
+from hypogeum.db import (
+    get_connection,
+    insert_stage_execution,
+    update_stage_execution_complete,
+    update_stage_execution_failed,
+    update_stage_execution_skipped,
+)
 from hypogeum.finance import clear_run_context, set_run_context, write_episode_rollup
 from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_blocked, is_factory_blocked
 from hypogeum.post_run_intelligence import run_post_run_intelligence
@@ -346,6 +355,7 @@ def run_pipeline(
     output_dir: Optional[Path] = None,
     youtube_privacy: str = "public",
     channel_id: Optional[str] = "hypogeum",
+    db_path: Optional[Path] = None,
 ) -> PipelineResult:
     """
     Execute the full 9-agent pipeline end-to-end.
@@ -369,6 +379,9 @@ def run_pipeline(
                           Raises ChannelNotActiveError if status != 'active'.
                           Pass None explicitly to bypass channel loading and use
                           .env configuration only.
+        db_path:          Path to the SQLite audit database. Defaults to
+                          .hypogeum-assets/hypogeum.db. Pass a tmp_path in
+                          tests to isolate stage_executions writes.
 
     Returns:
         PipelineResult — all 11 packages populated on success.
@@ -424,6 +437,9 @@ def run_pipeline(
     # -----------------------------------------------------------------------
     # run_id is set inside the try so the except can always reference it safely.
     run_id: Optional[str] = None
+    # Tracks the in-progress stage for audit failure recording in the except block.
+    _current_stage_id: Optional[str] = None
+    _current_stage_t0: str = ""
     try:
         run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id)
         set_run_context(run_id=run_id, episode_id=episode_id)
@@ -432,7 +448,13 @@ def run_pipeline(
         # -----------------------------------------------------------------------
         # 1. Startup verification — fail-fast before any agent is called
         # -----------------------------------------------------------------------
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "startup_checks", log,
+            db_path=db_path,
+        )
         startup_report = run_startup_checks(config, episode_id=episode_id)
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
 
         log.info(
             "pipeline_startup_verified",
@@ -445,12 +467,20 @@ def run_pipeline(
         # 2. Executive Producer
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="executive_producer")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "executive_producer", log,
+            model_slug=getattr(config, "EP_MODEL", None),
+            output_schema="validation_scorecard",
+            db_path=db_path,
+        )
         validation_scorecard, topic_brief = _run_executive_producer(
             topic_input=topic_input,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
 
         # Fail-fast: REJECT halts the pipeline before any downstream agent is called.
         if validation_scorecard.get("decision") == "REJECT":
@@ -473,12 +503,20 @@ def run_pipeline(
         # 3. Research Director
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="research_director")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "research_director", log,
+            model_slug=getattr(config, "RD_MODEL", None),
+            output_schema="research_package",
+            db_path=db_path,
+        )
         research_package, pdr = _run_research_director(
             topic_brief=topic_brief,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
 
         # Fail-fast: PDR halts the pipeline; operator resolves deficiencies and re-runs.
         if pdr is not None:
@@ -496,36 +534,57 @@ def run_pipeline(
         # 4. Narrative Architect
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="narrative_architect")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "narrative_architect", log,
+            output_schema="narrative_package",
+            db_path=db_path,
+        )
         narrative_package = _run_narrative_architect(
             research_package=research_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info("pipeline_stage_completed", agent="narrative_architect")
 
         # -----------------------------------------------------------------------
         # 5. Script Engine
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="script_engine")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "script_engine", log,
+            output_schema="script_package",
+            db_path=db_path,
+        )
         script_package = _run_script_engine(
             narrative_package=narrative_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info("pipeline_stage_completed", agent="script_engine")
 
         # -----------------------------------------------------------------------
         # 6. Finance Agent — budget authorization gate (pre-generation spend)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="finance_agent_authorization")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "finance_agent_authorization", log,
+            output_schema="finance_authorization",
+            db_path=db_path,
+        )
         finance_authorization = _run_budget_authorization(
             script_package=script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
             agent="finance_agent_authorization",
@@ -547,24 +606,39 @@ def run_pipeline(
         # 7. Visual Package Director
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="visual_package_director")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "visual_package_director", log,
+            output_schema="visual_package",
+            db_path=db_path,
+        )
         visual_package = _run_visual_package_director(
             script_package=script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info("pipeline_stage_completed", agent="visual_package_director")
 
         # -----------------------------------------------------------------------
         # 7. Thumbnail Director
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="thumbnail_director")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "thumbnail_director", log,
+            model_slug=getattr(config, "TD_PLANNING_MODEL", None),
+            output_schema="thumbnail_package",
+            db_path=db_path,
+        )
         thumbnail_package = _run_thumbnail_director(
             visual_package=visual_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info("pipeline_stage_completed", agent="thumbnail_director")
 
         # -----------------------------------------------------------------------
@@ -578,6 +652,11 @@ def run_pipeline(
             or not config.ENABLE_DEDICATED_SHORT_GENERATION
         )
         log.info("pipeline_stage_started", agent="audio_agent")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "audio_agent", log,
+            output_schema="narration_package",
+            db_path=db_path,
+        )
         narration_package = _run_audio_agent(
             script_package=script_package,
             config=config,
@@ -585,12 +664,19 @@ def run_pipeline(
             output_dir=output_dir,
             skip_shorts=_skip_shorts,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info("pipeline_stage_completed", agent="audio_agent")
 
         # -----------------------------------------------------------------------
         # 9. Assembly Agent
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="assembly_agent")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "assembly_agent", log,
+            output_schema="final_render_package",
+            db_path=db_path,
+        )
         final_render_package = _run_assembly_agent(
             visual_package=visual_package,
             narration_package=narration_package,
@@ -602,12 +688,18 @@ def run_pipeline(
             source_registry=research_package.get("source_registry", []),
             topic_brief=topic_brief,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info("pipeline_stage_completed", agent="assembly_agent")
 
         # -----------------------------------------------------------------------
         # 9b. Asset Archive — catalog all generated assets (non-blocking)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="asset_archive")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "asset_archive", log,
+            db_path=db_path,
+        )
         asset_archive_record = _run_asset_archive(
             visual_package=visual_package,
             narration_package=narration_package,
@@ -617,6 +709,8 @@ def run_pipeline(
             output_dir=output_dir,
             run_id=run_id,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
             agent="asset_archive",
@@ -628,6 +722,11 @@ def run_pipeline(
         # 10. QA Agent — pre-publish gate
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="qa_agent")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "qa_agent", log,
+            output_schema="qa_approval_report",
+            db_path=db_path,
+        )
         qa_approval_report = _run_qa_agent(
             final_render_package=final_render_package,
             thumbnail_package=thumbnail_package,
@@ -635,6 +734,8 @@ def run_pipeline(
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
             agent="qa_agent",
@@ -654,6 +755,11 @@ def run_pipeline(
         # 11. Rights & Compliance Agent
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="compliance_agent")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "compliance_agent", log,
+            output_schema="compliance_report",
+            db_path=db_path,
+        )
         compliance_report = _run_compliance_agent(
             final_render_package=final_render_package,
             source_registry=research_package.get("source_registry", []),
@@ -661,6 +767,8 @@ def run_pipeline(
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
             agent="compliance_agent",
@@ -680,6 +788,11 @@ def run_pipeline(
         # 12. Publishing Agent
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="publishing_agent")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "publishing_agent", log,
+            output_schema="publishing_record",
+            db_path=db_path,
+        )
         publishing_record = _run_publishing_agent(
             final_render_package=final_render_package,
             config=config,
@@ -687,12 +800,18 @@ def run_pipeline(
             output_dir=output_dir,
             youtube_privacy=youtube_privacy,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info("pipeline_stage_completed", agent="publishing_agent")
 
         # -----------------------------------------------------------------------
         # 13. Archive Agent — post-publish audit record (non-blocking)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="archive_agent")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "archive_agent", log,
+            db_path=db_path,
+        )
         archive_record = _run_archive_agent(
             final_render_package=final_render_package,
             publishing_record=publishing_record,
@@ -700,6 +819,8 @@ def run_pipeline(
             episode_id=episode_id,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
             agent="archive_agent",
@@ -711,6 +832,10 @@ def run_pipeline(
         # 14. Finance Agent — cost ledger record (post-run, non-blocking)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="finance_agent_ledger")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "finance_agent_ledger", log,
+            db_path=db_path,
+        )
         finance_record = _run_cost_ledger(
             final_render_package=final_render_package,
             publishing_record=publishing_record,
@@ -721,6 +846,8 @@ def run_pipeline(
             visual_package=visual_package,
             output_dir=output_dir,
         )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
             agent="finance_agent_ledger",
@@ -829,11 +956,143 @@ def run_pipeline(
                 fail_run(run_id, episode_id, error_message=str(_exc)[:4096])
             except Exception:
                 pass
+        if _current_stage_id is not None:
+            _record_stage_failed(
+                _current_stage_id, _current_stage_t0, str(_exc)[:4096], log,
+                db_path=db_path,
+            )
         try:
             clear_run_context()
         except Exception:
             pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# P3-01 Audit persistence helpers
+#
+# These three functions wrap the DB audit calls for stage_executions.
+# All are non-blocking: any exception is caught, logged as a warning,
+# and execution continues. A DB write failure must never crash the pipeline.
+# ---------------------------------------------------------------------------
+
+def _record_stage_start(
+    run_id: str,
+    episode_id: str,
+    stage_name: str,
+    log,
+    model_slug: Optional[str] = None,
+    output_schema: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> Tuple[str, str]:
+    """
+    Insert a stage_executions row with status='running'.
+
+    Returns (stage_exec_id, started_at_iso). Both are always valid strings
+    even when the DB write fails — the caller uses them with _record_stage_*
+    functions, which also suppress any DB errors.
+    """
+    stage_exec_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        conn = get_connection(db_path)
+        try:
+            insert_stage_execution(
+                conn, stage_exec_id, run_id, episode_id, stage_name,
+                started_at,
+                model_slug=model_slug,
+                output_schema=output_schema,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as _exc:
+        log.warn(
+            "audit_stage_write_failed",
+            stage=stage_name, phase="start", error=str(_exc)[:200],
+        )
+    return stage_exec_id, started_at
+
+
+def _record_stage_complete(
+    stage_exec_id: str,
+    started_at: str,
+    log,
+    cost_usd: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Update stage_executions row to status='completed'. Non-blocking."""
+    try:
+        completed_at = datetime.now(timezone.utc).isoformat()
+        t0 = datetime.fromisoformat(started_at)
+        duration_ms = max(0, int(
+            (datetime.now(timezone.utc) - t0).total_seconds() * 1000
+        ))
+        conn = get_connection(db_path)
+        try:
+            update_stage_execution_complete(
+                conn, stage_exec_id, completed_at,
+                duration_ms=duration_ms, cost_usd=cost_usd,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as _exc:
+        log.warn(
+            "audit_stage_write_failed",
+            stage_exec_id=stage_exec_id, phase="complete", error=str(_exc)[:200],
+        )
+
+
+def _record_stage_failed(
+    stage_exec_id: str,
+    started_at: str,
+    error_message: str,
+    log,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Update stage_executions row to status='failed'. Non-blocking."""
+    try:
+        completed_at = datetime.now(timezone.utc).isoformat()
+        t0 = datetime.fromisoformat(started_at)
+        duration_ms = max(0, int(
+            (datetime.now(timezone.utc) - t0).total_seconds() * 1000
+        ))
+        conn = get_connection(db_path)
+        try:
+            update_stage_execution_failed(
+                conn, stage_exec_id, completed_at,
+                error_message[:4096], duration_ms=duration_ms,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as _exc:
+        log.warn(
+            "audit_stage_write_failed",
+            stage_exec_id=stage_exec_id, phase="failed", error=str(_exc)[:200],
+        )
+
+
+def _record_stage_skipped(
+    stage_exec_id: str,
+    log,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Update stage_executions row to status='skipped' (checkpoint resume). Non-blocking."""
+    try:
+        completed_at = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db_path)
+        try:
+            update_stage_execution_skipped(conn, stage_exec_id, completed_at)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as _exc:
+        log.warn(
+            "audit_stage_write_failed",
+            stage_exec_id=stage_exec_id, phase="skipped", error=str(_exc)[:200],
+        )
 
 
 # ---------------------------------------------------------------------------

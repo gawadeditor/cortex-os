@@ -218,11 +218,12 @@ def run_startup_checks(
         ok, yt_err = _check_youtube_oauth(config)
         youtube_token_valid = ok
         if not ok:
-            errors.append(
+            # Non-blocking: publishing_agent handles youtube_available=False gracefully
+            # by skipping all YouTube uploads. Generation stages are unaffected.
+            warnings.append(
                 f"YouTube OAuth token refresh failed: {yt_err}. "
-                "The refresh token may be expired or the OAuth credentials may be "
-                "incorrect. Re-authorize the application at the Google OAuth consent "
-                "screen to generate a new YOUTUBE_REFRESH_TOKEN, then retry."
+                "YouTube publishing will be unavailable for this run. "
+                "Re-authorize at the Google OAuth consent screen to restore publishing."
             )
     elif any([config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET, config.YOUTUBE_REFRESH_TOKEN]):
         warnings.append(

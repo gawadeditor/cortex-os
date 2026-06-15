@@ -1,0 +1,738 @@
+"""
+tests/test_scheduler.py — P2-03: Schedule Entity and Scheduler Process
+
+Coverage:
+  - schedules table CRUD (insert, status transitions, next_run advance)
+  - scheduled_runs table CRUD (insert, status transitions)
+  - compute_next_run: daily, weekly, manual cadences
+  - get_due_schedules: only returns active schedules due now
+  - tick: enqueues pending runs and advances next_run_at
+  - Factory-scoped vs channel-scoped schedules
+  - Paused / disabled schedules are not ticked
+  - cancel_scheduled_run: pending→cancelled, triggered unaffected
+  - get_pending_runs: returns only pending rows
+  - No publishing, no content generation, no provider calls, no network I/O
+
+Safety invariants checked:
+  - tick() never calls the pipeline
+  - tick() never touches publishing modules
+  - No real HTTP/SMTP calls (socket-level ban via monkeypatch)
+"""
+
+from __future__ import annotations
+
+import socket
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from hypogeum.db import (
+    get_connection,
+    initialize_schema,
+    insert_scheduled_run,
+    update_scheduled_run_status,
+)
+from hypogeum.scheduler import (
+    cancel_scheduled_run,
+    compute_next_run,
+    create_schedule,
+    get_pending_runs,
+    set_next_run,
+    set_schedule_status,
+    tick,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _utc(*args) -> datetime:
+    return datetime(*args, tzinfo=timezone.utc)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _rows(db_path: Path, table: str) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        return [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
+    finally:
+        conn.close()
+
+
+def _schedule_row(db_path: Path, schedule_id: str) -> dict:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM schedules WHERE schedule_id = ?", (schedule_id,)
+        ).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def _sched_run_row(db_path: Path, sr_id: str) -> dict:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM scheduled_runs WHERE scheduled_run_id = ?", (sr_id,)
+        ).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Fixture: isolated DB
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def db_path(tmp_path) -> Path:
+    p = tmp_path / "test.db"
+    initialize_schema(p)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Safety fixture: block real network calls
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    original_connect = socket.socket.connect
+
+    def _block(self, address):
+        raise AssertionError(
+            f"scheduler tests must not open network connections (attempted: {address})"
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", _block)
+    yield
+
+
+# ===========================================================================
+# compute_next_run — pure function, no I/O
+# ===========================================================================
+
+class TestComputeNextRun:
+
+    def test_daily(self):
+        dt = _utc(2026, 6, 15, 9, 0, 0)
+        result = compute_next_run("daily", dt)
+        assert result == _utc(2026, 6, 16, 9, 0, 0)
+
+    def test_weekly(self):
+        dt = _utc(2026, 6, 15, 9, 0, 0)
+        result = compute_next_run("weekly", dt)
+        assert result == _utc(2026, 6, 22, 9, 0, 0)
+
+    def test_manual_returns_none(self):
+        dt = _utc(2026, 6, 15, 9, 0, 0)
+        assert compute_next_run("manual", dt) is None
+
+    def test_unknown_cadence_raises(self):
+        with pytest.raises(ValueError, match="Unknown cadence"):
+            compute_next_run("hourly", _now())
+
+    def test_daily_preserves_time_of_day(self):
+        dt = _utc(2026, 1, 31, 14, 30, 0)
+        result = compute_next_run("daily", dt)
+        assert result.hour == 14
+        assert result.minute == 30
+
+    def test_weekly_from_end_of_month(self):
+        dt = _utc(2026, 1, 28, 0, 0, 0)
+        result = compute_next_run("weekly", dt)
+        assert result == _utc(2026, 2, 4, 0, 0, 0)
+
+
+# ===========================================================================
+# DB schema — tables exist
+# ===========================================================================
+
+class TestSchemaTablesExist:
+
+    def test_schedules_table_exists(self, db_path):
+        conn = get_connection(db_path)
+        try:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert "schedules" in tables
+
+    def test_scheduled_runs_table_exists(self, db_path):
+        conn = get_connection(db_path)
+        try:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert "scheduled_runs" in tables
+
+    def test_schedules_columns(self, db_path):
+        conn = get_connection(db_path)
+        try:
+            cols = {
+                r[1]
+                for r in conn.execute("PRAGMA table_info(schedules)").fetchall()
+            }
+        finally:
+            conn.close()
+        expected = {
+            "schedule_id", "scope", "channel_id", "cadence", "status",
+            "next_run_at", "last_run_at", "max_runs_per_day", "label",
+            "created_at", "updated_at",
+        }
+        assert expected <= cols
+
+    def test_scheduled_runs_columns(self, db_path):
+        conn = get_connection(db_path)
+        try:
+            cols = {
+                r[1]
+                for r in conn.execute("PRAGMA table_info(scheduled_runs)").fetchall()
+            }
+        finally:
+            conn.close()
+        expected = {
+            "scheduled_run_id", "schedule_id", "channel_id", "episode_id",
+            "scheduled_for", "status", "triggered_at", "run_id", "created_at",
+        }
+        assert expected <= cols
+
+
+# ===========================================================================
+# create_schedule
+# ===========================================================================
+
+class TestCreateSchedule:
+
+    def test_factory_scope_default(self, db_path):
+        sid = create_schedule(db_path=db_path)
+        row = _schedule_row(db_path, sid)
+        assert row["scope"] == "factory"
+        assert row["cadence"] == "manual"
+        assert row["status"] == "active"
+        assert row["channel_id"] is None
+
+    def test_channel_scope(self, db_path):
+        sid = create_schedule(db_path=db_path, scope="channel", channel_id="ch_001")
+        row = _schedule_row(db_path, sid)
+        assert row["scope"] == "channel"
+        assert row["channel_id"] == "ch_001"
+
+    def test_channel_scope_requires_channel_id(self, db_path):
+        with pytest.raises(ValueError, match="channel_id is required"):
+            create_schedule(db_path=db_path, scope="channel")
+
+    def test_daily_cadence_with_next_run(self, db_path):
+        t = _utc(2026, 6, 20, 9, 0, 0)
+        sid = create_schedule(db_path=db_path, cadence="daily", next_run_at=t)
+        row = _schedule_row(db_path, sid)
+        assert row["cadence"] == "daily"
+        assert "2026-06-20" in row["next_run_at"]
+
+    def test_label_stored(self, db_path):
+        sid = create_schedule(db_path=db_path, label="Hypogeum weekly")
+        row = _schedule_row(db_path, sid)
+        assert row["label"] == "Hypogeum weekly"
+
+    def test_max_runs_per_day_stored(self, db_path):
+        sid = create_schedule(db_path=db_path, max_runs_per_day=3)
+        row = _schedule_row(db_path, sid)
+        assert row["max_runs_per_day"] == 3
+
+    def test_returns_uuid_string(self, db_path):
+        sid = create_schedule(db_path=db_path)
+        # Must be a valid UUID4
+        parsed = uuid.UUID(sid)
+        assert parsed.version == 4
+
+    def test_multiple_schedules_distinct_ids(self, db_path):
+        ids = {create_schedule(db_path=db_path) for _ in range(5)}
+        assert len(ids) == 5
+
+
+# ===========================================================================
+# set_schedule_status
+# ===========================================================================
+
+class TestSetScheduleStatus:
+
+    def test_active_to_paused(self, db_path):
+        sid = create_schedule(db_path=db_path)
+        set_schedule_status(sid, "paused", db_path=db_path)
+        assert _schedule_row(db_path, sid)["status"] == "paused"
+
+    def test_active_to_disabled(self, db_path):
+        sid = create_schedule(db_path=db_path)
+        set_schedule_status(sid, "disabled", db_path=db_path)
+        assert _schedule_row(db_path, sid)["status"] == "disabled"
+
+    def test_paused_to_active(self, db_path):
+        sid = create_schedule(db_path=db_path)
+        set_schedule_status(sid, "paused", db_path=db_path)
+        set_schedule_status(sid, "active", db_path=db_path)
+        assert _schedule_row(db_path, sid)["status"] == "active"
+
+    def test_paused_to_disabled(self, db_path):
+        sid = create_schedule(db_path=db_path)
+        set_schedule_status(sid, "paused", db_path=db_path)
+        set_schedule_status(sid, "disabled", db_path=db_path)
+        assert _schedule_row(db_path, sid)["status"] == "disabled"
+
+    def test_invalid_status_raises(self, db_path):
+        sid = create_schedule(db_path=db_path)
+        with pytest.raises(ValueError, match="Invalid status"):
+            set_schedule_status(sid, "unknown", db_path=db_path)
+
+
+# ===========================================================================
+# set_next_run
+# ===========================================================================
+
+class TestSetNextRun:
+
+    def test_set_next_run_updates_db(self, db_path):
+        sid = create_schedule(db_path=db_path, cadence="manual")
+        t = _utc(2026, 7, 1, 8, 0, 0)
+        set_next_run(sid, t, db_path=db_path)
+        row = _schedule_row(db_path, sid)
+        assert "2026-07-01" in row["next_run_at"]
+
+    def test_set_next_run_to_none_clears(self, db_path):
+        t = _utc(2026, 7, 1, 8, 0, 0)
+        sid = create_schedule(db_path=db_path, cadence="manual", next_run_at=t)
+        set_next_run(sid, None, db_path=db_path)
+        assert _schedule_row(db_path, sid)["next_run_at"] is None
+
+    def test_manual_with_explicit_next_run_is_due(self, db_path):
+        # Manual schedule with an explicit past next_run_at MUST be picked up by tick.
+        # The docstring says NULL schedules are excluded — not manual cadence itself.
+        past = _now() - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, cadence="manual", next_run_at=past)
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 1
+        sr = _sched_run_row(db_path, result[0])
+        assert sr["schedule_id"] == sid
+        # After the tick, next_run_at is cleared (manual returns None from compute_next_run)
+        assert _schedule_row(db_path, sid)["next_run_at"] is None
+
+
+# ===========================================================================
+# tick — core scheduler pass
+# ===========================================================================
+
+class TestTick:
+
+    def test_tick_no_due_schedules_returns_empty(self, db_path):
+        # Schedule with next_run_at in the future
+        future = _now() + timedelta(hours=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=future)
+        result = tick(db_path=db_path, now=_now())
+        assert result == []
+
+    def test_tick_one_due_schedule(self, db_path):
+        past = _now() - timedelta(minutes=5)
+        sid = create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 1
+        # Verify scheduled_run was created
+        sr = _sched_run_row(db_path, result[0])
+        assert sr["schedule_id"] == sid
+        assert sr["status"] == "pending"
+
+    def test_tick_advances_next_run_daily(self, db_path):
+        t = _now() - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, cadence="daily", next_run_at=t)
+        now = _now()
+        tick(db_path=db_path, now=now)
+        row = _schedule_row(db_path, sid)
+        # next_run_at should be approximately now + 1 day
+        next_dt = datetime.fromisoformat(row["next_run_at"])
+        expected = now + timedelta(days=1)
+        delta = abs((next_dt - expected).total_seconds())
+        assert delta < 5
+
+    def test_tick_advances_next_run_weekly(self, db_path):
+        t = _now() - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, cadence="weekly", next_run_at=t)
+        now = _now()
+        tick(db_path=db_path, now=now)
+        row = _schedule_row(db_path, sid)
+        next_dt = datetime.fromisoformat(row["next_run_at"])
+        expected = now + timedelta(weeks=1)
+        delta = abs((next_dt - expected).total_seconds())
+        assert delta < 5
+
+    def test_tick_manual_cadence_clears_next_run(self, db_path):
+        # Manual schedule manually triggered once: next_run_at should be cleared
+        t = _now() - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, cadence="manual", next_run_at=t)
+        tick(db_path=db_path, now=_now())
+        row = _schedule_row(db_path, sid)
+        assert row["next_run_at"] is None
+
+    def test_tick_sets_last_run_at(self, db_path):
+        t = _now() - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, cadence="daily", next_run_at=t)
+        tick(db_path=db_path, now=_now())
+        row = _schedule_row(db_path, sid)
+        assert row["last_run_at"] is not None
+
+    def test_tick_multiple_due_schedules(self, db_path):
+        past = _now() - timedelta(minutes=5)
+        for _ in range(3):
+            create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 3
+
+    def test_tick_paused_schedule_not_ticked(self, db_path):
+        past = _now() - timedelta(minutes=5)
+        sid = create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        set_schedule_status(sid, "paused", db_path=db_path)
+        result = tick(db_path=db_path, now=_now())
+        assert result == []
+
+    def test_tick_disabled_schedule_not_ticked(self, db_path):
+        past = _now() - timedelta(minutes=5)
+        sid = create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        set_schedule_status(sid, "disabled", db_path=db_path)
+        result = tick(db_path=db_path, now=_now())
+        assert result == []
+
+    def test_tick_manual_with_null_next_run_not_ticked(self, db_path):
+        # Manual schedule with no next_run_at set — must NOT be enqueued
+        create_schedule(db_path=db_path, cadence="manual")
+        result = tick(db_path=db_path, now=_now())
+        assert result == []
+
+    def test_tick_does_not_execute_pipeline(self, db_path, monkeypatch):
+        """tick() must never call run_pipeline or any pipeline entry point."""
+        import hypogeum.pipeline as _pipeline
+        monkeypatch.setattr(
+            _pipeline, "run_pipeline",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("tick() must not call run_pipeline")
+            ),
+            raising=False,
+        )
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 1  # enqueued, not executed
+
+    def test_tick_scheduled_run_inherits_channel_id(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        sid = create_schedule(
+            db_path=db_path,
+            scope="channel",
+            channel_id="ch_042",
+            cadence="daily",
+            next_run_at=past,
+        )
+        result = tick(db_path=db_path, now=_now())
+        sr = _sched_run_row(db_path, result[0])
+        assert sr["channel_id"] == "ch_042"
+
+    def test_tick_factory_scope_channel_id_null(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        result = tick(db_path=db_path, now=_now())
+        sr = _sched_run_row(db_path, result[0])
+        assert sr["channel_id"] is None
+
+    def test_tick_returns_distinct_ids(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        for _ in range(4):
+            create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        ids = tick(db_path=db_path, now=_now())
+        assert len(ids) == len(set(ids))
+
+    def test_tick_idempotent_same_now(self, db_path):
+        # Second tick with the same 'now' must not enqueue a duplicate.
+        # After the first tick, next_run_at is advanced by one cadence period,
+        # so the schedule is no longer due at the original 'now'.
+        past = _now() - timedelta(minutes=5)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        now = _now()
+        first = tick(db_path=db_path, now=now)
+        second = tick(db_path=db_path, now=now)
+        assert len(first) == 1
+        assert len(second) == 0  # already advanced; no duplicate enqueue
+
+    def test_max_runs_per_day_stored_only_p2_03(self, db_path):
+        # max_runs_per_day is persisted but NOT enforced by tick() in P2-03.
+        # Enforcement against the daily ceiling for manual triggers is deferred.
+        sid = create_schedule(db_path=db_path, cadence="manual", max_runs_per_day=1)
+        row = _schedule_row(db_path, sid)
+        assert row["max_runs_per_day"] == 1
+        # tick() does not consult max_runs_per_day; this test documents the deferred scope.
+
+    def test_tick_does_not_call_publishing(self, db_path):
+        """scheduler.py must not import or call publishing modules or run_pipeline."""
+        import ast, inspect
+        import hypogeum.scheduler as sched_mod
+        tree = ast.parse(inspect.getsource(sched_mod))
+        # Collect all Import / ImportFrom module names
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add(alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+        for name in imported:
+            assert "publishing" not in name, (
+                f"scheduler.py imports a publishing module: {name}"
+            )
+        # Verify run_pipeline is not called (no Name node with that id)
+        called = {
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        }
+        assert "run_pipeline" not in called, "scheduler.py must not call run_pipeline"
+
+
+# ===========================================================================
+# get_pending_runs
+# ===========================================================================
+
+class TestGetPendingRuns:
+
+    def test_empty_when_no_runs(self, db_path):
+        assert get_pending_runs(db_path=db_path) == []
+
+    def test_returns_pending_rows(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        pending = get_pending_runs(db_path=db_path)
+        assert len(pending) == 1
+        assert pending[0]["status"] == "pending"
+
+    def test_does_not_return_triggered_rows(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        conn = get_connection(db_path)
+        try:
+            update_scheduled_run_status(conn, sr_ids[0], "triggered",
+                                        triggered_at=_now().isoformat())
+            conn.commit()
+        finally:
+            conn.close()
+        pending = get_pending_runs(db_path=db_path)
+        assert len(pending) == 0  # triggered row must not appear in pending results
+
+    def test_returns_list_of_dicts(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        pending = get_pending_runs(db_path=db_path)
+        assert isinstance(pending, list)
+        assert isinstance(pending[0], dict)
+        assert "scheduled_run_id" in pending[0]
+
+
+# ===========================================================================
+# cancel_scheduled_run
+# ===========================================================================
+
+class TestCancelScheduledRun:
+
+    def test_pending_becomes_cancelled(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        cancel_scheduled_run(sr_ids[0], db_path=db_path)
+        sr = _sched_run_row(db_path, sr_ids[0])
+        assert sr["status"] == "cancelled"
+
+    def test_cancel_triggered_is_noop(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        conn = get_connection(db_path)
+        try:
+            update_scheduled_run_status(conn, sr_ids[0], "triggered",
+                                        triggered_at=_now().isoformat())
+            conn.commit()
+        finally:
+            conn.close()
+        # Cancel on an already-triggered row should not raise and should not change status
+        cancel_scheduled_run(sr_ids[0], db_path=db_path)
+        sr = _sched_run_row(db_path, sr_ids[0])
+        assert sr["status"] == "triggered"
+
+    def test_cancel_does_not_affect_other_runs(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        for _ in range(3):
+            create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        cancel_scheduled_run(sr_ids[0], db_path=db_path)
+        pending = get_pending_runs(db_path=db_path)
+        assert len(pending) == 2
+
+
+# ===========================================================================
+# Scope: factory vs channel
+# ===========================================================================
+
+class TestScheduleScope:
+
+    def test_factory_and_channel_schedules_coexist(self, db_path):
+        f_id = create_schedule(db_path=db_path, scope="factory", cadence="daily",
+                               next_run_at=_now() - timedelta(minutes=1))
+        c_id = create_schedule(db_path=db_path, scope="channel", channel_id="ch_A",
+                               cadence="weekly",
+                               next_run_at=_now() - timedelta(minutes=1))
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 2
+
+    def test_channel_scope_distinct_channels_both_ticked(self, db_path):
+        for ch in ("ch_A", "ch_B", "ch_C"):
+            create_schedule(db_path=db_path, scope="channel", channel_id=ch,
+                            cadence="daily",
+                            next_run_at=_now() - timedelta(minutes=1))
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 3
+        channel_ids = {_sched_run_row(db_path, r)["channel_id"] for r in result}
+        assert channel_ids == {"ch_A", "ch_B", "ch_C"}
+
+    def test_pausing_one_channel_does_not_affect_others(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        c1 = create_schedule(db_path=db_path, scope="channel", channel_id="ch_1",
+                             cadence="daily", next_run_at=past)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_2",
+                        cadence="daily", next_run_at=past)
+        set_schedule_status(c1, "paused", db_path=db_path)
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 1
+        sr = _sched_run_row(db_path, result[0])
+        assert sr["channel_id"] == "ch_2"
+
+
+# ===========================================================================
+# update_scheduled_run_status DB helper
+# ===========================================================================
+
+class TestUpdateScheduledRunStatus:
+
+    def test_pending_to_triggered(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        conn = get_connection(db_path)
+        try:
+            update_scheduled_run_status(
+                conn, sr_ids[0], "triggered",
+                triggered_at=_now().isoformat(),
+                run_id="run-abc-123",
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        sr = _sched_run_row(db_path, sr_ids[0])
+        assert sr["status"] == "triggered"
+        assert sr["run_id"] == "run-abc-123"
+        assert sr["triggered_at"] is not None
+
+    def test_pending_to_skipped(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        conn = get_connection(db_path)
+        try:
+            update_scheduled_run_status(conn, sr_ids[0], "skipped")
+            conn.commit()
+        finally:
+            conn.close()
+        assert _sched_run_row(db_path, sr_ids[0])["status"] == "skipped"
+
+
+# ===========================================================================
+# Migration safety — existing DB gains new tables
+# ===========================================================================
+
+class TestSchemaMigration:
+
+    def test_initialize_schema_idempotent(self, tmp_path):
+        p = tmp_path / "mig.db"
+        initialize_schema(p)
+        initialize_schema(p)  # second call must not raise
+        conn = get_connection(p)
+        try:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert "schedules" in tables
+        assert "scheduled_runs" in tables
+
+    def test_existing_db_gets_new_tables(self, tmp_path):
+        p = tmp_path / "old.db"
+        # Simulate a pre-P2-03 DB: create schema, then drop the new tables
+        initialize_schema(p)
+        conn = get_connection(p)
+        try:
+            conn.execute("DROP TABLE IF EXISTS scheduled_runs")
+            conn.execute("DROP TABLE IF EXISTS schedules")
+            conn.commit()
+        finally:
+            conn.close()
+        # Re-run initialize_schema (startup path)
+        initialize_schema(p)
+        conn = get_connection(p)
+        try:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert "schedules" in tables
+        assert "scheduled_runs" in tables
+
+    def test_existing_rows_survive_reinitialize(self, tmp_path):
+        # Existing schedule rows must not be dropped or truncated by a second
+        # initialize_schema() call (the startup idempotency path).
+        p = tmp_path / "survive.db"
+        initialize_schema(p)
+        sid = create_schedule(db_path=p, label="survivor", cadence="weekly")
+        initialize_schema(p)  # simulate startup re-run
+        row = _schedule_row(p, sid)
+        assert row["label"] == "survivor"
+        assert row["cadence"] == "weekly"
+
+    def test_existing_scheduled_run_rows_survive_reinitialize(self, tmp_path):
+        # Existing scheduled_run rows must survive repeated initialize_schema() calls.
+        p = tmp_path / "survive_sr.db"
+        initialize_schema(p)
+        past = datetime.now(timezone.utc) - timedelta(minutes=1)
+        sid = create_schedule(db_path=p, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=p, now=datetime.now(timezone.utc))
+        assert len(sr_ids) == 1
+        initialize_schema(p)  # simulate startup re-run
+        sr = _sched_run_row(p, sr_ids[0])
+        assert sr["schedule_id"] == sid
+        assert sr["status"] == "pending"

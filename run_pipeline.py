@@ -6,10 +6,15 @@ Invokes the full 9-agent hypogeum-brain pipeline for one episode.
 
 Usage:
     python run_pipeline.py --topic "The Antikythera Mechanism" --episode-id ep_001
+    python run_pipeline.py --topic "The Antikythera Mechanism" --episode-id ep_001 --channel-id hypogeum
 
 Options:
     --topic       Topic idea string passed to the Executive Producer. Required.
     --episode-id  Unique episode identifier used for log correlation and file naming. Required.
+    --channel-id  Channel ID to load from DB. Default: 'hypogeum'.
+                  Model assignments and voice ID are loaded from the DB channel
+                  profile and applied on top of .env defaults.
+                  The channel must exist and be active before the pipeline starts.
     --output-dir  Override output directory for all agent files.
                   Default: .hypogeum-assets/episodes/{episode_id}/
 
@@ -18,12 +23,12 @@ Exit codes:
     1  — topic rejected by Executive Producer (decision=REJECT; review scorecard)
     2  — pipeline halted by Package Deficiency Report (resolve and re-run)
     3  — startup failure — no viable API path (check credentials and connectivity)
-    4  — unhandled error (configuration, agent, or runtime failure)
+    4  — unhandled error (channel not found, configuration, agent, or runtime failure)
 
 Notes:
     - All Claude calls route through OpenRouter (primary) or Anthropic direct (fallback).
-    - Agent stubs raise NotImplementedError until implemented in M1–M5.
     - Set OPENROUTER_API_KEY in .env before running.
+    - Run scripts/bootstrap_channel.py before using --channel-id.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ from pathlib import Path
 
 from hypogeum.config import Config
 from hypogeum.pipeline import (
+    ChannelNotActiveError,
+    ChannelNotFoundError,
     PackageDeficiencyError,
     PipelineRejectedError,
     run_pipeline,
@@ -57,6 +64,17 @@ def main() -> int:
         required=True,
         metavar="EPISODE_ID",
         help="Unique episode identifier (e.g. 'ep_001')",
+    )
+    parser.add_argument(
+        "--channel-id",
+        default="hypogeum",
+        metavar="CHANNEL_ID",
+        help=(
+            "Channel ID to load configuration from DB. Default: 'hypogeum'. "
+            "Model assignments and voice ID are read from the channel profile "
+            "in the DB and applied on top of .env defaults. "
+            "The channel must exist and be active before the pipeline starts."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -87,7 +105,14 @@ def main() -> int:
             config=config,
             output_dir=output_dir,
             youtube_privacy=args.youtube_privacy,
+            channel_id=args.channel_id,
         )
+    except ChannelNotFoundError as exc:
+        print(f"Channel not found: {exc}", file=sys.stderr)
+        return 4
+    except ChannelNotActiveError as exc:
+        print(f"Channel not active: {exc}", file=sys.stderr)
+        return 4
     except StartupError as exc:
         print(f"Startup failure: {exc}", file=sys.stderr)
         return 3

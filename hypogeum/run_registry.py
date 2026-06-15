@@ -113,6 +113,7 @@ def register_run(
     config: Config,
     db_path: Optional[Path] = None,
     runs_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> str:
     """
     Register a new pipeline execution. Must be called before any agent runs.
@@ -123,10 +124,12 @@ def register_run(
       - An entry in runs/index.jsonl
 
     Args:
-        episode_id: Episode identifier (e.g. "ep_000").
-        config:     Loaded Config instance. Used to snapshot model assignments.
-        db_path:    Override SQLite path (tests use tmp_path).
-        runs_dir:   Override JSON/index directory (tests use tmp_path).
+        episode_id:  Episode identifier (e.g. "ep_000").
+        config:      Loaded Config instance. Used to snapshot model assignments.
+        db_path:     Override SQLite path (tests use tmp_path).
+        runs_dir:    Override JSON/index directory (tests use tmp_path).
+        channel_id:  Optional channel identifier (e.g. "hypogeum"). Recorded
+                     in the run row when the pipeline is channel-aware.
 
     Returns:
         run_id: UUID4 string. Store this and pass to complete_run or fail_run.
@@ -135,7 +138,7 @@ def register_run(
     started_at = _now_iso()
     model_assignments = _model_assignments_from_config(config)
 
-    # Ensure schema exists (idempotent)
+    # Ensure schema exists (idempotent) — also applies channel_id column migration
     initialize_schema(_db_path(db_path))
 
     # Write DB row
@@ -149,6 +152,12 @@ def register_run(
             model_assignments=model_assignments,
             metadata_version=METADATA_VERSION,
         )
+        # Write channel_id if provided — column added via v2 migration
+        if channel_id is not None:
+            conn.execute(
+                "UPDATE runs SET channel_id = ? WHERE run_id = ?",
+                (channel_id, run_id),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -162,6 +171,8 @@ def register_run(
         "model_assignments": model_assignments,
         "metadata_version": METADATA_VERSION,
     }
+    if channel_id is not None:
+        record["channel_id"] = channel_id
     _write_run_json(run_id, record, _runs_dir(runs_dir))
     _append_index(run_id, episode_id, "running", _runs_dir(runs_dir))
 

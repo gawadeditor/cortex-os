@@ -737,3 +737,197 @@ class TestNoProductionSideEffects:
         finally:
             conn.close()
         assert before == after
+
+
+# ===========================================================================
+# P1-01: TestBootstrapHypogeum
+# Tests for the Hypogeum-specific bootstrap config used by
+# scripts/bootstrap_channel.py. All writes go to a tmp_path DB.
+# ===========================================================================
+
+# The canonical Hypogeum bootstrap config, mirroring bootstrap_channel.py
+# but with pinned test model slugs instead of reading from .env.
+_HYPOGEUM_CONFIG = {
+    "channel_id": "hypogeum",
+    "name": "The Hypogeum Chronicles",
+    "description": (
+        "Ancient mysteries, hidden histories, and archaeological revelations. "
+        "Investigation-led documentary content for history and archaeology enthusiasts."
+    ),
+    "brand": {
+        "persona_name": "The Hypogeum Chronicles",
+        "tone": "investigative, evidence-based, mystery-led",
+        "target_audience": "history and archaeology enthusiasts, 25-55",
+        "visual_style": (
+            "warm earth tones, underground and ancient architecture, "
+            "atmospheric darkness, archaeological sites and artefacts"
+        ),
+        "language": "en",
+        "hashtags": [
+            "#history", "#archaeology", "#ancienthistory",
+            "#mystery", "#hiddenhistory", "#documentary",
+        ],
+        "color_palette": {
+            "void_black":      "#080C0E",
+            "deep_stone":      "#1A1D20",
+            "charcoal_earth":  "#2B2E33",
+            "ancient_soil":    "#5C4A2F",
+            "antique_gold":    "#C49A42",
+            "warm_gold":       "#E7D6B3",
+            "parchment_cream": "#F5F3EE",
+        },
+        "typography": {
+            "display_font": "Cinzel SemiBold",
+            "body_font":    "Raleway Regular",
+            "display_case": "ALL CAPS",
+            "body_case":    "sentence case",
+        },
+        "voice_guidelines": (
+            "Narrator: authoritative yet accessible. Investigation-led. "
+            "No sensationalism. Evidence presented before conclusions."
+        ),
+        "content_pillars": [
+            "ancient history",
+            "archaeology",
+            "historical mysteries",
+            "hidden histories",
+            "artefact investigation",
+            "civilisation origins",
+        ],
+    },
+    "publishing": {
+        "enabled_platforms": ["youtube"],
+        "schedule": {
+            "cadence":     "weekly",
+            "day_of_week": "thursday",
+            "time_of_day": "18:00",
+            "timezone":    "UTC",
+        },
+        "default_tags": [
+            "history", "archaeology", "ancient history",
+            "historical mysteries", "documentary", "hidden history",
+        ],
+        "ai_disclosure_required": True,
+        "auto_thumbnail":          True,
+        "auto_captions":           True,
+    },
+    "models": {
+        "episode_producer":   "anthropic/claude-fable-5",
+        "research_director":  "anthropic/claude-opus-4.6",
+        "thumbnail_planner":  "openai/gpt-5.5-pro",
+        "brand_guardian_p1":  "anthropic/claude-sonnet-4.6",
+        "brand_guardian_p2":  "openai/gpt-5.5-pro",
+        "narration_voice_id": "j9jfwdrw7BRfcR43Qohk",
+        "image_provider":     "muapi",
+        "video_provider":     "muapi",
+    },
+}
+
+
+class TestBootstrapHypogeum:
+    """
+    P1-01 acceptance tests.
+
+    All four sub-profile tables must have rows. The channel must be
+    retrievable and fully resolved through load_channel_config().
+    """
+
+    def test_bootstrap_creates_channel(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        assert cp.channel_id == "hypogeum"
+        assert cp.name == "The Hypogeum Chronicles"
+        assert cp.status == "active"
+
+    def test_bootstrap_is_idempotent(self, db_path):
+        bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)  # second call must not raise
+        channels = list_channel_profiles(db_path=db_path)
+        assert len(channels) == 1, "Idempotent: exactly one channel after two bootstraps"
+
+    def test_brand_profile_populated(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        assert cp.brand_profile_id is not None
+        bp = get_brand_profile(cp.brand_profile_id, db_path=db_path)
+        assert bp is not None
+        assert bp.language == "en"
+        assert "ancient history" in bp.content_pillars
+        assert "#history" in bp.hashtags
+        assert "void_black" in bp.color_palette
+        assert bp.color_palette["antique_gold"] == "#C49A42"
+
+    def test_publishing_profile_populated(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        assert cp.publishing_profile_id is not None
+        pp = get_publishing_profile(cp.publishing_profile_id, db_path=db_path)
+        assert pp is not None
+        assert "youtube" in pp.enabled_platforms
+        assert pp.ai_disclosure_required is True
+        assert pp.auto_thumbnail is True
+        assert pp.auto_captions is True
+
+    def test_publishing_schedule_fields(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        pp = get_publishing_profile(cp.publishing_profile_id, db_path=db_path)
+        assert pp is not None
+        assert pp.schedule.get("cadence") == "weekly"
+        assert pp.schedule.get("day_of_week") == "thursday"
+        assert pp.schedule.get("time_of_day") == "18:00"
+
+    def test_model_profile_populated(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        assert cp.model_profile_id is not None
+        mp = get_model_profile(cp.model_profile_id, db_path=db_path)
+        assert mp is not None
+        assert mp.episode_producer == "anthropic/claude-fable-5"
+        assert mp.research_director == "anthropic/claude-opus-4.6"
+        assert mp.thumbnail_planner == "openai/gpt-5.5-pro"
+        assert mp.brand_guardian_p1 == "anthropic/claude-sonnet-4.6"
+        assert mp.brand_guardian_p2 == "openai/gpt-5.5-pro"
+        assert mp.narration_voice_id == "j9jfwdrw7BRfcR43Qohk"
+        assert mp.image_provider == "muapi"
+        assert mp.video_provider == "muapi"
+
+    def test_load_channel_config_resolves_all_profiles(self, db_path):
+        bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        cc = load_channel_config("hypogeum", db_path=db_path)
+        assert cc is not None
+        assert cc.channel.channel_id == "hypogeum"
+        assert cc.brand is not None
+        assert cc.publishing is not None
+        assert cc.models is not None
+
+    def test_all_four_tables_have_rows(self, db_path):
+        bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        conn = get_connection(db_path)
+        try:
+            for table in ("brand_profiles", "publishing_profiles",
+                          "model_profiles", "channel_profiles"):
+                count = conn.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                assert count >= 1, f"{table} must have at least 1 row after bootstrap"
+        finally:
+            conn.close()
+
+    def test_channel_description_stored(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        fetched = get_channel_profile("hypogeum", db_path=db_path)
+        assert fetched is not None
+        assert "archaeology" in fetched.description.lower()
+
+    def test_color_palette_has_all_seven_swatches(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        bp = get_brand_profile(cp.brand_profile_id, db_path=db_path)
+        assert bp is not None
+        expected_swatches = {
+            "void_black", "deep_stone", "charcoal_earth",
+            "ancient_soil", "antique_gold", "warm_gold", "parchment_cream",
+        }
+        assert expected_swatches == set(bp.color_palette.keys())
+
+    def test_voice_id_is_pinned(self, db_path):
+        cp = bootstrap_channel(_HYPOGEUM_CONFIG, db_path=db_path)
+        mp = get_model_profile(cp.model_profile_id, db_path=db_path)
+        assert mp is not None
+        # Voice ID is pinned and irreversible per project memory
+        assert mp.narration_voice_id == "j9jfwdrw7BRfcR43Qohk"

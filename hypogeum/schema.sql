@@ -527,3 +527,316 @@ SELECT
     SUM(CASE WHEN status = 'failed'  THEN COALESCE(cost_usd, 0) ELSE 0 END) AS wasted_usd
 FROM asset_versions
 GROUP BY episode_id, asset_type, provider;
+
+-- ===========================================================================
+-- P1-03: User / Role System
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- users
+-- One row per user. role enforces the 6-role model.
+-- status: "active" | "disabled"
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id     TEXT NOT NULL PRIMARY KEY,
+    email       TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    role        TEXT NOT NULL CHECK(role IN ('owner','admin','operator','editor','viewer','client')),
+    status      TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email  ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_role   ON users(role);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+
+-- ---------------------------------------------------------------------------
+-- api_keys
+-- One row per issued API key. key_hash stores the SHA-256 hex digest.
+-- The raw key is never stored — shown once at creation time.
+-- status: "active" | "revoked"
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    key_id       TEXT NOT NULL PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(user_id),
+    key_hash     TEXT NOT NULL UNIQUE,
+    label        TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','revoked')),
+    last_used_at TEXT,
+    expires_at   TEXT,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_user_id  ON api_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_status   ON api_keys(status);
+
+-- ===========================================================================
+-- P1-04: Credential Manager / Secret Profiles
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- secret_profiles
+-- One row per managed credential. credential_data stored as plaintext (V1).
+-- scope: "factory" (shared) | "channel-specific" (per channel_id)
+-- status: "active" | "expired" | "revoked" | "testing"
+-- credential_type: "api_key" | "oauth2_token" | "webhook_url" | "username_password"
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS secret_profiles (
+    secret_profile_id  TEXT NOT NULL PRIMARY KEY,
+    provider           TEXT NOT NULL,
+    label              TEXT NOT NULL,
+    credential_type    TEXT NOT NULL CHECK(credential_type IN
+                           ('api_key','oauth2_token','webhook_url','username_password')),
+    credential_data    TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'active'
+                           CHECK(status IN ('active','expired','revoked','testing')),
+    scope              TEXT NOT NULL DEFAULT 'factory'
+                           CHECK(scope IN ('factory','channel-specific')),
+    channel_id         TEXT,
+    expires_at         TEXT,
+    last_tested_at     TEXT,
+    last_used_at       TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_secret_profiles_provider  ON secret_profiles(provider);
+CREATE INDEX IF NOT EXISTS idx_secret_profiles_scope     ON secret_profiles(scope);
+CREATE INDEX IF NOT EXISTS idx_secret_profiles_status    ON secret_profiles(status);
+CREATE INDEX IF NOT EXISTS idx_secret_profiles_channel   ON secret_profiles(channel_id);
+
+-- ===========================================================================
+-- P2-02: Notification Delivery
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- notification_deliveries
+-- One row per delivery attempt (one row per channel per signal).
+-- status: "pending" | "sent" | "failed"
+-- channel_name: "telegram" | "email"
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    delivery_id   TEXT NOT NULL PRIMARY KEY,
+    signal_id     TEXT,
+    channel_name  TEXT NOT NULL,
+    recipient     TEXT NOT NULL,
+    subject       TEXT,
+    message       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending'
+                       CHECK(status IN ('pending','sent','failed')),
+    sent_at       TEXT,
+    error         TEXT,
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notif_signal_id   ON notification_deliveries(signal_id);
+CREATE INDEX IF NOT EXISTS idx_notif_status      ON notification_deliveries(status);
+CREATE INDEX IF NOT EXISTS idx_notif_channel     ON notification_deliveries(channel_name);
+CREATE INDEX IF NOT EXISTS idx_notif_created_at  ON notification_deliveries(created_at);
+
+-- ===========================================================================
+-- P2-03: Schedule Entity and Scheduler Process
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- schedules
+-- One row per configured run schedule.
+-- scope:   "factory" (shared) | "channel" (per channel_id)
+-- cadence: "daily" | "weekly" | "manual"
+-- status:  "active" | "paused" | "disabled"
+-- next_run_at: ISO 8601 UTC — when the scheduler will next enqueue a run.
+--              NULL for manual cadence until explicitly set.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS schedules (
+    schedule_id      TEXT NOT NULL PRIMARY KEY,
+    scope            TEXT NOT NULL DEFAULT 'factory'
+                          CHECK(scope IN ('factory','channel')),
+    channel_id       TEXT,
+    cadence          TEXT NOT NULL DEFAULT 'manual'
+                          CHECK(cadence IN ('daily','weekly','manual')),
+    status           TEXT NOT NULL DEFAULT 'active'
+                          CHECK(status IN ('active','paused','disabled')),
+    next_run_at      TEXT,
+    last_run_at      TEXT,
+    max_runs_per_day INTEGER NOT NULL DEFAULT 1,
+    label            TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedules_status      ON schedules(status);
+CREATE INDEX IF NOT EXISTS idx_schedules_channel_id  ON schedules(channel_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_next_run_at ON schedules(next_run_at);
+
+-- ---------------------------------------------------------------------------
+-- scheduled_runs
+-- One row per run slot enqueued by the scheduler.
+-- Does NOT trigger pipeline execution — the pipeline reads pending rows
+-- and executes them independently.
+-- status: "pending" | "triggered" | "skipped" | "cancelled"
+-- run_id: set by the pipeline when it claims and starts this slot (NULL until then).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS scheduled_runs (
+    scheduled_run_id TEXT NOT NULL PRIMARY KEY,
+    schedule_id      TEXT NOT NULL REFERENCES schedules(schedule_id),
+    channel_id       TEXT,
+    episode_id       TEXT,
+    scheduled_for    TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','triggered','skipped','cancelled')),
+    triggered_at     TEXT,
+    run_id           TEXT,
+    created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sched_runs_schedule_id   ON scheduled_runs(schedule_id);
+CREATE INDEX IF NOT EXISTS idx_sched_runs_status        ON scheduled_runs(status);
+CREATE INDEX IF NOT EXISTS idx_sched_runs_scheduled_for ON scheduled_runs(scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_sched_runs_channel_id    ON scheduled_runs(channel_id);
+
+-- ===========================================================================
+-- P2-04: Run Queue and Queue Claiming
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- run_queue
+-- One row per queued work item. Workers claim rows atomically.
+-- The queue is the consumer of scheduled_runs (scheduler output).
+-- Queue processor only performs state transitions — never executes pipeline.
+--
+-- status lifecycle:
+--   queued    → claimed    (worker atomically claims via conditional UPDATE)
+--   queued    → cancelled  (operator cancels before a worker claims)
+--   claimed   → completed  (worker reports success)
+--   claimed   → failed     (worker reports failure)
+--   claimed   → queued     (worker releases for requeue on crash/timeout)
+--
+-- priority: lower integer = higher priority (0 = default, -1 = urgent).
+-- worker_id: unique per worker process; set at claim time, NULL before claim.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS run_queue (
+    queue_id          TEXT NOT NULL PRIMARY KEY,
+    scheduled_run_id  TEXT REFERENCES scheduled_runs(scheduled_run_id),
+    schedule_id       TEXT,
+    channel_id        TEXT,
+    episode_id        TEXT,
+    priority          INTEGER NOT NULL DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'queued'
+                           CHECK(status IN ('queued','claimed','completed','failed','cancelled')),
+    worker_id         TEXT,
+    queued_at         TEXT NOT NULL,
+    claimed_at        TEXT,
+    completed_at      TEXT,
+    failed_at         TEXT,
+    error_message     TEXT,
+    created_at        TEXT NOT NULL
+);
+
+-- General status lookup (most frequent query path)
+CREATE INDEX IF NOT EXISTS idx_run_queue_status
+    ON run_queue(status);
+
+-- Claim ordering: priority ASC, then FIFO within same priority, queued items only
+CREATE INDEX IF NOT EXISTS idx_run_queue_claim_order
+    ON run_queue(priority ASC, queued_at ASC)
+    WHERE status = 'queued';
+
+CREATE INDEX IF NOT EXISTS idx_run_queue_worker_id
+    ON run_queue(worker_id);
+
+CREATE INDEX IF NOT EXISTS idx_run_queue_channel_id
+    ON run_queue(channel_id);
+
+CREATE INDEX IF NOT EXISTS idx_run_queue_scheduled_run_id
+    ON run_queue(scheduled_run_id);
+
+-- ===========================================================================
+-- CALOG: Channel Activation & Lifecycle Governance
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- channel_state_transitions
+-- Immutable audit log — one row per state change.
+-- Current channel state is the to_state of the most recent row.
+-- Rows are never updated or deleted after insert.
+--
+-- channel states:
+--   draft       — channel record exists; profiles not yet linked
+--   configured  — all three sub-profiles linked; not yet activated
+--   active      — all activation gates passed; scheduler may enqueue runs
+--   paused      — operator-suspended; no new runs; resumes to active
+--   blocked     — OIS blocking signal active; no new runs
+--   archived    — permanently retired; no further transitions except error
+--   error       — unexpected condition; can transition to draft to reset
+--
+-- triggered_by: "operator" | "system:ois" | "system:calog" | "system:scheduler"
+-- gate_results: JSON array of {gate, passed, reason} — set on activation only
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS channel_state_transitions (
+    transition_id   TEXT NOT NULL PRIMARY KEY,
+    channel_id      TEXT NOT NULL,
+    from_state      TEXT,
+    to_state        TEXT NOT NULL,
+    triggered_by    TEXT NOT NULL DEFAULT 'operator',
+    reason          TEXT,
+    gate_results    TEXT,
+    transitioned_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cst_channel_id      ON channel_state_transitions(channel_id);
+CREATE INDEX IF NOT EXISTS idx_cst_transitioned_at ON channel_state_transitions(channel_id, transitioned_at DESC);
+
+-- ===========================================================================
+-- Topic Backlog / Episode Queue
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- episode_topics
+-- One row per topic idea waiting to be produced.
+-- The Queue Consumer claims the next topic for a channel before calling
+-- run_pipeline(). On successful pipeline completion the topic is consumed.
+--
+-- status lifecycle:
+--   queued   → claimed   (consumer atomically claims via conditional UPDATE)
+--   claimed  → consumed  (consumer marks after successful pipeline run)
+--   claimed  → queued    (future: release on pipeline failure if desired)
+--   queued   → skipped   (operator decides to skip this topic)
+--   queued   → cancelled (operator cancels before claim)
+--   claimed  → cancelled (operator force-cancels an in-flight topic)
+--
+-- priority: lower integer = higher priority. FIFO within same priority band.
+-- reason:   human-readable note for skip/cancel actions.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS episode_topics (
+    topic_id    TEXT NOT NULL PRIMARY KEY,
+    channel_id  TEXT NOT NULL,
+    topic_text  TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'queued'
+                     CHECK(status IN ('queued','claimed','consumed','skipped','cancelled')),
+    priority    INTEGER NOT NULL DEFAULT 0,
+    reason      TEXT,
+    claimed_at  TEXT,
+    consumed_at TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- Primary lookup: all queued topics for a channel
+CREATE INDEX IF NOT EXISTS idx_ep_topics_channel_status
+    ON episode_topics(channel_id, status);
+
+-- Claim ordering: priority ASC then FIFO, queued items only
+CREATE INDEX IF NOT EXISTS idx_ep_topics_claim_order
+    ON episode_topics(channel_id, priority ASC, created_at ASC)
+    WHERE status = 'queued';

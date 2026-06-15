@@ -1,8 +1,20 @@
 # Architecture Index
 
-**Last updated:** 2026-06-03
+**Last updated:** 2026-06-14
 
 Master index of all approved architecture documents for the hypogeum-brain production pipeline.
+
+---
+
+## Factory OS Design Status
+
+| Scope | Status | Date | Authority |
+|---|---|---|---|
+| Self-hosted V1 (local, private cloud, white-label, multi-user, multi-channel, single factory per deployment) | **Factory OS Design Complete** | 2026-06-14 | Scheduling Architecture Fragmentation Audit (2026-06-14) + Factory OS Design Completeness Audit — Self-Hosted Scope (2026-06-14) |
+
+**Exclusions from this status:** SaaS deployment architecture, multi-factory operator console, SaaS billing and metering. These are future optional productization layers above Factory OS, not part of Factory OS V1.
+
+**Basis:** All 15 required scheduling capabilities are covered by existing approved documents (11 explicitly designed, 2 designed by implication from CALOG, 2 partially documented with no missing architectural decisions). See `docs/scheduling-architecture-reference.md`.
 
 ---
 
@@ -135,6 +147,12 @@ provider-architecture.md covers: Provider Registry (8 providers), Capability Mat
 | Publishing Agent | Approved, not designed | `docs/roadmap.md` |
 | Performance Analyst | Post-production pipeline | `docs/roadmap.md` |
 | Competitor Intelligence Analyst | Post-production pipeline | `docs/roadmap.md` |
+
+## Architecture Reference Documents
+
+| Name | Status | Location |
+|---|---|---|
+| Scheduling Architecture Consolidation Reference | **Complete — 2026-06-14** | `docs/scheduling-architecture-reference.md` |
 
 ---
 

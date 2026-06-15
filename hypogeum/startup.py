@@ -309,6 +309,24 @@ def run_startup_checks(
             youtube_token_valid=youtube_token_valid,
             errors=errors,
         )
+        # Emit OIS credential_failure signal for API connectivity failures.
+        # Wrapped in broad except so OIS unavailability never blocks startup logging.
+        if not openrouter_reachable and not fallback_configured:
+            try:
+                import hypogeum.ois as _ois
+                _ois.emit_signal(
+                    signal_type="credential_failure",
+                    severity="CRITICAL",
+                    message=f"API path unavailable: {errors[0]}",
+                    channel_id=None,
+                    source_system="startup",
+                    blocking=True,
+                    metadata={"errors": errors},
+                    episode_id=episode_id,
+                    config=config,
+                )
+            except Exception:
+                pass
         raise StartupError(
             f"Pipeline startup aborted: {errors[0]}",
             report=report,

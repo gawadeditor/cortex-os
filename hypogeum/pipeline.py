@@ -69,6 +69,7 @@ from hypogeum.agents.visual_package_director import (
 )
 from hypogeum.config import Config
 from hypogeum.finance import clear_run_context, set_run_context, write_episode_rollup
+from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_blocked, is_factory_blocked
 from hypogeum.post_run_intelligence import run_post_run_intelligence
 from hypogeum.production_metadata import write_analytics_pending, write_production_metadata
 from hypogeum.logger import get_logger
@@ -230,6 +231,45 @@ class FinanceBudgetBlockedError(PipelineError):
         )
 
 
+class ChannelNotFoundError(PipelineError):
+    """
+    No channel record exists in the DB for the requested channel_id.
+
+    Run scripts/bootstrap_channel.py to create the channel before
+    invoking the pipeline with --channel-id.
+
+    Attributes:
+        channel_id — the channel_id that was not found.
+    """
+    def __init__(self, channel_id: str) -> None:
+        self.channel_id = channel_id
+        super().__init__(
+            f"Channel {channel_id!r} not found in DB. "
+            f"Run scripts/bootstrap_channel.py to create it, "
+            f"then re-run the pipeline."
+        )
+
+
+class ChannelNotActiveError(PipelineError):
+    """
+    The channel exists in the DB but is not in 'active' status.
+
+    The pipeline requires an active channel. Activate the channel
+    (or check why it is paused/blocked) before running.
+
+    Attributes:
+        channel_id — the channel that was found.
+        status     — its current status (e.g. 'configured', 'paused').
+    """
+    def __init__(self, channel_id: str, status: str) -> None:
+        self.channel_id = channel_id
+        self.status = status
+        super().__init__(
+            f"Channel {channel_id!r} is not active (status={status!r}). "
+            f"Activate the channel before running the pipeline."
+        )
+
+
 class PackageDeficiencyError(PipelineError):
     """
     Research Director issued a Package Deficiency Report, halting the pipeline.
@@ -305,6 +345,7 @@ def run_pipeline(
     config: Config,
     output_dir: Optional[Path] = None,
     youtube_privacy: str = "public",
+    channel_id: Optional[str] = "hypogeum",
 ) -> PipelineResult:
     """
     Execute the full 9-agent pipeline end-to-end.
@@ -321,11 +362,20 @@ def run_pipeline(
         youtube_privacy:  YouTube privacy for all uploads — "public", "private", or
                           "unlisted". Default "public". Pass "private" for Episode Zero
                           and test runs to prevent accidental public publishing.
+        channel_id:       Channel identifier. Default "hypogeum". Model assignments
+                          and voice ID are loaded from the DB channel profile and
+                          applied on top of .env defaults.
+                          Raises ChannelNotFoundError if the channel does not exist.
+                          Raises ChannelNotActiveError if status != 'active'.
+                          Pass None explicitly to bypass channel loading and use
+                          .env configuration only.
 
     Returns:
         PipelineResult — all 11 packages populated on success.
 
     Raises:
+        ChannelNotFoundError   — channel_id provided but not in DB.
+        ChannelNotActiveError  — channel exists but status != 'active'.
         StartupError           — no viable API path (OpenRouter unavailable AND
                                  no ANTHROPIC_API_KEY). Pipeline never starts.
         PipelineRejectedError  — EP scored topic below REJECT threshold (< 6.0).
@@ -335,18 +385,46 @@ def run_pipeline(
     """
     log = get_logger(episode_id=episode_id, agent="pipeline")
 
+    # -----------------------------------------------------------------------
+    # -1. Channel config resolution — before any agent, spend, or registration
+    # -----------------------------------------------------------------------
+    if channel_id is not None:
+        from hypogeum.channel_config import load_channel_config
+        channel_config = load_channel_config(channel_id)
+        if channel_config is None:
+            raise ChannelNotFoundError(channel_id)
+        if channel_config.channel.status != "active":
+            raise ChannelNotActiveError(channel_id, channel_config.channel.status)
+        config.apply_channel_config(channel_config)
+
+    # -----------------------------------------------------------------------
+    # -0.5. OIS factory/channel block check — before run registration
+    # If any active blocking signals exist the pipeline must not start.
+    # Wrapped in broad except so OIS unavailability never breaks startup.
+    # -----------------------------------------------------------------------
+    try:
+        if is_factory_blocked():
+            raise OISBlockedError(get_blocking_signals())
+        if channel_id is not None and is_channel_blocked(channel_id):
+            raise OISBlockedError(get_blocking_signals(channel_id=channel_id))
+    except OISBlockedError:
+        raise
+    except Exception:
+        pass  # OIS unavailable — don't block the pipeline
+
     log.info(
         "pipeline_run_started",
         episode_id=episode_id,
         topic_input=topic_input,
+        channel_id=channel_id,
     )
 
     # -----------------------------------------------------------------------
     # 0. Run registration — must happen before any agent or spend
     # -----------------------------------------------------------------------
-    run_id = register_run(episode_id=episode_id, config=config)
+    run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id)
     set_run_context(run_id=run_id, episode_id=episode_id)
-    log.info("pipeline_run_registered", run_id=run_id)
+    log.info("pipeline_run_registered", run_id=run_id, channel_id=channel_id)
 
     # -----------------------------------------------------------------------
     # 1. Startup verification — fail-fast before any agent is called

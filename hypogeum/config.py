@@ -344,6 +344,18 @@ class Config:
     META_GRAPH_API_VERSION: str        # default: v19.0
     META_STAGING_BASE_URL: Optional[str]
 
+    # ------------------------------------------------------------------
+    # Notifications (P2-02 — all optional; delivery skipped when absent)
+    # ------------------------------------------------------------------
+    TELEGRAM_BOT_TOKEN: Optional[str]
+    TELEGRAM_CHAT_ID: Optional[str]
+    NOTIFY_EMAIL_FROM: Optional[str]
+    NOTIFY_EMAIL_TO: Optional[str]
+    NOTIFY_SMTP_HOST: Optional[str]
+    NOTIFY_SMTP_PORT: int              # default: 587
+    NOTIFY_SMTP_PASSWORD: Optional[str]
+    NOTIFY_SEVERITY_THRESHOLD: str     # default: "WARNING" (send WARNING+CRITICAL)
+
     def __init__(self) -> None:
         _load_dotenv(_PROJECT_ROOT / ".env")
 
@@ -502,9 +514,54 @@ class Config:
         )
         self.META_STAGING_BASE_URL = _get_optional("META_STAGING_BASE_URL")
 
+        # --- Notifications ---
+        self.TELEGRAM_BOT_TOKEN = _get_optional("TELEGRAM_BOT_TOKEN")
+        self.TELEGRAM_CHAT_ID = _get_optional("TELEGRAM_CHAT_ID")
+        self.NOTIFY_EMAIL_FROM = _get_optional("NOTIFY_EMAIL_FROM")
+        self.NOTIFY_EMAIL_TO = _get_optional("NOTIFY_EMAIL_TO")
+        self.NOTIFY_SMTP_HOST = _get_optional("NOTIFY_SMTP_HOST")
+        self.NOTIFY_SMTP_PORT = _get_int("NOTIFY_SMTP_PORT", default=587)
+        self.NOTIFY_SMTP_PASSWORD = _get_optional("NOTIFY_SMTP_PASSWORD")
+        self.NOTIFY_SEVERITY_THRESHOLD = _get_optional(
+            "NOTIFY_SEVERITY_THRESHOLD", default="WARNING"
+        )
+
     # ------------------------------------------------------------------
     # Derived properties
     # ------------------------------------------------------------------
+
+    def apply_channel_config(self, channel_config: "ChannelConfig") -> "Config":  # type: ignore[name-defined]
+        """
+        Override model/voice settings with values from a DB channel profile.
+
+        Only fields that are explicitly set (non-None, non-empty) in the
+        channel's ModelProfile replace the current Config values. .env values
+        remain as-is for any field the channel profile does not specify.
+
+        Args:
+            channel_config: Resolved ChannelConfig from load_channel_config().
+
+        Returns:
+            self — for optional chaining.
+        """
+        models = channel_config.models
+        if models is None:
+            return self
+
+        if models.episode_producer:
+            self.EP_MODEL = models.episode_producer
+        if models.research_director:
+            self.RD_MODEL = models.research_director
+        if models.thumbnail_planner:
+            self.TD_PLANNING_MODEL = models.thumbnail_planner
+        if models.brand_guardian_p1:
+            self.BGA_PASS1_MODEL = models.brand_guardian_p1
+        if models.brand_guardian_p2:
+            self.BGA_PASS2_MODEL = models.brand_guardian_p2
+        if models.narration_voice_id:
+            self.ELEVENLABS_VOICE_ID = models.narration_voice_id
+
+        return self
 
     @property
     def tiktok_available(self) -> bool:

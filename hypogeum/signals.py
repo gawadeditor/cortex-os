@@ -1,5 +1,9 @@
 """
-hypogeum/signals.py — Signal Ingestion v1
+hypogeum/signals.py — Signal Ingestion v1 + OIS re-exports
+
+OIS operational signal functions are re-exported here for convenience.
+Use hypogeum.ois directly for full OIS functionality.
+
 
 Converts a raw analytics_snapshot into a normalized, durable signal_record
 suitable for learning loops, performance tracking, and world-bible updates.
@@ -47,6 +51,18 @@ from typing import Optional
 from hypogeum.identifiers import (
     METADATA_VERSION,
     generate_signal_id,
+)
+
+# Re-exports from OIS for backward-compatible access
+from hypogeum.ois import (  # noqa: F401
+    OISBlockedError,
+    SignalRecord,
+    emit_signal,
+    resolve_signal,
+    is_factory_blocked,
+    is_channel_blocked,
+    get_active_signals,
+    get_blocking_signals,
 )
 
 

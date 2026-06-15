@@ -41,6 +41,36 @@ Public API:
     insert_kg_entity(...)                  -> None
     insert_learning_record(...)            -> None
 
+    P2-03 schedule helpers:
+    insert_schedule(...)                   -> None
+    update_schedule_status(...)            -> None
+    update_schedule_next_run(...)          -> None
+    get_due_schedules(...)                 -> list[sqlite3.Row]
+    insert_scheduled_run(...)              -> None
+    update_scheduled_run_status(...)       -> None
+
+    P2-04 queue helpers:
+    insert_queue_item(...)                 -> None
+    claim_next_queue_item(...)             -> dict | None
+    complete_queue_item(...)               -> None
+    fail_queue_item(...)                   -> None
+    cancel_queue_item(...)                 -> None
+    release_queue_item(...)                -> None
+    get_queue_item(...)                    -> dict | None
+    get_pending_scheduled_runs(...)        -> list[sqlite3.Row]
+
+    CALOG helpers:
+    insert_channel_state_transition(...)   -> None
+    get_latest_channel_state(...)          -> Optional[str]
+    get_channel_transition_history(...)    -> list[sqlite3.Row]
+
+    Topic backlog helpers:
+    insert_episode_topic(...)              -> None
+    claim_next_episode_topic(...)          -> Optional[dict]
+    update_episode_topic_status(...)       -> None
+    get_episode_topic(...)                 -> Optional[dict]
+    list_episode_topics(...)               -> list[sqlite3.Row]
+
 All write functions accept an open sqlite3.Connection. Callers are
 responsible for commit() and close(). Use get_connection() to obtain
 a properly configured connection.
@@ -81,6 +111,7 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("total_cost_usd",       "REAL"),
         ("resume_from_stage",    "TEXT"),
         ("pipeline_version",     "TEXT"),
+        ("channel_id",           "TEXT"),   # P1-02: channel profile linkage
     ],
     "episodes": [
         ("youtube_video_id",  "TEXT"),
@@ -109,6 +140,17 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("attempt_number",  "INTEGER DEFAULT 1"),
         ("is_retry_waste",  "INTEGER DEFAULT 0"),
         ("short_id",        "TEXT"),
+    ],
+    "signal_records": [
+        # P2-01: OIS column extensions
+        ("severity",         "TEXT DEFAULT 'INFO'"),
+        ("signal_type",      "TEXT"),
+        ("blocking",         "INTEGER DEFAULT 0"),
+        ("resolved_at",      "TEXT"),
+        ("channel_id",       "TEXT"),
+        ("source_system",    "TEXT"),
+        ("lifecycle_status", "TEXT DEFAULT 'open'"),
+        ("resolved_by",      "TEXT"),
     ],
 }
 
@@ -1163,3 +1205,604 @@ def insert_learning_record(
             recommendation, applied_to_run, metadata_version,
         ),
     )
+
+
+# ===========================================================================
+# P2-03: Schedule entity helpers
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# schedules table
+# ---------------------------------------------------------------------------
+
+def insert_schedule(
+    conn: sqlite3.Connection,
+    schedule_id: str,
+    created_at: str,
+    updated_at: str,
+    scope: str = "factory",
+    channel_id: Optional[str] = None,
+    cadence: str = "manual",
+    status: str = "active",
+    next_run_at: Optional[str] = None,
+    last_run_at: Optional[str] = None,
+    max_runs_per_day: int = 1,
+    label: Optional[str] = None,
+) -> None:
+    """Insert a new schedule row."""
+    conn.execute(
+        """
+        INSERT INTO schedules
+            (schedule_id, scope, channel_id, cadence, status,
+             next_run_at, last_run_at, max_runs_per_day, label,
+             created_at, updated_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            schedule_id, scope, channel_id, cadence, status,
+            next_run_at, last_run_at, max_runs_per_day, label,
+            created_at, updated_at,
+        ),
+    )
+
+
+def update_schedule_status(
+    conn: sqlite3.Connection,
+    schedule_id: str,
+    status: str,
+    updated_at: str,
+) -> None:
+    """Transition a schedule to 'active', 'paused', or 'disabled'."""
+    conn.execute(
+        """
+        UPDATE schedules SET status = ?, updated_at = ?
+        WHERE schedule_id = ?
+        """,
+        (status, updated_at, schedule_id),
+    )
+
+
+def update_schedule_next_run(
+    conn: sqlite3.Connection,
+    schedule_id: str,
+    next_run_at: Optional[str],
+    last_run_at: str,
+    updated_at: str,
+) -> None:
+    """Advance next_run_at after a run has been enqueued."""
+    conn.execute(
+        """
+        UPDATE schedules
+        SET next_run_at = ?, last_run_at = ?, updated_at = ?
+        WHERE schedule_id = ?
+        """,
+        (next_run_at, last_run_at, updated_at, schedule_id),
+    )
+
+
+def get_due_schedules(
+    conn: sqlite3.Connection,
+    as_of: str,
+) -> list:
+    """
+    Return all active schedules whose next_run_at <= as_of.
+
+    Schedules whose next_run_at IS NULL are never returned. For manual
+    cadence, call set_next_run() to set an explicit next_run_at, which
+    makes the schedule due on the next tick. Once ticked, tick() clears
+    next_run_at back to NULL (compute_next_run returns None for "manual"),
+    preventing further automatic triggers until next_run_at is set again.
+
+    Args:
+        conn:   Open connection.
+        as_of:  ISO 8601 UTC timestamp string (the current time).
+
+    Returns:
+        List of sqlite3.Row objects from the schedules table.
+    """
+    cursor = conn.execute(
+        """
+        SELECT * FROM schedules
+        WHERE status = 'active'
+          AND next_run_at IS NOT NULL
+          AND next_run_at <= ?
+        ORDER BY next_run_at ASC
+        """,
+        (as_of,),
+    )
+    return cursor.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# scheduled_runs table
+# ---------------------------------------------------------------------------
+
+def insert_scheduled_run(
+    conn: sqlite3.Connection,
+    scheduled_run_id: str,
+    schedule_id: str,
+    scheduled_for: str,
+    created_at: str,
+    channel_id: Optional[str] = None,
+    episode_id: Optional[str] = None,
+    status: str = "pending",
+) -> None:
+    """Insert a pending scheduled run slot (does not execute the pipeline)."""
+    conn.execute(
+        """
+        INSERT INTO scheduled_runs
+            (scheduled_run_id, schedule_id, channel_id, episode_id,
+             scheduled_for, status, created_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scheduled_run_id, schedule_id, channel_id, episode_id,
+            scheduled_for, status, created_at,
+        ),
+    )
+
+
+def update_scheduled_run_status(
+    conn: sqlite3.Connection,
+    scheduled_run_id: str,
+    status: str,
+    triggered_at: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> None:
+    """Update a scheduled_run row to triggered, skipped, or cancelled."""
+    conn.execute(
+        """
+        UPDATE scheduled_runs
+        SET status = ?,
+            triggered_at = COALESCE(?, triggered_at),
+            run_id       = COALESCE(?, run_id)
+        WHERE scheduled_run_id = ?
+        """,
+        (status, triggered_at, run_id, scheduled_run_id),
+    )
+
+
+# ===========================================================================
+# P2-04: Run Queue helpers
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# run_queue table — write helpers
+# ---------------------------------------------------------------------------
+
+def insert_queue_item(
+    conn: sqlite3.Connection,
+    queue_id: str,
+    queued_at: str,
+    created_at: str,
+    scheduled_run_id: Optional[str] = None,
+    schedule_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    episode_id: Optional[str] = None,
+    priority: int = 0,
+) -> None:
+    """Insert a new queued work item with status='queued'."""
+    conn.execute(
+        """
+        INSERT INTO run_queue
+            (queue_id, scheduled_run_id, schedule_id, channel_id, episode_id,
+             priority, status, queued_at, created_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+        """,
+        (
+            queue_id, scheduled_run_id, schedule_id, channel_id, episode_id,
+            priority, queued_at, created_at,
+        ),
+    )
+
+
+def claim_next_queue_item(
+    conn: sqlite3.Connection,
+    worker_id: str,
+    claimed_at: str,
+) -> Optional[dict]:
+    """
+    Atomically claim the highest-priority queued item for worker_id.
+
+    Uses a conditional UPDATE: the WHERE clause requires status='queued' on the
+    specific row selected by the subquery, so two concurrent workers racing on
+    the same row will produce rowcount=1 for exactly one of them and rowcount=0
+    for the other. The loser receives None and must retry or give up.
+
+    Ordering: priority ASC (lower number = higher priority), then queued_at ASC
+    (FIFO within the same priority band).
+
+    Args:
+        conn:       Open connection (FK enforcement active).
+        worker_id:  Unique identifier for the claiming worker process.
+        claimed_at: ISO 8601 UTC timestamp of the claim.
+
+    Returns:
+        Dict of the claimed run_queue row, or None if no queued item exists
+        or if another worker claimed the candidate first.
+    """
+    # Step 1: identify the best candidate without modifying it
+    candidate = conn.execute(
+        """
+        SELECT queue_id FROM run_queue
+        WHERE status = 'queued'
+        ORDER BY priority ASC, queued_at ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    if candidate is None:
+        return None
+
+    queue_id = candidate[0]
+
+    # Step 2: atomic conditional claim — only succeeds if still 'queued'
+    cursor = conn.execute(
+        """
+        UPDATE run_queue
+        SET status = 'claimed', worker_id = ?, claimed_at = ?
+        WHERE queue_id = ? AND status = 'queued'
+        """,
+        (worker_id, claimed_at, queue_id),
+    )
+    if cursor.rowcount == 0:
+        # Another worker claimed this row between our SELECT and UPDATE
+        return None
+
+    row = conn.execute(
+        "SELECT * FROM run_queue WHERE queue_id = ?", (queue_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def complete_queue_item(
+    conn: sqlite3.Connection,
+    queue_id: str,
+    worker_id: str,
+    completed_at: str,
+) -> None:
+    """
+    Mark a claimed queue item as completed.
+
+    Only transitions items that are currently 'claimed' by the given worker_id.
+    Items in any other status are left unchanged (idempotent no-op).
+    """
+    conn.execute(
+        """
+        UPDATE run_queue
+        SET status = 'completed', completed_at = ?
+        WHERE queue_id = ? AND status = 'claimed' AND worker_id = ?
+        """,
+        (completed_at, queue_id, worker_id),
+    )
+
+
+def fail_queue_item(
+    conn: sqlite3.Connection,
+    queue_id: str,
+    worker_id: str,
+    failed_at: str,
+    error_message: str = "",
+) -> None:
+    """
+    Mark a claimed queue item as failed with an error message.
+
+    Only transitions items that are currently 'claimed' by the given worker_id.
+    """
+    conn.execute(
+        """
+        UPDATE run_queue
+        SET status = 'failed', failed_at = ?, error_message = ?
+        WHERE queue_id = ? AND status = 'claimed' AND worker_id = ?
+        """,
+        (failed_at, error_message[:4096], queue_id, worker_id),
+    )
+
+
+def cancel_queue_item(
+    conn: sqlite3.Connection,
+    queue_id: str,
+) -> None:
+    """
+    Cancel a queued item. Only 'queued' items can be cancelled.
+
+    Already-claimed, completed, or failed items are left unchanged (no-op).
+    """
+    conn.execute(
+        """
+        UPDATE run_queue
+        SET status = 'cancelled'
+        WHERE queue_id = ? AND status = 'queued'
+        """,
+        (queue_id,),
+    )
+
+
+def release_queue_item(
+    conn: sqlite3.Connection,
+    queue_id: str,
+    worker_id: str,
+) -> None:
+    """
+    Release a claimed item back to 'queued' status.
+
+    Used when a worker crashes or times out and the item needs to be
+    re-claimed by another worker. Only transitions items that are
+    currently 'claimed' by the given worker_id.
+    """
+    conn.execute(
+        """
+        UPDATE run_queue
+        SET status = 'queued', worker_id = NULL, claimed_at = NULL
+        WHERE queue_id = ? AND status = 'claimed' AND worker_id = ?
+        """,
+        (queue_id, worker_id),
+    )
+
+
+def get_queue_item(
+    conn: sqlite3.Connection,
+    queue_id: str,
+) -> Optional[dict]:
+    """Return a single run_queue row as a dict, or None if not found."""
+    row = conn.execute(
+        "SELECT * FROM run_queue WHERE queue_id = ?", (queue_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# scheduled_runs read helper used by queue consumer
+# ---------------------------------------------------------------------------
+
+def get_pending_scheduled_runs(
+    conn: sqlite3.Connection,
+) -> list:
+    """
+    Return all scheduled_runs rows with status='pending', FIFO order.
+
+    Used by the queue consumer to translate pending scheduler output
+    into run_queue entries.
+    """
+    return conn.execute(
+        """
+        SELECT * FROM scheduled_runs
+        WHERE status = 'pending'
+        ORDER BY scheduled_for ASC
+        """
+    ).fetchall()
+
+
+# ===========================================================================
+# CALOG: Channel Activation & Lifecycle Governance helpers
+# ===========================================================================
+
+def insert_channel_state_transition(
+    conn: sqlite3.Connection,
+    transition_id: str,
+    channel_id: str,
+    to_state: str,
+    transitioned_at: str,
+    from_state: Optional[str] = None,
+    triggered_by: str = "operator",
+    reason: Optional[str] = None,
+    gate_results: Optional[str] = None,
+) -> None:
+    """
+    Insert one immutable channel state transition record.
+
+    Rows are never updated or deleted after insert. The current channel
+    state is always the to_state of the most recent row by transitioned_at.
+
+    Args:
+        conn:             Open connection.
+        transition_id:    UUID4 string (primary key).
+        channel_id:       Channel identifier.
+        to_state:         Target state after transition.
+        transitioned_at:  ISO 8601 UTC timestamp.
+        from_state:       Previous state (None for first transition).
+        triggered_by:     "operator" | "system:ois" | "system:calog" | "system:scheduler"
+        reason:           Human-readable description of why the transition occurred.
+        gate_results:     JSON string of gate check results (activation only).
+    """
+    conn.execute(
+        """
+        INSERT INTO channel_state_transitions
+            (transition_id, channel_id, from_state, to_state,
+             triggered_by, reason, gate_results, transitioned_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            transition_id, channel_id, from_state, to_state,
+            triggered_by, reason, gate_results, transitioned_at,
+        ),
+    )
+
+
+def get_latest_channel_state(
+    conn: sqlite3.Connection,
+    channel_id: str,
+) -> Optional[str]:
+    """
+    Return the current state of a channel (to_state of most recent transition).
+
+    Returns None if no transition record exists for this channel.
+    """
+    row = conn.execute(
+        """
+        SELECT to_state FROM channel_state_transitions
+        WHERE channel_id = ?
+        ORDER BY transitioned_at DESC
+        LIMIT 1
+        """,
+        (channel_id,),
+    ).fetchone()
+    return row["to_state"] if row else None
+
+
+def get_channel_transition_history(
+    conn: sqlite3.Connection,
+    channel_id: str,
+) -> list:
+    """
+    Return all state transitions for a channel, oldest first.
+
+    Args:
+        conn:       Open connection.
+        channel_id: Channel identifier.
+
+    Returns:
+        List of sqlite3.Row objects from channel_state_transitions.
+    """
+    return conn.execute(
+        """
+        SELECT * FROM channel_state_transitions
+        WHERE channel_id = ?
+        ORDER BY transitioned_at ASC
+        """,
+        (channel_id,),
+    ).fetchall()
+
+
+# ===========================================================================
+# Topic Backlog helpers
+# ===========================================================================
+
+def insert_episode_topic(
+    conn: sqlite3.Connection,
+    topic_id: str,
+    channel_id: str,
+    topic_text: str,
+    created_at: str,
+    updated_at: str,
+    priority: int = 0,
+) -> None:
+    """Insert a new topic into the episode backlog with status='queued'."""
+    conn.execute(
+        """
+        INSERT INTO episode_topics
+            (topic_id, channel_id, topic_text, status, priority,
+             created_at, updated_at)
+        VALUES
+            (?, ?, ?, 'queued', ?, ?, ?)
+        """,
+        (topic_id, channel_id, topic_text, priority, created_at, updated_at),
+    )
+
+
+def claim_next_episode_topic(
+    conn: sqlite3.Connection,
+    channel_id: str,
+    claimed_at: str,
+) -> Optional[dict]:
+    """
+    Atomically claim the highest-priority queued topic for a channel.
+
+    Uses a conditional UPDATE (WHERE status='queued') on the specific candidate
+    identified by the prior SELECT. Two concurrent callers racing on the same
+    row will each get rowcount=1 or rowcount=0 — exactly one wins.
+
+    Ordering: priority ASC (lower = higher urgency), then created_at ASC (FIFO).
+
+    Args:
+        conn:       Open connection.
+        channel_id: Channel to claim a topic for.
+        claimed_at: ISO 8601 UTC timestamp.
+
+    Returns:
+        Dict of the claimed episode_topics row, or None if no queued topic
+        exists for the channel or another caller claimed it first.
+    """
+    candidate = conn.execute(
+        """
+        SELECT topic_id FROM episode_topics
+        WHERE channel_id = ? AND status = 'queued'
+        ORDER BY priority ASC, created_at ASC
+        LIMIT 1
+        """,
+        (channel_id,),
+    ).fetchone()
+    if candidate is None:
+        return None
+
+    topic_id = candidate[0]
+    cursor = conn.execute(
+        """
+        UPDATE episode_topics
+        SET status = 'claimed', claimed_at = ?, updated_at = ?
+        WHERE topic_id = ? AND status = 'queued'
+        """,
+        (claimed_at, claimed_at, topic_id),
+    )
+    if cursor.rowcount == 0:
+        return None
+
+    row = conn.execute(
+        "SELECT * FROM episode_topics WHERE topic_id = ?", (topic_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_episode_topic_status(
+    conn: sqlite3.Connection,
+    topic_id: str,
+    status: str,
+    updated_at: str,
+    reason: Optional[str] = None,
+    consumed_at: Optional[str] = None,
+) -> None:
+    """Update a topic's status and optional metadata fields."""
+    conn.execute(
+        """
+        UPDATE episode_topics
+        SET status     = ?,
+            updated_at = ?,
+            reason     = COALESCE(?, reason),
+            consumed_at = COALESCE(?, consumed_at)
+        WHERE topic_id = ?
+        """,
+        (status, updated_at, reason, consumed_at, topic_id),
+    )
+
+
+def get_episode_topic(
+    conn: sqlite3.Connection,
+    topic_id: str,
+) -> Optional[dict]:
+    """Return a single episode_topics row as a dict, or None."""
+    row = conn.execute(
+        "SELECT * FROM episode_topics WHERE topic_id = ?", (topic_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_episode_topics(
+    conn: sqlite3.Connection,
+    channel_id: Optional[str] = None,
+    status: Optional[str] = None,
+) -> list:
+    """
+    Return episode_topics rows, optionally filtered by channel_id and/or status.
+
+    Results ordered by channel_id, priority ASC, created_at ASC.
+    """
+    clauses: list[str] = []
+    params: list = []
+    if channel_id is not None:
+        clauses.append("channel_id = ?")
+        params.append(channel_id)
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return conn.execute(
+        f"""
+        SELECT * FROM episode_topics
+        {where}
+        ORDER BY channel_id, priority ASC, created_at ASC
+        """,
+        params,
+    ).fetchall()

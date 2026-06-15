@@ -466,6 +466,55 @@ def run_budget_authorization(
 
     validate("finance_record", record)
 
+    # Emit OIS signal on BLOCKED or WARNING verdict.
+    # Module-level import so patch("hypogeum.ois.emit_signal") works in tests.
+    if verdict == "BLOCKED":
+        try:
+            import hypogeum.ois as _ois
+            _ois.emit_signal(
+                signal_type="budget_exhaustion",
+                severity="CRITICAL",
+                message=(
+                    f"Episode {episode_id!r}: estimated spend "
+                    f"${total_estimated:.4f} exceeds ceiling ${ceiling:.2f} USD"
+                ),
+                channel_id=None,
+                source_system="finance_agent",
+                blocking=True,
+                metadata={
+                    "episode_id": episode_id,
+                    "estimated_usd": round(total_estimated, 4),
+                    "ceiling_usd": ceiling,
+                },
+                episode_id=episode_id,
+                config=config,
+            )
+        except Exception:
+            pass
+    elif verdict == "WARNING":
+        try:
+            import hypogeum.ois as _ois
+            _ois.emit_signal(
+                signal_type="low_budget_warning",
+                severity="WARNING",
+                message=(
+                    f"Episode {episode_id!r}: estimated spend "
+                    f"${total_estimated:.4f} is approaching ceiling ${ceiling:.2f} USD"
+                ),
+                channel_id=None,
+                source_system="finance_agent",
+                blocking=False,
+                metadata={
+                    "episode_id": episode_id,
+                    "estimated_usd": round(total_estimated, 4),
+                    "ceiling_usd": ceiling,
+                },
+                episode_id=episode_id,
+                config=config,
+            )
+        except Exception:
+            pass
+
     # Write output file
     base = output_dir or (
         Path(__file__).resolve().parent.parent.parent

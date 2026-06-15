@@ -327,7 +327,7 @@ class TestFirstCallArguments:
         calls, _ = self._capture_calls()
         assert calls[0]["agent_name"] == "executive_producer"
 
-    def test_model_slug_is_fable5(self):
+    def test_model_slug_is_config_ep_model(self):
         calls, cfg = self._capture_calls()
         assert calls[0]["model_slug"] == cfg.EP_MODEL
 
@@ -383,7 +383,7 @@ class TestSecondCallArguments:
         calls, _ = self._capture_calls()
         assert calls[1]["agent_name"] == "executive_producer"
 
-    def test_model_slug_is_fable5(self):
+    def test_model_slug_is_config_ep_model(self):
         calls, cfg = self._capture_calls()
         assert calls[1]["model_slug"] == cfg.EP_MODEL
 
@@ -673,7 +673,7 @@ class TestAgentIdentity:
         assert _AGENT_NAME == "executive_producer"
 
     def test_module_model_slug_constant(self):
-        assert _MODEL_SLUG == "anthropic/claude-fable-5"
+        assert _MODEL_SLUG == "anthropic/claude-sonnet-4.6"
 
     def test_module_max_tokens_constant(self):
         assert _MAX_TOKENS == 4096

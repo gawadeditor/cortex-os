@@ -30,7 +30,7 @@ from hypogeum.run_registry import complete_run, fail_run, register_run
 def _make_config():
     """Minimal Config-like object with model assignment fields."""
     cfg = MagicMock()
-    cfg.EP_MODEL = "anthropic/claude-fable-5"
+    cfg.EP_MODEL = "anthropic/claude-sonnet-4.6"
     cfg.RD_MODEL = "anthropic/claude-opus-4.6"
     cfg.TD_PLANNING_MODEL = "openai/gpt-5.5-pro"
     cfg.BGA_PASS1_MODEL = "anthropic/claude-sonnet-4.6"

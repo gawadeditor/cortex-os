@@ -10,7 +10,7 @@ Execution sequence:
   3. If decision is PASS or WARN, call run_agent() for topic_brief
   4. If decision is REJECT, return (scorecard, {}) immediately
 
-Model: config.EP_MODEL (default: anthropic/claude-fable-5)
+Model: config.EP_MODEL (default: anthropic/claude-sonnet-4.6)
 Max tokens: 4,096 per call (both calls)
 
 Integration contracts (must not be violated):
@@ -33,7 +33,7 @@ from hypogeum.config import Config
 # Constants
 # ---------------------------------------------------------------------------
 
-_MODEL_SLUG  = "anthropic/claude-fable-5"
+_MODEL_SLUG  = "anthropic/claude-sonnet-4.6"
 _MAX_TOKENS  = 4_096
 _AGENT_NAME  = "executive_producer"
 

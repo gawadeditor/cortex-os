@@ -1,5 +1,5 @@
 """
-benchmark_thumbnail_planning.py — A/B benchmark: Sonnet 4.6 vs Fable 5
+benchmark_thumbnail_planning.py — A/B benchmark: Sonnet 4.6 vs Opus 4.6
 
 Runs Phase 1 (Thumbnail Director planning) only — NO image generation, NO MUAPI.
 Uses the same handoff brief inputs for each episode across both models.
@@ -37,8 +37,8 @@ from hypogeum.config import Config
 MODEL_A_SLUG = "anthropic/claude-sonnet-4.6"
 MODEL_A_LABEL = "A — Sonnet 4.6 (production)"
 
-MODEL_B_SLUG = "anthropic/claude-fable-5"
-MODEL_B_LABEL = "B — Fable 5 (candidate)"
+MODEL_B_SLUG = "anthropic/claude-opus-4.6"
+MODEL_B_LABEL = "B — Opus 4.6 (quality ceiling)"
 
 _TD_MAX_TOKENS = 4_096
 
@@ -137,7 +137,7 @@ def main() -> int:
             plan_a_err = str(exc)
             print(f"      FAILED: {exc}")
 
-        # ── Model B (Fable 5) ─────────────────────────────────────────────
+        # ── Model B (Opus 4.6) ────────────────────────────────────────────
         print(f"  [B] Calling {MODEL_B_SLUG}...")
         try:
             plan_b = run_agent(

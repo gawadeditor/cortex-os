@@ -82,7 +82,7 @@ def active_channel(db_path):
             "brand": {"language": "en"},
             "publishing": {"enabled_platforms": ["youtube"]},
             "models": {
-                "episode_producer":   "anthropic/claude-fable-5",
+                "episode_producer":   "anthropic/claude-sonnet-4.6",
                 "research_director":  "anthropic/claude-opus-4.6",
                 "thumbnail_planner":  "openai/gpt-5.5-pro",
                 "brand_guardian_p1":  "anthropic/claude-sonnet-4.6",
@@ -127,7 +127,7 @@ def paused_channel(db_path):
 
 
 def _make_channel_config(
-    ep_model="anthropic/claude-fable-5",
+    ep_model="anthropic/claude-sonnet-4.6",
     rd_model="anthropic/claude-opus-4.6",
     td_model="openai/gpt-5.5-pro",
     bga1="anthropic/claude-sonnet-4.6",
@@ -173,10 +173,10 @@ class TestApplyChannelConfig:
     """Config.apply_channel_config() maps ModelProfile fields onto Config."""
 
     def test_ep_model_overridden(self, minimal_config):
-        cc = _make_channel_config(ep_model="anthropic/claude-fable-5")
+        cc = _make_channel_config(ep_model="anthropic/claude-sonnet-4.6")
         minimal_config.EP_MODEL = "old-ep-model"
         minimal_config.apply_channel_config(cc)
-        assert minimal_config.EP_MODEL == "anthropic/claude-fable-5"
+        assert minimal_config.EP_MODEL == "anthropic/claude-sonnet-4.6"
 
     def test_rd_model_overridden(self, minimal_config):
         cc = _make_channel_config(rd_model="anthropic/claude-opus-4.6")
@@ -497,7 +497,7 @@ class TestRunPipelineChannelId:
         with patch(
             "hypogeum.channel_config.load_channel_config",
             return_value=_make_channel_config(
-                ep_model="anthropic/claude-fable-5",
+                ep_model="anthropic/claude-sonnet-4.6",
                 voice_id="j9jfwdrw7BRfcR43Qohk",
             ),
         ):
@@ -513,7 +513,7 @@ class TestRunPipelineChannelId:
                             channel_id="hypogeum",
                             output_dir=tmp_path,
                         )
-        assert minimal_config.EP_MODEL == "anthropic/claude-fable-5"
+        assert minimal_config.EP_MODEL == "anthropic/claude-sonnet-4.6"
         assert minimal_config.ELEVENLABS_VOICE_ID == "j9jfwdrw7BRfcR43Qohk"
 
     def test_load_not_called_when_channel_id_none(self, minimal_config, tmp_path):

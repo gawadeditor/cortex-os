@@ -70,7 +70,7 @@ def _db_path(db_path: Optional[Path]) -> Path:
 def _model_assignments_from_config(config: Config) -> dict:
     """Extract current model assignments from config for snapshotting."""
     return {
-        "ep":         getattr(config, "EP_MODEL", "anthropic/claude-fable-5"),
+        "ep":         getattr(config, "EP_MODEL", "anthropic/claude-sonnet-4.6"),
         "rd":         getattr(config, "RD_MODEL", "anthropic/claude-opus-4.6"),
         "td_planning": getattr(config, "TD_PLANNING_MODEL", "openai/gpt-5.5-pro"),
         "bga_pass1":  getattr(config, "BGA_PASS1_MODEL", "anthropic/claude-sonnet-4.6"),

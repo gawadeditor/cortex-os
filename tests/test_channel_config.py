@@ -812,7 +812,7 @@ _HYPOGEUM_CONFIG = {
         "auto_captions":           True,
     },
     "models": {
-        "episode_producer":   "anthropic/claude-fable-5",
+        "episode_producer":   "anthropic/claude-sonnet-4.6",
         "research_director":  "anthropic/claude-opus-4.6",
         "thumbnail_planner":  "openai/gpt-5.5-pro",
         "brand_guardian_p1":  "anthropic/claude-sonnet-4.6",
@@ -878,7 +878,7 @@ class TestBootstrapHypogeum:
         assert cp.model_profile_id is not None
         mp = get_model_profile(cp.model_profile_id, db_path=db_path)
         assert mp is not None
-        assert mp.episode_producer == "anthropic/claude-fable-5"
+        assert mp.episode_producer == "anthropic/claude-sonnet-4.6"
         assert mp.research_director == "anthropic/claude-opus-4.6"
         assert mp.thumbnail_planner == "openai/gpt-5.5-pro"
         assert mp.brand_guardian_p1 == "anthropic/claude-sonnet-4.6"

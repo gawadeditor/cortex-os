@@ -396,8 +396,8 @@ _MINIMAL_ENV = {
 
 
 class TestModelSlugConfig:
-    # Both claude-fable-5 and gpt-5.5-pro confirmed live on OpenRouter 2026-06-12.
-    # This set is now empty; kept as a hook for future delist events.
+    # claude-fable-5 confirmed 404 on OpenRouter 2026-06-15 — replaced with claude-sonnet-4.6.
+    # openai/gpt-5.5-pro confirmed live on 2026-06-12.
     _KNOWN_INVALID: set = set()
 
     def _load_config(self):
@@ -408,12 +408,11 @@ class TestModelSlugConfig:
         with patch.dict(os.environ, env):
             return Config()
 
-    def test_ep_model_is_fable5_or_opus(self):
-        # claude-fable-5 confirmed live on OpenRouter 2026-06-12
+    def test_ep_model_is_valid_anthropic_model(self):
         cfg = self._load_config()
         assert cfg.EP_MODEL in (
-            "anthropic/claude-fable-5", "anthropic/claude-opus-4.6",
-        ), f"EP_MODEL={cfg.EP_MODEL!r} is not the expected EP model"
+            "anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.6",
+        ), f"EP_MODEL={cfg.EP_MODEL!r} is not a valid EP model"
 
     def test_td_planning_model_is_gpt_based(self):
         # openai/gpt-5.5-pro confirmed live on OpenRouter 2026-06-12;

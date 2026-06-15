@@ -92,10 +92,10 @@ class TestModelSlugChecks:
         assert result["ok"] is False
         assert len(result["issues"]) == 3
 
-    def test_known_invalid_set_is_empty_after_verification(self):
-        # Both anthropic/claude-fable-5 and openai/gpt-5.5-pro confirmed live
-        # on OpenRouter 2026-06-12 — the set is empty until a slug is delisted
-        assert "anthropic/claude-fable-5" not in _KNOWN_INVALID_SLUGS
+    def test_known_invalid_set_contains_delisted_slugs(self):
+        # claude-fable-5 confirmed 404 on OpenRouter 2026-06-15 — added to invalid set
+        # openai/gpt-5.5-pro confirmed live on 2026-06-12 — must NOT be in invalid set
+        assert "anthropic/claude-fable-5" in _KNOWN_INVALID_SLUGS
         assert "openai/gpt-5.5-pro" not in _KNOWN_INVALID_SLUGS
 
 

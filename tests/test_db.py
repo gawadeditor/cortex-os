@@ -189,7 +189,7 @@ class TestInsertRun:
         assert row["episode_id"] == "ep_000"
 
     def test_model_assignments_stored_as_json(self, db):
-        assignments = {"ep": "claude-fable-5", "rd": "claude-opus-4.6"}
+        assignments = {"ep": "claude-sonnet-4.6", "rd": "claude-opus-4.6"}
         insert_run(db, "run-001", "ep_000", _STARTED, model_assignments=assignments)
         db.commit()
         row = db.execute("SELECT model_assignments FROM runs WHERE run_id='run-001'").fetchone()

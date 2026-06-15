@@ -288,7 +288,7 @@ class Config:
     TD_PLANNING_MAX_TOKENS: int  # thumbnail planning max output tokens; default: 16384
     BGA_PASS1_MODEL: str         # BGA Pass 1 (VPD visual scenes); default: anthropic/claude-sonnet-4.6
     BGA_PASS2_MODEL: str         # BGA Pass 2 (thumbnail plans, visual identity); default: openai/gpt-5.5-pro
-    EP_MODEL: str                # Executive Producer; default: anthropic/claude-fable-5
+    EP_MODEL: str                # Executive Producer; default: anthropic/claude-sonnet-4.6
 
     # ------------------------------------------------------------------
     # Finance Agent (R50) — budget gate + cost ledger
@@ -457,7 +457,7 @@ class Config:
             "BGA_PASS2_MODEL", default="openai/gpt-5.5-pro"
         )
         self.EP_MODEL = _get_optional(
-            "EP_MODEL", default="anthropic/claude-fable-5"
+            "EP_MODEL", default="anthropic/claude-sonnet-4.6"
         )
 
         # --- Finance Agent ---

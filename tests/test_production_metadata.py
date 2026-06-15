@@ -47,7 +47,7 @@ _NARRATIVE = {
 }
 
 _MODEL_ASSIGNMENTS = {
-    "ep": "anthropic/claude-fable-5",
+    "ep": "anthropic/claude-sonnet-4.6",
     "rd": "anthropic/claude-opus-4.6",
 }
 

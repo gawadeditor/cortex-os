@@ -397,11 +397,14 @@ class TestSkipTopic:
         skip_topic(tid, reason="Not relevant anymore", db_path=db_path)
         assert get_topic(tid, db_path=db_path)["reason"] == "Not relevant anymore"
 
-    def test_skip_claimed_topic_is_noop(self, db_path):
+    def test_skip_claimed_topic_marks_skipped(self, db_path):
+        # claimed topics can be skipped (e.g. ep_rejected path in process_next)
         tid = enqueue_topic("ch_sk3", "topic", db_path=db_path)
         claim_next_topic("ch_sk3", db_path=db_path)
-        skip_topic(tid, db_path=db_path)
-        assert get_topic(tid, db_path=db_path)["status"] == "claimed"
+        skip_topic(tid, reason="ep_rejected", db_path=db_path)
+        row = get_topic(tid, db_path=db_path)
+        assert row["status"] == "skipped"
+        assert row["reason"] == "ep_rejected"
 
     def test_skipped_topic_not_claimed(self, db_path):
         tid = enqueue_topic("ch_sk4", "topic", db_path=db_path)
@@ -596,20 +599,21 @@ class TestProcessNextTopicIntegration:
         row = get_topic(topic_id, db_path=db_path)
         assert row["status"] == "consumed"
 
-    def test_topic_stays_claimed_on_pipeline_failure(self, db_path):
+    def test_topic_released_to_queued_on_pipeline_failure(self, db_path):
+        # Non-rejection failures release the topic for retry on the next pass.
         _, topic_id = self._setup(db_path, "ch_tf", "Pompeii")
 
         with patch("hypogeum.pipeline.run_pipeline",
-                   side_effect=RuntimeError("pipeline failed")):
+                   side_effect=RuntimeError("provider timeout")):
             result = process_next(
                 worker_id=_worker(), db_path=db_path, dry_run=False,
                 config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
             )
 
         assert result.status == "failed"
-        # Topic stays claimed — prevents infinite retry loop on a broken topic
         row = get_topic(topic_id, db_path=db_path)
-        assert row["status"] == "claimed"
+        assert row["status"] == "queued"
+        assert row["claimed_at"] is None
 
     def test_result_contains_topic_id_on_success(self, db_path):
         _, topic_id = self._setup(db_path, "ch_tr", "The Circus Maximus")

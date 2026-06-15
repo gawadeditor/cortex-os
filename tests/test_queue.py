@@ -56,7 +56,7 @@ from hypogeum.queue import (
     process_next,
     release,
 )
-from hypogeum.topics import enqueue_topic
+from hypogeum.topics import enqueue_topic, get_topic
 from hypogeum.scheduler import create_schedule, tick
 
 
@@ -1423,3 +1423,259 @@ class TestPollerStallGuard:
         default = sig.parameters["max_stall_iterations"].default
         assert isinstance(default, int), f"expected int, got {type(default)}"
         assert default > 0, f"must be > 0, got {default}"
+
+
+# ===========================================================================
+# 14. Consumer hygiene — run_registry and topic cleanup on pipeline failure
+# ===========================================================================
+
+class TestConsumerHygiene:
+    """
+    Verifies that process_next() and run_pipeline() leave no orphaned state
+    after a pipeline failure:
+
+      Path 1 — run_registry: run_pipeline must call fail_run() for any
+        exception raised after register_run(), so the runs row never
+        stays 'running' after the process exits.
+
+      Path 2 — topic backlog: process_next must release or skip the claimed
+        topic after a pipeline exception, so the topic never stays 'claimed':
+          PipelineRejectedError → topic 'skipped' (EP rejection is permanent)
+          Any other exception   → topic 'queued' (infrastructure error; retry)
+
+    run_pipeline is always patched — no providers, no content generation.
+    """
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    def _active_channel(self, db_path, channel_id="ch_hygiene"):
+        from hypogeum.calog import set_channel_state
+        set_channel_state(channel_id, "active", db_path=db_path)
+        return channel_id
+
+    def _setup(self, db_path, channel_id="ch_hygiene"):
+        """Enqueue one topic and one queue item. Returns (topic_id, queue_id)."""
+        self._active_channel(db_path, channel_id)
+        topic_id = enqueue_topic(channel_id, "test topic for hygiene", db_path=db_path)
+        queue_id = enqueue(db_path=db_path, channel_id=channel_id)
+        return topic_id, queue_id
+
+    # -----------------------------------------------------------------------
+    # Path 1: run_registry hygiene — run_pipeline marks its own run failed
+    # -----------------------------------------------------------------------
+
+    def test_run_pipeline_calls_fail_run_on_exception(self, monkeypatch):
+        """
+        When run_pipeline raises after register_run(), fail_run must be called
+        with the matching run_id so the runs row is never left 'running'.
+        """
+        from hypogeum.pipeline import run_pipeline
+
+        fail_run_calls = []
+
+        monkeypatch.setattr("hypogeum.pipeline.register_run",
+                            lambda *a, **kw: "run-hygiene-001")
+        monkeypatch.setattr("hypogeum.pipeline.set_run_context",
+                            lambda **kw: None)
+        monkeypatch.setattr("hypogeum.pipeline.fail_run",
+                            lambda run_id, episode_id, error_message, **kw:
+                                fail_run_calls.append((run_id, error_message[:40])))
+        monkeypatch.setattr("hypogeum.pipeline.clear_run_context", lambda: None)
+        monkeypatch.setattr("hypogeum.pipeline.is_factory_blocked",
+                            lambda **kw: False)
+        monkeypatch.setattr("hypogeum.pipeline.run_startup_checks",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                RuntimeError("provider unreachable")))
+
+        with pytest.raises(RuntimeError, match="provider unreachable"):
+            run_pipeline(
+                topic_input="test topic",
+                episode_id="ep_hyg_test",
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+                channel_id=None,
+            )
+
+        assert len(fail_run_calls) == 1, (
+            f"fail_run must be called exactly once; got {len(fail_run_calls)}"
+        )
+        assert fail_run_calls[0][0] == "run-hygiene-001"
+        assert "provider unreachable" in fail_run_calls[0][1]
+
+    def test_run_pipeline_fail_run_called_for_startup_error(self, monkeypatch):
+        """StartupError after register_run → fail_run is called."""
+        from hypogeum.pipeline import run_pipeline
+        from hypogeum.startup import StartupError, StartupReport
+
+        fail_run_calls = []
+        stub_report = StartupReport(
+            overall_status="unavailable",
+            openrouter_reachable=False,
+            models_verified=False,
+            fallback_active=True,
+            fallback_configured=False,
+            checked_at="2026-01-01T00:00:00Z",
+        )
+
+        monkeypatch.setattr("hypogeum.pipeline.register_run",
+                            lambda *a, **kw: "run-startup-001")
+        monkeypatch.setattr("hypogeum.pipeline.set_run_context", lambda **kw: None)
+        monkeypatch.setattr("hypogeum.pipeline.fail_run",
+                            lambda run_id, *a, **kw: fail_run_calls.append(run_id))
+        monkeypatch.setattr("hypogeum.pipeline.clear_run_context", lambda: None)
+        monkeypatch.setattr("hypogeum.pipeline.is_factory_blocked",
+                            lambda **kw: False)
+        monkeypatch.setattr("hypogeum.pipeline.run_startup_checks",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                StartupError("API unavailable", stub_report)))
+
+        with pytest.raises(StartupError):
+            run_pipeline(
+                topic_input="test",
+                episode_id="ep_startup_hyg",
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+                channel_id=None,
+            )
+
+        assert "run-startup-001" in fail_run_calls
+
+    def test_run_pipeline_no_fail_run_when_registration_not_reached(self, monkeypatch):
+        """
+        If the exception fires BEFORE register_run (e.g. ChannelNotFoundError),
+        fail_run must NOT be called — there is no run_id to fail.
+        """
+        from hypogeum.pipeline import run_pipeline, ChannelNotFoundError
+
+        fail_run_calls = []
+        monkeypatch.setattr("hypogeum.pipeline.fail_run",
+                            lambda *a, **kw: fail_run_calls.append(True))
+
+        # channel_id="nonexistent" will trigger ChannelNotFoundError before register_run
+        # Mock load_channel_config to return None
+        import hypogeum.channel_config as cc_mod
+        monkeypatch.setattr(cc_mod, "load_channel_config", lambda cid, **kw: None)
+
+        with pytest.raises(ChannelNotFoundError):
+            run_pipeline(
+                topic_input="test",
+                episode_id="ep_norun",
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+                channel_id="nonexistent",
+            )
+
+        assert fail_run_calls == [], (
+            "fail_run must not be called when no run was registered"
+        )
+
+    # -----------------------------------------------------------------------
+    # Path 2: topic hygiene — process_next releases or skips the topic
+    # -----------------------------------------------------------------------
+
+    def test_topic_released_to_queued_on_generic_pipeline_failure(self, db_path):
+        """
+        A generic pipeline failure (RuntimeError) must release the claimed topic
+        back to 'queued' so it is retried on the next poll pass.
+        """
+        topic_id, _ = self._setup(db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "failed"
+        topic = get_topic(topic_id, db_path=db_path)
+        assert topic is not None
+        assert topic["status"] == "queued", (
+            f"expected 'queued' after infrastructure failure; got {topic['status']!r}"
+        )
+        assert topic["claimed_at"] is None
+
+    def test_topic_skipped_on_pipeline_rejected_error(self, db_path):
+        """
+        PipelineRejectedError (EP scored topic < 6.0) must mark the topic 'skipped'
+        permanently — it is not re-queued for retry.
+        """
+        import hypogeum.pipeline as pl_mod
+
+        topic_id, _ = self._setup(db_path, channel_id="ch_rejected")
+
+        rejection = pl_mod.PipelineRejectedError(
+            episode_id="ep_rejected",
+            scorecard={"overall_score": 2.5, "decision": "REJECT"},
+        )
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=rejection):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "failed"
+        topic = get_topic(topic_id, db_path=db_path)
+        assert topic is not None
+        assert topic["status"] == "skipped", (
+            f"expected 'skipped' after EP rejection; got {topic['status']!r}"
+        )
+
+    def test_topic_released_on_finance_blocked_error(self, db_path):
+        """
+        FinanceBudgetBlockedError is an infrastructure constraint, not a topic
+        fault — the topic must be released back to 'queued' for retry.
+        """
+        import hypogeum.pipeline as pl_mod
+
+        topic_id, _ = self._setup(db_path, channel_id="ch_finance")
+
+        blocked = pl_mod.FinanceBudgetBlockedError(
+            episode_id="ep_finance",
+            record={"estimated_spend_usd": 30.0, "budget_ceiling_usd": 15.0},
+        )
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=blocked):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "failed"
+        topic = get_topic(topic_id, db_path=db_path)
+        assert topic["status"] == "queued", (
+            f"expected 'queued' after budget block; got {topic['status']!r}"
+        )
+
+    def test_topic_not_touched_on_dry_run(self, db_path):
+        """dry_run=True bypasses pipeline entirely — topic lifecycle is unchanged."""
+        self._active_channel(db_path, "ch_dryrun")
+        topic_id = enqueue_topic("ch_dryrun", "dry run topic", db_path=db_path)
+        enqueue(db_path=db_path, channel_id="ch_dryrun")
+
+        with patch("hypogeum.pipeline.run_pipeline") as mock_pl:
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=True,
+            )
+
+        mock_pl.assert_not_called()
+        assert result.status == "completed"
+        topic = get_topic(topic_id, db_path=db_path)
+        # dry_run never claims topics — topic stays queued
+        assert topic["status"] == "queued"
+
+    def test_topic_cleanup_does_not_suppress_original_exception(self, db_path):
+        """The original pipeline exception must propagate even if topic cleanup fails."""
+        topic_id, _ = self._setup(db_path, channel_id="ch_suppress")
+
+        # Make release_topic raise to verify it doesn't suppress the pipeline error
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("original error")):
+            with patch("hypogeum.topics.release_topic",
+                       side_effect=RuntimeError("cleanup also failed")):
+                result = process_next(
+                    worker_id=_worker(), db_path=db_path, dry_run=False,
+                    config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+                )
+
+        # process_next must return a ProcessResult even when cleanup raises
+        assert result.status == "failed"
+        assert "original error" in result.error_message

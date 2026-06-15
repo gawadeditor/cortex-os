@@ -422,404 +422,418 @@ def run_pipeline(
     # -----------------------------------------------------------------------
     # 0. Run registration — must happen before any agent or spend
     # -----------------------------------------------------------------------
-    run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id)
-    set_run_context(run_id=run_id, episode_id=episode_id)
-    log.info("pipeline_run_registered", run_id=run_id, channel_id=channel_id)
+    # run_id is set inside the try so the except can always reference it safely.
+    run_id: Optional[str] = None
+    try:
+        run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id)
+        set_run_context(run_id=run_id, episode_id=episode_id)
+        log.info("pipeline_run_registered", run_id=run_id, channel_id=channel_id)
 
-    # -----------------------------------------------------------------------
-    # 1. Startup verification — fail-fast before any agent is called
-    # -----------------------------------------------------------------------
-    startup_report = run_startup_checks(config, episode_id=episode_id)
+        # -----------------------------------------------------------------------
+        # 1. Startup verification — fail-fast before any agent is called
+        # -----------------------------------------------------------------------
+        startup_report = run_startup_checks(config, episode_id=episode_id)
 
-    log.info(
-        "pipeline_startup_verified",
-        overall_status=startup_report.overall_status,
-        openrouter_reachable=startup_report.openrouter_reachable,
-        fallback_active=startup_report.fallback_active,
-    )
+        log.info(
+            "pipeline_startup_verified",
+            overall_status=startup_report.overall_status,
+            openrouter_reachable=startup_report.openrouter_reachable,
+            fallback_active=startup_report.fallback_active,
+        )
 
-    # -----------------------------------------------------------------------
-    # 2. Executive Producer
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="executive_producer")
-    validation_scorecard, topic_brief = _run_executive_producer(
-        topic_input=topic_input,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-
-    # Fail-fast: REJECT halts the pipeline before any downstream agent is called.
-    if validation_scorecard.get("decision") == "REJECT":
-        log.warn(
-            "pipeline_topic_rejected",
+        # -----------------------------------------------------------------------
+        # 2. Executive Producer
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="executive_producer")
+        validation_scorecard, topic_brief = _run_executive_producer(
+            topic_input=topic_input,
+            config=config,
             episode_id=episode_id,
+            output_dir=output_dir,
+        )
+
+        # Fail-fast: REJECT halts the pipeline before any downstream agent is called.
+        if validation_scorecard.get("decision") == "REJECT":
+            log.warn(
+                "pipeline_topic_rejected",
+                episode_id=episode_id,
+                overall_score=validation_scorecard.get("overall_score"),
+                decision="REJECT",
+            )
+            raise PipelineRejectedError(episode_id=episode_id, scorecard=validation_scorecard)
+
+        log.info(
+            "pipeline_stage_completed",
+            agent="executive_producer",
+            decision=validation_scorecard.get("decision"),
             overall_score=validation_scorecard.get("overall_score"),
-            decision="REJECT",
         )
-        raise PipelineRejectedError(episode_id=episode_id, scorecard=validation_scorecard)
 
-    log.info(
-        "pipeline_stage_completed",
-        agent="executive_producer",
-        decision=validation_scorecard.get("decision"),
-        overall_score=validation_scorecard.get("overall_score"),
-    )
-
-    # -----------------------------------------------------------------------
-    # 3. Research Director
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="research_director")
-    research_package, pdr = _run_research_director(
-        topic_brief=topic_brief,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-
-    # Fail-fast: PDR halts the pipeline; operator resolves deficiencies and re-runs.
-    if pdr is not None:
-        log.error(
-            "pipeline_pdr_issued",
+        # -----------------------------------------------------------------------
+        # 3. Research Director
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="research_director")
+        research_package, pdr = _run_research_director(
+            topic_brief=topic_brief,
+            config=config,
             episode_id=episode_id,
-            severity=pdr.get("severity"),
-            issuing_agent="research_director",
+            output_dir=output_dir,
         )
-        raise PackageDeficiencyError(episode_id=episode_id, pdr=pdr)
 
-    log.info("pipeline_stage_completed", agent="research_director")
+        # Fail-fast: PDR halts the pipeline; operator resolves deficiencies and re-runs.
+        if pdr is not None:
+            log.error(
+                "pipeline_pdr_issued",
+                episode_id=episode_id,
+                severity=pdr.get("severity"),
+                issuing_agent="research_director",
+            )
+            raise PackageDeficiencyError(episode_id=episode_id, pdr=pdr)
 
-    # -----------------------------------------------------------------------
-    # 4. Narrative Architect
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="narrative_architect")
-    narrative_package = _run_narrative_architect(
-        research_package=research_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info("pipeline_stage_completed", agent="narrative_architect")
+        log.info("pipeline_stage_completed", agent="research_director")
 
-    # -----------------------------------------------------------------------
-    # 5. Script Engine
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="script_engine")
-    script_package = _run_script_engine(
-        narrative_package=narrative_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info("pipeline_stage_completed", agent="script_engine")
-
-    # -----------------------------------------------------------------------
-    # 6. Finance Agent — budget authorization gate (pre-generation spend)
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="finance_agent_authorization")
-    finance_authorization = _run_budget_authorization(
-        script_package=script_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info(
-        "pipeline_stage_completed",
-        agent="finance_agent_authorization",
-        verdict=finance_authorization.get("verdict"),
-        estimated_spend_usd=finance_authorization.get("estimated_spend_usd"),
-    )
-
-    # Fail-fast: BLOCKED verdict stops generation before provider spend.
-    if finance_authorization.get("verdict") == "BLOCKED":
-        log.error(
-            "pipeline_finance_blocked",
+        # -----------------------------------------------------------------------
+        # 4. Narrative Architect
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="narrative_architect")
+        narrative_package = _run_narrative_architect(
+            research_package=research_package,
+            config=config,
             episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        log.info("pipeline_stage_completed", agent="narrative_architect")
+
+        # -----------------------------------------------------------------------
+        # 5. Script Engine
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="script_engine")
+        script_package = _run_script_engine(
+            narrative_package=narrative_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        log.info("pipeline_stage_completed", agent="script_engine")
+
+        # -----------------------------------------------------------------------
+        # 6. Finance Agent — budget authorization gate (pre-generation spend)
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="finance_agent_authorization")
+        finance_authorization = _run_budget_authorization(
+            script_package=script_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        log.info(
+            "pipeline_stage_completed",
+            agent="finance_agent_authorization",
+            verdict=finance_authorization.get("verdict"),
             estimated_spend_usd=finance_authorization.get("estimated_spend_usd"),
-            budget_ceiling_usd=finance_authorization.get("budget_ceiling_usd"),
         )
-        raise FinanceBudgetBlockedError(episode_id=episode_id, record=finance_authorization)
 
-    # -----------------------------------------------------------------------
-    # 7. Visual Package Director
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="visual_package_director")
-    visual_package = _run_visual_package_director(
-        script_package=script_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info("pipeline_stage_completed", agent="visual_package_director")
+        # Fail-fast: BLOCKED verdict stops generation before provider spend.
+        if finance_authorization.get("verdict") == "BLOCKED":
+            log.error(
+                "pipeline_finance_blocked",
+                episode_id=episode_id,
+                estimated_spend_usd=finance_authorization.get("estimated_spend_usd"),
+                budget_ceiling_usd=finance_authorization.get("budget_ceiling_usd"),
+            )
+            raise FinanceBudgetBlockedError(episode_id=episode_id, record=finance_authorization)
 
-    # -----------------------------------------------------------------------
-    # 7. Thumbnail Director
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="thumbnail_director")
-    thumbnail_package = _run_thumbnail_director(
-        visual_package=visual_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info("pipeline_stage_completed", agent="thumbnail_director")
-
-    # -----------------------------------------------------------------------
-    # 8. Audio Agent (takes Script Package — parallel path to VPD+TD in M3)
-    # -----------------------------------------------------------------------
-    # Suppress Short narration tracks when dedicated short generation is disabled
-    # (default) or when this is an Episode Zero / validation run.
-    _skip_shorts = (
-        episode_id == "ep_000"
-        or config.EPISODE_ZERO_MAX_SCENES > 0
-        or not config.ENABLE_DEDICATED_SHORT_GENERATION
-    )
-    log.info("pipeline_stage_started", agent="audio_agent")
-    narration_package = _run_audio_agent(
-        script_package=script_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-        skip_shorts=_skip_shorts,
-    )
-    log.info("pipeline_stage_completed", agent="audio_agent")
-
-    # -----------------------------------------------------------------------
-    # 9. Assembly Agent
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="assembly_agent")
-    final_render_package = _run_assembly_agent(
-        visual_package=visual_package,
-        narration_package=narration_package,
-        thumbnail_package=thumbnail_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-        script_package=script_package,
-        source_registry=research_package.get("source_registry", []),
-        topic_brief=topic_brief,
-    )
-    log.info("pipeline_stage_completed", agent="assembly_agent")
-
-    # -----------------------------------------------------------------------
-    # 9b. Asset Archive — catalog all generated assets (non-blocking)
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="asset_archive")
-    asset_archive_record = _run_asset_archive(
-        visual_package=visual_package,
-        narration_package=narration_package,
-        thumbnail_package=thumbnail_package,
-        final_render_package=final_render_package,
-        episode_id=episode_id,
-        output_dir=output_dir,
-        run_id=run_id,
-    )
-    log.info(
-        "pipeline_stage_completed",
-        agent="asset_archive",
-        verdict=asset_archive_record.get("verdict"),
-        total_assets_indexed=asset_archive_record.get("catalog_summary", {}).get("total_assets_indexed", 0),
-    )
-
-    # -----------------------------------------------------------------------
-    # 10. QA Agent — pre-publish gate
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="qa_agent")
-    qa_approval_report = _run_qa_agent(
-        final_render_package=final_render_package,
-        thumbnail_package=thumbnail_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info(
-        "pipeline_stage_completed",
-        agent="qa_agent",
-        verdict=qa_approval_report.get("verdict"),
-    )
-
-    # Fail-fast: REJECTED verdict blocks Publishing Agent.
-    if qa_approval_report.get("verdict") == "REJECTED":
-        log.error(
-            "pipeline_qa_rejected",
+        # -----------------------------------------------------------------------
+        # 7. Visual Package Director
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="visual_package_director")
+        visual_package = _run_visual_package_director(
+            script_package=script_package,
+            config=config,
             episode_id=episode_id,
-            failures=qa_approval_report.get("failures", []),
+            output_dir=output_dir,
         )
-        raise QARejectedError(episode_id=episode_id, report=qa_approval_report)
+        log.info("pipeline_stage_completed", agent="visual_package_director")
 
-    # -----------------------------------------------------------------------
-    # 11. Rights & Compliance Agent
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="compliance_agent")
-    compliance_report = _run_compliance_agent(
-        final_render_package=final_render_package,
-        source_registry=research_package.get("source_registry", []),
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info(
-        "pipeline_stage_completed",
-        agent="compliance_agent",
-        verdict=compliance_report.get("verdict"),
-    )
-
-    # Fail-fast: REJECTED verdict blocks Publishing Agent.
-    if compliance_report.get("verdict") == "REJECTED":
-        log.error(
-            "pipeline_compliance_rejected",
+        # -----------------------------------------------------------------------
+        # 7. Thumbnail Director
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="thumbnail_director")
+        thumbnail_package = _run_thumbnail_director(
+            visual_package=visual_package,
+            config=config,
             episode_id=episode_id,
-            failures=compliance_report.get("failures", []),
+            output_dir=output_dir,
         )
-        raise ComplianceRejectedError(episode_id=episode_id, report=compliance_report)
+        log.info("pipeline_stage_completed", agent="thumbnail_director")
 
-    # -----------------------------------------------------------------------
-    # 12. Publishing Agent
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="publishing_agent")
-    publishing_record = _run_publishing_agent(
-        final_render_package=final_render_package,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-        youtube_privacy=youtube_privacy,
-    )
-    log.info("pipeline_stage_completed", agent="publishing_agent")
-
-    # -----------------------------------------------------------------------
-    # 13. Archive Agent — post-publish audit record (non-blocking)
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="archive_agent")
-    archive_record = _run_archive_agent(
-        final_render_package=final_render_package,
-        publishing_record=publishing_record,
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-    )
-    log.info(
-        "pipeline_stage_completed",
-        agent="archive_agent",
-        verdict=archive_record.get("verdict"),
-        archived=archive_record.get("archived"),
-    )
-
-    # -----------------------------------------------------------------------
-    # 14. Finance Agent — cost ledger record (post-run, non-blocking)
-    # -----------------------------------------------------------------------
-    log.info("pipeline_stage_started", agent="finance_agent_ledger")
-    finance_record = _run_cost_ledger(
-        final_render_package=final_render_package,
-        publishing_record=publishing_record,
-        archive_record=archive_record,
-        config=config,
-        episode_id=episode_id,
-        narration_package=narration_package,
-        visual_package=visual_package,
-        output_dir=output_dir,
-    )
-    log.info(
-        "pipeline_stage_completed",
-        agent="finance_agent_ledger",
-        verdict=finance_record.get("verdict"),
-    )
-
-    # -----------------------------------------------------------------------
-    # 15. Production metadata — durable production snapshot
-    # -----------------------------------------------------------------------
-    _selected_thumb = thumbnail_package.get("main_thumbnail", {}) if thumbnail_package else {}
-    _narrative_struct = {
-        k: narrative_package.get(k)
-        for k in ("narrative_arc", "structure_type", "total_segments")
-        if k in (narrative_package or {})
-    }
-    _title_text = script_package.get("title", "") if script_package else ""
-    from hypogeum.identifiers import generate_title_id
-    _title_id = generate_title_id(_title_text, episode_id) if _title_text else ""
-    _source_count = len(research_package.get("source_registry", [])) if research_package else 0
-    _model_assignments = {
-        "ep": getattr(config, "EP_MODEL", ""),
-        "rd": getattr(config, "RD_MODEL", ""),
-        "td_planning": getattr(config, "TD_PLANNING_MODEL", ""),
-        "bga_pass1": getattr(config, "BGA_PASS1_MODEL", ""),
-        "bga_pass2": getattr(config, "BGA_PASS2_MODEL", ""),
-    }
-    production_metadata_record = write_production_metadata(
-        run_id=run_id,
-        episode_id=episode_id,
-        title_id=_title_id,
-        selected_title=_title_text,
-        selected_thumbnail=_selected_thumb,
-        narrative_structure=_narrative_struct,
-        research_source_count=_source_count,
-        model_assignments=_model_assignments,
-    )
-
-    # Phase 5 — post-run intelligence (non-blocking)
-    _source_registry = research_package.get("source_registry", []) if research_package else []
-    run_post_run_intelligence(
-        episode_id=episode_id,
-        production_metadata=production_metadata_record,
-        source_registry=_source_registry,
-        run_id=run_id,
-        analytics_snapshot=None,  # not available at this stage; signal flow skipped
-    )
-
-    # analytics_pending — only after confirmed YouTube publish
-    analytics_pending_record = None
-    _yt_id = publishing_record.get("summary", {}).get("youtube_main_video_id", "") if publishing_record else ""
-    _yt_published = publishing_record.get("summary", {}).get("youtube_main_published", False) if publishing_record else False
-    _published_at = publishing_record.get("published_at", "") if publishing_record else ""
-    if _yt_published and _yt_id:
-        analytics_pending_record = write_analytics_pending(
+        # -----------------------------------------------------------------------
+        # 8. Audio Agent (takes Script Package — parallel path to VPD+TD in M3)
+        # -----------------------------------------------------------------------
+        # Suppress Short narration tracks when dedicated short generation is disabled
+        # (default) or when this is an Episode Zero / validation run.
+        _skip_shorts = (
+            episode_id == "ep_000"
+            or config.EPISODE_ZERO_MAX_SCENES > 0
+            or not config.ENABLE_DEDICATED_SHORT_GENERATION
+        )
+        log.info("pipeline_stage_started", agent="audio_agent")
+        narration_package = _run_audio_agent(
+            script_package=script_package,
+            config=config,
             episode_id=episode_id,
-            youtube_video_id=_yt_id,
-            published_at=_published_at,
+            output_dir=output_dir,
+            skip_shorts=_skip_shorts,
+        )
+        log.info("pipeline_stage_completed", agent="audio_agent")
+
+        # -----------------------------------------------------------------------
+        # 9. Assembly Agent
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="assembly_agent")
+        final_render_package = _run_assembly_agent(
+            visual_package=visual_package,
+            narration_package=narration_package,
+            thumbnail_package=thumbnail_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+            script_package=script_package,
+            source_registry=research_package.get("source_registry", []),
+            topic_brief=topic_brief,
+        )
+        log.info("pipeline_stage_completed", agent="assembly_agent")
+
+        # -----------------------------------------------------------------------
+        # 9b. Asset Archive — catalog all generated assets (non-blocking)
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="asset_archive")
+        asset_archive_record = _run_asset_archive(
+            visual_package=visual_package,
+            narration_package=narration_package,
+            thumbnail_package=thumbnail_package,
+            final_render_package=final_render_package,
+            episode_id=episode_id,
+            output_dir=output_dir,
             run_id=run_id,
         )
+        log.info(
+            "pipeline_stage_completed",
+            agent="asset_archive",
+            verdict=asset_archive_record.get("verdict"),
+            total_assets_indexed=asset_archive_record.get("catalog_summary", {}).get("total_assets_indexed", 0),
+        )
 
-    # -----------------------------------------------------------------------
-    # 16. Seal result
-    # -----------------------------------------------------------------------
-    complete_run(run_id=run_id, episode_id=episode_id)
-    write_episode_rollup(run_id=run_id, episode_id=episode_id)
-    clear_run_context()
+        # -----------------------------------------------------------------------
+        # 10. QA Agent — pre-publish gate
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="qa_agent")
+        qa_approval_report = _run_qa_agent(
+            final_render_package=final_render_package,
+            thumbnail_package=thumbnail_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        log.info(
+            "pipeline_stage_completed",
+            agent="qa_agent",
+            verdict=qa_approval_report.get("verdict"),
+        )
 
-    result = PipelineResult(
-        episode_id=episode_id,
-        status="completed",
-        startup_report=startup_report,
-        run_id=run_id,
-        validation_scorecard=validation_scorecard,
-        topic_brief=topic_brief,
-        research_package=research_package,
-        narrative_package=narrative_package,
-        script_package=script_package,
-        finance_authorization=finance_authorization,
-        visual_package=visual_package,
-        thumbnail_package=thumbnail_package,
-        narration_package=narration_package,
-        final_render_package=final_render_package,
-        qa_approval_report=qa_approval_report,
-        compliance_report=compliance_report,
-        publishing_record=publishing_record,
-        archive_record=archive_record,
-        finance_record=finance_record,
-        asset_archive_record=asset_archive_record,
-        production_metadata_record=production_metadata_record,
-        analytics_pending_record=analytics_pending_record,
-    )
+        # Fail-fast: REJECTED verdict blocks Publishing Agent.
+        if qa_approval_report.get("verdict") == "REJECTED":
+            log.error(
+                "pipeline_qa_rejected",
+                episode_id=episode_id,
+                failures=qa_approval_report.get("failures", []),
+            )
+            raise QARejectedError(episode_id=episode_id, report=qa_approval_report)
 
-    log.info(
-        "pipeline_run_completed",
-        episode_id=episode_id,
-        status="completed",
-        youtube_main_published=(
-            publishing_record.get("summary", {}).get("youtube_main_published", False)
-        ),
-    )
+        # -----------------------------------------------------------------------
+        # 11. Rights & Compliance Agent
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="compliance_agent")
+        compliance_report = _run_compliance_agent(
+            final_render_package=final_render_package,
+            source_registry=research_package.get("source_registry", []),
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        log.info(
+            "pipeline_stage_completed",
+            agent="compliance_agent",
+            verdict=compliance_report.get("verdict"),
+        )
 
-    return result
+        # Fail-fast: REJECTED verdict blocks Publishing Agent.
+        if compliance_report.get("verdict") == "REJECTED":
+            log.error(
+                "pipeline_compliance_rejected",
+                episode_id=episode_id,
+                failures=compliance_report.get("failures", []),
+            )
+            raise ComplianceRejectedError(episode_id=episode_id, report=compliance_report)
+
+        # -----------------------------------------------------------------------
+        # 12. Publishing Agent
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="publishing_agent")
+        publishing_record = _run_publishing_agent(
+            final_render_package=final_render_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+            youtube_privacy=youtube_privacy,
+        )
+        log.info("pipeline_stage_completed", agent="publishing_agent")
+
+        # -----------------------------------------------------------------------
+        # 13. Archive Agent — post-publish audit record (non-blocking)
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="archive_agent")
+        archive_record = _run_archive_agent(
+            final_render_package=final_render_package,
+            publishing_record=publishing_record,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        log.info(
+            "pipeline_stage_completed",
+            agent="archive_agent",
+            verdict=archive_record.get("verdict"),
+            archived=archive_record.get("archived"),
+        )
+
+        # -----------------------------------------------------------------------
+        # 14. Finance Agent — cost ledger record (post-run, non-blocking)
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="finance_agent_ledger")
+        finance_record = _run_cost_ledger(
+            final_render_package=final_render_package,
+            publishing_record=publishing_record,
+            archive_record=archive_record,
+            config=config,
+            episode_id=episode_id,
+            narration_package=narration_package,
+            visual_package=visual_package,
+            output_dir=output_dir,
+        )
+        log.info(
+            "pipeline_stage_completed",
+            agent="finance_agent_ledger",
+            verdict=finance_record.get("verdict"),
+        )
+
+        # -----------------------------------------------------------------------
+        # 15. Production metadata — durable production snapshot
+        # -----------------------------------------------------------------------
+        _selected_thumb = thumbnail_package.get("main_thumbnail", {}) if thumbnail_package else {}
+        _narrative_struct = {
+            k: narrative_package.get(k)
+            for k in ("narrative_arc", "structure_type", "total_segments")
+            if k in (narrative_package or {})
+        }
+        _title_text = script_package.get("title", "") if script_package else ""
+        from hypogeum.identifiers import generate_title_id
+        _title_id = generate_title_id(_title_text, episode_id) if _title_text else ""
+        _source_count = len(research_package.get("source_registry", [])) if research_package else 0
+        _model_assignments = {
+            "ep": getattr(config, "EP_MODEL", ""),
+            "rd": getattr(config, "RD_MODEL", ""),
+            "td_planning": getattr(config, "TD_PLANNING_MODEL", ""),
+            "bga_pass1": getattr(config, "BGA_PASS1_MODEL", ""),
+            "bga_pass2": getattr(config, "BGA_PASS2_MODEL", ""),
+        }
+        production_metadata_record = write_production_metadata(
+            run_id=run_id,
+            episode_id=episode_id,
+            title_id=_title_id,
+            selected_title=_title_text,
+            selected_thumbnail=_selected_thumb,
+            narrative_structure=_narrative_struct,
+            research_source_count=_source_count,
+            model_assignments=_model_assignments,
+        )
+
+        # Phase 5 — post-run intelligence (non-blocking)
+        _source_registry = research_package.get("source_registry", []) if research_package else []
+        run_post_run_intelligence(
+            episode_id=episode_id,
+            production_metadata=production_metadata_record,
+            source_registry=_source_registry,
+            run_id=run_id,
+            analytics_snapshot=None,  # not available at this stage; signal flow skipped
+        )
+
+        # analytics_pending — only after confirmed YouTube publish
+        analytics_pending_record = None
+        _yt_id = publishing_record.get("summary", {}).get("youtube_main_video_id", "") if publishing_record else ""
+        _yt_published = publishing_record.get("summary", {}).get("youtube_main_published", False) if publishing_record else False
+        _published_at = publishing_record.get("published_at", "") if publishing_record else ""
+        if _yt_published and _yt_id:
+            analytics_pending_record = write_analytics_pending(
+                episode_id=episode_id,
+                youtube_video_id=_yt_id,
+                published_at=_published_at,
+                run_id=run_id,
+            )
+
+        # -----------------------------------------------------------------------
+        # 16. Seal result
+        # -----------------------------------------------------------------------
+        complete_run(run_id=run_id, episode_id=episode_id)
+        write_episode_rollup(run_id=run_id, episode_id=episode_id)
+        clear_run_context()
+
+        result = PipelineResult(
+            episode_id=episode_id,
+            status="completed",
+            startup_report=startup_report,
+            run_id=run_id,
+            validation_scorecard=validation_scorecard,
+            topic_brief=topic_brief,
+            research_package=research_package,
+            narrative_package=narrative_package,
+            script_package=script_package,
+            finance_authorization=finance_authorization,
+            visual_package=visual_package,
+            thumbnail_package=thumbnail_package,
+            narration_package=narration_package,
+            final_render_package=final_render_package,
+            qa_approval_report=qa_approval_report,
+            compliance_report=compliance_report,
+            publishing_record=publishing_record,
+            archive_record=archive_record,
+            finance_record=finance_record,
+            asset_archive_record=asset_archive_record,
+            production_metadata_record=production_metadata_record,
+            analytics_pending_record=analytics_pending_record,
+        )
+
+        log.info(
+            "pipeline_run_completed",
+            episode_id=episode_id,
+            status="completed",
+            youtube_main_published=(
+                publishing_record.get("summary", {}).get("youtube_main_published", False)
+            ),
+        )
+
+        return result
+    except Exception as _exc:
+        if run_id is not None:
+            try:
+                fail_run(run_id, episode_id, error_message=str(_exc)[:4096])
+            except Exception:
+                pass
+        try:
+            clear_run_context()
+        except Exception:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -830,7 +844,7 @@ def run_pipeline(
 # the names below so tests can mock individual agents independently.
 #
 # Model assignments (current — see .env for overrides):
-#   EP → claude-fable-5 (config.EP_MODEL)
+#   EP → claude-sonnet-4.6 (config.EP_MODEL)
 #   RD → claude-opus-4.6 (config.RD_MODEL)
 #   TD planning → openai/gpt-5.5-pro (config.TD_PLANNING_MODEL)
 #   BGA Pass 1 → claude-sonnet-4.6 (config.BGA_PASS1_MODEL)

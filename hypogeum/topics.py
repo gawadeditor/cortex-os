@@ -8,6 +8,8 @@ pipeline completion the topic is consumed.
 Topic lifecycle:
     queued   → claimed   (claim_next_topic — atomic conditional UPDATE)
     claimed  → consumed  (consume_topic — called after successful pipeline run)
+    claimed  → queued    (release_topic — pipeline failed; topic retry on next pass)
+    claimed  → skipped   (skip_topic w/ reason="ep_rejected" — EP scored REJECT)
     queued   → skipped   (skip_topic — operator skips a specific topic)
     queued   → cancelled (cancel_topic — operator removes before claim)
     claimed  → cancelled (cancel_topic — operator force-cancels in-flight)
@@ -37,6 +39,7 @@ Public API:
                            priority=0, db_path=None)    -> ImportResult
     claim_next_topic(channel_id, db_path=None)          -> dict | None
     consume_topic(topic_id, db_path=None)               -> None
+    release_topic(topic_id, db_path=None)               -> None
     skip_topic(topic_id, reason=None, db_path=None)     -> None
     cancel_topic(topic_id, db_path=None)                -> None
     get_topic(topic_id, db_path=None)                   -> dict | None
@@ -391,20 +394,58 @@ def consume_topic(
         conn.close()
 
 
+def release_topic(
+    topic_id: str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """
+    Release a claimed topic back to 'queued' for retry.
+
+    Called when a pipeline run fails for reasons unrelated to the topic content
+    (provider error, model unavailable, budget exceeded, etc.). The topic text
+    remains valid and will be retried on the next poll pass.
+
+    Only transitions 'claimed' topics. No-op for topics in any other state.
+    Never raises — cleanup errors are silently swallowed so the caller can
+    always re-raise the original pipeline exception.
+
+    Args:
+        topic_id: Topic to release.
+        db_path:  Override DB path (for tests).
+    """
+    now = _now_iso()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE episode_topics
+            SET status = 'queued', claimed_at = NULL, updated_at = ?
+            WHERE topic_id = ? AND status = 'claimed'
+            """,
+            (now, topic_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def skip_topic(
     topic_id: str,
     reason: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> None:
     """
-    Skip a queued topic. Only 'queued' topics can be skipped.
+    Skip a topic that should not be retried.
 
-    A skipped topic will not be claimed. Use when the operator decides
-    a topic is no longer relevant without fully cancelling it.
+    Handles both 'queued' topics (operator decision) and 'claimed' topics
+    (EP rejection path — the pipeline claimed the topic, ran the EP, and the
+    EP scored it below the REJECT threshold).
+
+    A skipped topic will never be claimed or retried.
 
     Args:
         topic_id: Topic to skip.
-        reason:   Optional explanation.
+        reason:   Optional explanation (e.g. "ep_rejected").
         db_path:  Override DB path (for tests).
     """
     conn = get_connection(db_path)
@@ -412,8 +453,9 @@ def skip_topic(
         conn.execute(
             """
             UPDATE episode_topics
-            SET status = 'skipped', reason = COALESCE(?, reason), updated_at = ?
-            WHERE topic_id = ? AND status = 'queued'
+            SET status = 'skipped', claimed_at = NULL,
+                reason = COALESCE(?, reason), updated_at = ?
+            WHERE topic_id = ? AND status IN ('queued', 'claimed')
             """,
             (reason, _now_iso(), topic_id),
         )

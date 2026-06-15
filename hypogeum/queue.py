@@ -467,6 +467,13 @@ def process_next(
                          Custom resolvers are responsible for their own topic
                          lifecycle (consume_topic is NOT called for custom resolvers).
 
+    Failure hygiene (dry_run=False, backlog path):
+        On any pipeline exception:
+          - queue item is marked 'failed'.
+          - run_registry row is marked 'failed' by run_pipeline itself.
+          - PipelineRejectedError: topic marked 'skipped' (EP rejection is permanent).
+          - All other exceptions: topic released back to 'queued' for retry.
+
     Returns:
         ProcessResult with status one of:
             "completed" — success (pipeline ran or dry_run)
@@ -598,6 +605,22 @@ def process_next(
     except Exception as exc:
         error_msg = str(exc)[:4096]
         fail(queue_id, worker_id, error_message=error_msg, db_path=db_path)
+
+        # Topic hygiene: release or skip the topic based on failure type.
+        # PipelineRejectedError means the EP scored the topic below threshold —
+        # the topic content itself is the problem, so skip it permanently.
+        # All other exceptions are infrastructure failures — release for retry.
+        if topic_id is not None and using_backlog:
+            try:
+                if isinstance(exc, _pipeline_module.PipelineRejectedError):
+                    from hypogeum.topics import skip_topic
+                    skip_topic(topic_id, reason="ep_rejected", db_path=db_path)
+                else:
+                    from hypogeum.topics import release_topic
+                    release_topic(topic_id, db_path=db_path)
+            except Exception:
+                pass  # never let cleanup block the result
+
         return ProcessResult(
             status="failed",
             queue_id=queue_id,

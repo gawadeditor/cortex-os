@@ -112,6 +112,8 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("resume_from_stage",    "TEXT"),
         ("pipeline_version",     "TEXT"),
         ("channel_id",           "TEXT"),   # P1-02: channel profile linkage
+        ("queued_at",            "TEXT"),   # P3-03: RLG — set when run enters queued state
+        ("paused_at",            "TEXT"),   # P3-03: RLG — set when run enters paused state
     ],
     "episodes": [
         ("youtube_video_id",  "TEXT"),
@@ -1808,4 +1810,57 @@ def list_episode_topics(
         ORDER BY channel_id, priority ASC, created_at ASC
         """,
         params,
+    ).fetchall()
+
+
+# ===========================================================================
+# P3-03: Run State Machine helpers
+# ===========================================================================
+
+def insert_run_state_transition(
+    conn: sqlite3.Connection,
+    transition_id: str,
+    run_id: str,
+    from_state: Optional[str],
+    to_state: str,
+    triggered_by: str,
+    trigger_source: str,
+    transitioned_at: str,
+    reason: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> None:
+    """
+    Insert an immutable run state transition record.
+
+    This is the only write path for run_state_transitions — no UPDATE or
+    DELETE functions exist. from_state is NULL for the initial registration.
+    """
+    conn.execute(
+        """
+        INSERT INTO run_state_transitions
+            (transition_id, run_id, from_state, to_state, triggered_by,
+             trigger_source, reason, metadata, transitioned_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            transition_id, run_id, from_state, to_state,
+            triggered_by, trigger_source, reason,
+            json.dumps(metadata) if metadata is not None else None,
+            transitioned_at,
+        ),
+    )
+
+
+def get_run_state_transitions(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> list:
+    """Return all transition rows for run_id ordered by transitioned_at ASC."""
+    return conn.execute(
+        """
+        SELECT * FROM run_state_transitions
+        WHERE run_id = ?
+        ORDER BY transitioned_at ASC
+        """,
+        (run_id,),
     ).fetchall()

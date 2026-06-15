@@ -873,3 +873,34 @@ CREATE TABLE IF NOT EXISTS factories (
 
 CREATE INDEX IF NOT EXISTS idx_factories_slug   ON factories(factory_slug);
 CREATE INDEX IF NOT EXISTS idx_factories_status ON factories(status);
+
+-- ===========================================================================
+-- P3-03: Run Lifecycle Governance (RLG) — State Machine
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- run_state_transitions
+-- Immutable audit trail of every run state change. One row per transition.
+-- Rows are INSERT-only — no UPDATE or DELETE paths exist in the API.
+-- from_state is NULL for the initial registration transition (None → queued
+-- or None → running when register_run skips the queued phase).
+-- triggered_by: user_id or system actor (e.g. "system:pipeline").
+-- trigger_source: component that called transition_run_state
+--                 (e.g. "run_registry", "pipeline", "system:ois").
+-- metadata: optional JSON blob for context (e.g. error type, approval_id).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS run_state_transitions (
+    transition_id   TEXT NOT NULL PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES runs(run_id),
+    from_state      TEXT,
+    to_state        TEXT NOT NULL,
+    triggered_by    TEXT NOT NULL,
+    trigger_source  TEXT NOT NULL,
+    reason          TEXT,
+    metadata        TEXT,
+    transitioned_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rst_run_id ON run_state_transitions(run_id);
+CREATE INDEX IF NOT EXISTS idx_rst_transitioned_at ON run_state_transitions(run_id, transitioned_at);

@@ -125,12 +125,25 @@ def run_assembly_agent(
     source_registry: Optional[list] = None,
     music_track_package: Optional[dict] = None,
     topic_brief: Optional[dict] = None,
+    research_package: Optional[dict] = None,
+    narrative_package: Optional[dict] = None,
 ) -> dict:
     """
     Execute the Assembly Agent end-to-end.
 
-    Validates assets, constructs timelines, sources music, mixes audio,
-    renders video via ffmpeg, and returns a schema-validated Final Render Package.
+    Validates upstream package presence and structure, validates on-disk assets,
+    constructs timelines, sources music, mixes audio, renders video via ffmpeg,
+    and returns a schema-validated Final Render Package.
+
+    Input validation (stage 0) fires before any disk I/O or provider call:
+      - visual_package must be a non-empty dict with a 'scenes' key.
+      - narration_package must be a non-empty dict with a 'stitched_tracks' key.
+      - thumbnail_package must be a non-empty dict.
+      - script_package, topic_brief, research_package, narrative_package are
+        validated as non-empty dicts when provided (optional by design — earlier
+        pipeline stages may have been skipped during partial runs).
+    A validation failure returns a failed Final Render Package immediately; no
+    provider or ffmpeg calls are made.
 
     Args:
         visual_package:    Validated Visual Package from Visual Package Director.
@@ -141,21 +154,16 @@ def run_assembly_agent(
         output_dir:        Optional output directory override (defaults to
                            .hypogeum-assets/episodes/{episode_id}/).
         script_package:    Optional Script Package for chapter timestamp computation.
-                           When provided, section_titles in metadata_source will have
-                           accurate start_seconds derived from narration beat durations.
         source_registry:   Optional source_registry[] from the Research Package.
-                           When provided, sources are included in metadata_source for
-                           description attribution on all publishing platforms.
         music_track_package: Optional music_track_package from Music Agent.
-                           When provided, Assembly uses it directly (pipeline mode).
-                           When None, Assembly calls run_music_agent() internally
-                           (backward-compatible mode until pipeline is wired).
+        topic_brief:       Optional Topic Brief from Executive Producer.
+        research_package:  Optional Research Package from Research Director.
+                           Accepted for lineage validation; not consumed by Assembly.
+        narrative_package: Optional Narrative Package from Narrative Architect.
+                           Accepted for lineage validation; not consumed by Assembly.
 
     Returns:
         Final Render Package dict (schema-validated, written to disk).
-
-    Raises:
-        AssemblyAgentError — clip availability below 80% threshold.
     """
     _default_assets_root: Path = (
         Path(__file__).resolve().parent.parent.parent / ".hypogeum-assets"
@@ -188,6 +196,39 @@ def run_assembly_agent(
         episode_id=episode_id,
         agent_version=_AGENT_VERSION,
     )
+
+    # ------------------------------------------------------------------
+    # Stage 0: Required input package validation
+    # Fires before any disk I/O, timeline construction, or provider call.
+    # A missing or structurally invalid required package returns a failed
+    # Final Render Package immediately so the pipeline can report clearly.
+    # ------------------------------------------------------------------
+    _pkg_error = _validate_input_packages(
+        visual_package=visual_package,
+        narration_package=narration_package,
+        thumbnail_package=thumbnail_package,
+        script_package=script_package,
+        topic_brief=topic_brief,
+        research_package=research_package,
+        narrative_package=narrative_package,
+    )
+    if _pkg_error is not None:
+        log.error(
+            "assembly_input_validation_failed",
+            episode_id=episode_id,
+            reason=_pkg_error,
+        )
+        return _build_failed_package(
+            episode_id=episode_id,
+            visual_package=visual_package if isinstance(visual_package, dict) else {},
+            narration_package=narration_package if isinstance(narration_package, dict) else {},
+            thumbnail_package=thumbnail_package if isinstance(thumbnail_package, dict) else {},
+            reason=_pkg_error,
+            clip_availability_rate=0.0,
+            missing_clips=[],
+            log=log,
+            episode_dir=episode_dir,
+        )
 
     ffmpeg_timeout = getattr(config, "ASSEMBLY_FFMPEG_TIMEOUT", 600)
     if not isinstance(ffmpeg_timeout, int) or ffmpeg_timeout <= 0:
@@ -858,6 +899,64 @@ def _format_sources(source_registry: list) -> list:
 # ---------------------------------------------------------------------------
 # Internal: PDR builder
 # ---------------------------------------------------------------------------
+
+def _validate_input_packages(
+    visual_package: dict,
+    narration_package: dict,
+    thumbnail_package: dict,
+    script_package: Optional[dict],
+    topic_brief: Optional[dict],
+    research_package: Optional[dict],
+    narrative_package: Optional[dict],
+) -> Optional[str]:
+    """
+    Validate that required input packages are non-None, non-empty dicts, and
+    carry the minimum structural keys Assembly needs.
+
+    Returns None on success, or a short error string describing the first
+    failing check. Called at stage 0 before any disk I/O or provider call.
+
+    Required (must always be present):
+        visual_package    — must be a dict with a 'scenes' key
+        narration_package — must be a dict with a 'stitched_tracks' key
+        thumbnail_package — must be a non-empty dict
+
+    Optional-but-validated when provided:
+        script_package, topic_brief, research_package, narrative_package
+        — each must be a non-empty dict if not None
+    """
+    # Required packages with their minimum structural key
+    required_checks: list = [
+        ("visual_package",    visual_package,    "scenes"),
+        ("narration_package", narration_package, "stitched_tracks"),
+        ("thumbnail_package", thumbnail_package, None),
+    ]
+    for name, pkg, required_key in required_checks:
+        if pkg is None:
+            return f"required package '{name}' is None"
+        if not isinstance(pkg, dict):
+            return f"required package '{name}' is not a dict (got {type(pkg).__name__})"
+        if not pkg:
+            return f"required package '{name}' is an empty dict"
+        if required_key is not None and required_key not in pkg:
+            return f"required package '{name}' is malformed: missing key '{required_key}'"
+
+    # Optional packages — if provided they must be non-empty dicts
+    optional_checks: list = [
+        ("script_package",    script_package),
+        ("topic_brief",       topic_brief),
+        ("research_package",  research_package),
+        ("narrative_package", narrative_package),
+    ]
+    for name, pkg in optional_checks:
+        if pkg is not None:
+            if not isinstance(pkg, dict):
+                return f"optional package '{name}' is not a dict (got {type(pkg).__name__})"
+            if not pkg:
+                return f"optional package '{name}' was provided but is an empty dict"
+
+    return None
+
 
 def _build_pdr(episode_id: str, reason: str, severity: str = "BLOCKING") -> dict:
     """Build a minimal Package Deficiency Report."""

@@ -2076,3 +2076,362 @@ class TestTopicBriefTitleFallback:
                 )
 
         assert result["metadata_source"]["episode_title"] == ""
+
+
+# ---------------------------------------------------------------------------
+# TestAssemblyManifestContract — M4.2 required validation scenarios
+# ---------------------------------------------------------------------------
+
+class TestAssemblyManifestContract:
+    """
+    Required contract tests for the Assembly Agent manifest layer.
+
+    Verifies:
+      1. Successful manifest creation from valid inputs.
+      2. Missing required package → failed manifest, no providers called.
+      3. Malformed package (empty dict, missing key) → failed manifest.
+      4. No provider (subprocess/music) calls when validation fails.
+      5. Deterministic structural output for identical inputs.
+
+    All tests run without ffmpeg or real providers. All filesystem ops use
+    tmp_path. No content is generated.
+    """
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    def _full_setup(self, tmp_path):
+        """Return config + packages + assets_root with all files on disk."""
+        cfg = _make_config()
+        vp = _make_visual_package()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(vp, assets_root, "ep_001")
+        _setup_narration_on_disk(np_, assets_root)
+        mtp = _make_music_track_package(tmp_path=tmp_path)
+        return cfg, vp, np_, tp, mtp
+
+    def _run_with_mocks(self, cfg, vp, np_, tp, tmp_path, mtp=None, **extra_kwargs):
+        """Run assembly_agent with subprocess and music mocked out."""
+        kwargs = dict(
+            visual_package=vp,
+            narration_package=np_,
+            thumbnail_package=tp,
+            config=cfg,
+            episode_id="ep_001",
+            output_dir=tmp_path / "episodes" / "ep_001",
+        )
+        if mtp is not None:
+            kwargs["music_track_package"] = mtp
+        kwargs.update(extra_kwargs)
+        with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+            return run_assembly_agent(**kwargs)
+
+    # -----------------------------------------------------------------------
+    # 1. Successful manifest creation
+    # -----------------------------------------------------------------------
+
+    def test_successful_manifest_has_required_top_level_keys(self, tmp_path):
+        """A valid run produces a manifest dict with all required top-level keys."""
+        cfg, vp, np_, tp, mtp = self._full_setup(tmp_path)
+        result = self._run_with_mocks(cfg, vp, np_, tp, tmp_path, mtp=mtp)
+
+        required_keys = {
+            "package_metadata",
+            "episode_render",
+            "shorts_renders",
+            "thumbnail_references",
+            "music_log",
+            "metadata_source",
+            "assembly_qa_report",
+            "package_integrity",
+        }
+        assert required_keys <= set(result.keys()), (
+            f"missing keys: {required_keys - set(result.keys())}"
+        )
+
+    def test_successful_manifest_package_metadata_has_episode_id(self, tmp_path):
+        cfg, vp, np_, tp, mtp = self._full_setup(tmp_path)
+        result = self._run_with_mocks(cfg, vp, np_, tp, tmp_path, mtp=mtp)
+        assert result["package_metadata"]["episode_id"] == "ep_001"
+
+    def test_successful_manifest_with_upstream_packages(self, tmp_path):
+        """Passing research_package and narrative_package as valid dicts succeeds."""
+        cfg, vp, np_, tp, mtp = self._full_setup(tmp_path)
+        result = self._run_with_mocks(
+            cfg, vp, np_, tp, tmp_path, mtp=mtp,
+            research_package={"source_registry": [], "claims": []},
+            narrative_package={"narrative_arc": "mystery", "sections": []},
+            topic_brief={"episode_title": "Test", "logline": "Test logline."},
+            script_package={"sections": [], "title": "Test"},
+        )
+        assert result["package_metadata"]["episode_id"] == "ep_001"
+        assert result["package_integrity"]["production_ready"] is True
+
+    # -----------------------------------------------------------------------
+    # 2. Missing required package → failed manifest
+    # -----------------------------------------------------------------------
+
+    def test_none_visual_package_returns_failed_manifest(self, tmp_path):
+        """visual_package=None must return a failed manifest without raising."""
+        cfg = _make_config()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+
+        result = run_assembly_agent(
+            visual_package=None,  # type: ignore[arg-type]
+            narration_package=np_,
+            thumbnail_package=tp,
+            config=cfg,
+            episode_id="ep_missing_vp",
+            output_dir=tmp_path / "ep_missing_vp",
+        )
+
+        assert isinstance(result, dict)
+        assert result["package_integrity"]["production_ready"] is False
+        assert result["assembly_qa_report"]["overall_status"] == "fail"
+
+    def test_none_narration_package_returns_failed_manifest(self, tmp_path):
+        """narration_package=None must return a failed manifest without raising."""
+        cfg = _make_config()
+        vp = _make_visual_package()
+        tp = _make_thumbnail_package()
+
+        result = run_assembly_agent(
+            visual_package=vp,
+            narration_package=None,  # type: ignore[arg-type]
+            thumbnail_package=tp,
+            config=cfg,
+            episode_id="ep_missing_np",
+            output_dir=tmp_path / "ep_missing_np",
+        )
+
+        assert isinstance(result, dict)
+        assert result["package_integrity"]["production_ready"] is False
+
+    def test_none_thumbnail_package_returns_failed_manifest(self, tmp_path):
+        """thumbnail_package=None must return a failed manifest without raising."""
+        cfg = _make_config()
+        vp = _make_visual_package()
+        np_ = _make_narration_package()
+
+        result = run_assembly_agent(
+            visual_package=vp,
+            narration_package=np_,
+            thumbnail_package=None,  # type: ignore[arg-type]
+            config=cfg,
+            episode_id="ep_missing_tp",
+            output_dir=tmp_path / "ep_missing_tp",
+        )
+
+        assert isinstance(result, dict)
+        assert result["package_integrity"]["production_ready"] is False
+
+    # -----------------------------------------------------------------------
+    # 3. Malformed package → failed manifest
+    # -----------------------------------------------------------------------
+
+    def test_empty_visual_package_returns_failed_manifest(self, tmp_path):
+        """visual_package={} (missing 'scenes' key) → failed manifest."""
+        cfg = _make_config()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+
+        result = run_assembly_agent(
+            visual_package={},
+            narration_package=np_,
+            thumbnail_package=tp,
+            config=cfg,
+            episode_id="ep_empty_vp",
+            output_dir=tmp_path / "ep_empty_vp",
+        )
+
+        assert result["package_integrity"]["production_ready"] is False
+        assert result["assembly_qa_report"]["overall_status"] == "fail"
+
+    def test_visual_package_missing_scenes_key_returns_failed_manifest(self, tmp_path):
+        """visual_package without 'scenes' key → validation fails immediately."""
+        cfg = _make_config()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+
+        malformed_vp = {"package_metadata": {"visual_package_id": "vp_001"}}
+
+        result = run_assembly_agent(
+            visual_package=malformed_vp,
+            narration_package=np_,
+            thumbnail_package=tp,
+            config=cfg,
+            episode_id="ep_malformed",
+            output_dir=tmp_path / "ep_malformed",
+        )
+
+        assert result["package_integrity"]["production_ready"] is False
+        assert result["assembly_qa_report"]["overall_status"] == "fail"
+
+    def test_empty_narration_package_returns_failed_manifest(self, tmp_path):
+        """narration_package={} (missing 'stitched_tracks') → failed manifest."""
+        cfg = _make_config()
+        vp = _make_visual_package()
+        tp = _make_thumbnail_package()
+
+        result = run_assembly_agent(
+            visual_package=vp,
+            narration_package={},
+            thumbnail_package=tp,
+            config=cfg,
+            episode_id="ep_empty_np",
+            output_dir=tmp_path / "ep_empty_np",
+        )
+
+        assert result["package_integrity"]["production_ready"] is False
+
+    def test_malformed_optional_package_returns_failed_manifest(self, tmp_path):
+        """Passing a non-dict optional package → validation fails immediately."""
+        cfg = _make_config()
+        vp = _make_visual_package()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+
+        result = run_assembly_agent(
+            visual_package=vp,
+            narration_package=np_,
+            thumbnail_package=tp,
+            config=cfg,
+            episode_id="ep_bad_opt",
+            output_dir=tmp_path / "ep_bad_opt",
+            research_package="not_a_dict",  # type: ignore[arg-type]
+        )
+
+        assert result["package_integrity"]["production_ready"] is False
+
+    # -----------------------------------------------------------------------
+    # 4. No provider calls when validation fails
+    # -----------------------------------------------------------------------
+
+    def test_no_subprocess_call_on_validation_failure(self, tmp_path):
+        """When input validation fails, subprocess.run (ffmpeg) is never called."""
+        cfg = _make_config()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+
+        with patch("subprocess.run") as mock_sub, \
+             patch("hypogeum.agents.music_agent.generate_music_track") as mock_music, \
+             patch("hypogeum.agents.music_agent.run_music_agent") as mock_music_agent:
+            run_assembly_agent(
+                visual_package=None,  # type: ignore[arg-type]
+                narration_package=np_,
+                thumbnail_package=tp,
+                config=cfg,
+                episode_id="ep_no_provider",
+                output_dir=tmp_path / "ep_no_provider",
+            )
+
+        mock_sub.assert_not_called()
+        mock_music.assert_not_called()
+        mock_music_agent.assert_not_called()
+
+    def test_no_subprocess_call_on_malformed_package(self, tmp_path):
+        """Malformed visual_package → ffmpeg never called."""
+        cfg = _make_config()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+
+        with patch("subprocess.run") as mock_sub:
+            run_assembly_agent(
+                visual_package={},
+                narration_package=np_,
+                thumbnail_package=tp,
+                config=cfg,
+                episode_id="ep_no_ffmpeg",
+                output_dir=tmp_path / "ep_no_ffmpeg",
+            )
+
+        mock_sub.assert_not_called()
+
+    # -----------------------------------------------------------------------
+    # 5. Deterministic structural output
+    # -----------------------------------------------------------------------
+
+    def test_deterministic_package_keys_for_same_inputs(self, tmp_path):
+        """Running assembly twice with the same inputs produces identical key structure."""
+        cfg, vp, np_, tp, mtp = self._full_setup(tmp_path)
+
+        result_a = self._run_with_mocks(cfg, vp, np_, tp, tmp_path, mtp=mtp)
+        result_b = self._run_with_mocks(cfg, vp, np_, tp, tmp_path, mtp=mtp)
+
+        # Top-level keys must be identical
+        assert set(result_a.keys()) == set(result_b.keys())
+        # package_metadata keys must be identical
+        assert set(result_a["package_metadata"].keys()) == set(result_b["package_metadata"].keys())
+        # episode_id is stable
+        assert result_a["package_metadata"]["episode_id"] == result_b["package_metadata"]["episode_id"]
+        # package_integrity is stable
+        assert result_a["package_integrity"]["production_ready"] == result_b["package_integrity"]["production_ready"]
+
+    def test_deterministic_shorts_count(self, tmp_path):
+        """shorts_renders always contains exactly 3 entries regardless of short_id count."""
+        cfg, vp, np_, tp, mtp = self._full_setup(tmp_path)
+        result = self._run_with_mocks(cfg, vp, np_, tp, tmp_path, mtp=mtp)
+        assert len(result["shorts_renders"]) == 3
+
+    # -----------------------------------------------------------------------
+    # 6. _validate_input_packages unit tests
+    # -----------------------------------------------------------------------
+
+    def test_validate_returns_none_for_valid_inputs(self):
+        from hypogeum.agents.assembly_agent import _validate_input_packages
+        vp = _make_visual_package()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+        err = _validate_input_packages(vp, np_, tp, None, None, None, None)
+        assert err is None
+
+    def test_validate_returns_error_for_none_visual(self):
+        from hypogeum.agents.assembly_agent import _validate_input_packages
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+        err = _validate_input_packages(None, np_, tp, None, None, None, None)
+        assert err is not None
+        assert "visual_package" in err
+
+    def test_validate_returns_error_for_missing_scenes_key(self):
+        from hypogeum.agents.assembly_agent import _validate_input_packages
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+        err = _validate_input_packages({"other": 1}, np_, tp, None, None, None, None)
+        assert err is not None
+        assert "scenes" in err
+
+    def test_validate_returns_error_for_none_narration(self):
+        from hypogeum.agents.assembly_agent import _validate_input_packages
+        vp = _make_visual_package()
+        tp = _make_thumbnail_package()
+        err = _validate_input_packages(vp, None, tp, None, None, None, None)
+        assert err is not None
+        assert "narration_package" in err
+
+    def test_validate_returns_error_for_non_dict_optional(self):
+        from hypogeum.agents.assembly_agent import _validate_input_packages
+        vp = _make_visual_package()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+        err = _validate_input_packages(vp, np_, tp, "not_a_dict", None, None, None)
+        assert err is not None
+        assert "script_package" in err
+
+    def test_validate_passes_with_all_optional_packages(self):
+        from hypogeum.agents.assembly_agent import _validate_input_packages
+        vp = _make_visual_package()
+        np_ = _make_narration_package()
+        tp = _make_thumbnail_package()
+        err = _validate_input_packages(
+            vp, np_, tp,
+            script_package={"sections": []},
+            topic_brief={"episode_title": "Test"},
+            research_package={"claims": []},
+            narrative_package={"arc": "mystery"},
+        )
+        assert err is None

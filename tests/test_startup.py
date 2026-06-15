@@ -805,58 +805,68 @@ class TestYouTubeOAuthCheck:
         assert report.overall_status == "healthy"
 
     # --- All creds present, token invalid ---
+    # YouTube OAuth failure is non-blocking (warning, not error) as of 2026-06-15.
+    # publishing_agent.py handles youtube_available=False gracefully by skipping
+    # all YouTube uploads. Generation stages are unaffected by an expired token.
 
-    def test_invalid_token_raises_startup_error(self):
+    def test_invalid_token_does_not_raise_startup_error(self):
+        """Invalid YouTube token must NOT raise StartupError — it is a warning only."""
         _, _, exc = run_checks_with_youtube(youtube_creds="all", token_ok=False)
-        assert isinstance(exc, StartupError)
+        assert exc is None
 
     def test_invalid_token_youtube_token_valid_false(self):
+        """youtube_token_valid is still tracked as False even though it is non-blocking."""
         report, _, exc = run_checks_with_youtube(youtube_creds="all", token_ok=False)
-        assert isinstance(exc, StartupError)
+        assert exc is None
         assert report.youtube_token_valid is False
 
-    def test_invalid_token_report_unavailable(self):
+    def test_invalid_token_report_not_unavailable(self):
+        """With non-blocking YouTube, overall_status stays healthy (OpenRouter is up)."""
         report, _, exc = run_checks_with_youtube(youtube_creds="all", token_ok=False)
-        assert isinstance(exc, StartupError)
-        assert report.overall_status == "unavailable"
+        assert exc is None
+        assert report.overall_status != "unavailable"
 
-    def test_invalid_token_error_message_actionable(self):
-        _, _, exc = run_checks_with_youtube(
+    def test_invalid_token_warning_actionable(self):
+        """Warning message must mention youtube, oauth, or token so operator knows what failed."""
+        report, _, exc = run_checks_with_youtube(
             youtube_creds="all", token_ok=False, token_err="HTTP 401 Unauthorized"
         )
-        assert isinstance(exc, StartupError)
-        msg = str(exc).lower()
-        assert "youtube" in msg or "oauth" in msg or "token" in msg
+        assert exc is None
+        combined = " ".join(report.warnings).lower()
+        assert "youtube" in combined or "oauth" in combined or "token" in combined
 
-    def test_invalid_token_error_mentions_remedy(self):
-        """Error message must direct operator to re-authorize."""
-        _, _, exc = run_checks_with_youtube(youtube_creds="all", token_ok=False)
-        assert isinstance(exc, StartupError)
-        combined = " ".join(exc.report.errors).lower()
+    def test_invalid_token_warning_mentions_remedy(self):
+        """Warning must direct operator to re-authorize."""
+        report, _, exc = run_checks_with_youtube(youtube_creds="all", token_ok=False)
+        assert exc is None
+        combined = " ".join(report.warnings).lower()
         assert "re-authoriz" in combined or "refresh_token" in combined or "oauth" in combined
 
-    def test_invalid_token_report_errors_list_nonempty(self):
+    def test_invalid_token_warning_not_error(self):
+        """YouTube token failure must appear in warnings[], not errors[]."""
         report, _, exc = run_checks_with_youtube(youtube_creds="all", token_ok=False)
-        assert isinstance(exc, StartupError)
-        assert len(report.errors) >= 1
+        assert exc is None
+        assert len(report.warnings) >= 1
+        assert report.errors == []
 
-    def test_invalid_token_error_includes_diagnostic(self):
-        """The original error from _check_youtube_oauth should be in the report error."""
-        _, _, exc = run_checks_with_youtube(
+    def test_invalid_token_warning_includes_diagnostic(self):
+        """The original token error string must appear somewhere in warnings."""
+        report, _, exc = run_checks_with_youtube(
             youtube_creds="all", token_ok=False, token_err="HTTP 401 token expired"
         )
-        assert isinstance(exc, StartupError)
-        combined = " ".join(exc.report.errors)
+        assert exc is None
+        combined = " ".join(report.warnings)
         assert "HTTP 401 token expired" in combined
 
-    def test_invalid_token_overrides_healthy_api_path(self):
-        """Even when OpenRouter is healthy, invalid YouTube token → unavailable."""
+    def test_invalid_token_healthy_api_path_unaffected(self):
+        """Invalid YouTube token does not degrade the pipeline when OpenRouter is healthy."""
         report, _, exc = run_checks_with_youtube(
             youtube_creds="all", token_ok=False, health_result=True, flag_value=False
         )
-        assert isinstance(exc, StartupError)
-        assert exc.report.openrouter_reachable is True
-        assert exc.report.overall_status == "unavailable"
+        assert exc is None
+        assert report.openrouter_reachable is True
+        assert report.overall_status in ("healthy", "degraded")
+        assert len(report.warnings) >= 1
 
     # --- _check_youtube_oauth unit tests ---
 

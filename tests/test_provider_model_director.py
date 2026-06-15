@@ -96,7 +96,7 @@ def _insert_stage(conn, run_id, episode_id, stage_name, status,
                   skipped=0, duration_ms=1000, cost_usd=0.01, model_slug=None):
     conn.execute(
         """INSERT INTO stage_executions
-           (stage_execution_id, run_id, episode_id, stage_name, status,
+           (stage_exec_id, run_id, episode_id, stage_name, status,
             skipped, duration_ms, cost_usd, model_slug, started_at)
            VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (str(uuid.uuid4()), run_id, episode_id, stage_name, status,
@@ -107,10 +107,10 @@ def _insert_stage(conn, run_id, episode_id, stage_name, status,
 def _insert_cost(conn, run_id, episode_id, model, cost_usd=0.05):
     conn.execute(
         """INSERT INTO costs
-           (cost_id, run_id, episode_id, model, cost_usd, recorded_at)
-           VALUES (?,?,?,?,?,?)""",
-        (str(uuid.uuid4()), run_id, episode_id, model, cost_usd,
-         "2026-01-01T00:00:00"),
+           (cost_id, run_id, episode_id, provider, call_type, model, cost_usd, called_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (str(uuid.uuid4()), run_id, episode_id, "openrouter", "research_synthesis",
+         model, cost_usd, "2026-01-01T00:00:00"),
     )
 
 

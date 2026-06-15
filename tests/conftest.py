@@ -1,23 +1,35 @@
 """
 tests/conftest.py — Session-wide test isolation fixtures.
 
-Root cause: Config.__init__ calls _load_dotenv() which reads the production .env file
-and sets any key not already in os.environ. Since the production .env now contains
-BGA_ENABLED=true, FINANCE_BUDGET_CEILING_USD=50, etc., any test helper that clears
-only its own known env var list (but omits these newer guardrail vars) causes Config()
-to silently inherit live production values, which triggers real API calls in tests.
+Isolation guarantee: no test may read or write the production database at
+  .hypogeum-assets/hypogeum.db
 
-Fix: two co-operating fixtures.
+Three known contamination vectors are patched here:
 
-  _block_guardrail_leakage (session-scoped, autouse):
-    Runs once at session start. Pre-populates each guardrail var in os.environ with ""
-    (empty string). _load_dotenv skips keys that are already present, so the real .env
-    values are never injected into the test session.
+1. .env leakage — Config.__init__ calls _load_dotenv() which reads the production
+   .env file and injects values not already in os.environ. Tests that clear only
+   their own known env-var list leave gaps that allow production values (e.g.
+   BGA_ENABLED=true) to flow into Config objects.
+   Fix: _block_guardrail_leakage (session, autouse) + _patch_load_dotenv_globally
+   (function, autouse) + _isolate_guardrail_env_vars (function, autouse).
 
-  _isolate_guardrail_env_vars (function-scoped, autouse):
-    Runs around every test. Saves the current value (will be "" for most vars) before
-    the test and restores it after. This handles tests that explicitly remove or change
-    these vars (e.g., patch.dict with clear=True, or tests that set specific values).
+2. OIS live-DB contamination — pipeline.run_pipeline() calls is_factory_blocked()
+   and is_channel_blocked() without a db_path, so they resolve to the production
+   DB. If the production DB contains active blocking OIS signals (e.g. left over
+   from a failed live run), every test that calls run_pipeline() raises
+   OISBlockedError and fails.
+   Fix: _isolate_pipeline_ois (function, autouse) patches the two functions in
+   the pipeline module namespace so they always return False during tests. Tests
+   that intentionally test OIS-blocking behaviour patch them within their own
+   context managers, which override this fixture.
+
+3. run_registry live-DB contamination — register_run() and fail_run() in
+   pipeline.py call into the default DB when no db_path is given. Tests that
+   call run_pipeline() without a db_path would write run rows to the production
+   DB.
+   Fix: _isolate_pipeline_run_registry (function, autouse) patches register_run,
+   set_run_context, fail_run, complete_run, write_episode_rollup, and
+   clear_run_context in the pipeline module namespace.
 """
 
 from __future__ import annotations
@@ -115,3 +127,51 @@ def _isolate_guardrail_env_vars():
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_ois():
+    """
+    Prevent run_pipeline() from reading active OIS signals in the production DB.
+
+    pipeline.py imports is_factory_blocked and is_channel_blocked from hypogeum.ois
+    and calls them without a db_path at the top of every run_pipeline() call. When
+    the production DB has active blocking signals (e.g. from a prior failed live
+    run), every test that calls run_pipeline() raises OISBlockedError.
+
+    This fixture patches both functions in the pipeline module namespace so they
+    always return False (not blocked) during tests. Tests that intentionally verify
+    OIS-blocking behaviour in the pipeline patch these functions themselves within
+    their own context managers, which take precedence over this fixture.
+
+    Note: hypogeum.ois.is_factory_blocked and hypogeum.ois.is_channel_blocked
+    are NOT patched here — OIS unit tests that import directly from hypogeum.ois
+    and supply their own db_path are unaffected.
+    """
+    with _patch("hypogeum.pipeline.is_factory_blocked", return_value=False):
+        with _patch("hypogeum.pipeline.is_channel_blocked", return_value=False):
+            yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_run_registry():
+    """
+    Prevent run_pipeline() from writing run rows to the production database.
+
+    register_run(), fail_run(), complete_run() and related functions in pipeline.py
+    resolve to the default DB (.hypogeum-assets/hypogeum.db) when called without a
+    db_path. Tests that call run_pipeline() with mocked agents would otherwise
+    create dangling 'running' run rows in the production DB.
+
+    This fixture stubs out run-registry calls in the pipeline namespace so no
+    production DB writes occur during tests. Tests that need real run-registry
+    behaviour supply their own db_path and call run_registry functions directly.
+    """
+    _fake_run_id = "test-run-id-isolated"
+    with _patch("hypogeum.pipeline.register_run", return_value=_fake_run_id):
+        with _patch("hypogeum.pipeline.set_run_context"):
+            with _patch("hypogeum.pipeline.fail_run"):
+                with _patch("hypogeum.pipeline.complete_run"):
+                    with _patch("hypogeum.pipeline.write_episode_rollup"):
+                        with _patch("hypogeum.pipeline.clear_run_context"):
+                            yield

@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.config import Config
+from hypogeum.policy_cascade import get_effective_budget_ceiling
 from hypogeum.schemas import validate
 
 # ---------------------------------------------------------------------------
@@ -345,7 +346,14 @@ def run_budget_authorization(
     failures: list = []
     warnings: list = []
 
-    ceiling = config.FINANCE_BUDGET_CEILING_USD
+    # P3-05: cascade factory policy ceiling over env ceiling.
+    # Non-blocking — DB/factory unavailability falls back to env value.
+    try:
+        ceiling = get_effective_budget_ceiling(
+            env_ceiling=config.FINANCE_BUDGET_CEILING_USD,
+        )
+    except Exception:
+        ceiling = config.FINANCE_BUDGET_CEILING_USD
     warn_pct = config.FINANCE_WARNING_THRESHOLD_PCT
 
     # ----------------------------------------------------------------
@@ -573,7 +581,13 @@ def run_post_vpd_authorization(
     failures: list = []
     warnings: list = []
 
-    ceiling = config.FINANCE_BUDGET_CEILING_USD
+    # P3-05: cascade factory policy ceiling (non-blocking fallback to env value)
+    try:
+        ceiling = get_effective_budget_ceiling(
+            env_ceiling=config.FINANCE_BUDGET_CEILING_USD,
+        )
+    except Exception:
+        ceiling = config.FINANCE_BUDGET_CEILING_USD
     warn_pct = config.FINANCE_WARNING_THRESHOLD_PCT
 
     # ----------------------------------------------------------------
@@ -908,7 +922,14 @@ def run_cost_ledger(
         "total_actual_usd": round(total_actual_usd, 4),
     }
 
-    ceiling = config.FINANCE_BUDGET_CEILING_USD
+    # P3-05: use cascaded ceiling so ledger records the same effective ceiling
+    # that the authorization gate used. Non-blocking fallback to env value.
+    try:
+        ceiling = get_effective_budget_ceiling(
+            env_ceiling=config.FINANCE_BUDGET_CEILING_USD,
+        )
+    except Exception:
+        ceiling = config.FINANCE_BUDGET_CEILING_USD
 
     record = {
         "finance_id": f"fl_{uuid.uuid4().hex[:12]}",

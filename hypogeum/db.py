@@ -152,6 +152,9 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("lifecycle_status", "TEXT DEFAULT 'open'"),
         ("resolved_by",      "TEXT"),
     ],
+    "factories": [
+        ("factory_policies", "TEXT"),   # P3-05: JSON policy blob
+    ],
 }
 
 

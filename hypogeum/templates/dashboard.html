@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="30">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>
+    {% if state %}{{ state.factory_name or state.factory_id }} — Factory OS{% else %}Factory OS Dashboard{% endif %}
+  </title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0d1117;
+      --surface:  #161b22;
+      --border:   #30363d;
+      --text:     #e6edf3;
+      --muted:    #8b949e;
+      --green:    #3fb950;
+      --yellow:   #d29922;
+      --red:      #f85149;
+      --blue:     #58a6ff;
+      --radius:   6px;
+      --gap:      16px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      padding: var(--gap);
+    }
+
+    a { color: var(--blue); text-decoration: none; }
+
+    /* ── Layout ── */
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: var(--gap);
+      flex-wrap: wrap;
+    }
+    .page-header h1 { font-size: 20px; font-weight: 600; }
+    .page-header .meta { color: var(--muted); font-size: 12px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: var(--gap);
+    }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+    .card-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .badge-ready    { background: #1a3a22; color: var(--green);  border: 1px solid #2ea043; }
+    .badge-degraded { background: #3a2e0d; color: var(--yellow); border: 1px solid #9e6a03; }
+    .badge-blocked  { background: #3a0f0a; color: var(--red);    border: 1px solid #da3633; }
+    .badge-unknown  { background: #1e2430; color: var(--muted);  border: 1px solid var(--border); }
+    .badge-healthy  { background: #1a3a22; color: var(--green);  border: 1px solid #2ea043; }
+    .badge-warning  { background: #3a2e0d; color: var(--yellow); border: 1px solid #9e6a03; }
+    .badge-active   { background: #1a2a3a; color: var(--blue);   border: 1px solid #1f6feb; }
+
+    /* ── Score bar ── */
+    .score-bar-wrap { margin-top: 8px; }
+    .score-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .score-bar   { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .score-fill  { height: 100%; border-radius: 3px; transition: width .3s; }
+    .fill-high   { background: var(--green);  }
+    .fill-mid    { background: var(--yellow); }
+    .fill-low    { background: var(--red);    }
+
+    /* ── Stat rows ── */
+    .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: var(--muted); }
+    .stat-val   { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+    /* ── Signal / notification rows ── */
+    .signal-row { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .signal-row:last-child { border-bottom: none; }
+    .signal-type { font-weight: 600; }
+    .signal-msg  { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+    /* ── RLG states ── */
+    .rlg-states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .rlg-state  { font-size: 12px; color: var(--muted); }
+    .rlg-state .n { font-weight: 600; color: var(--text); }
+
+    /* ── Domain checks ── */
+    .domain-row   { padding: 4px 0; display: flex; align-items: flex-start; gap: 8px; }
+    .domain-icon  { flex-shrink: 0; width: 16px; text-align: center; }
+    .domain-body  { flex: 1; }
+    .domain-name  { font-weight: 500; font-size: 13px; }
+    .domain-sum   { color: var(--muted); font-size: 12px; }
+
+    /* ── Error banner ── */
+    .error-banner {
+      background: #3a0f0a;
+      border: 1px solid #da3633;
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      margin-bottom: var(--gap);
+      color: var(--red);
+    }
+
+    /* ── Clearance banner ── */
+    .clearance-ok  { color: var(--green); font-weight: 600; }
+    .clearance-no  { color: var(--red);   font-weight: 600; }
+
+    /* ── Costs table ── */
+    .cost-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .cost-row:last-child { border-bottom: none; }
+
+    /* ── Channel row ── */
+    .channel-row { padding: 6px 0; border-bottom: 1px solid var(--border); }
+    .channel-row:last-child { border-bottom: none; }
+    .progress-wrap { margin-top: 4px; height: 4px; background: var(--border); border-radius: 2px; }
+    .progress-fill { height: 100%; border-radius: 2px; background: var(--blue); }
+
+    /* ── Footer ── */
+    .footer { margin-top: var(--gap); color: var(--muted); font-size: 11px; text-align: center; }
+
+    /* ── Warn text ── */
+    .warn  { color: var(--yellow); }
+    .err   { color: var(--red); }
+    .ok    { color: var(--green); }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+
+{% if error %}
+  <div class="error-banner">
+    <strong>Dashboard unavailable:</strong> {{ error }}
+  </div>
+{% endif %}
+
+{# ──────────────────────────────────────────────── #}
+{# PAGE HEADER                                       #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="page-header">
+  <h1>
+    {% if state %}{{ state.factory_name or state.factory_id }}{% else %}Factory OS{% endif %}
+  </h1>
+
+  {% if report %}
+    {% set lvl = report.readiness_level %}
+    <span class="badge badge-{{ lvl | lower }}">{{ lvl }}</span>
+    <span class="badge badge-{{ state.factory_status if state else 'unknown' }}">
+      {{ state.factory_status if state else '—' }}
+    </span>
+  {% else %}
+    <span class="badge badge-unknown">UNKNOWN</span>
+  {% endif %}
+
+  <span class="meta">
+    {% if state %}Checked {{ state.checked_at[:19] }} UTC{% endif %}
+    &nbsp;·&nbsp; auto-refresh 30s
+  </span>
+</div>
+
+<div class="grid">
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 1 — DIRECTOR SUMMARY                        #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Factory Director</div>
+
+  {% if report %}
+    {% set lvl = report.readiness_level %}
+    {% set score = report.readiness_score %}
+
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <span class="badge badge-{{ lvl | lower }}">{{ lvl }}</span>
+      <span style="font-size:22px; font-weight:700; font-variant-numeric:tabular-nums;">
+        {{ score }}<span style="font-size:13px; color:var(--muted); font-weight:400;">/100</span>
+      </span>
+    </div>
+
+    <div class="score-bar-wrap">
+      <div class="score-bar">
+        <div class="score-fill {% if score >= 80 %}fill-high{% elif score >= 50 %}fill-mid{% else %}fill-low{% endif %}"
+             style="width:{{ score }}%"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;">
+      {% if report.run_clearance.cleared %}
+        <span class="clearance-ok">✓ Run clearance: CLEARED</span>
+      {% else %}
+        <span class="clearance-no">✗ Run clearance: NOT CLEARED — {{ report.run_clearance.reason }}</span>
+      {% endif %}
+    </div>
+
+    {% if report.blocking_reasons %}
+      <div style="margin-top:10px;">
+        {% for r in report.blocking_reasons %}
+          <div class="signal-row"><span class="err">✗ {{ r }}</span></div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if report.warnings %}
+      <div style="margin-top:6px;">
+        {% for w in report.warnings %}
+          <div class="signal-row"><span class="warn">⚠ {{ w }}</span></div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if not report.blocking_reasons and not report.warnings %}
+      <div style="margin-top:10px; color:var(--green); font-size:13px;">All checks passed.</div>
+    {% endif %}
+
+  {% else %}
+    <div class="muted">Director report unavailable.</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 2 — RUN HEALTH                              #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Run Health</div>
+
+  {% if state %}
+    {% set rh = state.run_health %}
+
+    <div class="stat-row">
+      <span class="stat-label">Total runs</span>
+      <span class="stat-val">{{ rh.total_runs | int }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Completed</span>
+      <span class="stat-val ok">{{ rh.complete_count | int }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Failed</span>
+      <span class="stat-val {% if rh.failed_count > 0 %}warn{% else %}ok{% endif %}">{{ rh.failed_count | int }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Running</span>
+      <span class="stat-val">{{ rh.running_count | int }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Success rate</span>
+      <span class="stat-val {% if rh.success_rate >= 0.8 %}ok{% elif rh.success_rate >= 0.5 %}warn{% else %}err{% endif %}">
+        {{ "%.1f"|format(rh.success_rate * 100) }}%
+      </span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Last run</span>
+      <span class="stat-val muted">{{ rh.last_run_at[:19] if rh.last_run_at else 'never' }}</span>
+    </div>
+
+    {% set rlg_states = [] %}
+    {% if rh.queued_count %}{{ rlg_states.append(("queued", rh.queued_count)) or "" }}{% endif %}
+    {% if rh.paused_count %}{{ rlg_states.append(("paused", rh.paused_count)) or "" }}{% endif %}
+    {% if rh.awaiting_review_count %}{{ rlg_states.append(("awaiting review", rh.awaiting_review_count)) or "" }}{% endif %}
+    {% if rh.awaiting_publish_approval_count %}{{ rlg_states.append(("awaiting publish", rh.awaiting_publish_approval_count)) or "" }}{% endif %}
+    {% if rh.publishing_count %}{{ rlg_states.append(("publishing", rh.publishing_count)) or "" }}{% endif %}
+
+    {% if rlg_states %}
+      <div class="rlg-states">
+        {% for label, count in rlg_states %}
+          <span class="rlg-state"><span class="n">{{ count }}</span> {{ label }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+  {% else %}
+    <div class="muted">Unavailable.</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 3 — ACTIVE OIS SIGNALS                      #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Active OIS Signals</div>
+
+  {% if state and state.active_signals %}
+    {% for s in state.active_signals %}
+      <div class="signal-row">
+        <div>
+          <span class="signal-type {% if s.blocking %}err{% else %}warn{% endif %}">
+            {% if s.blocking %}✗{% else %}⚠{% endif %}
+            {{ s.signal_type }}
+          </span>
+          <span class="badge badge-{{ 'blocked' if s.blocking else 'degraded' }}" style="margin-left:6px; font-size:10px;">
+            {{ s.severity }}{% if s.blocking %} · BLOCKING{% endif %}
+          </span>
+        </div>
+        {% if s.message %}
+          <div class="signal-msg">{{ s.message[:120] }}</div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="ok" style="font-size:13px;">✓ No active signals</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 4 — PENDING APPROVALS                       #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Pending Approvals</div>
+
+  {% if state and state.pending_approvals %}
+    {% for a in state.pending_approvals %}
+      <div class="signal-row">
+        <div class="signal-type warn">⏳ {{ a.approval_type }}</div>
+        <div class="signal-msg">
+          run {{ a.run_id[:12] }}… &nbsp;·&nbsp; ep {{ a.episode_id }}
+          &nbsp;·&nbsp; {{ a.requested_at[:16] if a.requested_at else '' }}
+        </div>
+        <div class="signal-msg" style="margin-top:2px;">
+          approval_id: <code style="font-size:11px; color:var(--blue);">{{ a.approval_id }}</code>
+        </div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="ok" style="font-size:13px;">✓ No pending approvals</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 5 — CHANNELS                                #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Channels</div>
+
+  {% if state and state.channels %}
+    {% for ch in state.channels %}
+      <div class="channel-row">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-weight:500;">{{ ch.name or ch.channel_id }}</span>
+          <span class="badge badge-{{ 'active' if ch.status == 'active' else 'unknown' }}">{{ ch.status }}</span>
+        </div>
+        <div class="progress-wrap" title="{{ '%.0f'|format(ch.profile_completeness * 100) }}% profile complete">
+          <div class="progress-fill" style="width:{{ (ch.profile_completeness * 100) | int }}%;"></div>
+        </div>
+        <div class="muted" style="font-size:11px; margin-top:3px;">
+          Profile {{ "%.0f"|format(ch.profile_completeness * 100) }}% complete
+          &nbsp;·&nbsp;
+          {% if ch.brand_complete %}brand ✓{% else %}<span class="warn">brand ✗</span>{% endif %}
+          &nbsp;
+          {% if ch.publishing_complete %}pub ✓{% else %}<span class="warn">pub ✗</span>{% endif %}
+          &nbsp;
+          {% if ch.models_complete %}models ✓{% else %}<span class="warn">models ✗</span>{% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="muted">No channels configured.</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 6 — SCHEDULES                               #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Schedules</div>
+
+  {% if state and state.schedules %}
+    {% for s in state.schedules %}
+      <div class="stat-row">
+        <span class="stat-label">
+          {{ s.channel_id or s.scope or '—' }} / {{ s.cadence }}
+        </span>
+        <span style="display:flex; gap:6px; align-items:center;">
+          <span class="badge badge-{{ 'active' if s.status == 'active' else 'unknown' }}">{{ s.status }}</span>
+          <span class="muted" style="font-size:12px;">{{ (s.next_run_at or 'unset')[:16] }}</span>
+        </span>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="muted">No schedules configured.</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 7 — COSTS                                   #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Costs</div>
+
+  {% if state %}
+    {% set c = state.costs %}
+    <div class="stat-row">
+      <span class="stat-label">Total spend</span>
+      <span class="stat-val">${{ "%.4f"|format(c.total_usd) }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Episodes</span>
+      <span class="stat-val">{{ c.episode_count }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Runs</span>
+      <span class="stat-val">{{ c.run_count }}</span>
+    </div>
+
+    {% if c.by_provider %}
+      <div style="margin-top:10px; margin-bottom:4px; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">By provider</div>
+      {% for prov, cost in c.by_provider.items() %}
+        <div class="cost-row">
+          <span class="muted">{{ prov }}</span>
+          <span>${{ "%.4f"|format(cost) }}</span>
+        </div>
+      {% endfor %}
+    {% endif %}
+
+    {% if c.by_model %}
+      <div style="margin-top:10px; margin-bottom:4px; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">By model</div>
+      {% for model, cost in c.by_model.items() %}
+        <div class="cost-row">
+          <span class="muted" style="word-break:break-all; max-width:200px;">{{ model }}</span>
+          <span>${{ "%.4f"|format(cost) }}</span>
+        </div>
+      {% endfor %}
+    {% endif %}
+  {% else %}
+    <div class="muted">Unavailable.</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 8 — AUDIT & NOTIFICATIONS                   #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Acceptance Audit</div>
+
+  {% if state %}
+    {% set au = state.audit %}
+    <div class="stat-row">
+      <span class="stat-label">Status</span>
+      <span class="stat-val">
+        {% if au.ready %}
+          <span class="ok">✓ ACCEPTED</span>
+        {% else %}
+          <span class="err">✗ REJECTED</span>
+        {% endif %}
+      </span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Blockers</span>
+      <span class="stat-val {% if au.blocker_count > 0 %}err{% else %}ok{% endif %}">{{ au.blocker_count }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Warnings</span>
+      <span class="stat-val {% if au.warning_count > 0 %}warn{% endif %}">{{ au.warning_count }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Last checked</span>
+      <span class="stat-val muted">{{ au.last_run_at[:16] if au.last_run_at else '—' }}</span>
+    </div>
+
+    {% if state.notifications %}
+      <div style="margin-top:12px; border-top:1px solid var(--border); padding-top:10px;">
+        <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px;">Notifications</div>
+        {% for n in state.notifications %}
+          <div class="signal-row">
+            <span class="{% if n.level == 'critical' %}err{% elif n.level == 'warning' %}warn{% else %}muted{% endif %}">
+              {{ n.message }}
+            </span>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="muted">Unavailable.</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 9 — DIRECTOR DOMAIN BREAKDOWN               #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Director — Domain Breakdown</div>
+
+  {% if report %}
+    {% for d in report.domains %}
+      {% if d.status == 'healthy' %}{% set icon = '✓' %}{% set cls = 'ok' %}
+      {% elif d.status == 'warning' %}{% set icon = '⚠' %}{% set cls = 'warn' %}
+      {% elif d.status == 'blocked' %}{% set icon = '✗' %}{% set cls = 'err' %}
+      {% else %}{% set icon = '?' %}{% set cls = 'muted' %}{% endif %}
+
+      <div class="domain-row">
+        <div class="domain-icon {{ cls }}">{{ icon }}</div>
+        <div class="domain-body">
+          <div class="domain-name">{{ d.domain.replace('_', ' ').title() }}</div>
+          <div class="domain-sum">{{ d.summary }}</div>
+        </div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="muted">Report unavailable.</div>
+  {% endif %}
+</div>
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 10 — AGENT HEALTH                           #}
+{# ──────────────────────────────────────────────── #}
+
+{% if state and state.agent_health %}
+<div class="card">
+  <div class="card-title">Agent Health</div>
+  {% for a in state.agent_health %}
+    <div class="stat-row">
+      <span class="stat-label" style="max-width:180px; word-break:break-word;">{{ a.stage_name }}</span>
+      <span class="stat-val {% if a.success_rate >= 0.8 %}ok{% elif a.success_rate >= 0.5 %}warn{% else %}err{% endif %}">
+        {{ "%.0f"|format(a.success_rate * 100) }}%
+        <span class="muted" style="font-size:11px;">({{ a.success_count }}/{{ a.total_runs - a.skip_count }})</span>
+      </span>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 11 — PROVIDER HEALTH                        #}
+{# ──────────────────────────────────────────────── #}
+
+{% if state and state.provider_health %}
+<div class="card">
+  <div class="card-title">Provider Health</div>
+  {% for p in state.provider_health %}
+    <div class="stat-row">
+      <span class="stat-label">{{ p.provider }}</span>
+      <span class="stat-val">
+        <span class="{% if p.failure_rate >= 0.3 %}err{% elif p.failure_rate >= 0.1 %}warn{% else %}ok{% endif %}">
+          {{ "%.0f"|format(p.failure_rate * 100) }}% fail
+        </span>
+        <span class="muted" style="font-size:11px; margin-left:8px;">${{ "%.4f"|format(p.total_cost_usd) }}</span>
+      </span>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ──────────────────────────────────────────────── #}
+{# CARD 12 — ARCHIVE & RECALL                       #}
+{# ──────────────────────────────────────────────── #}
+
+<div class="card">
+  <div class="card-title">Archive &amp; Recall</div>
+  {% if state %}
+    <div class="stat-row">
+      <span class="stat-label">Archived assets</span>
+      <span class="stat-val">{{ state.archive.total_archived }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Reuse eligible</span>
+      <span class="stat-val">{{ state.archive.reuse_eligible_count }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Recall decisions</span>
+      <span class="stat-val">{{ state.recall.total_decisions }}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Reuse rate</span>
+      <span class="stat-val">{{ "%.0f"|format(state.recall.reuse_rate * 100) }}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Learning records</span>
+      <span class="stat-val">{{ state.learning.total_records }}</span>
+    </div>
+  {% else %}
+    <div class="muted">Unavailable.</div>
+  {% endif %}
+</div>
+
+</div>{# end .grid #}
+
+<div class="footer">
+  Factory OS &nbsp;·&nbsp; schema {{ state.schema_version if state else '—' }}
+  &nbsp;·&nbsp; <a href="/api/state">/api/state</a>
+  &nbsp;·&nbsp; auto-refresh every 30 s
+</div>
+
+</body>
+</html>

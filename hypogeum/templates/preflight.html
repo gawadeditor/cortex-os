@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Preflight — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .check-row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+    .check-row:last-child { border-bottom: none; }
+    .check-icon { width: 18px; flex-shrink: 0; text-align: center; }
+    .check-body { flex: 1; min-width: 0; }
+    .check-name { font-weight: 500; font-size: 13px; }
+    .check-msg  { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .check-detail { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: monospace; }
+    .tier-blocker  { color: var(--red); }
+    .tier-warning  { color: var(--yellow); }
+    .tier-advisory { color: var(--muted); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Preflight Check</h1>
+  {% if preflight.ready %}
+    <span class="badge badge-complete">READY</span>
+  {% else %}
+    <span class="badge badge-failed">NOT READY</span>
+  {% endif %}
+  {% if preflight.checked_at %}
+    <span class="page-meta">Checked {{ preflight.checked_at[:19] }} UTC</span>
+  {% endif %}
+  <a href="/preflight" class="btn" style="margin-left:auto;">Re-run</a>
+</div>
+
+{# Summary #}
+<div class="card">
+  <div class="card-title">Summary</div>
+  {% if preflight.ready %}
+    <div class="ok" style="font-size:14px; font-weight:600;">✓ All checks passed — factory is ready to run episodes.</div>
+  {% else %}
+    <div class="err" style="font-size:14px; font-weight:600;">
+      ✗ {{ preflight.blocker_count }} blocker{% if preflight.blocker_count != 1 %}s{% endif %}
+      {% if preflight.warning_count %}, {{ preflight.warning_count }} warning{% if preflight.warning_count != 1 %}s{% endif %}{% endif %}
+    </div>
+    {% if preflight.blockers %}
+    <div style="margin-top:10px;">
+      {% for b in preflight.blockers %}
+        <div style="padding:3px 0; font-size:13px;"><span class="err">✗ {{ b }}</span></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>
+
+{# Check detail #}
+{% if preflight.checks %}
+<div class="card">
+  <div class="card-title">Check Detail ({{ preflight.checks | length }} checks)</div>
+  {% for c in preflight.checks %}
+    {% if c.passed %}{% set icon = '✓' %}{% set cls = 'ok' %}
+    {% elif c.tier == 'blocker' %}{% set icon = '✗' %}{% set cls = 'err' %}
+    {% else %}{% set icon = '⚠' %}{% set cls = 'warn' %}
+    {% endif %}
+    <div class="check-row">
+      <div class="check-icon {{ cls }}">{{ icon }}</div>
+      <div class="check-body">
+        <div class="check-name">{{ c.name }}</div>
+        <div class="check-msg {{ 'tier-' + c.tier if not c.passed else '' }}">
+          {% if c.tier and not c.passed %}[{{ c.tier }}]{% endif %} {{ c.message }}
+        </div>
+        {% for d in c.details %}
+          <div class="check-detail">{{ d }}</div>
+        {% endfor %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+</body>
+</html>

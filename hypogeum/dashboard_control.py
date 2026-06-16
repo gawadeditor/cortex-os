@@ -333,6 +333,36 @@ def action_reject(
         return _err(str(exc))
 
 
+def enqueue_topic(
+    channel_id:  str,
+    topic_text:  str,
+    priority:    int             = 0,
+    db_path:     Optional[Path] = None,
+) -> dict:
+    """Enqueue a topic for a channel. Returns Result dict."""
+    try:
+        from hypogeum.topics import (
+            enqueue_topic as _enqueue,
+            DuplicateTopicError,
+            ChannelNotFoundError as _CNF,
+        )
+        topic_id = _enqueue(
+            channel_id, topic_text,
+            priority=priority,
+            validate_channel=True,
+            db_path=db_path,
+        )
+        return _ok(topic_id=topic_id, channel_id=channel_id, topic_text=topic_text)
+    except _CNF as exc:
+        return _err(str(exc), "not_found")
+    except DuplicateTopicError as exc:
+        return _err(str(exc), "duplicate")
+    except ValueError as exc:
+        return _err(str(exc), "invalid")
+    except Exception as exc:
+        return _err(str(exc))
+
+
 def action_resolve_signal(
     signal_id: str,
     user_id: str = _SYSTEM_USER,

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Signals — Factory OS</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>OIS Signal History</h1>
+  <span class="page-meta">{{ signals | length }} record{% if signals|length != 1 %}s{% endif %}</span>
+</div>
+
+<div class="filters">
+  <span class="muted" style="font-size:12px;">Filter:</span>
+  <a href="/signals"               class="filter-link {% if not status_filter %}active{% endif %}">All</a>
+  <a href="/signals?status=open"   class="filter-link {% if status_filter == 'open' %}active{% endif %}">Open</a>
+  <a href="/signals?status=resolved" class="filter-link {% if status_filter == 'resolved' %}active{% endif %}">Resolved</a>
+  <a href="/signals?status=auto_resolved" class="filter-link {% if status_filter == 'auto_resolved' %}active{% endif %}">Auto-resolved</a>
+</div>
+
+{% if signals %}
+<div class="card" style="padding:0;">
+  <table>
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Severity</th>
+        <th>Message</th>
+        <th>Source</th>
+        <th>Status</th>
+        <th>Blocking</th>
+        <th>Ingested</th>
+        <th>Resolved by</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in signals %}
+      <tr>
+        <td style="font-weight:500; white-space:nowrap; font-size:13px;">{{ s.signal_type }}</td>
+        <td>
+          <span class="badge badge-{{ s.severity|lower }}
+            {% if s.severity == 'CRITICAL' %}badge-failed
+            {% elif s.severity == 'WARNING' %}badge-queued
+            {% else %}badge-running{% endif %}">
+            {{ s.severity }}
+          </span>
+        </td>
+        <td style="max-width:260px; font-size:12px; word-break:break-word;">{{ s.message[:120] or '—' }}</td>
+        <td class="muted" style="font-size:12px;">{{ s.source_system or '—' }}</td>
+        <td><span class="badge badge-{{ s.lifecycle_status }}">{{ s.lifecycle_status }}</span></td>
+        <td style="text-align:center;">
+          {% if s.blocking %}
+            <span class="err" style="font-weight:700;">✗</span>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ s.ingested_at[:16] if s.ingested_at else '—' }}</td>
+        <td class="muted" style="font-size:12px;">{{ s.resolved_by or '—' }}</td>
+        <td>
+          {% if s.lifecycle_status == 'open' %}
+          <button class="btn btn-resolve"
+                  onclick="postAction('/api/action/resolve-signal/{{ s.signal_id|e }}', {}, 'Mark as resolved?')">
+            Resolve
+          </button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">No signals found{% if status_filter %} with status "{{ status_filter }}"{% endif %}.</div>
+{% endif %}
+
+<div id="toast" class="toast"></div>
+<script>
+function showToast(msg, ok) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
+  setTimeout(function() { t.className = 'toast'; }, 3000);
+}
+function postAction(url, body, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{}) })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) { showToast('Done', true); setTimeout(function() { location.reload(); }, 800); }
+      else { showToast('Error: ' + (d.error||'unknown'), false); }
+    })
+    .catch(function(e) { showToast('Request failed: '+e, false); });
+}
+</script>
+</body>
+</html>

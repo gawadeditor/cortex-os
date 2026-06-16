@@ -67,6 +67,17 @@ from hypogeum.dashboard_control import (
     action_approve,
     action_reject,
     action_resolve_signal,
+    enqueue_topic,
+)
+from hypogeum.dashboard_runs import (
+    list_runs,
+    get_run_detail,
+    list_episodes,
+    list_episode_topics,
+    list_approvals_history,
+    list_signals_history,
+    get_preflight_status,
+    fmt_duration,
 )
 
 # ---------------------------------------------------------------------------
@@ -284,6 +295,155 @@ def api_action_resolve_signal(signal_id):
         404 if result.get("code") == "not_found" else 400
     )
     return jsonify(result), http_status
+
+
+# ===========================================================================
+# Phase C — Runs & Episode Operations (JSON API)
+# ===========================================================================
+
+@app.route("/api/runs", methods=["GET"])
+def api_runs():
+    status = request.args.get("status")
+    limit  = min(int(request.args.get("limit", 100)), 500)
+    return jsonify(list_runs(db_path=_db_path(), status=status or None, limit=limit))
+
+
+@app.route("/api/run/<run_id>", methods=["GET"])
+def api_run_detail(run_id):
+    detail = get_run_detail(run_id, db_path=_db_path())
+    if detail is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(detail)
+
+
+@app.route("/api/episodes", methods=["GET"])
+def api_episodes():
+    limit = min(int(request.args.get("limit", 100)), 500)
+    return jsonify(list_episodes(db_path=_db_path(), limit=limit))
+
+
+@app.route("/api/topics", methods=["GET"])
+def api_topics():
+    channel_id = request.args.get("channel_id")
+    status     = request.args.get("status")
+    limit      = min(int(request.args.get("limit", 200)), 500)
+    return jsonify(list_episode_topics(
+        channel_id=channel_id or None,
+        status=status or None,
+        db_path=_db_path(),
+        limit=limit,
+    ))
+
+
+@app.route("/api/topics", methods=["POST"])
+def api_topic_enqueue():
+    body       = request.get_json(silent=True) or {}
+    channel_id = body.get("channel_id", "")
+    topic_text = body.get("topic_text", "")
+    priority   = int(body.get("priority", 0))
+    result = enqueue_topic(channel_id, topic_text, priority=priority, db_path=_db_path())
+    http_status = 200 if result["ok"] else (
+        404 if result.get("code") == "not_found" else
+        409 if result.get("code") == "duplicate" else
+        400
+    )
+    return jsonify(result), http_status
+
+
+@app.route("/api/approvals", methods=["GET"])
+def api_approvals_history():
+    status = request.args.get("status")
+    limit  = min(int(request.args.get("limit", 200)), 500)
+    return jsonify(list_approvals_history(
+        db_path=_db_path(), status=status or None, limit=limit
+    ))
+
+
+@app.route("/api/signals", methods=["GET"])
+def api_signals_history():
+    status = request.args.get("status")
+    limit  = min(int(request.args.get("limit", 200)), 500)
+    return jsonify(list_signals_history(
+        db_path=_db_path(), status=status or None, limit=limit
+    ))
+
+
+@app.route("/api/preflight", methods=["GET"])
+def api_preflight():
+    return jsonify(get_preflight_status(db_path=_db_path()))
+
+
+# ===========================================================================
+# Phase C — Runs & Episode Operations (HTML)
+# ===========================================================================
+
+@app.route("/runs")
+def runs_page():
+    status = request.args.get("status")
+    runs   = list_runs(db_path=_db_path(), status=status or None)
+    return render_template("runs.html",
+                           runs=runs, status_filter=status, fmt_duration=fmt_duration)
+
+
+@app.route("/run/<run_id>")
+def run_detail_page(run_id):
+    detail = get_run_detail(run_id, db_path=_db_path())
+    if detail is None:
+        return render_template("not_found.html", kind="Run", id=run_id), 404
+    return render_template("run_detail.html", d=detail, fmt_duration=fmt_duration)
+
+
+@app.route("/episodes")
+def episodes_page():
+    channel_id = request.args.get("channel_id")
+    episodes   = list_episodes(db_path=_db_path())
+    topics     = list_episode_topics(
+        channel_id=channel_id or None, db_path=_db_path()
+    )
+    from hypogeum.dashboard_api import get_channel_summaries
+    channels   = get_channel_summaries(db_path=_db_path())
+    preflight  = get_preflight_status(db_path=_db_path())
+    return render_template("episodes.html",
+                           episodes=episodes, topics=topics,
+                           channels=channels, preflight=preflight,
+                           channel_filter=channel_id)
+
+
+@app.route("/episodes/enqueue", methods=["POST"])
+def episode_enqueue():
+    channel_id = request.form.get("channel_id", "")
+    topic_text = request.form.get("topic_text", "")
+    priority   = int(request.form.get("priority", 0))
+    result = enqueue_topic(channel_id, topic_text, priority=priority, db_path=_db_path())
+    # Redirect back regardless — flash message baked into query param
+    code = "ok" if result["ok"] else result.get("code", "error")
+    return redirect(url_for("episodes_page") + f"?enqueue={code}")
+
+
+@app.route("/approvals")
+def approvals_page():
+    status    = request.args.get("status")
+    approvals = list_approvals_history(
+        db_path=_db_path(), status=status or None
+    )
+    return render_template("approvals_history.html",
+                           approvals=approvals, status_filter=status)
+
+
+@app.route("/signals")
+def signals_page():
+    status  = request.args.get("status")
+    signals = list_signals_history(
+        db_path=_db_path(), status=status or None
+    )
+    return render_template("signals_history.html",
+                           signals=signals, status_filter=status)
+
+
+@app.route("/preflight")
+def preflight_page():
+    result = get_preflight_status(db_path=_db_path())
+    return render_template("preflight.html", preflight=result)
 
 
 # ===========================================================================

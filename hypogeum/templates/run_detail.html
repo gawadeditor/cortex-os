@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Run {{ d.run.run_id[:12] }} — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+    @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+    .stat-row { display: flex; justify-content: space-between; padding: 5px 0;
+                border-bottom: 1px solid var(--border); font-size: 13px; }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-l { color: var(--muted); }
+    .verdict-approved, .verdict-APPROVED, .verdict-APPROVED_WITH_FLAGS { color: var(--green); }
+    .verdict-REJECTED, .verdict-BLOCKED  { color: var(--red); }
+    .verdict-WARNING  { color: var(--yellow); }
+    code { font-family: monospace; font-size: 12px; color: var(--blue);
+           background: rgba(88,166,255,.08); padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Run <code>{{ d.run.run_id[:12] }}…</code></h1>
+  <span class="badge badge-{{ d.run.status }}">{{ d.run.status }}</span>
+  <a href="/runs" class="btn" style="margin-left:auto;">← All Runs</a>
+</div>
+
+{# ── Summary row ── #}
+<div class="card">
+  <div class="card-title">Summary</div>
+  <div class="grid2">
+    <div>
+      <div class="stat-row"><span class="stat-l">Run ID</span><code>{{ d.run.run_id }}</code></div>
+      <div class="stat-row"><span class="stat-l">Episode</span><span>{{ d.run.episode_id }}</span></div>
+      {% if d.episode.title %}
+      <div class="stat-row"><span class="stat-l">Title</span><span>{{ d.episode.title }}</span></div>
+      {% endif %}
+      {% if d.episode.topic %}
+      <div class="stat-row"><span class="stat-l">Topic</span><span>{{ d.episode.topic }}</span></div>
+      {% endif %}
+      <div class="stat-row"><span class="stat-l">Started</span><span class="muted">{{ d.run.started_at[:19] if d.run.started_at else '—' }}</span></div>
+      <div class="stat-row"><span class="stat-l">Completed</span><span class="muted">{{ d.run.completed_at[:19] if d.run.completed_at else '—' }}</span></div>
+    </div>
+    <div>
+      <div class="stat-row"><span class="stat-l">Status</span><span class="badge badge-{{ d.run.status }}">{{ d.run.status }}</span></div>
+      <div class="stat-row"><span class="stat-l">Exit code</span><span>{{ d.run.exit_code if d.run.exit_code is not none else '—' }}</span></div>
+      <div class="stat-row"><span class="stat-l">Stages</span><span>{{ d.stage_count }}</span></div>
+      <div class="stat-row"><span class="stat-l">Total cost</span>
+        <span>${{ "%.4f" | format(d.total_cost_usd) }}</span></div>
+      <div class="stat-row"><span class="stat-l">Assets</span><span>{{ d.assets | length }}</span></div>
+    </div>
+  </div>
+  {% if d.run.error_message %}
+  <div style="margin-top:12px; padding:10px 12px; background:#3a0f0a;
+              border:1px solid #da3633; border-radius:var(--radius);">
+    <div style="font-size:11px; color:var(--red); text-transform:uppercase;
+                letter-spacing:.05em; margin-bottom:4px;">Error</div>
+    <pre style="font-size:12px; color:var(--red); white-space:pre-wrap; word-break:break-all;">{{ d.run.error_message }}</pre>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Stage timeline ── #}
+<div class="card">
+  <div class="card-title">Stage Timeline ({{ d.stage_count }} stages)</div>
+  {% if d.stages %}
+  <ul class="timeline">
+    {% for s in d.stages %}
+    {% if s.status == 'completed' %}{% set icon = '✓' %}{% set cls = 'ok' %}
+    {% elif s.status == 'failed'    %}{% set icon = '✗' %}{% set cls = 'err' %}
+    {% elif s.status == 'skipped'   %}{% set icon = '—' %}{% set cls = 'muted' %}
+    {% else                         %}{% set icon = '⟳' %}{% set cls = 'muted' %}
+    {% endif %}
+    <li class="tl-item">
+      <div class="tl-icon {{ cls }}">{{ icon }}</div>
+      <div class="tl-body">
+        <div class="tl-name {{ cls }}">{{ s.stage_name }}</div>
+        <div class="tl-meta">
+          {{ s.duration_fmt }}
+          {% if s.cost_usd and s.cost_usd > 0 %} · ${{ "%.4f"|format(s.cost_usd) }}{% endif %}
+          {% if s.model_slug %} · <span style="font-family:monospace;font-size:11px;">{{ s.model_slug }}</span>{% endif %}
+          {% if s.skipped %} · <span class="muted">(skipped)</span>{% endif %}
+        </div>
+        {% if s.error_message %}
+        <div class="tl-error">{{ s.error_message[:300] }}</div>
+        {% endif %}
+      </div>
+      <div style="font-size:11px; color:var(--muted); white-space:nowrap; padding-top:2px;">
+        {{ s.started_at[11:19] if s.started_at else '' }}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="empty">No stage executions recorded.</div>
+  {% endif %}
+</div>
+
+{# ── Gate verdicts ── #}
+{% if d.gates %}
+<div class="card">
+  <div class="card-title">Gate Verdicts ({{ d.gates | length }})</div>
+  <table>
+    <thead>
+      <tr><th>Gate</th><th>Verdict</th><th>Flags</th><th>Blocking</th><th>Evaluated</th></tr>
+    </thead>
+    <tbody>
+      {% for g in d.gates %}
+      <tr>
+        <td style="font-weight:500;">{{ g.gate_name }}</td>
+        <td><span class="verdict-{{ g.verdict }}">{{ g.verdict }}</span></td>
+        <td class="muted" style="text-align:right;">{{ g.flag_count or 0 }}</td>
+        <td class="{% if g.blocking_count %}err{% else %}muted{% endif %}" style="text-align:right;">
+          {{ g.blocking_count or 0 }}
+        </td>
+        <td class="muted" style="font-size:12px;">{{ g.evaluated_at[11:19] if g.evaluated_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{# ── State transitions ── #}
+{% if d.transitions %}
+<div class="card">
+  <div class="card-title">State Transitions</div>
+  <ul class="timeline">
+    {% for t in d.transitions %}
+    <li class="tl-item">
+      <div class="tl-icon muted">→</div>
+      <div class="tl-body">
+        <div class="tl-name">
+          <span class="muted">{{ t.from_state or '(start)' }}</span>
+          → <span class="badge badge-{{ t.to_state }}">{{ t.to_state }}</span>
+        </div>
+        <div class="tl-meta">
+          {{ t.triggered_by or '—' }} · {{ t.trigger_source or '—' }}
+          {% if t.reason %} · {{ t.reason[:80] }}{% endif %}
+        </div>
+      </div>
+      <div style="font-size:11px; color:var(--muted); white-space:nowrap; padding-top:2px;">
+        {{ t.transitioned_at[11:19] if t.transitioned_at else '' }}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{# ── Costs ── #}
+{% if d.costs %}
+<div class="card">
+  <div class="card-title">Cost Breakdown (${{ "%.4f"|format(d.total_cost_usd) }} total)</div>
+  <table>
+    <thead><tr><th>Provider</th><th>Model</th><th>Type</th><th>Cost</th><th>Time</th></tr></thead>
+    <tbody>
+      {% for c in d.costs %}
+      <tr>
+        <td>{{ c.provider }}</td>
+        <td class="muted" style="font-size:12px; word-break:break-all;">{{ c.model or '—' }}</td>
+        <td class="muted">{{ c.call_type }}</td>
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">${{ "%.5f"|format(c.cost_usd or 0) }}</td>
+        <td class="muted" style="font-size:12px;">{{ c.called_at[11:19] if c.called_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{# ── Assets ── #}
+{% if d.assets %}
+<div class="card">
+  <div class="card-title">Assets ({{ d.assets | length }})</div>
+  <table>
+    <thead><tr><th>Type</th><th>Provider</th><th>File path</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for a in d.assets %}
+      <tr>
+        <td>{{ a.asset_type }}</td>
+        <td class="muted">{{ a.provider }}</td>
+        <td class="muted" style="font-size:12px; word-break:break-all;">{{ a.file_path or '—' }}</td>
+        <td class="muted" style="font-size:12px;">{{ a.created_at[11:19] if a.created_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+</body>
+</html>

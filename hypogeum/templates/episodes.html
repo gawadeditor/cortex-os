@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Episodes — Factory OS</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Episodes &amp; Topic Queue</h1>
+</div>
+
+{# Flash feedback from enqueue redirect #}
+{% set eq = request.args.get('enqueue') %}
+{% if eq == 'ok' %}
+  <div class="flash flash-ok">Topic enqueued successfully.</div>
+{% elif eq == 'duplicate' %}
+  <div class="flash flash-err">Duplicate — that topic is already queued for this channel.</div>
+{% elif eq == 'not_found' %}
+  <div class="flash flash-err">Channel not found. Check the channel ID.</div>
+{% elif eq and eq != 'ok' %}
+  <div class="flash flash-err">Enqueue failed ({{ eq }}).</div>
+{% endif %}
+
+{# ── Enqueue new topic ── #}
+<div class="card">
+  <div class="card-title">Queue New Topic</div>
+  {% if preflight.ready %}
+    <div class="ok" style="font-size:12px; margin-bottom:10px;">✓ Preflight passed — factory is ready.</div>
+  {% else %}
+    <div class="warn" style="font-size:12px; margin-bottom:10px;">
+      ⚠ Preflight has {{ preflight.blocker_count }} blocker(s).
+      Topics can be queued, but the pipeline will not start until preflight clears.
+      <a href="/preflight">View preflight →</a>
+    </div>
+  {% endif %}
+  <form method="POST" action="/episodes/enqueue" style="display:flex; flex-direction:column; gap:10px; max-width:560px;">
+    <div class="field">
+      <label for="channel_id">Channel</label>
+      {% if channels %}
+        <select id="channel_id" name="channel_id" required style="width:100%;">
+          {% for ch in channels %}
+            <option value="{{ ch.channel_id }}">{{ ch.name }} ({{ ch.channel_id }})</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input type="text" id="channel_id" name="channel_id" placeholder="channel_id" required style="width:100%;">
+        <div class="hint">No channels found — enter channel_id manually.</div>
+      {% endif %}
+    </div>
+    <div class="field">
+      <label for="topic_text">Topic</label>
+      <textarea id="topic_text" name="topic_text" rows="3" placeholder="e.g. The fall of the Library of Alexandria" required style="width:100%;"></textarea>
+    </div>
+    <div class="field">
+      <label for="priority">Priority</label>
+      <input type="number" id="priority" name="priority" value="0" min="0" max="100" style="width:120px;">
+      <div class="hint">Lower = higher priority. 0 = normal.</div>
+    </div>
+    <div>
+      <button type="submit" class="btn btn-save">+ Enqueue Topic</button>
+    </div>
+  </form>
+</div>
+
+{# ── Topic queue ── #}
+<div class="card">
+  <div class="card-title">
+    Topic Queue
+    ({{ topics | selectattr('status', 'eq', 'queued') | list | length }} queued,
+     {{ topics | selectattr('status', 'eq', 'consumed') | list | length }} consumed)
+  </div>
+  {% if topics %}
+  <table>
+    <thead>
+      <tr>
+        <th>Channel</th>
+        <th>Topic</th>
+        <th>Status</th>
+        <th>Priority</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in topics %}
+      <tr>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ t.channel_id }}</td>
+        <td style="max-width:340px; word-break:break-word;">{{ t.topic_text }}</td>
+        <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
+        <td class="muted" style="text-align:right;">{{ t.priority }}</td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ t.created_at[:16] if t.created_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No topics in queue.</div>
+  {% endif %}
+</div>
+
+{# ── Episode history ── #}
+<div class="card">
+  <div class="card-title">Episode History ({{ episodes | length }})</div>
+  {% if episodes %}
+  <table>
+    <thead>
+      <tr>
+        <th>Episode ID</th>
+        <th>Title / Topic</th>
+        <th>Status</th>
+        <th>Run status</th>
+        <th>Cost</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ep in episodes %}
+      <tr>
+        <td>
+          {% if ep.run_id %}
+            <a href="/run/{{ ep.run_id }}">{{ ep.episode_id }}</a>
+          {% else %}
+            {{ ep.episode_id }}
+          {% endif %}
+        </td>
+        <td style="max-width:260px; word-break:break-word; font-size:13px;">
+          {{ ep.title or ep.topic or '—' }}
+        </td>
+        <td><span class="badge badge-{{ ep.status }}">{{ ep.status }}</span></td>
+        <td>
+          {% if ep.run_status %}
+            <span class="badge badge-{{ ep.run_status }}">{{ ep.run_status }}</span>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+          {% if ep.total_cost_usd and ep.total_cost_usd > 0 %}
+            ${{ "%.4f"|format(ep.total_cost_usd) }}
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">
+          {{ ep.created_at[:16] if ep.created_at else '—' }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No episodes yet.</div>
+  {% endif %}
+</div>
+
+</body>
+</html>

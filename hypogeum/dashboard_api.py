@@ -30,9 +30,10 @@ Public API:
     # Aggregated factory state
     get_factory_state(db_path=None, factory_id="hypogeum") -> FactoryState
 
-    # Permission model (pure data)
-    get_permission(action)  -> Optional[Permission]
-    list_permissions()      -> list[Permission]
+    # Permission model
+    get_permission(action)                      -> Optional[Permission]
+    list_permissions()                          -> list[Permission]
+    is_authorized(user_id, action, db_path)     -> bool
 
     # Text formatter
     format_factory_state(state) -> str
@@ -238,7 +239,8 @@ class FactoryState:
     learning:        LearningSummary
     costs:           CostSummary
     audit:           AuditSummary
-    notifications:   list
+    notifications:    list
+    pending_approvals: list = field(default_factory=list)
     metadata_version: str = METADATA_VERSION
 
 
@@ -315,6 +317,28 @@ def list_permissions() -> list:
         PERMISSION_TABLE.values(),
         key=lambda p: (order.get(p.requires_level, 99), p.action),
     )
+
+
+def is_authorized(
+    user_id: str,
+    action: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """
+    Check whether user_id may perform action.
+
+    Single enforcement entry point for all permission-gated dashboard actions.
+    Delegates to auth.check_authorization() which enforces the role hierarchy:
+        owner > admin > operator > editor > viewer > client
+
+    Returns False on any error (user not found, action not defined, DB unavailable).
+    Non-blocking: never raises.
+    """
+    try:
+        from hypogeum.auth import check_authorization
+        return check_authorization(user_id, action, db_path=db_path)
+    except Exception:
+        return False
 
 
 # ===========================================================================
@@ -877,6 +901,15 @@ def _compute_overall_health(
 # Factory State (aggregated)
 # ===========================================================================
 
+def _get_pending_approvals(db_path: Optional[Path]) -> list:
+    """Return pending approval records for the factory state snapshot."""
+    try:
+        from hypogeum.approvals import list_pending_approvals
+        return list_pending_approvals(db_path=db_path)
+    except Exception:
+        return []
+
+
 def get_factory_state(
     db_path:    Optional[Path] = None,
     factory_id: str            = "hypogeum",
@@ -933,6 +966,7 @@ def get_factory_state(
         costs           = costs,
         audit           = audit,
         notifications   = notifications,
+        pending_approvals = _get_pending_approvals(db_path),
     )
 
 

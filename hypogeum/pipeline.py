@@ -342,6 +342,7 @@ class PipelineResult:
     asset_archive_record: Optional[dict] = None
     production_metadata_record: Optional[dict] = None
     analytics_pending_record: Optional[dict] = None
+    approval_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +838,7 @@ def run_pipeline(
                 status="awaiting_review",
                 startup_report=startup_report,
                 run_id=run_id,
+                approval_id=approval_id,
                 validation_scorecard=validation_scorecard,
                 topic_brief=topic_brief,
                 research_package=research_package,

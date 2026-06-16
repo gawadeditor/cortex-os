@@ -100,6 +100,10 @@ SIGNAL_TYPES: dict[str, dict] = {
     "run_failed":         {"severity": "WARNING",  "blocking": False},
     "low_budget_warning": {"severity": "WARNING",  "blocking": False},
     "run_completed":      {"severity": "INFO",     "blocking": False},
+    # P3-04: Approval System signals
+    "approval_pending":   {"severity": "WARNING",  "blocking": False},
+    "approval_granted":   {"severity": "INFO",     "blocking": False},
+    "approval_rejected":  {"severity": "WARNING",  "blocking": False},
 }
 
 VALID_SEVERITIES = ("INFO", "WARNING", "CRITICAL")

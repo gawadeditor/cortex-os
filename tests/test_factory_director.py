@@ -18,10 +18,12 @@ Coverage:
     TestNonBlocking         — bad db_path returns safe default for every domain
     TestNoSideEffects       — no DB writes; row counts unchanged after assess_factory()
     TestNoNetworkCalls      — socket blocked throughout
+    TestCLI                 — run_director_check.py: exit codes, --json, --domain, errors
 """
 
 from __future__ import annotations
 
+import json
 import socket
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -912,3 +914,143 @@ class TestNoNetworkCalls:
     def test_format_report_no_network(self, db_path):
         r = assess_factory(db_path=db_path, factory_id="test")
         format_report(r)
+
+
+# ---------------------------------------------------------------------------
+# TestCLI
+# ---------------------------------------------------------------------------
+
+class TestCLI:
+    """Tests for scripts/run_director_check.py via its main() function."""
+
+    @pytest.fixture(autouse=True)
+    def _import_cli(self):
+        import scripts.run_director_check as cli_mod
+        self.cli = cli_mod
+
+    def _make_report(self, level: str, score: int, can_run: bool):
+        from hypogeum.factory_director import RunClearanceDecision, FactoryDirectorReport
+        rc = RunClearanceDecision(can_run, "CLEARED" if can_run else "BLOCKED",
+                                  [], [], 0, "2026-01-01T00:00:00")
+        return FactoryDirectorReport(
+            factory_id="test", factory_name="Test Factory",
+            readiness_level=level, readiness_score=score,
+            can_run=can_run, assessed_at="2026-01-01T00:00:00",
+            domains=[], blocking_reasons=[], warnings=[], run_clearance=rc,
+        )
+
+    # --- Exit codes ---
+
+    def test_exit_0_when_ready(self):
+        report = self._make_report("READY", 100, True)
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            rc = self.cli.main([])
+        assert rc == 0
+
+    def test_exit_0_when_degraded(self):
+        report = self._make_report("DEGRADED", 70, True)
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            rc = self.cli.main([])
+        assert rc == 0
+
+    def test_exit_1_when_blocked(self):
+        report = self._make_report("BLOCKED", 40, False)
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            rc = self.cli.main([])
+        assert rc == 1
+
+    def test_exit_1_when_unknown(self):
+        report = self._make_report("UNKNOWN", 0, False)
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            rc = self.cli.main([])
+        assert rc == 1
+
+    # --- --factory-id ---
+
+    def test_factory_id_passed_to_assess(self):
+        report = self._make_report("READY", 100, True)
+        with patch("scripts.run_director_check.assess_factory",
+                   return_value=report) as mock_assess:
+            self.cli.main(["--factory-id", "my_factory"])
+        mock_assess.assert_called_once_with(factory_id="my_factory")
+
+    def test_default_factory_id_is_hypogeum(self):
+        report = self._make_report("READY", 100, True)
+        with patch("scripts.run_director_check.assess_factory",
+                   return_value=report) as mock_assess:
+            self.cli.main([])
+        mock_assess.assert_called_once_with(factory_id="hypogeum")
+
+    # --- --json ---
+
+    def test_json_flag_outputs_valid_json(self, capsys):
+        report = self._make_report("READY", 100, True)
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            self.cli.main(["--json"])
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["readiness_level"] == "READY"
+        assert parsed["readiness_score"] == 100
+        assert "factory_id" in parsed
+        assert "domains" in parsed
+        assert "run_clearance" in parsed
+
+    def test_json_includes_blocking_reasons(self, capsys):
+        report = self._make_report("BLOCKED", 40, False)
+        report = FactoryDirectorReport(
+            factory_id="test", factory_name="Test",
+            readiness_level="BLOCKED", readiness_score=40,
+            can_run=False, assessed_at="2026-01-01T00:00:00",
+            domains=[], blocking_reasons=["[ois] OIS blocked: 3 signals"],
+            warnings=[], run_clearance=report.run_clearance,
+        )
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            self.cli.main(["--json"])
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert len(parsed["blocking_reasons"]) == 1
+
+    def test_default_output_is_text_not_json(self, capsys):
+        report = self._make_report("READY", 100, True)
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            self.cli.main([])
+        out = capsys.readouterr().out
+        # format_report produces text, not JSON
+        assert out.startswith("─")
+
+    # --- --domain ---
+
+    def test_domain_filter_shows_only_that_domain(self, capsys, db_path):
+        _seed_factory(db_path)
+        r = assess_factory(db_path=db_path, factory_id="test")
+        with patch("scripts.run_director_check.assess_factory", return_value=r):
+            rc = self.cli.main(["--domain", "ois"])
+        out = capsys.readouterr().out
+        assert "ois" in out
+        # Other domains should not appear as domain headers
+        assert "factory_entity" not in out
+        assert "run_lifecycle" not in out
+
+    def test_domain_filter_json_output(self, capsys, db_path):
+        _seed_factory(db_path)
+        r = assess_factory(db_path=db_path, factory_id="test")
+        with patch("scripts.run_director_check.assess_factory", return_value=r):
+            self.cli.main(["--domain", "credentials", "--json"])
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["domain"]["domain"] == "credentials"
+        assert "readiness_level" in parsed
+
+    def test_invalid_domain_exits_1(self, capsys):
+        report = self._make_report("READY", 100, True)
+        with patch("scripts.run_director_check.assess_factory", return_value=report):
+            rc = self.cli.main(["--domain", "nonexistent_domain"])
+        assert rc == 1
+
+    def test_domain_exit_code_reflects_overall_level(self, db_path):
+        """--domain still uses overall readiness_level for exit code."""
+        _seed_blocking_signal(db_path)
+        r = assess_factory(db_path=db_path, factory_id="test")
+        with patch("scripts.run_director_check.assess_factory", return_value=r):
+            rc = self.cli.main(["--domain", "factory_entity"])
+        assert rc == 1  # BLOCKED overall even if factory_entity is healthy

@@ -904,3 +904,44 @@ CREATE TABLE IF NOT EXISTS run_state_transitions (
 
 CREATE INDEX IF NOT EXISTS idx_rst_run_id ON run_state_transitions(run_id);
 CREATE INDEX IF NOT EXISTS idx_rst_transitioned_at ON run_state_transitions(run_id, transitioned_at);
+
+-- ===========================================================================
+-- P3-04: Approval System
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- approvals
+-- One row per approval request. Immutable after creation except for the
+-- status/decided_* fields which are set once when the request is decided.
+-- approval_type:
+--   human_review        — operator reviews before publish (channel policy)
+--   publish_approval    — explicit approve-to-publish gate
+--   model_swap          — policy gate: changing model slug requires approval
+--   budget_increase     — policy gate: raising ceiling requires approval
+-- status: pending | approved | rejected | expired
+-- requested_by: user_id or "system:pipeline"
+-- decided_by:   user_id of the operator who approved/rejected
+-- evidence:     optional JSON blob — e.g. compliance_report excerpt
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id     TEXT NOT NULL PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES runs(run_id),
+    episode_id      TEXT NOT NULL,
+    approval_type   TEXT NOT NULL
+                        CHECK(approval_type IN
+                            ('human_review','publish_approval',
+                             'model_swap','budget_increase')),
+    requested_by    TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','approved','rejected','expired')),
+    requested_at    TEXT NOT NULL,
+    decided_by      TEXT,
+    decided_at      TEXT,
+    notes           TEXT,
+    evidence        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(run_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_status  ON approvals(status);
+CREATE INDEX IF NOT EXISTS idx_approvals_type    ON approvals(approval_type, status);

@@ -82,7 +82,7 @@ from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_block
 from hypogeum.post_run_intelligence import run_post_run_intelligence
 from hypogeum.production_metadata import write_analytics_pending, write_production_metadata
 from hypogeum.logger import get_logger
-from hypogeum.run_registry import complete_run, fail_run, register_run
+from hypogeum.run_registry import complete_run, fail_run, register_run, transition_run_state
 from hypogeum.startup import StartupReport, run_startup_checks
 
 
@@ -783,6 +783,73 @@ def run_pipeline(
                 failures=compliance_report.get("failures", []),
             )
             raise ComplianceRejectedError(episode_id=episode_id, report=compliance_report)
+
+        # -----------------------------------------------------------------------
+        # 11b. Approval gate — human review required by compliance report
+        # When compliance_report contains "human_review_required": True, the
+        # pipeline pauses here and waits for operator approval. The run is
+        # transitioned to awaiting_review via RLG. The operator uses
+        # scripts/approve_run.py to approve; that call transitions the run to
+        # awaiting_publish_approval and resumes from publishing on the next run.
+        # -----------------------------------------------------------------------
+        if compliance_report.get("human_review_required"):
+            from hypogeum.approvals import create_approval_request as _create_approval_req
+            try:
+                approval_id = _create_approval_req(
+                    run_id=run_id,
+                    episode_id=episode_id,
+                    approval_type="human_review",
+                    requested_by="system:pipeline",
+                    evidence={"compliance_verdict": compliance_report.get("verdict")},
+                    db_path=db_path,
+                )
+            except Exception as _ae:
+                approval_id = None
+                log.warn("pipeline_approval_request_failed", error=str(_ae)[:200])
+
+            try:
+                transition_run_state(
+                    run_id=run_id,
+                    to_state="awaiting_review",
+                    triggered_by="system:pipeline",
+                    trigger_source="pipeline",
+                    reason="human_review_required by compliance gate",
+                    db_path=db_path,
+                    episode_id=episode_id,
+                )
+            except Exception as _te:
+                log.warn("pipeline_rlg_transition_failed", to_state="awaiting_review",
+                         error=str(_te)[:200])
+
+            log.info(
+                "pipeline_awaiting_human_review",
+                approval_id=approval_id,
+                run_id=run_id,
+                episode_id=episode_id,
+            )
+            try:
+                clear_run_context()
+            except Exception:
+                pass
+
+            return PipelineResult(
+                episode_id=episode_id,
+                status="awaiting_review",
+                startup_report=startup_report,
+                run_id=run_id,
+                validation_scorecard=validation_scorecard,
+                topic_brief=topic_brief,
+                research_package=research_package,
+                narrative_package=narrative_package,
+                script_package=script_package,
+                finance_authorization=finance_authorization,
+                visual_package=visual_package,
+                thumbnail_package=thumbnail_package,
+                narration_package=narration_package,
+                final_render_package=final_render_package,
+                qa_approval_report=qa_approval_report,
+                compliance_report=compliance_report,
+            )
 
         # -----------------------------------------------------------------------
         # 12. Publishing Agent

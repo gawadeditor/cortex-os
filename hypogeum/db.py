@@ -1864,3 +1864,107 @@ def get_run_state_transitions(
         """,
         (run_id,),
     ).fetchall()
+
+
+# ===========================================================================
+# P3-04: Approval System helpers
+# ===========================================================================
+
+def insert_approval(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    run_id: str,
+    episode_id: str,
+    approval_type: str,
+    requested_by: str,
+    requested_at: str,
+    evidence: Optional[dict] = None,
+) -> None:
+    """Insert a new approval request with status='pending'."""
+    conn.execute(
+        """
+        INSERT INTO approvals
+            (approval_id, run_id, episode_id, approval_type, requested_by,
+             status, requested_at, evidence)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (
+            approval_id, run_id, episode_id, approval_type, requested_by,
+            requested_at,
+            json.dumps(evidence) if evidence is not None else None,
+        ),
+    )
+
+
+def get_approval_by_id(
+    conn: sqlite3.Connection,
+    approval_id: str,
+) -> Optional[sqlite3.Row]:
+    """Return the approvals row for approval_id, or None."""
+    return conn.execute(
+        "SELECT * FROM approvals WHERE approval_id = ?",
+        (approval_id,),
+    ).fetchone()
+
+
+def update_approval_decision(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    status: str,
+    decided_by: str,
+    decided_at: str,
+    notes: Optional[str] = None,
+) -> None:
+    """Set the decision fields on an approval row (called once)."""
+    conn.execute(
+        """
+        UPDATE approvals
+        SET status = ?, decided_by = ?, decided_at = ?, notes = ?
+        WHERE approval_id = ?
+        """,
+        (status, decided_by, decided_at, notes, approval_id),
+    )
+
+
+def list_approvals(
+    conn: sqlite3.Connection,
+    run_id: Optional[str] = None,
+    status: Optional[str] = None,
+    approval_type: Optional[str] = None,
+) -> list:
+    """Return approvals filtered by optional run_id / status / type, newest first."""
+    clauses, params = [], []
+    if run_id is not None:
+        clauses.append("run_id = ?")
+        params.append(run_id)
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if approval_type is not None:
+        clauses.append("approval_type = ?")
+        params.append(approval_type)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return conn.execute(
+        f"SELECT * FROM approvals {where} ORDER BY requested_at DESC",
+        params,
+    ).fetchall()
+
+
+def expire_old_approvals(
+    conn: sqlite3.Connection,
+    cutoff_at: str,
+) -> int:
+    """
+    Set status='expired' on all pending approvals older than cutoff_at.
+
+    Returns the number of rows updated.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE approvals
+        SET status = 'expired'
+        WHERE status = 'pending' AND requested_at < ?
+        """,
+        (cutoff_at,),
+    )
+    return cursor.rowcount

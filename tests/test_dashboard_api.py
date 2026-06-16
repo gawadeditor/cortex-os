@@ -53,6 +53,7 @@ from hypogeum.dashboard_api import (
     get_permission,
     list_permissions,
     # Section functions
+    get_active_signals,
     get_agent_health,
     get_archive_summary,
     get_audit_summary,
@@ -65,6 +66,7 @@ from hypogeum.dashboard_api import (
     get_provider_health,
     get_recall_summary,
     get_run_health,
+    get_schedules,
     # Formatter
     format_factory_state,
     # Internals
@@ -207,6 +209,45 @@ def populated_db(db_path):
             (str(uuid.uuid4()), "ep1", "video_clip", decision, "2026-01-01T00:00:00"),
         )
 
+    # Signal records (one blocking, one non-blocking, one resolved)
+    # message is stored inside full_record JSON; created_at maps to ingested_at
+    import json as _json
+    conn.executemany(
+        """INSERT INTO signal_records
+               (signal_id, episode_id, run_id, ingested_at, window_days,
+                data_quality, metadata_version,
+                signal_type, severity, full_record,
+                source_system, blocking, lifecycle_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            ("sig_block", "sys", "r_sys", "2026-01-04T00:00:00", 0,
+             "ok", "v1",
+             "budget_exhausted", "CRITICAL",
+             _json.dumps({"message": "Budget ceiling hit"}),
+             "finance_agent", 1, "open"),
+            ("sig_info", "sys", "r_sys", "2026-01-04T00:01:00", 0,
+             "ok", "v1",
+             "run_completed", "INFO",
+             _json.dumps({"message": "Run finished"}),
+             "pipeline", 0, "open"),
+            ("sig_resolved", "sys", "r_sys", "2026-01-01T00:00:00", 0,
+             "ok", "v1",
+             "run_failed", "WARNING",
+             _json.dumps({"message": "Old failure"}),
+             "pipeline", 0, "resolved"),
+        ],
+    )
+
+    # Schedule record (uses actual db.py schedules schema)
+    conn.execute("""
+        INSERT INTO schedules
+            (schedule_id, scope, channel_id, cadence, status,
+             max_runs_per_day, created_at, updated_at)
+        VALUES
+            ('sched_01', 'channel', 'test_ch', 'weekly', 'active',
+             1, '2026-01-01T00:00:00', '2026-01-01T00:00:00')
+    """)
+
     conn.commit()
     conn.close()
 
@@ -236,6 +277,12 @@ class TestDataContracts:
         rh = RunHealthSummary(10, 8, 2, 0, 0.8, "2026-01-01")
         assert rh.success_rate == 0.8
         assert rh.running_count == 0
+        # RLG intermediate counts default to 0
+        assert rh.queued_count == 0
+        assert rh.paused_count == 0
+        assert rh.awaiting_review_count == 0
+        assert rh.awaiting_publish_approval_count == 0
+        assert rh.publishing_count == 0
 
     def test_agent_health_fields(self):
         ah = AgentHealthSummary("research", 10, 8, 2, 0, 0.8, 1200.0, 0.01)
@@ -454,6 +501,51 @@ class TestRunHealth:
         bad.mkdir()
         rh = get_run_health(db_path=bad)
         assert rh.total_runs == 0
+
+    def test_completed_status_counted_as_complete(self, db_path):
+        """RLG terminal state 'completed' must be counted in complete_count."""
+        conn = get_connection(db_path)
+        conn.execute(
+            "INSERT INTO runs (run_id, episode_id, started_at, status) "
+            "VALUES ('rlg_r1','rlg_ep1','2026-06-01T00:00:00','completed')"
+        )
+        conn.commit()
+        conn.close()
+        rh = get_run_health(db_path=db_path)
+        assert rh.complete_count == 1
+
+    def test_legacy_complete_and_rlg_completed_both_counted(self, db_path):
+        conn = get_connection(db_path)
+        conn.executemany(
+            "INSERT INTO runs (run_id, episode_id, started_at, status) VALUES (?,?,?,?)",
+            [("r_old","ep_old","2026-01-01T00:00:00","complete"),
+             ("r_new","ep_new","2026-01-02T00:00:00","completed")],
+        )
+        conn.commit()
+        conn.close()
+        rh = get_run_health(db_path=db_path)
+        assert rh.complete_count == 2
+
+    def test_rlg_intermediate_states_counted(self, db_path):
+        conn = get_connection(db_path)
+        conn.executemany(
+            "INSERT INTO runs (run_id, episode_id, started_at, status) VALUES (?,?,?,?)",
+            [
+                ("rq", "eq", "2026-01-01T00:00:00", "queued"),
+                ("rp", "ep", "2026-01-01T00:00:00", "paused"),
+                ("ra", "ea", "2026-01-01T00:00:00", "awaiting_review"),
+                ("rb", "eb", "2026-01-01T00:00:00", "awaiting_publish_approval"),
+                ("rpu","epu","2026-01-01T00:00:00", "publishing"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        rh = get_run_health(db_path=db_path)
+        assert rh.queued_count == 1
+        assert rh.paused_count == 1
+        assert rh.awaiting_review_count == 1
+        assert rh.awaiting_publish_approval_count == 1
+        assert rh.publishing_count == 1
 
 
 # ===========================================================================
@@ -896,6 +988,100 @@ class TestOverallHealth:
     def test_exactly_80_is_healthy(self):
         assert _compute_overall_health(self._rh(10, 0.8), self._au()) == "healthy"
 
+    def test_degraded_when_blocking_signal(self):
+        signals = [{"blocking": 1, "signal_type": "budget_exhausted"}]
+        assert _compute_overall_health(self._rh(10, 0.9), self._au(), signals) == "degraded"
+
+    def test_blocking_signal_overrides_unknown(self):
+        """Blocking signal makes factory degraded even with zero run history."""
+        signals = [{"blocking": 1, "signal_type": "credential_failure"}]
+        assert _compute_overall_health(self._rh(0, 0.0), self._au(), signals) == "degraded"
+
+    def test_non_blocking_signal_does_not_degrade(self):
+        signals = [{"blocking": 0, "signal_type": "run_completed"}]
+        assert _compute_overall_health(self._rh(10, 0.9), self._au(), signals) == "healthy"
+
+    def test_empty_signal_list_does_not_affect_health(self):
+        assert _compute_overall_health(self._rh(10, 0.9), self._au(), []) == "healthy"
+
+    def test_none_signals_does_not_affect_health(self):
+        assert _compute_overall_health(self._rh(10, 0.9), self._au(), None) == "healthy"
+
+
+# ===========================================================================
+# TestGetActiveSignals
+# ===========================================================================
+
+class TestGetActiveSignals:
+    def test_empty_db_returns_empty(self, db_path):
+        assert get_active_signals(db_path=db_path) == []
+
+    def test_returns_open_signals(self, populated_db):
+        signals = get_active_signals(db_path=populated_db)
+        assert len(signals) == 2  # sig_block + sig_info; sig_resolved excluded
+
+    def test_resolved_signal_excluded(self, populated_db):
+        signals = get_active_signals(db_path=populated_db)
+        types = {s["signal_type"] for s in signals}
+        assert "run_failed" not in types  # sig_resolved is lifecycle_status='resolved'
+
+    def test_blocking_signal_present(self, populated_db):
+        signals = get_active_signals(db_path=populated_db)
+        blocking = [s for s in signals if s.get("blocking")]
+        assert len(blocking) == 1
+        assert blocking[0]["signal_type"] == "budget_exhausted"
+
+    def test_returns_list_of_dicts(self, populated_db):
+        signals = get_active_signals(db_path=populated_db)
+        assert all(isinstance(s, dict) for s in signals)
+
+    def test_signal_has_required_keys(self, populated_db):
+        signals = get_active_signals(db_path=populated_db)
+        required = {"signal_id", "signal_type", "severity", "message", "blocking"}
+        for s in signals:
+            assert required.issubset(s.keys())
+
+    def test_bad_db_returns_empty(self, tmp_path):
+        bad = tmp_path / "bad"
+        bad.mkdir()
+        assert get_active_signals(db_path=bad) == []
+
+
+# ===========================================================================
+# TestGetSchedules
+# ===========================================================================
+
+class TestGetSchedules:
+    def test_empty_db_returns_empty(self, db_path):
+        assert get_schedules(db_path=db_path) == []
+
+    def test_returns_schedule_rows(self, populated_db):
+        scheds = get_schedules(db_path=populated_db)
+        assert len(scheds) == 1
+
+    def test_returns_list_of_dicts(self, populated_db):
+        scheds = get_schedules(db_path=populated_db)
+        assert all(isinstance(s, dict) for s in scheds)
+
+    def test_schedule_has_required_keys(self, populated_db):
+        scheds = get_schedules(db_path=populated_db)
+        required = {"schedule_id", "cadence", "status"}
+        for s in scheds:
+            assert required.issubset(s.keys())
+
+    def test_schedule_channel_id_correct(self, populated_db):
+        scheds = get_schedules(db_path=populated_db)
+        assert scheds[0]["channel_id"] == "test_ch"
+
+    def test_schedule_cadence_correct(self, populated_db):
+        scheds = get_schedules(db_path=populated_db)
+        assert scheds[0]["cadence"] == "weekly"
+
+    def test_bad_db_returns_empty(self, tmp_path):
+        bad = tmp_path / "bad"
+        bad.mkdir()
+        assert get_schedules(db_path=bad) == []
+
 
 # ===========================================================================
 # TestGetFactoryState
@@ -974,6 +1160,38 @@ class TestGetFactoryState:
         state = get_factory_state(db_path=db_path)
         assert state.metadata_version == "v1"
 
+    def test_factory_name_is_string(self, db_path):
+        state = get_factory_state(db_path=db_path)
+        assert isinstance(state.factory_name, str)
+
+    def test_factory_status_is_string(self, db_path):
+        state = get_factory_state(db_path=db_path)
+        assert isinstance(state.factory_status, str)
+
+    def test_active_signals_is_list(self, db_path):
+        state = get_factory_state(db_path=db_path)
+        assert isinstance(state.active_signals, list)
+
+    def test_schedules_is_list(self, db_path):
+        state = get_factory_state(db_path=db_path)
+        assert isinstance(state.schedules, list)
+
+    def test_pending_approvals_is_list(self, db_path):
+        state = get_factory_state(db_path=db_path)
+        assert isinstance(state.pending_approvals, list)
+
+    def test_blocking_signal_degrades_health(self, populated_db):
+        state = get_factory_state(db_path=populated_db)
+        assert state.overall_health == "degraded"
+
+    def test_active_signals_populated(self, populated_db):
+        state = get_factory_state(db_path=populated_db)
+        assert len(state.active_signals) == 2
+
+    def test_schedules_populated(self, populated_db):
+        state = get_factory_state(db_path=populated_db)
+        assert len(state.schedules) == 1
+
 
 # ===========================================================================
 # TestFormatFactoryState
@@ -1039,6 +1257,30 @@ class TestFormatFactoryState:
         result = format_factory_state(state)
         assert isinstance(result, str)
 
+    def test_contains_pending_approvals_section(self, state):
+        result = format_factory_state(state)
+        assert "Pending Approvals" in result
+
+    def test_contains_active_signals_section(self, state):
+        result = format_factory_state(state)
+        assert "Active OIS Signals" in result
+
+    def test_contains_schedules_section(self, state):
+        result = format_factory_state(state)
+        assert "Schedules" in result
+
+    def test_blocking_signal_shown_in_formatter(self, populated_db):
+        state = get_factory_state(db_path=populated_db)
+        result = format_factory_state(state)
+        assert "BLOCKING" in result
+        assert "budget_exhausted" in result
+
+    def test_schedule_shown_in_formatter(self, populated_db):
+        state = get_factory_state(db_path=populated_db)
+        result = format_factory_state(state)
+        assert "weekly" in result
+        assert "test_ch" in result
+
 
 # ===========================================================================
 # TestNonBlocking
@@ -1093,6 +1335,12 @@ class TestNonBlocking:
     def test_get_factory_state_bad_db(self, tmp_path):
         state = get_factory_state(db_path=self._bad_db(tmp_path))
         assert isinstance(state, FactoryState)
+
+    def test_get_active_signals_bad_db(self, tmp_path):
+        assert get_active_signals(db_path=self._bad_db(tmp_path)) == []
+
+    def test_get_schedules_bad_db(self, tmp_path):
+        assert get_schedules(db_path=self._bad_db(tmp_path)) == []
 
 
 # ===========================================================================
@@ -1153,6 +1401,12 @@ class TestNoNetworkCalls:
         state = get_factory_state.__wrapped__(db_path) if hasattr(get_factory_state, "__wrapped__") else get_factory_state(db_path=db_path)
         format_factory_state(state)
 
+    def test_get_active_signals_no_network(self, db_path):
+        get_active_signals(db_path=db_path)
+
+    def test_get_schedules_no_network(self, db_path):
+        get_schedules(db_path=db_path)
+
 
 # ===========================================================================
 # TestNoProductionSideEffects
@@ -1199,6 +1453,8 @@ class TestNoProductionSideEffects:
         get_learning_summary(db_path=populated_db)
         get_cost_summary(db_path=populated_db)
         get_audit_summary(db_path=populated_db)
+        get_active_signals(db_path=populated_db)
+        get_schedules(db_path=populated_db)
         get_notifications(db_path=populated_db)
         state = get_factory_state(db_path=populated_db)
         format_factory_state(state)

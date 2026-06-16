@@ -38,6 +38,12 @@ Public API:
     # Text formatter
     format_factory_state(state) -> str
 
+    # OIS signals
+    get_active_signals(db_path=None) -> list[dict]
+
+    # Schedules
+    get_schedules(db_path=None) -> list[dict]
+
 Data contracts (dataclasses):
     ChannelSummary, RunHealthSummary, AgentHealthSummary, ModelUsageSummary,
     ProviderHealthSummary, ArchiveSummary, RecallSummary, LearningSummary,
@@ -108,6 +114,12 @@ class RunHealthSummary:
     running_count:  int
     success_rate:   float          # complete / (complete + failed); excludes running
     last_run_at:    Optional[str]
+    # RLG intermediate states (default 0 for pre-RLG DBs)
+    queued_count:                    int = 0
+    paused_count:                    int = 0
+    awaiting_review_count:           int = 0
+    awaiting_publish_approval_count: int = 0
+    publishing_count:                int = 0
 
 
 @dataclass
@@ -240,6 +252,11 @@ class FactoryState:
     costs:           CostSummary
     audit:           AuditSummary
     notifications:    list
+    # Fields with defaults — safe for callers that construct positionally
+    factory_name:     str  = ""
+    factory_status:   str  = "active"
+    active_signals:   list = field(default_factory=list)
+    schedules:        list = field(default_factory=list)
     pending_approvals: list = field(default_factory=list)
     metadata_version: str = METADATA_VERSION
 
@@ -398,11 +415,19 @@ def get_run_health(db_path: Optional[Path] = None) -> RunHealthSummary:
         try:
             row = conn.execute("""
                 SELECT
-                    COUNT(*)                                         AS total,
-                    SUM(CASE WHEN status='complete' THEN 1 ELSE 0 END) AS complete,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status IN ('complete','completed')
+                                  THEN 1 ELSE 0 END)              AS complete,
                     SUM(CASE WHEN status='failed'   THEN 1 ELSE 0 END) AS failed,
                     SUM(CASE WHEN status='running'  THEN 1 ELSE 0 END) AS running,
-                    MAX(started_at)                                  AS last_run_at
+                    SUM(CASE WHEN status='queued'   THEN 1 ELSE 0 END) AS queued,
+                    SUM(CASE WHEN status='paused'   THEN 1 ELSE 0 END) AS paused,
+                    SUM(CASE WHEN status='awaiting_review'
+                                  THEN 1 ELSE 0 END)              AS awaiting_review,
+                    SUM(CASE WHEN status='awaiting_publish_approval'
+                                  THEN 1 ELSE 0 END)              AS awaiting_publish_approval,
+                    SUM(CASE WHEN status='publishing' THEN 1 ELSE 0 END) AS publishing,
+                    MAX(started_at)                                AS last_run_at
                 FROM runs
             """).fetchone()
         finally:
@@ -415,12 +440,17 @@ def get_run_health(db_path: Optional[Path] = None) -> RunHealthSummary:
         failed   = row["failed"]   or 0
         running  = row["running"]  or 0
         return RunHealthSummary(
-            total_runs     = row["total"],
-            complete_count = complete,
-            failed_count   = failed,
-            running_count  = running,
-            success_rate   = _safe_rate(complete, complete + failed),
-            last_run_at    = row["last_run_at"],
+            total_runs                    = row["total"],
+            complete_count                = complete,
+            failed_count                  = failed,
+            running_count                 = running,
+            success_rate                  = _safe_rate(complete, complete + failed),
+            last_run_at                   = row["last_run_at"],
+            queued_count                  = row["queued"]                    or 0,
+            paused_count                  = row["paused"]                    or 0,
+            awaiting_review_count         = row["awaiting_review"]           or 0,
+            awaiting_publish_approval_count = row["awaiting_publish_approval"] or 0,
+            publishing_count              = row["publishing"]                or 0,
         )
     except Exception:
         return _empty
@@ -881,13 +911,87 @@ def _missing_profiles(ch: ChannelSummary) -> str:
 
 
 # ===========================================================================
+# Active OIS Signals
+# ===========================================================================
+
+def get_active_signals(db_path: Optional[Path] = None) -> list:
+    """
+    Return open (unresolved) signal records from signal_records.
+
+    Each entry is a plain dict with keys: signal_id, signal_type, severity,
+    message, channel_id, source_system, blocking, lifecycle_status, created_at.
+    Non-blocking: returns [] on any error.
+    """
+    try:
+        import json as _json
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            rows = conn.execute("""
+                SELECT signal_id, signal_type, severity, full_record, channel_id,
+                       source_system, blocking, lifecycle_status, ingested_at
+                FROM signal_records
+                WHERE lifecycle_status = 'open'
+                ORDER BY ingested_at DESC
+            """).fetchall()
+        finally:
+            conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                full = _json.loads(d.pop("full_record") or "{}")
+                d["message"] = full.get("message", "")
+            except Exception:
+                d.pop("full_record", None)
+                d["message"] = ""
+            d["created_at"] = d.pop("ingested_at", None)
+            result.append(d)
+        return result
+    except Exception:
+        return []
+
+
+# ===========================================================================
+# Schedules
+# ===========================================================================
+
+def get_schedules(db_path: Optional[Path] = None) -> list:
+    """
+    Return schedule rows from the schedules table.
+
+    Each entry is a plain dict with keys: schedule_id, channel_id, workflow,
+    cadence, day_of_week, time_of_day, timezone, status, next_run_at, last_run_at.
+    Non-blocking: returns [] on any error.
+    """
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            rows = conn.execute("""
+                SELECT schedule_id, scope, channel_id, cadence,
+                       status, next_run_at, last_run_at, label
+                FROM schedules
+                ORDER BY channel_id, cadence
+            """).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+# ===========================================================================
 # Overall Health
 # ===========================================================================
 
 def _compute_overall_health(
-    run_health: RunHealthSummary,
-    audit:      AuditSummary,
+    run_health:     RunHealthSummary,
+    audit:          AuditSummary,
+    active_signals: Optional[list] = None,
 ) -> str:
+    # Active blocking OIS signals always degrade the factory regardless of run history
+    if active_signals:
+        if any(s.get("blocking") for s in active_signals):
+            return "degraded"
     if run_health.total_runs == 0:
         return "unknown"
     if run_health.success_rate < 0.5:
@@ -900,6 +1004,18 @@ def _compute_overall_health(
 # ===========================================================================
 # Factory State (aggregated)
 # ===========================================================================
+
+def _get_factory_identity(factory_id: str, db_path: Optional[Path]) -> tuple:
+    """Return (factory_name, factory_status) from the factories table. Never raises."""
+    try:
+        from hypogeum.factory_entity import get_factory
+        rec = get_factory(factory_id=factory_id, db_path=db_path)
+        if rec is not None:
+            return rec.factory_name, rec.status
+    except Exception:
+        pass
+    return factory_id, "active"
+
 
 def _get_pending_approvals(db_path: Optional[Path]) -> list:
     """Return pending approval records for the factory state snapshot."""
@@ -929,6 +1045,7 @@ def get_factory_state(
     """
     checked_at = _now_iso()
 
+    factory_name, factory_status = _get_factory_identity(factory_id, db_path)
     run_health      = get_run_health(db_path)
     channels        = get_channel_summaries(db_path)
     agent_health    = get_agent_health(db_path)
@@ -939,6 +1056,8 @@ def get_factory_state(
     learning        = get_learning_summary(db_path)
     costs           = get_cost_summary(db_path)
     audit           = get_audit_summary(db_path)
+    active_signals  = get_active_signals(db_path)
+    schedules       = get_schedules(db_path)
     notifications   = get_notifications(
         db_path=db_path,
         run_health=run_health,
@@ -948,24 +1067,28 @@ def get_factory_state(
         channels=channels,
     )
 
-    overall_health = _compute_overall_health(run_health, audit)
+    overall_health = _compute_overall_health(run_health, audit, active_signals)
 
     return FactoryState(
-        factory_id      = factory_id,
-        schema_version  = SCHEMA_VERSION,
-        checked_at      = checked_at,
-        overall_health  = overall_health,
-        run_health      = run_health,
-        channels        = channels,
-        agent_health    = agent_health,
-        model_usage     = model_usage,
-        provider_health = provider_health,
-        archive         = archive,
-        recall          = recall,
-        learning        = learning,
-        costs           = costs,
-        audit           = audit,
-        notifications   = notifications,
+        factory_id        = factory_id,
+        schema_version    = SCHEMA_VERSION,
+        checked_at        = checked_at,
+        overall_health    = overall_health,
+        run_health        = run_health,
+        channels          = channels,
+        agent_health      = agent_health,
+        model_usage       = model_usage,
+        provider_health   = provider_health,
+        archive           = archive,
+        recall            = recall,
+        learning          = learning,
+        costs             = costs,
+        audit             = audit,
+        notifications     = notifications,
+        factory_name      = factory_name,
+        factory_status    = factory_status,
+        active_signals    = active_signals,
+        schedules         = schedules,
         pending_approvals = _get_pending_approvals(db_path),
     )
 
@@ -981,7 +1104,9 @@ def format_factory_state(state: FactoryState) -> str:
     No network calls. No DB access. Pure formatting.
     """
     lines = [
-        f"Factory State — {state.factory_id}",
+        f"Factory State — {state.factory_name or state.factory_id}",
+        f"  Factory ID:   {state.factory_id}",
+        f"  Status:       {state.factory_status}",
         f"  Checked at:   {state.checked_at}",
         f"  Schema:       {state.schema_version}",
         f"  Health:       {state.overall_health.upper()}",
@@ -1066,5 +1191,38 @@ def format_factory_state(state: FactoryState) -> str:
             lines.append(f"  [{n.level.upper():8s}] [{n.category}] {n.message}")
     else:
         lines += ["", "Notifications: none"]
+
+    if state.pending_approvals:
+        lines += ["", f"Pending Approvals ({len(state.pending_approvals)})"]
+        for a in state.pending_approvals:
+            run_short = getattr(a, "run_id", "?")[:12]
+            lines.append(
+                f"  [{getattr(a,'approval_type','?'):20s}] "
+                f"run={run_short}... ep={getattr(a,'episode_id','?')}"
+            )
+    else:
+        lines += ["", "Pending Approvals: none"]
+
+    if state.active_signals:
+        lines += ["", f"Active OIS Signals ({len(state.active_signals)})"]
+        for s in state.active_signals:
+            blocking = " [BLOCKING]" if s.get("blocking") else ""
+            lines.append(
+                f"  [{s.get('severity','?'):8s}] {s.get('signal_type','?')}"
+                f"{blocking}: {str(s.get('message',''))[:60]}"
+            )
+    else:
+        lines += ["", "Active OIS Signals: none"]
+
+    if state.schedules:
+        lines += ["", f"Schedules ({len(state.schedules)})"]
+        for sc in state.schedules:
+            ch = sc.get("channel_id") or sc.get("scope", "?")
+            lines.append(
+                f"  [{sc.get('status','?'):8s}] {ch:20s} "
+                f"{sc.get('cadence','?'):10s} next={sc.get('next_run_at') or 'unset'}"
+            )
+    else:
+        lines += ["", "Schedules: none"]
 
     return "\n".join(lines)

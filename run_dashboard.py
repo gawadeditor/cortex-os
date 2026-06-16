@@ -39,13 +39,16 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json as _json
 import sys
+import time
 from pathlib import Path
+from typing import Iterator
 
 _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
 
 from hypogeum.dashboard_api import get_factory_state
 from hypogeum.factory_director import assess_factory
@@ -68,6 +71,14 @@ from hypogeum.dashboard_control import (
     action_reject,
     action_resolve_signal,
     enqueue_topic,
+)
+from hypogeum.dashboard_live import (
+    get_active_runs,
+    get_run_live,
+    get_queue_snapshot,
+    get_live_metrics,
+    get_recent_failures,
+    tail_log,
 )
 from hypogeum.dashboard_runs import (
     list_runs,
@@ -444,6 +455,148 @@ def signals_page():
 def preflight_page():
     result = get_preflight_status(db_path=_db_path())
     return render_template("preflight.html", preflight=result)
+
+
+# ===========================================================================
+# Phase D — Live Operations (JSON API)
+# ===========================================================================
+
+@app.route("/api/live", methods=["GET"])
+def api_live():
+    return jsonify({
+        "active_runs":   get_active_runs(db_path=_db_path()),
+        "queue":         get_queue_snapshot(db_path=_db_path()),
+        "metrics":       get_live_metrics(db_path=_db_path()),
+        "failures":      get_recent_failures(db_path=_db_path(), limit=5),
+    })
+
+
+@app.route("/api/run/<run_id>/live", methods=["GET"])
+def api_run_live(run_id):
+    data = get_run_live(run_id, db_path=_db_path())
+    if data is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(data)
+
+
+@app.route("/api/queue", methods=["GET"])
+def api_queue():
+    return jsonify(get_queue_snapshot(db_path=_db_path()))
+
+
+@app.route("/api/failures", methods=["GET"])
+def api_failures():
+    limit = min(int(request.args.get("limit", 20)), 100)
+    return jsonify(get_recent_failures(db_path=_db_path(), limit=limit))
+
+
+@app.route("/api/run/<run_id>/logs", methods=["GET"])
+def api_run_logs(run_id):
+    """Last N log lines for a run (JSON array, no streaming)."""
+    n = min(int(request.args.get("n", 100)), 500)
+    detail = get_run_detail(run_id, db_path=_db_path())
+    episode_id = detail["run"]["episode_id"] if detail else None
+    lines = tail_log(episode_id=episode_id, n=n)
+    return jsonify(lines)
+
+
+@app.route("/api/run/<run_id>/log-stream")
+def api_run_log_stream(run_id):
+    """
+    Server-Sent Events: streams log lines for a running episode then
+    polls for new lines every 3 s until max_ticks are consumed.
+
+    max_ticks can be set low via ?max_ticks=N for tests.
+    """
+    detail = get_run_detail(run_id, db_path=_db_path())
+    episode_id = detail["run"]["episode_id"] if detail else None
+
+    from pathlib import Path as _Path
+    _PROJECT_ROOT2 = _Path(__file__).resolve().parent
+    log_path = _PROJECT_ROOT2 / ".hypogeum-assets" / "pipeline.log"
+
+    max_ticks = int(request.args.get("max_ticks", 120))  # default ~6 min
+
+    def _generate() -> Iterator[str]:
+        # Emit historical lines first
+        for entry in tail_log(episode_id=episode_id, n=80, log_path=log_path):
+            yield f"data: {_json.dumps(entry)}\n\n"
+
+        last_pos = log_path.stat().st_size if log_path.exists() else 0
+        for _ in range(max_ticks):
+            time.sleep(3)
+            if log_path.exists():
+                with log_path.open("rb") as fh:
+                    fh.seek(last_pos)
+                    raw = fh.read().decode("utf-8", errors="replace")
+                    last_pos = fh.tell() if last_pos < fh.seek(0, 2) else last_pos
+                for line in raw.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = _json.loads(line)
+                        if episode_id and entry.get("episode_id") != episode_id:
+                            continue
+                        yield f"data: {_json.dumps(entry)}\n\n"
+                    except Exception:
+                        pass
+
+            # Check if run finished — if so, close stream
+            live = get_run_live(run_id, db_path=_db_path())
+            if live and live["run"].get("status") not in ("running",):
+                yield f"data: {_json.dumps({'_stream_end': True, 'status': live['run'].get('status')})}\n\n"
+                return
+
+        yield f"data: {_json.dumps({'_stream_end': True, 'reason': 'timeout'})}\n\n"
+
+    return Response(
+        _generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection":       "keep-alive",
+        },
+    )
+
+
+# ===========================================================================
+# Phase D — Live Operations (HTML)
+# ===========================================================================
+
+@app.route("/live")
+def live_page():
+    metrics  = get_live_metrics(db_path=_db_path())
+    active   = get_active_runs(db_path=_db_path())
+    failures = get_recent_failures(db_path=_db_path(), limit=5)
+    queue    = get_queue_snapshot(db_path=_db_path())
+    return render_template("live.html",
+                           metrics=metrics, active=active,
+                           failures=failures, queue=queue)
+
+
+@app.route("/run/<run_id>/live")
+def run_live_page(run_id):
+    data = get_run_live(run_id, db_path=_db_path())
+    if data is None:
+        return render_template("not_found.html", kind="Run", id=run_id), 404
+    return render_template("run_live.html", d=data, run_id=run_id,
+                           fmt_duration=fmt_duration)
+
+
+@app.route("/queue")
+def queue_page():
+    queue    = get_queue_snapshot(db_path=_db_path())
+    metrics  = get_live_metrics(db_path=_db_path())
+    return render_template("queue.html", queue=queue, metrics=metrics)
+
+
+@app.route("/failures")
+def failures_page():
+    limit    = min(int(request.args.get("limit", 20)), 100)
+    failures = get_recent_failures(db_path=_db_path(), limit=limit)
+    return render_template("failures.html", failures=failures)
 
 
 # ===========================================================================

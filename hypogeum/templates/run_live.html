@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live · {{ d.run.run_id[:12] }} — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* Stage progress */
+    .stage-list { list-style: none; }
+    .stage-item { display: flex; gap: 12px; padding: 8px 0;
+                  border-bottom: 1px solid var(--border); align-items: flex-start; }
+    .stage-item:last-child { border-bottom: none; }
+    .stage-icon { width: 22px; flex-shrink: 0; text-align: center; font-size: 14px; }
+    .stage-body { flex: 1; min-width: 0; }
+    .stage-name { font-weight: 500; }
+    .stage-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .stage-err  { font-size: 12px; color: var(--red); font-family: monospace;
+                  margin-top: 3px; word-break: break-all; }
+    .stage-active { animation: bg-pulse 2s ease-in-out infinite; border-radius: 4px; padding: 4px 6px; }
+    @keyframes bg-pulse {
+      0%, 100% { background: transparent; }
+      50%       { background: rgba(88,166,255,.06); }
+    }
+
+    /* Metric bar */
+    .live-bar { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: var(--gap);
+                background: var(--surface); border: 1px solid var(--border);
+                border-radius: var(--radius); padding: 12px 16px; }
+    .live-stat { }
+    .live-stat-val { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .live-stat-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: .05em; }
+
+    /* Log pane */
+    .log-pane { background: #0a0d12; border: 1px solid var(--border); border-radius: var(--radius);
+                padding: 12px; height: 320px; overflow-y: auto; font-family: monospace;
+                font-size: 12px; line-height: 1.5; }
+    .log-line   { margin-bottom: 2px; white-space: pre-wrap; word-break: break-all; }
+    .log-info   { color: var(--muted); }
+    .log-warn   { color: var(--yellow); }
+    .log-error  { color: var(--red); }
+    .log-ts     { color: #444d56; margin-right: 8px; }
+    .log-agent  { color: var(--blue); margin-right: 6px; }
+    .log-event  { color: var(--text); }
+
+    /* Status badge (live update) */
+    #run-status-badge { transition: background .3s; }
+
+    /* Pulse indicator */
+    .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                background: var(--green); margin-right: 6px;
+                animation: pulse 1.2s ease-in-out infinite; }
+    .done-dot { background: var(--muted); animation: none; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.2; } }
+
+    /* Grid */
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+    @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>
+    <span class="live-dot" id="live-dot"></span>
+    Run <code style="font-size:16px;">{{ d.run.run_id[:12] }}…</code>
+  </h1>
+  <span id="run-status-badge" class="badge badge-{{ d.run.status }}">{{ d.run.status }}</span>
+  <span class="page-meta" id="last-updated">Polling every 3 s</span>
+  <div style="margin-left:auto; display:flex; gap:8px;">
+    <a href="/run/{{ d.run.run_id }}" class="btn">Full detail →</a>
+    <a href="/live" class="btn">← Live</a>
+  </div>
+</div>
+
+{# ── Live metric bar ── #}
+<div class="live-bar">
+  <div class="live-stat">
+    <div class="live-stat-val" id="stat-elapsed">{{ d.elapsed_s or '—' }} s</div>
+    <div class="live-stat-lbl">Elapsed</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-val ok" id="stat-done">{{ d.stages_done | length }}</div>
+    <div class="live-stat-lbl">Stages done</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-val" id="stat-cost">${{ "%.4f"|format(d.cost_so_far) }}</div>
+    <div class="live-stat-lbl">Cost so far</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-val" id="stat-tokens">{{ d.tokens_so_far | int }}</div>
+    <div class="live-stat-lbl">Tokens</div>
+  </div>
+  <div class="live-stat">
+    <div class="live-stat-val {% if d.run.status == 'running' %}ok{% elif d.run.status == 'failed' %}err{% else %}muted{% endif %}"
+         id="stat-status">{{ d.run.status }}</div>
+    <div class="live-stat-lbl">Status</div>
+  </div>
+  {% if d.stage_active %}
+  <div class="live-stat">
+    <div class="live-stat-val ok" id="stat-active-stage" style="font-size:15px;">▶ {{ d.stage_active.stage_name }}</div>
+    <div class="live-stat-lbl">Current stage</div>
+  </div>
+  {% else %}
+  <div class="live-stat">
+    <div class="live-stat-val muted" id="stat-active-stage" style="font-size:15px;">—</div>
+    <div class="live-stat-lbl">Current stage</div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="grid2">
+
+{# ── Stage timeline (live) ── #}
+<div class="card">
+  <div class="card-title">Stage Timeline</div>
+  <ul class="stage-list" id="stage-list">
+    {% for s in d.stages %}
+      {% if s.status == 'completed' %}{% set icon = '✓' %}{% set cls = 'ok' %}{% set item_cls = '' %}
+      {% elif s.status == 'failed'   %}{% set icon = '✗' %}{% set cls = 'err' %}{% set item_cls = '' %}
+      {% elif s.status == 'skipped'  %}{% set icon = '—' %}{% set cls = 'muted' %}{% set item_cls = '' %}
+      {% elif s.status == 'running'  %}{% set icon = '▶' %}{% set cls = 'ok' %}{% set item_cls = 'stage-active' %}
+      {% else                        %}{% set icon = '·' %}{% set cls = 'muted' %}{% set item_cls = '' %}
+      {% endif %}
+      <li class="stage-item">
+        <div class="stage-icon {{ cls }}">{{ icon }}</div>
+        <div class="stage-body {{ item_cls }}">
+          <div class="stage-name {{ cls }}">{{ s.stage_name }}</div>
+          <div class="stage-meta">
+            {% if s.duration_ms %}{{ fmt_duration(s.duration_ms) }}{% endif %}
+            {% if s.cost_usd and s.cost_usd > 0 %} · ${{ "%.4f"|format(s.cost_usd) }}{% endif %}
+            {% if s.model_slug %} · <span style="font-family:monospace;font-size:11px;">{{ s.model_slug }}</span>{% endif %}
+          </div>
+          {% if s.error_message %}
+            <div class="stage-err">{{ s.error_message[:200] }}</div>
+          {% endif %}
+        </div>
+        <div style="font-size:11px; color:var(--muted); white-space:nowrap; padding-top:2px;">
+          {{ s.started_at[11:19] if s.started_at else '' }}
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+</div>
+
+{# ── Log stream ── #}
+<div class="card" style="display:flex; flex-direction:column;">
+  <div class="card-title" style="display:flex; justify-content:space-between;">
+    <span>Log Stream</span>
+    <span id="log-status" style="font-size:11px; color:var(--muted);">connecting…</span>
+  </div>
+  <div class="log-pane" id="log-pane">
+    <div class="log-info">Connecting to log stream…</div>
+  </div>
+  <div style="margin-top:6px; display:flex; gap:8px;">
+    <label style="display:flex; align-items:center; gap:4px; font-size:12px; text-transform:none;
+                  letter-spacing:0; color:var(--muted); cursor:pointer;">
+      <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+    </label>
+    <button class="btn" id="clear-log" onclick="document.getElementById('log-pane').innerHTML='';"
+            style="font-size:11px; padding:2px 8px;">Clear</button>
+  </div>
+</div>
+
+</div>{# end grid2 #}
+
+{# If run is no longer active, show completion banner #}
+{% if d.run.status not in ('running',) %}
+<div class="card" style="margin-top:var(--gap); border-color:
+  {% if d.run.status == 'complete' or d.run.status == 'completed' %}#2ea043
+  {% elif d.run.status == 'failed' %}#da3633
+  {% else %}var(--border){% endif %};">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <span class="{% if d.run.status in ('complete','completed') %}ok{% elif d.run.status == 'failed' %}err{% else %}muted{% endif %}" style="font-size:15px; font-weight:600;">
+      {% if d.run.status in ('complete','completed') %}✓ Run completed{% elif d.run.status == 'failed' %}✗ Run failed{% else %}Run {{ d.run.status }}{% endif %}
+    </span>
+    <a href="/run/{{ d.run.run_id }}" class="btn">Full detail →</a>
+  </div>
+  {% if d.run.error_message %}
+  <pre style="font-size:12px; color:var(--red); margin-top:8px; white-space:pre-wrap; word-break:break-all;">{{ d.run.error_message }}</pre>
+  {% endif %}
+</div>
+{% endif %}
+
+<script>
+var RUN_ID = {{ run_id | tojson }};
+var _done  = false;
+
+// ── Log stream via SSE ───────────────────────────────────────────────────────
+var logPane    = document.getElementById('log-pane');
+var autoScroll = document.getElementById('auto-scroll');
+var logStatus  = document.getElementById('log-status');
+var lineCount  = 0;
+
+function appendLog(entry) {
+  var ts    = (entry.timestamp || '').slice(11, 23);
+  var level = entry.level || 'info';
+  var agent = entry.agent ? '[' + entry.agent + '] ' : '';
+  var event = entry.event || '';
+  var extra = '';
+
+  // Show key extra fields inline
+  ['model', 'provider', 'stage', 'cost_usd', 'tokens'].forEach(function(k) {
+    if (entry[k] !== undefined && entry[k] !== null) {
+      extra += ' ' + k + '=' + entry[k];
+    }
+  });
+
+  var line = document.createElement('div');
+  line.className = 'log-line log-' + level;
+  line.innerHTML =
+    '<span class="log-ts">' + ts + '</span>' +
+    '<span class="log-agent">' + escHtml(agent) + '</span>' +
+    '<span class="log-event">' + escHtml(event) + '</span>' +
+    (extra ? '<span class="muted">' + escHtml(extra) + '</span>' : '');
+  logPane.appendChild(line);
+  lineCount++;
+  if (lineCount > 500) {  // cap displayed lines
+    logPane.removeChild(logPane.firstChild);
+  }
+  if (autoScroll.checked) logPane.scrollTop = logPane.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Only start SSE if run is active
+{% if d.run.status == 'running' %}
+logPane.innerHTML = '';
+var es = new EventSource('/api/run/' + RUN_ID + '/log-stream');
+es.onopen    = function() { logStatus.textContent = 'streaming'; };
+es.onerror   = function() { logStatus.textContent = 'disconnected — retrying'; };
+es.onmessage = function(e) {
+  try {
+    var data = JSON.parse(e.data);
+    if (data._stream_end) {
+      logStatus.textContent = 'stream ended (' + (data.status || data.reason || 'done') + ')';
+      es.close();
+      _done = true;
+      return;
+    }
+    appendLog(data);
+  } catch(err) {}
+};
+{% else %}
+logPane.innerHTML = '<div class="log-info">Run is not active — fetch recent logs below.</div>';
+logStatus.textContent = 'inactive';
+// Load recent logs from REST endpoint
+fetch('/api/run/' + RUN_ID + '/logs?n=80')
+  .then(function(r) { return r.json(); })
+  .then(function(lines) {
+    logPane.innerHTML = '';
+    lines.forEach(appendLog);
+  })
+  .catch(function() { logStatus.textContent = 'log unavailable'; });
+{% endif %}
+
+// ── Status polling ──────────────────────────────────────────────────────────
+var liveDot    = document.getElementById('live-dot');
+var stageList  = document.getElementById('stage-list');
+
+function statusIcon(s) {
+  if (s === 'completed') return { icon: '✓', cls: 'ok' };
+  if (s === 'failed'  ) return { icon: '✗', cls: 'err' };
+  if (s === 'skipped' ) return { icon: '—', cls: 'muted' };
+  if (s === 'running' ) return { icon: '▶', cls: 'ok' };
+  return { icon: '·', cls: 'muted' };
+}
+
+function pollStatus() {
+  if (_done) return;
+  fetch('/api/run/' + RUN_ID + '/live')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.run) return;
+
+      // Update metric bar
+      document.getElementById('stat-elapsed').textContent  = (d.elapsed_s || '—') + ' s';
+      document.getElementById('stat-done').textContent     = d.stages_done ? d.stages_done.length : 0;
+      document.getElementById('stat-cost').textContent     = '$' + (d.cost_so_far || 0).toFixed(4);
+      document.getElementById('stat-tokens').textContent   = Math.round(d.tokens_so_far || 0);
+      document.getElementById('stat-status').textContent   = d.run.status;
+
+      var activeEl = document.getElementById('stat-active-stage');
+      activeEl.textContent = d.stage_active ? '▶ ' + d.stage_active.stage_name : '—';
+      document.getElementById('last-updated').textContent =
+        'Updated ' + new Date().toTimeString().slice(0,8);
+
+      // Rebuild stage list
+      if (d.stages && d.stages.length > 0) {
+        stageList.innerHTML = d.stages.map(function(s) {
+          var ic = statusIcon(s.status);
+          var isActive = s.status === 'running';
+          return '<li class="stage-item">' +
+            '<div class="stage-icon ' + ic.cls + '">' + ic.icon + '</div>' +
+            '<div class="stage-body' + (isActive ? ' stage-active' : '') + '">' +
+              '<div class="stage-name ' + ic.cls + '">' + escHtml(s.stage_name) + '</div>' +
+              (s.error_message ? '<div class="stage-err">' + escHtml(s.error_message.slice(0,120)) + '</div>' : '') +
+            '</div></li>';
+        }).join('');
+      }
+
+      // If run finished, mark done
+      if (d.run.status !== 'running') {
+        liveDot.className = 'live-dot done-dot';
+        _done = true;
+      }
+    })
+    .catch(function() {});
+}
+
+{% if d.run.status == 'running' %}
+setInterval(pollStatus, 3000);
+{% endif %}
+</script>
+</body>
+</html>

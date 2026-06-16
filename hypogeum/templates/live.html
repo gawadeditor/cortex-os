@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Operations — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* Metric strip */
+    .metric-strip { display: flex; gap: var(--gap); flex-wrap: wrap; margin-bottom: var(--gap); }
+    .metric-tile  { background: var(--surface); border: 1px solid var(--border);
+                    border-radius: var(--radius); padding: 12px 16px; flex: 1; min-width: 140px; }
+    .metric-val   { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums;
+                    line-height: 1.1; }
+    .metric-label { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                    letter-spacing: .05em; margin-top: 4px; }
+
+    /* Active run card */
+    .run-card { background: var(--surface); border: 1px solid var(--border);
+                border-radius: var(--radius); padding: 14px 16px; margin-bottom: 10px; }
+    .run-card-header { display: flex; justify-content: space-between; align-items: center;
+                       flex-wrap: wrap; gap: 8px; }
+    .run-card-meta   { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+    /* Stage progress bar */
+    .stage-bar   { display: flex; gap: 4px; margin-top: 10px; flex-wrap: wrap; }
+    .stage-dot   { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .dot-done    { background: var(--green); }
+    .dot-active  { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+    .dot-pending { background: var(--border); }
+    .dot-failed  { background: var(--red); }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: .3; }
+    }
+
+    /* Pulse indicator */
+    .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                background: var(--green); margin-right: 6px;
+                animation: pulse 1.2s ease-in-out infinite; }
+    .stale-dot { background: var(--muted); animation: none; }
+
+    /* 2-col grid */
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+    @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+
+    /* Refresh indicator */
+    #refresh-ts { font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1><span class="live-dot" id="live-dot"></span>Live Operations</h1>
+  <span id="refresh-ts" class="page-meta">Polling every 3 s</span>
+</div>
+
+{# ── Metric strip ── #}
+<div class="metric-strip" id="metric-strip">
+  <div class="metric-tile">
+    <div class="metric-val {% if metrics.active_runs > 0 %}ok{% else %}muted{% endif %}" id="m-active">{{ metrics.active_runs }}</div>
+    <div class="metric-label">Active runs</div>
+  </div>
+  <div class="metric-tile">
+    <div class="metric-val {% if metrics.queue_depth > 0 %}warn{% else %}muted{% endif %}" id="m-queue">{{ metrics.queue_depth }}</div>
+    <div class="metric-label">Queued</div>
+  </div>
+  <div class="metric-tile">
+    <div class="metric-val" id="m-cost">${{ "%.3f" | format(metrics.cost_today_usd) }}</div>
+    <div class="metric-label">Cost today</div>
+  </div>
+  <div class="metric-tile">
+    <div class="metric-val" id="m-tokens">{{ metrics.tokens_today | int }}</div>
+    <div class="metric-label">Tokens today</div>
+  </div>
+  <div class="metric-tile">
+    <div class="metric-val {% if metrics.failed_24h > 0 %}err{% else %}ok{% endif %}" id="m-failed">{{ metrics.failed_24h }}</div>
+    <div class="metric-label">Failed 24 h</div>
+  </div>
+  <div class="metric-tile">
+    <div class="metric-val ok" id="m-done">{{ metrics.completed_24h }}</div>
+    <div class="metric-label">Completed 24 h</div>
+  </div>
+</div>
+
+<div class="grid2">
+
+{# ── Active runs ── #}
+<div>
+  <div class="card-title" style="margin-bottom:10px;">
+    Active Runs <span id="active-count">({{ active | length }})</span>
+  </div>
+  <div id="active-runs">
+    {% if active %}
+      {% for r in active %}
+      <div class="run-card">
+        <div class="run-card-header">
+          <div>
+            <a href="/run/{{ r.run_id }}/live" style="font-weight:600;">
+              {{ r.run_id[:12] }}…
+            </a>
+            <span class="muted" style="font-size:12px; margin-left:8px;">{{ r.episode_id }}</span>
+          </div>
+          <span class="badge badge-running">running</span>
+        </div>
+        {% if r.episode_title or r.episode_topic %}
+        <div class="run-card-meta">{{ r.episode_title or r.episode_topic }}</div>
+        {% endif %}
+        <div class="run-card-meta" style="margin-top:4px;">
+          {% if r.active_stage %}
+            <span class="ok">▶ {{ r.active_stage }}</span>
+          {% else %}
+            <span class="muted">Starting…</span>
+          {% endif %}
+          &nbsp;·&nbsp; {{ r.stages_done }} stage{% if r.stages_done != 1 %}s{% endif %} done
+          &nbsp;·&nbsp; {{ r.elapsed_s or '—' }} s elapsed
+          &nbsp;·&nbsp; ${{ "%.3f"|format(r.cost_so_far) }}
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty">No runs currently executing.</div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Queue + recent failures ── #}
+<div>
+  <div class="card-title" style="margin-bottom:10px;">Queue Status</div>
+  <div class="card" id="queue-card">
+    <div style="display:flex; gap:20px; flex-wrap:wrap;">
+      <div><span class="metric-val" style="font-size:20px;" id="q-queued">{{ queue.queued }}</span><div class="metric-label">Queued</div></div>
+      <div><span class="metric-val" style="font-size:20px;" id="q-claimed">{{ queue.claimed }}</span><div class="metric-label">Claimed</div></div>
+      <div><span class="metric-val" style="font-size:20px;" id="q-completed">{{ queue.completed }}</span><div class="metric-label">Completed</div></div>
+      <div><span class="metric-val err" style="font-size:20px;" id="q-failed">{{ queue.failed }}</span><div class="metric-label">Failed</div></div>
+    </div>
+    <div style="margin-top:10px; font-size:12px;">
+      <a href="/queue" class="btn" style="font-size:11px;">View full queue →</a>
+    </div>
+  </div>
+
+  <div class="card-title" style="margin-bottom:10px; margin-top:var(--gap);">Recent Failures</div>
+  <div id="failures-section">
+    {% if failures.runs %}
+      {% for r in failures.runs %}
+      <div class="run-card" style="border-color:#da3633;">
+        <div class="run-card-header">
+          <a href="/run/{{ r.run_id }}" class="err" style="font-weight:600;">{{ r.run_id[:12] }}…</a>
+          <span class="badge badge-failed">failed</span>
+        </div>
+        <div class="run-card-meta">{{ r.episode_id }}</div>
+        {% if r.error_message %}
+        <div class="run-card-meta err" style="font-family:monospace; font-size:11px; margin-top:3px;">
+          {{ r.error_message[:100] }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+      <a href="/failures" class="btn" style="font-size:11px; margin-top:4px;">View all failures →</a>
+    {% else %}
+      <div class="empty">No recent failures.</div>
+    {% endif %}
+  </div>
+</div>
+
+</div>{# end grid2 #}
+
+<script>
+var _staleSince = 0;
+
+function setLiveDot(ok) {
+  var dot = document.getElementById('live-dot');
+  dot.className = ok ? 'live-dot' : 'live-dot stale-dot';
+}
+
+function pollLive() {
+  fetch('/api/live')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      _staleSince = 0;
+      setLiveDot(true);
+      document.getElementById('refresh-ts').textContent =
+        'Updated ' + new Date().toTimeString().slice(0,8);
+
+      // Metrics
+      var m = data.metrics;
+      document.getElementById('m-active').textContent  = m.active_runs;
+      document.getElementById('m-queue').textContent   = m.queue_depth;
+      document.getElementById('m-cost').textContent    = '$' + m.cost_today_usd.toFixed(3);
+      document.getElementById('m-tokens').textContent  = Math.round(m.tokens_today);
+      document.getElementById('m-failed').textContent  = m.failed_24h;
+      document.getElementById('m-done').textContent    = m.completed_24h;
+
+      // Queue counts
+      var q = data.queue;
+      document.getElementById('q-queued').textContent    = q.queued;
+      document.getElementById('q-claimed').textContent   = q.claimed;
+      document.getElementById('q-completed').textContent = q.completed;
+      document.getElementById('q-failed').textContent    = q.failed;
+
+      // Active runs — rebuild HTML
+      var ar = document.getElementById('active-runs');
+      document.getElementById('active-count').textContent = '(' + data.active_runs.length + ')';
+      if (data.active_runs.length === 0) {
+        ar.innerHTML = '<div class="empty">No runs currently executing.</div>';
+      } else {
+        ar.innerHTML = data.active_runs.map(function(r) {
+          return '<div class="run-card">' +
+            '<div class="run-card-header">' +
+              '<div><a href="/run/'+r.run_id+'/live" style="font-weight:600;">'+r.run_id.slice(0,12)+'…</a>' +
+              '<span class="muted" style="font-size:12px; margin-left:8px;">'+r.episode_id+'</span></div>' +
+              '<span class="badge badge-running">running</span>' +
+            '</div>' +
+            '<div class="run-card-meta">' +
+              (r.active_stage ? '<span class="ok">▶ '+r.active_stage+'</span>' : '<span class="muted">Starting…</span>') +
+              ' · ' + r.stages_done + ' stage'+(r.stages_done!==1?'s':'') + ' done' +
+              ' · ' + (r.elapsed_s||'—') + ' s elapsed' +
+              ' · $' + (r.cost_so_far||0).toFixed(3) +
+            '</div>' +
+          '</div>';
+        }).join('');
+      }
+    })
+    .catch(function() {
+      _staleSince++;
+      if (_staleSince > 3) setLiveDot(false);
+    });
+}
+
+pollLive();
+setInterval(pollLive, 3000);
+</script>
+</body>
+</html>

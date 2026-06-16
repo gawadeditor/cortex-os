@@ -237,7 +237,7 @@ class TestFlaskAnalyticsHtmlRoutes:
         r = flask_client.get("/learning")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Learning" in text
+        assert "Intelligence" in text
 
     def test_learning_page_shows_actions(self, flask_client):
         r = flask_client.get("/learning")

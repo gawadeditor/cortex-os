@@ -5,65 +5,161 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Analytics — Factory OS</title>
   {% include '_base_style.html' %}
-  <style>
-    .platform-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr));
-                     gap: var(--gap); margin-bottom: var(--gap); }
-    .plat-card { background: var(--surface); border: 1px solid var(--border);
-                 border-radius: var(--radius); padding: 14px 16px; }
-    .plat-name { font-size: 15px; font-weight: 700; margin-bottom: 6px; text-transform: capitalize; }
-    .plat-stat { display: flex; justify-content: space-between; font-size: 12px;
-                 padding: 3px 0; border-bottom: 1px solid var(--border); }
-    .plat-stat:last-child { border-bottom: none; }
-    .no-data { color: var(--muted); font-style: italic; font-size: 13px; }
-  </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
+{# ── Secondary nav ── #}
+<div class="sub-nav">
+  <a href="/analytics"                    class="sub-nav-link active">Portfolio</a>
+  <a href="/analytics/platform/youtube"   class="sub-nav-link">YouTube</a>
+  <a href="/analytics/platform/tiktok"    class="sub-nav-link">TikTok</a>
+  <a href="/analytics/platform/instagram" class="sub-nav-link">Instagram</a>
+  <a href="/analytics/platform/facebook"  class="sub-nav-link">Facebook</a>
+  <a href="/analytics/import"             class="sub-nav-link">Import</a>
+</div>
+
 <div class="page-header">
-  <h1>Analytics</h1>
+  <h1>Analytics Portfolio</h1>
   <span class="page-meta">
-    {{ overview.total_insights }} insight{% if overview.total_insights != 1 %}s{% endif %} ·
-    {{ overview.pending_action_count }} pending action{% if overview.pending_action_count != 1 %}s{% endif %}
+    {{ overview.total_insights }} insight{% if overview.total_insights != 1 %}s{% endif %}
   </span>
-  <div style="margin-left:auto; display:flex; gap:8px;">
-    <a href="/analytics/import" class="btn">Import / Seed →</a>
-    <a href="/learning" class="btn">Learning →</a>
+  {% if overview.pending_action_count > 0 %}
+  <a href="/learning" style="margin-left:auto;">
+    <span class="action-banner-count" style="font-size:12px;">
+      {{ overview.pending_action_count }} pending action{% if overview.pending_action_count != 1 %}s{% endif %} →
+    </span>
+  </a>
+  {% else %}
+  <div style="margin-left:auto;">
+    <a href="/learning" class="btn">Intelligence →</a>
+  </div>
+  {% endif %}
+</div>
+
+{# ── KPI strip ── #}
+{% set _plat_count = overview.platform_breakdown.values() | selectattr('episodes_tracked') | list | length %}
+{% set _ep_count = overview.episodes | length %}
+<div class="kpi-strip">
+  <div class="kpi-card">
+    <div class="kpi-val">{{ _ep_count }}</div>
+    <div class="kpi-lbl">Episodes tracked</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-val">{{ _plat_count }}</div>
+    <div class="kpi-lbl">Platforms with data</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-val">{{ overview.total_insights }}</div>
+    <div class="kpi-lbl">Insights</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-val {% if overview.pending_action_count > 0 %}warn{% else %}ok{% endif %}">
+      {{ overview.pending_action_count }}
+    </div>
+    <div class="kpi-lbl">Pending actions</div>
   </div>
 </div>
 
-{# ── Platform tiles ── #}
-<div class="platform-grid">
+{# ── Platform health cards ── #}
+<div class="health-grid">
   {% for platform in valid_platforms %}
     {% set pb = overview.platform_breakdown.get(platform, {}) %}
-    <div class="plat-card">
-      <div class="plat-name">
-        <a href="/analytics/platform/{{ platform }}" style="color:var(--text);">{{ platform }}</a>
+    {% set ep_count = pb.get('episodes_tracked', 0) %}
+    {% set avg_ctr = pb.get('avg_ctr', 0) or 0 %}
+    {% if ep_count == 0 %}
+      {% set _card_cls = 'health-card-empty' %}
+      {% set _dot_cls  = 'perf-dot-muted' %}
+    {% elif avg_ctr > 0.05 %}
+      {% set _card_cls = 'health-card-ok' %}
+      {% set _dot_cls  = 'perf-dot-ok' %}
+    {% elif avg_ctr >= 0.02 %}
+      {% set _card_cls = 'health-card-warn' %}
+      {% set _dot_cls  = 'perf-dot-warn' %}
+    {% else %}
+      {% set _card_cls = 'health-card-err' %}
+      {% set _dot_cls  = 'perf-dot-err' %}
+    {% endif %}
+    <div class="health-card {{ _card_cls }}">
+      <div class="health-name">
+        <span class="perf-dot {{ _dot_cls }}"></span>
+        <a href="/analytics/platform/{{ platform }}" style="color:var(--text);">{{ platform | capitalize }}</a>
       </div>
-      {% if pb.get('episodes_tracked', 0) > 0 %}
-        <div class="plat-stat"><span class="muted">Episodes</span><span>{{ pb.episodes_tracked }}</span></div>
-        <div class="plat-stat"><span class="muted">Avg CTR</span>
-          <span {% if pb.avg_ctr < 0.02 %}class="err"{% elif pb.avg_ctr > 0.05 %}class="ok"{% endif %}>
-            {{ "%.1f%%"|format(pb.avg_ctr * 100) }}
+      {% if ep_count > 0 %}
+        <div class="health-stat">
+          <span class="muted">Episodes</span>
+          <span>{{ ep_count }}</span>
+        </div>
+        <div class="health-stat">
+          <span class="muted">Avg CTR</span>
+          <span class="{% if avg_ctr < 0.02 %}err{% elif avg_ctr > 0.05 %}ok{% else %}warn{% endif %}">
+            {{ "%.1f%%"|format(avg_ctr * 100) }}
           </span>
         </div>
-        <div class="plat-stat"><span class="muted">Avg retention</span>
-          <span>{{ pb.avg_view_pct | pct_bar }}</span>
+        <div class="health-stat">
+          <span class="muted">Retention</span>
+          {% set ret = pb.get('avg_view_pct', 0) or 0 %}
+          <span class="{% if ret < 0.3 %}err{% elif ret > 0.5 %}ok{% else %}warn{% endif %}">
+            {{ "%.0f%%"|format(ret * 100) }}
+          </span>
         </div>
-        <div class="plat-stat"><span class="muted">Total views</span>
-          <span>{{ "{:,}".format(pb.total_views | int) }}</span>
+        <div class="health-stat">
+          <span class="muted">Views</span>
+          <span>{{ "{:,}".format(pb.get('total_views', 0) | int) }}</span>
         </div>
       {% else %}
-        <div class="no-data">No data yet</div>
-        <div style="margin-top:8px;">
-          <a href="/analytics/import?platform={{ platform }}" class="btn" style="font-size:11px;">Seed / Import →</a>
+        <div class="muted" style="font-size:12px; margin-top:4px;">No data yet</div>
+        <div style="margin-top:10px;">
+          <a href="/analytics/import?platform={{ platform }}" class="btn" style="font-size:11px;">Import →</a>
         </div>
       {% endif %}
     </div>
   {% endfor %}
 </div>
 
-{# ── Episode performance table ── #}
+{# ── Best / Worst scoreboard ── #}
+{% set _scored = overview.episodes | selectattr('avg_view_pct') | list %}
+{% if _scored | length >= 2 %}
+  {% set _sorted = _scored | sort(attribute='avg_view_pct') %}
+  {% set _best  = _sorted | last %}
+  {% set _worst = _sorted | first %}
+  <div class="scoreboard">
+    <div class="score-card score-card-best">
+      <div class="score-label score-label-best">Best retention</div>
+      <div class="score-ep">
+        <a href="/analytics/episode/{{ _best.episode_id }}" style="color:var(--text);">{{ _best.episode_id }}</a>
+      </div>
+      <div class="score-stats">
+        Retention <span class="ok">{{ "%.0f%%"|format(_best.avg_view_pct * 100) }}</span>
+        {% if _best.avg_ctr %} · CTR {{ "%.1f%%"|format(_best.avg_ctr * 100) }}{% endif %}
+        {% if _best.total_views %} · {{ "{:,}".format(_best.total_views|int) }} views{% endif %}
+      </div>
+    </div>
+    <div class="score-card score-card-worst">
+      <div class="score-label score-label-worst">Needs attention</div>
+      <div class="score-ep">
+        <a href="/analytics/episode/{{ _worst.episode_id }}" style="color:var(--text);">{{ _worst.episode_id }}</a>
+      </div>
+      <div class="score-stats">
+        Retention <span class="err">{{ "%.0f%%"|format(_worst.avg_view_pct * 100) }}</span>
+        {% if _worst.avg_ctr %} · CTR {{ "%.1f%%"|format(_worst.avg_ctr * 100) }}{% endif %}
+        {% if _worst.total_views %} · {{ "{:,}".format(_worst.total_views|int) }} views{% endif %}
+      </div>
+    </div>
+  </div>
+{% elif _scored | length == 1 %}
+  {% set _best = _scored[0] %}
+  <div class="card" style="border-color:#2ea043; margin-bottom:var(--gap);">
+    <div class="card-title ok">Top Episode</div>
+    <a href="/analytics/episode/{{ _best.episode_id }}" style="font-weight:600;">{{ _best.episode_id }}</a>
+    <span class="muted" style="font-size:12px; margin-left:8px;">
+      Retention {{ "%.0f%%"|format(_best.avg_view_pct * 100) }}
+      {% if _best.avg_ctr %} · CTR {{ "%.1f%%"|format(_best.avg_ctr * 100) }}{% endif %}
+    </span>
+  </div>
+{% endif %}
+
+{# ── Episode table ── #}
 {% if overview.episodes %}
 <div class="card" style="padding:0;">
   <table>
@@ -71,10 +167,10 @@
       <tr>
         <th>Episode</th>
         <th>Platforms</th>
-        <th>Avg CTR</th>
-        <th>Avg retention</th>
-        <th>Total views</th>
-        <th>Insights</th>
+        <th style="text-align:right;">Views</th>
+        <th style="text-align:right;">CTR</th>
+        <th style="text-align:right;">Retention</th>
+        <th style="text-align:right;">Insights</th>
         <th></th>
       </tr>
     </thead>
@@ -82,22 +178,28 @@
       {% for ep in overview.episodes %}
       <tr>
         <td>
-          <a href="/analytics/episode/{{ ep.episode_id }}">{{ ep.episode_id }}</a>
+          <a href="/analytics/episode/{{ ep.episode_id }}" style="font-weight:500;">{{ ep.episode_id }}</a>
           {% if ep.episode_title or ep.episode_topic %}
             <br><span class="muted" style="font-size:11px;">{{ (ep.episode_title or ep.episode_topic)[:50] }}</span>
           {% endif %}
         </td>
         <td class="muted" style="font-size:12px;">{{ ep.platforms_tracked }}</td>
-        <td style="font-variant-numeric:tabular-nums;">
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+          {% if ep.total_views %}{{ "{:,}".format(ep.total_views|int) }}{% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">
           {% if ep.avg_ctr %}
-            <span {% if ep.avg_ctr < 0.02 %}class="err"{% elif ep.avg_ctr > 0.05 %}class="ok"{% endif %}>
+            <span class="{% if ep.avg_ctr < 0.02 %}err{% elif ep.avg_ctr > 0.05 %}ok{% else %}warn{% endif %}">
               {{ "%.1f%%"|format(ep.avg_ctr * 100) }}
             </span>
           {% else %}<span class="muted">—</span>{% endif %}
         </td>
-        <td style="font-family:monospace; font-size:12px;">{{ ep.avg_view_pct | pct_bar }}</td>
         <td style="text-align:right; font-variant-numeric:tabular-nums;">
-          {{ "{:,}".format(ep.total_views | int) if ep.total_views else '—' }}
+          {% if ep.avg_view_pct %}
+            <span class="{% if ep.avg_view_pct < 0.3 %}err{% elif ep.avg_view_pct > 0.5 %}ok{% else %}warn{% endif %}">
+              {{ "%.0f%%"|format(ep.avg_view_pct * 100) }}
+            </span>
+          {% else %}<span class="muted">—</span>{% endif %}
         </td>
         <td style="text-align:right;">
           {% if ep.insight_count > 0 %}
@@ -110,30 +212,11 @@
     </tbody>
   </table>
 </div>
-{% else %}
-<div class="empty">No analytics data yet. <a href="/analytics/import">Import or seed mock data →</a></div>
-{% endif %}
 
-{# ── Recent snapshots ── #}
-{% if overview.recent_snapshots %}
-<div class="card" style="margin-top:var(--gap);">
-  <div class="card-title">Recent Imports ({{ overview.recent_snapshots | length }})</div>
-  <table>
-    <thead><tr><th>Episode</th><th>Platform</th><th>Date</th><th>Views</th><th>CTR</th><th>Retention</th><th>Source</th></tr></thead>
-    <tbody>
-      {% for r in overview.recent_snapshots %}
-      <tr>
-        <td style="font-size:12px;"><a href="/analytics/episode/{{ r.episode_id }}">{{ r.episode_id }}</a></td>
-        <td style="font-size:12px; text-transform:capitalize;">{{ r.platform }}</td>
-        <td class="muted" style="font-size:12px;">{{ r.snapshot_date }}</td>
-        <td style="font-variant-numeric:tabular-nums; text-align:right;">{{ "{:,}".format(r.views|int) if r.views else '—' }}</td>
-        <td>{% if r.ctr %}<span class="{% if r.ctr < 0.02 %}err{% elif r.ctr > 0.05 %}ok{% endif %}">{{ "%.1f%%"|format(r.ctr*100) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
-        <td style="font-family:monospace; font-size:11px;">{{ r.avg_view_pct | pct_bar(12) }}</td>
-        <td><span class="badge badge-{% if r.source == 'mock' %}unknown{% else %}active{% endif %}">{{ r.source }}</span></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+{% else %}
+<div class="empty">
+  No analytics data yet.
+  <a href="/analytics/import">Import or seed demo data →</a>
 </div>
 {% endif %}
 

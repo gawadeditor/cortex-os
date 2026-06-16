@@ -6,141 +6,247 @@
   <title>{{ d.episode_id }} Analytics — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
-    .platform-section { margin-bottom: var(--gap); }
-    .platform-header  { font-size: 14px; font-weight: 700; text-transform: capitalize;
-                        margin-bottom: 8px; padding-bottom: 4px;
-                        border-bottom: 1px solid var(--border); }
-    .metric-row { display: flex; justify-content: space-between; padding: 4px 0;
-                  border-bottom: 1px solid var(--border); font-size: 13px; }
-    .metric-row:last-child { border-bottom: none; }
-    .metric-l { color: var(--muted); }
-    .plat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr));
-                 gap: var(--gap); }
-    .insight-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .insight-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
     .insight-row:last-child { border-bottom: none; }
-    .strength-bar { font-family: monospace; font-size: 11px; }
-    .strength-pos { color: var(--green); }
-    .strength-neg { color: var(--red); }
-    .dim-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
-                 background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
-    .flash-ok  { background:#1a3a22; border:1px solid #2ea043; color:var(--green);
-                 padding:10px 14px; border-radius:var(--radius); margin-bottom:var(--gap); }
+    .insight-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+    .insight-type-label { font-weight: 600; font-size: 13px; }
+    .cross-table td:first-child { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 130px; }
+    .cross-table td { text-align: right; }
+    .cross-table td:first-child { text-align: left; }
+    .cross-table th:first-child { text-align: left; }
+    .cross-table th { text-align: right; }
+    .action-ep-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .action-ep-row:last-child { border-bottom: none; }
+    .flash-ok { background:#1a3a22; border:1px solid #2ea043; color:var(--green);
+                padding:10px 14px; border-radius:var(--radius); margin-bottom:var(--gap); font-size:13px; }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
+{# ── Breadcrumb ── #}
+<div class="breadcrumb">
+  <a href="/analytics">Analytics</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>{{ d.episode_id }}</span>
+</div>
+
 {% if request.args.get('import_result') == 'ok' %}
 <div class="flash-ok">Analytics imported and insights extracted successfully.</div>
 {% endif %}
 
+{% set _DIM_CLS = {
+  'thumbnail': 'dim-thumbnail', 'title': 'dim-title', 'hook': 'dim-hook',
+  'pacing': 'dim-pacing', 'retention': 'dim-retention', 'cta': 'dim-cta',
+  'audio': 'dim-audio', 'topic': 'dim-topic',
+} %}
+
+{# ── Page header with production cost ── #}
 <div class="page-header">
   <h1>{{ d.episode_id }}</h1>
   {% if d.episode.get('title') or d.episode.get('topic') %}
     <span class="page-meta">{{ d.episode.get('title') or d.episode.get('topic') }}</span>
   {% endif %}
+  {% if d.production_cost > 0 %}
+    <span class="muted" style="font-size:12px;">Cost: <strong style="color:var(--text);">${{ "%.4f"|format(d.production_cost) }}</strong></span>
+  {% endif %}
   <div style="margin-left:auto; display:flex; gap:8px;">
-    {% if d.episode.get('run_id') or d.platforms %}
-      <a href="/analytics/import" class="btn" style="font-size:11px;">Add data →</a>
-    {% endif %}
+    <a href="/analytics/import" class="btn" style="font-size:11px;">Add data →</a>
     <a href="/analytics" class="btn">← Analytics</a>
   </div>
 </div>
 
-{# Production cost summary #}
-{% if d.production_cost > 0 %}
-<div style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
-  Production cost: <strong>${{ "%.4f"|format(d.production_cost) }}</strong>
+{# ── Pending action banner ── #}
+{% set _pending = d.actions | selectattr('status', 'equalto', 'pending') | list %}
+{% if _pending %}
+<div class="action-banner">
+  <span style="font-size:18px; flex-shrink:0;">⚡</span>
+  <div class="action-banner-body">
+    <div class="action-banner-title">
+      {{ _pending | length }} pending action{% if _pending | length != 1 %}s{% endif %} from this episode
+    </div>
+    <div class="action-banner-sub">
+      Review in <a href="/learning">Intelligence →</a> to apply to the next production run.
+    </div>
+  </div>
+  <span class="action-banner-count">{{ _pending | length }}</span>
 </div>
 {% endif %}
 
-{# ── Platform metrics ── #}
-<div class="plat-grid">
-  {% for platform, rec in d.platforms.items() %}
-  <div class="card platform-section">
-    <div class="platform-header">
-      <a href="/analytics/platform/{{ platform }}" style="color:var(--text);">{{ platform }}</a>
-      <span class="badge badge-{% if rec.source == 'mock' %}unknown{% else %}active{% endif %}" style="float:right; font-size:10px;">{{ rec.source }}</span>
-    </div>
-    {% if rec.views %}
-    <div class="metric-row"><span class="metric-l">Views</span><span>{{ "{:,}".format(rec.views|int) }}</span></div>
-    {% endif %}
-    {% if rec.impressions %}
-    <div class="metric-row"><span class="metric-l">Impressions</span><span>{{ "{:,}".format(rec.impressions|int) }}</span></div>
-    {% endif %}
-    {% if rec.ctr is not none %}
-    <div class="metric-row"><span class="metric-l">CTR</span>
-      <span class="{% if rec.ctr < 0.02 %}err{% elif rec.ctr > 0.05 %}ok{% endif %}">
-        {{ "%.1f%%"|format(rec.ctr * 100) }}
-      </span>
-    </div>
-    {% endif %}
-    {% if rec.avg_view_pct is not none %}
-    <div class="metric-row"><span class="metric-l">Avg retention</span>
-      <span style="font-family:monospace; font-size:11px;">{{ rec.avg_view_pct | pct_bar(14) }}</span>
-    </div>
-    {% endif %}
-    {% if rec.avg_watch_time_s %}
-    <div class="metric-row"><span class="metric-l">Avg watch time</span><span>{{ rec.avg_watch_time_s|int }}s</span></div>
-    {% endif %}
-    {% if rec.likes %}
-    <div class="metric-row"><span class="metric-l">Likes</span><span>{{ "{:,}".format(rec.likes|int) }}</span></div>
-    {% endif %}
-    {% if rec.comments %}
-    <div class="metric-row"><span class="metric-l">Comments</span><span>{{ "{:,}".format(rec.comments|int) }}</span></div>
-    {% endif %}
-    {% if rec.shares %}
-    <div class="metric-row"><span class="metric-l">Shares</span><span>{{ "{:,}".format(rec.shares|int) }}</span></div>
-    {% endif %}
-    {% if rec.saves %}
-    <div class="metric-row"><span class="metric-l">Saves</span><span>{{ "{:,}".format(rec.saves|int) }}</span></div>
-    {% endif %}
-    <div class="metric-row muted" style="font-size:11px;"><span>Snapshot</span><span>{{ rec.snapshot_date }}</span></div>
-  </div>
-  {% endfor %}
+{# ── Cross-platform comparison table ── #}
+{% if d.platforms %}
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <table class="cross-table">
+    <thead>
+      <tr>
+        <th>Metric</th>
+        {% for p_name in d.platforms.keys() %}
+          <th>{{ p_name | capitalize }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {# Views #}
+      {% if d.platforms.values() | selectattr('views') | list %}
+      <tr>
+        <td>Views</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>{% if rec.views %}{{ "{:,}".format(rec.views|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# Impressions #}
+      {% if d.platforms.values() | selectattr('impressions') | list %}
+      <tr>
+        <td>Impressions</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>{% if rec.impressions %}{{ "{:,}".format(rec.impressions|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# CTR #}
+      {% if d.platforms.values() | selectattr('ctr') | list %}
+      <tr>
+        <td>CTR</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>
+            {% if rec.ctr is not none %}
+              <span class="{% if rec.ctr < 0.02 %}err{% elif rec.ctr > 0.05 %}ok{% else %}warn{% endif %}">
+                {{ "%.1f%%"|format(rec.ctr * 100) }}
+              </span>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# Retention — always shown #}
+      <tr>
+        <td>Retention</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>
+            {% if rec.avg_view_pct is not none %}
+              <span class="{% if rec.avg_view_pct < 0.3 %}err{% elif rec.avg_view_pct > 0.5 %}ok{% else %}warn{% endif %}">
+                {{ "%.0f%%"|format(rec.avg_view_pct * 100) }}
+              </span>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+        {% endfor %}
+      </tr>
+      {# Watch time #}
+      {% if d.platforms.values() | selectattr('avg_watch_time_s') | list %}
+      <tr>
+        <td>Avg watch time</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>{% if rec.avg_watch_time_s %}{{ rec.avg_watch_time_s|int }}s{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# Likes #}
+      {% if d.platforms.values() | selectattr('likes') | list %}
+      <tr>
+        <td>Likes</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>{% if rec.likes %}{{ "{:,}".format(rec.likes|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# Comments #}
+      {% if d.platforms.values() | selectattr('comments') | list %}
+      <tr>
+        <td>Comments</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>{% if rec.comments %}{{ "{:,}".format(rec.comments|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# Shares #}
+      {% if d.platforms.values() | selectattr('shares') | list %}
+      <tr>
+        <td>Shares</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>{% if rec.shares %}{{ "{:,}".format(rec.shares|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# Saves #}
+      {% if d.platforms.values() | selectattr('saves') | list %}
+      <tr>
+        <td>Saves</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>{% if rec.saves %}{{ "{:,}".format(rec.saves|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+      {% endif %}
+      {# Source #}
+      <tr>
+        <td>Source</td>
+        {% for p, rec in d.platforms.items() %}
+          <td>
+            {% if rec.source == 'mock' %}
+              <span class="badge badge-demo">Demo</span>
+            {% else %}
+              <span class="badge badge-active" style="font-size:10px;">{{ rec.source }}</span>
+            {% endif %}
+          </td>
+        {% endfor %}
+      </tr>
+      {# Snapshot date #}
+      <tr>
+        <td>Snapshot</td>
+        {% for p, rec in d.platforms.items() %}
+          <td class="muted" style="font-size:12px;">{{ rec.snapshot_date or '—' }}</td>
+        {% endfor %}
+      </tr>
+    </tbody>
+  </table>
 </div>
+{% endif %}
 
-{# ── Insights ── #}
+{# ── Insights (sorted by signal strength) ── #}
 {% if d.insights %}
-<div class="card" style="margin-top:var(--gap);">
-  <div class="card-title">Insights ({{ d.insights | length }})</div>
-  {% for ins in d.insights %}
-  {% set pos = ins.signal_strength >= 0 %}
-  <div class="insight-row">
-    <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
-      <span class="dim-badge">{{ ins.affected_dim }}</span>
-      <span style="font-size:11px; text-transform:uppercase; color:var(--muted);">{{ ins.platform }}</span>
-      <span class="{% if pos %}strength-pos{% else %}strength-neg{% endif %}" style="font-family:monospace; font-size:12px;">
-        {% if pos %}▲{% else %}▼{% endif %} {{ "%.2f"|format(ins.signal_strength | abs) }}
-      </span>
-      <span style="font-weight:500; font-size:13px;">{{ ins.insight_type.replace('_',' ') }}</span>
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <div style="padding:12px 16px 0;"><div class="card-title">Insights ({{ d.insights | length }})</div></div>
+  <div style="padding:0 16px 4px;">
+    {% for ins in d.insights | sort_by_signal %}
+    {% set _pos = ins.signal_strength >= 0 %}
+    <div class="insight-row">
+      <div class="insight-meta">
+        <span class="dim-badge {{ _DIM_CLS.get(ins.affected_dim|lower, 'dim-default') }}">{{ ins.affected_dim }}</span>
+        <span class="muted" style="font-size:11px; text-transform:uppercase;">{{ ins.platform }}</span>
+        <span class="{% if _pos %}signal-pos{% else %}signal-neg{% endif %}" style="font-size:12px;">
+          {% if _pos %}▲{% else %}▼{% endif %} {{ "%.2f"|format(ins.signal_strength | abs) }}
+        </span>
+        <span class="insight-type-label">{{ ins.insight_type | human_label }}</span>
+      </div>
+      {% if ins.detail %}
+        <div class="muted" style="font-size:12px; margin-top:2px;">{{ ins.detail }}</div>
+      {% endif %}
     </div>
-    {% if ins.detail %}
-    <div class="muted" style="font-size:12px; margin-top:3px;">{{ ins.detail }}</div>
-    {% endif %}
-    {% if ins.threshold_used %}
-    <div style="font-size:11px; color:var(--border); margin-top:2px; font-family:monospace;">{{ ins.threshold_used }}</div>
-    {% endif %}
+    {% endfor %}
   </div>
-  {% endfor %}
 </div>
 {% endif %}
 
-{# ── Actions for this episode ── #}
+{# ── Learning actions (directly after insights) ── #}
 {% if d.actions %}
-<div class="card" style="margin-top:var(--gap);">
-  <div class="card-title">Learning Actions from this Episode ({{ d.actions | length }})</div>
-  {% for a in d.actions %}
-  <div style="padding:8px 0; border-bottom:1px solid var(--border);">
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <span class="dim-badge">{{ a.dimension }}</span>
-      <span class="badge badge-{% if a.status == 'applied' %}complete{% elif a.status == 'dismissed' %}cancelled{% else %}queued{% endif %}">
-        {{ a.action_type }} · {{ a.status }}
-      </span>
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <div style="padding:12px 16px 0;"><div class="card-title">Learning Actions ({{ d.actions | length }})</div></div>
+  <div style="padding:0 16px 4px;">
+    {% for a in d.actions %}
+    <div class="action-ep-row">
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:4px;">
+        <span class="dim-badge {{ _DIM_CLS.get(a.dimension|lower, 'dim-default') }}">{{ a.dimension }}</span>
+        <span class="badge badge-{% if a.status == 'applied' %}complete{% elif a.status == 'dismissed' %}cancelled{% else %}queued{% endif %}">
+          {{ a.action_type }}
+        </span>
+        <span class="badge badge-{% if a.status == 'applied' %}complete{% elif a.status == 'dismissed' %}cancelled{% else %}queued{% endif %}" style="text-transform:none; letter-spacing:0;">
+          {{ a.status }}
+        </span>
+      </div>
+      <div style="font-size:12px; color:var(--muted);">{{ a.rationale[:180] }}</div>
     </div>
-    <div style="font-size:13px; margin-top:4px;">{{ a.rationale[:160] }}</div>
+    {% endfor %}
   </div>
-  {% endfor %}
 </div>
 {% endif %}
 

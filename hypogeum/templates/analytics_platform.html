@@ -6,13 +6,6 @@
   <title>{{ platform | capitalize }} Analytics — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
-    .kpi-strip { display: flex; gap: var(--gap); flex-wrap: wrap; margin-bottom: var(--gap); }
-    .kpi-tile  { background: var(--surface); border: 1px solid var(--border);
-                 border-radius: var(--radius); padding: 12px 16px; flex: 1; min-width: 130px; }
-    .kpi-val   { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
-    .kpi-lbl   { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 3px; }
-    .highlight-card { background: var(--surface); border: 1px solid var(--border);
-                      border-radius: var(--radius); padding: 12px 16px; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); margin-bottom: var(--gap); }
     @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
   </style>
@@ -20,12 +13,28 @@
 <body>
 {% include '_nav.html' %}
 
+{# ── Secondary nav ── #}
+<div class="sub-nav">
+  <a href="/analytics"                    class="sub-nav-link">Portfolio</a>
+  {% for _p in ['youtube','tiktok','instagram','facebook'] %}
+  <a href="/analytics/platform/{{ _p }}"
+     class="sub-nav-link {% if _p == platform %}active{% endif %}">{{ _p | capitalize }}</a>
+  {% endfor %}
+  <a href="/analytics/import" class="sub-nav-link">Import</a>
+</div>
+
+{# ── Breadcrumb ── #}
+<div class="breadcrumb">
+  <a href="/analytics">Analytics</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>{{ platform | capitalize }}</span>
+</div>
+
 <div class="page-header">
-  <h1>{{ platform | capitalize }} Analytics</h1>
+  <h1>{{ platform | capitalize }}</h1>
   <span class="page-meta">{{ summary.kpis.get('episodes_tracked', 0) }} episode{% if summary.kpis.get('episodes_tracked', 0) != 1 %}s{% endif %} tracked</span>
-  <div style="margin-left:auto; display:flex; gap:8px;">
-    <a href="/analytics/import" class="btn">Import →</a>
-    <a href="/analytics" class="btn">← Analytics</a>
+  <div style="margin-left:auto;">
+    <a href="/analytics/import?platform={{ platform }}" class="btn">Import →</a>
   </div>
 </div>
 
@@ -33,29 +42,29 @@
 
 {# ── KPI strip ── #}
 <div class="kpi-strip">
-  <div class="kpi-tile">
-    <div class="kpi-val {% if k.avg_ctr and k.avg_ctr < 0.02 %}err{% elif k.avg_ctr and k.avg_ctr > 0.05 %}ok{% endif %}">
+  <div class="kpi-card">
+    <div class="kpi-val {% if k.avg_ctr and k.avg_ctr < 0.02 %}err{% elif k.avg_ctr and k.avg_ctr > 0.05 %}ok{% elif k.avg_ctr %}warn{% endif %}">
       {% if k.avg_ctr %}{{ "%.1f%%"|format(k.avg_ctr * 100) }}{% else %}—{% endif %}
     </div>
     <div class="kpi-lbl">Avg CTR</div>
   </div>
-  <div class="kpi-tile">
-    <div class="kpi-val" style="font-family:monospace; font-size:16px;">
-      {{ k.avg_view_pct | pct_bar(14) if k.avg_view_pct else '—' }}
+  <div class="kpi-card">
+    {% set _ret = k.avg_view_pct or 0 %}
+    <div class="kpi-val {% if k.avg_view_pct %}{% if _ret < 0.3 %}err{% elif _ret > 0.5 %}ok{% else %}warn{% endif %}{% endif %}">
+      {% if k.avg_view_pct %}{{ "%.0f%%"|format(k.avg_view_pct * 100) }}{% else %}—{% endif %}
     </div>
-    <div class="kpi-lbl">Avg retention</div>
+    {% if k.avg_view_pct %}
+      <div class="kpi-sub">{{ k.avg_view_pct | pct_bar(12) }}</div>
+    {% endif %}
+    <div class="kpi-lbl">Avg Retention</div>
   </div>
-  <div class="kpi-tile">
+  <div class="kpi-card">
     <div class="kpi-val">{% if k.avg_watch_time_s %}{{ k.avg_watch_time_s | int }}s{% else %}—{% endif %}</div>
-    <div class="kpi-lbl">Avg watch time</div>
+    <div class="kpi-lbl">Avg Watch Time</div>
   </div>
-  <div class="kpi-tile">
+  <div class="kpi-card">
     <div class="kpi-val">{{ "{:,}".format(k.total_views | int) if k.total_views else '—' }}</div>
-    <div class="kpi-lbl">Total views</div>
-  </div>
-  <div class="kpi-tile">
-    <div class="kpi-val muted">{{ k.get('total_snapshots', 0) }}</div>
-    <div class="kpi-lbl">Snapshots</div>
+    <div class="kpi-lbl">Total Views</div>
   </div>
 </div>
 
@@ -64,25 +73,25 @@
 <div class="grid2">
   {% if summary.best_episode %}
   {% set b = summary.best_episode %}
-  <div class="highlight-card" style="border-color:#2ea043;">
-    <div class="card-title ok">Best Performer</div>
-    <div style="font-weight:600;"><a href="/analytics/episode/{{ b.episode_id }}">{{ b.episode_id }}</a></div>
-    <div class="muted" style="font-size:12px; margin-top:4px;">
-      Retention {{ b.avg_view_pct | pct_bar(12) if b.avg_view_pct else '—' }} ·
-      CTR {% if b.ctr %}{{ "%.1f%%"|format(b.ctr*100) }}{% else %}—{% endif %} ·
-      {{ "{:,}".format(b.views|int) if b.views else '—' }} views
+  <div class="score-card score-card-best">
+    <div class="score-label score-label-best">Best retention</div>
+    <div class="score-ep"><a href="/analytics/episode/{{ b.episode_id }}" style="color:var(--text);">{{ b.episode_id }}</a></div>
+    <div class="score-stats">
+      <span class="ok">{{ "%.0f%%"|format(b.avg_view_pct * 100) if b.avg_view_pct else '—' }}</span> retention
+      {% if b.ctr %} · CTR {{ "%.1f%%"|format(b.ctr*100) }}{% endif %}
+      {% if b.views %} · {{ "{:,}".format(b.views|int) }} views{% endif %}
     </div>
   </div>
   {% endif %}
   {% if summary.worst_episode %}
   {% set w = summary.worst_episode %}
-  <div class="highlight-card" style="border-color:#da3633;">
-    <div class="card-title err">Needs Attention</div>
-    <div style="font-weight:600;"><a href="/analytics/episode/{{ w.episode_id }}">{{ w.episode_id }}</a></div>
-    <div class="muted" style="font-size:12px; margin-top:4px;">
-      Retention {{ w.avg_view_pct | pct_bar(12) if w.avg_view_pct else '—' }} ·
-      CTR {% if w.ctr %}{{ "%.1f%%"|format(w.ctr*100) }}{% else %}—{% endif %} ·
-      {{ "{:,}".format(w.views|int) if w.views else '—' }} views
+  <div class="score-card score-card-worst">
+    <div class="score-label score-label-worst">Needs attention</div>
+    <div class="score-ep"><a href="/analytics/episode/{{ w.episode_id }}" style="color:var(--text);">{{ w.episode_id }}</a></div>
+    <div class="score-stats">
+      <span class="err">{{ "%.0f%%"|format(w.avg_view_pct * 100) if w.avg_view_pct else '—' }}</span> retention
+      {% if w.ctr %} · CTR {{ "%.1f%%"|format(w.ctr*100) }}{% endif %}
+      {% if w.views %} · {{ "{:,}".format(w.views|int) }} views{% endif %}
     </div>
   </div>
   {% endif %}
@@ -94,22 +103,49 @@
 <div class="card" style="padding:0;">
   <table>
     <thead>
-      <tr><th>Episode</th><th>Date</th><th>Views</th><th>CTR</th><th>Retention</th><th>Watch time</th><th>Likes</th><th>Source</th><th></th></tr>
+      <tr>
+        <th>Episode</th>
+        <th>Date</th>
+        <th style="text-align:right;">Views</th>
+        <th style="text-align:right;">CTR</th>
+        <th style="text-align:right;">Retention</th>
+        <th style="text-align:right;">Watch time</th>
+        <th>Source</th>
+        <th></th>
+      </tr>
     </thead>
     <tbody>
       {% for r in summary.episodes %}
       <tr>
         <td style="font-size:12px;"><a href="/analytics/episode/{{ r.episode_id }}">{{ r.episode_id }}</a></td>
         <td class="muted" style="font-size:12px; white-space:nowrap;">{{ r.snapshot_date }}</td>
-        <td style="text-align:right; font-variant-numeric:tabular-nums;">{{ "{:,}".format(r.views|int) if r.views else '—' }}</td>
-        <td>
-          {% if r.ctr %}<span class="{% if r.ctr < 0.02 %}err{% elif r.ctr > 0.05 %}ok{% endif %}">{{ "%.1f%%"|format(r.ctr*100) }}</span>
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+          {{ "{:,}".format(r.views|int) if r.views else '—' }}
+        </td>
+        <td style="text-align:right;">
+          {% if r.ctr %}
+            <span class="{% if r.ctr < 0.02 %}err{% elif r.ctr > 0.05 %}ok{% else %}warn{% endif %}">
+              {{ "%.1f%%"|format(r.ctr*100) }}
+            </span>
           {% else %}<span class="muted">—</span>{% endif %}
         </td>
-        <td style="font-family:monospace; font-size:11px;">{{ r.avg_view_pct | pct_bar(12) if r.avg_view_pct else '—' }}</td>
-        <td class="muted" style="font-size:12px;">{{ r.avg_watch_time_s|int if r.avg_watch_time_s else '—' }}{% if r.avg_watch_time_s %}s{% endif %}</td>
-        <td class="muted" style="text-align:right;">{{ "{:,}".format(r.likes|int) if r.likes else '—' }}</td>
-        <td><span class="badge badge-{% if r.source == 'mock' %}unknown{% else %}active{% endif %}">{{ r.source }}</span></td>
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+          {% if r.avg_view_pct %}
+            <span class="{% if r.avg_view_pct < 0.3 %}err{% elif r.avg_view_pct > 0.5 %}ok{% else %}warn{% endif %}">
+              {{ "%.0f%%"|format(r.avg_view_pct * 100) }}
+            </span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="muted" style="font-size:12px; text-align:right;">
+          {% if r.avg_watch_time_s %}{{ r.avg_watch_time_s|int }}s{% else %}—{% endif %}
+        </td>
+        <td>
+          {% if r.source == 'mock' %}
+            <span class="badge badge-demo">Demo</span>
+          {% else %}
+            <span class="badge badge-active" style="font-size:10px;">{{ r.source }}</span>
+          {% endif %}
+        </td>
         <td><a href="/analytics/episode/{{ r.episode_id }}" class="btn" style="font-size:11px; padding:2px 8px;">→</a></td>
       </tr>
       {% endfor %}
@@ -117,7 +153,7 @@
   </table>
 </div>
 {% else %}
-<div class="empty">No {{ platform }} data. <a href="/analytics/import">Import →</a></div>
+<div class="empty">No {{ platform }} data yet. <a href="/analytics/import?platform={{ platform }}">Import →</a></div>
 {% endif %}
 
 </body>

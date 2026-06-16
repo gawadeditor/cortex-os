@@ -130,6 +130,24 @@ def pct_bar_filter(value, width=16):
     return "▓" * filled + "░" * (width - filled) + f" {v:.0%}"
 
 
+@app.template_filter("sort_by_signal")
+def sort_by_signal_filter(insights):
+    """Sort insights by abs(signal_strength) descending — strongest first."""
+    return sorted(insights, key=lambda x: abs(x.get("signal_strength") or 0), reverse=True)
+
+
+@app.template_filter("human_label")
+def human_label_filter(value):
+    """Convert snake_case insight_type to human-readable label."""
+    if not value:
+        return value
+    _acronyms = {"ctr", "cta", "api", "url"}
+    return " ".join(
+        w.upper() if w.lower() in _acronyms else w.title()
+        for w in str(value).split("_")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------
@@ -860,11 +878,12 @@ def analytics_import_page():
     from hypogeum.dashboard_runs import list_episodes
     channels = get_channel_summaries(db_path=_db_path())
     episodes = list_episodes(db_path=_db_path(), limit=50)
+    overview = get_analytics_overview(db_path=_db_path())
     flash    = request.args.get("import_result")
     return render_template("analytics_import.html",
                            channels=channels, episodes=episodes,
                            valid_platforms=sorted(_VALID_PLATFORMS),
-                           flash=flash)
+                           flash=flash, overview=overview)
 
 
 @app.route("/analytics/import", methods=["POST"])

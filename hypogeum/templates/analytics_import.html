@@ -17,32 +17,80 @@
                    padding: 10px 12px; font-family: monospace; font-size: 12px; color: var(--muted);
                    white-space: pre; overflow-x: auto; margin-top: 6px; }
     textarea { width: 100%; min-height: 160px; font-family: monospace; font-size: 12px; }
+    .demo-warning { background: #2a2a1a; border: 1px solid #9e6a03; border-radius: var(--radius);
+                    padding: 8px 12px; font-size: 12px; color: #d29922; margin-top: 8px; }
+    .already-imported { background: var(--surface); border: 1px solid var(--border);
+                        border-radius: var(--radius); padding: 12px 14px;
+                        margin-bottom: var(--gap); font-size: 13px; }
+    .already-imported strong { color: var(--text); }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
-<div class="page-header">
-  <h1>Import / Seed Analytics</h1>
-  <a href="/analytics" class="btn" style="margin-left:auto;">← Analytics</a>
+{# ── Secondary nav ── #}
+<div class="sub-nav">
+  <a href="/analytics"                    class="sub-nav-link">Portfolio</a>
+  <a href="/analytics/platform/youtube"   class="sub-nav-link">YouTube</a>
+  <a href="/analytics/platform/tiktok"    class="sub-nav-link">TikTok</a>
+  <a href="/analytics/platform/instagram" class="sub-nav-link">Instagram</a>
+  <a href="/analytics/platform/facebook"  class="sub-nav-link">Facebook</a>
+  <a href="/analytics/import"             class="sub-nav-link active">Import</a>
 </div>
 
-{# Flash #}
+{# ── Breadcrumb ── #}
+<div class="breadcrumb">
+  <a href="/analytics">Analytics</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>Import</span>
+</div>
+
+<div class="page-header">
+  <h1>Import Analytics</h1>
+  <span class="page-meta">Add real or demo performance data for any episode</span>
+</div>
+
+{# Flash messages #}
 {% if flash == 'ok' %}
-  <div class="flash flash-ok">Import successful.</div>
+  <div class="flash flash-ok">Import successful — insights extracted.</div>
 {% elif flash == 'invalid' %}
   <div class="flash flash-err">Invalid input — check episode ID, platform, and metric format.</div>
 {% elif flash == 'json_error' %}
-  <div class="flash flash-err">Could not parse JSON — check format.</div>
+  <div class="flash flash-err">Could not parse JSON — check the format hint below.</div>
 {% elif flash %}
   <div class="flash flash-err">Import failed: {{ flash }}</div>
 {% endif %}
 
-<div class="card" style="max-width:680px;">
+{# ── Already-imported summary ── #}
+{% if overview and (overview.episodes | length > 0 or overview.platform_breakdown.values() | selectattr('episodes_tracked') | list | length > 0) %}
+{% set _ep_cnt  = overview.episodes | length %}
+{% set _plat_ct = overview.platform_breakdown.values() | selectattr('episodes_tracked') | list | length %}
+<div class="already-imported">
+  <strong>{{ _ep_cnt }}</strong> episode{% if _ep_cnt != 1 %}s{% endif %} already tracked
+  across <strong>{{ _plat_ct }}</strong> platform{% if _plat_ct != 1 %}s{% endif %}.
+  <a href="/analytics" style="margin-left:8px;">View portfolio →</a>
+</div>
+{% endif %}
+
+{# ── Import guidance ── #}
+<div class="card" style="margin-bottom:var(--gap); padding:12px 16px;">
+  <div class="card-title">How to import</div>
+  <div style="display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted);">
+    <div><strong style="color:var(--text);">1.</strong> Select the episode and platform below.</div>
+    <div><strong style="color:var(--text);">2.</strong> Choose an import method — demo data for testing, or paste your real export.</div>
+    <div><strong style="color:var(--text);">3.</strong> Submit. Insights are extracted automatically.</div>
+    <div style="margin-top:4px; font-size:12px;">
+      Real data: export CSV or JSON from your platform dashboard and paste it directly.
+      Data imported here does not connect to or affect any social platform.
+    </div>
+  </div>
+</div>
+
+<div class="card" style="max-width:680px; padding:16px;">
   <form method="POST" action="/analytics/import" id="import-form">
 
     <div class="field">
-      <label>Episode ID</label>
+      <label>Episode</label>
       {% if episodes %}
         <select name="episode_id" required style="width:100%;">
           <option value="">— select episode —</option>
@@ -50,7 +98,7 @@
             <option value="{{ ep.episode_id }}">{{ ep.episode_id }}{% if ep.title or ep.topic %} — {{ ep.title or ep.topic }}{% endif %}</option>
           {% endfor %}
         </select>
-        <div class="hint">Or type a custom episode ID below — analytics can be imported before the episode exists locally.</div>
+        <div class="hint">Or type a custom ID below — analytics can be imported before the episode exists locally.</div>
         <input type="text" name="episode_id_custom" id="episode_id_custom"
                placeholder="Custom episode ID (overrides dropdown)" style="width:100%; margin-top:6px;">
       {% else %}
@@ -64,7 +112,9 @@
       <select name="platform" id="platform-select" required style="width:100%;" onchange="updateHint()">
         <option value="">— select platform —</option>
         {% for p in valid_platforms %}
-          <option value="{{ p }}">{{ p | capitalize }}</option>
+          <option value="{{ p }}" {% if request.args.get('platform') == p %}selected{% endif %}>
+            {{ p | capitalize }}
+          </option>
         {% endfor %}
       </select>
     </div>
@@ -72,18 +122,21 @@
     <div class="field">
       <label>Import method</label>
       <div class="method-tabs">
-        <button type="button" class="method-tab active" onclick="setMethod('mock')">Generate mock data</button>
-        <button type="button" class="method-tab" onclick="setMethod('json')">Paste JSON</button>
-        <button type="button" class="method-tab" onclick="setMethod('csv')">Paste CSV</button>
+        <button type="button" class="method-tab active" onclick="setMethod('mock', event)">Generate demo data</button>
+        <button type="button" class="method-tab" onclick="setMethod('json', event)">Paste JSON</button>
+        <button type="button" class="method-tab" onclick="setMethod('csv', event)">Paste CSV</button>
       </div>
       <input type="hidden" name="method" id="method-input" value="mock">
     </div>
 
     <div class="method-panel active" id="panel-mock">
-      <div style="color:var(--muted); font-size:13px;">
+      <div style="color:var(--muted); font-size:13px; line-height:1.6;">
         Generates deterministic synthetic metrics based on the episode ID and platform.
-        Safe to call repeatedly — always produces the same values.
-        Useful for testing the dashboard before real data is available.
+        Produces the same values every time — safe to call repeatedly.
+      </div>
+      <div class="demo-warning">
+        Demo data is clearly labelled throughout the dashboard and will not be confused with real imports.
+        Use it to explore the intelligence features before real analytics are available.
       </div>
     </div>
 
@@ -117,10 +170,10 @@ var _HINTS = {
 function updateHint() {
   var p = document.getElementById('platform-select').value;
   var hint = document.getElementById('json-hint');
-  hint.textContent = _HINTS[p] || 'Select a platform above to see the expected format.';
+  if (hint) hint.textContent = _HINTS[p] || 'Select a platform above to see the expected format.';
 }
 
-function setMethod(method) {
+function setMethod(method, event) {
   document.getElementById('method-input').value = method;
   document.querySelectorAll('.method-tab').forEach(function(b) { b.classList.remove('active'); });
   document.querySelectorAll('.method-panel').forEach(function(p) { p.classList.remove('active'); });
@@ -128,7 +181,6 @@ function setMethod(method) {
   document.getElementById('panel-' + method).classList.add('active');
 }
 
-// If custom episode_id_custom is filled, use it for episode_id
 {% if episodes %}
 document.getElementById('import-form').addEventListener('submit', function() {
   var custom = document.getElementById('episode_id_custom').value.trim();

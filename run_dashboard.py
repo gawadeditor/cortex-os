@@ -72,6 +72,25 @@ from hypogeum.dashboard_control import (
     action_resolve_signal,
     enqueue_topic,
 )
+from hypogeum.analytics_store import (
+    seed_mock_analytics,
+    import_from_dict,
+    import_from_csv,
+    list_analytics,
+    VALID_PLATFORMS as _VALID_PLATFORMS,
+)
+from hypogeum.learning_engine import (
+    extract_insights,
+    generate_actions,
+    apply_action,
+    dismiss_action,
+)
+from hypogeum.dashboard_analytics import (
+    get_analytics_overview,
+    get_platform_summary,
+    get_episode_performance,
+    get_learning_state,
+)
 from hypogeum.dashboard_live import (
     get_active_runs,
     get_run_live,
@@ -99,6 +118,16 @@ _TEMPLATE_DIR = _ROOT / "hypogeum" / "templates"
 
 app = Flask(__name__, template_folder=str(_TEMPLATE_DIR))
 app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+
+@app.template_filter("pct_bar")
+def pct_bar_filter(value, width=16):
+    """0.0–1.0 → '▓▓▓▓▓░░░░░░░░░░ 31%'"""
+    if value is None:
+        return "—"
+    v = max(0.0, min(1.0, float(value)))
+    filled = round(v * width)
+    return "▓" * filled + "░" * (width - filled) + f" {v:.0%}"
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +731,195 @@ def publishing_edit(publishing_profile_id):
         return render_template("not_found.html", kind="Publishing profile",
                                id=publishing_profile_id), 404
     return render_template("publishing_edit.html", publishing=pub)
+
+
+# ===========================================================================
+# Phase E — Analytics & Learning (JSON API)
+# ===========================================================================
+
+@app.route("/api/analytics/overview", methods=["GET"])
+def api_analytics_overview():
+    return jsonify(get_analytics_overview(db_path=_db_path()))
+
+
+@app.route("/api/analytics/platform/<platform>", methods=["GET"])
+def api_analytics_platform(platform):
+    if platform not in _VALID_PLATFORMS:
+        return jsonify({"error": f"unknown platform {platform!r}"}), 400
+    limit = min(int(request.args.get("limit", 50)), 200)
+    return jsonify(get_platform_summary(platform, db_path=_db_path(), limit=limit))
+
+
+@app.route("/api/analytics/episode/<episode_id>", methods=["GET"])
+def api_analytics_episode(episode_id):
+    data = get_episode_performance(episode_id, db_path=_db_path())
+    if data is None:
+        return jsonify({"error": "no analytics found"}), 404
+    return jsonify(data)
+
+
+@app.route("/api/analytics/insights/<episode_id>", methods=["GET"])
+def api_analytics_insights(episode_id):
+    from hypogeum.analytics_store import list_insights
+    return jsonify(list_insights(episode_id=episode_id, db_path=_db_path()))
+
+
+@app.route("/api/analytics/import", methods=["POST"])
+def api_analytics_import():
+    body       = request.get_json(silent=True) or {}
+    episode_id = body.get("episode_id", "")
+    platform   = body.get("platform", "")
+    raw        = body.get("metrics") or body.get("raw") or {}
+    if not episode_id:
+        return jsonify({"ok": False, "error": "episode_id required", "code": "invalid"}), 400
+    result = import_from_dict(episode_id, platform, raw, source="manual", db_path=_db_path())
+    status = 200 if result["ok"] else (400 if result.get("code") == "invalid" else 500)
+    return jsonify(result), status
+
+
+@app.route("/api/analytics/seed-mock/<episode_id>", methods=["POST"])
+def api_analytics_seed_mock(episode_id):
+    body     = request.get_json(silent=True) or {}
+    platform = body.get("platform", "")
+    if platform not in _VALID_PLATFORMS:
+        # Seed all platforms when not specified
+        results = {}
+        for p in sorted(_VALID_PLATFORMS):
+            results[p] = seed_mock_analytics(episode_id, p, db_path=_db_path())
+        return jsonify({"ok": True, "results": results})
+    result = seed_mock_analytics(episode_id, platform, db_path=_db_path())
+    status = 200 if result["ok"] else 400
+    return jsonify(result), status
+
+
+@app.route("/api/learning", methods=["GET"])
+def api_learning():
+    return jsonify(get_learning_state(db_path=_db_path()))
+
+
+@app.route("/api/learning/recommendations", methods=["GET"])
+def api_learning_recommendations():
+    from hypogeum.learning_engine import get_recommendations
+    return jsonify(get_recommendations(db_path=_db_path()))
+
+
+@app.route("/api/learning/action/<action_id>/apply", methods=["POST"])
+def api_learning_action_apply(action_id):
+    result = apply_action(action_id, db_path=_db_path())
+    status = 200 if result["ok"] else (
+        404 if result.get("code") == "not_found" else 400
+    )
+    return jsonify(result), status
+
+
+@app.route("/api/learning/action/<action_id>/dismiss", methods=["POST"])
+def api_learning_action_dismiss(action_id):
+    result = dismiss_action(action_id, db_path=_db_path())
+    status = 200 if result["ok"] else (
+        404 if result.get("code") == "not_found" else 400
+    )
+    return jsonify(result), status
+
+
+# ===========================================================================
+# Phase E — Analytics & Learning (HTML)
+# ===========================================================================
+
+@app.route("/analytics")
+def analytics_page():
+    overview   = get_analytics_overview(db_path=_db_path())
+    # Fetch channel list for seed-mock form
+    from hypogeum.dashboard_api import get_channel_summaries
+    channels   = get_channel_summaries(db_path=_db_path())
+    return render_template("analytics.html",
+                           overview=overview, channels=channels,
+                           valid_platforms=sorted(_VALID_PLATFORMS))
+
+
+@app.route("/analytics/platform/<platform>")
+def analytics_platform_page(platform):
+    if platform not in _VALID_PLATFORMS:
+        return render_template("not_found.html", kind="Platform", id=platform), 404
+    summary = get_platform_summary(platform, db_path=_db_path())
+    return render_template("analytics_platform.html",
+                           summary=summary, platform=platform)
+
+
+@app.route("/analytics/episode/<episode_id>")
+def analytics_episode_page(episode_id):
+    data = get_episode_performance(episode_id, db_path=_db_path())
+    if data is None:
+        return render_template("not_found.html",
+                               kind="Episode analytics", id=episode_id), 404
+    return render_template("analytics_episode.html", d=data)
+
+
+@app.route("/analytics/import", methods=["GET"])
+def analytics_import_page():
+    from hypogeum.dashboard_api import get_channel_summaries
+    from hypogeum.dashboard_runs import list_episodes
+    channels = get_channel_summaries(db_path=_db_path())
+    episodes = list_episodes(db_path=_db_path(), limit=50)
+    flash    = request.args.get("import_result")
+    return render_template("analytics_import.html",
+                           channels=channels, episodes=episodes,
+                           valid_platforms=sorted(_VALID_PLATFORMS),
+                           flash=flash)
+
+
+@app.route("/analytics/import", methods=["POST"])
+def analytics_import_submit():
+    episode_id = request.form.get("episode_id", "").strip()
+    platform   = request.form.get("platform", "").strip()
+    method     = request.form.get("method", "json")
+
+    if not episode_id or platform not in _VALID_PLATFORMS:
+        return redirect(url_for("analytics_import_page") + "?import_result=invalid")
+
+    if method == "mock":
+        result = seed_mock_analytics(episode_id, platform, db_path=_db_path())
+    elif method == "csv":
+        csv_text = request.form.get("csv_text", "")
+        result   = import_from_csv(episode_id, platform, csv_text, db_path=_db_path())
+    else:  # json
+        raw_text = request.form.get("json_text", "{}")
+        try:
+            import json as _j
+            raw = _j.loads(raw_text)
+        except Exception:
+            return redirect(url_for("analytics_import_page") + "?import_result=json_error")
+        result = import_from_dict(episode_id, platform, raw, source="manual", db_path=_db_path())
+
+    if result["ok"]:
+        # Auto-extract insights after import
+        try:
+            extract_insights(episode_id, db_path=_db_path())
+            generate_actions(episode_id, db_path=_db_path())
+        except Exception:
+            pass
+        return redirect(url_for("analytics_episode_page", episode_id=episode_id)
+                        + "?import_result=ok")
+
+    code = result.get("code", "error")
+    return redirect(url_for("analytics_import_page") + f"?import_result={code}")
+
+
+@app.route("/learning")
+def learning_page():
+    state = get_learning_state(db_path=_db_path())
+    return render_template("learning.html", state=state)
+
+
+@app.route("/learning/action/<action_id>/apply", methods=["POST"])
+def learning_action_apply(action_id):
+    apply_action(action_id, db_path=_db_path())
+    return redirect(url_for("learning_page"))
+
+
+@app.route("/learning/action/<action_id>/dismiss", methods=["POST"])
+def learning_action_dismiss(action_id):
+    dismiss_action(action_id, db_path=_db_path())
+    return redirect(url_for("learning_page"))
 
 
 # ---------------------------------------------------------------------------

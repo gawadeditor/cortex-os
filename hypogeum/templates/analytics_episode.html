@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ d.episode_id }} Analytics — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .platform-section { margin-bottom: var(--gap); }
+    .platform-header  { font-size: 14px; font-weight: 700; text-transform: capitalize;
+                        margin-bottom: 8px; padding-bottom: 4px;
+                        border-bottom: 1px solid var(--border); }
+    .metric-row { display: flex; justify-content: space-between; padding: 4px 0;
+                  border-bottom: 1px solid var(--border); font-size: 13px; }
+    .metric-row:last-child { border-bottom: none; }
+    .metric-l { color: var(--muted); }
+    .plat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr));
+                 gap: var(--gap); }
+    .insight-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .insight-row:last-child { border-bottom: none; }
+    .strength-bar { font-family: monospace; font-size: 11px; }
+    .strength-pos { color: var(--green); }
+    .strength-neg { color: var(--red); }
+    .dim-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
+                 background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
+    .flash-ok  { background:#1a3a22; border:1px solid #2ea043; color:var(--green);
+                 padding:10px 14px; border-radius:var(--radius); margin-bottom:var(--gap); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+{% if request.args.get('import_result') == 'ok' %}
+<div class="flash-ok">Analytics imported and insights extracted successfully.</div>
+{% endif %}
+
+<div class="page-header">
+  <h1>{{ d.episode_id }}</h1>
+  {% if d.episode.get('title') or d.episode.get('topic') %}
+    <span class="page-meta">{{ d.episode.get('title') or d.episode.get('topic') }}</span>
+  {% endif %}
+  <div style="margin-left:auto; display:flex; gap:8px;">
+    {% if d.episode.get('run_id') or d.platforms %}
+      <a href="/analytics/import" class="btn" style="font-size:11px;">Add data →</a>
+    {% endif %}
+    <a href="/analytics" class="btn">← Analytics</a>
+  </div>
+</div>
+
+{# Production cost summary #}
+{% if d.production_cost > 0 %}
+<div style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  Production cost: <strong>${{ "%.4f"|format(d.production_cost) }}</strong>
+</div>
+{% endif %}
+
+{# ── Platform metrics ── #}
+<div class="plat-grid">
+  {% for platform, rec in d.platforms.items() %}
+  <div class="card platform-section">
+    <div class="platform-header">
+      <a href="/analytics/platform/{{ platform }}" style="color:var(--text);">{{ platform }}</a>
+      <span class="badge badge-{% if rec.source == 'mock' %}unknown{% else %}active{% endif %}" style="float:right; font-size:10px;">{{ rec.source }}</span>
+    </div>
+    {% if rec.views %}
+    <div class="metric-row"><span class="metric-l">Views</span><span>{{ "{:,}".format(rec.views|int) }}</span></div>
+    {% endif %}
+    {% if rec.impressions %}
+    <div class="metric-row"><span class="metric-l">Impressions</span><span>{{ "{:,}".format(rec.impressions|int) }}</span></div>
+    {% endif %}
+    {% if rec.ctr is not none %}
+    <div class="metric-row"><span class="metric-l">CTR</span>
+      <span class="{% if rec.ctr < 0.02 %}err{% elif rec.ctr > 0.05 %}ok{% endif %}">
+        {{ "%.1f%%"|format(rec.ctr * 100) }}
+      </span>
+    </div>
+    {% endif %}
+    {% if rec.avg_view_pct is not none %}
+    <div class="metric-row"><span class="metric-l">Avg retention</span>
+      <span style="font-family:monospace; font-size:11px;">{{ rec.avg_view_pct | pct_bar(14) }}</span>
+    </div>
+    {% endif %}
+    {% if rec.avg_watch_time_s %}
+    <div class="metric-row"><span class="metric-l">Avg watch time</span><span>{{ rec.avg_watch_time_s|int }}s</span></div>
+    {% endif %}
+    {% if rec.likes %}
+    <div class="metric-row"><span class="metric-l">Likes</span><span>{{ "{:,}".format(rec.likes|int) }}</span></div>
+    {% endif %}
+    {% if rec.comments %}
+    <div class="metric-row"><span class="metric-l">Comments</span><span>{{ "{:,}".format(rec.comments|int) }}</span></div>
+    {% endif %}
+    {% if rec.shares %}
+    <div class="metric-row"><span class="metric-l">Shares</span><span>{{ "{:,}".format(rec.shares|int) }}</span></div>
+    {% endif %}
+    {% if rec.saves %}
+    <div class="metric-row"><span class="metric-l">Saves</span><span>{{ "{:,}".format(rec.saves|int) }}</span></div>
+    {% endif %}
+    <div class="metric-row muted" style="font-size:11px;"><span>Snapshot</span><span>{{ rec.snapshot_date }}</span></div>
+  </div>
+  {% endfor %}
+</div>
+
+{# ── Insights ── #}
+{% if d.insights %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Insights ({{ d.insights | length }})</div>
+  {% for ins in d.insights %}
+  {% set pos = ins.signal_strength >= 0 %}
+  <div class="insight-row">
+    <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
+      <span class="dim-badge">{{ ins.affected_dim }}</span>
+      <span style="font-size:11px; text-transform:uppercase; color:var(--muted);">{{ ins.platform }}</span>
+      <span class="{% if pos %}strength-pos{% else %}strength-neg{% endif %}" style="font-family:monospace; font-size:12px;">
+        {% if pos %}▲{% else %}▼{% endif %} {{ "%.2f"|format(ins.signal_strength | abs) }}
+      </span>
+      <span style="font-weight:500; font-size:13px;">{{ ins.insight_type.replace('_',' ') }}</span>
+    </div>
+    {% if ins.detail %}
+    <div class="muted" style="font-size:12px; margin-top:3px;">{{ ins.detail }}</div>
+    {% endif %}
+    {% if ins.threshold_used %}
+    <div style="font-size:11px; color:var(--border); margin-top:2px; font-family:monospace;">{{ ins.threshold_used }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ── Actions for this episode ── #}
+{% if d.actions %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Learning Actions from this Episode ({{ d.actions | length }})</div>
+  {% for a in d.actions %}
+  <div style="padding:8px 0; border-bottom:1px solid var(--border);">
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <span class="dim-badge">{{ a.dimension }}</span>
+      <span class="badge badge-{% if a.status == 'applied' %}complete{% elif a.status == 'dismissed' %}cancelled{% else %}queued{% endif %}">
+        {{ a.action_type }} · {{ a.status }}
+      </span>
+    </div>
+    <div style="font-size:13px; margin-top:4px;">{{ a.rationale[:160] }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+</body>
+</html>

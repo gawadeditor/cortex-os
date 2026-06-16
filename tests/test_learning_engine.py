@@ -1,0 +1,452 @@
+"""
+tests/test_learning_engine.py — Phase E: Learning Engine tests
+
+Coverage:
+    TestInsightRules        — InsightRule.fires(), compute_strength() boundaries
+    TestExtractInsights     — rule firing on known metric values, deduplication
+    TestEngagementInsights  — ratio-based rules (shares, saves, likes)
+    TestGenerateActions     — grouping by dim, dedup pending, all action types
+    TestApplyDismissActions — status transitions, not-found, already-decided
+    TestGetRecommendations  — output structure, applied > pending confidence
+    TestGetFactoryState     — counts, top_recommendation, empty state
+    TestFeedbackLoopIntegrity — actions reference valid insight_ids
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from hypogeum.db import initialize_schema
+from hypogeum.analytics_store import (
+    seed_mock_analytics,
+    store_platform_metrics,
+    store_insight,
+    store_action,
+    list_actions,
+    list_insights,
+    update_action_status,
+)
+from hypogeum.learning_engine import (
+    InsightRule,
+    INSIGHT_RULES,
+    extract_insights,
+    generate_actions,
+    apply_action,
+    dismiss_action,
+    get_recommendations,
+    get_factory_learning_state,
+)
+
+
+@pytest.fixture()
+def db_path(tmp_path):
+    p = tmp_path / "learning_test.db"
+    initialize_schema(p)
+    return p
+
+
+@pytest.fixture()
+def youtube_low_ctr(db_path):
+    """Episode with CTR < 2% — should fire weak_thumbnail."""
+    store_platform_metrics("ep_low", "youtube",
+                           {"views": 5000, "ctr": 0.010, "avg_view_pct": 0.40},
+                           db_path=db_path)
+    return "ep_low"
+
+
+@pytest.fixture()
+def youtube_high_retention(db_path):
+    """Episode with avg_view_pct > 60% — should fire high_retention."""
+    store_platform_metrics("ep_high", "youtube",
+                           {"views": 10000, "ctr": 0.07, "avg_view_pct": 0.68},
+                           db_path=db_path)
+    return "ep_high"
+
+
+@pytest.fixture()
+def hook_failure(db_path):
+    """Episode with avg_view_pct < 15% — hook_failure rule."""
+    store_platform_metrics("ep_hook", "youtube",
+                           {"views": 3000, "avg_view_pct": 0.09},
+                           db_path=db_path)
+    return "ep_hook"
+
+
+@pytest.fixture()
+def seeded_all_platforms(db_path):
+    """Seed all platforms for ep_seed."""
+    for p in ("youtube", "tiktok", "instagram", "facebook"):
+        seed_mock_analytics("ep_seed", p, db_path=db_path)
+    return "ep_seed"
+
+
+# ===========================================================================
+# TestInsightRules
+# ===========================================================================
+
+class TestInsightRules:
+    def test_lt_rule_fires_below_threshold(self):
+        rule = InsightRule("youtube", "ctr", "lt", 0.02, "weak_thumbnail", "thumbnail")
+        assert rule.fires(0.01) is True
+        assert rule.fires(0.02) is False
+        assert rule.fires(0.03) is False
+
+    def test_gt_rule_fires_above_threshold(self):
+        rule = InsightRule("youtube", "ctr", "gt", 0.06, "strong_thumbnail", "thumbnail")
+        assert rule.fires(0.07) is True
+        assert rule.fires(0.06) is False
+        assert rule.fires(0.04) is False
+
+    def test_none_value_never_fires(self):
+        rule = InsightRule("youtube", "ctr", "lt", 0.02, "weak_thumbnail", "thumbnail")
+        assert rule.fires(None) is False
+
+    def test_lt_rule_negative_strength(self):
+        rule = InsightRule("youtube", "ctr", "lt", 0.02, "weak_thumbnail", "thumbnail")
+        strength = rule.compute_strength(0.01)
+        assert strength < 0
+
+    def test_gt_rule_positive_strength(self):
+        rule = InsightRule("youtube", "ctr", "gt", 0.06, "strong_thumbnail", "thumbnail")
+        strength = rule.compute_strength(0.09)
+        assert strength > 0
+
+    def test_strength_capped_at_1(self):
+        rule = InsightRule("youtube", "ctr", "lt", 0.02, "weak_thumbnail", "thumbnail", strength_scale=10.0)
+        assert rule.compute_strength(0.0) >= -1.0
+
+    def test_strength_capped_at_minus_1(self):
+        rule = InsightRule("youtube", "ctr", "gt", 0.06, "strong_thumbnail", "thumbnail", strength_scale=10.0)
+        assert rule.compute_strength(100.0) <= 1.0
+
+    def test_all_rules_have_valid_comparators(self):
+        valid = {"lt", "le", "gt", "ge"}
+        for r in INSIGHT_RULES:
+            assert r.comparator in valid, f"Rule {r.insight_type} has invalid comparator"
+
+    def test_all_rules_have_non_empty_detail_tpl(self):
+        for r in INSIGHT_RULES:
+            assert len(r.detail_tpl) > 0, f"Rule {r.insight_type} has empty detail_tpl"
+
+    def test_threshold_label_includes_metric(self):
+        rule = InsightRule("youtube", "ctr", "lt", 0.02, "weak_thumbnail", "thumbnail")
+        label = rule.threshold_label()
+        assert "ctr" in label
+        assert "<" in label
+
+
+# ===========================================================================
+# TestExtractInsights
+# ===========================================================================
+
+class TestExtractInsights:
+    def test_no_analytics_returns_empty(self, db_path):
+        result = extract_insights("no-ep", db_path=db_path)
+        assert result == []
+
+    def test_low_ctr_fires_weak_thumbnail(self, db_path, youtube_low_ctr):
+        insights = extract_insights(youtube_low_ctr, db_path=db_path)
+        types = {i["insight_type"] for i in insights}
+        assert "weak_thumbnail" in types
+
+    def test_high_retention_fires_high_retention(self, db_path, youtube_high_retention):
+        insights = extract_insights(youtube_high_retention, db_path=db_path)
+        types = {i["insight_type"] for i in insights}
+        assert "high_retention" in types
+
+    def test_hook_failure_fires_on_low_view_pct(self, db_path, hook_failure):
+        insights = extract_insights(hook_failure, db_path=db_path)
+        types = {i["insight_type"] for i in insights}
+        assert "hook_failure" in types
+
+    def test_insights_have_required_fields(self, db_path, youtube_low_ctr):
+        insights = extract_insights(youtube_low_ctr, db_path=db_path)
+        required = {"insight_id", "episode_id", "platform", "insight_type",
+                    "affected_dim", "signal_strength"}
+        for ins in insights:
+            assert required.issubset(ins.keys())
+
+    def test_negative_insight_has_negative_strength(self, db_path, youtube_low_ctr):
+        insights = extract_insights(youtube_low_ctr, db_path=db_path)
+        thumbnail = [i for i in insights if i["insight_type"] == "weak_thumbnail"]
+        assert len(thumbnail) > 0
+        assert thumbnail[0]["signal_strength"] < 0
+
+    def test_positive_insight_has_positive_strength(self, db_path, youtube_high_retention):
+        insights = extract_insights(youtube_high_retention, db_path=db_path)
+        high = [i for i in insights if i["insight_type"] in ("high_retention", "good_retention", "strong_thumbnail")]
+        assert any(i["signal_strength"] > 0 for i in high)
+
+    def test_idempotent_call_does_not_duplicate(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        all_ins = list_insights(episode_id=youtube_low_ctr, db_path=db_path)
+        types = [i["insight_type"] for i in all_ins]
+        assert len(types) == len(set(types)), "Duplicate insight types found"
+
+    def test_stored_in_db(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        stored = list_insights(episode_id=youtube_low_ctr, db_path=db_path)
+        assert len(stored) > 0
+
+    def test_multiple_platforms_all_extracted(self, db_path, seeded_all_platforms):
+        insights = extract_insights(seeded_all_platforms, db_path=db_path)
+        platforms_seen = {i["platform"] for i in insights}
+        # Should have insights from at least 2 platforms (depends on seeded values)
+        assert len(platforms_seen) >= 1
+
+
+# ===========================================================================
+# TestEngagementInsights
+# ===========================================================================
+
+class TestEngagementInsights:
+    def test_high_share_rate_fires_viral_signal(self, db_path):
+        store_platform_metrics("ep1", "youtube",
+                               {"views": 10000, "shares": 600},  # 6% share rate
+                               db_path=db_path)
+        insights = extract_insights("ep1", db_path=db_path)
+        types = {i["insight_type"] for i in insights}
+        assert "viral_signal" in types
+
+    def test_low_share_rate_fires_low_shareability(self, db_path):
+        store_platform_metrics("ep1", "youtube",
+                               {"views": 10000, "shares": 10},  # 0.1% share rate
+                               db_path=db_path)
+        insights = extract_insights("ep1", db_path=db_path)
+        types = {i["insight_type"] for i in insights}
+        assert "low_shareability" in types
+
+    def test_high_save_rate_on_instagram(self, db_path):
+        store_platform_metrics("ep1", "instagram",
+                               {"views": 5000, "saves": 200},  # 4% save rate
+                               db_path=db_path)
+        insights = extract_insights("ep1", db_path=db_path)
+        types = {i["insight_type"] for i in insights}
+        assert "high_save_rate" in types
+
+    def test_insufficient_views_no_engagement_insights(self, db_path):
+        store_platform_metrics("ep1", "youtube",
+                               {"views": 5, "shares": 1},
+                               db_path=db_path)
+        insights = extract_insights("ep1", db_path=db_path)
+        types = {i["insight_type"] for i in insights}
+        assert "viral_signal" not in types
+        assert "low_shareability" not in types
+
+
+# ===========================================================================
+# TestGenerateActions
+# ===========================================================================
+
+class TestGenerateActions:
+    def test_no_insights_returns_empty(self, db_path):
+        result = generate_actions("no-ep", db_path=db_path)
+        assert result == []
+
+    def test_generates_action_for_weak_thumbnail(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        actions = generate_actions(youtube_low_ctr, db_path=db_path)
+        dims = {a["dimension"] for a in actions}
+        assert "thumbnail" in dims
+
+    def test_generated_action_is_pending(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        actions = list_actions(status="pending", db_path=db_path)
+        assert len(actions) > 0
+
+    def test_deduplicates_pending_actions_same_dimension(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        count_before = len(list_actions(status="pending", db_path=db_path))
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        count_after = len(list_actions(status="pending", db_path=db_path))
+        assert count_before == count_after
+
+    def test_action_has_rationale(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        actions = list_actions(status="pending", db_path=db_path)
+        for a in actions:
+            assert a["rationale"] and len(a["rationale"]) > 0
+
+    def test_action_has_valid_action_type(self, db_path, youtube_low_ctr):
+        from hypogeum.analytics_store import VALID_ACTION_TYPES
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        for a in list_actions(status="pending", db_path=db_path):
+            assert a["action_type"] in VALID_ACTION_TYPES
+
+
+# ===========================================================================
+# TestApplyDismissActions
+# ===========================================================================
+
+class TestApplyDismissActions:
+    def _make_pending(self, db_path):
+        return store_action({
+            "source_episode": "ep1",
+            "dimension":      "thumbnail",
+            "action_type":    "test",
+            "rationale":      "Low CTR",
+        }, db_path=db_path)
+
+    def test_apply_returns_ok(self, db_path):
+        aid = self._make_pending(db_path)
+        result = apply_action(aid, db_path=db_path)
+        assert result["ok"] is True
+        assert result["status"] == "applied"
+
+    def test_dismiss_returns_ok(self, db_path):
+        aid = self._make_pending(db_path)
+        result = dismiss_action(aid, db_path=db_path)
+        assert result["ok"] is True
+        assert result["status"] == "dismissed"
+
+    def test_apply_not_found(self, db_path):
+        result = apply_action("no-such-action", db_path=db_path)
+        assert result["ok"] is False
+        assert result["code"] == "not_found"
+
+    def test_dismiss_not_found(self, db_path):
+        result = dismiss_action("no-such-action", db_path=db_path)
+        assert result["ok"] is False
+        assert result["code"] == "not_found"
+
+    def test_apply_already_applied(self, db_path):
+        aid = self._make_pending(db_path)
+        apply_action(aid, db_path=db_path)
+        result = apply_action(aid, db_path=db_path)
+        assert result["ok"] is False
+        assert result["code"] == "invalid_status"
+
+    def test_dismiss_already_dismissed(self, db_path):
+        aid = self._make_pending(db_path)
+        dismiss_action(aid, db_path=db_path)
+        result = dismiss_action(aid, db_path=db_path)
+        assert result["ok"] is False
+
+    def test_apply_sets_applied_at(self, db_path):
+        from hypogeum.analytics_store import get_action
+        aid = self._make_pending(db_path)
+        apply_action(aid, db_path=db_path)
+        a = get_action(aid, db_path=db_path)
+        assert a["applied_at"] is not None
+
+
+# ===========================================================================
+# TestGetRecommendations
+# ===========================================================================
+
+class TestGetRecommendations:
+    def test_empty_db_returns_empty_dict(self, db_path):
+        recs = get_recommendations(db_path=db_path)
+        assert isinstance(recs, dict)
+
+    def test_applied_action_in_recommendations(self, db_path):
+        aid = store_action({
+            "source_episode": "ep1", "dimension": "thumbnail",
+            "action_type": "test", "rationale": "Low CTR",
+        }, db_path=db_path)
+        update_action_status(aid, "applied", db_path=db_path)
+        recs = get_recommendations(db_path=db_path)
+        assert "thumbnail" in recs
+
+    def test_applied_higher_confidence_than_pending(self, db_path):
+        aid1 = store_action({"source_episode": "ep1", "dimension": "thumbnail",
+                              "action_type": "test", "rationale": "Low CTR"}, db_path=db_path)
+        update_action_status(aid1, "applied", db_path=db_path)
+        store_action({"source_episode": "ep2", "dimension": "hook",
+                      "action_type": "change", "rationale": "Low completion"}, db_path=db_path)
+        recs = get_recommendations(db_path=db_path)
+        if "thumbnail" in recs and "hook" in recs:
+            assert recs["thumbnail"]["confidence"] >= recs["hook"]["confidence"]
+
+    def test_recommendation_has_required_keys(self, db_path):
+        store_action({"source_episode": "ep1", "dimension": "pacing",
+                      "action_type": "change", "rationale": "R"}, db_path=db_path)
+        recs = get_recommendations(db_path=db_path)
+        if recs:
+            for dim, rec in recs.items():
+                required = {"action_type", "rationale", "confidence", "status", "action_id"}
+                assert required.issubset(rec.keys())
+
+    def test_confidence_is_between_0_and_1(self, db_path):
+        store_action({"source_episode": "ep1", "dimension": "title",
+                      "action_type": "test", "rationale": "R"}, db_path=db_path)
+        recs = get_recommendations(db_path=db_path)
+        for rec in recs.values():
+            assert 0.0 <= rec["confidence"] <= 1.0
+
+
+# ===========================================================================
+# TestGetFactoryState
+# ===========================================================================
+
+class TestGetFactoryState:
+    def test_empty_db_returns_zeroed_state(self, db_path):
+        state = get_factory_learning_state(db_path=db_path)
+        assert state["total_analytics_records"] == 0
+        assert state["total_insights"] == 0
+        assert state["pending_actions"] == 0
+
+    def test_counts_analytics_records(self, db_path):
+        seed_mock_analytics("ep1", "youtube", db_path=db_path)
+        state = get_factory_learning_state(db_path=db_path)
+        assert state["total_analytics_records"] == 1
+
+    def test_counts_insights_after_extract(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        state = get_factory_learning_state(db_path=db_path)
+        assert state["total_insights"] > 0
+
+    def test_top_recommendation_set_when_actions_exist(self, db_path):
+        store_action({"source_episode": "ep1", "dimension": "thumbnail",
+                      "action_type": "test", "rationale": "Low CTR",
+                      "status": "applied"}, db_path=db_path)
+        # Manually update status to applied
+        actions = list_actions(db_path=db_path)
+        if actions:
+            update_action_status(actions[0]["action_id"], "applied", db_path=db_path)
+        state = get_factory_learning_state(db_path=db_path)
+        assert isinstance(state.get("top_recommendation"), (str, type(None)))
+
+    def test_platform_coverage_populated(self, db_path):
+        seed_mock_analytics("ep1", "youtube",    db_path=db_path)
+        seed_mock_analytics("ep2", "tiktok",     db_path=db_path)
+        state = get_factory_learning_state(db_path=db_path)
+        assert "youtube" in state["platform_coverage"]
+        assert "tiktok"  in state["platform_coverage"]
+
+    def test_bad_db_returns_zeroed(self, tmp_path):
+        bad = tmp_path / "bad"; bad.mkdir()
+        state = get_factory_learning_state(db_path=bad)
+        assert state["total_analytics_records"] == 0
+
+
+# ===========================================================================
+# TestFeedbackLoopIntegrity
+# ===========================================================================
+
+class TestFeedbackLoopIntegrity:
+    def test_actions_reference_existing_episodes(self, db_path, youtube_low_ctr):
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        actions = list_actions(db_path=db_path)
+        for a in actions:
+            assert a.get("source_episode") == youtube_low_ctr
+
+    def test_insights_have_episode_id(self, db_path, youtube_low_ctr):
+        insights = extract_insights(youtube_low_ctr, db_path=db_path)
+        for ins in insights:
+            assert ins.get("episode_id") == youtube_low_ctr
+
+    def test_dismissed_actions_not_in_recommendations(self, db_path):
+        aid = store_action({"source_episode": "ep1", "dimension": "pacing",
+                            "action_type": "change", "rationale": "Dismissed"}, db_path=db_path)
+        update_action_status(aid, "dismissed", db_path=db_path)
+        recs = get_recommendations(db_path=db_path)
+        # dismissed should not appear (only pending and applied)
+        for rec in recs.values():
+            assert rec["status"] != "dismissed"

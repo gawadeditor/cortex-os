@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Analytics — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .platform-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr));
+                     gap: var(--gap); margin-bottom: var(--gap); }
+    .plat-card { background: var(--surface); border: 1px solid var(--border);
+                 border-radius: var(--radius); padding: 14px 16px; }
+    .plat-name { font-size: 15px; font-weight: 700; margin-bottom: 6px; text-transform: capitalize; }
+    .plat-stat { display: flex; justify-content: space-between; font-size: 12px;
+                 padding: 3px 0; border-bottom: 1px solid var(--border); }
+    .plat-stat:last-child { border-bottom: none; }
+    .no-data { color: var(--muted); font-style: italic; font-size: 13px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Analytics</h1>
+  <span class="page-meta">
+    {{ overview.total_insights }} insight{% if overview.total_insights != 1 %}s{% endif %} ·
+    {{ overview.pending_action_count }} pending action{% if overview.pending_action_count != 1 %}s{% endif %}
+  </span>
+  <div style="margin-left:auto; display:flex; gap:8px;">
+    <a href="/analytics/import" class="btn">Import / Seed →</a>
+    <a href="/learning" class="btn">Learning →</a>
+  </div>
+</div>
+
+{# ── Platform tiles ── #}
+<div class="platform-grid">
+  {% for platform in valid_platforms %}
+    {% set pb = overview.platform_breakdown.get(platform, {}) %}
+    <div class="plat-card">
+      <div class="plat-name">
+        <a href="/analytics/platform/{{ platform }}" style="color:var(--text);">{{ platform }}</a>
+      </div>
+      {% if pb.get('episodes_tracked', 0) > 0 %}
+        <div class="plat-stat"><span class="muted">Episodes</span><span>{{ pb.episodes_tracked }}</span></div>
+        <div class="plat-stat"><span class="muted">Avg CTR</span>
+          <span {% if pb.avg_ctr < 0.02 %}class="err"{% elif pb.avg_ctr > 0.05 %}class="ok"{% endif %}>
+            {{ "%.1f%%"|format(pb.avg_ctr * 100) }}
+          </span>
+        </div>
+        <div class="plat-stat"><span class="muted">Avg retention</span>
+          <span>{{ pb.avg_view_pct | pct_bar }}</span>
+        </div>
+        <div class="plat-stat"><span class="muted">Total views</span>
+          <span>{{ "{:,}".format(pb.total_views | int) }}</span>
+        </div>
+      {% else %}
+        <div class="no-data">No data yet</div>
+        <div style="margin-top:8px;">
+          <a href="/analytics/import?platform={{ platform }}" class="btn" style="font-size:11px;">Seed / Import →</a>
+        </div>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+
+{# ── Episode performance table ── #}
+{% if overview.episodes %}
+<div class="card" style="padding:0;">
+  <table>
+    <thead>
+      <tr>
+        <th>Episode</th>
+        <th>Platforms</th>
+        <th>Avg CTR</th>
+        <th>Avg retention</th>
+        <th>Total views</th>
+        <th>Insights</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ep in overview.episodes %}
+      <tr>
+        <td>
+          <a href="/analytics/episode/{{ ep.episode_id }}">{{ ep.episode_id }}</a>
+          {% if ep.episode_title or ep.episode_topic %}
+            <br><span class="muted" style="font-size:11px;">{{ (ep.episode_title or ep.episode_topic)[:50] }}</span>
+          {% endif %}
+        </td>
+        <td class="muted" style="font-size:12px;">{{ ep.platforms_tracked }}</td>
+        <td style="font-variant-numeric:tabular-nums;">
+          {% if ep.avg_ctr %}
+            <span {% if ep.avg_ctr < 0.02 %}class="err"{% elif ep.avg_ctr > 0.05 %}class="ok"{% endif %}>
+              {{ "%.1f%%"|format(ep.avg_ctr * 100) }}
+            </span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td style="font-family:monospace; font-size:12px;">{{ ep.avg_view_pct | pct_bar }}</td>
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+          {{ "{:,}".format(ep.total_views | int) if ep.total_views else '—' }}
+        </td>
+        <td style="text-align:right;">
+          {% if ep.insight_count > 0 %}
+            <span class="badge badge-{% if ep.insight_count > 3 %}queued{% else %}running{% endif %}">{{ ep.insight_count }}</span>
+          {% else %}<span class="muted">0</span>{% endif %}
+        </td>
+        <td><a href="/analytics/episode/{{ ep.episode_id }}" class="btn" style="font-size:11px;">View →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">No analytics data yet. <a href="/analytics/import">Import or seed mock data →</a></div>
+{% endif %}
+
+{# ── Recent snapshots ── #}
+{% if overview.recent_snapshots %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Recent Imports ({{ overview.recent_snapshots | length }})</div>
+  <table>
+    <thead><tr><th>Episode</th><th>Platform</th><th>Date</th><th>Views</th><th>CTR</th><th>Retention</th><th>Source</th></tr></thead>
+    <tbody>
+      {% for r in overview.recent_snapshots %}
+      <tr>
+        <td style="font-size:12px;"><a href="/analytics/episode/{{ r.episode_id }}">{{ r.episode_id }}</a></td>
+        <td style="font-size:12px; text-transform:capitalize;">{{ r.platform }}</td>
+        <td class="muted" style="font-size:12px;">{{ r.snapshot_date }}</td>
+        <td style="font-variant-numeric:tabular-nums; text-align:right;">{{ "{:,}".format(r.views|int) if r.views else '—' }}</td>
+        <td>{% if r.ctr %}<span class="{% if r.ctr < 0.02 %}err{% elif r.ctr > 0.05 %}ok{% endif %}">{{ "%.1f%%"|format(r.ctr*100) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td style="font-family:monospace; font-size:11px;">{{ r.avg_view_pct | pct_bar(12) }}</td>
+        <td><span class="badge badge-{% if r.source == 'mock' %}unknown{% else %}active{% endif %}">{{ r.source }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+</body>
+</html>

@@ -945,3 +945,145 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(run_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_status  ON approvals(status);
 CREATE INDEX IF NOT EXISTS idx_approvals_type    ON approvals(approval_type, status);
+
+-- ===========================================================================
+-- Phase E: Analytics & Learning
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- platform_analytics
+-- One row per episode × platform × snapshot_date.
+-- Stores normalised metrics regardless of source (manual paste, CSV, API).
+-- Multiple snapshots per episode are supported: 7d, 28d, 90d windows.
+-- UNIQUE(episode_id, platform, snapshot_date) enables idempotent import.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS platform_analytics (
+    record_id          TEXT    NOT NULL PRIMARY KEY,
+    episode_id         TEXT    NOT NULL,
+    platform           TEXT    NOT NULL
+                               CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    snapshot_date      TEXT    NOT NULL,
+    window_days        INTEGER NOT NULL DEFAULT 7,
+    -- Normalised metrics (NULL = not applicable or not imported for this platform)
+    views              INTEGER,   -- plays/views
+    impressions        INTEGER,   -- impressions/reach depending on platform
+    ctr                REAL,      -- click-through rate 0.0–1.0
+    avg_view_pct       REAL,      -- retention proxy 0.0–1.0
+    avg_watch_time_s   REAL,      -- average watch time in seconds
+    total_watch_time_s REAL,      -- total accumulated watch time in seconds
+    likes              INTEGER,
+    comments           INTEGER,
+    shares             INTEGER,
+    saves              INTEGER,   -- bookmarks/saves (Instagram, TikTok)
+    platform_video_id  TEXT,      -- platform's own video identifier
+    raw_json           TEXT,      -- JSON blob for platform-specific extra fields
+    source             TEXT    NOT NULL DEFAULT 'manual'
+                               CHECK(source IN ('manual','api','csv','mock')),
+    imported_at        TEXT    NOT NULL,
+    metadata_version   TEXT    NOT NULL DEFAULT 'v1',
+    UNIQUE(episode_id, platform, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pa_episode  ON platform_analytics(episode_id);
+CREATE INDEX IF NOT EXISTS idx_pa_platform ON platform_analytics(platform);
+CREATE INDEX IF NOT EXISTS idx_pa_date     ON platform_analytics(snapshot_date DESC);
+
+-- ---------------------------------------------------------------------------
+-- analytics_insights
+-- Derived signals extracted from platform_analytics by the learning engine.
+-- Rule-based on configurable thresholds; one row per fired rule per episode.
+-- signal_strength: -1.0 (worst) to +1.0 (best).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS analytics_insights (
+    insight_id       TEXT    NOT NULL PRIMARY KEY,
+    episode_id       TEXT    NOT NULL,
+    platform         TEXT    NOT NULL,
+    created_at       TEXT    NOT NULL,
+    insight_type     TEXT    NOT NULL,  -- weak_thumbnail|high_retention|hook_failure|…
+    affected_dim     TEXT    NOT NULL,  -- thumbnail|title|hook|pacing|topic|
+                                        -- publishing_time|duration|description
+    signal_strength  REAL    NOT NULL,  -- -1.0 to +1.0
+    threshold_used   TEXT,              -- human-readable rule that fired
+    detail           TEXT,              -- explanation sentence
+    metadata_version TEXT    NOT NULL DEFAULT 'v1'
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_episode ON analytics_insights(episode_id);
+CREATE INDEX IF NOT EXISTS idx_ai_dim     ON analytics_insights(affected_dim);
+CREATE INDEX IF NOT EXISTS idx_ai_type    ON analytics_insights(insight_type);
+
+-- ---------------------------------------------------------------------------
+-- learning_actions
+-- Concrete factory-level changes derived from analytics_insights.
+-- Applied actions will be consumed by the pipeline in Phase F.
+-- Lifecycle: pending → applied | dismissed
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS learning_actions (
+    action_id        TEXT    NOT NULL PRIMARY KEY,
+    created_at       TEXT    NOT NULL,
+    source_episode   TEXT,               -- episode that triggered this action
+    dimension        TEXT    NOT NULL,   -- thumbnail|title|hook|pacing|topic|
+                                         -- publishing_time|duration|description
+    action_type      TEXT    NOT NULL
+                             CHECK(action_type IN
+                                 ('prefer','avoid','increase','decrease','test','change')),
+    rationale        TEXT    NOT NULL,
+    evidence_json    TEXT,               -- JSON: {insight_ids, metrics_snapshot}
+    status           TEXT    NOT NULL DEFAULT 'pending'
+                             CHECK(status IN ('pending','applied','dismissed')),
+    applied_at       TEXT,
+    dismissed_at     TEXT,
+    metadata_version TEXT    NOT NULL DEFAULT 'v1'
+);
+
+CREATE INDEX IF NOT EXISTS idx_la_status    ON learning_actions(status);
+CREATE INDEX IF NOT EXISTS idx_la_dimension ON learning_actions(dimension);
+CREATE INDEX IF NOT EXISTS idx_la_episode   ON learning_actions(source_episode);
+
+-- ---------------------------------------------------------------------------
+-- Phase E Views
+-- ---------------------------------------------------------------------------
+
+CREATE VIEW IF NOT EXISTS v_platform_kpis AS
+SELECT
+    platform,
+    COUNT(DISTINCT episode_id)              AS episodes_tracked,
+    COUNT(*)                                AS total_snapshots,
+    ROUND(COALESCE(AVG(ctr), 0.0), 4)     AS avg_ctr,
+    ROUND(COALESCE(AVG(avg_view_pct), 0.0), 4) AS avg_view_pct,
+    ROUND(COALESCE(AVG(avg_watch_time_s), 0.0), 1) AS avg_watch_time_s,
+    COALESCE(SUM(views), 0)               AS total_views,
+    COALESCE(SUM(total_watch_time_s), 0)  AS total_watch_time_s
+FROM platform_analytics
+GROUP BY platform;
+
+CREATE VIEW IF NOT EXISTS v_episode_performance AS
+SELECT
+    pa.episode_id,
+    e.title                                    AS episode_title,
+    e.topic                                    AS episode_topic,
+    e.created_at                               AS episode_created_at,
+    COUNT(DISTINCT pa.platform)               AS platforms_tracked,
+    COUNT(*)                                   AS total_snapshots,
+    ROUND(COALESCE(AVG(pa.ctr), 0.0), 4)     AS avg_ctr,
+    ROUND(COALESCE(AVG(pa.avg_view_pct),0.0),4) AS avg_view_pct,
+    COALESCE(SUM(pa.views), 0)               AS total_views,
+    COALESCE(SUM(pa.total_watch_time_s), 0)  AS total_watch_time_s,
+    COUNT(DISTINCT ai.insight_id)              AS insight_count
+FROM platform_analytics pa
+LEFT JOIN episodes          e  ON e.episode_id  = pa.episode_id
+LEFT JOIN analytics_insights ai ON ai.episode_id = pa.episode_id
+GROUP BY pa.episode_id;
+
+CREATE VIEW IF NOT EXISTS v_learning_action_summary AS
+SELECT
+    dimension,
+    COUNT(*)                                               AS total_actions,
+    SUM(CASE WHEN status='pending'   THEN 1 ELSE 0 END)  AS pending_count,
+    SUM(CASE WHEN status='applied'   THEN 1 ELSE 0 END)  AS applied_count,
+    SUM(CASE WHEN status='dismissed' THEN 1 ELSE 0 END)  AS dismissed_count
+FROM learning_actions
+GROUP BY dimension;

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Import Analytics — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .method-tabs  { display: flex; gap: 8px; margin-bottom: var(--gap); flex-wrap: wrap; }
+    .method-tab   { padding: 6px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+                    cursor: pointer; font-size: 13px; background: transparent; color: var(--muted);
+                    font-family: inherit; }
+    .method-tab.active { background: var(--surface); border-color: var(--blue); color: var(--blue); }
+    .method-panel { display: none; }
+    .method-panel.active { display: block; }
+    .format-hint { background: #0a0d12; border: 1px solid var(--border); border-radius: var(--radius);
+                   padding: 10px 12px; font-family: monospace; font-size: 12px; color: var(--muted);
+                   white-space: pre; overflow-x: auto; margin-top: 6px; }
+    textarea { width: 100%; min-height: 160px; font-family: monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Import / Seed Analytics</h1>
+  <a href="/analytics" class="btn" style="margin-left:auto;">← Analytics</a>
+</div>
+
+{# Flash #}
+{% if flash == 'ok' %}
+  <div class="flash flash-ok">Import successful.</div>
+{% elif flash == 'invalid' %}
+  <div class="flash flash-err">Invalid input — check episode ID, platform, and metric format.</div>
+{% elif flash == 'json_error' %}
+  <div class="flash flash-err">Could not parse JSON — check format.</div>
+{% elif flash %}
+  <div class="flash flash-err">Import failed: {{ flash }}</div>
+{% endif %}
+
+<div class="card" style="max-width:680px;">
+  <form method="POST" action="/analytics/import" id="import-form">
+
+    <div class="field">
+      <label>Episode ID</label>
+      {% if episodes %}
+        <select name="episode_id" required style="width:100%;">
+          <option value="">— select episode —</option>
+          {% for ep in episodes %}
+            <option value="{{ ep.episode_id }}">{{ ep.episode_id }}{% if ep.title or ep.topic %} — {{ ep.title or ep.topic }}{% endif %}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">Or type a custom episode ID below — analytics can be imported before the episode exists locally.</div>
+        <input type="text" name="episode_id_custom" id="episode_id_custom"
+               placeholder="Custom episode ID (overrides dropdown)" style="width:100%; margin-top:6px;">
+      {% else %}
+        <input type="text" name="episode_id" required placeholder="e.g. ep_001" style="width:100%;">
+        <div class="hint">Analytics can be imported for any episode ID, even before the episode has been run locally.</div>
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label>Platform</label>
+      <select name="platform" id="platform-select" required style="width:100%;" onchange="updateHint()">
+        <option value="">— select platform —</option>
+        {% for p in valid_platforms %}
+          <option value="{{ p }}">{{ p | capitalize }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Import method</label>
+      <div class="method-tabs">
+        <button type="button" class="method-tab active" onclick="setMethod('mock')">Generate mock data</button>
+        <button type="button" class="method-tab" onclick="setMethod('json')">Paste JSON</button>
+        <button type="button" class="method-tab" onclick="setMethod('csv')">Paste CSV</button>
+      </div>
+      <input type="hidden" name="method" id="method-input" value="mock">
+    </div>
+
+    <div class="method-panel active" id="panel-mock">
+      <div style="color:var(--muted); font-size:13px;">
+        Generates deterministic synthetic metrics based on the episode ID and platform.
+        Safe to call repeatedly — always produces the same values.
+        Useful for testing the dashboard before real data is available.
+      </div>
+    </div>
+
+    <div class="method-panel" id="panel-json">
+      <label>Paste JSON metrics</label>
+      <textarea name="json_text" id="json-text" placeholder='{ "views": 15000, "ctr": 0.048, ... }'></textarea>
+      <div id="json-hint" class="format-hint">Select a platform above to see the expected format.</div>
+    </div>
+
+    <div class="method-panel" id="panel-csv">
+      <label>Paste CSV (with header row)</label>
+      <textarea name="csv_text" placeholder="Views,Impressions,Impressions click-through rate (%),..."></textarea>
+      <div class="hint">First row must be the header. Maps YouTube Studio, TikTok, Instagram, and Facebook CSV export columns automatically.</div>
+    </div>
+
+    <div style="margin-top:18px;">
+      <button type="submit" class="btn btn-save">Import</button>
+    </div>
+  </form>
+</div>
+
+{# JSON format hints per platform #}
+<script>
+var _HINTS = {
+  youtube: '{\n  "views": 15000,\n  "impressions": 120000,\n  "ctr": 0.048,\n  "avg_view_pct": 0.52,\n  "avg_watch_time_s": 312,\n  "total_watch_time_s": 4680000,\n  "likes": 450,\n  "comments": 38,\n  "shares": 72,\n  "platform_video_id": "dQw4w9WgXcQ"\n}',
+  tiktok:  '{\n  "views": 28000,\n  "avg_view_pct": 0.34,\n  "avg_watch_time_s": 20,\n  "likes": 1200,\n  "comments": 85,\n  "shares": 340,\n  "saves": 210\n}',
+  instagram: '{\n  "views": 8500,\n  "impressions": 12000,\n  "avg_view_pct": 0.45,\n  "avg_watch_time_s": 22,\n  "likes": 380,\n  "comments": 42,\n  "saves": 210,\n  "shares": 95\n}',
+  facebook: '{\n  "views": 4200,\n  "impressions": 18000,\n  "avg_watch_time_s": 32,\n  "likes": 85,\n  "comments": 12,\n  "shares": 48\n}'
+};
+
+function updateHint() {
+  var p = document.getElementById('platform-select').value;
+  var hint = document.getElementById('json-hint');
+  hint.textContent = _HINTS[p] || 'Select a platform above to see the expected format.';
+}
+
+function setMethod(method) {
+  document.getElementById('method-input').value = method;
+  document.querySelectorAll('.method-tab').forEach(function(b) { b.classList.remove('active'); });
+  document.querySelectorAll('.method-panel').forEach(function(p) { p.classList.remove('active'); });
+  event.target.classList.add('active');
+  document.getElementById('panel-' + method).classList.add('active');
+}
+
+// If custom episode_id_custom is filled, use it for episode_id
+{% if episodes %}
+document.getElementById('import-form').addEventListener('submit', function() {
+  var custom = document.getElementById('episode_id_custom').value.trim();
+  if (custom) {
+    document.querySelector('select[name="episode_id"]').name = '_episode_id_dropdown';
+    var h = document.createElement('input');
+    h.type = 'hidden'; h.name = 'episode_id'; h.value = custom;
+    this.appendChild(h);
+  }
+});
+{% endif %}
+</script>
+</body>
+</html>

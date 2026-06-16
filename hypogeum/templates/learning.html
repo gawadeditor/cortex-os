@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Learning — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .summary-strip { display: flex; gap: var(--gap); flex-wrap: wrap; margin-bottom: var(--gap); }
+    .summary-tile  { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); padding: 12px 16px; flex: 1; min-width: 120px; }
+    .summary-val   { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .summary-lbl   { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: .05em; margin-top: 3px; }
+    .dim-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
+                 background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
+    .action-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .action-row:last-child { border-bottom: none; }
+    .action-header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+    .action-btns { margin-left: auto; display: flex; gap: 6px; }
+    .rec-card { background: var(--surface); border: 1px solid var(--border);
+                border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; }
+    .rec-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .confidence-bar { font-family: monospace; font-size: 11px; color: var(--blue); }
+    .lr-row { padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .lr-row:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Learning</h1>
+  <span class="page-meta">
+    {{ state.total_insights }} insight{% if state.total_insights != 1 %}s{% endif %} extracted
+  </span>
+  <div style="margin-left:auto;">
+    <a href="/analytics" class="btn">Analytics →</a>
+  </div>
+</div>
+
+{% if state.top_recommendation %}
+<div class="card" style="border-color:var(--blue); margin-bottom:var(--gap);">
+  <div class="card-title">Top Recommendation</div>
+  <div style="font-size:14px; font-weight:500;">{{ state.top_recommendation }}</div>
+</div>
+{% endif %}
+
+{# ── Summary strip ── #}
+<div class="summary-strip">
+  <div class="summary-tile">
+    <div class="summary-val">{{ state.total_analytics_records }}</div>
+    <div class="summary-lbl">Analytics records</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val">{{ state.total_insights }}</div>
+    <div class="summary-lbl">Insights</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val warn">{{ state.pending_actions }}</div>
+    <div class="summary-lbl">Pending actions</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val ok">{{ state.applied_actions }}</div>
+    <div class="summary-lbl">Applied</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val muted">{{ state.dismissed_actions }}</div>
+    <div class="summary-lbl">Dismissed</div>
+  </div>
+</div>
+
+{# ── Platform coverage ── #}
+{% if state.platform_coverage %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Platform Coverage</div>
+  <div style="display:flex; gap:16px; flex-wrap:wrap;">
+    {% for plat, count in state.platform_coverage.items() %}
+    <div style="text-align:center;">
+      <div style="font-size:18px; font-weight:700;">{{ count }}</div>
+      <div class="muted" style="font-size:11px; text-transform:uppercase;">{{ plat }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Recommendations by dimension ── #}
+{% if state.recommendations %}
+<div class="card-title" style="margin-bottom:10px;">Recommendations by Dimension</div>
+{% for dim, rec in state.recommendations.items() %}
+<div class="rec-card">
+  <div class="rec-header">
+    <span class="dim-badge">{{ dim }}</span>
+    <span class="badge badge-{% if rec.status == 'applied' %}complete{% else %}queued{% endif %}">
+      {{ rec.action_type }}
+    </span>
+    <span class="confidence-bar">{{ rec.confidence | pct_bar(10) }} confidence</span>
+    <span class="muted" style="font-size:11px; margin-left:auto;">{{ rec.status }}</span>
+  </div>
+  <div style="font-size:13px;">{{ rec.rationale[:180] }}</div>
+</div>
+{% endfor %}
+{% endif %}
+
+{# ── Pending action queue ── #}
+{% if state.pending_actions_list %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Pending Actions ({{ state.pending_actions_list | length }})</div>
+  {% for a in state.pending_actions_list %}
+  <div class="action-row">
+    <div class="action-header">
+      <span class="dim-badge">{{ a.dimension }}</span>
+      <span class="badge badge-queued">{{ a.action_type }}</span>
+      {% if a.source_episode %}
+        <a href="/analytics/episode/{{ a.source_episode }}" class="muted" style="font-size:11px;">
+          {{ a.source_episode }}
+        </a>
+      {% endif %}
+      <div class="action-btns">
+        <form method="POST" action="/learning/action/{{ a.action_id }}/apply"
+              style="display:inline;">
+          <button type="submit" class="btn btn-approve">✓ Apply</button>
+        </form>
+        <form method="POST" action="/learning/action/{{ a.action_id }}/dismiss"
+              style="display:inline;" onsubmit="return confirm('Dismiss this action?')">
+          <button type="submit" class="btn btn-reject">✗ Dismiss</button>
+        </form>
+      </div>
+    </div>
+    <div style="font-size:13px; margin-top:2px;">{{ a.rationale[:200] }}</div>
+    <div class="muted" style="font-size:11px; margin-top:3px;">{{ a.created_at[:16] if a.created_at else '' }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty" style="margin-top:var(--gap);">No pending actions.
+  {% if state.total_analytics_records == 0 %}
+    <a href="/analytics/import">Import analytics to generate insights →</a>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ── Applied actions ── #}
+{% if state.applied_actions_list %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Applied Actions ({{ state.applied_actions_list | length }}) — will inform next episode</div>
+  {% for a in state.applied_actions_list %}
+  <div class="action-row">
+    <div class="action-header">
+      <span class="dim-badge">{{ a.dimension }}</span>
+      <span class="badge badge-complete">{{ a.action_type }}</span>
+      <span class="muted" style="font-size:11px;">Applied {{ a.applied_at[:16] if a.applied_at else '' }}</span>
+    </div>
+    <div class="muted" style="font-size:12px;">{{ a.rationale[:160] }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ── Insights by dimension ── #}
+{% if state.insights_by_dimension %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Signal Map by Dimension</div>
+  <table>
+    <thead><tr><th>Dimension</th><th>Positive signals</th><th>Negative signals</th><th>Net</th></tr></thead>
+    <tbody>
+      {% for dim, counts in state.insights_by_dimension.items() %}
+      {% set net = counts.positive - counts.negative %}
+      <tr>
+        <td><span class="dim-badge">{{ dim }}</span></td>
+        <td class="ok" style="text-align:right;">{{ counts.positive }}</td>
+        <td class="err" style="text-align:right;">{{ counts.negative }}</td>
+        <td class="{% if net > 0 %}ok{% elif net < 0 %}err{% else %}muted{% endif %}"
+            style="text-align:right; font-weight:600;">
+          {% if net > 0 %}+{% endif %}{{ net }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{# ── Pipeline learning_records (legacy signals) ── #}
+{% if state.learning_records %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Pipeline Learning Records ({{ state.learning_records | length }})</div>
+  {% for lr in state.learning_records %}
+  <div class="lr-row">
+    <span class="badge badge-running" style="font-size:10px;">{{ lr.signal_type }}</span>
+    &nbsp;
+    <span style="font-size:12px;">{{ lr.episode_id }}</span>
+    {% if lr.recommendation %}
+      <span class="muted" style="font-size:11px; margin-left:8px;">{{ lr.recommendation[:100] }}</span>
+    {% endif %}
+    <span class="muted" style="font-size:11px; float:right;">{{ lr.recorded_at[:16] if lr.recorded_at else '' }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div id="toast" class="toast"></div>
+<script>
+function showToast(msg, ok) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
+  setTimeout(function() { t.className = 'toast'; }, 3000);
+}
+</script>
+</body>
+</html>

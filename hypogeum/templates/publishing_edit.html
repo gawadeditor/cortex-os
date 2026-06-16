@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edit Publishing Profile — Factory OS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --green: #3fb950;
+      --yellow: #d29922; --red: #f85149; --blue: #58a6ff; --radius: 6px; --gap: 16px;
+    }
+    body { background: var(--bg); color: var(--text);
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+           font-size: 14px; line-height: 1.5; padding: var(--gap); max-width: 640px; }
+    a { color: var(--blue); text-decoration: none; }
+    .page-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: var(--gap); flex-wrap: wrap; }
+    .page-header h1 { font-size: 20px; font-weight: 600; }
+    .card { background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 20px; }
+    .field { margin-bottom: 14px; }
+    label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .05em; margin-bottom: 4px; }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    input[type=text] {
+      width: 100%; background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 14px;
+      font-family: inherit; padding: 6px 10px;
+    }
+    input[type=text]:focus { outline: none; border-color: var(--blue); }
+    .checkbox-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .checkbox-row input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--blue); }
+    .checkbox-row label { text-transform: none; letter-spacing: 0; font-size: 14px;
+                          color: var(--text); margin-bottom: 0; cursor: pointer; }
+    .actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+    .btn { display: inline-flex; align-items: center; padding: 6px 16px;
+           border: 1px solid var(--border); border-radius: var(--radius);
+           background: transparent; color: var(--text); font-size: 13px;
+           font-family: inherit; cursor: pointer; text-decoration: none; }
+    .btn-save { background: #1a3a22; border-color: #2ea043; color: var(--green); }
+    .btn-save:hover { background: #22502e; }
+    .btn:hover { border-color: var(--blue); color: var(--blue); }
+    .divider { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>Edit Publishing Profile</h1>
+  <a href="/" class="btn">← Dashboard</a>
+</div>
+
+<div class="card">
+  <form method="POST" action="/publishing/{{ publishing.publishing_profile_id|e }}/edit">
+
+    <div class="field">
+      <label for="name">Profile name</label>
+      <input type="text" id="name" name="name" value="{{ publishing.name|e }}" required>
+    </div>
+
+    <div class="field">
+      <label for="enabled_platforms">Enabled platforms</label>
+      <input type="text" id="enabled_platforms" name="enabled_platforms"
+             value="{{ publishing.enabled_platforms | join(', ') }}">
+      <div class="hint">Comma-separated — e.g. <code>youtube, instagram</code></div>
+    </div>
+
+    <hr class="divider">
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="ai_disclosure_required" name="ai_disclosure_required"
+             {% if publishing.ai_disclosure_required %}checked{% endif %}>
+      <label for="ai_disclosure_required">AI disclosure required</label>
+    </div>
+    <div class="hint" style="margin: -6px 0 10px 26px;">Adds "AI-assisted" disclosure to published content.</div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="auto_thumbnail" name="auto_thumbnail"
+             {% if publishing.auto_thumbnail %}checked{% endif %}>
+      <label for="auto_thumbnail">Auto-generate thumbnail</label>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="auto_captions" name="auto_captions"
+             {% if publishing.auto_captions %}checked{% endif %}>
+      <label for="auto_captions">Auto-generate captions</label>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="btn btn-save">Save Changes</button>
+      <a href="/" class="btn">Cancel</a>
+    </div>
+  </form>
+</div>
+
+</body>
+</html>

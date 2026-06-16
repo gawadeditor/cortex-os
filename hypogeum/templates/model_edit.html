@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edit Model Profile — Factory OS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --green: #3fb950;
+      --yellow: #d29922; --red: #f85149; --blue: #58a6ff; --radius: 6px; --gap: 16px;
+    }
+    body { background: var(--bg); color: var(--text);
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+           font-size: 14px; line-height: 1.5; padding: var(--gap); max-width: 640px; }
+    a { color: var(--blue); text-decoration: none; }
+    .page-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: var(--gap); flex-wrap: wrap; }
+    .page-header h1 { font-size: 20px; font-weight: 600; }
+    .card { background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 20px; }
+    .section-heading { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                       letter-spacing: .05em; margin: 16px 0 10px; border-top: 1px solid var(--border); padding-top: 12px; }
+    .field { margin-bottom: 14px; }
+    label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .05em; margin-bottom: 4px; }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    input[type=text] {
+      width: 100%; background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13px;
+      font-family: monospace; padding: 6px 10px;
+    }
+    input[type=text]:focus { outline: none; border-color: var(--blue); }
+    .actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+    .btn { display: inline-flex; align-items: center; padding: 6px 16px;
+           border: 1px solid var(--border); border-radius: var(--radius);
+           background: transparent; color: var(--text); font-size: 13px;
+           font-family: inherit; cursor: pointer; text-decoration: none; }
+    .btn-save { background: #1a3a22; border-color: #2ea043; color: var(--green); }
+    .btn-save:hover { background: #22502e; }
+    .btn:hover { border-color: var(--blue); color: var(--blue); }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>Edit Model Profile</h1>
+  <a href="/" class="btn">← Dashboard</a>
+</div>
+
+<div class="card">
+  <form method="POST" action="/model/{{ model.model_profile_id|e }}/edit">
+
+    <div class="field">
+      <label for="name">Profile name</label>
+      <input type="text" id="name" name="name" value="{{ model.name|e }}" required>
+    </div>
+
+    <div class="section-heading">LLM Agents — OpenRouter model slug</div>
+
+    <div class="field">
+      <label for="episode_producer">Episode producer</label>
+      <input type="text" id="episode_producer" name="episode_producer"
+             value="{{ model.episode_producer|e }}">
+      <div class="hint">Coordinates the full episode run</div>
+    </div>
+
+    <div class="field">
+      <label for="research_director">Research director</label>
+      <input type="text" id="research_director" name="research_director"
+             value="{{ model.research_director|e }}">
+    </div>
+
+    <div class="field">
+      <label for="thumbnail_planner">Thumbnail planner</label>
+      <input type="text" id="thumbnail_planner" name="thumbnail_planner"
+             value="{{ model.thumbnail_planner|e }}">
+    </div>
+
+    <div class="field">
+      <label for="brand_guardian_p1">Brand guardian — Pass 1</label>
+      <input type="text" id="brand_guardian_p1" name="brand_guardian_p1"
+             value="{{ model.brand_guardian_p1|e }}">
+    </div>
+
+    <div class="field">
+      <label for="brand_guardian_p2">Brand guardian — Pass 2</label>
+      <input type="text" id="brand_guardian_p2" name="brand_guardian_p2"
+             value="{{ model.brand_guardian_p2|e }}">
+    </div>
+
+    <div class="section-heading">Voice &amp; Media Providers</div>
+
+    <div class="field">
+      <label for="narration_voice_id">Narration voice ID</label>
+      <input type="text" id="narration_voice_id" name="narration_voice_id"
+             value="{{ (model.narration_voice_id or '')|e }}">
+      <div class="hint">ElevenLabs voice ID</div>
+    </div>
+
+    <div class="field">
+      <label for="image_provider">Image provider</label>
+      <input type="text" id="image_provider" name="image_provider"
+             value="{{ model.image_provider|e }}">
+    </div>
+
+    <div class="field">
+      <label for="video_provider">Video provider</label>
+      <input type="text" id="video_provider" name="video_provider"
+             value="{{ model.video_provider|e }}">
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="btn btn-save">Save Changes</button>
+      <a href="/" class="btn">Cancel</a>
+    </div>
+  </form>
+</div>
+
+</body>
+</html>

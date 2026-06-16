@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edit Brand Profile — Factory OS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --green: #3fb950;
+      --yellow: #d29922; --red: #f85149; --blue: #58a6ff; --radius: 6px; --gap: 16px;
+    }
+    body { background: var(--bg); color: var(--text);
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+           font-size: 14px; line-height: 1.5; padding: var(--gap); max-width: 640px; }
+    a { color: var(--blue); text-decoration: none; }
+    .page-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: var(--gap); flex-wrap: wrap; }
+    .page-header h1 { font-size: 20px; font-weight: 600; }
+    .card { background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 20px; }
+    .field { margin-bottom: 14px; }
+    label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .05em; margin-bottom: 4px; }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    input[type=text], textarea {
+      width: 100%; background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 14px;
+      font-family: inherit; padding: 6px 10px;
+    }
+    input[type=text]:focus, textarea:focus { outline: none; border-color: var(--blue); }
+    textarea { min-height: 80px; resize: vertical; }
+    .actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+    .btn { display: inline-flex; align-items: center; padding: 6px 16px;
+           border: 1px solid var(--border); border-radius: var(--radius);
+           background: transparent; color: var(--text); font-size: 13px;
+           font-family: inherit; cursor: pointer; text-decoration: none; }
+    .btn-save { background: #1a3a22; border-color: #2ea043; color: var(--green); }
+    .btn-save:hover { background: #22502e; }
+    .btn:hover { border-color: var(--blue); color: var(--blue); }
+    .saved-banner { background: #1a3a22; border: 1px solid #2ea043; border-radius: var(--radius);
+                    padding: 10px 14px; margin-bottom: var(--gap); color: var(--green); display: none; }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>Edit Brand Profile</h1>
+  <a href="/" class="btn">← Dashboard</a>
+</div>
+
+<div class="card">
+  <form method="POST" action="/brand/{{ brand.brand_profile_id|e }}/edit">
+
+    <div class="field">
+      <label for="name">Profile name</label>
+      <input type="text" id="name" name="name" value="{{ brand.name|e }}" required>
+    </div>
+
+    <div class="field">
+      <label for="persona_name">Persona name</label>
+      <input type="text" id="persona_name" name="persona_name" value="{{ (brand.persona_name or '')|e }}">
+      <div class="hint">The host or narrator character — e.g. "Alex Chen"</div>
+    </div>
+
+    <div class="field">
+      <label for="tone">Tone</label>
+      <input type="text" id="tone" name="tone" value="{{ (brand.tone or '')|e }}">
+      <div class="hint">e.g. "conversational and curious"</div>
+    </div>
+
+    <div class="field">
+      <label for="target_audience">Target audience</label>
+      <input type="text" id="target_audience" name="target_audience" value="{{ (brand.target_audience or '')|e }}">
+      <div class="hint">e.g. "software engineers 25-40"</div>
+    </div>
+
+    <div class="field">
+      <label for="visual_style">Visual style</label>
+      <input type="text" id="visual_style" name="visual_style" value="{{ (brand.visual_style or '')|e }}">
+      <div class="hint">e.g. "dark minimal, high contrast"</div>
+    </div>
+
+    <div class="field">
+      <label for="language">Language</label>
+      <input type="text" id="language" name="language" value="{{ brand.language|e }}" required>
+      <div class="hint">ISO 639-1 code — e.g. "en"</div>
+    </div>
+
+    <div class="field">
+      <label for="voice_guidelines">Voice guidelines</label>
+      <textarea id="voice_guidelines" name="voice_guidelines">{{ (brand.voice_guidelines or '')|e }}</textarea>
+      <div class="hint">Free-form narration style notes passed to the script writer.</div>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="btn btn-save">Save Changes</button>
+      <a href="/" class="btn">Cancel</a>
+    </div>
+  </form>
+</div>
+
+</body>
+</html>

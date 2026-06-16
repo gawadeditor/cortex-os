@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ channel.name }} — Channel Detail</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --green: #3fb950;
+      --yellow: #d29922; --red: #f85149; --blue: #58a6ff; --radius: 6px; --gap: 16px;
+    }
+    body { background: var(--bg); color: var(--text);
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+           font-size: 14px; line-height: 1.5; padding: var(--gap); }
+    a { color: var(--blue); text-decoration: none; }
+    .page-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: var(--gap); flex-wrap: wrap; }
+    .page-header h1 { font-size: 20px; font-weight: 600; }
+    .card { background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 14px 16px; margin-bottom: var(--gap); }
+    .card-title { font-size: 12px; font-weight: 600; text-transform: uppercase;
+                  letter-spacing: .05em; color: var(--muted); margin-bottom: 10px; }
+    .field-row { display: flex; justify-content: space-between; padding: 5px 0;
+                 border-bottom: 1px solid var(--border); }
+    .field-row:last-child { border-bottom: none; }
+    .field-label { color: var(--muted); min-width: 160px; flex-shrink: 0; }
+    .field-val { font-weight: 500; word-break: break-all; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px;
+             font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+    .badge-active { background: #1a2a3a; color: var(--blue); border: 1px solid #1f6feb; }
+    .badge-unknown { background: #1e2430; color: var(--muted); border: 1px solid var(--border); }
+    .btn { display: inline-flex; align-items: center; padding: 4px 12px;
+           border: 1px solid var(--border); border-radius: var(--radius);
+           background: transparent; color: var(--text); font-size: 12px;
+           font-family: inherit; cursor: pointer; text-decoration: none; }
+    .btn:hover { border-color: var(--blue); color: var(--blue); }
+    .btn-edit { border-color: #9e6a03; color: var(--yellow); }
+    .btn-edit:hover { background: #3a2e0d; }
+    .muted { color: var(--muted); }
+    .ok    { color: var(--green); }
+    .section-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .missing { color: var(--muted); font-style: italic; }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>{{ channel.name }}</h1>
+  <span class="badge badge-{{ 'active' if channel.status == 'active' else 'unknown' }}">{{ channel.status }}</span>
+  <a href="/" class="btn" style="margin-left:auto;">← Dashboard</a>
+</div>
+
+{# ── Channel profile ── #}
+<div class="card">
+  <div class="card-title">Channel Profile</div>
+  <div class="field-row"><span class="field-label">channel_id</span><span class="field-val muted">{{ channel.channel_id }}</span></div>
+  <div class="field-row"><span class="field-label">Name</span><span class="field-val">{{ channel.name }}</span></div>
+  <div class="field-row"><span class="field-label">Description</span><span class="field-val {% if not channel.description %}muted{% endif %}">{{ channel.description or '—' }}</span></div>
+  <div class="field-row"><span class="field-label">Status</span><span class="field-val">{{ channel.status }}</span></div>
+  <div class="field-row"><span class="field-label">Created</span><span class="field-val muted">{{ channel.created_at[:19] if channel.created_at else '—' }}</span></div>
+  <div class="section-actions">
+    <a href="/channel/{{ channel.channel_id|e }}/edit" class="btn btn-edit">Edit Channel</a>
+  </div>
+</div>
+
+{# ── Brand profile ── #}
+<div class="card">
+  <div class="card-title">Brand Profile</div>
+  {% if brand %}
+    <div class="field-row"><span class="field-label">Name</span><span class="field-val">{{ brand.name }}</span></div>
+    <div class="field-row"><span class="field-label">Persona</span><span class="field-val">{{ brand.persona_name or '—' }}</span></div>
+    <div class="field-row"><span class="field-label">Tone</span><span class="field-val">{{ brand.tone or '—' }}</span></div>
+    <div class="field-row"><span class="field-label">Target audience</span><span class="field-val">{{ brand.target_audience or '—' }}</span></div>
+    <div class="field-row"><span class="field-label">Visual style</span><span class="field-val">{{ brand.visual_style or '—' }}</span></div>
+    <div class="field-row"><span class="field-label">Language</span><span class="field-val">{{ brand.language }}</span></div>
+    <div class="field-row"><span class="field-label">Voice guidelines</span><span class="field-val">{{ brand.voice_guidelines or '—' }}</span></div>
+    <div class="section-actions">
+      <a href="/brand/{{ brand.brand_profile_id|e }}/edit" class="btn btn-edit">Edit Brand</a>
+    </div>
+  {% else %}
+    <div class="missing">No brand profile linked.</div>
+  {% endif %}
+</div>
+
+{# ── Model profile ── #}
+<div class="card">
+  <div class="card-title">Model Profile</div>
+  {% if model %}
+    <div class="field-row"><span class="field-label">Name</span><span class="field-val">{{ model.name }}</span></div>
+    <div class="field-row"><span class="field-label">Episode producer</span><span class="field-val muted">{{ model.episode_producer }}</span></div>
+    <div class="field-row"><span class="field-label">Research director</span><span class="field-val muted">{{ model.research_director }}</span></div>
+    <div class="field-row"><span class="field-label">Thumbnail planner</span><span class="field-val muted">{{ model.thumbnail_planner }}</span></div>
+    <div class="field-row"><span class="field-label">Brand guardian P1</span><span class="field-val muted">{{ model.brand_guardian_p1 }}</span></div>
+    <div class="field-row"><span class="field-label">Brand guardian P2</span><span class="field-val muted">{{ model.brand_guardian_p2 }}</span></div>
+    <div class="field-row"><span class="field-label">Narration voice ID</span><span class="field-val">{{ model.narration_voice_id or '—' }}</span></div>
+    <div class="field-row"><span class="field-label">Image provider</span><span class="field-val">{{ model.image_provider }}</span></div>
+    <div class="field-row"><span class="field-label">Video provider</span><span class="field-val">{{ model.video_provider }}</span></div>
+    <div class="section-actions">
+      <a href="/model/{{ model.model_profile_id|e }}/edit" class="btn btn-edit">Edit Models</a>
+    </div>
+  {% else %}
+    <div class="missing">No model profile linked.</div>
+  {% endif %}
+</div>
+
+{# ── Publishing profile ── #}
+<div class="card">
+  <div class="card-title">Publishing Profile</div>
+  {% if publishing %}
+    <div class="field-row"><span class="field-label">Name</span><span class="field-val">{{ publishing.name }}</span></div>
+    <div class="field-row"><span class="field-label">Platforms</span><span class="field-val">{{ publishing.enabled_platforms | join(', ') or '—' }}</span></div>
+    <div class="field-row"><span class="field-label">AI disclosure required</span><span class="field-val {% if publishing.ai_disclosure_required %}ok{% endif %}">{{ 'Yes' if publishing.ai_disclosure_required else 'No' }}</span></div>
+    <div class="field-row"><span class="field-label">Auto thumbnail</span><span class="field-val">{{ 'Yes' if publishing.auto_thumbnail else 'No' }}</span></div>
+    <div class="field-row"><span class="field-label">Auto captions</span><span class="field-val">{{ 'Yes' if publishing.auto_captions else 'No' }}</span></div>
+    <div class="section-actions">
+      <a href="/publishing/{{ publishing.publishing_profile_id|e }}/edit" class="btn btn-edit">Edit Publishing</a>
+    </div>
+  {% else %}
+    <div class="missing">No publishing profile linked.</div>
+  {% endif %}
+</div>
+
+</body>
+</html>

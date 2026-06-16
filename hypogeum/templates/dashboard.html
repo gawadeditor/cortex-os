@@ -151,6 +151,36 @@
     .err   { color: var(--red); }
     .ok    { color: var(--green); }
     .muted { color: var(--muted); }
+
+    /* ── Action buttons ── */
+    .btn {
+      display: inline-flex; align-items: center; padding: 3px 10px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: transparent; color: var(--text);
+      font-size: 12px; font-family: inherit; cursor: pointer;
+      line-height: 1.5; white-space: nowrap; text-decoration: none;
+    }
+    .btn:hover  { border-color: var(--blue); color: var(--blue); }
+    .btn-approve { border-color: #2ea043; color: var(--green); }
+    .btn-approve:hover { background: #1a3a22; }
+    .btn-reject  { border-color: #da3633; color: var(--red); }
+    .btn-reject:hover  { background: #3a0f0a; }
+    .btn-resolve { border-color: #9e6a03; color: var(--yellow); }
+    .btn-resolve:hover { background: #3a2e0d; }
+    .btn-pause   { border-color: #9e6a03; color: var(--yellow); }
+    .btn-pause:hover  { background: #3a2e0d; }
+    .btn-resume  { border-color: #2ea043; color: var(--green); }
+    .btn-resume:hover { background: #1a3a22; }
+    .btn-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    .toast {
+      position: fixed; bottom: 20px; right: 20px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 10px 16px;
+      font-size: 13px; z-index: 999; display: none;
+    }
+    .toast.show { display: block; }
+    .toast-ok  { border-color: #2ea043; color: var(--green); }
+    .toast-err { border-color: #da3633; color: var(--red); }
   </style>
 </head>
 <body>
@@ -325,6 +355,12 @@
         {% if s.message %}
           <div class="signal-msg">{{ s.message[:120] }}</div>
         {% endif %}
+        <div class="btn-row">
+          <button class="btn btn-resolve"
+                  onclick="postAction('/api/action/resolve-signal/{{ s.signal_id|e }}', {}, 'Mark signal as resolved?')">
+            Resolve
+          </button>
+        </div>
       </div>
     {% endfor %}
   {% else %}
@@ -348,7 +384,17 @@
           &nbsp;·&nbsp; {{ a.requested_at[:16] if a.requested_at else '' }}
         </div>
         <div class="signal-msg" style="margin-top:2px;">
-          approval_id: <code style="font-size:11px; color:var(--blue);">{{ a.approval_id }}</code>
+          <code style="font-size:11px; color:var(--blue);">{{ a.approval_id[:16] }}…</code>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-approve"
+                  onclick="postAction('/api/action/approve/{{ a.approval_id|e }}', {})">
+            ✓ Approve
+          </button>
+          <button class="btn btn-reject"
+                  onclick="postAction('/api/action/reject/{{ a.approval_id|e }}', {}, 'Reject this approval? The run will be marked failed.')">
+            ✗ Reject
+          </button>
         </div>
       </div>
     {% endfor %}
@@ -369,7 +415,10 @@
       <div class="channel-row">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <span style="font-weight:500;">{{ ch.name or ch.channel_id }}</span>
-          <span class="badge badge-{{ 'active' if ch.status == 'active' else 'unknown' }}">{{ ch.status }}</span>
+          <span style="display:flex; gap:6px; align-items:center;">
+            <span class="badge badge-{{ 'active' if ch.status == 'active' else 'unknown' }}">{{ ch.status }}</span>
+            <a href="/channel/{{ ch.channel_id|e }}" class="btn" style="font-size:11px; padding:2px 8px;">View →</a>
+          </span>
         </div>
         <div class="progress-wrap" title="{{ '%.0f'|format(ch.profile_completeness * 100) }}% profile complete">
           <div class="progress-fill" style="width:{{ (ch.profile_completeness * 100) | int }}%;"></div>
@@ -399,13 +448,24 @@
 
   {% if state and state.schedules %}
     {% for s in state.schedules %}
-      <div class="stat-row">
+      <div class="stat-row" style="flex-wrap:wrap; gap:6px;">
         <span class="stat-label">
           {{ s.channel_id or s.scope or '—' }} / {{ s.cadence }}
         </span>
-        <span style="display:flex; gap:6px; align-items:center;">
+        <span style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
           <span class="badge badge-{{ 'active' if s.status == 'active' else 'unknown' }}">{{ s.status }}</span>
           <span class="muted" style="font-size:12px;">{{ (s.next_run_at or 'unset')[:16] }}</span>
+          {% if s.status == 'active' %}
+            <button class="btn btn-pause"
+                    onclick="postAction('/api/schedule/{{ s.schedule_id|e }}/status', {'status': 'paused'})">
+              Pause
+            </button>
+          {% elif s.status == 'paused' %}
+            <button class="btn btn-resume"
+                    onclick="postAction('/api/schedule/{{ s.schedule_id|e }}/status', {'status': 'active'})">
+              Resume
+            </button>
+          {% endif %}
         </span>
       </div>
     {% endfor %}
@@ -616,5 +676,35 @@
   &nbsp;·&nbsp; auto-refresh every 30 s
 </div>
 
+
+<div id="toast" class="toast"></div>
+
+<script>
+function showToast(msg, ok) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
+  setTimeout(function() { t.className = 'toast'; }, 3000);
+}
+
+function postAction(url, body, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      showToast('Done', true);
+      setTimeout(function() { location.reload(); }, 800);
+    } else {
+      showToast('Error: ' + (d.error || 'unknown'), false);
+    }
+  })
+  .catch(function(e) { showToast('Request failed: ' + e, false); });
+}
+</script>
 </body>
 </html>

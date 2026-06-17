@@ -60,6 +60,15 @@ from hypogeum.decision_reviews import (
     accept_decision,
     reject_decision,
 )
+from hypogeum.decision_execution import (
+    create_execution_plan_from_review,
+    list_execution_plans,
+    get_execution_plan,
+    approve_execution_plan,
+    reject_execution_plan as reject_execution_plan_fn,
+    cancel_execution_plan,
+    dry_run_execution_plan,
+)
 from hypogeum.dashboard_api import get_factory_state
 from hypogeum.factory_director import assess_factory
 from hypogeum.dashboard_control import (
@@ -240,8 +249,16 @@ def command_page():
         pending_reviews = list_decision_reviews(status="pending", db_path=_db_path())
     except Exception:
         pending_reviews = []
+    try:
+        exec_plans = (
+            list_execution_plans(status="draft",    db_path=_db_path()) +
+            list_execution_plans(status="approved", db_path=_db_path())
+        )
+    except Exception:
+        exec_plans = []
     return render_template("command.html", cmd=cmd, di=di, ds=ds,
-                           pending_reviews=pending_reviews)
+                           pending_reviews=pending_reviews,
+                           exec_plans=exec_plans)
 
 
 @app.route("/api/command-state")
@@ -1086,6 +1103,82 @@ def decision_reviews_page():
         pending = accepted = rejected = []
     return render_template("decision_reviews.html",
                            pending=pending, accepted=accepted, rejected=rejected)
+
+
+# ---------------------------------------------------------------------------
+# F5: Execution Plans
+# ---------------------------------------------------------------------------
+
+@app.route("/api/execution-plans", methods=["GET"])
+def api_execution_plans_list():
+    status = request.args.get("status")
+    plans = list_execution_plans(status=status or None, db_path=_db_path())
+    return jsonify(plans)
+
+
+@app.route("/api/execution-plans/<plan_id>", methods=["GET"])
+def api_execution_plan_get(plan_id):
+    plan = get_execution_plan(plan_id, db_path=_db_path())
+    if plan is None:
+        return jsonify({"ok": False, "code": "not_found"}), 404
+    return jsonify(plan)
+
+
+@app.route("/api/execution-plans/from-review/<review_id>", methods=["POST"])
+def api_execution_plan_from_review(review_id):
+    result = create_execution_plan_from_review(review_id, db_path=_db_path())
+    if not result["ok"]:
+        code = result.get("code", "error")
+        http = 404 if code == "review_not_found" else 400
+        return jsonify(result), http
+    return jsonify(result)
+
+
+@app.route("/api/execution-plans/<plan_id>/approve", methods=["POST"])
+def api_execution_plan_approve(plan_id):
+    body   = request.get_json(silent=True) or {}
+    result = approve_execution_plan(plan_id, note=body.get("note", ""), db_path=_db_path())
+    http   = 200 if result["ok"] else (404 if result.get("code") == "not_found" else 400)
+    return jsonify(result), http
+
+
+@app.route("/api/execution-plans/<plan_id>/reject", methods=["POST"])
+def api_execution_plan_reject(plan_id):
+    body   = request.get_json(silent=True) or {}
+    result = reject_execution_plan_fn(plan_id, note=body.get("note", ""), db_path=_db_path())
+    http   = 200 if result["ok"] else (404 if result.get("code") == "not_found" else 400)
+    return jsonify(result), http
+
+
+@app.route("/api/execution-plans/<plan_id>/cancel", methods=["POST"])
+def api_execution_plan_cancel(plan_id):
+    body   = request.get_json(silent=True) or {}
+    result = cancel_execution_plan(plan_id, note=body.get("note", ""), db_path=_db_path())
+    http   = 200 if result["ok"] else (404 if result.get("code") == "not_found" else 400)
+    return jsonify(result), http
+
+
+@app.route("/api/execution-plans/<plan_id>/dry-run", methods=["POST"])
+def api_execution_plan_dry_run(plan_id):
+    result = dry_run_execution_plan(plan_id, db_path=_db_path())
+    http   = 200 if result["ok"] else (404 if result.get("code") == "not_found" else 400)
+    return jsonify(result), http
+
+
+@app.route("/execution-plans")
+def execution_plans_page():
+    try:
+        draft     = list_execution_plans(status="draft",     db_path=_db_path())
+        approved  = list_execution_plans(status="approved",  db_path=_db_path())
+        rejected  = list_execution_plans(status="rejected",  db_path=_db_path())
+        cancelled = list_execution_plans(status="cancelled", db_path=_db_path())
+    except Exception:
+        draft = approved = rejected = cancelled = []
+    return render_template(
+        "execution_plans.html",
+        draft=draft, approved=approved,
+        rejected=rejected, cancelled=cancelled,
+    )
 
 
 @app.route("/decision-inputs")

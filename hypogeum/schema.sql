@@ -1147,3 +1147,38 @@ CREATE TABLE IF NOT EXISTS decision_reviews (
 CREATE INDEX IF NOT EXISTS idx_dr_decision_id ON decision_reviews(decision_id);
 CREATE INDEX IF NOT EXISTS idx_dr_status      ON decision_reviews(operator_status);
 CREATE INDEX IF NOT EXISTS idx_dr_type        ON decision_reviews(decision_type);
+
+-- ---------------------------------------------------------------------------
+-- decision_execution_plans  (F5)
+-- Dry-run / reviewable execution plans derived from accepted decision_reviews.
+-- Accepting a plan does NOT trigger execution — plan_status='executed' is
+-- unreachable in F5. execution_mode is always 'dry_run' in F5.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS decision_execution_plans (
+    plan_id             TEXT NOT NULL PRIMARY KEY,
+    review_id           TEXT NOT NULL,
+    decision_id         TEXT NOT NULL,
+    decision_type       TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    plan_status         TEXT NOT NULL DEFAULT 'draft'
+                             CHECK(plan_status IN ('draft','approved','rejected','executed','cancelled')),
+    execution_mode      TEXT NOT NULL DEFAULT 'dry_run'
+                             CHECK(execution_mode IN ('dry_run','live')),
+    action_summary      TEXT NOT NULL,
+    planned_steps_json  TEXT NOT NULL,
+    risk_level          TEXT NOT NULL
+                             CHECK(risk_level IN ('low','medium','high','blocked')),
+    blockers_json       TEXT,
+    evidence_json       TEXT,
+    operator_note       TEXT,
+    approved_at         TEXT,
+    rejected_at         TEXT,
+    executed_at         TEXT,
+    metadata_version    TEXT NOT NULL DEFAULT 'v1'
+);
+
+CREATE INDEX IF NOT EXISTS idx_dep_review_id    ON decision_execution_plans(review_id);
+CREATE INDEX IF NOT EXISTS idx_dep_decision_id  ON decision_execution_plans(decision_id);
+CREATE INDEX IF NOT EXISTS idx_dep_plan_status  ON decision_execution_plans(plan_status);
+CREATE INDEX IF NOT EXISTS idx_dep_decision_type ON decision_execution_plans(decision_type);

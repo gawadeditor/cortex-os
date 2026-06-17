@@ -423,6 +423,27 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
+     5b. EXECUTION PLANS (compact status card)
+     ═══════════════════════════════════════════════════════════════ -->
+{%- if exec_plans is defined and exec_plans %}
+<div class="section-header" style="margin-top: var(--gap);">
+  <h2>Execution plans</h2>
+  <span class="section-count">{{ exec_plans | length }} active</span>
+</div>
+<div class="card" style="margin-bottom: var(--gap);">
+  <div style="font-size:12px; color:var(--yellow); margin-bottom:8px;">
+    ◆ F5 dry-run only — no live execution available
+  </div>
+  {%- set draft_count    = exec_plans | selectattr('plan_status','equalto','draft')    | list | length %}
+  {%- set approved_count = exec_plans | selectattr('plan_status','equalto','approved') | list | length %}
+  <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
+    {{ draft_count }} draft &nbsp;·&nbsp; {{ approved_count }} approved
+  </div>
+  <a href="/execution-plans" class="btn" style="font-size:12px;">View execution plans →</a>
+</div>
+{%- endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════
      6. DECISION INPUTS STATUS
      ═══════════════════════════════════════════════════════════════ -->
 {%- if di is defined %}

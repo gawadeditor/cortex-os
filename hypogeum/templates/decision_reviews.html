@@ -49,6 +49,8 @@
     .btn-accept:hover { background: #1a3a22; }
     .btn-reject { border-color: #da3633; color: var(--red); }
     .btn-reject:hover { background: #3a0f0a; }
+    .btn-plan { border-color: var(--blue); color: var(--blue); }
+    .btn-plan:hover { background: #1a2a3a; }
 
     /* ── Section ── */
     .rev-section { margin-bottom: var(--gap); }
@@ -160,6 +162,11 @@
       <span>note: {{ r.operator_note }}</span>
       {%- endif %}
     </div>
+    <div class="btn-row">
+      <button class="btn btn-plan"
+              onclick="createPlan('{{ r.review_id }}')">Create execution plan</button>
+      <a href="/execution-plans" class="btn">View plans</a>
+    </div>
   </div>
   {%- endfor %}
 </div>
@@ -231,6 +238,24 @@ function reviewAction(reviewId, action) {
     if (d.ok) {
       showToast(action.charAt(0).toUpperCase() + action.slice(1) + 'd', true);
       setTimeout(function(){ location.reload(); }, 600);
+    } else {
+      showToast('Error: ' + (d.error || d.code || 'unknown'), false);
+    }
+  })
+  .catch(function(e){ showToast('Request failed: ' + e, false); });
+}
+
+function createPlan(reviewId) {
+  fetch('/api/execution-plans/from-review/' + reviewId, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.ok) {
+      showToast('Execution plan created (dry-run only)', true);
+      setTimeout(function(){ window.location.href = '/execution-plans'; }, 800);
     } else {
       showToast('Error: ' + (d.error || d.code || 'unknown'), false);
     }

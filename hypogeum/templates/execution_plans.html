@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Execution Plans — Factory OS</title>
+  {% include "_base_style.html" %}
+  <style>
+    /* ── Plan cards ── */
+    .plan-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px; margin-bottom: 10px;
+    }
+    .plan-card:last-child { margin-bottom: 0; }
+    .plan-draft    { border-left: 3px solid var(--blue); }
+    .plan-approved { border-left: 3px solid var(--green); }
+    .plan-rejected { border-left: 3px solid var(--muted); }
+    .plan-cancelled { border-left: 3px solid var(--muted); }
+
+    .plan-header { display: flex; align-items: baseline; gap: 10px;
+                   margin-bottom: 8px; flex-wrap: wrap; }
+    .plan-title  { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; }
+    .plan-type   { font-size: 10px; font-weight: 700; padding: 2px 8px;
+                   border-radius: 8px; white-space: nowrap;
+                   background: var(--surface); border: 1px solid var(--border);
+                   color: var(--muted); }
+
+    .risk-badge { font-size: 10px; font-weight: 700; padding: 2px 8px;
+                  border-radius: 8px; white-space: nowrap; }
+    .risk-low     { background: #1a3a22; color: var(--green); }
+    .risk-medium  { background: #3a2e0d; color: var(--yellow); }
+    .risk-high    { background: #3a0f0a; color: var(--red); }
+    .risk-blocked { background: #2a1a2a; color: var(--muted); }
+
+    .mode-badge { font-size: 10px; font-weight: 700; padding: 2px 8px;
+                  border-radius: 8px; background: #1a2a3a; color: var(--blue); }
+
+    .plan-summary { font-size: 13px; color: var(--text); margin-bottom: 8px; line-height: 1.5; }
+
+    .steps-list { margin: 0 0 8px 0; padding: 0; list-style: none; }
+    .steps-list li {
+      font-size: 12px; color: var(--muted); padding: 3px 0 3px 18px;
+      border-bottom: 1px solid var(--border); position: relative;
+    }
+    .steps-list li:last-child { border-bottom: none; }
+    .steps-list li::before { content: counter(step-counter) '.';
+      counter-increment: step-counter; position: absolute; left: 0;
+      font-size: 11px; color: var(--muted); }
+    .steps-list { counter-reset: step-counter; }
+
+    .blockers-box {
+      font-size: 11px; color: var(--red); font-family: monospace;
+      background: #1f0a09; border: 1px solid #da3633;
+      border-radius: 3px; padding: 5px 10px; margin-bottom: 8px;
+    }
+
+    .evidence-box {
+      font-size: 11px; color: var(--muted); font-family: monospace;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 3px; padding: 5px 10px; margin-bottom: 8px;
+      white-space: pre; overflow-x: auto;
+    }
+
+    .plan-meta { display: flex; gap: 16px; font-size: 11px; color: var(--muted);
+                 margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+
+    /* ── Buttons ── */
+    .btn-approve { border-color: #2ea043; color: var(--green); }
+    .btn-approve:hover { background: #1a3a22; }
+    .btn-reject  { border-color: #da3633; color: var(--red); }
+    .btn-reject:hover  { background: #3a0f0a; }
+    .btn-cancel  { border-color: var(--muted); color: var(--muted); }
+    .btn-dryrun  { border-color: var(--blue); color: var(--blue); }
+    .btn-dryrun:hover  { background: #1a2a3a; }
+
+    /* ── Sections ── */
+    .plan-section { margin-bottom: var(--gap); }
+    .empty-section { padding: 16px; text-align: center; color: var(--muted);
+                     background: var(--surface); border: 1px dashed var(--border);
+                     border-radius: var(--radius); font-size: 12px; }
+
+    /* ── Dry-run result panel ── */
+    #dry-run-panel {
+      display: none; position: fixed; top: 60px; right: 20px; width: 380px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px; z-index: 500;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    }
+    #dry-run-panel h3 { font-size: 13px; margin: 0 0 8px; }
+    .drs-step { font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+    .drs-step:last-child { border-bottom: none; }
+    .drs-warning { font-size: 11px; color: var(--yellow); margin-top: 6px; }
+    #dry-run-close { float: right; cursor: pointer; color: var(--muted); font-size: 13px; }
+
+    /* ── Toast ── */
+    #toast { position: fixed; bottom: 20px; right: 20px; padding: 10px 16px;
+             border-radius: var(--radius); font-size: 13px; z-index: 999;
+             background: var(--surface); border: 1px solid var(--border);
+             display: none; }
+    #toast.ok  { border-color: #2ea043; color: var(--green); }
+    #toast.err { border-color: #da3633; color: var(--red); }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+<div class="page-header">
+  <h1>Execution Plans</h1>
+  <span class="page-meta">
+    {{ draft | length }} draft &nbsp;·&nbsp;
+    {{ approved | length }} approved &nbsp;·&nbsp;
+    {{ rejected | length + cancelled | length }} closed
+  </span>
+</div>
+
+<!-- ── F5 guard notice ── -->
+<div class="flash flash-warn" style="margin-bottom:var(--gap); font-size:12px;">
+  <strong>F5 is dry-run only.</strong>
+  No live execution is available. Plans record operator intent and simulate steps.
+  Approving a plan does NOT launch an episode, publish content, or call any external service.
+  The "executed" status is unreachable in this release.
+</div>
+
+<!-- ── Quick links ── -->
+<div style="display:flex; gap:8px; align-items:center; margin-bottom:var(--gap); flex-wrap:wrap;">
+  <a href="/decision-reviews" class="btn">Decision reviews</a>
+  <a href="/decisions"        class="btn">Computed decisions</a>
+  <a href="/api/execution-plans" class="btn" target="_blank">JSON API</a>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     DRAFT PLANS
+     ══════════════════════════════════════════════════════════════════ -->
+<div class="section-header">
+  <h2>Draft plans</h2>
+  <span class="section-count">{{ draft | length }}</span>
+</div>
+
+<div class="plan-section">
+{%- if draft %}
+  {%- for p in draft %}
+  {{ _render_plan(p) }}
+  {%- endfor %}
+{%- else %}
+<div class="empty-section">No draft plans. Create one from an accepted decision review.</div>
+{%- endif %}
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     APPROVED PLANS
+     ══════════════════════════════════════════════════════════════════ -->
+{%- if approved %}
+<div class="section-header">
+  <h2>Approved plans</h2>
+  <span class="section-count">{{ approved | length }}</span>
+</div>
+<div class="plan-section">
+  {%- for p in approved %}
+  {{ _render_plan(p) }}
+  {%- endfor %}
+</div>
+{%- endif %}
+
+<!-- ══════════════════════════════════════════════════════════════════
+     REJECTED / CANCELLED
+     ══════════════════════════════════════════════════════════════════ -->
+{%- if rejected or cancelled %}
+<div class="section-header">
+  <h2>Rejected / Cancelled</h2>
+  <span class="section-count">{{ rejected | length + cancelled | length }}</span>
+</div>
+<div class="plan-section">
+  {%- for p in rejected + cancelled %}
+  <div class="plan-card plan-{{ p.plan_status }}">
+    <div class="plan-header">
+      <div class="plan-title">{{ p.action_summary }}</div>
+      <span class="plan-type">{{ p.decision_type | replace("_"," ") }}</span>
+      <span class="badge badge-failed">{{ p.plan_status }}</span>
+    </div>
+    <div class="plan-meta">
+      <span>created {{ p.created_at[:10] }}</span>
+      {%- if p.operator_note %}<span>note: {{ p.operator_note }}</span>{%- endif %}
+    </div>
+  </div>
+  {%- endfor %}
+</div>
+{%- endif %}
+
+<!-- ── Dry-run result panel ── -->
+<div id="dry-run-panel">
+  <span id="dry-run-close" onclick="closeDryRun()">✕</span>
+  <h3>Dry-run result</h3>
+  <div id="dry-run-body"></div>
+</div>
+
+<div id="toast"></div>
+
+{%- macro _render_plan(p) %}
+<div class="plan-card plan-{{ p.plan_status }}" id="plan-{{ p.plan_id }}">
+  <div class="plan-header">
+    <div class="plan-title">{{ p.action_summary }}</div>
+    <span class="plan-type">{{ p.decision_type | replace("_"," ") }}</span>
+    <span class="risk-badge risk-{{ p.risk_level }}">{{ p.risk_level }}</span>
+    <span class="mode-badge">{{ p.execution_mode }}</span>
+    <span class="badge badge-{{ 'pending' if p.plan_status == 'draft' else ('complete' if p.plan_status == 'approved' else 'failed') }}">{{ p.plan_status }}</span>
+  </div>
+
+  {%- if p.planned_steps %}
+  <ol class="steps-list">
+    {%- for s in p.planned_steps %}
+    <li>{{ s }}</li>
+    {%- endfor %}
+  </ol>
+  {%- endif %}
+
+  {%- if p.blockers %}
+  <div class="blockers-box">
+    {%- for b in p.blockers %}■ {{ b }}<br>{%- endfor %}
+  </div>
+  {%- endif %}
+
+  {%- if p.evidence %}
+  <div class="evidence-box">{{ p.evidence | join('\n') }}</div>
+  {%- endif %}
+
+  <div class="plan-meta">
+    <span>created {{ p.created_at[:10] }}</span>
+    {%- if p.approved_at %}<span>approved {{ p.approved_at[:10] }}</span>{%- endif %}
+    {%- if p.operator_note %}<span>note: {{ p.operator_note }}</span>{%- endif %}
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-dryrun"  onclick="doDryRun('{{ p.plan_id }}')">Dry run</button>
+    {%- if p.plan_status == 'draft' %}
+    <button class="btn btn-approve" onclick="planAction('{{ p.plan_id }}','approve')">Approve</button>
+    <button class="btn btn-reject"  onclick="planAction('{{ p.plan_id }}','reject')">Reject</button>
+    {%- endif %}
+    {%- if p.plan_status in ('draft', 'approved') %}
+    <button class="btn btn-cancel"  onclick="planAction('{{ p.plan_id }}','cancel')">Cancel</button>
+    {%- endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+<script>
+function showToast(msg, ok) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = ok ? 'ok' : 'err';
+  t.style.display = 'block';
+  setTimeout(function(){ t.style.display = 'none'; }, 3500);
+}
+
+function planAction(planId, action) {
+  fetch('/api/execution-plans/' + planId + '/' + action, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.ok) {
+      showToast(action.charAt(0).toUpperCase() + action.slice(1) + 'd', true);
+      setTimeout(function(){ location.reload(); }, 600);
+    } else {
+      showToast('Error: ' + (d.error || d.code || 'unknown'), false);
+    }
+  })
+  .catch(function(e){ showToast('Request failed: ' + e, false); });
+}
+
+function doDryRun(planId) {
+  fetch('/api/execution-plans/' + planId + '/dry-run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (!d.ok) {
+      showToast('Error: ' + (d.error || d.code || 'unknown'), false);
+      return;
+    }
+    var html = '';
+    (d.simulated_steps || []).forEach(function(s){
+      html += '<div class="drs-step">' + s.step + '. ' + s.description + '</div>';
+    });
+    (d.warnings || []).forEach(function(w){
+      html += '<div class="drs-warning">⚠ ' + w + '</div>';
+    });
+    if (d.validation) {
+      html += '<div class="drs-warning" style="margin-top:8px; color:var(--muted);">risk: '
+            + d.validation.risk_level + ' &nbsp;·&nbsp; can proceed: '
+            + d.validation.can_proceed + '</div>';
+    }
+    document.getElementById('dry-run-body').innerHTML = html || '<div class="drs-step">No steps.</div>';
+    document.getElementById('dry-run-panel').style.display = 'block';
+  })
+  .catch(function(e){ showToast('Request failed: ' + e, false); });
+}
+
+function closeDryRun() {
+  document.getElementById('dry-run-panel').style.display = 'none';
+}
+</script>
+</body>
+</html>

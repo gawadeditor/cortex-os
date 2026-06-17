@@ -339,7 +339,7 @@ class TestDecisionReviewsAccepted:
         resp = client.get("/decision-reviews")
         assert resp.status_code == 200
         html = resp.data.decode()
-        assert "Create execution plan" in html
+        assert "Create action plan" in html
 
     def test_execution_plans_link_present_in_accepted_section(self, client, db):
         _seed_accepted_review(db)

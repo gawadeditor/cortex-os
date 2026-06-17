@@ -275,7 +275,7 @@ class TestCommandPrefersReview:
         assert resp.status_code == 200
         html = resp.data.decode()
         assert "Review queue" in html
-        assert "Pending review" in html
+        assert "Decision waiting for review" in html
 
     def test_command_falls_back_to_engine_when_no_reviews(self, client, db):
         d_engine = _fake_decision(title="Engine decision")

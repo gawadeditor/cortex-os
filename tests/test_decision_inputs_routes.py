@@ -189,7 +189,7 @@ class TestCommandIntegration:
         resp = client.get("/command")
         assert resp.status_code == 200
         html = resp.data.decode()
-        assert "Decision inputs" in html
+        assert "Decision data" in html
 
     def test_command_page_has_link_to_decision_inputs(self, client):
         resp = client.get("/command")

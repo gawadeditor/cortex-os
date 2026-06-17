@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Channel Profile</title>
+  {% include '_base_style.html' %}
+  <style>
+    .profile-form { max-width: 700px; }
+    .field-group { margin-bottom: calc(var(--gap) * 1.2); }
+    .field-label { font-size: 12px; font-weight: 600; color: var(--muted);
+                   text-transform: uppercase; letter-spacing: .05em;
+                   margin-bottom: 5px; display: block; }
+    .field-hint  { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .color-row   { display: flex; gap: 12px; flex-wrap: wrap; }
+    .color-swatch { display: flex; align-items: center; gap: 8px; }
+    .color-swatch input[type=color] { width: 36px; height: 28px; padding: 1px 2px;
+                                       border: 1px solid var(--border); border-radius: var(--radius);
+                                       background: var(--bg); cursor: pointer; }
+    .targets-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    @media (max-width: 480px) { .targets-grid { grid-template-columns: 1fr 1fr; } }
+    .target-card { background: var(--surface); border: 1px solid var(--border);
+                   border-radius: var(--radius); padding: 12px; }
+    .target-plat { font-size: 12px; font-weight: 600; color: var(--text);
+                   margin-bottom: 6px; }
+    .save-banner { background: #0f2016; border: 1px solid var(--green);
+                   border-radius: var(--radius); padding: 10px 14px;
+                   color: var(--green); font-size: 13px; margin-bottom: var(--gap); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Channel Profile</h1>
+  <span class="page-meta">Identity and weekly content targets</span>
+</div>
+
+{% if flash %}
+<div class="save-banner">&#x2713;&ensp;Profile saved.</div>
+{% endif %}
+
+<form method="POST" action="/channel-profile/save" class="profile-form">
+
+  <div class="card">
+    <div class="card-title">Channel Identity</div>
+
+    <div class="field-group">
+      <label class="field-label" for="channel_name">Channel Name</label>
+      <input type="text" id="channel_name" name="channel_name"
+             value="{{ profile.channel_name or '' }}" placeholder="My Channel">
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" for="description">Description</label>
+      <textarea id="description" name="description" rows="3"
+                placeholder="What this channel is about">{{ profile.description or '' }}</textarea>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" for="content_niche">Content Niche</label>
+      <input type="text" id="content_niche" name="content_niche"
+             value="{{ profile.content_niche or '' }}"
+             placeholder="e.g. Tech, Finance, Fitness">
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" for="tone_style">Tone &amp; Style</label>
+      <input type="text" id="tone_style" name="tone_style"
+             value="{{ profile.tone_style or '' }}"
+             placeholder="e.g. Educational, Conversational, Documentary">
+    </div>
+
+    <div class="field-group">
+      <label class="field-label">Brand Colors</label>
+      <div class="color-row">
+        <div class="color-swatch">
+          <input type="color" name="primary_color"
+                 value="{{ profile.primary_color or '#3fb950' }}">
+          <span style="font-size:12px; color:var(--muted)">Primary</span>
+        </div>
+        <div class="color-swatch">
+          <input type="color" name="secondary_color"
+                 value="{{ profile.secondary_color or '#58a6ff' }}">
+          <span style="font-size:12px; color:var(--muted)">Secondary</span>
+        </div>
+        <div class="color-swatch">
+          <input type="color" name="accent_color"
+                 value="{{ profile.accent_color or '#d29922' }}">
+          <span style="font-size:12px; color:var(--muted)">Accent</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Weekly Publishing Targets</div>
+    <p style="font-size:12px; color:var(--muted); margin-bottom:14px">
+      Set how many pieces of content you aim to publish per week on each platform.
+    </p>
+    <div class="targets-grid">
+      <div class="target-card">
+        <div class="target-plat">YouTube Videos</div>
+        <input type="number" name="yt_videos_per_week" min="0" max="99"
+               value="{{ profile.yt_videos_per_week or 2 }}" style="width:80px">
+        <span style="font-size:11px; color:var(--muted)"> / week</span>
+      </div>
+      <div class="target-card">
+        <div class="target-plat">YouTube Shorts</div>
+        <input type="number" name="yt_shorts_per_week" min="0" max="99"
+               value="{{ profile.yt_shorts_per_week or 3 }}" style="width:80px">
+        <span style="font-size:11px; color:var(--muted)"> / week</span>
+      </div>
+      <div class="target-card">
+        <div class="target-plat">TikTok Posts</div>
+        <input type="number" name="tiktok_per_week" min="0" max="99"
+               value="{{ profile.tiktok_per_week or 5 }}" style="width:80px">
+        <span style="font-size:11px; color:var(--muted)"> / week</span>
+      </div>
+      <div class="target-card">
+        <div class="target-plat">Instagram Reels</div>
+        <input type="number" name="instagram_per_week" min="0" max="99"
+               value="{{ profile.instagram_per_week or 3 }}" style="width:80px">
+        <span style="font-size:11px; color:var(--muted)"> / week</span>
+      </div>
+      <div class="target-card">
+        <div class="target-plat">Facebook Posts</div>
+        <input type="number" name="facebook_per_week" min="0" max="99"
+               value="{{ profile.facebook_per_week or 2 }}" style="width:80px">
+        <span style="font-size:11px; color:var(--muted)"> / week</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex; gap:10px; margin-top:var(--gap)">
+    <button type="submit" class="btn btn-save">Save Profile</button>
+    <a href="/dashboard" class="btn">← Back to Dashboard</a>
+  </div>
+
+</form>
+
+</body>
+</html>

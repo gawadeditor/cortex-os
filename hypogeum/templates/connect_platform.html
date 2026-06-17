@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Connect {{ setup.label }}</title>
+  {% include '_base_style.html' %}
+  <style>
+    .connect-card { max-width: 560px; }
+    .instructions { font-size: 13px; color: var(--muted); line-height: 1.7;
+                    margin-bottom: var(--gap); }
+    .cred-field   { width: 100%; font-size: 13px; font-family: monospace;
+                    background: var(--bg); border: 1px solid var(--border);
+                    color: var(--text); border-radius: var(--radius);
+                    padding: 8px 10px; }
+    .cred-field:focus { outline: none; border-color: var(--blue); }
+    .save-banner  { background: #0f2016; border: 1px solid var(--green);
+                    border-radius: var(--radius); padding: 10px 14px;
+                    color: var(--green); font-size: 13px; margin-bottom: var(--gap); }
+    .warning-note { background: #1a1200; border: 1px solid var(--yellow);
+                    border-radius: var(--radius); padding: 10px 14px;
+                    color: var(--yellow); font-size: 12px; margin-bottom: var(--gap); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="breadcrumb">
+  <a href="/dashboard">Dashboard</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>Connect {{ setup.label }}</span>
+</div>
+
+{% if flash %}
+<div class="save-banner">
+  &#x2713;&ensp;{{ setup.label }} credential saved. Status: configured.
+  The credential has not been tested yet — analytics will appear after your first import.
+</div>
+{% endif %}
+
+<div class="page-header">
+  <h1>Connect {{ setup.label }}</h1>
+</div>
+
+<div class="card connect-card">
+  <div class="card-title">What you need</div>
+  <p class="instructions">{{ setup.instructions }}</p>
+
+  <div class="warning-note">
+    &#x26A0;&ensp;This stores the credential locally. No live API calls are made now.
+    Credentials are tested only when analytics are imported.
+  </div>
+
+  <form method="POST" action="/platforms/connect/{{ platform }}/save">
+    <div style="margin-bottom: 12px">
+      <label style="font-size:12px; font-weight:600; color:var(--muted);
+                    text-transform:uppercase; letter-spacing:.05em;
+                    display:block; margin-bottom:5px">
+        {{ setup.cred_label }}
+      </label>
+      <input type="text" name="credential" class="cred-field"
+             placeholder="{{ setup.placeholder }}" autocomplete="off" required>
+    </div>
+    <div style="margin-bottom: var(--gap)">
+      <label style="font-size:12px; font-weight:600; color:var(--muted);
+                    text-transform:uppercase; letter-spacing:.05em;
+                    display:block; margin-bottom:5px">
+        Label (optional)
+      </label>
+      <input type="text" name="label" style="width:100%"
+             placeholder="{{ setup.label }} main account">
+    </div>
+    <div style="display:flex; gap:10px">
+      <button type="submit" class="btn btn-save">Save Credential</button>
+      <a href="/dashboard" class="btn">Cancel</a>
+    </div>
+  </form>
+</div>
+
+</body>
+</html>

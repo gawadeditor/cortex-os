@@ -1,19 +1,19 @@
 <nav class="site-nav">
-  <a href="/command" class="nav-brand">Factory OS</a>
+  <a href="/dashboard" class="nav-brand">Factory OS</a>
   <div class="nav-links">
-    <a href="/command"   class="nav-link nav-link-command {% if request.path == '/command' %}active{% endif %}">Command</a>
+    <a href="/dashboard" class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Dashboard</a>
+    <a href="/command"   class="nav-link {% if request.path == '/command' %}active{% endif %}">Command</a>
     <a href="/live"      class="nav-link {% if request.path == '/live' %}active{% endif %}">Live</a>
     <a href="/runs"      class="nav-link {% if request.path.startswith('/runs') or (request.path.startswith('/run/') and request.path.endswith('/live')) == false and request.path.startswith('/run/') %}active{% endif %}">Runs</a>
     <a href="/episodes"  class="nav-link {% if request.path.startswith('/episodes') %}active{% endif %}">Episodes</a>
     <a href="/queue"     class="nav-link {% if request.path == '/queue' %}active{% endif %}">Queue</a>
     <a href="/approvals" class="nav-link {% if request.path.startswith('/approvals') %}active{% endif %}">Approvals</a>
     <a href="/signals"   class="nav-link {% if request.path.startswith('/signals') %}active{% endif %}">Signals</a>
-    <a href="/analytics"        class="nav-link {% if request.path.startswith('/analytics') %}active{% endif %}">Analytics</a>
-    <a href="/learning"         class="nav-link {% if request.path.startswith('/learning') %}active{% endif %}">Intelligence</a>
-    <a href="/decisions"        class="nav-link {% if request.path.startswith('/decisions') and not request.path.startswith('/decision-inputs') and not request.path.startswith('/decision-reviews') %}active{% endif %}">Decisions</a>
-    <a href="/decision-reviews"  class="nav-link {% if request.path.startswith('/decision-reviews') %}active{% endif %}">Reviews</a>
-    <a href="/execution-plans"   class="nav-link {% if request.path.startswith('/execution-plans') %}active{% endif %}">Plans</a>
-    <a href="/decision-inputs"   class="nav-link {% if request.path.startswith('/decision-inputs') %}active{% endif %}">Inputs</a>
-    <a href="/dashboard"  class="nav-link {% if request.path == '/dashboard' %}active{% endif %}" title="Legacy dashboard">&#x2022;</a>
+    <a href="/analytics"       class="nav-link {% if request.path.startswith('/analytics') %}active{% endif %}">Analytics</a>
+    <a href="/learning"        class="nav-link {% if request.path.startswith('/learning') %}active{% endif %}">Intelligence</a>
+    <a href="/decisions"       class="nav-link {% if request.path.startswith('/decisions') and not request.path.startswith('/decision-inputs') and not request.path.startswith('/decision-reviews') %}active{% endif %}">Decisions</a>
+    <a href="/decision-reviews" class="nav-link {% if request.path.startswith('/decision-reviews') %}active{% endif %}">Reviews</a>
+    <a href="/execution-plans"  class="nav-link {% if request.path.startswith('/execution-plans') %}active{% endif %}">Plans</a>
+    <a href="/decision-inputs"  class="nav-link {% if request.path.startswith('/decision-inputs') %}active{% endif %}">Inputs</a>
   </div>
 </nav>

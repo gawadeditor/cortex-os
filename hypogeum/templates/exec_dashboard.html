@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="30">
+  <title>{% if state %}{{ (overview.channel_profile.channel_name if overview and overview.channel_profile and overview.channel_profile.channel_name else state.factory_name) or "Dashboard" }}{% else %}Dashboard{% endif %}</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* ── F9 Executive Dashboard ───────────────────────────────── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .exec-section { animation: fadeUp .3s ease both; }
+    .exec-section:nth-child(1) { animation-delay: .04s; }
+    .exec-section:nth-child(2) { animation-delay: .08s; }
+    .exec-section:nth-child(3) { animation-delay: .12s; }
+    .exec-section:nth-child(4) { animation-delay: .16s; }
+    .exec-section:nth-child(5) { animation-delay: .20s; }
+    .exec-section:nth-child(6) { animation-delay: .24s; }
+    .exec-section:nth-child(7) { animation-delay: .28s; }
+
+    /* ── Channel header ─────────────────────────────────────── */
+    .exec-header    { display: flex; align-items: center; gap: 18px;
+                      margin-bottom: 4px; flex-wrap: wrap; }
+    .exec-logo      { width: 52px; height: 52px; border-radius: 10px;
+                      background: var(--border); display: flex;
+                      align-items: center; justify-content: center;
+                      font-size: 26px; flex-shrink: 0; overflow: hidden; }
+    .exec-logo img  { width: 52px; height: 52px; object-fit: cover; border-radius: 10px; }
+    .exec-channel-name { font-size: 22px; font-weight: 700; line-height: 1.15; }
+    .exec-meta      { font-size: 12px; color: var(--muted); margin-top: 4px;
+                      display: flex; gap: 14px; flex-wrap: wrap; }
+    .status-pill    { display: flex; align-items: center; gap: 10px; margin-left: auto;
+                      background: var(--surface); border: 1px solid var(--border);
+                      border-radius: var(--radius); padding: 7px 14px; flex-shrink: 0; }
+
+    /* ── Banners ────────────────────────────────────────────── */
+    .demo-banner  { background: #1e1a00; border: 1px solid var(--yellow);
+                    border-radius: var(--radius); padding: 10px 14px;
+                    color: var(--yellow); font-size: 12px;
+                    margin-bottom: var(--gap);
+                    display: flex; gap: 8px; align-items: flex-start; }
+    .error-banner { background: #2d0f0f; border: 1px solid var(--red);
+                    border-radius: var(--radius); padding: 12px 16px;
+                    color: #ff7b72; margin-bottom: var(--gap); }
+
+    /* ── Platform cards ─────────────────────────────────────── */
+    .platform-grid  { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
+    @media (max-width: 560px) { .platform-grid { grid-template-columns: repeat(2,1fr); } }
+
+    .platform-card  { background: var(--surface); border: 1px solid var(--border);
+                      border-radius: var(--radius); padding: 13px 14px;
+                      transition: border-color .15s, box-shadow .15s; }
+    .platform-card:hover { border-color: #404850; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+    .platform-card-on      { border-color: #2ea043; }
+    .platform-card-on:hover { border-color: var(--green); }
+    .platform-card-demo    { border-color: var(--yellow); border-style: dashed; }
+    .platform-card-expired { border-color: var(--red); border-style: dashed; }
+
+    .platform-name    { font-size: 13px; font-weight: 600; margin-bottom: 5px;
+                        display: flex; align-items: center; gap: 6px; }
+    .pulse            { display: inline-block; width: 7px; height: 7px;
+                        border-radius: 50%; background: var(--green);
+                        animation: pulse 2s ease-in-out infinite; flex-shrink: 0; }
+    @keyframes pulse  { 0%,100%{ opacity:1; transform:scale(1); }
+                        50%    { opacity:.5; transform:scale(.85); } }
+
+    .plat-connected    { color: var(--green);  font-size: 11px; font-weight: 600; }
+    .plat-disconnected { color: var(--muted);  font-size: 11px; }
+    .plat-demo         { color: var(--yellow); font-size: 11px; font-weight: 600; }
+    .plat-expired      { color: var(--red);    font-size: 11px; font-weight: 600; }
+    .plat-data         { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .btn-connect       { display: inline-block; margin-top: 7px; padding: 3px 10px;
+                         font-size: 11px; font-weight: 600; border-radius: var(--radius);
+                         border: 1px solid var(--border); color: var(--muted);
+                         text-decoration: none; background: transparent; cursor: pointer; }
+    .btn-connect:hover { border-color: var(--blue); color: var(--blue);
+                         text-decoration: none; }
+
+    /* ── Production / KPI ───────────────────────────────────── */
+    .prod-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+    @media (max-width: 600px) { .prod-grid { grid-template-columns: 1fr; } }
+
+    .progress-bar  { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 5px; }
+    .progress-fill { height: 100%; background: var(--blue); border-radius: 3px;
+                     transition: width .4s ease; }
+    .progress-fill-green { background: var(--green); }
+
+    .kpi-4  { display: grid; grid-template-columns: repeat(4,1fr); gap: var(--gap); }
+    @media (max-width: 600px) { .kpi-4 { grid-template-columns: repeat(2,1fr); } }
+    .kpi-source      { font-size: 10px; margin-top: 3px; }
+    .kpi-source-real { color: var(--green); }
+    .kpi-source-none { color: var(--muted); }
+    .dash-val        { color: var(--muted); }
+
+    /* ── Targets section ────────────────────────────────────── */
+    .targets-list { display: flex; flex-direction: column; gap: 10px; }
+    .target-row   { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+    .target-label { width: 130px; color: var(--muted); flex-shrink: 0; }
+    .target-bar   { flex: 1; }
+    .target-num   { font-size: 11px; color: var(--muted); width: 40px; text-align: right; flex-shrink: 0; }
+
+    /* ── Charts section ─────────────────────────────────────── */
+    .exec-charts   { margin-bottom: var(--gap); }
+    .chart-title   { font-size: 11px; font-weight: 600; text-transform: uppercase;
+                     letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; }
+    .chart-bars    { display: flex; align-items: flex-end; gap: 5px;
+                     height: 60px; overflow: hidden; }
+    .chart-bar     { flex: 1; background: var(--blue); border-radius: 2px 2px 0 0;
+                     min-width: 10px; opacity: .8; transition: opacity .15s; }
+    .chart-bar:hover { opacity: 1; }
+    .chart-bar-empty { background: var(--border); }
+    .chart-empty   { font-size: 12px; color: var(--muted); padding: 12px 0; }
+
+    /* ── Alerts ─────────────────────────────────────────────── */
+    .alert-row  { display: flex; align-items: flex-start; gap: 10px;
+                  padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .alert-row:last-child { border-bottom: none; }
+    .alert-dot  { width: 8px; height: 8px; border-radius: 50%;
+                  margin-top: 5px; flex-shrink: 0; }
+    .alert-dot-critical { background: var(--red); }
+    .alert-dot-warning  { background: var(--yellow); }
+    .alert-dot-info     { background: var(--blue); }
+    .alert-label { font-size: 13px; font-weight: 500; }
+    .alert-sub   { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Operations ─────────────────────────────────────────── */
+    .ops-grid    { display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; }
+    @media (max-width: 480px) { .ops-grid { grid-template-columns: 1fr; } }
+    .ops-link    { display: block; padding: 10px 14px; background: var(--surface);
+                   border: 1px solid var(--border); border-radius: var(--radius);
+                   text-decoration: none; transition: border-color .15s; }
+    .ops-link:hover { border-color: var(--blue); text-decoration: none; }
+    .ops-link-label { font-size: 13px; font-weight: 600; color: var(--text); }
+    .ops-link-sub   { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .ops-aux  { display: flex; gap: 12px; flex-wrap: wrap;
+                margin-top: 12px; font-size: 12px; }
+    .ops-aux a { color: var(--muted); }
+    .ops-aux a:hover { color: var(--text); text-decoration: none; }
+
+    .no-data  { font-size: 13px; color: var(--muted); padding: 10px 0; }
+    .ep-table-wrap { overflow-x: auto; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+{% if error %}
+<div class="error-banner">Dashboard unavailable — {{ error }}</div>
+{% endif %}
+
+{% if state %}
+
+{# ─── demo warning ────────────────────────────────────────────── #}
+{% if overview and overview.demo_warning %}
+<div class="demo-banner">
+  <span>&#x26A0;</span>
+  <span>{{ overview.demo_warning }}
+    Import real analytics via <a href="/analytics/import">Analytics Import</a>
+    to populate the executive dashboard.
+  </span>
+</div>
+{% endif %}
+
+{# ═════════════════════════════════════════════════════════════════
+   1. CHANNEL IDENTITY
+══════════════════════════════════════════════════════════════════ #}
+{% set cp = overview.channel_profile if overview and overview.channel_profile else {} %}
+{% set ch_name = (cp.channel_name if cp and cp.channel_name else None) or state.factory_name or "My Channel" %}
+
+<div class="card exec-section">
+  <div class="exec-header">
+    <div class="exec-logo">
+      {% if cp and cp.logo_path %}
+      <img src="{{ cp.logo_path }}" alt="logo">
+      {% else %}📺{% endif %}
+    </div>
+    <div style="flex:1; min-width:0">
+      <div class="exec-channel-name">{{ ch_name }}</div>
+      <div class="exec-meta">
+        <span>Status: <strong>{{ (state.factory_status or "active") | upper }}</strong></span>
+        {% if cp and cp.content_niche %}
+        <span>{{ cp.content_niche }}</span>
+        {% endif %}
+        <span>Updated:
+          {% if state.checked_at %}{{ state.checked_at[:10] }}{% else %}—{% endif %}
+        </span>
+      </div>
+    </div>
+    {% if report %}
+    <div class="status-pill">
+      <span class="badge badge-{{ report.readiness_level | lower }}">{{ report.readiness_level }}</span>
+      <span style="font-size:12px; color:var(--muted)">{{ report.readiness_score }}%</span>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card-title" style="margin-top:10px">Channels</div>
+  {% if state.channels %}
+    {% for ch in state.channels %}
+    <div style="font-size:13px; padding:3px 0; color:var(--muted)">
+      <a href="/channel/{{ ch.channel_id }}" style="color:var(--text); font-weight:600">{{ ch.name }}</a>
+      &mdash; {{ ch.status }}
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="no-data">No channels configured yet.
+      <a href="/channel-profile">Set up your channel profile →</a>
+    </div>
+  {% endif %}
+</div>
+
+{# ═════════════════════════════════════════════════════════════════
+   2. CONNECTED PLATFORMS
+══════════════════════════════════════════════════════════════════ #}
+<div class="card exec-section">
+  <div class="card-title">Connected Platforms</div>
+  <div class="platform-grid">
+    {% set pstate = overview.platform_state if overview and overview.platform_state else {} %}
+    {% set pmap   = pstate.platforms if pstate.platforms else {} %}
+    {% for pkey in ["youtube", "tiktok", "instagram", "facebook"] %}
+    {% set p      = pmap[pkey] if pkey in pmap else {} %}
+    {% set cstate = p.connection_state if p else "not_connected" %}
+    {% set pname  = p.name if p else pkey | title %}
+    <div class="platform-card
+                {{ 'platform-card-on'      if cstate in ('connected','connected_no_data') else '' }}
+                {{ 'platform-card-demo'    if cstate == 'demo_only'                       else '' }}
+                {{ 'platform-card-expired' if cstate == 'published_no_cred'               else '' }}">
+      <div class="platform-name">
+        {% if cstate in ('connected','connected_no_data') %}<span class="pulse"></span>{% endif %}
+        {{ pname }}
+      </div>
+      {% if cstate == "connected" %}
+        <div class="plat-connected">Connected</div>
+        <div class="plat-data">{{ p.real_count }} analytics record{{ '' if p.real_count == 1 else 's' }}</div>
+      {% elif cstate == "connected_no_data" %}
+        <div class="plat-connected">Connected</div>
+        <div class="plat-data">No analytics imported yet</div>
+      {% elif cstate == "published_no_cred" %}
+        <div class="plat-expired">Credential expired</div>
+        <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Reconnect</a>
+      {% elif cstate == "demo_only" %}
+        <div class="plat-demo">Not connected</div>
+        <div class="plat-data">Demo data only — excluded from dashboard</div>
+        <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Connect {{ pname }}</a>
+      {% else %}
+        <div class="plat-disconnected">Not connected</div>
+        <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Connect {{ pname }}</a>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+{# ═════════════════════════════════════════════════════════════════
+   3. PRODUCTION OVERVIEW
+══════════════════════════════════════════════════════════════════ #}
+<div class="card exec-section">
+  <div class="card-title">Production Overview</div>
+  {% set prod = overview.production if overview and overview.production else {} %}
+  <div class="prod-grid">
+    <div>
+      {% if prod.current_episode %}
+      <div style="font-size:13px; margin-bottom:6px">
+        <span style="color:var(--muted)">Current episode:</span>
+        <strong>{{ prod.current_episode }}</strong>
+      </div>
+      <div style="font-size:13px; margin-bottom:10px">
+        <span style="color:var(--muted)">Stage:</span>
+        <strong>{{ prod.current_stage or "—" }}</strong>
+      </div>
+      <div>
+        <div style="font-size:11px; color:var(--muted); margin-bottom:3px">Progress</div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width:{{ prod.progress_pct or 0 }}%"></div>
+        </div>
+      </div>
+      {% else %}
+      <div class="no-data">No episode currently in production.</div>
+      {% endif %}
+    </div>
+    <div class="kpi-strip" style="margin-bottom:0; align-items:flex-start">
+      <div class="kpi-card">
+        <div class="kpi-val">{{ prod.queue_size or 0 }}</div>
+        <div class="kpi-lbl">Queued</div>
+      </div>
+      <div class="kpi-card">
+        {% if state.run_health and state.run_health.total_runs > 0 %}
+        <div class="kpi-val">{{ (state.run_health.success_rate * 100) | round | int }}%</div>
+        {% else %}<div class="kpi-val dash-val">—</div>{% endif %}
+        <div class="kpi-lbl">Run Health</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val">{{ state.run_health.total_runs if state.run_health else 0 }}</div>
+        <div class="kpi-lbl">Total Runs</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ═════════════════════════════════════════════════════════════════
+   4. RECENT EPISODES
+══════════════════════════════════════════════════════════════════ #}
+<div class="card exec-section">
+  <div class="card-title">Recent Episodes</div>
+  {% set recent = overview.recent_episodes if overview and overview.recent_episodes else [] %}
+  {% if recent %}
+  <div class="ep-table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Episode</th><th>Date</th><th>Status</th>
+          <th>Views</th><th>CTR</th><th>Retention</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ep in recent %}
+        <tr>
+          <td>{{ ep.title }}</td>
+          <td style="color:var(--muted); white-space:nowrap">
+            {{ ep.published_at[:10] if ep.published_at else "—" }}
+          </td>
+          <td><span class="badge badge-{{ ep.status or 'unknown' }}">{{ ep.status or "—" }}</span></td>
+          <td>{% if ep.views %}{{ "{:,}".format(ep.views) }}{% else %}<span class="dash-val">—</span>{% endif %}</td>
+          <td>{% if ep.ctr %}{{ ep.ctr }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
+          <td>{% if ep.retention %}{{ ep.retention }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="no-data">No episodes produced yet.</div>
+  {% endif %}
+</div>
+
+{# ═════════════════════════════════════════════════════════════════
+   5. ANALYTICS SUMMARY  (real data only)
+══════════════════════════════════════════════════════════════════ #}
+<div class="card exec-section">
+  <div class="card-title">Analytics Summary</div>
+  {% set anl = overview.analytics if overview and overview.analytics else {} %}
+  {% set ps  = overview.platform_state if overview and overview.platform_state else {} %}
+  <div class="kpi-4">
+    <div class="kpi-card">
+      <div class="kpi-val">
+        {% if anl.subscribers %}{{ "{:,}".format(anl.subscribers) }}{% else %}<span class="dash-val">—</span>{% endif %}
+      </div>
+      <div class="kpi-lbl">Subscribers</div>
+      <div class="kpi-source {{ 'kpi-source-real' if anl.subscribers else 'kpi-source-none' }}">
+        {{ "Real data" if anl.subscribers else "No real data" }}
+      </div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-val">
+        {% if anl.views %}{{ "{:,}".format(anl.views) }}{% else %}<span class="dash-val">—</span>{% endif %}
+      </div>
+      <div class="kpi-lbl">Total Views</div>
+      <div class="kpi-source {{ 'kpi-source-real' if anl.views else 'kpi-source-none' }}">
+        {{ "Real data" if anl.views else "No real data" }}
+      </div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-val">
+        {% if anl.watch_time_h %}{{ anl.watch_time_h }}h{% else %}<span class="dash-val">—</span>{% endif %}
+      </div>
+      <div class="kpi-lbl">Watch Time</div>
+      <div class="kpi-source {{ 'kpi-source-real' if anl.watch_time_h else 'kpi-source-none' }}">
+        {{ "Real data" if anl.watch_time_h else "No real data" }}
+      </div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-val">
+        {% if state.costs and state.costs.total_usd %}${{ "%.2f"|format(state.costs.total_usd) }}
+        {% else %}<span class="dash-val">$0.00</span>{% endif %}
+      </div>
+      <div class="kpi-lbl">Production Costs</div>
+      <div class="kpi-source kpi-source-real">Internal tracking</div>
+    </div>
+  </div>
+  {% if not (ps.any_real_data if ps else false) %}
+  <div style="font-size:12px; color:var(--muted); margin-top:10px; padding-top:10px;
+              border-top:1px solid var(--border)">
+    No real analytics imported yet.
+    <a href="/analytics/import">Import from platform dashboards →</a>
+  </div>
+  {% endif %}
+</div>
+
+{# ═════════════════════════════════════════════════════════════════
+   6. CHARTS  (views trend + weekly targets)
+══════════════════════════════════════════════════════════════════ #}
+<div class="card exec-section exec-charts">
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:var(--gap)">
+
+    {# ── Views trend ── #}
+    <div>
+      <div class="chart-title">Views Trend (Real Data)</div>
+      {% set chart = overview.views_chart if overview and overview.views_chart else [] %}
+      {% if chart and (chart | selectattr('value') | list) %}
+      <div class="chart-bars">
+        {% for bar in chart %}
+        <div class="chart-bar {{ 'chart-bar-empty' if bar.value == 0 else '' }}"
+             style="height:{{ bar.pct }}%" title="{{ bar.label }}: {{ bar.value }} views"></div>
+        {% endfor %}
+      </div>
+      <div style="font-size:10px; color:var(--muted); margin-top:4px">Last {{ chart|length }} episodes</div>
+      {% else %}
+      <div class="chart-empty">No real analytics yet — chart will appear after import.</div>
+      <div class="chart-bars">
+        {% for i in range(5) %}
+        <div class="chart-bar chart-bar-empty" style="height:{{ [20,35,15,45,25][i] }}%"></div>
+        {% endfor %}
+      </div>
+      <div style="font-size:10px; color:var(--muted); margin-top:4px">Empty state — demo shape only</div>
+      {% endif %}
+    </div>
+
+    {# ── Weekly targets ── #}
+    <div>
+      <div class="chart-title">Weekly Publishing Targets</div>
+      {% set targets = [
+        ("YouTube Videos",  cp.yt_videos_per_week  if cp else 2),
+        ("YouTube Shorts",  cp.yt_shorts_per_week  if cp else 3),
+        ("TikTok Posts",    cp.tiktok_per_week     if cp else 5),
+        ("Instagram Reels", cp.instagram_per_week  if cp else 3),
+        ("Facebook Posts",  cp.facebook_per_week   if cp else 2),
+      ] %}
+      {% set max_target = (targets | map(attribute=1) | max) or 1 %}
+      <div class="targets-list">
+        {% for label, target in targets %}
+        <div class="target-row">
+          <span class="target-label">{{ label }}</span>
+          <div class="target-bar">
+            <div class="progress-bar" style="height:6px">
+              <div class="progress-fill progress-fill-green"
+                   style="width:{{ (target / max_target * 100) | int }}%"></div>
+            </div>
+          </div>
+          <span class="target-num">{{ target }}/wk</span>
+        </div>
+        {% endfor %}
+      </div>
+      <div style="font-size:11px; color:var(--muted); margin-top:8px">
+        <a href="/channel-profile">Edit targets →</a>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+{# ═════════════════════════════════════════════════════════════════
+   7. SYSTEM ALERTS
+══════════════════════════════════════════════════════════════════ #}
+{% if exec_alerts %}
+<div class="card exec-section">
+  <div class="card-title">System Alerts</div>
+  {% for alert in exec_alerts %}
+  <div class="alert-row"
+       {% if alert.signal_type  %}data-signal-type="{{ alert.signal_type }}"{% endif %}
+       {% if alert.signal_id    %}data-signal-id="{{ alert.signal_id }}"{% endif %}
+       {% if alert.approval_id  %}data-approval-id="{{ alert.approval_id }}"{% endif %}
+       {% if alert.approval_type%}data-approval-type="{{ alert.approval_type }}"{% endif %}>
+    <div class="alert-dot alert-dot-{{ alert.level }}"></div>
+    <div style="flex:1">
+      <div class="alert-label">{{ alert.label }}</div>
+      <div class="alert-sub">{{ alert.detail }}</div>
+    </div>
+    {% if alert.signal_id %}
+    <button onclick="postAction('/api/action/resolve-signal/{{ alert.signal_id }}')"
+            class="btn btn-resolve">Resolve</button>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ═════════════════════════════════════════════════════════════════
+   8. OPERATIONS  (internal — collapsed)
+══════════════════════════════════════════════════════════════════ #}
+<details class="exec-section">
+  <summary>Operations</summary>
+  <div class="collapse-body" style="padding:16px">
+    <p style="font-size:12px; color:var(--muted); margin-bottom:14px">
+      Factory Director — Domain health, run controls, and system internals.
+    </p>
+    <div class="ops-grid">
+      <a href="/decision-reviews" class="ops-link">
+        <div class="ops-link-label">Decision Reviews</div>
+        <div class="ops-link-sub">Review and approve content decisions</div>
+      </a>
+      <a href="/execution-plans" class="ops-link">
+        <div class="ops-link-label">Action Plans</div>
+        <div class="ops-link-sub">Manage approved execution plans</div>
+      </a>
+      <a href="/decision-inputs" class="ops-link">
+        <div class="ops-link-label">Data Readiness</div>
+        <div class="ops-link-sub">Audience signals and analytics inputs</div>
+      </a>
+      <a href="/signals" class="ops-link">
+        <div class="ops-link-label">Active OIS Signals</div>
+        <div class="ops-link-sub">Operational intelligence events</div>
+      </a>
+    </div>
+    <div class="ops-aux">
+      <a href="/runs">Run History</a>
+      <a href="/preflight">Acceptance Audit</a>
+      <a href="/approvals">Pending Approvals</a>
+      <a href="/analytics">Full Analytics</a>
+      <a href="/learning">Intelligence Engine</a>
+      <a href="/queue">Schedules &amp; Queue</a>
+      <a href="/command">Command Center</a>
+      <a href="/channel-profile">Channel Profile</a>
+    </div>
+  </div>
+</details>
+
+{% else %}
+<div class="card">
+  <div class="no-data" style="text-align:center; padding:40px 0">
+    Dashboard data is unavailable. Check system status.
+  </div>
+</div>
+{% endif %}
+
+<footer style="margin-top:calc(var(--gap)*2); padding-top:var(--gap);
+               border-top:1px solid var(--border); font-size:11px;
+               color:var(--muted); display:flex; gap:16px; flex-wrap:wrap;">
+  <a href="/api/state" style="color:var(--muted)">/api/state</a>
+  <a href="/api/platform-connections" style="color:var(--muted)">/api/platform-connections</a>
+  <a href="/channel-profile" style="color:var(--muted)">Profile</a>
+  {% if report %}<span>Readiness: {{ report.readiness_score }}%</span>{% endif %}
+  {% if state %}<span>Updated: {{ state.checked_at[:19].replace("T"," ") if state.checked_at else "—" }}</span>{% endif %}
+</footer>
+
+<script>
+function postAction(url, body) {
+  body = body || {};
+  fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify(body)})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if(d.ok){ location.reload(); } else { alert(d.error||'Error'); } })
+    .catch(function(){ alert('Request failed'); });
+}
+</script>
+</body>
+</html>

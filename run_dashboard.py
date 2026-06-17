@@ -71,6 +71,33 @@ from hypogeum.decision_execution import (
 )
 from hypogeum.dashboard_api import get_factory_state
 from hypogeum.factory_director import assess_factory
+from hypogeum.dashboard_executive import (
+    get_executive_overview,
+    translate_alert,
+    translate_approval_type,
+)
+from hypogeum.platform_connections import (
+    get_platform_connection_state,
+    detect_real_vs_mock_analytics,
+)
+from hypogeum.channel_profile import get_channel_profile, update_channel_profile
+from hypogeum.credential_manager import (
+    create_secret_profile,
+    list_secret_profiles,
+    update_secret_profile,
+)
+
+_PLATFORM_CRED_TYPE = {
+    "youtube":   "oauth2_token",
+    "tiktok":    "api_key",
+    "instagram": "api_key",
+    "facebook":  "api_key",
+}
+_PLATFORM_DISPLAY = {
+    "youtube": "YouTube", "tiktok": "TikTok",
+    "instagram": "Instagram", "facebook": "Facebook",
+}
+_VALID_PLATFORMS_CONNECT = frozenset(_PLATFORM_CRED_TYPE)
 from hypogeum.dashboard_control import (
     # reads
     get_channel_detail,
@@ -273,11 +300,45 @@ def api_command_state():
 @app.route("/dashboard")
 def legacy_dashboard():
     state, report, err = _safe_state()
+
+    # Build pre-translated alert list (signals + pending approvals)
+    exec_alerts = []
+    if state:
+        for sig in (state.active_signals or []):
+            exec_alerts.append({
+                "level":        "critical" if sig.get("severity") == "CRITICAL" else "warning",
+                "label":        translate_alert(sig.get("signal_type", "")),
+                "detail":       sig.get("message", ""),
+                "signal_type":  sig.get("signal_type", ""),
+                "signal_id":    sig.get("signal_id", ""),
+                "approval_id":  None,
+                "approval_type": None,
+            })
+        for approval in (state.pending_approvals or []):
+            atype = getattr(approval, "approval_type", "")
+            aid   = getattr(approval, "approval_id",   "")
+            exec_alerts.append({
+                "level":        "warning",
+                "label":        translate_approval_type(atype),
+                "detail":       f"{atype} — {aid}",
+                "signal_type":  None,
+                "approval_id":  aid,
+                "approval_type": atype,
+            })
+
+    # Fetch executive overview (non-blocking; empty dict on any failure)
+    try:
+        overview = get_executive_overview(db_path=_db_path())
+    except Exception:
+        overview = {}
+
     return render_template(
-        "dashboard.html",
+        "exec_dashboard.html",
         state=state,
         report=report,
         error=err,
+        exec_alerts=exec_alerts,
+        overview=overview,
     )
 
 
@@ -292,6 +353,182 @@ def api_state():
         "director_report": _to_dict(report),
     }
     return jsonify(payload)
+
+
+@app.route("/api/platform-connections")
+def api_platform_connections():
+    """
+    Returns platform connection state and real-vs-mock analytics counts.
+    No credentials returned — status only.
+    """
+    try:
+        state  = get_platform_connection_state(db_path=_db_path())
+        detail = detect_real_vs_mock_analytics(db_path=_db_path())
+        return jsonify({"connections": state, "analytics_integrity": detail})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+# ===========================================================================
+# F9 — Channel Profile (Control Center)
+# ===========================================================================
+
+@app.route("/channel-profile")
+def channel_profile_page():
+    try:
+        profile = get_channel_profile(db_path=_db_path())
+    except Exception:
+        profile = {}
+    flash = request.args.get("saved")
+    return render_template("channel_profile.html", profile=profile, flash=flash)
+
+
+@app.route("/api/channel-profile")
+def api_channel_profile():
+    try:
+        return jsonify(get_channel_profile(db_path=_db_path()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/api/channel-profile/update", methods=["POST"])
+def api_channel_profile_update():
+    body = request.get_json(silent=True) or {}
+    result = update_channel_profile(body, db_path=_db_path())
+    http = 200 if result["ok"] else 400
+    return jsonify(result), http
+
+
+@app.route("/channel-profile/save", methods=["POST"])
+def channel_profile_save():
+    updates = {k: v for k, v in request.form.items()}
+    update_channel_profile(updates, db_path=_db_path())
+    return redirect(url_for("channel_profile_page") + "?saved=1")
+
+
+# ===========================================================================
+# F9 — Platform Connection Setup
+# ===========================================================================
+
+_PLATFORM_SETUP = {
+    "youtube": {
+        "label":        "YouTube",
+        "cred_label":   "OAuth 2.0 Access Token",
+        "instructions": (
+            "Go to Google Cloud Console → APIs & Services → Credentials. "
+            "Create an OAuth 2.0 client ID, complete the consent flow, "
+            "and paste the access token below."
+        ),
+        "credential_type": "oauth2_token",
+        "placeholder": "ya29.A0...",
+    },
+    "tiktok": {
+        "label":        "TikTok",
+        "cred_label":   "TikTok API Key",
+        "instructions": (
+            "Go to TikTok for Developers → Manage Apps → your app → Keys. "
+            "Copy your Access Token and paste it below."
+        ),
+        "credential_type": "api_key",
+        "placeholder": "act.abc123...",
+    },
+    "instagram": {
+        "label":        "Instagram",
+        "cred_label":   "Instagram Graph API Token",
+        "instructions": (
+            "Go to Meta for Developers → your app → Instagram → Generate Token. "
+            "Paste the long-lived access token below."
+        ),
+        "credential_type": "api_key",
+        "placeholder": "EAAGm...",
+    },
+    "facebook": {
+        "label":        "Facebook",
+        "cred_label":   "Facebook Page Access Token",
+        "instructions": (
+            "Go to Meta for Developers → your app → Tools → Graph API Explorer. "
+            "Select your Page and generate a long-lived token. Paste it below."
+        ),
+        "credential_type": "api_key",
+        "placeholder": "EAAGm...",
+    },
+}
+
+
+@app.route("/platforms/connect/<platform>")
+def platform_connect_page(platform: str):
+    if platform not in _VALID_PLATFORMS_CONNECT:
+        return render_template("not_found.html", kind="Platform", id=platform), 404
+    setup = _PLATFORM_SETUP[platform]
+    flash = request.args.get("saved")
+    return render_template("connect_platform.html",
+                           platform=platform, setup=setup, flash=flash)
+
+
+@app.route("/api/platforms/connect/<platform>/save", methods=["POST"])
+def api_platform_connect_save(platform: str):
+    if platform not in _VALID_PLATFORMS_CONNECT:
+        return jsonify({"ok": False, "error": "unknown platform", "code": "invalid"}), 400
+
+    body  = request.get_json(silent=True) or {}
+    cred  = (body.get("credential") or "").strip()
+    label = body.get("label") or f"{_PLATFORM_DISPLAY.get(platform, platform)} credential"
+
+    if not cred:
+        return jsonify({"ok": False, "error": "credential is required", "code": "invalid"}), 400
+
+    ctype = _PLATFORM_CRED_TYPE.get(platform, "api_key")
+    db    = _db_path()
+
+    try:
+        existing = list_secret_profiles(provider=platform, db_path=db)
+        active   = [p for p in existing if p.status == "active"]
+        if active:
+            update_secret_profile(
+                active[0].secret_profile_id,
+                credential_data=cred,
+                label=label,
+                db_path=db,
+            )
+            return jsonify({"ok": True, "action": "updated"})
+
+        create_secret_profile(
+            provider=platform,
+            label=label,
+            credential_type=ctype,
+            credential_data=cred,
+            db_path=db,
+        )
+        return jsonify({"ok": True, "action": "created"})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "code": "db_error"}), 500
+
+
+@app.route("/platforms/connect/<platform>/save", methods=["POST"])
+def platform_connect_save_form(platform: str):
+    if platform not in _VALID_PLATFORMS_CONNECT:
+        return render_template("not_found.html", kind="Platform", id=platform), 404
+    cred  = request.form.get("credential", "").strip()
+    label = request.form.get("label") or f"{_PLATFORM_DISPLAY.get(platform, platform)} credential"
+    if cred:
+        ctype = _PLATFORM_CRED_TYPE.get(platform, "api_key")
+        db    = _db_path()
+        try:
+            existing = list_secret_profiles(provider=platform, db_path=db)
+            active   = [p for p in existing if p.status == "active"]
+            if active:
+                update_secret_profile(
+                    active[0].secret_profile_id,
+                    credential_data=cred, label=label, db_path=db,
+                )
+            else:
+                create_secret_profile(
+                    provider=platform, label=label,
+                    credential_type=ctype, credential_data=cred, db_path=db,
+                )
+        except Exception:
+            pass
+    return redirect(url_for("platform_connect_page", platform=platform) + "?saved=1")
 
 
 # ===========================================================================

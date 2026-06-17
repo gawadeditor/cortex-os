@@ -1182,3 +1182,28 @@ CREATE INDEX IF NOT EXISTS idx_dep_review_id    ON decision_execution_plans(revi
 CREATE INDEX IF NOT EXISTS idx_dep_decision_id  ON decision_execution_plans(decision_id);
 CREATE INDEX IF NOT EXISTS idx_dep_plan_status  ON decision_execution_plans(plan_status);
 CREATE INDEX IF NOT EXISTS idx_dep_decision_type ON decision_execution_plans(decision_type);
+
+-- ---------------------------------------------------------------------------
+-- channel_profile_settings — F9: Channel Control Center
+-- Single-row table (profile_id = 'default').  get_channel_profile() inserts
+-- the default row on first access so the row always exists after that call.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS channel_profile_settings (
+    profile_id          TEXT NOT NULL PRIMARY KEY DEFAULT 'default',
+    channel_name        TEXT,
+    logo_path           TEXT,
+    description         TEXT,
+    primary_color       TEXT NOT NULL DEFAULT '#3fb950',
+    secondary_color     TEXT NOT NULL DEFAULT '#58a6ff',
+    accent_color        TEXT NOT NULL DEFAULT '#d29922',
+    content_niche       TEXT,
+    tone_style          TEXT,
+    yt_videos_per_week  INTEGER NOT NULL DEFAULT 2,
+    yt_shorts_per_week  INTEGER NOT NULL DEFAULT 3,
+    tiktok_per_week     INTEGER NOT NULL DEFAULT 5,
+    instagram_per_week  INTEGER NOT NULL DEFAULT 3,
+    facebook_per_week   INTEGER NOT NULL DEFAULT 2,
+    created_at          TEXT,
+    updated_at          TEXT,
+    metadata_version    TEXT NOT NULL DEFAULT 'v1'
+);

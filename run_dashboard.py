@@ -50,6 +50,8 @@ sys.path.insert(0, str(_ROOT))
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
 
+from hypogeum.command_state import get_command_state
+from hypogeum.decision_inputs import get_decision_inputs_state
 from hypogeum.dashboard_api import get_factory_state
 from hypogeum.factory_director import assess_factory
 from hypogeum.dashboard_control import (
@@ -187,8 +189,54 @@ def _safe_state():
 # Routes
 # ---------------------------------------------------------------------------
 
+def _safe_command():
+    """Return command state dict, never raises."""
+    try:
+        return get_command_state(db_path=_db_path())
+    except Exception as exc:
+        return {
+            "checked_at": "",
+            "factory_status": {"level": "UNKNOWN", "reason": str(exc),
+                               "director_score": 0, "director_level": "UNKNOWN",
+                               "blocking_reasons": [], "warnings": []},
+            "providers": [],
+            "run_state": {"active_runs": [], "queued_runs": [],
+                          "last_completed": None, "recent_failures": [], "blockers": []},
+            "episode_readiness": {"can_launch": False, "next_topic": {},
+                                  "blockers": [str(exc)], "missing_inputs": [],
+                                  "required_approvals": [], "publishing_ready": False,
+                                  "pending_approval_count": 0},
+            "attention_queue": [],
+        }
+
+
 @app.route("/")
 def index():
+    return redirect(url_for("command_page"), 302)
+
+
+@app.route("/command")
+def command_page():
+    cmd = _safe_command()
+    try:
+        di = get_decision_inputs_state(db_path=_db_path())
+    except Exception:
+        di = {"readiness": {"has_real_inputs": False, "missing_inputs": [],
+                            "ready_for_decision_engine": False}}
+    return render_template("command.html", cmd=cmd, di=di)
+
+
+@app.route("/api/command-state")
+def api_command_state():
+    try:
+        cmd = get_command_state(db_path=_db_path())
+        return jsonify(cmd)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/dashboard")
+def legacy_dashboard():
     state, report, err = _safe_state()
     return render_template(
         "dashboard.html",
@@ -939,6 +987,46 @@ def learning_action_apply(action_id):
 def learning_action_dismiss(action_id):
     dismiss_action(action_id, db_path=_db_path())
     return redirect(url_for("learning_page"))
+
+
+# ===========================================================================
+# F2 — Decision Inputs (JSON API + HTML)
+# ===========================================================================
+
+@app.route("/api/decision-inputs", methods=["GET"])
+def api_decision_inputs():
+    try:
+        state = get_decision_inputs_state(db_path=_db_path())
+        return jsonify(state)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/decision-inputs")
+def decision_inputs_page():
+    try:
+        state = get_decision_inputs_state(db_path=_db_path())
+    except Exception as exc:
+        state = {
+            "checked_at": "",
+            "discovery":  {"has_data": False, "total_topics": 0, "by_status": {},
+                           "channels_with_topics": 0, "recent_consumed": []},
+            "episodes":   {"has_data": False, "total_episodes": 0, "completed_episodes": 0,
+                           "failed_episodes": 0, "by_status": {}, "recent_completed": [],
+                           "avg_run_duration_s": None, "total_produced_assets": 0},
+            "publishing": {"has_data": False, "total_outcomes": 0, "by_status": {},
+                           "by_platform": {}, "successful": 0, "recent_outcomes": []},
+            "costs":      {"has_data": False, "total_episodes_costed": 0, "total_cost_usd": 0.0,
+                           "avg_cost_per_episode": None, "by_provider": {}, "by_model": {},
+                           "recent_episodes": [], "total_tokens": 0.0},
+            "audience":   {"has_real_data": False, "total_snapshots": 0, "real_snapshots": 0,
+                           "mock_snapshots": 0, "by_platform": {}, "recent_real": [],
+                           "mock_warning": None},
+            "readiness":  {"has_real_inputs": False, "missing_inputs": [],
+                           "ready_for_decision_engine": False},
+            "error":      str(exc),
+        }
+    return render_template("decision_inputs.html", state=state)
 
 
 # ---------------------------------------------------------------------------

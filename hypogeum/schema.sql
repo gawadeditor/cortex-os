@@ -1087,3 +1087,35 @@ SELECT
     SUM(CASE WHEN status='dismissed' THEN 1 ELSE 0 END)  AS dismissed_count
 FROM learning_actions
 GROUP BY dimension;
+
+-- ===========================================================================
+-- F2: Decision Inputs Layer
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- publishing_outcomes
+-- One row per episode × platform publishing attempt.
+-- Written by store.record_publishing_outcome() — never by live publishing code.
+-- publishing_status: 'success' | 'failed' | 'pending' | 'skipped' | 'unknown'
+-- UNIQUE(episode_id, platform) — one canonical outcome per episode/platform pair.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS publishing_outcomes (
+    outcome_id          TEXT NOT NULL PRIMARY KEY,
+    episode_id          TEXT NOT NULL,
+    run_id              TEXT,
+    platform            TEXT NOT NULL,
+    publishing_status   TEXT NOT NULL DEFAULT 'unknown'
+                             CHECK(publishing_status IN
+                                 ('success','failed','pending','skipped','unknown')),
+    platform_video_id   TEXT,
+    published_at        TEXT,
+    failure_reason      TEXT,
+    recorded_at         TEXT NOT NULL,
+    metadata_version    TEXT NOT NULL DEFAULT 'v1',
+    UNIQUE(episode_id, platform)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pub_outcomes_episode  ON publishing_outcomes(episode_id);
+CREATE INDEX IF NOT EXISTS idx_pub_outcomes_platform ON publishing_outcomes(platform);
+CREATE INDEX IF NOT EXISTS idx_pub_outcomes_status   ON publishing_outcomes(publishing_status);

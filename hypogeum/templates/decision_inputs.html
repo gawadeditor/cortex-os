@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Decision Inputs — Factory OS</title>
+  {% include "_base_style.html" %}
+  <style>
+    .di-section { margin-bottom: var(--gap); }
+    .di-header { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; }
+    .di-title { font-size:13px; font-weight:700; text-transform:uppercase;
+                letter-spacing:.06em; }
+    .di-status { font-size:11px; padding:2px 8px; border-radius:8px; font-weight:600; }
+    .di-status-ok   { background:#1a3a22; color:var(--green); border:1px solid #2ea043; }
+    .di-status-warn { background:#3a2e0d; color:var(--yellow); border:1px solid #9e6a03; }
+    .di-status-none { background:var(--surface); color:var(--muted); border:1px solid var(--border); }
+    .di-card { background:var(--surface); border:1px solid var(--border);
+               border-radius:var(--radius); padding:14px 16px; }
+    .di-row { display:flex; justify-content:space-between; align-items:baseline;
+              font-size:12px; padding:3px 0; border-bottom:1px solid var(--border); }
+    .di-row:last-child { border-bottom:none; }
+    .di-label { color:var(--muted); }
+    .di-val   { font-family:monospace; font-weight:600; }
+    .mock-warning { background:#1f1800; border:1px solid #9e6a03; border-radius:var(--radius);
+                    padding:10px 14px; font-size:12px; color:var(--yellow); margin-top:8px; }
+    .readiness-bar { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .readiness-item { display:flex; align-items:center; gap:5px; font-size:12px; }
+    .ri-ok   { color:var(--green); }
+    .ri-miss { color:var(--muted); }
+    .di-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
+               gap:var(--gap); }
+    .no-data { font-size:12px; color:var(--muted); padding:8px 0; font-style:italic; }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+<div class="page-header">
+  <h1>Decision Inputs</h1>
+  <span class="page-meta">{{ state.checked_at[:19] | replace("T"," ") }}Z — investigative view</span>
+</div>
+
+<!-- ── Readiness summary ── -->
+{%- set r = state.readiness %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Decision Engine Readiness</div>
+  <div style="font-size:14px; font-weight:600; margin-bottom:8px;">
+    {%- if r.ready_for_decision_engine %}
+    <span class="ok">● Ready</span> — core inputs available
+    {%- elif r.has_real_inputs %}
+    <span class="warn">◆ Partial</span> — some inputs available, others missing
+    {%- else %}
+    <span class="muted">○ Not ready</span> — no real inputs collected yet
+    {%- endif %}
+  </div>
+  <div class="readiness-bar">
+    {%- set sections = ['discovery','episodes','costs','publishing','audience'] %}
+    {%- for s in sections %}
+    {%- set missing = r.missing_inputs %}
+    <div class="readiness-item">
+      {%- if s not in missing %}
+      <span class="ri-ok">●</span>
+      {%- else %}
+      <span class="ri-miss">○</span>
+      {%- endif %}
+      <span>{{ s.title() }}</span>
+    </div>
+    {%- endfor %}
+  </div>
+  {%- if r.missing_inputs %}
+  <div style="font-size:12px; color:var(--muted); margin-top:8px;">
+    Missing: {{ r.missing_inputs | join(' · ') }}
+  </div>
+  {%- endif %}
+</div>
+
+{%- if state.get('error') %}
+<div class="flash flash-err">Error loading state: {{ state.error }}</div>
+{%- endif %}
+
+<!-- ── Grid of sections ── -->
+<div class="di-grid">
+
+  <!-- Discovery -->
+  <div class="di-section">
+    <div class="di-header">
+      <span class="di-title">Discovery</span>
+      <span class="di-status {{ 'di-status-ok' if state.discovery.has_data else 'di-status-none' }}">
+        {{ 'data' if state.discovery.has_data else 'empty' }}
+      </span>
+    </div>
+    <div class="di-card">
+      <div class="di-row"><span class="di-label">Total topics</span><span class="di-val">{{ state.discovery.total_topics }}</span></div>
+      <div class="di-row"><span class="di-label">Channels</span><span class="di-val">{{ state.discovery.channels_with_topics }}</span></div>
+      {%- for st, cnt in state.discovery.by_status.items() %}
+      {%- if cnt > 0 %}
+      <div class="di-row"><span class="di-label">{{ st }}</span><span class="di-val">{{ cnt }}</span></div>
+      {%- endif %}
+      {%- endfor %}
+      {%- if not state.discovery.has_data %}
+      <div class="no-data">No topics in queue yet</div>
+      {%- endif %}
+    </div>
+  </div>
+
+  <!-- Episodes -->
+  <div class="di-section">
+    <div class="di-header">
+      <span class="di-title">Episodes</span>
+      <span class="di-status {{ 'di-status-ok' if state.episodes.completed_episodes > 0 else 'di-status-none' }}">
+        {{ 'data' if state.episodes.completed_episodes > 0 else 'empty' }}
+      </span>
+    </div>
+    <div class="di-card">
+      <div class="di-row"><span class="di-label">Total</span><span class="di-val">{{ state.episodes.total_episodes }}</span></div>
+      <div class="di-row"><span class="di-label">Completed</span><span class="di-val ok">{{ state.episodes.completed_episodes }}</span></div>
+      <div class="di-row"><span class="di-label">Failed</span><span class="di-val {{ 'err' if state.episodes.failed_episodes > 0 else '' }}">{{ state.episodes.failed_episodes }}</span></div>
+      <div class="di-row"><span class="di-label">Assets produced</span><span class="di-val">{{ state.episodes.total_produced_assets }}</span></div>
+      {%- if state.episodes.avg_run_duration_s %}
+      <div class="di-row"><span class="di-label">Avg duration</span><span class="di-val">{{ "%.0f"|format(state.episodes.avg_run_duration_s / 60) }}m</span></div>
+      {%- endif %}
+      {%- if not state.episodes.has_data %}
+      <div class="no-data">No episodes produced yet</div>
+      {%- endif %}
+    </div>
+  </div>
+
+  <!-- Production Costs -->
+  <div class="di-section">
+    <div class="di-header">
+      <span class="di-title">Production Costs</span>
+      <span class="di-status {{ 'di-status-ok' if state.costs.has_data else 'di-status-none' }}">
+        {{ 'data' if state.costs.has_data else 'empty' }}
+      </span>
+    </div>
+    <div class="di-card">
+      <div class="di-row"><span class="di-label">Total spend</span><span class="di-val">${{ "%.4f"|format(state.costs.total_cost_usd) }}</span></div>
+      <div class="di-row"><span class="di-label">Episodes costed</span><span class="di-val">{{ state.costs.total_episodes_costed }}</span></div>
+      {%- if state.costs.avg_cost_per_episode %}
+      <div class="di-row"><span class="di-label">Avg / episode</span><span class="di-val">${{ "%.4f"|format(state.costs.avg_cost_per_episode) }}</span></div>
+      {%- endif %}
+      {%- for prov, cost in state.costs.by_provider.items() %}
+      <div class="di-row"><span class="di-label">{{ prov }}</span><span class="di-val">${{ "%.4f"|format(cost) }}</span></div>
+      {%- endfor %}
+      {%- if not state.costs.has_data %}
+      <div class="no-data">No cost records yet</div>
+      {%- endif %}
+    </div>
+  </div>
+
+  <!-- Publishing Outcomes -->
+  <div class="di-section">
+    <div class="di-header">
+      <span class="di-title">Publishing</span>
+      <span class="di-status {{ 'di-status-ok' if state.publishing.has_data else 'di-status-none' }}">
+        {{ 'data' if state.publishing.has_data else 'empty' }}
+      </span>
+    </div>
+    <div class="di-card">
+      <div class="di-row"><span class="di-label">Total outcomes</span><span class="di-val">{{ state.publishing.total_outcomes }}</span></div>
+      <div class="di-row"><span class="di-label">Successful</span><span class="di-val ok">{{ state.publishing.successful }}</span></div>
+      {%- for platform, cnt in state.publishing.by_platform.items() %}
+      <div class="di-row"><span class="di-label">{{ platform }}</span><span class="di-val">{{ cnt }}</span></div>
+      {%- endfor %}
+      {%- if not state.publishing.has_data %}
+      <div class="no-data">No publishing outcomes recorded yet</div>
+      {%- endif %}
+    </div>
+  </div>
+
+  <!-- Audience Response -->
+  <div class="di-section">
+    <div class="di-header">
+      <span class="di-title">Audience</span>
+      <span class="di-status {{ 'di-status-ok' if state.audience.has_real_data else ('di-status-warn' if state.audience.mock_snapshots > 0 else 'di-status-none') }}">
+        {{ 'real data' if state.audience.has_real_data else ('mock only' if state.audience.mock_snapshots > 0 else 'empty') }}
+      </span>
+    </div>
+    <div class="di-card">
+      <div class="di-row"><span class="di-label">Real snapshots</span><span class="di-val ok">{{ state.audience.real_snapshots }}</span></div>
+      <div class="di-row"><span class="di-label">Mock/demo snapshots</span><span class="di-val warn">{{ state.audience.mock_snapshots }}</span></div>
+      {%- for platform, counts in state.audience.by_platform.items() %}
+      <div class="di-row">
+        <span class="di-label">{{ platform }}</span>
+        <span class="di-val">{{ counts.real }} real · {{ counts.mock }} mock</span>
+      </div>
+      {%- endfor %}
+      {%- if state.audience.mock_warning %}
+      <div class="mock-warning">{{ state.audience.mock_warning }}</div>
+      {%- endif %}
+      {%- if not state.audience.has_real_data and state.audience.mock_snapshots == 0 %}
+      <div class="no-data">No audience data imported yet</div>
+      {%- endif %}
+    </div>
+  </div>
+
+</div><!-- end grid -->
+
+<div class="card" style="margin-top:var(--gap); margin-bottom:0;">
+  <div class="card-title">What this page shows</div>
+  <div style="font-size:12px; color:var(--muted); line-height:1.6;">
+    This page shows the factual inputs available for future decision-making.
+    It does not generate recommendations. Mock/demo data is labeled and excluded from readiness checks.
+    Real inputs become available as episodes are produced, published, and audience data is imported.
+  </div>
+  <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+    <a href="/command"    class="btn">Command</a>
+    <a href="/analytics"  class="btn">Analytics</a>
+    <a href="/episodes"   class="btn">Episodes</a>
+    <a href="/api/decision-inputs" class="btn" target="_blank">JSON API</a>
+  </div>
+</div>
+
+</body>
+</html>

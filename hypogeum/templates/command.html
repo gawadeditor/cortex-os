@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Command — Factory OS</title>
+  {% include "_base_style.html" %}
+  <style>
+    /* ── Command-specific additions ── */
+    .nav-link-command { font-weight: 700; }
+
+    /* ── Factory status banner ── */
+    .factory-banner {
+      display: flex; align-items: flex-start; gap: 16px;
+      padding: 18px 20px; border-radius: var(--radius); margin-bottom: var(--gap);
+      border-width: 2px; border-style: solid;
+    }
+    .factory-banner-healthy  { background: #0d1f14; border-color: #2ea043; }
+    .factory-banner-degraded { background: #1f1800; border-color: #9e6a03; }
+    .factory-banner-blocked  { background: #1f0a09; border-color: #da3633; }
+    .factory-banner-unknown  { background: var(--surface); border-color: var(--border); }
+    .factory-banner-icon { font-size: 28px; flex-shrink: 0; line-height: 1; padding-top: 2px; }
+    .factory-banner-body { flex: 1; min-width: 0; }
+    .factory-banner-level {
+      font-size: 22px; font-weight: 800; letter-spacing: .04em; line-height: 1.1;
+      text-transform: uppercase;
+    }
+    .factory-banner-level-healthy  { color: var(--green); }
+    .factory-banner-level-degraded { color: var(--yellow); }
+    .factory-banner-level-blocked  { color: var(--red); }
+    .factory-banner-level-unknown  { color: var(--muted); }
+    .factory-banner-reason { font-size: 13px; color: var(--muted); margin-top: 5px; }
+    .factory-banner-score  { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: monospace; }
+    .factory-banner-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+    /* ── Section header ── */
+    .section-header {
+      display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px;
+    }
+    .section-header h2 {
+      font-size: 12px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .07em; color: var(--muted);
+    }
+    .section-count {
+      font-size: 11px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1px 8px; color: var(--muted);
+    }
+
+    /* ── Decision cards (attention queue) ── */
+    .decision-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+      margin-bottom: 8px; display: flex; gap: 14px; align-items: flex-start;
+    }
+    .decision-card:last-child { margin-bottom: 0; }
+    .dc-critical { border-left: 3px solid var(--red); }
+    .dc-high     { border-left: 3px solid var(--yellow); }
+    .dc-medium   { border-left: 3px solid #9e6a03; }
+    .dc-low      { border-left: 3px solid var(--border); }
+    .dc-icon { flex-shrink: 0; font-size: 13px; padding-top: 2px; width: 16px; text-align: center; }
+    .dc-body { flex: 1; min-width: 0; }
+    .dc-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .dc-why  { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .dc-evidence {
+      font-size: 11px; color: var(--muted); font-family: monospace;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 3px; padding: 4px 8px; margin-bottom: 8px;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .dc-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .dc-actions-area { flex-shrink: 0; display: flex; flex-direction: column; gap: 6px;
+                       align-items: flex-end; }
+    .btn-primary { background: #1a2a3a; border-color: var(--blue); color: var(--blue); }
+    .btn-primary:hover { background: #1f3a4a; }
+    .empty-queue {
+      padding: 20px; text-align: center; color: var(--muted); font-size: 13px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .empty-queue-ok { color: var(--green); font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+
+    /* ── Launch readiness ── */
+    .launch-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px; margin-bottom: var(--gap);
+    }
+    .launch-yes { color: var(--green); font-weight: 700; font-size: 14px; }
+    .launch-no  { color: var(--red);   font-weight: 700; font-size: 14px; }
+    .launch-topic { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+    .launch-blocker { font-size: 12px; color: var(--red); padding: 3px 0;
+                      border-bottom: 1px solid var(--border); }
+    .launch-blocker:last-child { border-bottom: none; }
+    .launch-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+
+    /* ── Run state grid ── */
+    .run-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap);
+                margin-bottom: var(--gap); }
+    @media (max-width: 620px) { .run-grid { grid-template-columns: 1fr; } }
+    .run-panel { background: var(--surface); border: 1px solid var(--border);
+                 border-radius: var(--radius); padding: 14px 16px; }
+    .run-panel-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+                       letter-spacing: .05em; color: var(--muted); margin-bottom: 8px; }
+    .run-item { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border);
+                display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+    .run-item:last-child { border-bottom: none; }
+    .run-ep  { font-family: monospace; color: var(--blue); }
+    .run-ts  { color: var(--muted); font-size: 11px; }
+    .run-err { color: var(--red); font-size: 11px; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+
+    /* ── Provider grid ── */
+    .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px,1fr));
+                     gap: 10px; margin-bottom: var(--gap); }
+    .provider-card { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); padding: 12px 14px; }
+    .provider-card-configured { border-color: #2ea043; }
+    .provider-card-untested   { border-color: #9e6a03; }
+    .provider-card-missing    { border-color: #da3633; }
+    .provider-card-expired    { border-color: #da3633; }
+    .provider-card-revoked    { border-color: var(--muted); }
+    .provider-name { font-weight: 600; font-size: 13px; margin-bottom: 4px;
+                     display: flex; align-items: center; gap: 6px; }
+    .provider-badge { font-size: 10px; font-weight: 700; padding: 1px 6px;
+                      border-radius: 8px; text-transform: uppercase; }
+    .provider-badge-configured { background: #1a3a22; color: var(--green); }
+    .provider-badge-untested   { background: #3a2e0d; color: var(--yellow); }
+    .provider-badge-missing    { background: #3a0f0a; color: var(--red); }
+    .provider-badge-expired    { background: #3a0f0a; color: var(--red); }
+    .provider-badge-revoked    { background: #1e2430; color: var(--muted); }
+    .provider-req  { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .provider-note { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+{%- set level = cmd.factory_status.level | lower -%}
+{%- set lvl_icons = {'healthy': '●', 'degraded': '▲', 'blocked': '■', 'unknown': '○'} -%}
+{%- set lvl_icon = lvl_icons.get(level, '○') -%}
+
+<!-- ═══════════════════════════════════════════════════════════════
+     1. FACTORY STATUS BANNER
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="factory-banner factory-banner-{{ level }}">
+  <div class="factory-banner-icon">{{ lvl_icon }}</div>
+  <div class="factory-banner-body">
+    <div class="factory-banner-level factory-banner-level-{{ level }}">
+      {{ cmd.factory_status.level }}
+    </div>
+    {%- if cmd.factory_status.reason %}
+    <div class="factory-banner-reason">{{ cmd.factory_status.reason }}</div>
+    {%- endif %}
+    <div class="factory-banner-score">
+      Director score: {{ cmd.factory_status.director_score }}/100
+      &nbsp;·&nbsp; {{ cmd.checked_at[:19] | replace("T"," ") }}Z
+    </div>
+    <div class="factory-banner-actions">
+      <a href="/preflight" class="btn">Preflight</a>
+      <a href="/signals"   class="btn">OIS signals</a>
+      <a href="/live"      class="btn">Live</a>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     2. ATTENTION QUEUE
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="section-header">
+  <h2>Attention queue</h2>
+  <span class="section-count">{{ cmd.attention_queue | length }}</span>
+</div>
+
+{%- if cmd.attention_queue %}
+  {%- set dc_icons = {'critical': '■', 'high': '▲', 'medium': '◆', 'low': '○'} -%}
+  {%- for item in cmd.attention_queue %}
+  <div class="decision-card dc-{{ item.level }}">
+    <div class="dc-icon">{{ dc_icons.get(item.level, '○') }}</div>
+    <div class="dc-body">
+      <div class="dc-title">{{ item.title }}</div>
+      {%- if item.why %}
+      <div class="dc-why">{{ item.why }}</div>
+      {%- endif %}
+      {%- if item.evidence %}
+      <div class="dc-evidence">{{ item.evidence }}</div>
+      {%- endif %}
+      <div class="dc-actions">
+        <a href="{{ item.action_url }}" class="btn btn-primary">{{ item.action_label }}</a>
+        {%- if item.investigate_url and item.investigate_url != item.action_url %}
+        <a href="{{ item.investigate_url }}" class="btn">{{ item.investigate_label }}</a>
+        {%- endif %}
+      </div>
+    </div>
+  </div>
+  {%- endfor %}
+{%- else %}
+<div class="empty-queue">
+  <div class="empty-queue-ok">● No items require attention</div>
+  <div>Factory is operating normally</div>
+</div>
+{%- endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════
+     3. LAUNCH READINESS
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="section-header" style="margin-top: var(--gap);">
+  <h2>Launch readiness</h2>
+</div>
+<div class="launch-card">
+  {%- if cmd.episode_readiness.can_launch %}
+  <div class="launch-yes">● Ready to launch</div>
+  {%- if cmd.episode_readiness.next_topic %}
+  <div class="launch-topic">
+    Next topic: <strong>{{ cmd.episode_readiness.next_topic.get('topic_text', '(unnamed)') }}</strong><br>
+    Channel: {{ cmd.episode_readiness.next_topic.get('channel_id', '?') }}
+    &nbsp;·&nbsp; Priority: {{ cmd.episode_readiness.next_topic.get('priority', 0) }}
+  </div>
+  {%- else %}
+  <div class="launch-topic" style="color: var(--yellow);">
+    No topics queued — add a topic to the queue before launching
+  </div>
+  {%- endif %}
+  <div class="launch-actions">
+    <a href="/episodes" class="btn">Episodes</a>
+    <a href="/queue"    class="btn">Topic queue</a>
+  </div>
+
+  {%- else %}
+  <div class="launch-no">■ Cannot launch</div>
+  {%- if cmd.episode_readiness.blockers %}
+  <div style="margin-top: 8px;">
+    {%- for b in cmd.episode_readiness.blockers %}
+    <div class="launch-blocker">{{ b }}</div>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+  {%- if cmd.episode_readiness.required_approvals %}
+  <div style="margin-top: 8px; font-size: 12px; color: var(--yellow);">
+    {%- for a in cmd.episode_readiness.required_approvals %}
+    <div>{{ a }}</div>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+  <div class="launch-actions">
+    <a href="/preflight" class="btn">Preflight details</a>
+    {%- if cmd.episode_readiness.pending_approval_count > 0 %}
+    <a href="/approvals" class="btn">
+      {{ cmd.episode_readiness.pending_approval_count }} pending approval{{ 's' if cmd.episode_readiness.pending_approval_count != 1 else '' }}
+    </a>
+    {%- endif %}
+  </div>
+  {%- endif %}
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     4. ACTIVE PRODUCTION
+     ═══════════════════════════════════════════════════════════════ -->
+{%- set active_count = cmd.run_state.active_runs | length %}
+{%- set queued_count = cmd.run_state.queued_runs | length %}
+<div class="section-header" style="margin-top: var(--gap);">
+  <h2>Active production</h2>
+  <span class="section-count">{{ active_count }} running &nbsp;·&nbsp; {{ queued_count }} queued</span>
+</div>
+<div class="run-grid">
+
+  <div class="run-panel">
+    <div class="run-panel-title">Running now</div>
+    {%- if cmd.run_state.active_runs %}
+      {%- for r in cmd.run_state.active_runs %}
+      <div class="run-item">
+        <span class="run-ep">{{ r.episode_id }}</span>
+        <a href="/run/{{ r.run_id }}/live" class="btn" style="font-size:11px;padding:2px 8px;">Live →</a>
+        <span class="run-ts">{{ r.started_at[:16] | replace("T"," ") }}</span>
+      </div>
+      {%- endfor %}
+    {%- else %}
+      <div class="muted" style="font-size:12px; padding:6px 0;">No runs active</div>
+    {%- endif %}
+  </div>
+
+  <div class="run-panel">
+    <div class="run-panel-title">Queued / waiting</div>
+    {%- if cmd.run_state.queued_runs %}
+      {%- for r in cmd.run_state.queued_runs %}
+      <div class="run-item">
+        <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+        <span class="run-ep">{{ r.episode_id }}</span>
+        <a href="/run/{{ r.run_id }}" class="muted" style="font-size:11px;">view</a>
+      </div>
+      {%- endfor %}
+    {%- else %}
+      <div class="muted" style="font-size:12px; padding:6px 0;">Queue empty</div>
+    {%- endif %}
+  </div>
+
+  <div class="run-panel">
+    <div class="run-panel-title">Last completed</div>
+    {%- if cmd.run_state.last_completed %}
+    {%- set lc = cmd.run_state.last_completed %}
+    <div style="font-size:13px;">
+      <span class="run-ep">{{ lc.episode_id }}</span>
+      <span class="badge badge-completed" style="margin-left:6px;">completed</span>
+    </div>
+    <div class="run-ts" style="margin-top:4px;">
+      {{ lc.get('completed_at', lc.get('started_at',''))[:16] | replace("T"," ") }}
+      &nbsp;·&nbsp; <a href="/run/{{ lc.run_id }}">details →</a>
+    </div>
+    {%- else %}
+      <div class="muted" style="font-size:12px; padding:6px 0;">No completed runs yet</div>
+    {%- endif %}
+  </div>
+
+  <div class="run-panel">
+    <div class="run-panel-title">Recent failures</div>
+    {%- if cmd.run_state.recent_failures %}
+      {%- for r in cmd.run_state.recent_failures %}
+      <div class="run-item">
+        <span class="run-ep">{{ r.episode_id }}</span>
+        {%- if r.error_message %}
+        <span class="run-err" title="{{ r.error_message }}">{{ r.error_message[:55] }}</span>
+        {%- endif %}
+        <a href="/run/{{ r.run_id }}" class="muted" style="font-size:11px;">view</a>
+      </div>
+      {%- endfor %}
+    {%- else %}
+      <div class="muted ok" style="font-size:12px; padding:6px 0;">No recent failures</div>
+    {%- endif %}
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     5. PROVIDERS
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="section-header" style="margin-top: var(--gap);">
+  <h2>Provider connectivity</h2>
+</div>
+<div class="provider-grid">
+  {%- for p in cmd.providers %}
+  {%- set st = p.status %}
+  <div class="provider-card provider-card-{{ st }}">
+    <div class="provider-name">
+      {{ p.label }}
+      <span class="provider-badge provider-badge-{{ st }}">{{ st }}</span>
+    </div>
+    <div class="provider-req">{{ 'Required' if p.required else 'Optional' }}</div>
+    {%- if p.note %}
+    <div class="provider-note">{{ p.note }}</div>
+    {%- endif %}
+  </div>
+  {%- endfor %}
+  {%- if not cmd.providers %}
+  <div class="provider-note muted" style="grid-column:1/-1;">No provider configuration found</div>
+  {%- endif %}
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     6. DECISION INPUTS STATUS
+     ═══════════════════════════════════════════════════════════════ -->
+{%- if di is defined %}
+{%- set dr = di.readiness %}
+<div class="section-header" style="margin-top: var(--gap);">
+  <h2>Decision inputs</h2>
+</div>
+<div class="card" style="margin-bottom: var(--gap);">
+  <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
+    <span style="font-size:13px; font-weight:600;">
+      {%- if dr.ready_for_decision_engine %}
+      <span class="ok">● Ready</span>
+      {%- elif dr.has_real_inputs %}
+      <span class="warn">◆ Partial</span>
+      {%- else %}
+      <span class="muted">○ Not ready</span>
+      {%- endif %}
+    </span>
+    <span style="font-size:12px; color:var(--muted);">Decision engine readiness</span>
+  </div>
+  {%- if dr.missing_inputs %}
+  <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
+    Missing: {{ dr.missing_inputs | join(', ') }}
+  </div>
+  {%- endif %}
+  <a href="/decision-inputs" class="btn" style="font-size:12px;">View decision inputs →</a>
+</div>
+{%- endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════
+     7. INVESTIGATE
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="section-header" style="margin-top: var(--gap);">
+  <h2>Investigate</h2>
+</div>
+<div class="card" style="margin-bottom:0;">
+  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    <a href="/analytics"  class="btn">Analytics</a>
+    <a href="/learning"   class="btn">Intelligence</a>
+    <a href="/runs"       class="btn">All runs</a>
+    <a href="/episodes"   class="btn">Episodes</a>
+    <a href="/failures"   class="btn">Failures</a>
+    <a href="/preflight"  class="btn">Preflight</a>
+    <a href="/signals"    class="btn">OIS signals</a>
+    <a href="/approvals"  class="btn">Approvals</a>
+  </div>
+</div>
+
+</body>
+</html>

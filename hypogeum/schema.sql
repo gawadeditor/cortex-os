@@ -1119,3 +1119,31 @@ CREATE TABLE IF NOT EXISTS publishing_outcomes (
 CREATE INDEX IF NOT EXISTS idx_pub_outcomes_episode  ON publishing_outcomes(episode_id);
 CREATE INDEX IF NOT EXISTS idx_pub_outcomes_platform ON publishing_outcomes(platform);
 CREATE INDEX IF NOT EXISTS idx_pub_outcomes_status   ON publishing_outcomes(publishing_status);
+
+-- ---------------------------------------------------------------------------
+-- decision_reviews  (F4)
+-- One row per persisted decision proposal. operator_status tracks the
+-- human review lifecycle: pending → accepted | rejected.
+-- Accept/reject only records intent — no execution is triggered.
+-- decision_id is UNIQUE so re-sync is idempotent.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS decision_reviews (
+    review_id          TEXT NOT NULL PRIMARY KEY,
+    decision_id        TEXT NOT NULL UNIQUE,
+    decision_type      TEXT NOT NULL,
+    decision_title     TEXT NOT NULL,
+    recommendation     TEXT NOT NULL,
+    evidence_json      TEXT,
+    confidence         REAL,
+    operator_status    TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(operator_status IN ('pending','accepted','rejected')),
+    operator_note      TEXT,
+    created_at         TEXT NOT NULL,
+    reviewed_at        TEXT,
+    metadata_version   TEXT NOT NULL DEFAULT 'v1'
+);
+
+CREATE INDEX IF NOT EXISTS idx_dr_decision_id ON decision_reviews(decision_id);
+CREATE INDEX IF NOT EXISTS idx_dr_status      ON decision_reviews(operator_status);
+CREATE INDEX IF NOT EXISTS idx_dr_type        ON decision_reviews(decision_type);

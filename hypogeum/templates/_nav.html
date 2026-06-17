@@ -10,7 +10,8 @@
     <a href="/signals"   class="nav-link {% if request.path.startswith('/signals') %}active{% endif %}">Signals</a>
     <a href="/analytics"        class="nav-link {% if request.path.startswith('/analytics') %}active{% endif %}">Analytics</a>
     <a href="/learning"         class="nav-link {% if request.path.startswith('/learning') %}active{% endif %}">Intelligence</a>
-    <a href="/decisions"        class="nav-link {% if request.path.startswith('/decisions') and not request.path.startswith('/decision-inputs') %}active{% endif %}">Decisions</a>
+    <a href="/decisions"        class="nav-link {% if request.path.startswith('/decisions') and not request.path.startswith('/decision-inputs') and not request.path.startswith('/decision-reviews') %}active{% endif %}">Decisions</a>
+    <a href="/decision-reviews" class="nav-link {% if request.path.startswith('/decision-reviews') %}active{% endif %}">Reviews</a>
     <a href="/decision-inputs"  class="nav-link {% if request.path.startswith('/decision-inputs') %}active{% endif %}">Inputs</a>
     <a href="/dashboard"  class="nav-link {% if request.path == '/dashboard' %}active{% endif %}" title="Legacy dashboard">&#x2022;</a>
   </div>

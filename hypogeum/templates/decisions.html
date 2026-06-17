@@ -93,10 +93,17 @@
   <span class="engine-summary">{{ state.summary }}</span>
 </div>
 
-<!-- ── Review-only notice ── -->
+<!-- ── Computed vs persisted notice ── -->
 <div class="flash flash-ok" style="margin-bottom:var(--gap); font-size:12px;">
-  These decisions are proposed based on real operational data. No action is taken automatically.
-  Accept/Reject persistence is not yet implemented — use this page for review only.
+  This page shows <strong>computed, live decisions</strong> — recalculated on every page load, never stored.
+  To review and track decisions, sync them to the review queue first.
+</div>
+
+<!-- ── Sync to review queue ── -->
+<div style="display:flex; gap:8px; align-items:center; margin-bottom:var(--gap); flex-wrap:wrap;">
+  <button class="btn" id="sync-btn" onclick="syncReviews()">Sync to review queue</button>
+  <span id="sync-result" style="font-size:12px; color:var(--muted);"></span>
+  <a href="/decision-reviews" class="btn">Open review queue →</a>
 </div>
 
 <!-- ── Proposed decisions ── -->
@@ -130,9 +137,8 @@
     </div>
     <div class="dec-actions">
       <a href="{{ d.investigate_url }}" class="btn btn-primary">{{ d.action_label }}</a>
-      <button class="btn btn-review-only" disabled title="Accept/Reject not yet implemented">Accept (review only)</button>
-      <button class="btn btn-review-only" disabled title="Accept/Reject not yet implemented">{{ d.reject_label }} (review only)</button>
-      <span class="review-note">— no persistence yet</span>
+      <a href="/decision-reviews" class="btn">Review queue →</a>
+      <span class="review-note">— sync to /decision-reviews to accept/reject</span>
     </div>
   </div>
   {%- endfor %}
@@ -178,11 +184,35 @@
     Content direction recommendations require ≥{{ 3 }} real audience snapshots.
   </div>
   <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-    <a href="/command"         class="btn">Command</a>
-    <a href="/decision-inputs" class="btn">Decision Inputs</a>
-    <a href="/api/decisions"   class="btn" target="_blank">JSON API</a>
+    <a href="/command"          class="btn">Command</a>
+    <a href="/decision-reviews" class="btn">Review queue</a>
+    <a href="/decision-inputs"  class="btn">Decision Inputs</a>
+    <a href="/api/decisions"    class="btn" target="_blank">JSON API</a>
   </div>
 </div>
 
+<script>
+function syncReviews() {
+  var btn = document.getElementById('sync-btn');
+  var res = document.getElementById('sync-result');
+  btn.disabled = true;
+  res.textContent = 'Syncing…';
+  fetch('/api/decision-reviews/sync', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.ok) {
+      res.textContent = 'Created: ' + d.created + '  Updated: ' + d.updated + '  Skipped: ' + d.skipped;
+    } else {
+      res.textContent = 'Error: ' + (d.error || 'unknown');
+    }
+    btn.disabled = false;
+  })
+  .catch(function(e){ res.textContent = 'Request failed'; btn.disabled = false; });
+}
+</script>
 </body>
 </html>

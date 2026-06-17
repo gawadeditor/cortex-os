@@ -200,16 +200,39 @@
 {%- endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════
-     2b. NEXT DECISION (from decision engine)
+     2b. NEXT DECISION (pending review or decision engine)
      ═══════════════════════════════════════════════════════════════ -->
 {%- if ds is defined %}
 <div class="section-header" style="margin-top:var(--gap);">
   <h2>Next decision</h2>
+  {%- if pending_reviews %}
+  <span class="section-count">{{ pending_reviews | length }} pending review{{ 's' if pending_reviews | length != 1 else '' }}</span>
+  {%- else %}
   {%- set es_label = {'ready': 'ready', 'partial': 'partial', 'not_ready': 'not ready'}[ds.engine_status] | default('unknown') %}
   <span class="section-count">engine {{ es_label }}</span>
+  {%- endif %}
 </div>
 
-{%- if ds.decisions %}
+{%- if pending_reviews %}
+  {%- set rev = pending_reviews[0] %}
+  <div class="decision-card dc-high" style="margin-bottom:var(--gap);">
+    <div class="dc-icon">▲</div>
+    <div class="dc-body">
+      <div class="dc-title">{{ rev.decision_title }}</div>
+      <div class="dc-why">{{ rev.recommendation }}</div>
+      {%- if rev.evidence %}
+      <div class="dc-evidence">{{ rev.evidence | join('\n') }}</div>
+      {%- endif %}
+      <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">
+        Pending review &nbsp;·&nbsp; confidence {{ "%.0f"|format((rev.confidence or 0) * 100) }}%
+      </div>
+      <div class="dc-actions">
+        <a href="/decision-reviews" class="btn btn-primary">Review queue</a>
+        <a href="/decisions" class="btn">Investigate</a>
+      </div>
+    </div>
+  </div>
+{%- elif ds.decisions %}
   {%- set top = ds.decisions[0] %}
   {%- set pri_level = {1: 'critical', 2: 'high', 3: 'medium', 4: 'low'}[top.priority] | default('low') %}
   {%- set dc_icons = {'critical': '■', 'high': '▲', 'medium': '◆', 'low': '○'} %}

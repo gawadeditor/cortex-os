@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Decision Reviews — Factory OS</title>
+  {% include "_base_style.html" %}
+  <style>
+    /* ── Review cards ── */
+    .rev-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px; margin-bottom: 10px;
+    }
+    .rev-card:last-child { margin-bottom: 0; }
+    .rev-pending  { border-left: 3px solid var(--blue); }
+    .rev-accepted { border-left: 3px solid var(--green); }
+    .rev-rejected { border-left: 3px solid var(--muted); }
+
+    .rev-header { display: flex; align-items: baseline; gap: 10px;
+                  margin-bottom: 8px; flex-wrap: wrap; }
+    .rev-title  { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; }
+    .rev-type   { font-size: 10px; font-weight: 700; padding: 2px 8px;
+                  border-radius: 8px; white-space: nowrap;
+                  background: var(--surface); border: 1px solid var(--border);
+                  color: var(--muted); }
+
+    .rev-recommendation { font-size: 13px; color: var(--text); margin-bottom: 8px;
+                          line-height: 1.5; }
+    .rev-evidence {
+      font-size: 11px; color: var(--muted); font-family: monospace;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 3px; padding: 5px 10px; margin-bottom: 8px;
+      white-space: pre; overflow-x: auto;
+    }
+    .rev-meta { display: flex; gap: 16px; font-size: 11px; color: var(--muted);
+                margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+    .conf-track { width: 50px; height: 4px; background: var(--border);
+                  border-radius: 2px; overflow: hidden; display: inline-block;
+                  vertical-align: middle; }
+    .conf-fill  { height: 100%; border-radius: 2px; }
+    .conf-high   { background: var(--green); }
+    .conf-medium { background: var(--yellow); }
+    .conf-low    { background: var(--muted); }
+    .rev-note { font-size: 12px; color: var(--muted); font-style: italic;
+                margin-top: 4px; }
+
+    /* ── Accept/reject buttons ── */
+    .btn-accept { border-color: #2ea043; color: var(--green); }
+    .btn-accept:hover { background: #1a3a22; }
+    .btn-reject { border-color: #da3633; color: var(--red); }
+    .btn-reject:hover { background: #3a0f0a; }
+
+    /* ── Section ── */
+    .rev-section { margin-bottom: var(--gap); }
+    .empty-section { padding: 16px; text-align: center; color: var(--muted);
+                     background: var(--surface); border: 1px dashed var(--border);
+                     border-radius: var(--radius); font-size: 12px; }
+
+    /* ── Toast ── */
+    #toast { position: fixed; bottom: 20px; right: 20px; padding: 10px 16px;
+             border-radius: var(--radius); font-size: 13px; z-index: 999;
+             background: var(--surface); border: 1px solid var(--border);
+             display: none; }
+    #toast.ok  { border-color: #2ea043; color: var(--green); }
+    #toast.err { border-color: #da3633; color: var(--red); }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+<div class="page-header">
+  <h1>Decision Reviews</h1>
+  <span class="page-meta">
+    {{ pending | length }} pending &nbsp;·&nbsp;
+    {{ accepted | length }} accepted &nbsp;·&nbsp;
+    {{ rejected | length }} rejected
+  </span>
+</div>
+
+<!-- ── Intent notice ── -->
+<div class="flash flash-ok" style="margin-bottom:var(--gap); font-size:12px;">
+  Review records operator intent only. Nothing is executed from this page.
+  Decisions are proposals derived from real operational data.
+  Accept/Reject stores your review — no pipeline action is triggered.
+</div>
+
+<!-- ── Sync shortcut ── -->
+<div style="display:flex; gap:8px; align-items:center; margin-bottom:var(--gap); flex-wrap:wrap;">
+  <button class="btn" id="sync-btn" onclick="syncReviews()">Sync from decision engine</button>
+  <span id="sync-result" style="font-size:12px; color:var(--muted);"></span>
+  <a href="/decisions" class="btn">View computed decisions</a>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     PENDING
+     ══════════════════════════════════════════════════════════════════ -->
+<div class="section-header">
+  <h2>Pending review</h2>
+  <span class="section-count">{{ pending | length }}</span>
+</div>
+
+<div class="rev-section">
+{%- if pending %}
+  {%- for r in pending %}
+  {%- set conf_class = 'conf-high' if (r.confidence or 0) >= 0.7 else ('conf-medium' if (r.confidence or 0) >= 0.4 else 'conf-low') %}
+  <div class="rev-card rev-pending" id="card-{{ r.review_id }}">
+    <div class="rev-header">
+      <div class="rev-title">{{ r.decision_title }}</div>
+      <span class="rev-type">{{ r.decision_type | replace("_"," ") }}</span>
+      <span class="badge badge-pending">pending</span>
+    </div>
+    <div class="rev-recommendation">{{ r.recommendation }}</div>
+    {%- if r.evidence %}
+    <div class="rev-evidence">{{ r.evidence | join('\n') }}</div>
+    {%- endif %}
+    <div class="rev-meta">
+      <span>
+        confidence
+        <span class="conf-track"><span class="conf-fill {{ conf_class }}" style="width:{{ "%.0f"|format((r.confidence or 0) * 100) }}%"></span></span>
+        {{ "%.0f"|format((r.confidence or 0) * 100) }}%
+      </span>
+      <span>created {{ r.created_at[:10] }}</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-accept"
+              onclick="reviewAction('{{ r.review_id }}', 'accept')">Accept</button>
+      <button class="btn btn-reject"
+              onclick="reviewAction('{{ r.review_id }}', 'reject')">Reject</button>
+    </div>
+  </div>
+  {%- endfor %}
+{%- else %}
+<div class="empty-section">No pending reviews — sync from the decision engine to create reviews.</div>
+{%- endif %}
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     ACCEPTED
+     ══════════════════════════════════════════════════════════════════ -->
+{%- if accepted %}
+<div class="section-header">
+  <h2>Accepted</h2>
+  <span class="section-count">{{ accepted | length }}</span>
+</div>
+<div class="rev-section">
+  {%- for r in accepted %}
+  <div class="rev-card rev-accepted">
+    <div class="rev-header">
+      <div class="rev-title">{{ r.decision_title }}</div>
+      <span class="rev-type">{{ r.decision_type | replace("_"," ") }}</span>
+      <span class="badge badge-complete">accepted</span>
+    </div>
+    <div class="rev-recommendation" style="color:var(--muted);">{{ r.recommendation }}</div>
+    {%- if r.evidence %}
+    <div class="rev-evidence">{{ r.evidence | join('\n') }}</div>
+    {%- endif %}
+    <div class="rev-meta">
+      <span>reviewed {{ r.reviewed_at[:10] if r.reviewed_at else '—' }}</span>
+      {%- if r.operator_note %}
+      <span>note: {{ r.operator_note }}</span>
+      {%- endif %}
+    </div>
+  </div>
+  {%- endfor %}
+</div>
+{%- endif %}
+
+<!-- ══════════════════════════════════════════════════════════════════
+     REJECTED
+     ══════════════════════════════════════════════════════════════════ -->
+{%- if rejected %}
+<div class="section-header">
+  <h2>Rejected</h2>
+  <span class="section-count">{{ rejected | length }}</span>
+</div>
+<div class="rev-section">
+  {%- for r in rejected %}
+  <div class="rev-card rev-rejected">
+    <div class="rev-header">
+      <div class="rev-title">{{ r.decision_title }}</div>
+      <span class="rev-type">{{ r.decision_type | replace("_"," ") }}</span>
+      <span class="badge badge-failed">rejected</span>
+    </div>
+    <div class="rev-recommendation" style="color:var(--muted);">{{ r.recommendation }}</div>
+    <div class="rev-meta">
+      <span>reviewed {{ r.reviewed_at[:10] if r.reviewed_at else '—' }}</span>
+      {%- if r.operator_note %}
+      <span>note: {{ r.operator_note }}</span>
+      {%- endif %}
+    </div>
+  </div>
+  {%- endfor %}
+</div>
+{%- endif %}
+
+<!-- ── Footer ── -->
+<div class="card" style="margin-top:var(--gap); margin-bottom:0;">
+  <div class="card-title">About this page</div>
+  <div style="font-size:12px; color:var(--muted); line-height:1.6;">
+    <strong>/decisions</strong> — live computed view, never persisted.<br>
+    <strong>/decision-reviews</strong> — persisted review queue. Sync from decisions to start reviewing.
+    Accept/Reject stores your decision here; no pipeline action is taken.
+  </div>
+  <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+    <a href="/command"         class="btn">Command</a>
+    <a href="/decisions"       class="btn">Computed decisions</a>
+    <a href="/decision-inputs" class="btn">Decision inputs</a>
+    <a href="/api/decision-reviews" class="btn" target="_blank">JSON API</a>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+function showToast(msg, ok) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = ok ? 'ok' : 'err';
+  t.style.display = 'block';
+  setTimeout(function(){ t.style.display = 'none'; }, 3000);
+}
+
+function reviewAction(reviewId, action) {
+  fetch('/api/decision-reviews/' + reviewId + '/' + action, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.ok) {
+      showToast(action.charAt(0).toUpperCase() + action.slice(1) + 'd', true);
+      setTimeout(function(){ location.reload(); }, 600);
+    } else {
+      showToast('Error: ' + (d.error || d.code || 'unknown'), false);
+    }
+  })
+  .catch(function(e){ showToast('Request failed: ' + e, false); });
+}
+
+function syncReviews() {
+  var btn = document.getElementById('sync-btn');
+  var res = document.getElementById('sync-result');
+  btn.disabled = true;
+  res.textContent = 'Syncing…';
+  fetch('/api/decision-reviews/sync', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.ok) {
+      res.textContent = 'Created: ' + d.created + '  Updated: ' + d.updated + '  Skipped: ' + d.skipped;
+      if (d.created > 0) setTimeout(function(){ location.reload(); }, 800);
+    } else {
+      res.textContent = 'Sync error: ' + (d.error || 'unknown');
+    }
+    btn.disabled = false;
+  })
+  .catch(function(e){ res.textContent = 'Request failed'; btn.disabled = false; });
+}
+</script>
+</body>
+</html>

@@ -53,6 +53,13 @@ from flask import Flask, Response, jsonify, redirect, render_template, request, 
 from hypogeum.command_state import get_command_state
 from hypogeum.decision_inputs import get_decision_inputs_state
 from hypogeum.decision_engine import get_decision_state
+from hypogeum.decision_reviews import (
+    sync_decisions_to_reviews,
+    list_decision_reviews,
+    get_decision_review,
+    accept_decision,
+    reject_decision,
+)
 from hypogeum.dashboard_api import get_factory_state
 from hypogeum.factory_director import assess_factory
 from hypogeum.dashboard_control import (
@@ -229,7 +236,12 @@ def command_page():
     except Exception:
         ds = {"engine_status": "not_ready", "summary": "", "decisions": [],
               "insufficient_data": []}
-    return render_template("command.html", cmd=cmd, di=di, ds=ds)
+    try:
+        pending_reviews = list_decision_reviews(status="pending", db_path=_db_path())
+    except Exception:
+        pending_reviews = []
+    return render_template("command.html", cmd=cmd, di=di, ds=ds,
+                           pending_reviews=pending_reviews)
 
 
 @app.route("/api/command-state")
@@ -1028,6 +1040,52 @@ def decisions_page():
             "decisions": [], "insufficient_data": [],
         }
     return render_template("decisions.html", state=state)
+
+
+# ===========================================================================
+# F4 — Decision Review Persistence
+# ===========================================================================
+
+@app.route("/api/decision-reviews", methods=["GET"])
+def api_decision_reviews():
+    status = request.args.get("status")
+    reviews = list_decision_reviews(status=status or None, db_path=_db_path())
+    return jsonify(reviews)
+
+
+@app.route("/api/decision-reviews/sync", methods=["POST"])
+def api_decision_reviews_sync():
+    result = sync_decisions_to_reviews(db_path=_db_path())
+    http_status = 200 if result.get("ok") else 503
+    return jsonify(result), http_status
+
+
+@app.route("/api/decision-reviews/<review_id>/accept", methods=["POST"])
+def api_decision_reviews_accept(review_id):
+    body = request.get_json(silent=True) or {}
+    result = accept_decision(review_id, note=body.get("note", ""), db_path=_db_path())
+    http_status = 200 if result["ok"] else (404 if result.get("code") == "not_found" else 400)
+    return jsonify(result), http_status
+
+
+@app.route("/api/decision-reviews/<review_id>/reject", methods=["POST"])
+def api_decision_reviews_reject(review_id):
+    body = request.get_json(silent=True) or {}
+    result = reject_decision(review_id, note=body.get("note", ""), db_path=_db_path())
+    http_status = 200 if result["ok"] else (404 if result.get("code") == "not_found" else 400)
+    return jsonify(result), http_status
+
+
+@app.route("/decision-reviews")
+def decision_reviews_page():
+    try:
+        pending  = list_decision_reviews(status="pending",  db_path=_db_path())
+        accepted = list_decision_reviews(status="accepted", db_path=_db_path())
+        rejected = list_decision_reviews(status="rejected", db_path=_db_path())
+    except Exception:
+        pending = accepted = rejected = []
+    return render_template("decision_reviews.html",
+                           pending=pending, accepted=accepted, rejected=rejected)
 
 
 @app.route("/decision-inputs")

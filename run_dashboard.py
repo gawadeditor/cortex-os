@@ -52,6 +52,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request, 
 
 from hypogeum.command_state import get_command_state
 from hypogeum.decision_inputs import get_decision_inputs_state
+from hypogeum.decision_engine import get_decision_state
 from hypogeum.dashboard_api import get_factory_state
 from hypogeum.factory_director import assess_factory
 from hypogeum.dashboard_control import (
@@ -223,7 +224,12 @@ def command_page():
     except Exception:
         di = {"readiness": {"has_real_inputs": False, "missing_inputs": [],
                             "ready_for_decision_engine": False}}
-    return render_template("command.html", cmd=cmd, di=di)
+    try:
+        ds = get_decision_state(db_path=_db_path())
+    except Exception:
+        ds = {"engine_status": "not_ready", "summary": "", "decisions": [],
+              "insufficient_data": []}
+    return render_template("command.html", cmd=cmd, di=di, ds=ds)
 
 
 @app.route("/api/command-state")
@@ -1000,6 +1006,28 @@ def api_decision_inputs():
         return jsonify(state)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/api/decisions", methods=["GET"])
+def api_decisions():
+    try:
+        state = get_decision_state(db_path=_db_path())
+        return jsonify(state)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/decisions")
+def decisions_page():
+    try:
+        state = get_decision_state(db_path=_db_path())
+    except Exception as exc:
+        state = {
+            "checked_at": "", "engine_status": "not_ready",
+            "summary": f"Error: {exc}",
+            "decisions": [], "insufficient_data": [],
+        }
+    return render_template("decisions.html", state=state)
 
 
 @app.route("/decision-inputs")

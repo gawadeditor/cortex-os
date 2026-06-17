@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Decisions — Factory OS</title>
+  {% include "_base_style.html" %}
+  <style>
+    /* ── Engine status banner ── */
+    .engine-banner {
+      padding: 14px 18px; border-radius: var(--radius);
+      margin-bottom: var(--gap); display: flex; align-items: baseline;
+      gap: 12px; border: 1px solid;
+    }
+    .engine-ready   { background:#0d1f14; border-color:#2ea043; }
+    .engine-partial { background:#1f1800; border-color:#9e6a03; }
+    .engine-not_ready { background:var(--surface); border-color:var(--border); }
+    .engine-level { font-size:13px; font-weight:700; text-transform:uppercase;
+                    letter-spacing:.05em; }
+    .engine-level-ready    { color:var(--green); }
+    .engine-level-partial  { color:var(--yellow); }
+    .engine-level-not_ready { color:var(--muted); }
+    .engine-summary { font-size:12px; color:var(--muted); }
+
+    /* ── Decision cards ── */
+    .dec-card {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:var(--radius); padding:16px 18px; margin-bottom:10px;
+    }
+    .dec-card:last-child { margin-bottom:0; }
+    .dec-card-1 { border-left:3px solid var(--red); }
+    .dec-card-2 { border-left:3px solid var(--yellow); }
+    .dec-card-3 { border-left:3px solid #9e6a03; }
+    .dec-card-4 { border-left:3px solid var(--border); }
+    .dec-header { display:flex; align-items:baseline; gap:10px; margin-bottom:8px;
+                  flex-wrap:wrap; }
+    .dec-title { font-size:14px; font-weight:600; flex:1; min-width:0; }
+    .dec-type-badge { font-size:10px; font-weight:700; padding:2px 8px;
+                      border-radius:8px; white-space:nowrap;
+                      background:var(--surface); border:1px solid var(--border);
+                      color:var(--muted); }
+    .dec-recommendation { font-size:13px; color:var(--text); margin-bottom:10px;
+                          line-height:1.5; }
+    .dec-evidence {
+      font-size:11px; color:var(--muted); font-family:monospace;
+      background:var(--bg); border:1px solid var(--border);
+      border-radius:3px; padding:6px 10px; margin-bottom:10px;
+      white-space:pre; overflow-x:auto;
+    }
+    .dec-meta { display:flex; gap:16px; flex-wrap:wrap; font-size:11px;
+                color:var(--muted); margin-bottom:10px; align-items:center; }
+    .confidence-bar { display:inline-flex; align-items:center; gap:6px; }
+    .conf-track { width:60px; height:4px; background:var(--border);
+                  border-radius:2px; overflow:hidden; }
+    .conf-fill  { height:100%; border-radius:2px; }
+    .conf-high   { background:var(--green); }
+    .conf-medium { background:var(--yellow); }
+    .conf-low    { background:var(--muted); }
+    .dec-impact { font-style:italic; font-size:12px; color:var(--muted); }
+    .dec-actions { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+    .btn-review-only { border-color:var(--border); color:var(--muted); cursor:default; }
+    .review-note { font-size:11px; color:var(--muted); font-style:italic; }
+
+    /* ── Insufficient data section ── */
+    .insuff-card {
+      background:var(--surface); border:1px dashed var(--border);
+      border-radius:var(--radius); padding:10px 14px; margin-bottom:6px;
+      display:flex; gap:10px; align-items:baseline; font-size:12px;
+    }
+    .insuff-type { color:var(--muted); font-weight:600; min-width:120px; flex-shrink:0; }
+    .insuff-reason { color:var(--muted); }
+
+    /* ── No decisions ── */
+    .no-decisions { padding:24px; text-align:center; color:var(--muted);
+                    background:var(--surface); border:1px solid var(--border);
+                    border-radius:var(--radius); }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+<div class="page-header">
+  <h1>Decisions</h1>
+  <span class="page-meta">{{ state.checked_at[:19] | replace("T"," ") }}Z — proposed decisions only</span>
+</div>
+
+<!-- ── Engine status banner ── -->
+{%- set es = state.engine_status %}
+<div class="engine-banner engine-{{ es }}">
+  <span class="engine-level engine-level-{{ es }}">
+    {{ {'ready':'● Ready','partial':'◆ Partial','not_ready':'○ Not ready'}[es] | default('○ Unknown') }}
+  </span>
+  <span class="engine-summary">{{ state.summary }}</span>
+</div>
+
+<!-- ── Review-only notice ── -->
+<div class="flash flash-ok" style="margin-bottom:var(--gap); font-size:12px;">
+  These decisions are proposed based on real operational data. No action is taken automatically.
+  Accept/Reject persistence is not yet implemented — use this page for review only.
+</div>
+
+<!-- ── Proposed decisions ── -->
+<div class="section-header">
+  <h2>Proposed decisions</h2>
+  <span class="section-count">{{ state.decisions | length }}</span>
+</div>
+
+{%- if state.decisions %}
+  {%- for d in state.decisions %}
+  {%- set conf_class = 'conf-high' if d.confidence >= 0.7 else ('conf-medium' if d.confidence >= 0.4 else 'conf-low') %}
+  <div class="dec-card dec-card-{{ d.priority }}">
+    <div class="dec-header">
+      <div class="dec-title">{{ d.title }}</div>
+      <span class="dec-type-badge">{{ d.type | replace("_"," ") }}</span>
+    </div>
+    <div class="dec-recommendation">{{ d.recommendation }}</div>
+    {%- if d.evidence %}
+    <div class="dec-evidence">{{ d.evidence | join('\n') }}</div>
+    {%- endif %}
+    <div class="dec-meta">
+      <div class="confidence-bar">
+        confidence
+        <div class="conf-track">
+          <div class="conf-fill {{ conf_class }}" style="width:{{ "%.0f"|format(d.confidence * 100) }}%"></div>
+        </div>
+        <span>{{ "%.0f"|format(d.confidence * 100) }}%</span>
+      </div>
+      <div>priority {{ d.priority }}</div>
+      <div class="dec-impact">{{ d.expected_impact }}</div>
+    </div>
+    <div class="dec-actions">
+      <a href="{{ d.investigate_url }}" class="btn btn-primary">{{ d.action_label }}</a>
+      <button class="btn btn-review-only" disabled title="Accept/Reject not yet implemented">Accept (review only)</button>
+      <button class="btn btn-review-only" disabled title="Accept/Reject not yet implemented">{{ d.reject_label }} (review only)</button>
+      <span class="review-note">— no persistence yet</span>
+    </div>
+  </div>
+  {%- endfor %}
+{%- else %}
+<div class="no-decisions">
+  {%- if es == 'not_ready' %}
+  <div style="font-weight:600; margin-bottom:6px;">Decision engine not ready</div>
+  <div>{{ state.summary }}</div>
+  <div style="margin-top:10px;">
+    <a href="/decision-inputs" class="btn">View decision inputs</a>
+  </div>
+  {%- else %}
+  <div style="font-weight:600; color:var(--green); margin-bottom:6px;">● No decisions pending</div>
+  <div>{{ state.summary }}</div>
+  {%- endif %}
+</div>
+{%- endif %}
+
+<!-- ── Insufficient data ── -->
+{%- if state.insufficient_data %}
+<div class="section-header" style="margin-top:var(--gap);">
+  <h2>Insufficient data</h2>
+  <span class="section-count">{{ state.insufficient_data | length }}</span>
+</div>
+<div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
+  These decision types cannot be evaluated yet. The engine will produce decisions
+  automatically once the required data is available.
+</div>
+{%- for i in state.insufficient_data %}
+<div class="insuff-card">
+  <span class="insuff-type">{{ i.type | replace("_"," ") }}</span>
+  <span class="insuff-reason">{{ i.reason }}</span>
+</div>
+{%- endfor %}
+{%- endif %}
+
+<!-- ── Footer ── -->
+<div class="card" style="margin-top:var(--gap); margin-bottom:0;">
+  <div class="card-title">About this page</div>
+  <div style="font-size:12px; color:var(--muted); line-height:1.6;">
+    Decisions are computed live from real operational data. No LLM-generated strategy.
+    No mock data treated as truth. Confidence scores reflect evidence quality, not certainty.
+    Content direction recommendations require ≥{{ 3 }} real audience snapshots.
+  </div>
+  <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+    <a href="/command"         class="btn">Command</a>
+    <a href="/decision-inputs" class="btn">Decision Inputs</a>
+    <a href="/api/decisions"   class="btn" target="_blank">JSON API</a>
+  </div>
+</div>
+
+</body>
+</html>

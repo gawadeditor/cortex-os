@@ -200,6 +200,52 @@
 {%- endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════
+     2b. NEXT DECISION (from decision engine)
+     ═══════════════════════════════════════════════════════════════ -->
+{%- if ds is defined %}
+<div class="section-header" style="margin-top:var(--gap);">
+  <h2>Next decision</h2>
+  {%- set es_label = {'ready': 'ready', 'partial': 'partial', 'not_ready': 'not ready'}[ds.engine_status] | default('unknown') %}
+  <span class="section-count">engine {{ es_label }}</span>
+</div>
+
+{%- if ds.decisions %}
+  {%- set top = ds.decisions[0] %}
+  {%- set pri_level = {1: 'critical', 2: 'high', 3: 'medium', 4: 'low'}[top.priority] | default('low') %}
+  {%- set dc_icons = {'critical': '■', 'high': '▲', 'medium': '◆', 'low': '○'} %}
+  <div class="decision-card dc-{{ pri_level }}" style="margin-bottom:var(--gap);">
+    <div class="dc-icon">{{ dc_icons.get(pri_level, '○') }}</div>
+    <div class="dc-body">
+      <div class="dc-title">{{ top.title }}</div>
+      <div class="dc-why">{{ top.recommendation }}</div>
+      {%- if top.evidence %}
+      <div class="dc-evidence">{{ top.evidence | join('\n') }}</div>
+      {%- endif %}
+      <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">
+        confidence {{ "%.0f"|format(top.confidence * 100) }}%
+        &nbsp;·&nbsp; <a href="/decisions">{{ ds.decisions | length }} total decision(s) →</a>
+      </div>
+      <div class="dc-actions">
+        <a href="{{ top.investigate_url }}" class="btn btn-primary">{{ top.action_label }}</a>
+        <a href="/decisions" class="btn">All decisions</a>
+      </div>
+    </div>
+  </div>
+{%- elif ds.engine_status == 'not_ready' %}
+<div class="empty-queue" style="margin-bottom:var(--gap);">
+  <div style="font-weight:600; color:var(--muted);">○ Decision engine not ready</div>
+  <div style="margin-top:4px;">{{ ds.summary }}</div>
+  <div style="margin-top:8px;"><a href="/decision-inputs" class="btn" style="font-size:12px;">View decision inputs →</a></div>
+</div>
+{%- else %}
+<div class="empty-queue" style="margin-bottom:var(--gap);">
+  <div class="empty-queue-ok">● No decisions pending</div>
+  <div>{{ ds.summary }}</div>
+</div>
+{%- endif %}
+{%- endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════
      3. LAUNCH READINESS
      ═══════════════════════════════════════════════════════════════ -->
 <div class="section-header" style="margin-top: var(--gap);">

@@ -52,6 +52,141 @@ _APPROVAL_LABELS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Factory Health / Needs Attention / Primary CTA helpers
+# ---------------------------------------------------------------------------
+
+def _build_factory_health(active_count: int, queue_size: int) -> dict:
+    """Translate production state into operator-readable factory health."""
+    if active_count > 0:
+        status = "Ready"
+    elif queue_size > 0:
+        status = "Ready"
+    else:
+        status = "Needs Setup"
+    return {
+        "status_label": status,
+        "active_count": active_count,
+        "queued_count": queue_size,
+    }
+
+
+def _build_needs_attention(
+    platform_state,
+    recent_episodes: list,
+    channel_profile,
+    failed_run_id: Optional[str],
+) -> list:
+    """Return operator-language attention items. Never expose raw IDs or OIS terms."""
+    items: list[dict] = []
+
+    if platform_state:
+        pmap = platform_state.get("platforms", {})
+        for pkey in ("youtube", "tiktok", "instagram", "facebook"):
+            p    = pmap.get(pkey, {})
+            cs   = p.get("connection_state", "not_connected")
+            pname = p.get("name", pkey.title())
+            if cs == "not_connected":
+                items.append({
+                    "label":        f"{pname} is not connected",
+                    "severity":     "info",
+                    "action_url":   f"/platforms/connect/{pkey}",
+                    "action_label": "Connect",
+                })
+            elif cs == "published_no_cred":
+                items.append({
+                    "label":        f"{pname} credential expired — reconnect to resume publishing",
+                    "severity":     "warning",
+                    "action_url":   f"/platforms/connect/{pkey}",
+                    "action_label": "Reconnect",
+                })
+
+        if not platform_state.get("any_real_data"):
+            items.append({
+                "label":        "No real analytics imported yet",
+                "severity":     "info",
+                "action_url":   "/analytics/import",
+                "action_label": "Import analytics",
+            })
+
+    if failed_run_id:
+        items.append({
+            "label":        "Most recent production run failed",
+            "severity":     "warning",
+            "action_url":   f"/run/{failed_run_id}",
+            "action_label": "View run",
+        })
+
+    if not recent_episodes:
+        items.append({
+            "label":        "No episodes produced yet — start your first video",
+            "severity":     "info",
+            "action_url":   "/episodes",
+            "action_label": "View episodes",
+        })
+
+    if channel_profile:
+        ytv = channel_profile.get("yt_videos_per_week") or 0
+        ttk = channel_profile.get("tiktok_per_week") or 0
+        if not ytv and not ttk:
+            items.append({
+                "label":        "No publishing targets set",
+                "severity":     "info",
+                "action_url":   "/channel-profile",
+                "action_label": "Set targets",
+            })
+
+    return items
+
+
+def _build_primary_cta(
+    recent_episodes: list,
+    production: dict,
+    needs_attention: list,
+    failed_run_id: Optional[str],
+) -> dict:
+    """Return single primary call-to-action based on current factory state."""
+    current_ep = production.get("current_episode") if production else None
+
+    if failed_run_id:
+        return {
+            "label":       "Review issue",
+            "url":         f"/run/{failed_run_id}",
+            "description": "A recent production run failed and needs attention.",
+        }
+
+    if current_ep:
+        return {
+            "label":       "Continue production",
+            "url":         f"/episode/{current_ep}",
+            "description": "An episode is currently in production.",
+        }
+
+    if not recent_episodes:
+        return {
+            "label":       "Start first video",
+            "url":         "/episodes",
+            "description": "Get started by producing your first episode.",
+        }
+
+    no_analytics = any(
+        "No real analytics" in item.get("label", "")
+        for item in needs_attention
+    )
+    if no_analytics:
+        return {
+            "label":       "Import analytics",
+            "url":         "/analytics/import",
+            "description": "Import platform analytics to see how your videos are performing.",
+        }
+
+    return {
+        "label":       "View recent episodes",
+        "url":         "/episodes",
+        "description": "Review your recent episode performance.",
+    }
+
+
 def translate_alert(signal_type: str) -> str:
     """Map internal signal_type to human-readable operator label."""
     label = _SIGNAL_LABELS.get(signal_type)
@@ -96,6 +231,7 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
         "recent_episodes": [],
         "production": {
             "current_episode":  None,
+            "display_title":    None,
             "current_stage":    None,
             "progress_pct":     0,
             "queue_size":       0,
@@ -111,6 +247,9 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
         "channel_profile": None,
         "views_chart":     [],
         "demo_warning":    None,
+        "factory_health":  {"status_label": "Needs Setup", "active_count": 0, "queued_count": 0},
+        "needs_attention": [],
+        "primary_cta":     {},
     }
 
     db = Path(db_path) if db_path else _DEFAULT_DB_PATH
@@ -149,16 +288,37 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
         pass
 
     # ── DB queries: real analytics only ──────────────────────────────────────
+    failed_run_id: Optional[str] = None
     try:
         from hypogeum.db import get_connection
         conn = get_connection(db)
         try:
             _load_recent_episodes(conn, result)
             _load_real_analytics_summary(conn, result)
+            _load_current_episode_title(conn, result)
+            failed_run_id = _load_failed_run_id(conn)
         finally:
             conn.close()
     except Exception:
         pass
+
+    # ── Factory health, needs attention, primary CTA ──────────────────────────
+    active_count = 1 if result["production"].get("current_episode") else 0
+    result["factory_health"] = _build_factory_health(
+        active_count, result["production"]["queue_size"]
+    )
+    result["needs_attention"] = _build_needs_attention(
+        result["platform_state"],
+        result["recent_episodes"],
+        result["channel_profile"],
+        failed_run_id,
+    )
+    result["primary_cta"] = _build_primary_cta(
+        result["recent_episodes"],
+        result["production"],
+        result["needs_attention"],
+        failed_run_id,
+    )
 
     # ── Views trend (pre-normalised for chart rendering) ──────────────────────
     result["views_chart"] = _build_views_chart(result["recent_episodes"])
@@ -242,6 +402,41 @@ def _load_recent_episodes(conn, result: dict) -> None:
         ]
     except Exception:
         pass
+
+
+def _load_current_episode_title(conn, result: dict) -> None:
+    """Populate display_title for the current in-production episode."""
+    ep_id = result["production"].get("current_episode")
+    if not ep_id:
+        return
+    try:
+        title_row = conn.execute(
+            "SELECT title_text FROM titles WHERE episode_id = ? AND selected = 1 LIMIT 1",
+            [ep_id],
+        ).fetchone()
+        if title_row:
+            result["production"]["display_title"] = title_row["title_text"]
+            return
+        ep_row = conn.execute(
+            "SELECT title, topic FROM episodes WHERE episode_id = ?", [ep_id]
+        ).fetchone()
+        if ep_row:
+            result["production"]["display_title"] = (
+                ep_row["title"] or ep_row["topic"] or ep_id
+            )
+    except Exception:
+        pass
+
+
+def _load_failed_run_id(conn) -> Optional[str]:
+    """Return the run_id of the most recent failed run, or None."""
+    try:
+        row = conn.execute(
+            "SELECT run_id FROM runs WHERE status = 'failed' ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        return row["run_id"] if row else None
+    except Exception:
+        return None
 
 
 def _load_real_analytics_summary(conn, result: dict) -> None:

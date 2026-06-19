@@ -191,7 +191,7 @@
     {% if report %}
     <div class="status-pill">
       <span class="badge badge-{{ report.readiness_level | lower }}">{{ report.readiness_level }}</span>
-      <span style="font-size:12px; color:var(--muted)">{{ report.readiness_score }}%</span>
+      <span style="font-size:12px; color:var(--muted)">{{ report.readiness_score }}% Factory Readiness</span>
     </div>
     {% endif %}
   </div>
@@ -208,6 +208,49 @@
     <div class="no-data">No channels configured yet.
       <a href="/channel-profile">Set up your channel profile →</a>
     </div>
+  {% endif %}
+</div>
+
+{# ═════════════════════════════════════════════════════════════════
+   1b. FACTORY HEALTH
+══════════════════════════════════════════════════════════════════ #}
+{% set fh = overview.factory_health if overview and overview.factory_health else {} %}
+<div class="card exec-section">
+  <div class="card-title" style="margin-bottom:10px;">Factory Health</div>
+  <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+    <div style="font-size:22px; font-weight:700; min-width:120px;">
+      {% set fhlabel = fh.status_label if fh else 'Needs Setup' %}
+      {% if fhlabel == 'Ready' %}
+        <span class="ok">Ready</span>
+      {% elif fhlabel == 'Blocked' %}
+        <span class="err">Blocked</span>
+      {% else %}
+        <span class="warn">Needs Setup</span>
+      {% endif %}
+    </div>
+    <div class="kpi-strip" style="margin-bottom:0">
+      <div class="kpi-card">
+        <div class="kpi-val">{{ fh.active_count if fh else 0 }}</div>
+        <div class="kpi-lbl">In Production</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val">{{ fh.queued_count if fh else 0 }}</div>
+        <div class="kpi-lbl">Queued</div>
+      </div>
+    </div>
+  </div>
+  {# Primary CTA — one main action #}
+  {% if overview and overview.primary_cta and overview.primary_cta.label %}
+  {% set cta = overview.primary_cta %}
+  <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);
+              display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:0; font-size:12px; color:var(--muted);">
+      {{ cta.description }}
+    </div>
+    <a href="{{ cta.url }}" class="btn btn-approve" style="flex-shrink:0; white-space:nowrap;">
+      {{ cta.label }}
+    </a>
+  </div>
   {% endif %}
 </div>
 
@@ -244,10 +287,10 @@
       {% elif cstate == "demo_only" %}
         <div class="plat-demo">Not connected</div>
         <div class="plat-data">Demo data only — excluded from dashboard</div>
-        <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Connect {{ pname }}</a>
+        <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Connect {{ pname }} account</a>
       {% else %}
         <div class="plat-disconnected">Not connected</div>
-        <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Connect {{ pname }}</a>
+        <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Connect {{ pname }} account</a>
       {% endif %}
     </div>
     {% endfor %}
@@ -265,7 +308,9 @@
       {% if prod.current_episode %}
       <div style="font-size:13px; margin-bottom:6px">
         <span style="color:var(--muted)">Current episode:</span>
-        <strong>{{ prod.current_episode }}</strong>
+        <a href="/episode/{{ prod.current_episode }}" style="color:var(--text);">
+          <strong>{{ prod.display_title or prod.current_episode }}</strong>
+        </a>
       </div>
       <div style="font-size:13px; margin-bottom:10px">
         <span style="color:var(--muted)">Stage:</span>
@@ -490,6 +535,28 @@
     {% if alert.signal_id %}
     <button onclick="postAction('/api/action/resolve-signal/{{ alert.signal_id }}')"
             class="btn btn-resolve">Resolve</button>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ═════════════════════════════════════════════════════════════════
+   7b. NEEDS ATTENTION
+══════════════════════════════════════════════════════════════════ #}
+{% if overview and overview.needs_attention %}
+<div class="card exec-section">
+  <div class="card-title" style="margin-bottom:6px;">Needs Attention</div>
+  {% for item in overview.needs_attention %}
+  <div class="alert-row">
+    <div class="alert-dot alert-dot-{{ item.severity or 'info' }}"></div>
+    <div style="flex:1">
+      <div class="alert-label">{{ item.label }}</div>
+    </div>
+    {% if item.action_url %}
+    <a href="{{ item.action_url }}" class="btn" style="font-size:11px; padding:3px 9px;">
+      {{ item.action_label }}
+    </a>
     {% endif %}
   </div>
   {% endfor %}

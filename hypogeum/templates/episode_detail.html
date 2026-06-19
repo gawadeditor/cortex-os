@@ -170,6 +170,41 @@
 
     @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:.4; } }
 
+    /* ── Titles tab ── */
+    .title-list  { display: flex; flex-direction: column; gap: 8px; }
+    .title-card  {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px;
+      border-left: 3px solid var(--border);
+    }
+    .title-card-selected { border-left-color: #2ea043; }
+    .title-text  { font-size: 15px; font-weight: 600; margin-bottom: 10px;
+                   line-height: 1.4; }
+    .title-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .title-perf  {
+      display: flex; gap: 20px; flex-wrap: wrap;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 10px 14px;
+      margin-bottom: 10px;
+    }
+    .title-perf-item { display: flex; flex-direction: column; }
+    .title-perf-val  { font-size: 18px; font-weight: 700;
+                       font-variant-numeric: tabular-nums; }
+    .title-perf-lbl  { font-size: 10px; color: var(--muted);
+                       text-transform: uppercase; letter-spacing: .05em;
+                       margin-top: 2px; }
+    .title-no-data   { font-size: 12px; color: var(--muted);
+                       font-style: italic; margin-bottom: 8px; }
+    .title-date      { font-size: 11px; color: var(--muted); }
+
+    /* format badge colours */
+    .fmt-question    { background:#132030; color:#79c0ff; border:1px solid #1f6feb; }
+    .fmt-mystery     { background:#1e1030; color:#d2a8ff; border:1px solid #8957e5; }
+    .fmt-vs          { background:#201500; color:#ffa657; border:1px solid #9e5a00; }
+    .fmt-list        { background:#0f2016; color:#56d364; border:1px solid #238636; }
+    .fmt-statement   { background:var(--surface); color:var(--muted);
+                       border:1px solid var(--border); }
+
     /* ── Thumbnails tab ── */
     .tn-grid {
       display: grid;
@@ -362,7 +397,7 @@
   <a href="?tab=production" class="tab-btn {% if active_tab == 'production' %}active{% endif %}">Production</a>
   <a href="?tab=publishing" class="tab-btn {% if active_tab == 'publishing' %}active{% endif %}">Publishing</a>
   <a href="?tab=thumbnails" class="tab-btn {% if active_tab == 'thumbnails' %}active{% endif %}">Thumbnails</a>
-  <span class="tab-btn disabled" title="Coming soon">Titles</span>
+  <a href="?tab=titles" class="tab-btn {% if active_tab == 'titles' %}active{% endif %}">Titles</a>
   <span class="tab-btn disabled" title="Coming soon">Analytics</span>
   <span class="tab-btn disabled" title="Coming soon">Revenue</span>
   <span class="tab-btn disabled" title="Coming soon">Learning</span>
@@ -792,6 +827,102 @@
 {% endif %}
 
 {% endif %}{# end active_tab == 'thumbnails' #}
+
+{# ════════════════════════════════════════════════════════════════
+   TITLES TAB
+════════════════════════════════════════════════════════════════ #}
+{% if active_tab == 'titles' %}
+{% set tl = d.titles %}
+
+{% if tl.candidates %}
+<div class="title-list">
+  {% for c in tl.candidates %}
+  {% set is_sel = c.selected %}
+
+  <div class="title-card {% if is_sel %}title-card-selected{% endif %}">
+
+    {# Title text ──────────────────────────────────────────────── #}
+    <div class="title-text">{{ c.title_text }}</div>
+
+    {# Badges ─────────────────────────────────────────────────── #}
+    <div class="title-badges">
+      {# Format badge #}
+      {% set ft = c.format_type %}
+      {% if ft == 'question' %}
+        <span class="badge fmt-question">Question</span>
+      {% elif ft == 'mystery' %}
+        <span class="badge fmt-mystery">Mystery</span>
+      {% elif ft == 'vs_comparison' %}
+        <span class="badge fmt-vs">Comparison</span>
+      {% elif ft == 'list' %}
+        <span class="badge fmt-list">List</span>
+      {% else %}
+        <span class="badge fmt-statement">Statement</span>
+      {% endif %}
+
+      {# Selected badge #}
+      {% if is_sel %}
+        <span class="badge badge-completed">Published title</span>
+      {% endif %}
+
+      {# Performance badge #}
+      {% if c.performance_status == 'winner' %}
+        <span class="badge badge-completed">Best CTR</span>
+      {% elif c.performance_status == 'underperformed' %}
+        <span class="badge badge-failed">Underperformed</span>
+      {% elif c.performance_status == 'awaiting_analytics' %}
+        <span class="badge badge-skipped">Awaiting analytics</span>
+      {% elif c.performance_status == 'not_published' %}
+        <span class="badge badge-skipped">Not published</span>
+      {% endif %}
+    </div>
+
+    {# Performance metrics (selected title only) ──────────────── #}
+    {% if c.ctr is not none %}
+    <div class="title-perf">
+      <div class="title-perf-item">
+        <span class="title-perf-val">{{ c.ctr }}%</span>
+        <span class="title-perf-lbl">CTR</span>
+      </div>
+      {% if c.impressions is not none %}
+      <div class="title-perf-item">
+        <span class="title-perf-val">{{ "{:,}".format(c.impressions) }}</span>
+        <span class="title-perf-lbl">Impressions</span>
+      </div>
+      {% endif %}
+      {% if c.views is not none %}
+      <div class="title-perf-item">
+        <span class="title-perf-val">{{ "{:,}".format(c.views) }}</span>
+        <span class="title-perf-lbl">Views</span>
+      </div>
+      {% endif %}
+    </div>
+    {% elif c.performance_status == 'awaiting_analytics' %}
+    <div class="title-no-data">No real performance data yet</div>
+    {% elif not is_sel %}
+    <div class="title-no-data">Not published — no performance data</div>
+    {% endif %}
+
+    {# Created date ────────────────────────────────────────────── #}
+    {% if c.created_at %}
+    <div class="title-date">Generated: {{ c.created_at[:10] }}</div>
+    {% endif %}
+
+  </div>{# /title-card #}
+  {% endfor %}
+</div>
+
+{% else %}
+{# Empty state #}
+<div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
+  No title candidates found for this episode.
+  <div style="margin-top:12px;">
+    <a href="?tab=production" class="btn">← Back to Production</a>
+  </div>
+</div>
+{% endif %}
+
+{% endif %}{# end active_tab == 'titles' #}
 
 </body>
 </html>

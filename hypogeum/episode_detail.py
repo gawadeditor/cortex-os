@@ -1,5 +1,5 @@
 """
-hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Steps 1–3).
+hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Steps 1–4).
 
 Public API:
     get_episode_detail(episode_id, db_path=None) -> dict | None
@@ -320,6 +320,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     # ── Thumbnails tab data ──────────────────────────────────────────────
     thumbnails = _build_thumbnails_data(conn, episode_id, run_id)
 
+    # ── Titles tab data ──────────────────────────────────────────────────
+    titles_data = _build_titles_data(conn, episode_id)
+
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
 
@@ -376,6 +379,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
 
         # Thumbnails tab
         "thumbnails": thumbnails,
+
+        # Titles tab
+        "titles": titles_data,
 
         # Production tab
         "stage_groups": stage_groups,
@@ -694,5 +700,148 @@ def _build_thumbnails_data(
             "count":          len(candidates),
             "has_selected":   has_selected,
             "has_real_data":  has_real_data,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Titles tab data
+# ---------------------------------------------------------------------------
+
+def _classify_title_format(text: str) -> str:
+    """
+    Deterministic format classification based on title text only.
+
+    Rules (applied in order):
+        contains "?"                     → question
+        contains "mystery" (case-insensitive) → mystery
+        contains " vs " or "versus"      → vs_comparison
+        first char is a digit            → list
+        non-empty text                   → direct_statement
+        empty / whitespace-only          → unknown
+    """
+    if not text:
+        return "unknown"
+    t  = text.strip()
+    tl = t.lower()
+    if not t:
+        return "unknown"
+    if "?" in t:
+        return "question"
+    if "mystery" in tl:
+        return "mystery"
+    if " vs " in tl or "versus" in tl:
+        return "vs_comparison"
+    if t[0].isdigit():
+        return "list"
+    return "direct_statement"
+
+
+# Human-readable labels for each format type
+_FORMAT_LABELS: dict[str, str] = {
+    "question":        "Question",
+    "mystery":         "Mystery",
+    "vs_comparison":   "Comparison",
+    "list":            "List",
+    "direct_statement": "Statement",
+    "unknown":         "Other",
+}
+
+
+def _build_titles_data(conn, episode_id: str) -> dict:
+    """
+    Build Titles tab data from titles + platform_analytics.
+
+    format_type:  computed from title_text; not stored in schema.
+    performance:  real analytics only (source != 'mock'), applied to selected
+                  title only (non-selected titles were never published).
+
+    Returns:
+        {
+          "candidates": [...],
+          "summary": {"count": N, "has_selected": bool, "has_real_data": bool},
+        }
+    """
+    # ── Title candidates ─────────────────────────────────────────────────
+    title_rows = conn.execute(
+        """
+        SELECT title_id, run_id, episode_id, title_text, selected, created_at
+        FROM titles
+        WHERE episode_id = ?
+        ORDER BY created_at ASC
+        """,
+        [episode_id],
+    ).fetchall()
+
+    if not title_rows:
+        return {
+            "candidates": [],
+            "summary": {"count": 0, "has_selected": False, "has_real_data": False},
+        }
+
+    # ── Real analytics (same query as thumbnails) ─────────────────────────
+    analytics_rows = conn.execute(
+        """
+        SELECT platform, ctr, impressions, views
+        FROM platform_analytics
+        WHERE episode_id = ? AND source != 'mock'
+          AND ctr IS NOT NULL
+        ORDER BY CASE platform WHEN 'youtube' THEN 0 ELSE 1 END ASC,
+                 snapshot_date DESC
+        """,
+        [episode_id],
+    ).fetchall()
+
+    real_ctr: Optional[float]      = None
+    real_impressions: Optional[int] = None
+    real_views: Optional[int]       = None
+
+    if analytics_rows:
+        best = analytics_rows[0]
+        real_ctr        = best["ctr"]
+        real_impressions = int(best["impressions"]) if best["impressions"] else None
+        real_views       = int(best["views"])       if best["views"]       else None
+
+    # ── Build candidate dicts ─────────────────────────────────────────────
+    candidates: list[dict] = []
+    for row in title_rows:
+        c        = _row(row)
+        selected = bool(c.get("selected"))
+        c["format_type"]   = _classify_title_format(c.get("title_text", ""))
+        c["format_label"]  = _FORMAT_LABELS.get(c["format_type"], "Other")
+
+        if selected:
+            if real_ctr is not None:
+                c["ctr"]         = round(real_ctr * 100, 2)
+                c["impressions"] = real_impressions
+                c["views"]       = real_views
+                if real_ctr >= _CTR_WINNER_THRESHOLD:
+                    c["performance_status"] = "winner"
+                elif real_ctr < _CTR_UNDERPERFORMED_THRESHOLD:
+                    c["performance_status"] = "underperformed"
+                else:
+                    c["performance_status"] = "has_data"
+            else:
+                c["ctr"]              = None
+                c["impressions"]      = None
+                c["views"]            = None
+                c["performance_status"] = "awaiting_analytics"
+        else:
+            c["ctr"]              = None
+            c["impressions"]      = None
+            c["views"]            = None
+            c["performance_status"] = "not_published"
+
+        candidates.append(c)
+
+    has_selected  = any(bool(c.get("selected")) for c in candidates)
+    has_real_data = real_ctr is not None
+
+    return {
+        "candidates": candidates,
+        "summary": {
+            "count":         len(candidates),
+            "has_selected":  has_selected,
+            "has_real_data": has_real_data,
         },
     }

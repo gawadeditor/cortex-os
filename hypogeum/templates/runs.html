@@ -45,7 +45,9 @@
           <a href="/run/{{ r.run_id }}">{{ r.run_id[:12] }}…</a>
         </td>
         <td>
-          <span style="font-size:12px;">{{ r.episode_id }}</span>
+          <a href="/episode/{{ r.episode_id }}" style="font-size:12px; color:var(--text);">
+            {{ r.episode_id }}
+          </a>
           {% if r.episode_title %}
             <br><span class="muted" style="font-size:11px;">{{ r.episode_title[:60] }}</span>
           {% elif r.episode_topic %}

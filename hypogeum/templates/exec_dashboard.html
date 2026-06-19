@@ -237,6 +237,7 @@
       {% elif cstate == "connected_no_data" %}
         <div class="plat-connected">Connected</div>
         <div class="plat-data">No analytics imported yet</div>
+        <a href="/analytics/import?platform={{ pkey }}" class="btn-connect">Import analytics</a>
       {% elif cstate == "published_no_cred" %}
         <div class="plat-expired">Credential expired</div>
         <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Reconnect</a>
@@ -311,13 +312,19 @@
       <thead>
         <tr>
           <th>Episode</th><th>Date</th><th>Status</th>
-          <th>Views</th><th>CTR</th><th>Retention</th>
+          <th>Views</th><th>CTR</th><th>Retention</th><th>Platform ID</th>
         </tr>
       </thead>
       <tbody>
         {% for ep in recent %}
         <tr>
-          <td>{{ ep.title }}</td>
+          <td>
+            {% if ep.episode_id %}
+            <a href="/episode/{{ ep.episode_id }}" style="color:var(--text);">{{ ep.title }}</a>
+            {% else %}
+            {{ ep.title }}
+            {% endif %}
+          </td>
           <td style="color:var(--muted); white-space:nowrap">
             {{ ep.published_at[:10] if ep.published_at else "—" }}
           </td>
@@ -325,13 +332,26 @@
           <td>{% if ep.views %}{{ "{:,}".format(ep.views) }}{% else %}<span class="dash-val">—</span>{% endif %}</td>
           <td>{% if ep.ctr %}{{ ep.ctr }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
           <td>{% if ep.retention %}{{ ep.retention }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
+          <td>
+            {% if ep.url %}
+              <a href="{{ ep.url }}" target="_blank" rel="noopener" style="font-size:11px">
+                {{ ep.platform_video_id or "link" }}
+              </a>
+            {% elif ep.platform_video_id %}
+              <span style="font-size:11px; color:var(--muted)">{{ ep.platform_video_id }}</span>
+            {% else %}
+              <span class="dash-val">—</span>
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {% else %}
-  <div class="no-data">No episodes produced yet.</div>
+  <div class="no-data">No episodes produced yet.
+    <a href="/published/import" style="margin-left:6px">Import a published video →</a>
+  </div>
   {% endif %}
 </div>
 
@@ -383,7 +403,7 @@
   <div style="font-size:12px; color:var(--muted); margin-top:10px; padding-top:10px;
               border-top:1px solid var(--border)">
     No real analytics imported yet.
-    <a href="/analytics/import">Import from platform dashboards →</a>
+    <a href="/analytics/import">Import analytics →</a>
   </div>
   {% endif %}
 </div>

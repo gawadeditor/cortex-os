@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if d.display_title %}{{ d.display_title }} — {% endif %}Episode — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* ── Episode header ── */
+    .ep-header {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px 22px;
+      margin-bottom: var(--gap);
+    }
+    .ep-title {
+      font-size: 20px; font-weight: 700; line-height: 1.3;
+      margin-bottom: 4px;
+    }
+    .ep-topic {
+      font-size: 13px; color: var(--muted); margin-bottom: 12px;
+    }
+    .ep-meta-row {
+      display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+      font-size: 12px; color: var(--muted); margin-bottom: 14px;
+    }
+    .ep-id-chip {
+      font-family: monospace; font-size: 11px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 4px; padding: 1px 7px; color: var(--muted);
+    }
+    .ep-kpis {
+      display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px;
+    }
+    .ep-kpi {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 10px 16px; min-width: 100px;
+    }
+    .ep-kpi-val { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .ep-kpi-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase;
+                  letter-spacing: .06em; margin-top: 3px; }
+    .ep-actions {
+      display: flex; gap: 8px; flex-wrap: wrap;
+    }
+    .ep-plat-pills {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;
+    }
+    .plat-pill {
+      display: flex; align-items: center; gap: 6px; padding: 4px 12px;
+      border-radius: 20px; font-size: 12px; font-weight: 600;
+      border: 1px solid var(--border);
+    }
+    .plat-pill-ok   { border-color: #2ea043; color: var(--green); background: #0d1f14; }
+    .plat-pill-fail { border-color: #da3633; color: var(--red);   background: #1f0a09; }
+    .plat-pill-pend { border-color: #9e6a03; color: var(--yellow);background: #1f1800; }
+    .plat-pill-none { color: var(--muted); background: var(--bg); }
+    .plat-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .plat-dot-ok   { background: var(--green); }
+    .plat-dot-fail { background: var(--red); }
+    .plat-dot-pend { background: var(--yellow); }
+    .plat-dot-none { background: var(--muted); opacity: .5; }
+
+    /* ── Tabs ── */
+    .tab-bar {
+      display: flex; gap: 2px; border-bottom: 1px solid var(--border);
+      margin-bottom: var(--gap); overflow-x: auto;
+    }
+    .tab-btn {
+      padding: 8px 16px; font-size: 13px; font-weight: 500;
+      color: var(--muted); border: none; background: transparent;
+      cursor: pointer; border-bottom: 2px solid transparent;
+      white-space: nowrap; font-family: inherit;
+      text-decoration: none; display: inline-block;
+    }
+    .tab-btn:hover { color: var(--text); text-decoration: none; }
+    .tab-btn.active {
+      color: var(--blue); border-bottom-color: var(--blue); font-weight: 600;
+    }
+    .tab-btn.disabled {
+      opacity: .4; cursor: not-allowed; pointer-events: none;
+    }
+
+    /* ── Stage timeline ── */
+    .stage-list  { display: flex; flex-direction: column; gap: 8px; }
+    .stage-card  {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+      border-left: 3px solid var(--border);
+    }
+    .stage-card-completed { border-left-color: #2ea043; }
+    .stage-card-failed    { border-left-color: #da3633; }
+    .stage-card-running   { border-left-color: #58a6ff; }
+    .stage-card-skipped   { border-left-color: var(--muted); }
+    .stage-card-pending   { border-left-color: var(--border); opacity: .6; }
+
+    .stage-header {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .stage-icon  { font-size: 14px; flex-shrink: 0; width: 20px; text-align: center; }
+    .stage-name  { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; }
+    .stage-meta  { font-size: 12px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
+    .stage-error {
+      margin-top: 10px; padding: 10px 12px;
+      background: #1f0a09; border: 1px solid #da3633;
+      border-radius: var(--radius); font-size: 12px; color: #ff7b72;
+    }
+    .stage-error-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--red); margin-bottom: 4px; font-weight: 700;
+    }
+
+    /* ── Advanced collapsible ── */
+    .adv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .adv-table td { padding: 5px 8px; border-bottom: 1px solid var(--border);
+                    vertical-align: top; }
+    .adv-table tr:last-child td { border-bottom: none; }
+    .adv-table td:first-child { color: var(--muted); width: 140px; white-space: nowrap; }
+    .adv-mono { font-family: monospace; color: var(--blue); font-size: 11px;
+                word-break: break-all; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+{# ── Breadcrumb ── #}
+<div class="breadcrumb">
+  <a href="/dashboard">Dashboard</a>
+  <span class="breadcrumb-sep">/</span>
+  <a href="/episodes">Episodes</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>{{ d.display_title or d.episode_id }}</span>
+</div>
+
+{# ════════════════════════════════════════════════════════════════
+   EPISODE HEADER
+════════════════════════════════════════════════════════════════ #}
+<div class="ep-header">
+
+  {# Title + topic #}
+  <div class="ep-title">{{ d.display_title or d.episode_id }}</div>
+  {% if d.topic and d.topic != d.display_title %}
+  <div class="ep-topic">Topic: {{ d.topic }}</div>
+  {% endif %}
+
+  {# Meta: id · created · published · status #}
+  <div class="ep-meta-row">
+    <span class="ep-id-chip">{{ d.episode_id }}</span>
+    {% if d.created_at %}
+    <span>Created {{ d.created_at[:10] }}</span>
+    {% endif %}
+    {% if d.published_at %}
+    <span>Published {{ d.published_at[:10] }}</span>
+    {% endif %}
+    <span class="badge badge-{{ d.status }}">{{ d.status_label }}</span>
+    {% if d.current_stage %}
+    <span style="color: var(--blue);">⟳ {{ d.current_stage }}</span>
+    {% endif %}
+  </div>
+
+  {# Platform pills #}
+  {% if d.platforms %}
+  <div class="ep-plat-pills">
+    {% for p in d.platforms %}
+    {% set ps = p.publishing_status or 'unknown' %}
+    {% if ps == 'success' %}{% set pcls = 'ok' %}
+    {% elif ps == 'failed' %}{% set pcls = 'fail' %}
+    {% elif ps == 'pending' %}{% set pcls = 'pend' %}
+    {% else %}{% set pcls = 'none' %}{% endif %}
+    <span class="plat-pill plat-pill-{{ pcls }}">
+      <span class="plat-dot plat-dot-{{ pcls }}"></span>
+      {{ p.platform | capitalize }}
+      {% if ps == 'success' %}· {{ p.status_label }}
+      {% elif ps == 'failed' %}· Failed
+      {% elif ps == 'pending' %}· Uploading
+      {% endif %}
+    </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# KPI cards #}
+  <div class="ep-kpis">
+    <div class="ep-kpi">
+      <div class="ep-kpi-val">
+        {% if d.total_cost_usd %}
+          ${{ "%.2f" | format(d.total_cost_usd) }}
+        {% else %}
+          <span style="color:var(--muted)">—</span>
+        {% endif %}
+      </div>
+      <div class="ep-kpi-lbl">Production Cost</div>
+    </div>
+    <div class="ep-kpi">
+      <div class="ep-kpi-val">
+        {% if d.run_duration_fmt %}
+          {{ d.run_duration_fmt }}
+        {% else %}
+          <span style="color:var(--muted)">—</span>
+        {% endif %}
+      </div>
+      <div class="ep-kpi-lbl">Duration</div>
+    </div>
+    <div class="ep-kpi">
+      <div class="ep-kpi-val">
+        {% if d.platforms %}
+          {{ d.platforms | selectattr('publishing_status', 'equalto', 'success') | list | length }}
+          / {{ d.platforms | length }}
+        {% else %}
+          <span style="color:var(--muted)">—</span>
+        {% endif %}
+      </div>
+      <div class="ep-kpi-lbl">Platforms Published</div>
+    </div>
+    <div class="ep-kpi">
+      <div class="ep-kpi-val">{{ d.stage_groups | length }}</div>
+      <div class="ep-kpi-lbl">Stages</div>
+    </div>
+  </div>
+
+  {# Quick actions #}
+  <div class="ep-actions">
+    {% for p in d.platforms %}
+      {% if p.url and p.publishing_status == 'success' %}
+      <a href="{{ p.url }}" target="_blank" rel="noopener" class="btn btn-approve">
+        ▶ Watch on {{ p.platform | capitalize }} ↗
+      </a>
+      {% endif %}
+    {% endfor %}
+    {% if d.run_id %}
+    <a href="/run/{{ d.run_id }}" class="btn">View run log</a>
+    {% endif %}
+    <a href="/analytics/episode/{{ d.episode_id }}" class="btn">Analytics</a>
+    <a href="/analytics/import?episode_id={{ d.episode_id }}" class="btn">Import analytics</a>
+  </div>
+
+</div>{# /ep-header #}
+
+{# ════════════════════════════════════════════════════════════════
+   TAB BAR  (Production only for P0; others staged for future)
+════════════════════════════════════════════════════════════════ #}
+<div class="tab-bar">
+  <span class="tab-btn active">Production</span>
+  <span class="tab-btn disabled" title="Coming soon">Publishing</span>
+  <span class="tab-btn disabled" title="Coming soon">Thumbnails</span>
+  <span class="tab-btn disabled" title="Coming soon">Titles</span>
+  <span class="tab-btn disabled" title="Coming soon">Analytics</span>
+  <span class="tab-btn disabled" title="Coming soon">Revenue</span>
+  <span class="tab-btn disabled" title="Coming soon">Learning</span>
+</div>
+
+{# ════════════════════════════════════════════════════════════════
+   PRODUCTION TAB
+════════════════════════════════════════════════════════════════ #}
+
+{# Run error banner (fatal run failure) #}
+{% if d.run_error_hint %}
+<div style="background:#1f0a09; border:1px solid #da3633; border-radius:var(--radius);
+            padding:12px 16px; margin-bottom:var(--gap); font-size:13px; color:#ff7b72;">
+  <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em;
+              color:var(--red); margin-bottom:4px; font-weight:700;">Run Failed</div>
+  {{ d.run_error_hint }}
+</div>
+{% endif %}
+
+{% if d.stage_groups %}
+<div class="stage-list">
+  {% for g in d.stage_groups %}
+  {% set s = g.status %}
+  {% if s == 'completed' %}{% set icon = '✓' %}{% set badge_cls = 'badge-completed' %}
+  {% elif s == 'failed'  %}{% set icon = '✗' %}{% set badge_cls = 'badge-failed' %}
+  {% elif s == 'running' %}{% set icon = '⟳' %}{% set badge_cls = 'badge-running' %}
+  {% elif s == 'skipped' %}{% set icon = '—' %}{% set badge_cls = 'badge-skipped' %}
+  {% else                %}{% set icon = '○' %}{% set badge_cls = 'badge-skipped' %}
+  {% endif %}
+
+  <div class="stage-card stage-card-{{ s }}">
+    <div class="stage-header">
+      <span class="stage-icon
+        {% if s == 'completed' %}ok{% elif s == 'failed' %}err{% elif s == 'running' %}{% else %}muted{% endif %}">
+        {{ icon }}
+      </span>
+      <span class="stage-name">{{ g.group_name }}</span>
+      <span class="badge {{ badge_cls }}" style="font-size:10px;">{{ s }}</span>
+      <div class="stage-meta">
+        {% if g.duration_fmt and g.duration_fmt != '—' %}
+        <span>{{ g.duration_fmt }}</span>
+        {% endif %}
+        {% if g.total_cost_usd and g.total_cost_usd > 0 %}
+        <span>${{ "%.4f" | format(g.total_cost_usd) }}</span>
+        {% endif %}
+        {% if g.stage_count > 1 %}
+        <span>{{ g.stage_count }} sub-stages</span>
+        {% endif %}
+      </div>
+    </div>
+    {% if g.error_message %}
+    <div class="stage-error">
+      <div class="stage-error-label">Error</div>
+      {{ g.error_message }}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
+  {% if d.run_id %}
+    No stage data recorded for this episode's production run.
+    <div style="margin-top:8px;">
+      <a href="/run/{{ d.run_id }}" class="btn" style="margin-top:6px;">View raw run log →</a>
+    </div>
+  {% else %}
+    This episode has not been produced yet.
+  {% endif %}
+</div>
+{% endif %}
+
+{# ════════════════════════════════════════════════════════════════
+   ADVANCED (developer detail — collapsed by default)
+════════════════════════════════════════════════════════════════ #}
+{% if d.run_id or d.raw_stages or d.assets %}
+<details style="margin-top:var(--gap);">
+  <summary>Advanced — Run &amp; Stage Details</summary>
+  <div class="collapse-body" style="padding:14px 16px;">
+
+    {# Run metadata #}
+    {% if d.run_id %}
+    <div class="card-title" style="margin-bottom:8px;">Run</div>
+    <table class="adv-table" style="margin-bottom:16px;">
+      <tr><td>Run ID</td><td><span class="adv-mono">{{ d.run_id }}</span></td></tr>
+      <tr><td>Status</td><td><span class="badge badge-{{ d.run_status }}">{{ d.run_status }}</span></td></tr>
+      {% if d.run_started_at %}
+      <tr><td>Started</td><td class="muted">{{ d.run_started_at[:19] | replace("T"," ") }}</td></tr>
+      {% endif %}
+      {% if d.run_completed_at %}
+      <tr><td>Completed</td><td class="muted">{{ d.run_completed_at[:19] | replace("T"," ") }}</td></tr>
+      {% endif %}
+      {% if d.run_error_message %}
+      <tr><td>Raw error</td><td style="color:var(--red); font-size:11px; word-break:break-all;">{{ d.run_error_message[:400] }}</td></tr>
+      {% endif %}
+    </table>
+    {% endif %}
+
+    {# Raw stage executions #}
+    {% if d.raw_stages %}
+    <div class="card-title" style="margin-bottom:8px;">Stage Executions ({{ d.raw_stages | length }})</div>
+    <table class="adv-table" style="margin-bottom:16px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">Stage</th>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">Status</th>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">Duration</th>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">Cost</th>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">Stage Exec ID</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in d.raw_stages %}
+      <tr>
+        <td style="font-family:monospace; font-size:11px;">{{ s.stage_name }}</td>
+        <td><span class="badge badge-{{ s.status }}" style="font-size:10px;">{{ s.status }}</span></td>
+        <td class="muted">{{ s.duration_fmt }}</td>
+        <td class="muted">${{ "%.5f" | format(s.cost_usd or 0) }}</td>
+        <td><span class="adv-mono">{{ s.stage_exec_id }}</span></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {# Assets #}
+    {% if d.assets %}
+    <div class="card-title" style="margin-bottom:8px;">Assets ({{ d.assets | length }})</div>
+    <table class="adv-table">
+      <thead>
+        <tr>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">Type</th>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">Provider</th>
+          <th style="text-align:left; color:var(--muted); font-size:10px; padding:4px 8px;">File path</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for a in d.assets %}
+      <tr>
+        <td style="font-size:11px;">{{ a.asset_type }}</td>
+        <td class="muted" style="font-size:11px;">{{ a.provider }}</td>
+        <td class="adv-mono" style="word-break:break-all;">{{ a.file_path or '—' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+  </div>
+</details>
+{% endif %}
+
+</body>
+</html>

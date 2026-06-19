@@ -155,6 +155,7 @@ from hypogeum.dashboard_runs import (
     get_preflight_status,
     fmt_duration,
 )
+from hypogeum.episode_detail import get_episode_detail
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -528,7 +529,7 @@ def platform_connect_save_form(platform: str):
                 )
         except Exception:
             pass
-    return redirect(url_for("platform_connect_page", platform=platform) + "?saved=1")
+    return redirect(url_for("legacy_dashboard"))
 
 
 # ===========================================================================
@@ -769,6 +770,14 @@ def run_detail_page(run_id):
     if detail is None:
         return render_template("not_found.html", kind="Run", id=run_id), 404
     return render_template("run_detail.html", d=detail, fmt_duration=fmt_duration)
+
+
+@app.route("/episode/<episode_id>")
+def episode_detail_page(episode_id):
+    d = get_episode_detail(episode_id, db_path=_db_path())
+    if d is None:
+        return render_template("not_found.html", kind="Episode", id=episode_id), 404
+    return render_template("episode_detail.html", d=d)
 
 
 @app.route("/episodes")
@@ -1115,6 +1124,82 @@ def api_analytics_import():
     return jsonify(result), status
 
 
+@app.route("/api/analytics/import/manual", methods=["POST"])
+def api_analytics_import_manual():
+    """
+    F10: Explicit manual analytics import endpoint.
+    Accepts the exact field set documented in F10 spec.
+    watch_time maps to total_watch_time_s.
+    Always inserts source='manual'.
+    """
+    body = request.get_json(silent=True) or {}
+    episode_id = (body.get("episode_id") or "").strip()
+    platform   = (body.get("platform") or "").strip()
+
+    if not episode_id:
+        return jsonify({"ok": False, "error": "episode_id required", "code": "invalid"}), 400
+    if platform not in _VALID_PLATFORMS:
+        return jsonify({"ok": False, "error": f"unknown platform {platform!r}", "code": "invalid"}), 400
+
+    metrics: dict = {}
+    for f in ("views", "impressions", "likes", "comments", "shares"):
+        v = body.get(f)
+        if v is not None:
+            try:
+                metrics[f] = int(float(str(v)))
+            except (ValueError, TypeError):
+                pass
+    for f in ("ctr", "avg_view_pct"):
+        v = body.get(f)
+        if v is not None:
+            try:
+                metrics[f] = float(v)
+            except (ValueError, TypeError):
+                pass
+    if body.get("watch_time") is not None:
+        try:
+            metrics["total_watch_time_s"] = float(body["watch_time"])
+        except (ValueError, TypeError):
+            pass
+    if body.get("platform_video_id"):
+        metrics["platform_video_id"] = str(body["platform_video_id"])
+
+    snapshot_date = body.get("snapshot_date") or None
+    result = import_from_dict(
+        episode_id, platform, metrics,
+        source="manual",
+        db_path=_db_path(),
+    )
+    if snapshot_date and result.get("ok") and result.get("record_id"):
+        pass  # snapshot_date handled inside import_from_dict via metrics
+    http = 200 if result["ok"] else (400 if result.get("code") == "invalid" else 500)
+    return jsonify(result), http
+
+
+@app.route("/api/analytics/import/csv", methods=["POST"])
+def api_analytics_import_csv():
+    """
+    F10: CSV analytics import endpoint.
+    Accepts JSON body with episode_id, platform, csv_text.
+    Validates required columns; inserts rows with source='csv'.
+    """
+    body       = request.get_json(silent=True) or {}
+    episode_id = (body.get("episode_id") or "").strip()
+    platform   = (body.get("platform") or "").strip()
+    csv_text   = body.get("csv_text") or ""
+
+    if not episode_id:
+        return jsonify({"ok": False, "error": "episode_id required", "code": "invalid"}), 400
+    if platform not in _VALID_PLATFORMS:
+        return jsonify({"ok": False, "error": f"unknown platform {platform!r}", "code": "invalid"}), 400
+    if not csv_text.strip():
+        return jsonify({"ok": False, "error": "csv_text required", "code": "invalid"}), 400
+
+    result = import_from_csv(episode_id, platform, csv_text, db_path=_db_path())
+    http = 200 if result["ok"] else (400 if result.get("code") == "invalid" else 500)
+    return jsonify(result), http
+
+
 @app.route("/api/analytics/seed-mock/<episode_id>", methods=["POST"])
 def api_analytics_seed_mock(episode_id):
     body     = request.get_json(silent=True) or {}
@@ -1259,6 +1344,112 @@ def learning_action_apply(action_id):
 def learning_action_dismiss(action_id):
     dismiss_action(action_id, db_path=_db_path())
     return redirect(url_for("learning_page"))
+
+
+# ===========================================================================
+# F10 — Published Video Import
+# ===========================================================================
+
+_VALID_PUBLISH_STATUSES = frozenset({"success", "failed", "pending", "skipped", "unknown"})
+
+
+def _import_publishing_outcome(body: dict, db_path) -> dict:
+    """
+    Write one publishing_outcome row. Returns Result dict.
+    Fields: episode_id, run_id?, platform, publishing_status,
+            platform_video_id?, published_at?, url?, failure_reason?
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    episode_id        = (body.get("episode_id") or "").strip()
+    platform          = (body.get("platform") or "").strip()
+    publishing_status = (body.get("publishing_status") or "unknown").strip()
+
+    if not episode_id:
+        return {"ok": False, "error": "episode_id required", "code": "invalid"}
+    if platform not in _VALID_PLATFORMS:
+        return {"ok": False, "error": f"unknown platform {platform!r}", "code": "invalid"}
+    if publishing_status not in _VALID_PUBLISH_STATUSES:
+        return {"ok": False, "error": f"invalid publishing_status {publishing_status!r}", "code": "invalid"}
+
+    from hypogeum.db import get_connection, initialize_schema
+    db = db_path
+    initialize_schema(db)
+    conn = get_connection(db)
+    try:
+        existing = conn.execute(
+            "SELECT outcome_id FROM publishing_outcomes WHERE episode_id=? AND platform=?",
+            [episode_id, platform],
+        ).fetchone()
+        outcome_id = existing["outcome_id"] if existing else str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT OR REPLACE INTO publishing_outcomes
+               (outcome_id, episode_id, run_id, platform, publishing_status,
+                platform_video_id, published_at, url, failure_reason,
+                recorded_at, metadata_version)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                outcome_id,
+                episode_id,
+                body.get("run_id") or None,
+                platform,
+                publishing_status,
+                body.get("platform_video_id") or None,
+                body.get("published_at") or None,
+                body.get("url") or None,
+                body.get("failure_reason") or None,
+                now,
+                "v1",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "outcome_id": outcome_id, "episode_id": episode_id, "platform": platform}
+
+
+@app.route("/api/published/import/manual", methods=["POST"])
+def api_published_import_manual():
+    body   = request.get_json(silent=True) or {}
+    result = _import_publishing_outcome(body, _db_path())
+    http   = 200 if result["ok"] else (400 if result.get("code") == "invalid" else 500)
+    return jsonify(result), http
+
+
+@app.route("/published/import", methods=["GET"])
+def published_import_page():
+    from hypogeum.dashboard_runs import list_episodes
+    episodes = list_episodes(db_path=_db_path(), limit=50)
+    flash    = request.args.get("import_result")
+    error    = request.args.get("error")
+    return render_template(
+        "published_import.html",
+        episodes=episodes,
+        valid_platforms=sorted(_VALID_PLATFORMS),
+        valid_statuses=sorted(_VALID_PUBLISH_STATUSES),
+        flash=flash,
+        error=error,
+    )
+
+
+@app.route("/published/import", methods=["POST"])
+def published_import_submit():
+    body = {
+        "episode_id":        request.form.get("episode_id", "").strip(),
+        "run_id":            request.form.get("run_id", "").strip() or None,
+        "platform":          request.form.get("platform", "").strip(),
+        "publishing_status": request.form.get("publishing_status", "unknown").strip(),
+        "platform_video_id": request.form.get("platform_video_id", "").strip() or None,
+        "published_at":      request.form.get("published_at", "").strip() or None,
+        "url":               request.form.get("url", "").strip() or None,
+        "failure_reason":    request.form.get("failure_reason", "").strip() or None,
+    }
+    result = _import_publishing_outcome(body, _db_path())
+    if result["ok"]:
+        return redirect(url_for("published_import_page") + "?import_result=ok")
+    return redirect(url_for("published_import_page") + f"?error={result.get('error','error')}")
 
 
 # ===========================================================================

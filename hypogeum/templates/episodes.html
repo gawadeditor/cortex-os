@@ -120,14 +120,12 @@
       {% for ep in episodes %}
       <tr>
         <td>
-          {% if ep.run_id %}
-            <a href="/run/{{ ep.run_id }}">{{ ep.episode_id }}</a>
-          {% else %}
-            {{ ep.episode_id }}
-          {% endif %}
+          <a href="/episode/{{ ep.episode_id }}">{{ ep.episode_id }}</a>
         </td>
         <td style="max-width:260px; word-break:break-word; font-size:13px;">
-          {{ ep.title or ep.topic or '—' }}
+          <a href="/episode/{{ ep.episode_id }}" style="color:var(--text);">
+            {{ ep.title or ep.topic or ep.episode_id }}
+          </a>
         </td>
         <td><span class="badge badge-{{ ep.status }}">{{ ep.status }}</span></td>
         <td>

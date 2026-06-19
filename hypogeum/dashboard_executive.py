@@ -195,32 +195,48 @@ def _build_views_chart(episodes: list) -> list:
 def _load_recent_episodes(conn, result: dict) -> None:
     """
     Last 5 episodes with REAL analytics only (source != 'mock').
-    Episodes that have no real analytics show '—' for metrics but still appear
-    if they were actually produced (they exist in the episodes table).
+    Includes episodes from episodes table and from publishing_outcomes (so
+    manually-imported published videos appear even without a pipeline run).
     """
     try:
         rows = conn.execute(
             """
-            SELECT e.episode_id, e.title, e.status, e.created_at,
+            WITH base AS (
+                SELECT episode_id, title, status, created_at FROM episodes
+                UNION
+                SELECT po.episode_id,
+                       po.episode_id AS title,
+                       po.publishing_status AS status,
+                       po.published_at AS created_at
+                FROM publishing_outcomes po
+                WHERE po.episode_id NOT IN (SELECT episode_id FROM episodes)
+            )
+            SELECT b.episode_id, b.title, b.status, b.created_at,
                    COALESCE(SUM(CASE WHEN pa.source != 'mock' THEN pa.views  ELSE 0 END), 0)
                        AS real_views,
                    AVG(CASE WHEN pa.source != 'mock' THEN pa.ctr         END) AS real_ctr,
-                   AVG(CASE WHEN pa.source != 'mock' THEN pa.avg_view_pct END) AS real_ret
-            FROM episodes e
-            LEFT JOIN platform_analytics pa USING(episode_id)
-            GROUP BY e.episode_id
-            ORDER BY e.created_at DESC
+                   AVG(CASE WHEN pa.source != 'mock' THEN pa.avg_view_pct END) AS real_ret,
+                   MAX(po.platform_video_id) AS platform_video_id,
+                   MAX(po.url)               AS url
+            FROM base b
+            LEFT JOIN platform_analytics pa ON pa.episode_id = b.episode_id
+            LEFT JOIN publishing_outcomes po ON po.episode_id = b.episode_id
+            GROUP BY b.episode_id
+            ORDER BY b.created_at DESC
             LIMIT 5
             """
         ).fetchall()
         result["recent_episodes"] = [
             {
-                "title":        r["title"] or r["episode_id"],
-                "published_at": r["created_at"],
-                "status":       r["status"],
-                "views":        int(r["real_views"]) if r["real_views"] else None,
-                "ctr":          round(r["real_ctr"] * 100, 1) if r["real_ctr"] else None,
-                "retention":    round(r["real_ret"] * 100, 1) if r["real_ret"] else None,
+                "episode_id":        r["episode_id"],
+                "title":             r["title"] or r["episode_id"],
+                "published_at":      r["created_at"],
+                "status":            r["status"],
+                "views":             int(r["real_views"]) if r["real_views"] else None,
+                "ctr":               round(r["real_ctr"] * 100, 1) if r["real_ctr"] else None,
+                "retention":         round(r["real_ret"] * 100, 1) if r["real_ret"] else None,
+                "platform_video_id": r["platform_video_id"],
+                "url":               r["url"],
             }
             for r in rows
         ]

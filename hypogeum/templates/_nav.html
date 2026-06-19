@@ -1,19 +1,43 @@
 <nav class="site-nav">
   <a href="/dashboard" class="nav-brand">Factory OS</a>
   <div class="nav-links">
-    <a href="/dashboard" class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Dashboard</a>
-    <a href="/command"   class="nav-link {% if request.path == '/command' %}active{% endif %}">Command</a>
-    <a href="/live"      class="nav-link {% if request.path == '/live' %}active{% endif %}">Live</a>
-    <a href="/runs"      class="nav-link {% if request.path.startswith('/runs') or (request.path.startswith('/run/') and request.path.endswith('/live')) == false and request.path.startswith('/run/') %}active{% endif %}">Runs</a>
-    <a href="/episodes"  class="nav-link {% if request.path.startswith('/episodes') %}active{% endif %}">Episodes</a>
-    <a href="/queue"     class="nav-link {% if request.path == '/queue' %}active{% endif %}">Queue</a>
-    <a href="/approvals" class="nav-link {% if request.path.startswith('/approvals') %}active{% endif %}">Approvals</a>
-    <a href="/signals"   class="nav-link {% if request.path.startswith('/signals') %}active{% endif %}">Signals</a>
-    <a href="/analytics"       class="nav-link {% if request.path.startswith('/analytics') %}active{% endif %}">Analytics</a>
-    <a href="/learning"        class="nav-link {% if request.path.startswith('/learning') %}active{% endif %}">Intelligence</a>
-    <a href="/decisions"       class="nav-link {% if request.path.startswith('/decisions') and not request.path.startswith('/decision-inputs') and not request.path.startswith('/decision-reviews') %}active{% endif %}">Decisions</a>
-    <a href="/decision-reviews" class="nav-link {% if request.path.startswith('/decision-reviews') %}active{% endif %}">Reviews</a>
-    <a href="/execution-plans"  class="nav-link {% if request.path.startswith('/execution-plans') %}active{% endif %}">Plans</a>
-    <a href="/decision-inputs"  class="nav-link {% if request.path.startswith('/decision-inputs') %}active{% endif %}">Inputs</a>
+    <a href="/dashboard"  class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Dashboard</a>
+    <a href="/create"     class="nav-link {% if request.path == '/create' %}active{% endif %}">Create</a>
+    <a href="/episodes"   class="nav-link {% if request.path.startswith('/episodes') or (request.path.startswith('/episode/') and not request.path.startswith('/episodes')) %}active{% endif %}">Episodes</a>
+    <a href="/channels"   class="nav-link {% if request.path.startswith('/channels') or (request.path.startswith('/channel/') and not request.path.startswith('/channel-profile')) %}active{% endif %}">Channels</a>
+    <a href="/providers"  class="nav-link {% if request.path == '/providers' %}active{% endif %}">Providers</a>
+    <a href="/analytics"  class="nav-link {% if request.path.startswith('/analytics') %}active{% endif %}">Analytics</a>
+    <a href="/settings"   class="nav-link {% if request.path == '/settings' or request.path.startswith('/channel-profile') %}active{% endif %}">Settings</a>
+    <details class="nav-ops-details">
+      <summary class="nav-ops-toggle">Operations</summary>
+      <div class="nav-ops-menu">
+        <a href="/command">Command</a>
+        <a href="/live">Live</a>
+        <a href="/runs">Production History</a>
+        <a href="/queue">Schedule</a>
+        <a href="/approvals">Pending Approvals</a>
+        <a href="/signals">System Checks</a>
+        <a href="/learning">Learning</a>
+        <a href="/decisions">Decisions</a>
+        <a href="/decision-reviews">Reviews</a>
+        <a href="/execution-plans">Plans</a>
+        <a href="/decision-inputs">Inputs</a>
+        <a href="/preflight">System Checks</a>
+      </div>
+    </details>
   </div>
 </nav>
+<style>
+  .nav-ops-details { position: relative; }
+  .nav-ops-toggle  { padding: 4px 10px; border-radius: var(--radius); color: var(--muted);
+                     font-size: 13px; cursor: pointer; list-style: none; user-select: none; }
+  .nav-ops-toggle::-webkit-details-marker { display: none; }
+  .nav-ops-toggle:hover { background: var(--surface); color: var(--text); }
+  .nav-ops-menu    { position: absolute; top: 100%; right: 0; min-width: 180px; z-index: 100;
+                     background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); padding: 6px 0; margin-top: 4px;
+                     box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+  .nav-ops-menu a  { display: block; padding: 6px 14px; font-size: 13px; color: var(--muted);
+                     text-decoration: none; white-space: nowrap; }
+  .nav-ops-menu a:hover { color: var(--text); background: rgba(255,255,255,.04); text-decoration: none; }
+</style>

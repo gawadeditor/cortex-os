@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Create — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .create-form { max-width: 640px; }
+    .create-form .field { margin-bottom: 20px; }
+    .create-form label { display: block; font-size: 13px; font-weight: 600;
+                         color: var(--text); margin-bottom: 6px; }
+    .create-form .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .create-form input[type="text"],
+    .create-form select,
+    .create-form textarea {
+      width: 100%; padding: 8px 10px; font-size: 13px; font-family: inherit;
+      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+      color: var(--text);
+    }
+    .create-form input:focus,
+    .create-form select:focus { outline: none; border-color: var(--blue); }
+    .radio-group { display: flex; gap: 10px; flex-wrap: wrap; }
+    .radio-opt   { display: flex; align-items: center; gap: 7px;
+                   padding: 8px 14px; background: var(--surface);
+                   border: 1px solid var(--border); border-radius: var(--radius);
+                   cursor: pointer; font-size: 13px; }
+    .radio-opt input[type="radio"] { accent-color: var(--blue); cursor: pointer; }
+    .radio-opt:has(input:checked) { border-color: var(--blue); color: var(--blue); }
+    .platform-checks { display: flex; gap: 10px; flex-wrap: wrap; }
+    .check-opt { display: flex; align-items: center; gap: 7px;
+                 padding: 7px 12px; background: var(--surface);
+                 border: 1px solid var(--border); border-radius: var(--radius);
+                 cursor: pointer; font-size: 13px; }
+    .check-opt input[type="checkbox"] { accent-color: var(--blue); cursor: pointer; }
+    .blocker-list { margin-top: 10px; }
+    .blocker-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0;
+                    border-bottom: 1px solid var(--border); font-size: 13px; }
+    .blocker-item:last-child { border-bottom: none; }
+    .blocker-dot { width: 8px; height: 8px; border-radius: 50%;
+                   background: var(--yellow); margin-top: 5px; flex-shrink: 0; }
+    .blocker-dot-err { background: var(--red); }
+    .btn-launch { padding: 10px 28px; font-size: 14px; font-weight: 600;
+                  background: var(--green); color: #0d1117; border: none;
+                  border-radius: var(--radius); cursor: pointer; font-family: inherit; }
+    .btn-launch:hover { background: #4caf63; }
+    .btn-launch:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+    .ready-status { font-size: 13px; margin-top: 6px; }
+    .ready-ok  { color: var(--green); }
+    .ready-no  { color: var(--yellow); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Create Video</h1>
+  <span class="page-meta">Launch a new production run</span>
+</div>
+
+{# ── Requirements check ── #}
+{% set missing_reqs = [] %}
+{% if not channels %}{% set _ = missing_reqs.append("No channels configured — set up a channel first") %}{% endif %}
+
+{% if missing_reqs %}
+<div class="card" style="border-color: var(--yellow); margin-bottom: var(--gap);">
+  <div class="card-title" style="color: var(--yellow);">Missing Requirements</div>
+  <div class="blocker-list">
+    {% for req in missing_reqs %}
+    <div class="blocker-item">
+      <div class="blocker-dot blocker-dot-err"></div>
+      <div>{{ req }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <div style="margin-top: 12px; font-size: 13px; color: var(--muted);">
+    <a href="/settings">Configure settings →</a>
+  </div>
+</div>
+{% endif %}
+
+{% if preflight %}
+{% set blockers = preflight.blockers if preflight.blockers else [] %}
+{% if blockers %}
+<div class="card" style="border-color: var(--red); margin-bottom: var(--gap);">
+  <div class="card-title" style="color: var(--red);">Production Blocked</div>
+  <div class="blocker-list">
+    {% for b in blockers %}
+    <div class="blocker-item">
+      <div class="blocker-dot blocker-dot-err"></div>
+      <div>{{ b.message if b.message else b }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+{# ── Launch form ── #}
+<div class="card create-form">
+  <form method="POST" action="/create/launch">
+    <div class="field">
+      <label>Channel</label>
+      {% if channels %}
+      <select name="channel_id" required>
+        <option value="">— select channel —</option>
+        {% for ch in channels %}
+        <option value="{{ ch.channel_id }}">{{ ch.name or ch.channel_id }}</option>
+        {% endfor %}
+      </select>
+      {% else %}
+      <select name="channel_id" disabled>
+        <option>No channels configured</option>
+      </select>
+      <div class="hint">
+        <a href="/settings">Set up a channel →</a>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label>Topic</label>
+      <input type="text" name="topic" id="topic-input"
+             placeholder="e.g. The rise and fall of ancient Rome"
+             required maxlength="500">
+      <div class="hint">Describe what this video should be about.</div>
+    </div>
+
+    <div class="field">
+      <label>Video type</label>
+      <div class="radio-group" id="video-type-group">
+        <label class="radio-opt">
+          <input type="radio" name="video_type" value="long_video" checked> Long video
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="video_type" value="short"> Short
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="video_type" value="reel"> Reel
+        </label>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Target platforms</label>
+      <div class="platform-checks">
+        <label class="check-opt">
+          <input type="checkbox" name="platforms" value="youtube" checked> YouTube
+        </label>
+        <label class="check-opt">
+          <input type="checkbox" name="platforms" value="tiktok"> TikTok
+        </label>
+        <label class="check-opt">
+          <input type="checkbox" name="platforms" value="instagram"> Instagram
+        </label>
+        <label class="check-opt">
+          <input type="checkbox" name="platforms" value="facebook"> Facebook
+        </label>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Quality mode</label>
+      <div class="radio-group" id="quality-mode-group">
+        <label class="radio-opt">
+          <input type="radio" name="quality_mode" value="economy"> Economy
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="quality_mode" value="balanced" checked> Balanced
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="quality_mode" value="premium"> Premium
+        </label>
+      </div>
+      <div class="hint">Economy: fastest, lowest cost. Premium: highest quality, highest cost.</div>
+    </div>
+
+    <div style="padding-top: 8px; border-top: 1px solid var(--border); margin-top: 8px;">
+      <button type="submit" class="btn-launch"
+              {% if not channels or missing_reqs %}disabled{% endif %}>
+        Start Production
+      </button>
+      {% if channels and not missing_reqs %}
+      <div class="ready-status ready-ok" style="margin-top: 8px;">Factory ready</div>
+      {% else %}
+      <div class="ready-status ready-no" style="margin-top: 8px;">Resolve requirements above before launching</div>
+      {% endif %}
+    </div>
+  </form>
+</div>
+</body>
+</html>

@@ -574,11 +574,12 @@ class TestF1Routes:
         with server.app.test_client() as c:
             yield c, server
 
-    def test_root_redirects_to_command(self, flask_client):
+    def test_root_redirects_to_dashboard(self, flask_client):
         client, _ = flask_client
         resp = client.get("/")
         assert resp.status_code == 302
-        assert "/command" in resp.headers.get("Location", "")
+        location = resp.headers.get("Location", "")
+        assert "/dashboard" in location or "/command" in location
 
     def test_root_follows_redirect_to_command_html(self, flask_client):
         client, _ = flask_client

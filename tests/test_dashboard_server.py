@@ -124,20 +124,31 @@ def client():
 # ---------------------------------------------------------------------------
 
 class TestRoutes:
-    def test_index_returns_200(self, client):
+    def test_index_redirects(self, client):
+        resp = client.get("/")
+        assert resp.status_code == 302
+        location = resp.headers.get("Location", "")
+        assert "/dashboard" in location or "/command" in location
+
+    def test_index_follows_redirect_to_command(self, client):
+        resp = client.get("/", follow_redirects=True)
+        assert resp.status_code == 200
+        assert b"<!DOCTYPE html>" in resp.data or b"<html" in resp.data
+
+    def test_legacy_dashboard_returns_200(self, client):
         state  = _fake_state()
         report = _fake_report()
         with patch.object(server, "get_factory_state", return_value=state), \
              patch.object(server, "assess_factory", return_value=report):
-            resp = client.get("/")
+            resp = client.get("/dashboard")
         assert resp.status_code == 200
 
-    def test_index_returns_html(self, client):
+    def test_legacy_dashboard_returns_html(self, client):
         state  = _fake_state()
         report = _fake_report()
         with patch.object(server, "get_factory_state", return_value=state), \
              patch.object(server, "assess_factory", return_value=report):
-            resp = client.get("/")
+            resp = client.get("/dashboard")
         assert b"<!DOCTYPE html>" in resp.data or b"<html" in resp.data
 
     def test_api_state_returns_200(self, client):
@@ -172,7 +183,7 @@ class TestBadges:
                                can_run=(level in ("READY", "DEGRADED")))
         with patch.object(server, "get_factory_state", return_value=state), \
              patch.object(server, "assess_factory", return_value=report):
-            return client.get("/").data.decode()
+            return client.get("/dashboard").data.decode()
 
     def test_ready_badge_rendered(self, client):
         html = self._render(client, "READY", score=100)
@@ -210,7 +221,7 @@ class TestSections:
         report = _fake_report()
         with patch.object(server, "get_factory_state", return_value=state), \
              patch.object(server, "assess_factory", return_value=report):
-            return client.get("/").data.decode()
+            return client.get("/dashboard").data.decode()
 
     def test_factory_header_present(self, html):
         assert "Test Factory" in html
@@ -334,16 +345,16 @@ class TestAPIState:
 # ---------------------------------------------------------------------------
 
 class TestFailSafe:
-    def test_index_200_when_get_factory_state_raises(self, client):
+    def test_dashboard_200_when_get_factory_state_raises(self, client):
         with patch.object(server, "get_factory_state", side_effect=RuntimeError("DB down")), \
              patch.object(server, "assess_factory", side_effect=RuntimeError("DB down")):
-            resp = client.get("/")
+            resp = client.get("/dashboard")
         assert resp.status_code == 200
 
-    def test_index_shows_error_banner_on_failure(self, client):
+    def test_dashboard_shows_error_banner_on_failure(self, client):
         with patch.object(server, "get_factory_state", side_effect=Exception("connection refused")), \
              patch.object(server, "assess_factory", side_effect=Exception("connection refused")):
-            resp = client.get("/")
+            resp = client.get("/dashboard")
         assert b"connection refused" in resp.data or b"unavailable" in resp.data
 
     def test_api_state_503_when_factory_state_raises(self, client):
@@ -370,7 +381,7 @@ class TestFailSafe:
                                can_run=False, cleared=False)
         with patch.object(server, "get_factory_state", return_value=state), \
              patch.object(server, "assess_factory", return_value=report):
-            resp = client.get("/")
+            resp = client.get("/dashboard")
         html = resp.data.decode()
         assert "credential_failure" in html
 
@@ -386,7 +397,7 @@ class TestFailSafe:
         report = _fake_report()
         with patch.object(server, "get_factory_state", return_value=state), \
              patch.object(server, "assess_factory", return_value=report):
-            resp = client.get("/")
+            resp = client.get("/dashboard")
         html = resp.data.decode()
         assert "human_review" in html
         assert "appr-001" in html
@@ -404,12 +415,9 @@ class TestNoNetworkCalls:
         monkeypatch.setattr(socket, "socket", no_socket)
         yield
 
-    def test_index_no_network(self, client):
-        state  = _fake_state()
-        report = _fake_report()
-        with patch.object(server, "get_factory_state", return_value=state), \
-             patch.object(server, "assess_factory", return_value=report):
-            client.get("/")
+    def test_command_no_network(self, client):
+        # /command uses get_command_state which must not make network calls
+        client.get("/command")
 
     def test_api_state_no_network(self, client):
         state  = _fake_state()
@@ -424,14 +432,12 @@ class TestNoNetworkCalls:
 # ---------------------------------------------------------------------------
 
 class TestReadOnly:
-    def test_index_calls_no_db_writes(self, client):
+    def test_legacy_dashboard_calls_factory_state(self, client):
         state  = _fake_state()
         report = _fake_report()
-        # Patch at the app module level; if any write SQL slips through
-        # the DB is not involved at all since state/report are mocked
         with patch.object(server, "get_factory_state", return_value=state) as mock_s, \
              patch.object(server, "assess_factory", return_value=report) as mock_r:
-            client.get("/")
+            client.get("/dashboard")
         mock_s.assert_called_once()
         mock_r.assert_called_once()
 

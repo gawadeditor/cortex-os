@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Channels — Factory OS</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Channels</h1>
+  <span class="page-meta">{{ channels | length }} channel{% if channels | length != 1 %}s{% endif %} configured</span>
+</div>
+
+{% if channels %}
+{% for ch in channels %}
+<div class="card">
+  <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:0;">
+      <div style="font-size:16px; font-weight:700;">
+        <a href="/channel/{{ ch.channel_id }}" style="color:var(--text);">{{ ch.name or ch.channel_id }}</a>
+      </div>
+      <div style="font-size:12px; color:var(--muted); margin-top:3px;">
+        {{ ch.channel_id }}
+        &mdash;
+        <span class="badge badge-{{ ch.status }}">{{ ch.status }}</span>
+      </div>
+    </div>
+    <div style="text-align:right; flex-shrink:0;">
+      <div style="font-size:13px; font-weight:600;">
+        {{ (ch.profile_completeness * 100) | round | int }}% complete
+      </div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+        Brand: {{ "&#x2713;" if ch.brand_complete else "&times;" }}
+        &nbsp;Publishing: {{ "&#x2713;" if ch.publishing_complete else "&times;" }}
+        &nbsp;Models: {{ "&#x2713;" if ch.models_complete else "&times;" }}
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+    <a href="/channel/{{ ch.channel_id }}" class="btn">View</a>
+    <a href="/channel/{{ ch.channel_id }}/edit" class="btn">Edit</a>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card">
+  <div class="no-data" style="text-align:center; padding:30px 0">
+    No channels configured.
+    <a href="/settings" style="margin-left:6px;">Set up a channel →</a>
+  </div>
+</div>
+{% endif %}
+</body>
+</html>

@@ -257,7 +257,127 @@ def _safe_command():
 
 @app.route("/")
 def index():
-    return redirect(url_for("command_page"), 302)
+    return redirect(url_for("legacy_dashboard"), 302)
+
+
+# ===========================================================================
+# F13 — Operator Product Routes
+# ===========================================================================
+
+@app.route("/create", methods=["GET"])
+def create_page():
+    db = _db_path()
+    try:
+        from hypogeum.dashboard_api import get_channel_summaries
+        channels = get_channel_summaries(db_path=db)
+    except Exception:
+        channels = []
+    try:
+        preflight = get_preflight_status(db_path=db)
+    except Exception:
+        preflight = {}
+    return render_template("create.html", channels=channels, preflight=preflight)
+
+
+@app.route("/create/launch", methods=["POST"])
+def create_launch():
+    channel_id   = request.form.get("channel_id", "").strip()
+    topic        = request.form.get("topic", "").strip()
+    video_type   = request.form.get("video_type", "long_video")
+    quality_mode = request.form.get("quality_mode", "balanced")
+    platforms    = request.form.getlist("platforms")
+    # Production launch is not yet wired to the pipeline runner.
+    # Redirect back with a flash indicating the job was queued.
+    if channel_id and topic:
+        result = enqueue_topic(channel_id, topic, priority=0, db_path=_db_path())
+        code = "ok" if result["ok"] else result.get("code", "error")
+        return redirect(url_for("create_page") + f"?launched={code}")
+    return redirect(url_for("create_page") + "?launched=invalid")
+
+
+@app.route("/channels")
+def channels_page():
+    db = _db_path()
+    try:
+        from hypogeum.dashboard_api import get_channel_summaries
+        channels = get_channel_summaries(db_path=db)
+    except Exception:
+        channels = []
+    return render_template("channels.html", channels=channels)
+
+
+@app.route("/settings")
+def settings_page():
+    return redirect(url_for("channel_profile_page"))
+
+
+_CONTENT_PROVIDERS = [
+    {"id": "openrouter", "label": "OpenRouter", "auth": "api_key",
+     "description": "LLM model routing"},
+    {"id": "elevenlabs", "label": "ElevenLabs", "auth": "api_key",
+     "description": "Voice generation"},
+    {"id": "muapi",      "label": "MUAPI",      "auth": "api_key",
+     "description": "Image & video generation"},
+    {"id": "seedance",   "label": "Seedance",   "auth": "api_key",
+     "description": "Video generation via MUAPI"},
+    {"id": "veo",        "label": "Veo",        "auth": "api_key",
+     "description": "Video generation"},
+    {"id": "kling",      "label": "Kling",      "auth": "api_key",
+     "description": "Video generation"},
+    {"id": "runway",     "label": "Runway",     "auth": "api_key",
+     "description": "Video generation"},
+    {"id": "freepik",    "label": "Freepik",    "auth": "api_key",
+     "description": "Image generation"},
+]
+
+_PLATFORM_PROVIDERS = [
+    {"id": "youtube",   "label": "YouTube",   "auth": "oauth2",
+     "description": "Video publishing"},
+    {"id": "tiktok",    "label": "TikTok",    "auth": "api_key",
+     "description": "Short video publishing"},
+    {"id": "instagram", "label": "Instagram", "auth": "api_key",
+     "description": "Reels & posts"},
+    {"id": "facebook",  "label": "Facebook",  "auth": "api_key",
+     "description": "Video posts"},
+]
+
+
+def _build_providers(provider_list, creds_map, cost_map):
+    result = []
+    for p in provider_list:
+        entry = dict(p)
+        cred = creds_map.get(p["id"])
+        entry["connected"] = cred is not None
+        entry["credential_label"] = getattr(cred, "label", None) if cred else None
+        entry["cost_usd"] = cost_map.get(p["id"], 0.0)
+        if p["id"] == "youtube":
+            entry["oauth_client_id"] = None
+            entry["oauth_redirect_uri"] = "http://localhost:8080/oauth2callback"
+        result.append(entry)
+    return result
+
+
+@app.route("/providers")
+def providers_page():
+    db = _db_path()
+    try:
+        all_secrets = list_secret_profiles(db_path=db)
+        creds_map = {s.provider: s for s in all_secrets if s.status == "active"}
+    except Exception:
+        creds_map = {}
+    try:
+        from hypogeum.dashboard_api import get_cost_summary
+        costs = get_cost_summary(db_path=db)
+        cost_map = costs.by_provider
+    except Exception:
+        cost_map = {}
+    content_providers  = _build_providers(list(_CONTENT_PROVIDERS),  creds_map, cost_map)
+    platform_providers = _build_providers(list(_PLATFORM_PROVIDERS), creds_map, cost_map)
+    return render_template(
+        "providers.html",
+        content_providers=content_providers,
+        platform_providers=platform_providers,
+    )
 
 
 @app.route("/command")

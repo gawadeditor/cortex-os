@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Providers — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: var(--gap); }
+    .provider-card { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); padding: 16px; }
+    .provider-card-connected { border-color: #2ea043; }
+    .provider-name { font-size: 15px; font-weight: 700; margin-bottom: 4px;
+                     display: flex; align-items: center; gap: 8px; }
+    .provider-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+    .provider-badge-connected { font-size: 11px; font-weight: 600; color: var(--green); }
+    .provider-badge-disconnected { font-size: 11px; color: var(--muted); }
+    .provider-auth-type { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+    .provider-meta { font-size: 11px; color: var(--muted); margin-top: 6px; }
+    .provider-cost { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .btn-provider { display: inline-block; margin-top: 10px; padding: 5px 12px;
+                    font-size: 12px; font-weight: 600; border-radius: var(--radius);
+                    border: 1px solid var(--border); color: var(--muted); cursor: pointer;
+                    background: transparent; font-family: inherit; text-decoration: none; }
+    .btn-provider:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
+    .oauth-fields { margin-top: 10px; padding: 10px 12px; background: var(--bg);
+                    border: 1px solid var(--border); border-radius: var(--radius); }
+    .oauth-field-row { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+    .oauth-field-row:last-child { margin-bottom: 0; }
+    .oauth-label { font-size: 11px; color: var(--muted); font-weight: 600; }
+    .oauth-value { font-size: 12px; color: var(--text); font-family: monospace; }
+    .oauth-notice { font-size: 12px; color: var(--yellow); background: #1e1a00;
+                    border: 1px solid var(--yellow); border-radius: var(--radius);
+                    padding: 8px 10px; margin-top: 8px; }
+    .connect-form input[type="text"],
+    .connect-form input[type="password"] {
+      width: 100%; padding: 5px 8px; font-size: 12px; font-family: monospace;
+      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+      color: var(--text); margin-top: 4px;
+    }
+    .connect-form input:focus { outline: none; border-color: var(--blue); }
+    .section-label { font-size: 12px; font-weight: 700; text-transform: uppercase;
+                     letter-spacing: .06em; color: var(--muted); margin: var(--gap) 0 10px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Providers</h1>
+  <span class="page-meta">Connection status for all content and publishing providers</span>
+</div>
+
+{# ── Content Providers ── #}
+<div class="section-label">Content Providers</div>
+<div class="provider-grid">
+  {% for p in content_providers %}
+  <div class="provider-card {{ 'provider-card-connected' if p.connected else '' }}">
+    <div class="provider-name">
+      {{ p.label }}
+      {% if p.connected %}
+        <span class="provider-badge-connected">&#x2713; Connected</span>
+      {% else %}
+        <span class="provider-badge-disconnected">Not connected</span>
+      {% endif %}
+    </div>
+    <div class="provider-desc">{{ p.description }}</div>
+    <div class="provider-auth-type">Auth: API key</div>
+
+    {% if p.cost_usd and p.cost_usd > 0 %}
+    <div class="provider-cost">Usage cost tracked: ${{ "%.4f"|format(p.cost_usd) }}</div>
+    {% else %}
+    <div class="provider-meta">No usage recorded</div>
+    {% endif %}
+
+    <div class="provider-meta">Model list: <em>placeholder — not fetched</em></div>
+    <div class="provider-meta">Credits/balance: <em>placeholder — not fetched</em></div>
+
+    {% if p.connected %}
+    <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Reconnect</a>
+    {% else %}
+    <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Connect</a>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{# ── Publishing Platforms ── #}
+<div class="section-label" style="margin-top: calc(var(--gap) * 1.5)">Publishing Platforms</div>
+<div class="provider-grid">
+  {% for p in platform_providers %}
+  <div class="provider-card {{ 'provider-card-connected' if p.connected else '' }}"
+       data-provider-id="{{ p.id }}">
+    <div class="provider-name">
+      {{ p.label }}
+      {% if p.connected %}
+        <span class="provider-badge-connected">&#x2713; Connected</span>
+      {% else %}
+        <span class="provider-badge-disconnected">Not connected</span>
+      {% endif %}
+    </div>
+    <div class="provider-desc">{{ p.description }}</div>
+
+    {% if p.id == "youtube" %}
+      {# YouTube requires OAuth — never a plain API key paste #}
+      <div class="provider-auth-type">Auth: OAuth 2.0</div>
+
+      <div class="oauth-notice">
+        OAuth setup required. YouTube uses OAuth 2.0 — not an API key.
+      </div>
+
+      <div class="oauth-fields">
+        <div class="section-label" style="margin:0 0 8px; font-size:10px">Required OAuth fields</div>
+        <div class="oauth-field-row">
+          <span class="oauth-label">client_id</span>
+          <span class="oauth-value">{{ p.oauth_client_id or "— not configured —" }}</span>
+        </div>
+        <div class="oauth-field-row">
+          <span class="oauth-label">client_secret</span>
+          <span class="oauth-value">{{ "••••••••" if p.oauth_client_id else "— not configured —" }}</span>
+        </div>
+        <div class="oauth-field-row">
+          <span class="oauth-label">redirect_uri</span>
+          <span class="oauth-value">{{ p.oauth_redirect_uri or "http://localhost:8080/oauth2callback" }}</span>
+        </div>
+        <div class="oauth-field-row">
+          <span class="oauth-label">scopes</span>
+          <span class="oauth-value">youtube.upload, youtube.readonly</span>
+        </div>
+        <div class="oauth-field-row">
+          <span class="oauth-label">authorization status</span>
+          <span class="oauth-value {{ 'provider-badge-connected' if p.connected else '' }}">
+            {{ "Authorized" if p.connected else "Not authorized" }}
+          </span>
+        </div>
+      </div>
+
+      {% if p.cost_usd and p.cost_usd > 0 %}
+      <div class="provider-cost" style="margin-top:8px">Usage cost tracked: ${{ "%.4f"|format(p.cost_usd) }}</div>
+      {% endif %}
+
+      <div class="provider-meta" style="margin-top:6px">
+        Automatic pull: <em>not implemented — manual import only</em>
+      </div>
+
+      {% if p.connected %}
+      <a href="/platforms/connect/youtube" class="btn-provider">Re-authorize</a>
+      {% else %}
+      <a href="/platforms/connect/youtube" class="btn-provider">Set up OAuth</a>
+      {% endif %}
+
+    {% else %}
+      {# TikTok, Instagram, Facebook — API key #}
+      <div class="provider-auth-type">Auth: API key</div>
+
+      {% if p.cost_usd and p.cost_usd > 0 %}
+      <div class="provider-cost">Usage cost tracked: ${{ "%.4f"|format(p.cost_usd) }}</div>
+      {% else %}
+      <div class="provider-meta">No usage recorded</div>
+      {% endif %}
+
+      <div class="provider-meta">Model list: <em>n/a</em></div>
+      <div class="provider-meta">Credits/balance: <em>placeholder — not fetched</em></div>
+
+      {% if p.connected %}
+      <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Reconnect</a>
+      {% else %}
+      <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Connect</a>
+      {% endif %}
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<div style="margin-top: calc(var(--gap) * 2); font-size: 12px; color: var(--muted);">
+  Connections are stored locally. No credentials are sent to external services during provider status checks.
+</div>
+</body>
+</html>

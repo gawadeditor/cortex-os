@@ -455,6 +455,109 @@ class TestOperationsCollapsed:
 
 
 # ===========================================================================
+# F13 — Operator Product Reset
+# ===========================================================================
+
+class TestF13NavRefactor:
+
+    def test_primary_nav_has_only_operator_items(self, client, db):
+        html = _html(client, db)
+        import re as _re
+        # Extract all nav-link hrefs (primary navigation only)
+        nav_links = _re.findall(r'class="nav-link[^"]*"[^>]*href="([^"]+)"', html)
+        if not nav_links:
+            nav_links = _re.findall(r'href="([^"]+)"[^>]*class="nav-link', html)
+        operator_paths = {"/dashboard", "/create", "/episodes", "/channels",
+                          "/providers", "/analytics", "/settings"}
+        for href in nav_links:
+            assert href in operator_paths, (
+                f"Non-operator nav item found: {href!r}. "
+                f"Only {sorted(operator_paths)} allowed in primary nav."
+            )
+
+    def test_internal_pages_not_in_primary_nav(self, client, db):
+        html = _html(client, db)
+        import re as _re
+        nav_links = _re.findall(r'class="nav-link[^"]*"[^>]*href="([^"]+)"', html)
+        if not nav_links:
+            nav_links = _re.findall(r'href="([^"]+)"[^>]*class="nav-link', html)
+        internal = {"/command", "/live", "/runs", "/queue", "/approvals",
+                    "/signals", "/learning", "/decisions", "/decision-reviews",
+                    "/execution-plans", "/decision-inputs"}
+        for href in nav_links:
+            assert href not in internal, (
+                f"Internal page {href!r} found in primary nav — must be in Operations only."
+            )
+
+    def test_dashboard_contains_factory_health(self, client, db):
+        html = _html(client, db)
+        assert "Factory Health" in html
+
+    def test_dashboard_contains_production_section(self, client, db):
+        html = _html(client, db)
+        assert "Production Overview" in html or "In Production" in html or "Current Production" in html
+
+    def test_dashboard_contains_needs_attention(self, client, db):
+        html = _html(client, db)
+        assert "Needs Attention" in html
+
+    def test_dashboard_contains_recent_episodes(self, client, db):
+        html = _html(client, db)
+        assert "Recent Episodes" in html
+
+    def test_dashboard_contains_analytics_or_performance(self, client, db):
+        html = _html(client, db)
+        assert "Analytics" in html or "Performance" in html
+
+    def test_dashboard_contains_cost_section(self, client, db):
+        html = _html(client, db)
+        # Cost appears in production cost KPI or costs section
+        assert "cost" in html.lower() or "Cost" in html
+
+    def test_dashboard_no_raw_signal_ids_in_text_nodes(self, client, db):
+        sig_id = str(uuid.uuid4())
+        sig = {
+            "signal_id": sig_id, "signal_type": "ois_block",
+            "severity": "CRITICAL", "message": "factory blocked",
+            "blocking": True, "lifecycle_status": "open",
+            "channel_id": None, "source_system": "ois",
+            "created_at": "2026-06-19T10:00:00",
+        }
+        html = _html(client, db, signals=[sig])
+        text_nodes = re.findall(r'>([^<]*' + re.escape(sig_id) + r'[^<]*)<', html)
+        assert len(text_nodes) == 0, f"Raw signal ID found as text node: {text_nodes}"
+
+    def test_dashboard_no_decision_execution_plans_visible(self, client, db):
+        html = _html(client, db)
+        text_nodes = re.findall(r'>([^<]*decision_execution_plan[^<]*)<', html)
+        assert len(text_nodes) == 0, f"'decision_execution_plans' exposed as text: {text_nodes}"
+
+    def test_dashboard_no_secret_profiles_visible(self, client, db):
+        html = _html(client, db)
+        text_nodes = re.findall(r'>([^<]*secret_profile[^<]*)<', html)
+        assert len(text_nodes) == 0, f"'secret_profiles' exposed as text: {text_nodes}"
+
+    def test_analytics_import_default_is_not_mock(self, client, db):
+        import run_dashboard as server
+        server.app.config["DB_PATH"] = str(db)
+        resp = client.get("/analytics/import")
+        html = resp.data.decode()
+        # The hidden input "method-input" should NOT default to "mock"
+        assert 'id="method-input" value="mock"' not in html
+        assert 'value="mock"' not in html.split('id="method-input"')[0][-200:] if 'id="method-input"' in html else True
+
+    def test_analytics_import_json_is_first_active_tab(self, client, db):
+        import run_dashboard as server
+        server.app.config["DB_PATH"] = str(db)
+        resp = client.get("/analytics/import")
+        html = resp.data.decode()
+        # JSON tab must come before mock tab in the HTML
+        json_pos = html.find("setMethod('json'")
+        mock_pos = html.find("setMethod('mock'")
+        assert json_pos < mock_pos, "JSON tab must appear before mock tab"
+
+
+# ===========================================================================
 # TestNoNetworkCalls
 # ===========================================================================
 

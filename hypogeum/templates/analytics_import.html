@@ -122,14 +122,14 @@
     <div class="field">
       <label>Import method</label>
       <div class="method-tabs">
-        <button type="button" class="method-tab active" onclick="setMethod('mock', event)">Generate demo data</button>
-        <button type="button" class="method-tab" onclick="setMethod('json', event)">Paste JSON</button>
+        <button type="button" class="method-tab active" onclick="setMethod('json', event)">Paste JSON</button>
         <button type="button" class="method-tab" onclick="setMethod('csv', event)">Paste CSV</button>
+        <button type="button" class="method-tab" onclick="setMethod('mock', event)" style="color:var(--muted); opacity:.7;">Generate demo data</button>
       </div>
-      <input type="hidden" name="method" id="method-input" value="mock">
+      <input type="hidden" name="method" id="method-input" value="json">
     </div>
 
-    <div class="method-panel active" id="panel-mock">
+    <div class="method-panel" id="panel-mock">
       <div style="color:var(--muted); font-size:13px; line-height:1.6;">
         Generates deterministic synthetic metrics based on the episode ID and platform.
         Produces the same values every time — safe to call repeatedly.
@@ -140,7 +140,7 @@
       </div>
     </div>
 
-    <div class="method-panel" id="panel-json">
+    <div class="method-panel active" id="panel-json">
       <label>Paste JSON metrics</label>
       <textarea name="json_text" id="json-text" placeholder='{ "views": 15000, "ctr": 0.048, ... }'></textarea>
       <div id="json-hint" class="format-hint">Select a platform above to see the expected format.</div>

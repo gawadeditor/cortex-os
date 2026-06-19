@@ -1,5 +1,5 @@
 """
-hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Steps 1–4).
+hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Steps 1–5).
 
 Public API:
     get_episode_detail(episode_id, db_path=None) -> dict | None
@@ -323,6 +323,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     # ── Titles tab data ──────────────────────────────────────────────────
     titles_data = _build_titles_data(conn, episode_id)
 
+    # ── Analytics tab data ───────────────────────────────────────────────
+    analytics_data = _build_analytics_data(conn, episode_id)
+
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
 
@@ -382,6 +385,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
 
         # Titles tab
         "titles": titles_data,
+
+        # Analytics tab
+        "analytics": analytics_data,
 
         # Production tab
         "stage_groups": stage_groups,
@@ -843,5 +849,199 @@ def _build_titles_data(conn, episode_id: str) -> dict:
             "count":         len(candidates),
             "has_selected":  has_selected,
             "has_real_data": has_real_data,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Analytics tab data
+# ---------------------------------------------------------------------------
+
+_ANALYTICS_STALE_DAYS = 7  # snapshots older than this are flagged stale
+
+
+def _build_analytics_data(conn, episode_id: str) -> dict:
+    """
+    Build Analytics tab data for one episode.
+
+    Real analytics:  source IN ('manual','api','csv')  — source != 'mock'
+    Mock analytics:  source = 'mock' — counted in health panel ONLY, never in KPIs.
+
+    For multi-snapshot episodes the LATEST snapshot per platform is used for
+    metric display (avoids double-counting across 7d/28d windows).
+    The EARLIEST snapshot date is shown as "first analytics" in Publishing
+    Performance.
+
+    Returns:
+        {
+          "overview":   aggregate totals/averages across all real platforms,
+          "platforms":  per-platform breakdown (all 4 canonical platforms),
+          "health":     row counts, missing platforms, stale flags,
+        }
+    """
+    from datetime import date as _date
+
+    today = _date.today()
+
+    # ── Publishing outcomes for this episode ─────────────────────────────
+    pub_rows = conn.execute(
+        """
+        SELECT platform, publishing_status, platform_video_id, published_at, url
+        FROM publishing_outcomes
+        WHERE episode_id = ?
+        """,
+        [episode_id],
+    ).fetchall()
+    pub_by_platform: dict[str, dict] = {_row(r)["platform"]: _row(r) for r in pub_rows}
+
+    # ── Latest real snapshot per platform ───────────────────────────────
+    latest_rows = conn.execute(
+        """
+        SELECT pa.platform, pa.views, pa.impressions, pa.ctr,
+               pa.avg_view_pct, pa.avg_watch_time_s, pa.total_watch_time_s,
+               pa.likes, pa.comments, pa.shares, pa.saves,
+               pa.platform_video_id, pa.snapshot_date
+        FROM platform_analytics pa
+        INNER JOIN (
+            SELECT platform, MAX(snapshot_date) AS max_date
+            FROM platform_analytics
+            WHERE episode_id = ? AND source != 'mock'
+            GROUP BY platform
+        ) lx ON pa.platform = lx.platform AND pa.snapshot_date = lx.max_date
+        WHERE pa.episode_id = ? AND pa.source != 'mock'
+        """,
+        [episode_id, episode_id],
+    ).fetchall()
+    real_by_platform: dict[str, dict] = {_row(r)["platform"]: _row(r) for r in latest_rows}
+
+    # ── Earliest snapshot per platform (for Publishing Performance) ──────
+    first_rows = conn.execute(
+        """
+        SELECT platform, MIN(snapshot_date) AS first_snapshot
+        FROM platform_analytics
+        WHERE episode_id = ? AND source != 'mock'
+        GROUP BY platform
+        """,
+        [episode_id],
+    ).fetchall()
+    first_snap: dict[str, str] = {r["platform"]: r["first_snapshot"] for r in first_rows}
+
+    # ── Row counts (real vs mock) ────────────────────────────────────────
+    counts = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN source != 'mock' THEN 1 ELSE 0 END) AS real_count,
+            SUM(CASE WHEN source  = 'mock' THEN 1 ELSE 0 END) AS mock_count
+        FROM platform_analytics
+        WHERE episode_id = ?
+        """,
+        [episode_id],
+    ).fetchone()
+    real_row_count = int(counts["real_count"] or 0) if counts else 0
+    mock_row_count = int(counts["mock_count"] or 0) if counts else 0
+
+    # ── Per-platform breakdown ───────────────────────────────────────────
+    missing_platforms: list[str] = []
+    stale_platforms: list[str]   = []
+    platform_cards: list[dict]   = []
+
+    for p_key in _PLATFORM_ORDER:
+        real = real_by_platform.get(p_key)
+        pub  = pub_by_platform.get(p_key)
+
+        published        = pub is not None and pub.get("publishing_status") == "success"
+        has_data         = real is not None
+        latest_snap      = real["snapshot_date"] if real else None
+
+        # Staleness: real data exists but last snapshot is old
+        is_stale = False
+        if latest_snap:
+            try:
+                delta = (today - _date.fromisoformat(latest_snap)).days
+                if delta >= _ANALYTICS_STALE_DAYS:
+                    is_stale = True
+                    stale_platforms.append(p_key)
+            except Exception:
+                pass
+
+        # Missing: no real analytics data at all for this platform
+        if not has_data:
+            missing_platforms.append(p_key)
+
+        # Days since publish
+        days_since_publish: Optional[int] = None
+        published_at = pub.get("published_at") if pub else None
+        if published_at:
+            try:
+                days_since_publish = (today - _date.fromisoformat(published_at[:10])).days
+            except Exception:
+                pass
+
+        # Derived metrics
+        ctr_pct          = round(real["ctr"] * 100, 2) if real and real.get("ctr") is not None else None
+        avg_retention    = round(real["avg_view_pct"] * 100, 1) if real and real.get("avg_view_pct") is not None else None
+        total_watch_h    = round(real["total_watch_time_s"] / 3600, 1) if real and real.get("total_watch_time_s") is not None else None
+        avg_watch_s      = real.get("avg_watch_time_s") if real else None
+
+        # platform_video_id: prefer publishing_outcomes, fall back to analytics
+        video_id = (pub.get("platform_video_id") if pub else None) or (real.get("platform_video_id") if real else None)
+
+        platform_cards.append({
+            "platform":            p_key,
+            "display_name":        _PLATFORM_DISPLAY_NAMES[p_key],
+            "published":           published,
+            "published_at":        published_at,
+            "platform_video_id":   video_id,
+            "url":                 pub.get("url") if pub else None,
+            "days_since_publish":  days_since_publish,
+            "first_snapshot":      first_snap.get(p_key),
+            "latest_snapshot":     latest_snap,
+            "views":               int(real["views"]) if real and real.get("views") is not None else None,
+            "impressions":         int(real["impressions"]) if real and real.get("impressions") is not None else None,
+            "ctr_pct":             ctr_pct,
+            "avg_retention_pct":   avg_retention,
+            "total_watch_time_h":  total_watch_h,
+            "avg_watch_time_s":    avg_watch_s,
+            "likes":               int(real["likes"]) if real and real.get("likes") is not None else None,
+            "comments":            int(real["comments"]) if real and real.get("comments") is not None else None,
+            "shares":              int(real["shares"]) if real and real.get("shares") is not None else None,
+            "saves":               int(real["saves"]) if real and real.get("saves") is not None else None,
+            "has_data":            has_data,
+            "is_stale":            is_stale,
+        })
+
+    # ── Overview: aggregate across platforms with real data ───────────────
+    has_real = bool(real_by_platform)
+
+    def _sum(field: str) -> Optional[int]:
+        vals = [p[field] for p in platform_cards if p.get(field) is not None]
+        return sum(vals) if vals else None
+
+    def _avg(field: str) -> Optional[float]:
+        vals = [p[field] for p in platform_cards if p.get(field) is not None]
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    overview: dict = {
+        "total_views":         _sum("views"),
+        "total_impressions":   _sum("impressions"),
+        "avg_ctr":             _avg("ctr_pct"),
+        "total_watch_time_h":  _sum("total_watch_time_h"),
+        "avg_view_duration_s": _avg("avg_watch_time_s"),
+        "avg_retention_pct":   _avg("avg_retention_pct"),
+        "total_likes":         _sum("likes"),
+        "total_comments":      _sum("comments"),
+        "total_shares":        _sum("shares"),
+        "has_real_data":       has_real,
+    }
+
+    return {
+        "overview":  overview,
+        "platforms": platform_cards,
+        "health": {
+            "real_row_count":    real_row_count,
+            "mock_row_count":    mock_row_count,
+            "has_mock":          mock_row_count > 0,
+            "missing_platforms": missing_platforms,
+            "stale_platforms":   stale_platforms,
         },
     }

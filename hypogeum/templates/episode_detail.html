@@ -170,6 +170,60 @@
 
     @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:.4; } }
 
+    /* ── Analytics tab ── */
+    .anl-section  { margin-bottom: var(--gap); }
+    .anl-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 10px; margin-bottom: var(--gap);
+    }
+    .anl-kpi-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 14px;
+    }
+    .anl-kpi-val  { font-size: 20px; font-weight: 700;
+                    font-variant-numeric: tabular-nums; line-height: 1.1; }
+    .anl-kpi-lbl  { font-size: 10px; color: var(--muted);
+                    text-transform: uppercase; letter-spacing: .05em;
+                    margin-top: 4px; }
+    .anl-plat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: var(--gap); margin-bottom: var(--gap);
+    }
+    .anl-plat-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+      border-left: 3px solid var(--border);
+    }
+    .anl-plat-card-pub  { border-left-color: #2ea043; }
+    .anl-plat-card-stale { border-left-color: #9e6a03; }
+    .anl-plat-header    { display:flex; align-items:center; gap:8px;
+                          margin-bottom:10px; }
+    .anl-plat-name      { font-size:14px; font-weight:700; }
+    .anl-metric-row     { display:flex; justify-content:space-between;
+                          font-size:12px; padding:3px 0;
+                          border-bottom:1px solid var(--border); }
+    .anl-metric-row:last-child { border-bottom:none; }
+    .anl-metric-label   { color:var(--muted); }
+    .anl-metric-value   { font-weight:600; font-variant-numeric:tabular-nums; }
+    .anl-no-data        { font-size:12px; color:var(--muted);
+                          font-style:italic; margin-top:4px; }
+    .anl-health-card    {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:var(--radius); padding:14px 16px;
+    }
+    .anl-health-row     { display:flex; justify-content:space-between;
+                          font-size:12px; padding:4px 0;
+                          border-bottom:1px solid var(--border); }
+    .anl-health-row:last-child { border-bottom:none; }
+    .anl-mock-warning   {
+      background:#1f1800; border:1px solid #9e6a03;
+      border-radius:var(--radius); padding:10px 14px;
+      font-size:12px; color:var(--yellow); margin-top:10px;
+    }
+    .anl-stale-warn     { color:var(--yellow); font-size:11px; }
+
     /* ── Titles tab ── */
     .title-list  { display: flex; flex-direction: column; gap: 8px; }
     .title-card  {
@@ -398,7 +452,7 @@
   <a href="?tab=publishing" class="tab-btn {% if active_tab == 'publishing' %}active{% endif %}">Publishing</a>
   <a href="?tab=thumbnails" class="tab-btn {% if active_tab == 'thumbnails' %}active{% endif %}">Thumbnails</a>
   <a href="?tab=titles" class="tab-btn {% if active_tab == 'titles' %}active{% endif %}">Titles</a>
-  <span class="tab-btn disabled" title="Coming soon">Analytics</span>
+  <a href="?tab=analytics" class="tab-btn {% if active_tab == 'analytics' %}active{% endif %}">Analytics</a>
   <span class="tab-btn disabled" title="Coming soon">Revenue</span>
   <span class="tab-btn disabled" title="Coming soon">Learning</span>
 </div>
@@ -923,6 +977,238 @@
 {% endif %}
 
 {% endif %}{# end active_tab == 'titles' #}
+
+{# ════════════════════════════════════════════════════════════════
+   ANALYTICS TAB
+════════════════════════════════════════════════════════════════ #}
+{% if active_tab == 'analytics' %}
+{% set anl = d.analytics %}
+{% set ov  = anl.overview %}
+
+{# ── 1. Analytics Overview ──────────────────────────────────── #}
+<div class="anl-section">
+  <div class="card-title" style="margin-bottom:10px;">Analytics Overview
+    <span class="muted" style="font-size:11px; font-weight:400; text-transform:none; letter-spacing:0;">
+      &mdash; real data only
+    </span>
+  </div>
+
+  {% if ov.has_real_data %}
+  <div class="anl-kpi-grid">
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ "{:,}".format(ov.total_views) if ov.total_views is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Total Views</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ "{:,}".format(ov.total_impressions) if ov.total_impressions is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Impressions</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ ov.avg_ctr ~ '%' if ov.avg_ctr is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Avg CTR</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ ov.total_watch_time_h ~ 'h' if ov.total_watch_time_h is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Watch Time</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ ov.avg_view_duration_s|round|int ~ 's' if ov.avg_view_duration_s is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Avg Duration</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ ov.avg_retention_pct ~ '%' if ov.avg_retention_pct is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Avg Retention</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ "{:,}".format(ov.total_likes) if ov.total_likes is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Likes</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ "{:,}".format(ov.total_comments) if ov.total_comments is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Comments</div>
+    </div>
+    <div class="anl-kpi-card">
+      <div class="anl-kpi-val">{{ "{:,}".format(ov.total_shares) if ov.total_shares is not none else '—' }}</div>
+      <div class="anl-kpi-lbl">Shares</div>
+    </div>
+  </div>
+  {% else %}
+  <div class="card" style="text-align:center; padding:30px 20px; color:var(--muted);">
+    No real analytics imported yet.
+    <div style="margin-top:10px;">
+      <a href="/analytics/import?episode_id={{ d.episode_id }}" class="btn">Import analytics →</a>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{# ── 2. Platform Breakdown ───────────────────────────────────── #}
+<div class="anl-section">
+  <div class="card-title" style="margin-bottom:10px;">Platform Breakdown</div>
+  <div class="anl-plat-grid">
+    {% for p in anl.platforms %}
+    <div class="anl-plat-card
+                {% if p.published %}anl-plat-card-pub{% endif %}
+                {% if p.is_stale %}anl-plat-card-stale{% endif %}">
+
+      <div class="anl-plat-header">
+        <span class="anl-plat-name">{{ p.display_name }}</span>
+        {% if p.published %}
+          <span class="badge badge-completed" style="font-size:10px;">Published</span>
+        {% else %}
+          <span class="badge badge-skipped" style="font-size:10px;">Not published</span>
+        {% endif %}
+        {% if p.is_stale %}
+          <span class="anl-stale-warn">⚠ Stale</span>
+        {% endif %}
+      </div>
+
+      {% if p.has_data %}
+        {% if p.views is not none %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">Views</span>
+          <span class="anl-metric-value">{{ "{:,}".format(p.views) }}</span>
+        </div>
+        {% endif %}
+        {% if p.impressions is not none %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">Impressions</span>
+          <span class="anl-metric-value">{{ "{:,}".format(p.impressions) }}</span>
+        </div>
+        {% endif %}
+        {% if p.ctr_pct is not none %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">CTR</span>
+          <span class="anl-metric-value">{{ p.ctr_pct }}%</span>
+        </div>
+        {% endif %}
+        {% if p.avg_retention_pct is not none %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">Avg Retention</span>
+          <span class="anl-metric-value">{{ p.avg_retention_pct }}%</span>
+        </div>
+        {% endif %}
+        {% if p.total_watch_time_h is not none %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">Watch Time</span>
+          <span class="anl-metric-value">{{ p.total_watch_time_h }}h</span>
+        </div>
+        {% endif %}
+        {% if p.likes is not none %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">Likes</span>
+          <span class="anl-metric-value">{{ "{:,}".format(p.likes) }}</span>
+        </div>
+        {% endif %}
+        {% if p.comments is not none %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">Comments</span>
+          <span class="anl-metric-value">{{ "{:,}".format(p.comments) }}</span>
+        </div>
+        {% endif %}
+        {% if p.latest_snapshot %}
+        <div class="anl-metric-row">
+          <span class="anl-metric-label">Last snapshot</span>
+          <span class="anl-metric-value muted">{{ p.latest_snapshot }}</span>
+        </div>
+        {% endif %}
+      {% else %}
+        <div class="anl-no-data">No analytics imported for this platform.</div>
+      {% endif %}
+
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+{# ── 3. Publishing Performance ───────────────────────────────── #}
+{% set published_platforms = anl.platforms | selectattr('published') | list %}
+{% if published_platforms %}
+<div class="anl-section">
+  <div class="card-title" style="margin-bottom:10px;">Publishing Performance</div>
+  <div class="card" style="padding:0;">
+    <table>
+      <thead>
+        <tr>
+          <th>Platform</th>
+          <th>Published</th>
+          <th>Days since publish</th>
+          <th>Video ID</th>
+          <th>First analytics</th>
+          <th>Latest analytics</th>
+          <th>Link</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in published_platforms %}
+        <tr>
+          <td style="font-weight:600;">{{ p.display_name }}</td>
+          <td class="muted">{{ p.published_at[:10] if p.published_at else '—' }}</td>
+          <td class="muted">{{ p.days_since_publish ~ ' days' if p.days_since_publish is not none else '—' }}</td>
+          <td>
+            {% if p.platform_video_id %}
+              <span style="font-family:monospace; font-size:11px; color:var(--muted);">
+                {{ p.platform_video_id }}
+              </span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="muted">{{ p.first_snapshot or '—' }}</td>
+          <td class="muted">{{ p.latest_snapshot or '—' }}</td>
+          <td>
+            {% if p.url %}
+              <a href="{{ p.url }}" target="_blank" rel="noopener"
+                 style="font-size:12px;">Open ↗</a>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ── 4. Analytics Health ─────────────────────────────────────── #}
+<div class="anl-section">
+  <div class="card-title" style="margin-bottom:10px;">Analytics Health</div>
+  <div class="anl-health-card">
+    <div class="anl-health-row">
+      <span class="anl-metric-label">Real analytics rows</span>
+      <span class="anl-metric-value {% if anl.health.real_row_count > 0 %}ok{% else %}muted{% endif %}">
+        {{ anl.health.real_row_count }}
+      </span>
+    </div>
+    <div class="anl-health-row">
+      <span class="anl-metric-label">Mock/demo rows</span>
+      <span class="anl-metric-value {% if anl.health.mock_row_count > 0 %}warn{% else %}muted{% endif %}">
+        {{ anl.health.mock_row_count }}
+      </span>
+    </div>
+    {% if anl.health.missing_platforms %}
+    <div class="anl-health-row">
+      <span class="anl-metric-label">Missing analytics</span>
+      <span class="anl-metric-value muted">
+        {{ anl.health.missing_platforms | map('upper') | join(', ') }}
+      </span>
+    </div>
+    {% endif %}
+    {% if anl.health.stale_platforms %}
+    <div class="anl-health-row">
+      <span class="anl-metric-label">Stale (>7 days)</span>
+      <span class="anl-metric-value warn">
+        {{ anl.health.stale_platforms | map('upper') | join(', ') }}
+      </span>
+    </div>
+    {% endif %}
+    {% if anl.health.has_mock %}
+    <div class="anl-mock-warning">
+      ⚠ Mock/demo data exists but is excluded from all KPIs.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endif %}{# end active_tab == 'analytics' #}
 
 </body>
 </html>

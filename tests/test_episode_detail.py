@@ -269,10 +269,12 @@ class TestGetEpisodeDetail:
         conn.commit()
         conn.close()
         d = get_episode_detail("ep_001", db_path=db_path)
-        # episode_detail never reads platform_analytics; verify no mock field leaks
         assert d is not None
-        # No analytics field exists on the result dict
-        assert "analytics" not in d
+        # Mock analytics must not appear in KPI values (overview totals)
+        # d["analytics"] now exists (added Step 5) but its KPIs must reflect real=0
+        assert d["analytics"]["overview"]["has_real_data"] is False
+        assert d["analytics"]["overview"]["total_views"] is None
+        # Top-level dict must not expose raw views
         assert "views" not in d
 
     def test_non_blocking_on_bad_db_path(self):

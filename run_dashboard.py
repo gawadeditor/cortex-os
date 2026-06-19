@@ -777,7 +777,7 @@ def episode_detail_page(episode_id):
     d = get_episode_detail(episode_id, db_path=_db_path())
     if d is None:
         return render_template("not_found.html", kind="Episode", id=episode_id), 404
-    valid_tabs = {"production", "publishing", "thumbnails", "titles", "analytics", "revenue"}
+    valid_tabs = {"production", "publishing", "thumbnails", "titles", "analytics", "revenue", "learning"}
     active_tab = request.args.get("tab", "production")
     if active_tab not in valid_tabs:
         active_tab = "production"

@@ -104,6 +104,38 @@ _CALL_TYPE_LABELS: dict[str, str] = {
     "api_call":         "API Call",
 }
 
+# Learning tab — domain mapping for analytics_insights.affected_dim
+_INSIGHT_DIM_TO_DOMAIN: dict[str, str] = {
+    "thumbnail":       "thumbnail",
+    "title":           "title",
+    "hook":            "title",
+    "pacing":          "topic",
+    "topic":           "topic",
+    "publishing_time": "platform",
+    "duration":        "topic",
+    "description":     "title",
+}
+
+# Learning tab — domain mapping for learning_records.signal_type
+_SIGNAL_TYPE_TO_DOMAIN: dict[str, str] = {
+    "performance":     "platform",
+    "gate_outcome":    "topic",
+    "cost_efficiency": "cost",
+    "quality_verdict": "topic",
+    "topic_score":     "topic",
+    "thumbnail_ctr":   "thumbnail",
+}
+
+# Learning tab — action_type → readable verb
+_ACTION_TYPE_LABELS: dict[str, str] = {
+    "prefer":   "Repeat",
+    "avoid":    "Avoid",
+    "increase": "Increase",
+    "decrease": "Reduce",
+    "test":     "Test",
+    "change":   "Change",
+}
+
 # Operator-language translations for publish failure reasons
 _PUBLISH_FAILURE_HINTS: dict[str, str] = {
     "rate_limit": "Platform rate limit reached",
@@ -170,6 +202,16 @@ def _published_at_display(published_at: Optional[str]) -> str:
         return f"{delta} days ago"
     except Exception:
         return "Unknown"
+
+
+def _signal_to_confidence(signal_strength: float) -> str:
+    """Convert a -1.0..+1.0 signal strength to Low / Medium / High label."""
+    abs_s = abs(signal_strength)
+    if abs_s >= 0.65:
+        return "High"
+    if abs_s >= 0.35:
+        return "Medium"
+    return "Low"
 
 
 def _group_status(stages: list[dict]) -> str:
@@ -338,6 +380,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     # ── Revenue tab data ─────────────────────────────────────────────────
     revenue_data = _build_revenue_data(conn, episode_id, run_id)
 
+    # ── Learning tab data ────────────────────────────────────────────────
+    learning_data = _build_learning_data(conn, episode_id, run_id)
+
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
 
@@ -403,6 +448,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
 
         # Revenue tab
         "revenue": revenue_data,
+
+        # Learning tab
+        "learning": learning_data,
 
         # Production tab
         "stage_groups": stage_groups,
@@ -1046,6 +1094,540 @@ def _build_revenue_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
         },
         "cost_breakdown":   cost_rows,
         "platform_revenue": platform_revenue,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Learning tab data
+# ---------------------------------------------------------------------------
+
+def _build_learning_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
+    """
+    Build Learning tab data for one episode.
+
+    Sources (real data only — source != 'mock'):
+        analytics_insights, learning_records, learning_actions,
+        platform_analytics, thumbnail_candidates, titles, costs.
+
+    Returns:
+        {
+          "summary":          {has_real_data, has_learning_records, overall_verdict,
+                               what_worked, what_underperformed,
+                               what_to_repeat, what_to_avoid},
+          "thumbnail":        {selected_text, visual_prompt, ctr_pct, verdict,
+                               recommendation, has_thumbnail},
+          "title":            {selected_text, format_type, format_label, ctr_pct,
+                               verdict, recommendation, has_title},
+          "platform":         {has_data, best_by_views, best_by_ctr,
+                               best_by_retention, platform_cards,
+                               missing_platforms, missing_warning},
+          "financial":        {has_cost_data, total_cost_usd, cost_verdict,
+                               has_revenue_data, revenue_verdict},
+          "recommendations":  [{domain, text, confidence, reason}],
+        }
+    """
+    # ── Real analytics: latest snapshot per platform, source != 'mock' ────
+    try:
+        latest_rows = conn.execute(
+            """
+            SELECT pa.platform, pa.views, pa.ctr, pa.avg_view_pct,
+                   pa.avg_watch_time_s, pa.likes, pa.comments, pa.shares
+            FROM platform_analytics pa
+            INNER JOIN (
+                SELECT platform, MAX(snapshot_date) AS max_date
+                FROM platform_analytics
+                WHERE episode_id = ? AND source != 'mock'
+                GROUP BY platform
+            ) lx ON pa.platform = lx.platform AND pa.snapshot_date = lx.max_date
+            WHERE pa.episode_id = ? AND pa.source != 'mock'
+            """,
+            [episode_id, episode_id],
+        ).fetchall()
+        real_by_platform: dict[str, dict] = {_row(r)["platform"]: _row(r) for r in latest_rows}
+    except Exception:
+        real_by_platform = {}
+
+    has_real_data = bool(real_by_platform)
+
+    # ── Learning records ──────────────────────────────────────────────────
+    try:
+        lr_rows = conn.execute(
+            """
+            SELECT signal_type, signal_value, signal_label, recommendation
+            FROM learning_records
+            WHERE episode_id = ?
+            ORDER BY recorded_at DESC
+            """,
+            [episode_id],
+        ).fetchall()
+        learning_records_list = [_row(r) for r in lr_rows]
+    except Exception:
+        learning_records_list = []
+
+    has_learning_records = bool(learning_records_list)
+
+    # ── Analytics insights ────────────────────────────────────────────────
+    try:
+        ai_rows = conn.execute(
+            """
+            SELECT insight_type, affected_dim, signal_strength, threshold_used, detail
+            FROM analytics_insights
+            WHERE episode_id = ?
+            ORDER BY ABS(signal_strength) DESC
+            """,
+            [episode_id],
+        ).fetchall()
+        insights = [_row(r) for r in ai_rows]
+    except Exception:
+        insights = []
+
+    # ── Learning actions (for this episode) ───────────────────────────────
+    try:
+        la_rows = conn.execute(
+            """
+            SELECT action_id, dimension, action_type, rationale, status
+            FROM learning_actions
+            WHERE source_episode = ?
+            ORDER BY created_at DESC
+            """,
+            [episode_id],
+        ).fetchall()
+        actions = [_row(r) for r in la_rows]
+    except Exception:
+        actions = []
+
+    # ── Selected thumbnail ────────────────────────────────────────────────
+    try:
+        tn_row = conn.execute(
+            """
+            SELECT text_overlay, visual_prompt
+            FROM thumbnail_candidates
+            WHERE episode_id = ? AND selected = 1
+            LIMIT 1
+            """,
+            [episode_id],
+        ).fetchone()
+        sel_thumbnail = _row(tn_row) if tn_row else {}
+    except Exception:
+        sel_thumbnail = {}
+
+    # ── Selected title ────────────────────────────────────────────────────
+    try:
+        title_row = conn.execute(
+            "SELECT title_text FROM titles WHERE episode_id = ? AND selected = 1 LIMIT 1",
+            [episode_id],
+        ).fetchone()
+        sel_title_text: Optional[str] = title_row["title_text"] if title_row else None
+    except Exception:
+        sel_title_text = None
+
+    # ── Cost total ────────────────────────────────────────────────────────
+    total_cost_usd_l: Optional[float] = None
+    try:
+        cost_row = conn.execute(
+            "SELECT SUM(cost_usd) AS total FROM costs WHERE episode_id = ?",
+            [episode_id],
+        ).fetchone()
+        if cost_row and cost_row["total"] is not None:
+            total_cost_usd_l = round(float(cost_row["total"]), 6)
+    except Exception:
+        pass
+
+    # ── Best platform per metric ──────────────────────────────────────────
+    best_by_views:     Optional[dict] = None
+    best_by_ctr:       Optional[dict] = None
+    best_by_retention: Optional[dict] = None
+
+    if real_by_platform:
+        views_pairs = [
+            (p, int(d["views"])) for p, d in real_by_platform.items()
+            if d.get("views") is not None
+        ]
+        ctr_pairs = [
+            (p, float(d["ctr"])) for p, d in real_by_platform.items()
+            if d.get("ctr") is not None
+        ]
+        ret_pairs = [
+            (p, float(d["avg_view_pct"])) for p, d in real_by_platform.items()
+            if d.get("avg_view_pct") is not None
+        ]
+        if views_pairs:
+            best_p, best_v = max(views_pairs, key=lambda x: x[1])
+            best_by_views = {
+                "platform":     best_p,
+                "display_name": _PLATFORM_DISPLAY_NAMES.get(best_p, best_p.title()),
+                "value":        best_v,
+                "label":        "views",
+            }
+        if ctr_pairs:
+            best_p, best_v = max(ctr_pairs, key=lambda x: x[1])
+            best_by_ctr = {
+                "platform":     best_p,
+                "display_name": _PLATFORM_DISPLAY_NAMES.get(best_p, best_p.title()),
+                "value":        round(best_v * 100, 2),
+                "label":        "CTR",
+            }
+        if ret_pairs:
+            best_p, best_v = max(ret_pairs, key=lambda x: x[1])
+            best_by_retention = {
+                "platform":     best_p,
+                "display_name": _PLATFORM_DISPLAY_NAMES.get(best_p, best_p.title()),
+                "value":        round(best_v * 100, 1),
+                "label":        "avg retention",
+            }
+
+    # ── Thumbnail verdict ─────────────────────────────────────────────────
+    best_ctr_val: Optional[float] = None
+    if real_by_platform:
+        ctr_vals = [
+            float(d["ctr"]) for d in real_by_platform.values()
+            if d.get("ctr") is not None
+        ]
+        if ctr_vals:
+            best_ctr_val = max(ctr_vals)
+
+    ctr_pct_ep: Optional[float] = (
+        round(best_ctr_val * 100, 2) if best_ctr_val is not None else None
+    )
+
+    if best_ctr_val is None:
+        tn_verdict = "Waiting for analytics"
+        tn_rec     = "Import analytics to see how this thumbnail performed."
+    elif best_ctr_val >= _CTR_WINNER_THRESHOLD:
+        tn_verdict = "Strong thumbnail"
+        tn_rec     = "Keep this visual approach for similar topics."
+    elif best_ctr_val >= _CTR_UNDERPERFORMED_THRESHOLD:
+        tn_verdict = "Acceptable thumbnail"
+        tn_rec     = "Test a stronger visual hook in the next episode."
+    else:
+        tn_verdict = "Weak thumbnail"
+        tn_rec     = "Replace thumbnail approach — current style underperformed."
+
+    prompt_preview = (sel_thumbnail.get("visual_prompt") or "")[:120] or None
+
+    thumbnail_learning = {
+        "selected_text":  sel_thumbnail.get("text_overlay"),
+        "visual_prompt":  prompt_preview,
+        "ctr_pct":        ctr_pct_ep,
+        "verdict":        tn_verdict,
+        "recommendation": tn_rec,
+        "has_thumbnail":  bool(sel_thumbnail),
+    }
+
+    # ── Title verdict ─────────────────────────────────────────────────────
+    title_fmt   = _classify_title_format(sel_title_text) if sel_title_text else "unknown"
+    title_label = _FORMAT_LABELS.get(title_fmt, "Other")
+
+    if best_ctr_val is None:
+        title_verdict = "Waiting for analytics"
+        title_rec     = "Import analytics to see how this title performed."
+    elif best_ctr_val >= _CTR_WINNER_THRESHOLD:
+        title_verdict = "Strong title"
+        title_rec     = (
+            f"This {title_label.lower()} format worked well — use similar approach."
+        )
+    elif best_ctr_val >= _CTR_UNDERPERFORMED_THRESHOLD:
+        title_verdict = "Acceptable title"
+        title_rec     = "Title performed adequately — refine the hook for better click-through."
+    else:
+        title_verdict = "Weak title"
+        title_rec     = "Title underperformed — try a stronger hook or different format."
+
+    title_learning = {
+        "selected_text":  sel_title_text,
+        "format_type":    title_fmt,
+        "format_label":   title_label,
+        "ctr_pct":        ctr_pct_ep,
+        "verdict":        title_verdict,
+        "recommendation": title_rec,
+        "has_title":      bool(sel_title_text),
+    }
+
+    # ── Platform learning ─────────────────────────────────────────────────
+    platform_cards: list[dict] = []
+    for p_key in _PLATFORM_ORDER:
+        real = real_by_platform.get(p_key)
+        if not real:
+            continue
+        platform_cards.append({
+            "platform":      p_key,
+            "display_name":  _PLATFORM_DISPLAY_NAMES[p_key],
+            "views":         int(real["views"]) if real.get("views") is not None else None,
+            "ctr_pct":       round(float(real["ctr"]) * 100, 2) if real.get("ctr") is not None else None,
+            "retention_pct": round(float(real["avg_view_pct"]) * 100, 1) if real.get("avg_view_pct") is not None else None,
+            "likes":         int(real["likes"]) if real.get("likes") is not None else None,
+        })
+
+    missing_platforms = [
+        _PLATFORM_DISPLAY_NAMES.get(p, p.title())
+        for p in _PLATFORM_ORDER
+        if p not in real_by_platform
+    ]
+
+    platform_learning = {
+        "has_data":          has_real_data,
+        "best_by_views":     best_by_views,
+        "best_by_ctr":       best_by_ctr,
+        "best_by_retention": best_by_retention,
+        "platform_cards":    platform_cards,
+        "missing_platforms": missing_platforms,
+        "missing_warning":   bool(missing_platforms) and has_real_data,
+    }
+
+    # ── Financial learning ────────────────────────────────────────────────
+    cost_verdict: Optional[str] = None
+    if total_cost_usd_l is not None:
+        if total_cost_usd_l < 0.10:
+            cost_verdict = "Low production cost"
+        elif total_cost_usd_l < 1.00:
+            cost_verdict = "Moderate production cost"
+        else:
+            cost_verdict = "High production cost"
+
+    revenue_verdict = "Revenue data not available yet"
+    has_revenue_data_l = False
+    try:
+        col_rows = conn.execute("PRAGMA table_info(platform_analytics)").fetchall()
+        col_names = {r["name"] for r in col_rows}
+        if "revenue_usd" in col_names:
+            rev_row = conn.execute(
+                """
+                SELECT SUM(revenue_usd) AS total
+                FROM platform_analytics
+                WHERE episode_id = ? AND source != 'mock'
+                  AND revenue_usd IS NOT NULL
+                """,
+                [episode_id],
+            ).fetchone()
+            if rev_row and rev_row["total"] is not None:
+                total_rev = float(rev_row["total"])
+                has_revenue_data_l = True
+                if total_cost_usd_l is not None:
+                    profit = total_rev - total_cost_usd_l
+                    if profit > 0:
+                        revenue_verdict = (
+                            f"Profitable — ${total_rev:.2f} revenue, ${profit:.2f} profit"
+                        )
+                    else:
+                        revenue_verdict = (
+                            f"Not yet profitable — ${total_rev:.2f} revenue,"
+                            f" ${abs(profit):.2f} shortfall"
+                        )
+                else:
+                    revenue_verdict = f"Revenue imported: ${total_rev:.2f}"
+    except Exception:
+        pass
+
+    financial_learning = {
+        "has_cost_data":   total_cost_usd_l is not None,
+        "total_cost_usd":  total_cost_usd_l,
+        "cost_verdict":    cost_verdict,
+        "has_revenue_data": has_revenue_data_l,
+        "revenue_verdict": revenue_verdict,
+    }
+
+    # ── Recommendations ───────────────────────────────────────────────────
+    recommendations: list[dict] = []
+
+    # From analytics_insights (strongest signals first)
+    for ins in insights[:6]:
+        strength = float(ins.get("signal_strength") or 0.0)
+        if abs(strength) < 0.2:
+            continue
+        detail = ins.get("detail") or ins.get("threshold_used") or ""
+        if not detail:
+            continue
+        domain = _INSIGHT_DIM_TO_DOMAIN.get(ins.get("affected_dim", ""), "topic")
+        recommendations.append({
+            "domain":     domain,
+            "text":       detail,
+            "confidence": _signal_to_confidence(strength),
+            "reason":     (
+                ins.get("insight_type", "analytics signal")
+                .replace("_", " ").title()
+            ),
+        })
+
+    # From learning_actions
+    for act in actions[:4]:
+        rationale = act.get("rationale") or ""
+        if not rationale:
+            continue
+        dim       = act.get("dimension", "")
+        verb      = _ACTION_TYPE_LABELS.get(act.get("action_type", ""), "Note")
+        domain    = _INSIGHT_DIM_TO_DOMAIN.get(dim, dim or "topic")
+        recommendations.append({
+            "domain":     domain,
+            "text":       f"{verb}: {rationale}",
+            "confidence": "Medium",
+            "reason":     "Learning engine recommendation",
+        })
+
+    # From learning_records (recommendation field)
+    for lr in learning_records_list[:4]:
+        rec = lr.get("recommendation") or ""
+        if not rec:
+            continue
+        sig_type = lr.get("signal_type") or ""
+        domain   = _SIGNAL_TYPE_TO_DOMAIN.get(sig_type, "topic")
+        sig_val  = lr.get("signal_value")
+        conf     = _signal_to_confidence(float(sig_val)) if sig_val is not None else "Medium"
+        recommendations.append({
+            "domain":     domain,
+            "text":       rec,
+            "confidence": conf,
+            "reason":     sig_type.replace("_", " ").title() if sig_type else "Factory signal",
+        })
+
+    # Derived recommendations when no external signals are available
+    if not recommendations:
+        if best_ctr_val is None:
+            recommendations.append({
+                "domain":     "thumbnail",
+                "text":       "Import analytics to evaluate thumbnail and title performance.",
+                "confidence": "Low",
+                "reason":     "No analytics data available yet",
+            })
+        elif best_ctr_val >= _CTR_WINNER_THRESHOLD:
+            recommendations.append({
+                "domain":     "thumbnail",
+                "text":       "Replicate this thumbnail style — click-through exceeded target.",
+                "confidence": "High",
+                "reason":     f"CTR {round(best_ctr_val*100, 2)}% — above 5% threshold",
+            })
+            recommendations.append({
+                "domain":     "title",
+                "text":       (
+                    f"Continue using {title_label.lower()} title format — performed well."
+                ),
+                "confidence": "Medium",
+                "reason":     "CTR above threshold with this format",
+            })
+        elif best_ctr_val < _CTR_UNDERPERFORMED_THRESHOLD:
+            recommendations.append({
+                "domain":     "thumbnail",
+                "text":       "Test a more visually distinct thumbnail for the next episode.",
+                "confidence": "Medium",
+                "reason":     f"CTR {round(best_ctr_val*100, 2)}% — below 2% threshold",
+            })
+            recommendations.append({
+                "domain":     "title",
+                "text":       "Try a stronger hook or a different title format next time.",
+                "confidence": "Medium",
+                "reason":     "Click-through rate below target",
+            })
+        else:
+            recommendations.append({
+                "domain":     "thumbnail",
+                "text":       "Test a stronger visual hook in the next episode.",
+                "confidence": "Low",
+                "reason":     f"CTR {round(best_ctr_val*100, 2)}% — room to improve",
+            })
+
+        if best_by_views and len(platform_cards) > 1:
+            recommendations.append({
+                "domain":     "platform",
+                "text":       (
+                    f"Prioritise {best_by_views['display_name']}"
+                    f" — highest views this episode."
+                ),
+                "confidence": "Medium",
+                "reason":     f"{best_by_views['value']:,} views",
+            })
+
+        if total_cost_usd_l is not None and not has_revenue_data_l:
+            recommendations.append({
+                "domain":     "revenue",
+                "text": (
+                    "Import platform revenue data to calculate return on"
+                    " production investment."
+                ),
+                "confidence": "Low",
+                "reason": "Production cost tracked; revenue not yet imported",
+            })
+
+    # ── Summary: what worked / underperformed / repeat / avoid ───────────
+    what_worked:        list[str] = []
+    what_underperformed: list[str] = []
+    what_to_repeat:     list[str] = []
+    what_to_avoid:      list[str] = []
+    overall_verdict: str
+
+    if not has_real_data:
+        overall_verdict = "Waiting for analytics"
+    else:
+        pos_insights = [i for i in insights if (i.get("signal_strength") or 0) > 0.2]
+        neg_insights = [i for i in insights if (i.get("signal_strength") or 0) < -0.2]
+
+        for ins in pos_insights[:3]:
+            detail = ins.get("detail") or (
+                ins.get("insight_type", "").replace("_", " ").title()
+            )
+            if detail:
+                what_worked.append(detail)
+
+        for ins in neg_insights[:3]:
+            detail = ins.get("detail") or (
+                ins.get("insight_type", "").replace("_", " ").title()
+            )
+            if detail:
+                what_underperformed.append(detail)
+
+        # Derive from analytics if no insights cover it
+        if not what_worked and best_ctr_val is not None:
+            if best_ctr_val >= _CTR_WINNER_THRESHOLD:
+                what_worked.append(
+                    f"Strong click-through rate ({round(best_ctr_val*100, 2)}%)"
+                )
+            elif best_by_views:
+                what_worked.append(
+                    f"Published successfully on {best_by_views['display_name']}"
+                )
+
+        if not what_underperformed and best_ctr_val is not None:
+            if best_ctr_val < _CTR_UNDERPERFORMED_THRESHOLD:
+                what_underperformed.append(
+                    f"Click-through rate was low ({round(best_ctr_val*100, 2)}%)"
+                    " — thumbnail or title may need improvement"
+                )
+
+        if best_ctr_val is not None and best_ctr_val >= _CTR_WINNER_THRESHOLD:
+            what_to_repeat.append(
+                f"Thumbnail style with {title_label.lower()} title format"
+            )
+        elif best_by_views:
+            what_to_repeat.append(f"Publishing to {best_by_views['display_name']}")
+
+        what_to_avoid = [
+            ins.get("detail") for ins in neg_insights[:2]
+            if ins.get("detail")
+        ]
+
+        # Overall verdict
+        if best_ctr_val is not None and best_ctr_val >= _CTR_WINNER_THRESHOLD:
+            overall_verdict = "Strong episode — above-target click-through"
+        elif best_ctr_val is not None and best_ctr_val < _CTR_UNDERPERFORMED_THRESHOLD:
+            overall_verdict = "Below target — review thumbnail and title"
+        elif has_learning_records:
+            overall_verdict = "Learning recorded — review recommendations below"
+        else:
+            overall_verdict = "Analytics available — lessons derived"
+
+    return {
+        "summary": {
+            "has_real_data":         has_real_data,
+            "has_learning_records":  has_learning_records,
+            "overall_verdict":       overall_verdict,
+            "what_worked":           what_worked,
+            "what_underperformed":   what_underperformed,
+            "what_to_repeat":        what_to_repeat,
+            "what_to_avoid":         what_to_avoid,
+        },
+        "thumbnail":       thumbnail_learning,
+        "title":           title_learning,
+        "platform":        platform_learning,
+        "financial":       financial_learning,
+        "recommendations": recommendations,
     }
 
 

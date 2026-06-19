@@ -259,6 +259,103 @@
     .fmt-statement   { background:var(--surface); color:var(--muted);
                        border:1px solid var(--border); }
 
+    /* ── Learning tab ── */
+    .lrn-waiting {
+      text-align: center; padding: 50px 20px; color: var(--muted);
+      font-size: 14px;
+    }
+    .lrn-verdict-banner {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 20px;
+      margin-bottom: var(--gap); display: flex; align-items: center; gap: 12px;
+    }
+    .lrn-verdict-text { font-size: 15px; font-weight: 600; }
+    .lrn-quad-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px; margin-bottom: var(--gap);
+    }
+    .lrn-quad-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+    }
+    .lrn-quad-title {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--muted); font-weight: 700; margin-bottom: 8px;
+    }
+    .lrn-quad-item { font-size: 12px; color: var(--text);
+                     padding: 3px 0; line-height: 1.5; }
+    .lrn-quad-empty { font-size: 12px; color: var(--muted); font-style: italic; }
+    .lrn-component-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: var(--gap); margin-bottom: var(--gap);
+    }
+    .lrn-component-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px;
+    }
+    .lrn-component-title {
+      font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--muted); font-weight: 700; margin-bottom: 10px;
+    }
+    .lrn-verdict-chip {
+      display: inline-block; padding: 3px 10px; border-radius: 12px;
+      font-size: 12px; font-weight: 600; margin-bottom: 10px;
+    }
+    .lrn-verdict-strong  { background: #0d1f14; color: var(--green);  border: 1px solid #2ea043; }
+    .lrn-verdict-ok      { background: #1a1600; color: var(--yellow); border: 1px solid #9e6a03; }
+    .lrn-verdict-weak    { background: #1f0a09; color: var(--red);    border: 1px solid #da3633; }
+    .lrn-verdict-waiting { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+    .lrn-metric-row {
+      display: flex; justify-content: space-between; font-size: 12px;
+      padding: 3px 0; border-bottom: 1px solid var(--border);
+    }
+    .lrn-metric-row:last-child { border-bottom: none; }
+    .lrn-metric-label { color: var(--muted); }
+    .lrn-metric-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .lrn-rec-list { display: flex; flex-direction: column; gap: 8px;
+                    margin-bottom: var(--gap); }
+    .lrn-rec-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+      border-left: 3px solid var(--border);
+    }
+    .lrn-rec-domain { font-size: 10px; text-transform: uppercase;
+                      letter-spacing: .06em; color: var(--blue);
+                      font-weight: 700; margin-bottom: 4px; }
+    .lrn-rec-text { font-size: 13px; font-weight: 500; margin-bottom: 6px;
+                    line-height: 1.5; }
+    .lrn-rec-meta { display: flex; gap: 10px; font-size: 11px;
+                    color: var(--muted); align-items: center; }
+    .lrn-conf-high   { color: var(--green);  font-weight: 700; }
+    .lrn-conf-medium { color: var(--yellow); font-weight: 700; }
+    .lrn-conf-low    { color: var(--muted);  font-weight: 600; }
+    .lrn-plat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 10px; margin-bottom: var(--gap);
+    }
+    .lrn-plat-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+    }
+    .lrn-plat-name { font-size: 14px; font-weight: 700; margin-bottom: 8px; }
+    .lrn-best-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 10px; margin-bottom: var(--gap);
+    }
+    .lrn-best-card {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 14px;
+    }
+    .lrn-best-val { font-size: 18px; font-weight: 700;
+                    font-variant-numeric: tabular-nums; }
+    .lrn-best-lbl { font-size: 10px; color: var(--muted);
+                    text-transform: uppercase; letter-spacing: .05em; margin-top: 3px; }
+    .lrn-best-plat { font-size: 11px; color: var(--blue); margin-top: 2px; }
+
     /* ── Revenue tab ── */
     .rev-summary-grid {
       display: grid;
@@ -481,7 +578,7 @@
   <a href="?tab=titles" class="tab-btn {% if active_tab == 'titles' %}active{% endif %}">Titles</a>
   <a href="?tab=analytics" class="tab-btn {% if active_tab == 'analytics' %}active{% endif %}">Analytics</a>
   <a href="?tab=revenue" class="tab-btn {% if active_tab == 'revenue' %}active{% endif %}">Revenue</a>
-  <span class="tab-btn disabled" title="Coming soon">Learning</span>
+  <a href="?tab=learning" class="tab-btn {% if active_tab == 'learning' %}active{% endif %}">Learning</a>
 </div>
 
 {# ════════════════════════════════════════════════════════════════
@@ -1428,6 +1525,291 @@
 </div>
 
 {% endif %}{# end active_tab == 'revenue' #}
+
+{# ════════════════════════════════════════════════════════════════
+   LEARNING TAB
+════════════════════════════════════════════════════════════════ #}
+{% if active_tab == 'learning' %}
+{% set lrn = d.learning %}
+{% set lsum = lrn.summary %}
+
+{# ── Waiting state ──────────────────────────────────────────────── #}
+{% if not lsum.has_real_data %}
+<div class="lrn-waiting">
+  <div style="font-size:32px; margin-bottom:12px;">📊</div>
+  <div style="font-weight:600; font-size:15px; margin-bottom:6px;">
+    Learning will appear after real analytics are imported.
+  </div>
+  <div style="font-size:13px; margin-bottom:16px;">
+    Production cost and episode metadata are tracked, but platform performance
+    data is needed to derive lessons.
+  </div>
+  <a href="/analytics/import?episode_id={{ d.episode_id }}" class="btn">
+    Import analytics →
+  </a>
+</div>
+
+{% else %}
+
+{# ── 1. Episode Lessons Summary ──────────────────────────────────── #}
+<div class="lrn-verdict-banner">
+  <span style="font-size:20px;">
+    {% if 'Strong' in lsum.overall_verdict %}✅
+    {% elif 'Below' in lsum.overall_verdict %}⚠️
+    {% else %}📈{% endif %}
+  </span>
+  <span class="lrn-verdict-text">{{ lsum.overall_verdict }}</span>
+</div>
+
+<div class="lrn-quad-grid">
+
+  <div class="lrn-quad-card">
+    <div class="lrn-quad-title">What Worked</div>
+    {% if lsum.what_worked %}
+      {% for item in lsum.what_worked %}
+        <div class="lrn-quad-item">✓ {{ item }}</div>
+      {% endfor %}
+    {% else %}
+      <div class="lrn-quad-empty">No standout successes detected yet.</div>
+    {% endif %}
+  </div>
+
+  <div class="lrn-quad-card">
+    <div class="lrn-quad-title">What Underperformed</div>
+    {% if lsum.what_underperformed %}
+      {% for item in lsum.what_underperformed %}
+        <div class="lrn-quad-item">✗ {{ item }}</div>
+      {% endfor %}
+    {% else %}
+      <div class="lrn-quad-empty">No underperformance signals detected.</div>
+    {% endif %}
+  </div>
+
+  <div class="lrn-quad-card">
+    <div class="lrn-quad-title">What to Repeat</div>
+    {% if lsum.what_to_repeat %}
+      {% for item in lsum.what_to_repeat %}
+        <div class="lrn-quad-item">↺ {{ item }}</div>
+      {% endfor %}
+    {% else %}
+      <div class="lrn-quad-empty">No repeat signals yet.</div>
+    {% endif %}
+  </div>
+
+  <div class="lrn-quad-card">
+    <div class="lrn-quad-title">What to Avoid</div>
+    {% if lsum.what_to_avoid %}
+      {% for item in lsum.what_to_avoid %}
+        <div class="lrn-quad-item">✕ {{ item }}</div>
+      {% endfor %}
+    {% else %}
+      <div class="lrn-quad-empty">No avoidance signals yet.</div>
+    {% endif %}
+  </div>
+
+</div>{# /lrn-quad-grid #}
+
+{# ── 2. Thumbnail + Title Learning ──────────────────────────────── #}
+<div class="lrn-component-grid">
+
+  {# Thumbnail card #}
+  <div class="lrn-component-card">
+    <div class="lrn-component-title">Thumbnail</div>
+    {% set tv = lrn.thumbnail.verdict %}
+    {% if 'Strong' in tv %}
+      <span class="lrn-verdict-chip lrn-verdict-strong">{{ tv }}</span>
+    {% elif 'Acceptable' in tv %}
+      <span class="lrn-verdict-chip lrn-verdict-ok">{{ tv }}</span>
+    {% elif 'Weak' in tv %}
+      <span class="lrn-verdict-chip lrn-verdict-weak">{{ tv }}</span>
+    {% else %}
+      <span class="lrn-verdict-chip lrn-verdict-waiting">{{ tv }}</span>
+    {% endif %}
+
+    {% if lrn.thumbnail.ctr_pct is not none %}
+    <div class="lrn-metric-row">
+      <span class="lrn-metric-label">CTR</span>
+      <span class="lrn-metric-value">{{ lrn.thumbnail.ctr_pct }}%</span>
+    </div>
+    {% endif %}
+    {% if lrn.thumbnail.selected_text %}
+    <div class="lrn-metric-row">
+      <span class="lrn-metric-label">Overlay</span>
+      <span class="lrn-metric-value" style="font-size:11px;">{{ lrn.thumbnail.selected_text }}</span>
+    </div>
+    {% endif %}
+
+    <div style="margin-top:10px; font-size:12px; color:var(--text); line-height:1.5;">
+      {{ lrn.thumbnail.recommendation }}
+    </div>
+  </div>
+
+  {# Title card #}
+  <div class="lrn-component-card">
+    <div class="lrn-component-title">Title</div>
+    {% set tv = lrn.title.verdict %}
+    {% if 'Strong' in tv %}
+      <span class="lrn-verdict-chip lrn-verdict-strong">{{ tv }}</span>
+    {% elif 'Acceptable' in tv %}
+      <span class="lrn-verdict-chip lrn-verdict-ok">{{ tv }}</span>
+    {% elif 'Weak' in tv %}
+      <span class="lrn-verdict-chip lrn-verdict-weak">{{ tv }}</span>
+    {% else %}
+      <span class="lrn-verdict-chip lrn-verdict-waiting">{{ tv }}</span>
+    {% endif %}
+
+    {% if lrn.title.ctr_pct is not none %}
+    <div class="lrn-metric-row">
+      <span class="lrn-metric-label">CTR</span>
+      <span class="lrn-metric-value">{{ lrn.title.ctr_pct }}%</span>
+    </div>
+    {% endif %}
+    {% if lrn.title.format_label %}
+    <div class="lrn-metric-row">
+      <span class="lrn-metric-label">Format</span>
+      <span class="lrn-metric-value">{{ lrn.title.format_label }}</span>
+    </div>
+    {% endif %}
+    {% if lrn.title.selected_text %}
+    <div style="margin-top:8px; font-size:12px; color:var(--muted);
+                font-style:italic; line-height:1.4;">
+      "{{ lrn.title.selected_text }}"
+    </div>
+    {% endif %}
+
+    <div style="margin-top:10px; font-size:12px; color:var(--text); line-height:1.5;">
+      {{ lrn.title.recommendation }}
+    </div>
+  </div>
+
+</div>{# /lrn-component-grid #}
+
+{# ── 3. Platform Learning ────────────────────────────────────────── #}
+<div style="margin-bottom:var(--gap);">
+  <div class="card-title" style="margin-bottom:10px;">Platform Performance</div>
+
+  {% if lrn.platform.best_by_views or lrn.platform.best_by_ctr or lrn.platform.best_by_retention %}
+  <div class="lrn-best-grid">
+    {% if lrn.platform.best_by_views %}
+    <div class="lrn-best-card">
+      <div class="lrn-best-val">{{ "{:,}".format(lrn.platform.best_by_views.value) }}</div>
+      <div class="lrn-best-lbl">Best by Views</div>
+      <div class="lrn-best-plat">{{ lrn.platform.best_by_views.display_name }}</div>
+    </div>
+    {% endif %}
+    {% if lrn.platform.best_by_ctr %}
+    <div class="lrn-best-card">
+      <div class="lrn-best-val">{{ lrn.platform.best_by_ctr.value }}%</div>
+      <div class="lrn-best-lbl">Best CTR</div>
+      <div class="lrn-best-plat">{{ lrn.platform.best_by_ctr.display_name }}</div>
+    </div>
+    {% endif %}
+    {% if lrn.platform.best_by_retention %}
+    <div class="lrn-best-card">
+      <div class="lrn-best-val">{{ lrn.platform.best_by_retention.value }}%</div>
+      <div class="lrn-best-lbl">Best Retention</div>
+      <div class="lrn-best-plat">{{ lrn.platform.best_by_retention.display_name }}</div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if lrn.platform.platform_cards %}
+  <div class="lrn-plat-grid">
+    {% for p in lrn.platform.platform_cards %}
+    <div class="lrn-plat-card">
+      <div class="lrn-plat-name">{{ p.display_name }}</div>
+      {% if p.views is not none %}
+      <div class="lrn-metric-row">
+        <span class="lrn-metric-label">Views</span>
+        <span class="lrn-metric-value">{{ "{:,}".format(p.views) }}</span>
+      </div>
+      {% endif %}
+      {% if p.ctr_pct is not none %}
+      <div class="lrn-metric-row">
+        <span class="lrn-metric-label">CTR</span>
+        <span class="lrn-metric-value">{{ p.ctr_pct }}%</span>
+      </div>
+      {% endif %}
+      {% if p.retention_pct is not none %}
+      <div class="lrn-metric-row">
+        <span class="lrn-metric-label">Retention</span>
+        <span class="lrn-metric-value">{{ p.retention_pct }}%</span>
+      </div>
+      {% endif %}
+      {% if p.likes is not none %}
+      <div class="lrn-metric-row">
+        <span class="lrn-metric-label">Likes</span>
+        <span class="lrn-metric-value">{{ "{:,}".format(p.likes) }}</span>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if lrn.platform.missing_warning %}
+  <div style="font-size:12px; color:var(--yellow); margin-top:4px;">
+    ⚠ Analytics missing for:
+    {{ lrn.platform.missing_platforms | join(', ') }}
+  </div>
+  {% endif %}
+</div>
+
+{# ── 4. Financial Learning ───────────────────────────────────────── #}
+<div style="margin-bottom:var(--gap);">
+  <div class="card-title" style="margin-bottom:10px;">Financial Summary</div>
+  <div class="lrn-component-grid">
+
+    <div class="lrn-component-card">
+      <div class="lrn-component-title">Production Cost</div>
+      {% if lrn.financial.has_cost_data %}
+        <div class="lrn-best-val" style="font-size:18px;">
+          ${{ "%.4f" | format(lrn.financial.total_cost_usd) }}
+        </div>
+        <div style="margin-top:6px; font-size:12px; color:var(--muted);">
+          {{ lrn.financial.cost_verdict }}
+        </div>
+      {% else %}
+        <div class="lrn-quad-empty">No cost data recorded for this episode.</div>
+      {% endif %}
+    </div>
+
+    <div class="lrn-component-card">
+      <div class="lrn-component-title">Revenue</div>
+      <div style="font-size:12px; color:var(--text); line-height:1.5;">
+        {{ lrn.financial.revenue_verdict }}
+      </div>
+    </div>
+
+  </div>
+</div>
+
+{# ── 5. Actionable Recommendations ──────────────────────────────── #}
+{% if lrn.recommendations %}
+<div>
+  <div class="card-title" style="margin-bottom:10px;">Actionable Recommendations</div>
+  <div class="lrn-rec-list">
+    {% for rec in lrn.recommendations %}
+    <div class="lrn-rec-card">
+      <div class="lrn-rec-domain">{{ rec.domain }}</div>
+      <div class="lrn-rec-text">{{ rec.text }}</div>
+      <div class="lrn-rec-meta">
+        <span class="lrn-conf-{{ rec.confidence | lower }}">
+          {{ rec.confidence }} confidence
+        </span>
+        <span>·</span>
+        <span>{{ rec.reason }}</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% endif %}{# end has_real_data #}
+
+{% endif %}{# end active_tab == 'learning' #}
 
 </body>
 </html>

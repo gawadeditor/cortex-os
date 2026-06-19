@@ -259,6 +259,33 @@
     .fmt-statement   { background:var(--surface); color:var(--muted);
                        border:1px solid var(--border); }
 
+    /* ── Revenue tab ── */
+    .rev-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 10px; margin-bottom: var(--gap);
+    }
+    .rev-kpi-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+      border-left: 3px solid var(--border);
+    }
+    .rev-kpi-card-pos { border-left-color: #2ea043; }
+    .rev-kpi-card-neg { border-left-color: #da3633; }
+    .rev-kpi-val  { font-size: 20px; font-weight: 700;
+                    font-variant-numeric: tabular-nums; line-height: 1.2; }
+    .rev-kpi-lbl  { font-size: 10px; color: var(--muted);
+                    text-transform: uppercase; letter-spacing: .06em;
+                    margin-top: 4px; }
+    .rev-empty-note { font-size: 11px; color: var(--muted);
+                      font-style: italic; margin-top: 4px; }
+    .rev-breakeven-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px;
+      margin-bottom: var(--gap);
+    }
+    .rev-breakeven-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
     /* ── Thumbnails tab ── */
     .tn-grid {
       display: grid;
@@ -453,7 +480,7 @@
   <a href="?tab=thumbnails" class="tab-btn {% if active_tab == 'thumbnails' %}active{% endif %}">Thumbnails</a>
   <a href="?tab=titles" class="tab-btn {% if active_tab == 'titles' %}active{% endif %}">Titles</a>
   <a href="?tab=analytics" class="tab-btn {% if active_tab == 'analytics' %}active{% endif %}">Analytics</a>
-  <span class="tab-btn disabled" title="Coming soon">Revenue</span>
+  <a href="?tab=revenue" class="tab-btn {% if active_tab == 'revenue' %}active{% endif %}">Revenue</a>
   <span class="tab-btn disabled" title="Coming soon">Learning</span>
 </div>
 
@@ -1209,6 +1236,198 @@
 </div>
 
 {% endif %}{# end active_tab == 'analytics' #}
+
+{# ════════════════════════════════════════════════════════════════
+   REVENUE TAB
+════════════════════════════════════════════════════════════════ #}
+{% if active_tab == 'revenue' %}
+{% set rev = d.revenue %}
+{% set rev_sum = rev.summary %}
+
+{# ── Summary cards ──────────────────────────────────────────────── #}
+<div class="rev-summary-grid">
+
+  {# Cost #}
+  <div class="rev-kpi-card">
+    <div class="rev-kpi-val">
+      {% if rev_sum.total_cost_usd is not none %}
+        ${{ "%.4f" | format(rev_sum.total_cost_usd) }}
+      {% else %}
+        <span class="muted">—</span>
+      {% endif %}
+    </div>
+    <div class="rev-kpi-lbl">Production Cost</div>
+    {% if not rev_sum.has_cost_data %}
+      <div class="rev-empty-note">No cost data</div>
+    {% endif %}
+  </div>
+
+  {# Revenue #}
+  <div class="rev-kpi-card">
+    <div class="rev-kpi-val">
+      {% if rev_sum.total_revenue_usd is not none %}
+        ${{ "%.2f" | format(rev_sum.total_revenue_usd) }}
+      {% else %}
+        <span class="muted">—</span>
+      {% endif %}
+    </div>
+    <div class="rev-kpi-lbl">Revenue</div>
+    {% if not rev_sum.has_revenue_data %}
+      <div class="rev-empty-note">Revenue not imported yet</div>
+    {% endif %}
+  </div>
+
+  {# Profit / Loss #}
+  <div class="rev-kpi-card
+    {% if rev_sum.profit_usd is not none and rev_sum.profit_usd >= 0 %}rev-kpi-card-pos
+    {% elif rev_sum.profit_usd is not none %}rev-kpi-card-neg
+    {% endif %}">
+    <div class="rev-kpi-val">
+      {% if rev_sum.profit_usd is not none %}
+        {% if rev_sum.profit_usd >= 0 %}+{% endif %}${{ "%.2f" | format(rev_sum.profit_usd | abs) }}
+      {% else %}
+        <span class="muted">—</span>
+      {% endif %}
+    </div>
+    <div class="rev-kpi-lbl">Profit / Loss</div>
+    {% if not rev_sum.has_revenue_data %}
+      <div class="rev-empty-note">Profitability unknown</div>
+    {% endif %}
+  </div>
+
+  {# ROI #}
+  <div class="rev-kpi-card
+    {% if rev_sum.roi_pct is not none and rev_sum.roi_pct >= 0 %}rev-kpi-card-pos
+    {% elif rev_sum.roi_pct is not none %}rev-kpi-card-neg
+    {% endif %}">
+    <div class="rev-kpi-val">
+      {% if rev_sum.roi_pct is not none %}
+        {{ "%.1f" | format(rev_sum.roi_pct) }}%
+      {% else %}
+        <span class="muted">—</span>
+      {% endif %}
+    </div>
+    <div class="rev-kpi-lbl">ROI</div>
+    {% if not rev_sum.has_revenue_data %}
+      <div class="rev-empty-note">Profitability unknown</div>
+    {% endif %}
+  </div>
+
+</div>{# /rev-summary-grid #}
+
+{# ── Break-even card ─────────────────────────────────────────────── #}
+<div class="rev-breakeven-card">
+  <div class="card-title" style="margin-bottom:8px;">Break-even Estimate</div>
+  {% if rev_sum.break_even_views is not none %}
+    <div class="rev-kpi-val">{{ "{:,}".format(rev_sum.break_even_views) }} views</div>
+    <div class="rev-breakeven-note">Estimated views needed to recover production cost</div>
+  {% elif rev_sum.break_even_reason %}
+    <div class="rev-empty-note">{{ rev_sum.break_even_reason }}</div>
+  {% else %}
+    <div class="rev-empty-note">Break-even unavailable</div>
+  {% endif %}
+</div>
+
+{# ── Cost Breakdown table ─────────────────────────────────────────── #}
+<div style="margin-bottom:var(--gap);">
+  <div class="card-title" style="margin-bottom:10px;">Production Cost Breakdown</div>
+  {% if rev.cost_breakdown %}
+  <div class="card" style="padding:0;">
+    <table>
+      <thead>
+        <tr>
+          <th>Stage</th>
+          <th>Provider</th>
+          <th>Type</th>
+          <th style="text-align:right;">Cost</th>
+          <th>Date</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rev.cost_breakdown %}
+        <tr>
+          <td style="font-size:13px;">{{ row.stage or '—' }}</td>
+          <td class="muted" style="font-size:12px;">{{ row.provider or '—' }}</td>
+          <td class="muted" style="font-size:12px;">{{ row.label }}</td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums;
+                     font-size:13px; font-weight:600;">
+            ${{ "%.5f" | format(row.amount_usd) }}
+          </td>
+          <td class="muted" style="font-size:11px;">
+            {{ row.created_at[:10] if row.created_at else '—' }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr style="border-top:2px solid var(--border);">
+          <td colspan="3" style="font-weight:700; font-size:13px;">Total</td>
+          <td style="text-align:right; font-weight:700;
+                     font-variant-numeric:tabular-nums;">
+            ${{ "%.4f" | format(rev_sum.total_cost_usd) }}
+          </td>
+          <td></td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+  {% else %}
+  <div class="card" style="text-align:center; padding:30px 20px; color:var(--muted);">
+    No production cost records found for this episode.
+  </div>
+  {% endif %}
+</div>
+
+{# ── Platform Revenue table ───────────────────────────────────────── #}
+<div style="margin-bottom:var(--gap);">
+  <div class="card-title" style="margin-bottom:10px;">Platform Revenue</div>
+  {% if rev.platform_revenue %}
+  <div class="card" style="padding:0;">
+    <table>
+      <thead>
+        <tr>
+          <th>Platform</th>
+          <th style="text-align:right;">Views</th>
+          <th style="text-align:right;">Revenue</th>
+          <th style="text-align:right;">RPM</th>
+          <th style="text-align:right;">CPM</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in rev.platform_revenue %}
+        <tr>
+          <td style="font-weight:600;">{{ p.display_name }}</td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums;">
+            {{ "{:,}".format(p.views) if p.views is not none else '—' }}
+          </td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums;
+                     font-weight:600;">
+            ${{ "%.2f" | format(p.revenue_usd) if p.revenue_usd is not none else '—' }}
+          </td>
+          <td style="text-align:right; font-size:12px;">
+            {{ "$%.2f" | format(p.rpm) if p.rpm is not none else '—' }}
+          </td>
+          <td style="text-align:right; font-size:12px;">
+            {{ "$%.2f" | format(p.cpm) if p.cpm is not none else '—' }}
+          </td>
+          <td class="muted" style="font-size:11px;">{{ p.source or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card" style="text-align:center; padding:30px 20px; color:var(--muted);">
+    Revenue not imported yet.
+    <div style="margin-top:8px; font-size:12px; color:var(--muted);">
+      Revenue data can be imported when available from platform dashboards.
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% endif %}{# end active_tab == 'revenue' #}
 
 </body>
 </html>

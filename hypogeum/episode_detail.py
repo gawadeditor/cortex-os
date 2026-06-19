@@ -95,6 +95,15 @@ _PLATFORM_DISPLAY_NAMES: dict[str, str] = {
     "facebook":  "Facebook",
 }
 
+_CALL_TYPE_LABELS: dict[str, str] = {
+    "text_generation":  "Text Generation",
+    "image_generation": "Image Generation",
+    "video_generation": "Video Generation",
+    "audio_generation": "Audio Generation",
+    "embedding":        "Embedding",
+    "api_call":         "API Call",
+}
+
 # Operator-language translations for publish failure reasons
 _PUBLISH_FAILURE_HINTS: dict[str, str] = {
     "rate_limit": "Platform rate limit reached",
@@ -326,6 +335,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     # ── Analytics tab data ───────────────────────────────────────────────
     analytics_data = _build_analytics_data(conn, episode_id)
 
+    # ── Revenue tab data ─────────────────────────────────────────────────
+    revenue_data = _build_revenue_data(conn, episode_id, run_id)
+
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
 
@@ -388,6 +400,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
 
         # Analytics tab
         "analytics": analytics_data,
+
+        # Revenue tab
+        "revenue": revenue_data,
 
         # Production tab
         "stage_groups": stage_groups,
@@ -850,6 +865,187 @@ def _build_titles_data(conn, episode_id: str) -> dict:
             "has_selected":  has_selected,
             "has_real_data": has_real_data,
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Revenue tab data
+# ---------------------------------------------------------------------------
+
+def _build_revenue_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
+    """
+    Build Revenue tab data for one episode.
+
+    Cost data:  costs table (all rows for this episode_id).
+    Revenue:    platform_analytics WHERE source != 'mock' AND revenue_usd IS NOT NULL
+                Only if revenue_usd column exists; detected via PRAGMA table_info.
+                Also checks for rpm/cpm for break-even estimation.
+
+    Returns:
+        {
+          "summary": { total_cost_usd, total_revenue_usd, profit_usd, roi_pct,
+                       break_even_views, break_even_reason,
+                       has_cost_data, has_revenue_data },
+          "cost_breakdown": [ {label, provider, stage, amount_usd, created_at} ],
+          "platform_revenue": [ {platform, display_name, views, revenue_usd,
+                                  rpm, cpm, source} ],
+        }
+    """
+    import math
+
+    # ── Detect optional revenue columns in platform_analytics ────────────
+    try:
+        col_rows = conn.execute("PRAGMA table_info(platform_analytics)").fetchall()
+        col_names = {r["name"] for r in col_rows}
+    except Exception:
+        col_names = set()
+
+    has_revenue_col = "revenue_usd" in col_names
+    has_rpm_col     = "rpm"         in col_names
+    has_cpm_col     = "cpm"         in col_names
+
+    # ── Cost breakdown (all runs for this episode) ────────────────────────
+    cost_rows: list[dict] = []
+    total_cost_usd: Optional[float] = None
+    has_cost_data = False
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT provider, model, call_type, cost_usd, called_at, stage_name
+            FROM costs
+            WHERE episode_id = ?
+            ORDER BY called_at ASC
+            """,
+            [episode_id],
+        ).fetchall()
+
+        if rows:
+            has_cost_data = True
+            cost_total = 0.0
+            for r in rows:
+                d = _row(r)
+                stage_raw = d.get("stage_name") or ""
+                group     = _STAGE_TO_GROUP.get(stage_raw) if stage_raw else None
+                stage_display = (
+                    group
+                    or (stage_raw.replace("_", " ").title() if stage_raw else None)
+                )
+                call_type = d.get("call_type") or ""
+                label     = _CALL_TYPE_LABELS.get(
+                    call_type,
+                    call_type.replace("_", " ").title() if call_type else "API Call",
+                )
+                amount = float(d.get("cost_usd") or 0.0)
+                cost_total += amount
+                cost_rows.append({
+                    "label":      label,
+                    "provider":   d.get("provider"),
+                    "stage":      stage_display,
+                    "amount_usd": round(amount, 6),
+                    "created_at": d.get("called_at"),
+                })
+            total_cost_usd = round(cost_total, 6)
+    except Exception:
+        pass
+
+    # ── Platform revenue (real rows only, revenue_usd column must exist) ──
+    platform_revenue: list[dict] = []
+    total_revenue_usd: Optional[float] = None
+    has_revenue_data = False
+
+    if has_revenue_col:
+        try:
+            extra_cols = ""
+            if has_rpm_col:
+                extra_cols += ", rpm"
+            if has_cpm_col:
+                extra_cols += ", cpm"
+
+            rev_rows = conn.execute(
+                f"""
+                SELECT platform, views, revenue_usd{extra_cols}, source
+                FROM platform_analytics
+                WHERE episode_id = ? AND source != 'mock'
+                  AND revenue_usd IS NOT NULL
+                ORDER BY CASE platform
+                         WHEN 'youtube' THEN 0 WHEN 'tiktok' THEN 1
+                         WHEN 'instagram' THEN 2 ELSE 3 END ASC,
+                         snapshot_date DESC
+                """,
+                [episode_id],
+            ).fetchall()
+
+            seen_plat: set = set()
+            rev_total = 0.0
+            for r in rev_rows:
+                d  = _row(r)
+                pl = d.get("platform", "")
+                if pl in seen_plat:
+                    continue
+                seen_plat.add(pl)
+
+                rev_usd = float(d.get("revenue_usd") or 0.0)
+                rev_total += rev_usd
+                has_revenue_data = True
+
+                platform_revenue.append({
+                    "platform":     pl,
+                    "display_name": _PLATFORM_DISPLAY_NAMES.get(pl, pl.title()),
+                    "views":        int(d["views"]) if d.get("views") is not None else None,
+                    "revenue_usd":  round(rev_usd, 2),
+                    "rpm": float(d["rpm"]) if has_rpm_col and d.get("rpm") is not None else None,
+                    "cpm": float(d["cpm"]) if has_cpm_col and d.get("cpm") is not None else None,
+                    "source": d.get("source"),
+                })
+
+            if has_revenue_data:
+                total_revenue_usd = round(rev_total, 2)
+        except Exception:
+            pass
+
+    # ── Derived financials ───────────────────────────────────────────────
+    profit_usd:        Optional[float] = None
+    roi_pct:           Optional[float] = None
+    break_even_views:  Optional[int]   = None
+    break_even_reason: Optional[str]   = None
+
+    if (has_revenue_data
+            and total_revenue_usd is not None
+            and total_cost_usd is not None):
+        profit_usd = round(total_revenue_usd - total_cost_usd, 2)
+        if total_cost_usd > 0:
+            roi_pct = round((profit_usd / total_cost_usd) * 100, 1)
+
+    # Break-even: requires both revenue_usd column AND rpm or cpm column
+    if has_revenue_col and (has_rpm_col or has_cpm_col):
+        best_rate: Optional[float] = None
+        for pr in platform_revenue:
+            for rate_key in ("rpm", "cpm"):
+                val = pr.get(rate_key)
+                if val is not None and float(val) > 0:
+                    if best_rate is None or float(val) > best_rate:
+                        best_rate = float(val)
+        if best_rate is not None and total_cost_usd is not None and total_cost_usd > 0:
+            break_even_views = math.ceil(total_cost_usd / (best_rate / 1000))
+        else:
+            break_even_reason = "Break-even unavailable — CPM/RPM missing"
+    else:
+        break_even_reason = "Break-even unavailable — CPM/RPM missing"
+
+    return {
+        "summary": {
+            "total_cost_usd":    total_cost_usd,
+            "total_revenue_usd": total_revenue_usd,
+            "profit_usd":        profit_usd,
+            "roi_pct":           roi_pct,
+            "break_even_views":  break_even_views,
+            "break_even_reason": break_even_reason,
+            "has_cost_data":     has_cost_data,
+            "has_revenue_data":  has_revenue_data,
+        },
+        "cost_breakdown":   cost_rows,
+        "platform_revenue": platform_revenue,
     }
 
 

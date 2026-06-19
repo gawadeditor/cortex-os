@@ -1,5 +1,5 @@
 """
-hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Step 1).
+hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Steps 1–2).
 
 Public API:
     get_episode_detail(episode_id, db_path=None) -> dict | None
@@ -85,6 +85,23 @@ _PUBLISH_STATUS_LABELS: dict[str, str] = {
     "unknown":  "Unknown",
 }
 
+# Canonical platform order for Publishing tab
+_PLATFORM_ORDER = ("youtube", "tiktok", "instagram", "facebook")
+
+_PLATFORM_DISPLAY_NAMES: dict[str, str] = {
+    "youtube":   "YouTube",
+    "tiktok":    "TikTok",
+    "instagram": "Instagram",
+    "facebook":  "Facebook",
+}
+
+# Operator-language translations for publish failure reasons
+_PUBLISH_FAILURE_HINTS: dict[str, str] = {
+    "rate_limit": "Platform rate limit reached",
+    "timeout":    "Upload timed out",
+    "api_error":  "Platform rejected upload",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -115,6 +132,35 @@ def _translate_error(msg: Optional[str]) -> Optional[str]:
             return hint
     # Return first 120 chars of the raw message as fallback
     return msg[:120] if len(msg) > 120 else msg
+
+
+def _translate_publish_failure(reason: Optional[str]) -> str:
+    """Translate a raw publish failure_reason to operator language."""
+    if not reason:
+        return "Publishing failed"
+    r = reason.lower()
+    for key, hint in _PUBLISH_FAILURE_HINTS.items():
+        if key in r:
+            return hint
+    return "Publishing failed"
+
+
+def _published_at_display(published_at: Optional[str]) -> str:
+    """Return a human-readable age string from an ISO 8601 published_at value."""
+    if not published_at:
+        return "Unknown"
+    try:
+        from datetime import date
+        pub_date = date.fromisoformat(published_at[:10])
+        today = date.today()
+        delta = (today - pub_date).days
+        if delta == 0:
+            return "Today"
+        if delta == 1:
+            return "Yesterday"
+        return f"{delta} days ago"
+    except Exception:
+        return "Unknown"
 
 
 def _group_status(stages: list[dict]) -> str:
@@ -256,12 +302,20 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
         [episode_id],
     ).fetchall()
     platforms = []
+    pub_outcomes_by_platform: dict[str, dict] = {}
     for r in pub_rows:
         p = _row(r)
         p["status_label"] = _PUBLISH_STATUS_LABELS.get(
             p.get("publishing_status", "unknown"), "Unknown"
         )
         platforms.append(p)
+        pub_outcomes_by_platform[p["platform"]] = p
+
+    # ── Credential states (for Publishing tab connection_state) ─────────
+    cred_states = _load_cred_states(conn)
+
+    # ── Publishing tab data ─────────────────────────────────────────────
+    publishing = _build_publishing_data(pub_outcomes_by_platform, cred_states)
 
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
@@ -311,8 +365,11 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
         # Economics
         "total_cost_usd": total_cost_usd,
 
-        # Publishing
+        # Publishing (header pills — quick status per platform)
         "platforms": platforms,
+
+        # Publishing tab (full card data)
+        "publishing": publishing,
 
         # Production tab
         "stage_groups": stage_groups,
@@ -373,3 +430,122 @@ def _build_stage_groups(
         })
 
     return groups
+
+
+# ---------------------------------------------------------------------------
+# Publishing tab data
+# ---------------------------------------------------------------------------
+
+def _load_cred_states(conn) -> dict[str, str]:
+    """
+    Return {platform: credential_status} using the most-recent credential row
+    per platform.  status values: "active" | "expired" | "revoked" | "none"
+    """
+    result = {p: "none" for p in _PLATFORM_ORDER}
+    try:
+        rows = conn.execute(
+            """
+            SELECT provider, status
+            FROM secret_profiles
+            WHERE provider IN ('youtube','tiktok','instagram','facebook')
+              AND status IN ('active','expired','revoked')
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+        seen: set = set()
+        for r in rows:
+            if r["provider"] not in seen:
+                result[r["provider"]] = r["status"]
+                seen.add(r["provider"])
+    except Exception:
+        pass
+    return result
+
+
+def _build_publishing_data(
+    pub_outcomes: dict[str, dict],
+    cred_states: dict[str, str],
+) -> dict:
+    """
+    Merge per-episode publishing_outcomes with platform credential states.
+
+    Only includes a card for a platform when it has a publishing_outcome OR
+    an active/expired credential.
+
+    Returns:
+        {
+          "platform_cards": [ {...} ],
+          "summary": {"published": N, "failed": N, "pending": N, "connected": N},
+        }
+    """
+    cards = []
+    published = failed = pending = connected = 0
+
+    for platform in _PLATFORM_ORDER:
+        outcome     = pub_outcomes.get(platform)
+        cred_status = cred_states.get(platform, "none")
+        has_outcome = outcome is not None
+
+        # Skip platforms with nothing to show
+        if not has_outcome and cred_status == "none":
+            continue
+
+        # connection_state: from credential only, not from analytics
+        if cred_status == "active":
+            connection_state = "connected"
+            connected += 1
+        elif cred_status in ("expired", "revoked"):
+            connection_state = "expired"
+        else:
+            connection_state = "missing"
+
+        # card_state drives the visual variant
+        pub_status = outcome.get("publishing_status") if outcome else None
+        if pub_status == "success":
+            card_state = "published"
+            published += 1
+        elif pub_status == "failed":
+            card_state = "failed"
+            failed += 1
+        elif pub_status in ("pending", "uploading") or (has_outcome and pub_status not in (None,)):
+            card_state = "pending"
+            pending += 1
+        elif has_outcome:
+            # Record exists with unknown/skipped status
+            card_state = "pending"
+            pending += 1
+        elif connection_state == "connected":
+            card_state = "connected_unpublished"
+        else:
+            card_state = "not_connected"
+
+        # Failure hint
+        raw_reason  = outcome.get("failure_reason") if outcome else None
+        failure_hint = _translate_publish_failure(raw_reason) if raw_reason else None
+
+        # Date display
+        published_at = outcome.get("published_at") if outcome else None
+
+        cards.append({
+            "platform":            platform,
+            "display_name":        _PLATFORM_DISPLAY_NAMES[platform],
+            "card_state":          card_state,
+            "publishing_status":   pub_status,
+            "platform_video_id":   outcome.get("platform_video_id") if outcome else None,
+            "url":                 outcome.get("url") if outcome else None,
+            "published_at":        published_at,
+            "published_at_display": _published_at_display(published_at),
+            "failure_reason":      raw_reason,
+            "failure_hint":        failure_hint,
+            "connection_state":    connection_state,
+        })
+
+    return {
+        "platform_cards": cards,
+        "summary": {
+            "published": published,
+            "failed":    failed,
+            "pending":   pending,
+            "connected": connected,
+        },
+    }

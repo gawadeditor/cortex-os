@@ -116,6 +116,59 @@
     .adv-table td:first-child { color: var(--muted); width: 140px; white-space: nowrap; }
     .adv-mono { font-family: monospace; color: var(--blue); font-size: 11px;
                 word-break: break-all; }
+
+    /* ── Publishing tab ── */
+    .pub-summary {
+      display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: var(--gap);
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 20px;
+    }
+    .pub-summary-item { display: flex; align-items: baseline; gap: 6px; }
+    .pub-sum-num  { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .pub-sum-lbl  { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                    letter-spacing: .05em; }
+    .pub-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: var(--gap);
+    }
+    .pub-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px;
+      border-left: 3px solid var(--border);
+    }
+    .pub-card-ok   { border-left-color: #2ea043; }
+    .pub-card-fail { border-left-color: #da3633; }
+    .pub-card-pend { border-left-color: #58a6ff; }
+    .pub-card-none { border-left-color: var(--border); opacity: .8; }
+    .pub-card-header {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+    }
+    .pub-platform-name { font-size: 14px; font-weight: 700; }
+    .pub-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .pub-dot-ok   { background: var(--green); }
+    .pub-dot-fail { background: var(--red); }
+    .pub-dot-pend { background: var(--blue); }
+    .pub-dot-none { background: var(--muted); opacity: .5; }
+    .pub-field {
+      display: flex; gap: 8px; font-size: 12px; margin-bottom: 4px;
+      align-items: baseline;
+    }
+    .pub-field-label { color: var(--muted); flex-shrink: 0; width: 72px; font-size: 11px;
+                       text-transform: uppercase; letter-spacing: .04em; }
+    .pub-video-id  { font-family: monospace; font-size: 11px; color: var(--muted);
+                     word-break: break-all; }
+    .pub-card-actions { margin-top: 12px; }
+    .pub-failure-block {
+      margin-top: 6px; padding: 10px 12px;
+      background: #1f0a09; border: 1px solid #da3633;
+      border-radius: var(--radius);
+    }
+    .pub-failure-label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+                         color: var(--red); margin-bottom: 4px; font-weight: 700; }
+    .pub-failure-text  { font-size: 12px; color: #ff7b72; }
+
+    @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:.4; } }
   </style>
 </head>
 <body>
@@ -235,11 +288,11 @@
 </div>{# /ep-header #}
 
 {# ════════════════════════════════════════════════════════════════
-   TAB BAR  (Production only for P0; others staged for future)
+   TAB BAR — server-rendered via ?tab= query param
 ════════════════════════════════════════════════════════════════ #}
 <div class="tab-bar">
-  <span class="tab-btn active">Production</span>
-  <span class="tab-btn disabled" title="Coming soon">Publishing</span>
+  <a href="?tab=production" class="tab-btn {% if active_tab == 'production' %}active{% endif %}">Production</a>
+  <a href="?tab=publishing" class="tab-btn {% if active_tab == 'publishing' %}active{% endif %}">Publishing</a>
   <span class="tab-btn disabled" title="Coming soon">Thumbnails</span>
   <span class="tab-btn disabled" title="Coming soon">Titles</span>
   <span class="tab-btn disabled" title="Coming soon">Analytics</span>
@@ -248,8 +301,10 @@
 </div>
 
 {# ════════════════════════════════════════════════════════════════
-   PRODUCTION TAB
+   TAB CONTENT — conditional on active_tab
 ════════════════════════════════════════════════════════════════ #}
+
+{% if active_tab == 'production' %}
 
 {# Run error banner (fatal run failure) #}
 {% if d.run_error_hint %}
@@ -394,6 +449,161 @@
   </div>
 </details>
 {% endif %}
+
+{% endif %}{# end active_tab == 'production' #}
+
+{# ════════════════════════════════════════════════════════════════
+   PUBLISHING TAB
+════════════════════════════════════════════════════════════════ #}
+
+{% if active_tab == 'publishing' %}
+{% set pub = d.publishing %}
+{% set summary = pub.summary %}
+
+{# Summary header #}
+<div class="pub-summary">
+  <div class="pub-summary-item">
+    <span class="pub-sum-num {% if summary.published > 0 %}ok{% endif %}">{{ summary.published }}</span>
+    <span class="pub-sum-lbl">Published</span>
+  </div>
+  <div class="pub-summary-item">
+    <span class="pub-sum-num {% if summary.failed > 0 %}err{% endif %}">{{ summary.failed }}</span>
+    <span class="pub-sum-lbl">Failed</span>
+  </div>
+  <div class="pub-summary-item">
+    <span class="pub-sum-num {% if summary.pending > 0 %}{% endif %}">{{ summary.pending }}</span>
+    <span class="pub-sum-lbl">Pending</span>
+  </div>
+  <div class="pub-summary-item">
+    <span class="pub-sum-num muted">{{ summary.connected }}</span>
+    <span class="pub-sum-lbl">Connected</span>
+  </div>
+</div>
+
+{% if pub.platform_cards %}
+<div class="pub-grid">
+  {% for card in pub.platform_cards %}
+  {% set cs = card.card_state %}
+
+  {# Determine border/bg class #}
+  {% if cs == 'published'           %}{% set card_cls = 'pub-card-ok'   %}
+  {% elif cs == 'failed'            %}{% set card_cls = 'pub-card-fail' %}
+  {% elif cs == 'pending'           %}{% set card_cls = 'pub-card-pend' %}
+  {% else                           %}{% set card_cls = 'pub-card-none' %}
+  {% endif %}
+
+  <div class="pub-card {{ card_cls }}">
+
+    {# Card header: dot + platform name + status badge #}
+    <div class="pub-card-header">
+      {% if cs == 'published' %}
+        <span class="pub-dot pub-dot-ok"></span>
+      {% elif cs == 'failed' %}
+        <span class="pub-dot pub-dot-fail"></span>
+      {% elif cs == 'pending' %}
+        <span class="pub-dot pub-dot-pend" style="animation:pulse 1.5s ease-in-out infinite;"></span>
+      {% else %}
+        <span class="pub-dot pub-dot-none"></span>
+      {% endif %}
+      <span class="pub-platform-name">{{ card.display_name }}</span>
+      {% if cs == 'published' %}
+        <span class="badge badge-completed" style="font-size:10px; margin-left:auto;">Published</span>
+      {% elif cs == 'failed' %}
+        <span class="badge badge-failed" style="font-size:10px; margin-left:auto;">Failed</span>
+      {% elif cs == 'pending' %}
+        <span class="badge badge-running" style="font-size:10px; margin-left:auto;">Pending</span>
+      {% elif cs == 'connected_unpublished' %}
+        <span class="badge badge-skipped" style="font-size:10px; margin-left:auto;">Connected</span>
+      {% else %}
+        <span class="badge badge-skipped" style="font-size:10px; margin-left:auto;">Not connected</span>
+      {% endif %}
+    </div>
+
+    {# Card body: state-specific content #}
+    {% if cs == 'published' %}
+      {% if card.published_at %}
+      <div class="pub-field">
+        <span class="pub-field-label">Published</span>
+        <span>{{ card.published_at[:10] }}</span>
+      </div>
+      {% endif %}
+      {% if card.published_at_display and card.published_at_display != 'Unknown' %}
+      <div class="pub-field">
+        <span class="pub-field-label">Last sync</span>
+        <span class="muted">{{ card.published_at_display }}</span>
+      </div>
+      {% endif %}
+      {% if card.platform_video_id %}
+      <div class="pub-field">
+        <span class="pub-field-label">Video ID</span>
+        <span class="pub-video-id">{{ card.platform_video_id }}</span>
+      </div>
+      {% endif %}
+      {% if card.url %}
+      <div class="pub-card-actions">
+        <a href="{{ card.url }}" target="_blank" rel="noopener" class="btn btn-approve">
+          ▶ Watch on {{ card.display_name }} ↗
+        </a>
+      </div>
+      {% endif %}
+
+    {% elif cs == 'failed' %}
+      <div class="pub-failure-block">
+        <div class="pub-failure-label">Reason</div>
+        <div class="pub-failure-text">
+          {{ card.failure_hint or "Publishing failed" }}
+        </div>
+      </div>
+
+    {% elif cs == 'pending' %}
+      <div class="muted" style="font-size:13px; margin-top:4px;">
+        Pending publication
+      </div>
+      {% if card.published_at %}
+      <div class="pub-field" style="margin-top:8px;">
+        <span class="pub-field-label">Queued at</span>
+        <span>{{ card.published_at[:10] }}</span>
+      </div>
+      {% endif %}
+
+    {% elif cs == 'connected_unpublished' %}
+      <div style="font-size:13px; color:var(--muted); margin-top:4px;">
+        Platform connected — no publication record yet
+      </div>
+      <div class="pub-card-actions">
+        <span class="btn" style="opacity:.4; cursor:not-allowed;"
+              title="Manual publishing coming in a future step">Publish manually</span>
+      </div>
+
+    {% else %}{# not_connected #}
+      <div style="font-size:13px; color:var(--muted); margin-top:4px;">
+        Platform not connected
+      </div>
+      <div class="pub-card-actions">
+        <a href="/platforms/connect/{{ card.platform }}" class="btn">
+          Connect {{ card.display_name }}
+        </a>
+      </div>
+    {% endif %}
+
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+{# No cards — no outcomes and no credentials #}
+<div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
+  No platform connections or publishing records found for this episode.
+  <div style="margin-top:12px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
+    <a href="/platforms/connect/youtube"    class="btn">Connect YouTube</a>
+    <a href="/platforms/connect/tiktok"     class="btn">Connect TikTok</a>
+    <a href="/platforms/connect/instagram"  class="btn">Connect Instagram</a>
+    <a href="/platforms/connect/facebook"   class="btn">Connect Facebook</a>
+  </div>
+</div>
+{% endif %}
+
+{% endif %}{# end active_tab == 'publishing' #}
 
 </body>
 </html>

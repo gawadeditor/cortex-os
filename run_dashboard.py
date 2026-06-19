@@ -777,7 +777,11 @@ def episode_detail_page(episode_id):
     d = get_episode_detail(episode_id, db_path=_db_path())
     if d is None:
         return render_template("not_found.html", kind="Episode", id=episode_id), 404
-    return render_template("episode_detail.html", d=d)
+    valid_tabs = {"production", "publishing"}
+    active_tab = request.args.get("tab", "production")
+    if active_tab not in valid_tabs:
+        active_tab = "production"
+    return render_template("episode_detail.html", d=d, active_tab=active_tab)
 
 
 @app.route("/episodes")

@@ -169,6 +169,74 @@
     .pub-failure-text  { font-size: 12px; color: #ff7b72; }
 
     @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:.4; } }
+
+    /* ── Thumbnails tab ── */
+    .tn-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: var(--gap);
+      margin-bottom: var(--gap);
+    }
+    .tn-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 0;
+      overflow: hidden;
+    }
+    .tn-card-selected { border-color: #2ea043; }
+    .tn-image-box {
+      width: 100%; aspect-ratio: 16/9;
+      background: #0a0d12; display: flex; align-items: center;
+      justify-content: center; overflow: hidden; position: relative;
+      border-bottom: 1px solid var(--border);
+    }
+    .tn-image-placeholder {
+      font-size: 11px; color: var(--muted); text-align: center; padding: 8px;
+    }
+    .tn-image-path {
+      font-size: 10px; color: var(--muted); font-family: monospace;
+      text-align: center; padding: 6px 10px; word-break: break-all;
+    }
+    .tn-card-body { padding: 14px 16px; }
+    .tn-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .tn-meta {
+      display: flex; flex-direction: column; gap: 4px;
+      font-size: 12px; color: var(--muted); margin-bottom: 10px;
+    }
+    .tn-meta-row { display: flex; gap: 8px; align-items: baseline; }
+    .tn-meta-label { width: 72px; flex-shrink: 0; font-size: 10px;
+                     text-transform: uppercase; letter-spacing: .04em; }
+    .tn-perf {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .tn-perf-row {
+      display: flex; justify-content: space-between;
+      font-size: 12px; padding: 2px 0;
+    }
+    .tn-perf-label { color: var(--muted); }
+    .tn-perf-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .tn-no-data {
+      font-size: 12px; color: var(--muted);
+      font-style: italic; margin-bottom: 10px;
+    }
+    .tn-prompt-details { margin-top: 8px; }
+    .tn-prompt-details > summary {
+      font-size: 11px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .05em;
+      cursor: pointer; padding: 4px 0; list-style: none;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .tn-prompt-details > summary::-webkit-details-marker { display: none; }
+    .tn-prompt-details > summary::before { content: '▶'; font-size: 8px;
+                                            transition: transform .15s; }
+    .tn-prompt-details[open] > summary::before { transform: rotate(90deg); }
+    .tn-prompt-text {
+      margin-top: 6px; font-size: 12px; color: var(--muted);
+      line-height: 1.6; padding: 8px 10px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      word-break: break-word;
+    }
   </style>
 </head>
 <body>
@@ -293,7 +361,7 @@
 <div class="tab-bar">
   <a href="?tab=production" class="tab-btn {% if active_tab == 'production' %}active{% endif %}">Production</a>
   <a href="?tab=publishing" class="tab-btn {% if active_tab == 'publishing' %}active{% endif %}">Publishing</a>
-  <span class="tab-btn disabled" title="Coming soon">Thumbnails</span>
+  <a href="?tab=thumbnails" class="tab-btn {% if active_tab == 'thumbnails' %}active{% endif %}">Thumbnails</a>
   <span class="tab-btn disabled" title="Coming soon">Titles</span>
   <span class="tab-btn disabled" title="Coming soon">Analytics</span>
   <span class="tab-btn disabled" title="Coming soon">Revenue</span>
@@ -604,6 +672,126 @@
 {% endif %}
 
 {% endif %}{# end active_tab == 'publishing' #}
+
+{# ════════════════════════════════════════════════════════════════
+   THUMBNAILS TAB
+════════════════════════════════════════════════════════════════ #}
+{% if active_tab == 'thumbnails' %}
+{% set tn = d.thumbnails %}
+
+{% if tn.candidates %}
+<div class="tn-grid">
+  {% for c in tn.candidates %}
+
+  {# Derive border style from selected + performance #}
+  {% set is_sel = c.selected %}
+  <div class="tn-card {% if is_sel %}tn-card-selected{% endif %}">
+
+    {# Image area ─────────────────────────────────────────────── #}
+    <div class="tn-image-box">
+      {% if c.image_path %}
+        <div class="tn-image-path">{{ c.image_path }}</div>
+      {% else %}
+        <div class="tn-image-placeholder">No preview available</div>
+      {% endif %}
+    </div>
+
+    <div class="tn-card-body">
+
+      {# Badges ──────────────────────────────────────────────── #}
+      <div class="tn-badges">
+        {% if is_sel %}
+          <span class="badge badge-completed">Published thumbnail</span>
+        {% endif %}
+        {% if c.performance_status == 'winner' %}
+          <span class="badge badge-completed">Best CTR</span>
+        {% elif c.performance_status == 'underperformed' %}
+          <span class="badge badge-failed">Underperformed</span>
+        {% elif c.performance_status == 'awaiting_analytics' %}
+          <span class="badge badge-skipped">Awaiting analytics</span>
+        {% elif c.performance_status == 'not_published' %}
+          <span class="badge badge-skipped">Not published</span>
+        {% endif %}
+      </div>
+
+      {# Performance data (selected candidate only) ──────────── #}
+      {% if c.ctr is not none %}
+      <div class="tn-perf">
+        <div class="tn-perf-row">
+          <span class="tn-perf-label">CTR</span>
+          <span class="tn-perf-value">{{ c.ctr }}%</span>
+        </div>
+        {% if c.impressions is not none %}
+        <div class="tn-perf-row">
+          <span class="tn-perf-label">Impressions</span>
+          <span class="tn-perf-value">{{ "{:,}".format(c.impressions) }}</span>
+        </div>
+        {% endif %}
+        {% if c.views is not none %}
+        <div class="tn-perf-row">
+          <span class="tn-perf-label">Views</span>
+          <span class="tn-perf-value">{{ "{:,}".format(c.views) }}</span>
+        </div>
+        {% endif %}
+      </div>
+      {% elif c.performance_status == 'awaiting_analytics' %}
+      <div class="tn-no-data">No real performance data yet</div>
+      {% elif not is_sel %}
+      <div class="tn-no-data">Not published — no performance data</div>
+      {% endif %}
+
+      {# Metadata ────────────────────────────────────────────── #}
+      <div class="tn-meta">
+        <div class="tn-meta-row">
+          <span class="tn-meta-label">Rank</span>
+          <span>{{ c.rank }}</span>
+        </div>
+        {% if c.text_overlay %}
+        <div class="tn-meta-row">
+          <span class="tn-meta-label">Overlay</span>
+          <span>{{ c.text_overlay }}</span>
+        </div>
+        {% endif %}
+        {% if c.placement %}
+        <div class="tn-meta-row">
+          <span class="tn-meta-label">Placement</span>
+          <span>{{ c.placement }}</span>
+        </div>
+        {% endif %}
+        <div class="tn-meta-row">
+          <span class="tn-meta-label">Model</span>
+          <span>{{ c.model or '—' }}</span>
+        </div>
+        <div class="tn-meta-row">
+          <span class="tn-meta-label">Seed</span>
+          <span>{{ c.seed or '—' }}</span>
+        </div>
+      </div>
+
+      {# Prompt (collapsible) ────────────────────────────────── #}
+      {% if c.visual_prompt %}
+      <details class="tn-prompt-details">
+        <summary>Prompt</summary>
+        <div class="tn-prompt-text">{{ c.visual_prompt }}</div>
+      </details>
+      {% endif %}
+
+    </div>{# /tn-card-body #}
+  </div>{# /tn-card #}
+  {% endfor %}
+</div>
+
+{% else %}
+{# Empty state #}
+<div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
+  No thumbnail candidates found for this episode.
+  <div style="margin-top:12px;">
+    <a href="?tab=production" class="btn">← Back to Production</a>
+  </div>
+</div>
+{% endif %}
+
+{% endif %}{# end active_tab == 'thumbnails' #}
 
 </body>
 </html>

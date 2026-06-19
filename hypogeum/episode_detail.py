@@ -1,5 +1,5 @@
 """
-hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Steps 1–2).
+hypogeum/episode_detail.py — Episode Detail page data layer (P0 / Steps 1–3).
 
 Public API:
     get_episode_detail(episode_id, db_path=None) -> dict | None
@@ -317,6 +317,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     # ── Publishing tab data ─────────────────────────────────────────────
     publishing = _build_publishing_data(pub_outcomes_by_platform, cred_states)
 
+    # ── Thumbnails tab data ──────────────────────────────────────────────
+    thumbnails = _build_thumbnails_data(conn, episode_id, run_id)
+
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
 
@@ -370,6 +373,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
 
         # Publishing tab (full card data)
         "publishing": publishing,
+
+        # Thumbnails tab
+        "thumbnails": thumbnails,
 
         # Production tab
         "stage_groups": stage_groups,
@@ -547,5 +553,146 @@ def _build_publishing_data(
             "failed":    failed,
             "pending":   pending,
             "connected": connected,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Thumbnails tab data
+# ---------------------------------------------------------------------------
+
+# CTR thresholds (stored as 0.0–1.0 in platform_analytics.ctr)
+_CTR_WINNER_THRESHOLD       = 0.05   # >= 5% → winner
+_CTR_UNDERPERFORMED_THRESHOLD = 0.02  # < 2%  → underperformed
+
+
+def _build_thumbnails_data(
+    conn,
+    episode_id: str,
+    run_id: Optional[str],
+) -> dict:
+    """
+    Build Thumbnails tab data from thumbnail_candidates + assets + platform_analytics.
+
+    image_path:   joined from assets (asset_type='thumbnail') by position match.
+    model/seed:   not stored in the schema → always None.
+    performance:  real analytics only (source != 'mock'), applied to selected
+                  candidate only (non-selected candidates were never published).
+
+    Returns:
+        {
+          "candidates": [...],
+          "summary": {"count": N, "has_selected": bool, "has_real_data": bool},
+        }
+    """
+    # ── Thumbnail candidates ─────────────────────────────────────────────
+    cand_rows = conn.execute(
+        """
+        SELECT candidate_id, run_id, episode_id, rank,
+               text_overlay, placement, visual_prompt, selected
+        FROM thumbnail_candidates
+        WHERE episode_id = ?
+        ORDER BY rank ASC
+        """,
+        [episode_id],
+    ).fetchall()
+
+    if not cand_rows:
+        return {
+            "candidates": [],
+            "summary": {"count": 0, "has_selected": False, "has_real_data": False},
+        }
+
+    # ── Thumbnail asset file paths (heuristic: match by creation order → rank) ──
+    asset_paths: list[Optional[str]] = []
+    if run_id:
+        asset_rows = conn.execute(
+            """
+            SELECT file_path FROM assets
+            WHERE run_id = ? AND asset_type = 'thumbnail'
+            ORDER BY created_at ASC
+            """,
+            [run_id],
+        ).fetchall()
+        asset_paths = [r["file_path"] for r in asset_rows]
+
+    # ── Real analytics for this episode (source != 'mock') ───────────────
+    # Prefer YouTube; fall back to any platform with real data.
+    analytics_rows = conn.execute(
+        """
+        SELECT platform, ctr, impressions, views
+        FROM platform_analytics
+        WHERE episode_id = ? AND source != 'mock'
+          AND ctr IS NOT NULL
+        ORDER BY CASE platform WHEN 'youtube' THEN 0 ELSE 1 END ASC,
+                 snapshot_date DESC
+        """,
+        [episode_id],
+    ).fetchall()
+
+    # Take the first (preferred) platform's most-recent data
+    real_ctr: Optional[float]    = None
+    real_impressions: Optional[int] = None
+    real_views: Optional[int]    = None
+    linked_platforms: list[str]  = []
+
+    # Collect all platforms with real data
+    seen_plat: set = set()
+    for ar in analytics_rows:
+        if ar["platform"] not in seen_plat:
+            linked_platforms.append(ar["platform"])
+            seen_plat.add(ar["platform"])
+        if real_ctr is None:  # first row is already preferred platform
+            real_ctr        = ar["ctr"]
+            real_impressions = int(ar["impressions"]) if ar["impressions"] else None
+            real_views       = int(ar["views"])       if ar["views"]       else None
+
+    # ── Build candidate dicts ─────────────────────────────────────────────
+    candidates: list[dict] = []
+    for i, row in enumerate(cand_rows):
+        c = _row(row)
+        # Image path by position (heuristic; None if no matching asset)
+        c["image_path"] = asset_paths[i] if i < len(asset_paths) else None
+        # model/seed not stored in schema
+        c["model"] = None
+        c["seed"]  = None
+
+        selected = bool(c.get("selected"))
+
+        if selected:
+            c["linked_platforms"] = linked_platforms
+            if real_ctr is not None:
+                c["ctr"]         = round(real_ctr * 100, 2)
+                c["impressions"] = real_impressions
+                c["views"]       = real_views
+                if real_ctr >= _CTR_WINNER_THRESHOLD:
+                    c["performance_status"] = "winner"
+                elif real_ctr < _CTR_UNDERPERFORMED_THRESHOLD:
+                    c["performance_status"] = "underperformed"
+                else:
+                    c["performance_status"] = "has_data"
+            else:
+                c["ctr"]         = None
+                c["impressions"] = None
+                c["views"]       = None
+                c["performance_status"] = "awaiting_analytics"
+        else:
+            c["linked_platforms"] = []
+            c["ctr"]              = None
+            c["impressions"]      = None
+            c["views"]            = None
+            c["performance_status"] = "not_published"
+
+        candidates.append(c)
+
+    has_selected  = any(bool(c.get("selected")) for c in candidates)
+    has_real_data = real_ctr is not None
+
+    return {
+        "candidates": candidates,
+        "summary": {
+            "count":          len(candidates),
+            "has_selected":   has_selected,
+            "has_real_data":  has_real_data,
         },
     }

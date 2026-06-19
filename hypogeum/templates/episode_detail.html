@@ -450,6 +450,26 @@
       border: 1px solid var(--border); border-radius: var(--radius);
       word-break: break-word;
     }
+
+    /* ── Branding tab ── */
+    .brd-overview-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 10px; margin-bottom: var(--gap);
+    }
+    .brd-overview-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+    }
+    .brd-overview-val { font-size: 20px; font-weight: 700; line-height: 1.2; }
+    .brd-overview-lbl { font-size: 10px; color: var(--muted);
+                        text-transform: uppercase; letter-spacing: .06em; margin-top: 4px; }
+    .brd-audit-row {
+      display: flex; justify-content: space-between; font-size: 12px;
+      padding: 4px 0; border-bottom: 1px solid var(--border); margin-top: 4px;
+    }
+    .brd-audit-row:last-of-type { border-bottom: none; }
+    .brd-rec-list { display: flex; flex-direction: column; gap: 8px; }
   </style>
 </head>
 <body>
@@ -579,6 +599,7 @@
   <a href="?tab=analytics" class="tab-btn {% if active_tab == 'analytics' %}active{% endif %}">Analytics</a>
   <a href="?tab=revenue" class="tab-btn {% if active_tab == 'revenue' %}active{% endif %}">Revenue</a>
   <a href="?tab=learning" class="tab-btn {% if active_tab == 'learning' %}active{% endif %}">Learning</a>
+  <a href="?tab=branding" class="tab-btn {% if active_tab == 'branding' %}active{% endif %}">Branding</a>
 </div>
 
 {# ════════════════════════════════════════════════════════════════
@@ -1810,6 +1831,232 @@
 {% endif %}{# end has_real_data #}
 
 {% endif %}{# end active_tab == 'learning' #}
+
+{# ════════════════════════════════════════════════════════════════
+   BRANDING TAB
+════════════════════════════════════════════════════════════════ #}
+{% if active_tab == 'branding' %}
+{% set brd  = d.branding %}
+{% set bsum = brd.summary %}
+
+{# ── 1. Branding Overview ────────────────────────────────────────── #}
+<div style="margin-bottom:var(--gap);">
+  <div class="card-title" style="margin-bottom:10px;">Branding Overview</div>
+  <div class="brd-overview-grid">
+    <div class="brd-overview-card">
+      <div class="brd-overview-val">{{ bsum.assets_found }}</div>
+      <div class="brd-overview-lbl">Assets Found</div>
+    </div>
+    <div class="brd-overview-card">
+      <div class="brd-overview-val">{{ bsum.assets_missing }}</div>
+      <div class="brd-overview-lbl">Assets Missing</div>
+    </div>
+    <div class="brd-overview-card">
+      <div class="brd-overview-val">{{ bsum.completeness_pct }}%</div>
+      <div class="brd-overview-lbl">Completeness</div>
+    </div>
+    <div class="brd-overview-card">
+      <div class="brd-overview-val" style="font-size:15px;">
+        {% set ov = bsum.overall_verdict %}
+        {% if ov == 'Complete' %}<span class="ok">{{ ov }}</span>
+        {% elif ov == 'Mostly Complete' %}<span style="color:var(--blue);">{{ ov }}</span>
+        {% elif ov == 'Partial' %}<span class="warn">{{ ov }}</span>
+        {% else %}<span class="err">{{ ov }}</span>
+        {% endif %}
+      </div>
+      <div class="brd-overview-lbl">Verdict</div>
+    </div>
+  </div>
+</div>
+
+{# ── 2. Thumbnail & Title Branding Audits ─────────────────────── #}
+<div class="lrn-component-grid" style="margin-bottom:var(--gap);">
+
+  {# Thumbnail Audit #}
+  <div class="lrn-component-card">
+    <div class="lrn-component-title">Thumbnail Branding Audit</div>
+    {% set tv = brd.thumbnail_audit.verdict %}
+    {% if tv == 'Strong Branding' %}
+      <span class="lrn-verdict-chip lrn-verdict-strong">{{ tv }}</span>
+    {% elif tv == 'Acceptable Branding' %}
+      <span class="lrn-verdict-chip lrn-verdict-ok">{{ tv }}</span>
+    {% elif tv == 'Weak Branding' %}
+      <span class="lrn-verdict-chip lrn-verdict-weak">{{ tv }}</span>
+    {% else %}
+      <span class="lrn-verdict-chip lrn-verdict-waiting">Not Available</span>
+    {% endif %}
+
+    <div class="brd-audit-row">
+      <span class="lrn-metric-label">Thumbnail exists</span>
+      <span class="lrn-metric-value">{{ 'Yes' if brd.thumbnail_audit.thumbnail_exists else 'No' }}</span>
+    </div>
+    <div class="brd-audit-row">
+      <span class="lrn-metric-label">Branding markers</span>
+      <span class="lrn-metric-value">{{ 'Yes' if brd.thumbnail_audit.branding_markers else 'No' }}</span>
+    </div>
+    <div class="brd-audit-row">
+      <span class="lrn-metric-label">Consistent style</span>
+      <span class="lrn-metric-value muted">
+        {{ brd.thumbnail_audit.consistent_style or 'Insufficient evidence' }}
+      </span>
+    </div>
+  </div>
+
+  {# Title Audit #}
+  <div class="lrn-component-card">
+    <div class="lrn-component-title">Title Branding Audit</div>
+    {% set tv = brd.title_audit.verdict %}
+    {% if tv == 'On Brand' %}
+      <span class="lrn-verdict-chip lrn-verdict-strong">{{ tv }}</span>
+    {% elif tv == 'Acceptable' %}
+      <span class="lrn-verdict-chip lrn-verdict-ok">{{ tv }}</span>
+    {% elif tv == 'Off Brand' %}
+      <span class="lrn-verdict-chip lrn-verdict-weak">{{ tv }}</span>
+    {% else %}
+      <span class="lrn-verdict-chip lrn-verdict-waiting">Not Available</span>
+    {% endif %}
+
+    <div class="brd-audit-row">
+      <span class="lrn-metric-label">Title exists</span>
+      <span class="lrn-metric-value">{{ 'Yes' if brd.title_audit.title_exists else 'No' }}</span>
+    </div>
+    {% if brd.title_audit.style_classification %}
+    <div class="brd-audit-row">
+      <span class="lrn-metric-label">Style</span>
+      <span class="lrn-metric-value">{{ brd.title_audit.style_classification }}</span>
+    </div>
+    {% endif %}
+    <div class="brd-audit-row">
+      <span class="lrn-metric-label">Channel fit</span>
+      <span class="lrn-metric-value muted">
+        {{ brd.title_audit.matches_positioning or 'Insufficient evidence' }}
+      </span>
+    </div>
+    {% if brd.title_audit.title_text %}
+    <div style="margin-top:8px; font-size:12px; color:var(--muted);
+                font-style:italic; line-height:1.4;">
+      "{{ brd.title_audit.title_text[:80] }}{% if brd.title_audit.title_text|length > 80 %}...{% endif %}"
+    </div>
+    {% endif %}
+  </div>
+
+</div>{# /lrn-component-grid #}
+
+{# ── 3. Publishing Branding Audit ──────────────────────────────── #}
+<div style="margin-bottom:var(--gap);">
+  <div class="card-title" style="margin-bottom:10px;">Publishing Branding Audit</div>
+  <div class="card" style="padding:0;">
+    <table>
+      <thead>
+        <tr>
+          <th>Platform</th>
+          <th>Published</th>
+          <th>Custom Thumbnail</th>
+          <th>Title Present</th>
+          <th>Description</th>
+          <th style="text-align:right;">Branding Completeness</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in brd.platform_audit %}
+        <tr>
+          <td style="font-weight:600;">{{ p.display_name }}</td>
+          <td>
+            {% if p.published %}
+              <span class="badge badge-completed" style="font-size:10px;">Published</span>
+            {% else %}
+              <span class="badge badge-skipped" style="font-size:10px;">Not published</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if p.custom_thumbnail is none %}
+              <span class="muted">—</span>
+            {% elif p.custom_thumbnail %}
+              <span class="ok">Yes</span>
+            {% else %}
+              <span class="err">No</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if p.title_present %}
+              <span class="ok">Yes</span>
+            {% else %}
+              <span class="err">No</span>
+            {% endif %}
+          </td>
+          <td><span class="muted">—</span></td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums;">
+            {% if p.branding_completeness is not none %}
+              {{ p.branding_completeness }}%
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ── 4. Asset Inventory ──────────────────────────────────────────── #}
+<div style="margin-bottom:var(--gap);">
+  <div class="card-title" style="margin-bottom:10px;">Asset Inventory</div>
+  {% if brd.asset_inventory %}
+  <div class="card" style="padding:0;">
+    <table>
+      <thead>
+        <tr>
+          <th>Asset Type</th>
+          <th>Source</th>
+          <th>Created</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in brd.asset_inventory %}
+        <tr>
+          <td style="font-size:13px;">{{ a.asset_type }}</td>
+          <td class="muted" style="font-size:12px;">{{ a.source or '—' }}</td>
+          <td class="muted" style="font-size:11px;">{{ a.created_at[:10] if a.created_at else '—' }}</td>
+          <td>
+            {% if a.status == 'available' %}
+              <span class="badge badge-completed" style="font-size:10px;">Available</span>
+            {% else %}
+              <span class="badge badge-skipped" style="font-size:10px;">Referenced</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card" style="text-align:center; padding:30px 20px; color:var(--muted);">
+    No branding assets found for this episode's run.
+  </div>
+  {% endif %}
+</div>
+
+{# ── 5. Branding Recommendations ──────────────────────────────────── #}
+<div>
+  <div class="card-title" style="margin-bottom:10px;">Branding Recommendations</div>
+  <div class="brd-rec-list">
+    {% for rec in brd.recommendations %}
+    <div class="lrn-rec-card">
+      <div class="lrn-rec-domain">{{ rec.domain }}</div>
+      <div class="lrn-rec-text">{{ rec.recommendation }}</div>
+      <div class="lrn-rec-meta">
+        <span class="lrn-conf-{{ rec.confidence | lower }}">{{ rec.confidence }} confidence</span>
+        <span>·</span>
+        <span>{{ rec.reason }}</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+{% endif %}{# end active_tab == 'branding' #}
 
 </body>
 </html>

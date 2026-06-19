@@ -383,6 +383,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     # ── Learning tab data ────────────────────────────────────────────────
     learning_data = _build_learning_data(conn, episode_id, run_id)
 
+    # ── Branding tab data ─────────────────────────────────────────────────
+    branding_data = _build_branding_data(conn, episode_id, run_id)
+
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
 
@@ -451,6 +454,9 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
 
         # Learning tab
         "learning": learning_data,
+
+        # Branding tab
+        "branding": branding_data,
 
         # Production tab
         "stage_groups": stage_groups,
@@ -1627,6 +1633,296 @@ def _build_learning_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
         "title":           title_learning,
         "platform":        platform_learning,
         "financial":       financial_learning,
+        "recommendations": recommendations,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Branding tab data
+# ---------------------------------------------------------------------------
+
+_BRANDING_ASSET_TYPES = [
+    "logo", "logo_bug", "watermark", "intro", "outro",
+    "lower_third", "channel_package", "thumbnail_template", "title_template",
+]
+
+_BRANDING_COMPLETE_THRESHOLD       = 90   # >= 90% → Complete
+_BRANDING_MOSTLY_COMPLETE_THRESHOLD = 60  # >= 60% → Mostly Complete
+_BRANDING_PARTIAL_THRESHOLD        = 30   # >= 30% → Partial
+
+
+def _build_branding_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
+    """
+    Build Branding tab data for one episode.
+
+    Sources: assets, thumbnail_candidates, titles, publishing_outcomes.
+    No mock analytics, no hallucinated judgments. Missing evidence stated explicitly.
+
+    Returns:
+        {
+          "summary":         {assets_found, assets_missing, completeness_pct, overall_verdict},
+          "thumbnail_audit": {thumbnail_exists, branding_markers, consistent_style, verdict},
+          "title_audit":     {title_exists, title_text, style_classification,
+                              matches_positioning, verdict},
+          "platform_audit":  [{platform, display_name, published, custom_thumbnail,
+                               title_present, description_present, branding_completeness}],
+          "asset_inventory": [{asset_type, source, created_at, status}],
+          "recommendations": [{domain, recommendation, confidence, reason}],
+        }
+    """
+    # ── Asset Inventory ───────────────────────────────────────────────
+    asset_inventory: list[dict] = []
+    found_types: set = set()
+
+    if run_id:
+        placeholders = ",".join("?" * len(_BRANDING_ASSET_TYPES))
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT asset_type, provider, file_path, created_at
+                FROM assets
+                WHERE run_id = ?
+                  AND asset_type IN ({placeholders})
+                ORDER BY created_at ASC
+                """,
+                [run_id] + list(_BRANDING_ASSET_TYPES),
+            ).fetchall()
+            for r in rows:
+                d = _row(r)
+                atype = d.get("asset_type", "")
+                found_types.add(atype)
+                asset_inventory.append({
+                    "asset_type": atype,
+                    "source":     d.get("provider") or "unknown",
+                    "created_at": d.get("created_at"),
+                    "status":     "available" if d.get("file_path") else "referenced",
+                })
+        except Exception:
+            pass
+
+    # ── Branding Overview ─────────────────────────────────────────────
+    total_types    = len(_BRANDING_ASSET_TYPES)
+    assets_found   = len(found_types)
+    assets_missing = total_types - assets_found
+    completeness_pct = round(assets_found / total_types * 100) if total_types else 0
+
+    if completeness_pct >= _BRANDING_COMPLETE_THRESHOLD:
+        overall_verdict = "Complete"
+    elif completeness_pct >= _BRANDING_MOSTLY_COMPLETE_THRESHOLD:
+        overall_verdict = "Mostly Complete"
+    elif completeness_pct >= _BRANDING_PARTIAL_THRESHOLD:
+        overall_verdict = "Partial"
+    else:
+        overall_verdict = "Missing"
+
+    summary = {
+        "assets_found":     assets_found,
+        "assets_missing":   assets_missing,
+        "completeness_pct": completeness_pct,
+        "overall_verdict":  overall_verdict,
+    }
+
+    # ── Selected thumbnail ────────────────────────────────────────────
+    sel_thumbnail: dict = {}
+    try:
+        tn_row = conn.execute(
+            """
+            SELECT text_overlay, visual_prompt
+            FROM thumbnail_candidates
+            WHERE episode_id = ? AND selected = 1
+            LIMIT 1
+            """,
+            [episode_id],
+        ).fetchone()
+        sel_thumbnail = _row(tn_row) if tn_row else {}
+    except Exception:
+        pass
+
+    # ── Thumbnail Branding Audit ──────────────────────────────────────
+    if not sel_thumbnail:
+        thumbnail_audit: dict = {
+            "thumbnail_exists": False,
+            "branding_markers": False,
+            "consistent_style": None,
+            "verdict":          "Not Available",
+        }
+    else:
+        has_overlay = bool(sel_thumbnail.get("text_overlay"))
+        has_prompt  = bool(sel_thumbnail.get("visual_prompt"))
+        has_markers = has_overlay or has_prompt
+
+        if has_overlay and has_prompt:
+            tn_verdict = "Strong Branding"
+        elif has_markers:
+            tn_verdict = "Acceptable Branding"
+        else:
+            tn_verdict = "Weak Branding"
+
+        thumbnail_audit = {
+            "thumbnail_exists": True,
+            "branding_markers": has_markers,
+            "consistent_style": None,   # insufficient evidence without brand profile
+            "verdict":          tn_verdict,
+        }
+
+    # ── Selected title ────────────────────────────────────────────────
+    sel_title_text: Optional[str] = None
+    try:
+        title_row = conn.execute(
+            "SELECT title_text FROM titles WHERE episode_id = ? AND selected = 1 LIMIT 1",
+            [episode_id],
+        ).fetchone()
+        sel_title_text = title_row["title_text"] if title_row else None
+    except Exception:
+        pass
+
+    # ── Title Branding Audit ──────────────────────────────────────────
+    if not sel_title_text:
+        title_audit: dict = {
+            "title_exists":         False,
+            "title_text":           None,
+            "style_classification": None,
+            "matches_positioning":  None,
+            "verdict":              "Not Available",
+        }
+    else:
+        fmt       = _classify_title_format(sel_title_text)
+        fmt_label = _FORMAT_LABELS.get(fmt, "Other")
+
+        if fmt in ("question", "mystery", "vs_comparison"):
+            title_verdict = "On Brand"
+        else:
+            title_verdict = "Acceptable"
+
+        title_audit = {
+            "title_exists":         True,
+            "title_text":           sel_title_text,
+            "style_classification": fmt_label,
+            "matches_positioning":  None,   # insufficient evidence without brand profile
+            "verdict":              title_verdict,
+        }
+
+    # ── Publishing Branding Audit ─────────────────────────────────────
+    pub_rows_raw: list = []
+    try:
+        pub_rows_raw = conn.execute(
+            """
+            SELECT platform, publishing_status
+            FROM publishing_outcomes
+            WHERE episode_id = ?
+            """,
+            [episode_id],
+        ).fetchall()
+    except Exception:
+        pass
+
+    pub_by_platform: dict[str, dict] = {_row(r)["platform"]: _row(r) for r in pub_rows_raw}
+
+    has_sel_thumbnail = bool(sel_thumbnail)
+    has_sel_title     = bool(sel_title_text)
+
+    platform_audit: list[dict] = []
+    for p in _PLATFORM_ORDER:
+        pub          = pub_by_platform.get(p)
+        is_published = pub is not None and pub.get("publishing_status") == "success"
+
+        custom_thumbnail    = has_sel_thumbnail if is_published else None
+        title_present       = has_sel_title
+        description_present = None   # not stored in current schema
+
+        if is_published:
+            verifiable = [custom_thumbnail, title_present]
+            score: Optional[int] = round(sum(1 for x in verifiable if x) / len(verifiable) * 100)
+        else:
+            score = None
+
+        platform_audit.append({
+            "platform":              p,
+            "display_name":          _PLATFORM_DISPLAY_NAMES[p],
+            "published":             is_published,
+            "custom_thumbnail":      custom_thumbnail,
+            "title_present":         title_present,
+            "description_present":   description_present,
+            "branding_completeness": score,
+        })
+
+    # ── Branding Recommendations ──────────────────────────────────────
+    recommendations: list[dict] = []
+
+    tn_v = thumbnail_audit["verdict"]
+    if tn_v == "Not Available":
+        recommendations.append({
+            "domain":         "thumbnail",
+            "recommendation": "No thumbnail selected. Select a branded thumbnail before publishing.",
+            "confidence":     "High",
+            "reason":         "No thumbnail candidate selected for this episode",
+        })
+    elif tn_v == "Weak Branding":
+        recommendations.append({
+            "domain":         "thumbnail",
+            "recommendation": "Add text overlay or visual prompt to strengthen thumbnail branding.",
+            "confidence":     "Medium",
+            "reason":         "Thumbnail present but no branding markers found",
+        })
+
+    title_v = title_audit["verdict"]
+    if title_v == "Not Available":
+        recommendations.append({
+            "domain":         "title",
+            "recommendation": "No title selected. Choose a title to complete branding before publishing.",
+            "confidence":     "High",
+            "reason":         "No title candidate selected for this episode",
+        })
+
+    critical_missing = [t for t in ("logo", "intro", "outro") if t not in found_types]
+    if critical_missing:
+        recommendations.append({
+            "domain":         "assets",
+            "recommendation": (
+                f"Critical branding assets missing: {', '.join(critical_missing)}."
+                " Upload these to ensure consistent brand presentation."
+            ),
+            "confidence":     "High",
+            "reason":         f"{len(critical_missing)} critical asset(s) not found for this episode",
+        })
+    elif assets_missing > 0:
+        missing_names = [t for t in _BRANDING_ASSET_TYPES if t not in found_types]
+        sample = ", ".join(missing_names[:3])
+        suffix = "..." if len(missing_names) > 3 else ""
+        recommendations.append({
+            "domain":         "assets",
+            "recommendation": f"Optional branding assets not found: {sample}{suffix}.",
+            "confidence":     "Low",
+            "reason":         f"{assets_missing} branding asset(s) not found",
+        })
+
+    low_completeness = [
+        p for p in platform_audit
+        if p["published"] and p["branding_completeness"] is not None
+        and p["branding_completeness"] < 100
+    ]
+    if low_completeness:
+        recommendations.append({
+            "domain":         "publishing",
+            "recommendation": "Ensure thumbnails and titles are consistent across all published platforms.",
+            "confidence":     "Medium",
+            "reason":         f"{len(low_completeness)} published platform(s) with incomplete branding",
+        })
+
+    if not recommendations:
+        recommendations.append({
+            "domain":         "branding",
+            "recommendation": "Insufficient branding evidence.",
+            "confidence":     "Low",
+            "reason":         "No branding assets or selections found for this episode",
+        })
+
+    return {
+        "summary":         summary,
+        "thumbnail_audit": thumbnail_audit,
+        "title_audit":     title_audit,
+        "platform_audit":  platform_audit,
+        "asset_inventory": asset_inventory,
         "recommendations": recommendations,
     }
 

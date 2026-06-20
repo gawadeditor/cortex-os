@@ -126,9 +126,47 @@
 </div>
 {% endif %}
 
+{# ── Queued Topics — surface first ── #}
+{% if queued_topics %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Queued Topics
+    <span style="font-weight:400; font-size:11px; color:var(--muted);">— approve one to start production</span>
+  </div>
+  {% for t in queued_topics %}
+  <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;">
+    <div style="flex:1; min-width:0;">
+      <div style="font-weight:500; line-height:1.4;">{{ t.topic_text }}</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+        Channel: {{ t.channel_id }} · Priority: {{ t.priority }}
+        {% if t.created_at %} · {{ t.created_at[:10] }}{% endif %}
+      </div>
+    </div>
+    {% if not (missing_reqs or setup_blockers) %}
+    <form method="POST" action="/create/launch" style="flex-shrink:0;">
+      <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
+      <input type="hidden" name="topic" value="{{ t.topic_text }}">
+      <input type="hidden" name="video_type" value="long_video">
+      <input type="hidden" name="quality_mode" value="balanced">
+      <input type="hidden" name="platforms" value="youtube">
+      <button type="submit" class="btn btn-approve" style="font-size:12px; padding:4px 12px;">
+        ▶ Start
+      </button>
+    </form>
+    {% else %}
+    <span class="btn" style="opacity:.35; cursor:not-allowed; font-size:12px;" title="Resolve blockers first">▶ Start</span>
+    {% endif %}
+  </div>
+  {% endfor %}
+  <div style="margin-top:8px; font-size:12px;">
+    <a href="/episodes">Manage queue →</a>
+  </div>
+</div>
+{% endif %}
+
 {# ── Launch form ── #}
 {% set launch_blocked = missing_reqs or setup_blockers %}
 <div class="card create-form">
+  <div class="card-title">Or enter a custom topic</div>
   <form method="POST" action="/create/launch">
     <div class="field">
       <label>Channel</label>

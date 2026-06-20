@@ -593,6 +593,7 @@
 ════════════════════════════════════════════════════════════════ #}
 <div class="tab-bar">
   <a href="?tab=production" class="tab-btn {% if active_tab == 'production' %}active{% endif %}">Production</a>
+  <a href="?tab=artifacts"  class="tab-btn {% if active_tab == 'artifacts' %}active{% endif %}">Files &amp; Artifacts</a>
   <a href="?tab=publishing" class="tab-btn {% if active_tab == 'publishing' %}active{% endif %}">Publishing</a>
   <a href="?tab=thumbnails" class="tab-btn {% if active_tab == 'thumbnails' %}active{% endif %}">Thumbnails</a>
   <a href="?tab=titles" class="tab-btn {% if active_tab == 'titles' %}active{% endif %}">Titles</a>
@@ -752,7 +753,163 @@
 </details>
 {% endif %}
 
+{% if active_tab == 'production' %}
+{# ── Resume buttons (disk-only or failed episodes) ── #}
+{% set da = d.get('disk_artifacts') or {} %}
+{% if da.get('exists') %}
+<div class="card" style="margin-top:var(--gap);">
+  <div class="card-title">Resume Actions</div>
+  <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+    Run assembly+QA from existing clips and narration, or resume missing narration beats.
+    These actions use files already on disk — no new video clips are generated.
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-resume"
+            onclick="resumeEpisode('{{ d.episode_id }}', 'assembly')"
+            title="Re-run assembly, final render review, and QA from existing clips.">
+      ▶ Rebuild Assembly + QA
+    </button>
+    <button class="btn btn-resume"
+            onclick="resumeEpisode('{{ d.episode_id }}', 'narration')"
+            title="Generate missing narration beats only, then rebuild.">
+      🎙 Resume Narration
+    </button>
+    {% if da.get('has_render') %}
+    <a href="/episode/{{ d.episode_id }}/render" class="btn" download>
+      ⬇ Download Render ({{ da.render_size_mb }}MB)
+    </a>
+    {% endif %}
+  </div>
+  <div id="resume-status-{{ d.episode_id }}" style="display:none; margin-top:8px; font-size:12px;"></div>
+</div>
+<script>
+function resumeEpisode(episodeId, kind) {
+  var statusEl = document.getElementById('resume-status-' + episodeId);
+  if (statusEl) { statusEl.style.display = 'block'; statusEl.textContent = 'Starting…'; statusEl.style.color = 'var(--muted)'; }
+  fetch('/api/episode/' + episodeId + '/resume/' + kind, { method: 'POST',
+        headers: {'Content-Type': 'application/json'} })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        if (statusEl) { statusEl.textContent = '✓ Started (PID ' + (d.pid || '?') + '). Refresh in ~30s to see updated status.'; statusEl.style.color = 'var(--green)'; }
+      } else {
+        if (statusEl) { statusEl.textContent = '✗ ' + (d.error || 'Failed to start.'); statusEl.style.color = 'var(--red)'; }
+      }
+    })
+    .catch(function(e) {
+      if (statusEl) { statusEl.textContent = '✗ Network error: ' + e; statusEl.style.color = 'var(--red)'; }
+    });
+}
+</script>
+{% endif %}
+{% endif %}{# end second production check for resume buttons #}
+
 {% endif %}{# end active_tab == 'production' #}
+
+{# ════════════════════════════════════════════════════════════════
+   ARTIFACTS TAB
+════════════════════════════════════════════════════════════════ #}
+{% if active_tab == 'artifacts' %}
+{% set da = d.get('disk_artifacts') or {} %}
+{% if da.get('exists') %}
+
+{# ── Video render ── #}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Video Render</div>
+  {% if da.get('has_render') %}
+  <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+    <span class="ok">✓ Rendered ({{ da.render_size_mb }} MB)</span>
+    <a href="/episode/{{ d.episode_id }}/render" class="btn" download>⬇ Download MP4</a>
+  </div>
+  {% else %}
+  <div class="muted">No render found. Run assembly to generate.</div>
+  {% endif %}
+</div>
+
+{# ── Thumbnail ── #}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Thumbnail</div>
+  {% if da.get('has_thumbnail') %}
+  <div style="display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap;">
+    <img src="/episode/{{ d.episode_id }}/thumbnail"
+         alt="thumbnail" loading="lazy"
+         style="width:280px; height:157px; object-fit:cover; border-radius:var(--radius); border:1px solid var(--border);">
+    <div>
+      <div class="ok" style="margin-bottom:8px;">✓ Thumbnail present</div>
+      <a href="/episode/{{ d.episode_id }}/thumbnail" class="btn" download>⬇ Download</a>
+    </div>
+  </div>
+  {% else %}
+  <div class="muted">No thumbnail found.</div>
+  {% endif %}
+</div>
+
+{# ── Narration and captions ── #}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Audio &amp; Captions</div>
+  {% if da.get('has_narration') %}
+  <div class="stat-row">
+    <span class="stat-label">Narration ({{ da.narration_size_mb }} MB)</span>
+    <a href="/episode/{{ d.episode_id }}/narration" class="btn" download>⬇ Download MP3</a>
+  </div>
+  {% else %}
+  <div class="stat-row"><span class="stat-label muted">No narration found</span></div>
+  {% endif %}
+  {% if da.get('has_captions') %}
+  <div class="stat-row">
+    <span class="stat-label">Captions (SRT)</span>
+    <a href="/episode/{{ d.episode_id }}/captions" class="btn" download>⬇ Download SRT</a>
+  </div>
+  {% else %}
+  <div class="stat-row"><span class="stat-label muted">No captions found</span></div>
+  {% endif %}
+</div>
+
+{# ── Video clips ── #}
+{% if da.get('video_clips') %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Video Clips ({{ da.clip_count }} scenes)</div>
+  <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:4px;">
+    {% for clip in da.video_clips %}
+    <a href="/episode/{{ d.episode_id }}/clip/{{ clip.scene_id }}"
+       class="btn" download title="{{ clip.size_mb }} MB"
+       style="font-size:11px; padding:3px 8px;">
+      {{ clip.scene_id }} ({{ clip.size_mb }}MB)
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ── JSON packages ── #}
+{% if da.get('json_artifacts') %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Pipeline Packages</div>
+  <div style="display:flex; flex-direction:column; gap:0;">
+    {% for art in da.json_artifacts %}
+    <div class="stat-row">
+      <span class="stat-label">{{ art.label }}</span>
+      <span style="display:flex; gap:8px; align-items:center;">
+        <span class="muted" style="font-size:11px;">{{ art.size_kb }}KB</span>
+        <a href="/episode/{{ d.episode_id }}/artifact/{{ art.stem }}"
+           class="btn" style="font-size:11px; padding:2px 8px;" target="_blank">View JSON</a>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
+  No on-disk artifacts found for <code>{{ d.episode_id }}</code>.
+  <div style="margin-top:10px; font-size:12px;">
+    Artifacts are generated by running the production pipeline.
+    <a href="/create" class="btn" style="margin-top:6px; display:inline-block;">Start production →</a>
+  </div>
+</div>
+{% endif %}
+{% endif %}{# end active_tab == 'artifacts' #}
 
 {# ════════════════════════════════════════════════════════════════
    PUBLISHING TAB
@@ -923,7 +1080,14 @@
 
     {# Image area ─────────────────────────────────────────────── #}
     <div class="tn-image-box">
-      {% if c.image_path %}
+      {% if c.selected %}
+        {# Selected thumbnail — serve via the artifact route so it renders as an image #}
+        <img src="/episode/{{ d.episode_id }}/thumbnail"
+             alt="thumbnail" loading="lazy"
+             style="width:100%; height:100%; object-fit:cover; border-radius:0;"
+             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+        <div class="tn-image-placeholder" style="display:none;">No preview</div>
+      {% elif c.image_path %}
         <div class="tn-image-path">{{ c.image_path }}</div>
       {% else %}
         <div class="tn-image-placeholder">No preview available</div>

@@ -141,6 +141,34 @@
 
     .no-data  { font-size: 13px; color: var(--muted); padding: 10px 0; }
     .ep-table-wrap { overflow-x: auto; }
+
+    /* ── Next action banner ─────────────────────────────────────── */
+    .next-action {
+      display: flex; align-items: center; gap: 14px;
+      padding: 14px 18px; border-radius: var(--radius);
+      border: 1px solid var(--border); margin-bottom: var(--gap);
+      background: var(--surface);
+    }
+    .next-action-critical { border-color: var(--red);    background: #1f0a09; }
+    .next-action-warning  { border-color: var(--yellow); background: #1e1a00; }
+    .next-action-info     { border-color: var(--blue);   background: #0d1620; }
+    .next-action-icon { font-size: 20px; flex-shrink: 0; }
+    .next-action-body { flex: 1; }
+    .next-action-label { font-size: 14px; font-weight: 600; }
+    .next-action-detail { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Episode row ────────────────────────────────────────────── */
+    .ep-row { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+              border-bottom: 1px solid var(--border); font-size: 13px; }
+    .ep-row:last-child { border-bottom: none; }
+    .ep-row-title { flex: 1; min-width: 0; }
+    .ep-row-title a { color: var(--text); text-decoration: none;
+                      display: block; white-space: nowrap; overflow: hidden;
+                      text-overflow: ellipsis; }
+    .ep-row-title a:hover { color: var(--blue); }
+    .ep-row-meta { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .ep-tn { width: 48px; height: 27px; object-fit: cover; border-radius: 3px;
+              border: 1px solid var(--border); flex-shrink: 0; background: var(--bg); }
   </style>
 </head>
 <body>
@@ -602,6 +630,57 @@
     </div>
   </div>
 </details>
+
+{# ═══════════════════════════════════════════════════════════════
+   NEXT REQUIRED ACTION
+═══════════════════════════════════════════════════════════════ #}
+{% if next_action %}
+<div class="next-action next-action-{{ next_action.urgency }} exec-section">
+  <div class="next-action-icon">
+    {% if next_action.urgency == 'critical' %}🚫
+    {% elif next_action.urgency == 'warning' %}⚠️
+    {% else %}▶{% endif %}
+  </div>
+  <div class="next-action-body">
+    <div class="next-action-label">{{ next_action.label }}</div>
+    {% if next_action.detail %}
+    <div class="next-action-detail">{{ next_action.detail }}</div>
+    {% endif %}
+  </div>
+  <a href="{{ next_action.url }}" class="btn" style="flex-shrink:0;">Go →</a>
+</div>
+{% endif %}
+
+{# ═══════════════════════════════════════════════════════════════
+   LATEST EPISODES
+═══════════════════════════════════════════════════════════════ #}
+{% if recent_episodes %}
+<div class="card exec-section">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+    <div class="card-title" style="margin-bottom:0">Latest Episodes</div>
+    <a href="/episodes" class="btn" style="font-size:11px;">All episodes →</a>
+  </div>
+  {% for ep in recent_episodes %}
+  <div class="ep-row">
+    <img class="ep-tn"
+         src="/episode/{{ ep.episode_id }}/thumbnail"
+         alt=""
+         onerror="this.style.display='none'"
+         loading="lazy">
+    <div class="ep-row-title">
+      <a href="/episode/{{ ep.episode_id }}">{{ ep.title or ep.topic or ep.episode_id }}</a>
+      <div class="ep-row-meta">{{ ep.episode_id }}
+        {% if ep.created_at %} · {{ ep.created_at[:10] }}{% endif %}
+        {% if ep.total_cost_usd and ep.total_cost_usd > 0 %} · ${{ "%.2f"|format(ep.total_cost_usd) }}{% endif %}
+        {% if ep.qa_verdict %} · QA: <span class="{% if ep.qa_verdict == 'APPROVED' or ep.qa_verdict == 'WARNING' %}ok{% elif ep.qa_verdict == 'REJECTED' %}err{% else %}muted{% endif %}">{{ ep.qa_verdict }}</span>{% endif %}
+      </div>
+    </div>
+    {% set s = ep.run_status or ep.status or 'unknown' %}
+    <span class="badge badge-{{ s }}" style="font-size:10px; flex-shrink:0;">{{ s }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 
 {% else %}
 <div class="card">

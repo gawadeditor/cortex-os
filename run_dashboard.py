@@ -160,6 +160,11 @@ from hypogeum.dashboard_runs import (
 from hypogeum.episode_detail import get_episode_detail
 from hypogeum.setup_preflight import get_setup_preflight_status
 from hypogeum.provider_verifier import verify_provider, get_all_provider_statuses
+from hypogeum.episode_artifacts import (
+    get_episode_artifacts,
+    list_disk_episodes,
+    safe_episode_asset_path,
+)
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -285,12 +290,18 @@ def create_page():
     except Exception:
         setup_preflight = {"ready": False, "blockers": [], "blocker_count": 0}
     error = request.args.get("error")
+    # Surface topic queue so the operator can start from a queued topic
+    try:
+        queued_topics = list_episode_topics(status="queued", db_path=db, limit=10)
+    except Exception:
+        queued_topics = []
     return render_template(
         "create.html",
         channels=channels,
         preflight=preflight,
         setup_preflight=setup_preflight,
         error=error,
+        queued_topics=queued_topics,
     )
 
 
@@ -705,6 +716,87 @@ def api_command_state():
         return jsonify({"error": str(exc)}), 503
 
 
+def _compute_next_action(state, report, recent_episodes: list) -> dict:
+    """
+    Derive the single most important next action the operator should take.
+    Returns {label, url, urgency: "critical"|"warning"|"info", detail}.
+    Non-blocking — returns an "info" action on any error.
+    """
+    try:
+        # 1. Blocking OIS signals
+        if state and state.active_signals:
+            blocking = [s for s in state.active_signals if s.get("blocking")]
+            if blocking:
+                sig = blocking[0]
+                return {
+                    "label":   "Resolve blocking signal",
+                    "url":     "/signals",
+                    "urgency": "critical",
+                    "detail":  translate_alert(sig.get("signal_type", "")) + (
+                        f" — {sig.get('message', '')[:80]}" if sig.get("message") else ""
+                    ),
+                }
+
+        # 2. Factory readiness blockers
+        if report and report.blocking_reasons:
+            return {
+                "label":   "Fix factory setup",
+                "url":     "/setup",
+                "urgency": "critical",
+                "detail":  report.blocking_reasons[0][:100],
+            }
+
+        # 3. Pending approvals
+        if state and state.pending_approvals:
+            return {
+                "label":   f"Review {len(state.pending_approvals)} pending approval(s)",
+                "url":     "/approvals",
+                "urgency": "warning",
+                "detail":  "Production is waiting for your approval before proceeding.",
+            }
+
+        # 4. Episodes stuck at partial (have artifacts but no render)
+        stuck = [
+            ep for ep in recent_episodes
+            if ep.get("_disk_only") and not ep.get("has_render")
+        ]
+        if stuck:
+            ep = stuck[0]
+            return {
+                "label":   f"Resume production for {ep['episode_id']}",
+                "url":     f"/episode/{ep['episode_id']}",
+                "urgency": "warning",
+                "detail":  "Episode has partial artifacts — assembly or narration may need to resume.",
+            }
+
+        # 5. Topic queue has items ready
+        if state and getattr(state, "run_health", None):
+            rh = state.run_health
+            if hasattr(rh, "queued_count") and rh.queued_count > 0:
+                return {
+                    "label":   "Start production from queued topics",
+                    "url":     "/episodes",
+                    "urgency": "info",
+                    "detail":  f"{rh.queued_count} topic(s) are queued and ready.",
+                }
+
+        # 6. Default: ready to create
+        return {
+            "label":   "Create a new episode",
+            "url":     "/create",
+            "urgency": "info",
+            "detail":  "Factory is ready. Queue a topic or start a new episode.",
+        }
+
+    except Exception:
+        return {
+            "label":   "Open dashboard",
+            "url":     "/dashboard",
+            "urgency": "info",
+            "detail":  "",
+        }
+
+
 @app.route("/dashboard")
 def legacy_dashboard():
     state, report, err = _safe_state()
@@ -740,6 +832,36 @@ def legacy_dashboard():
     except Exception:
         overview = {}
 
+    # Recent episodes: DB rows + any disk-only episodes (like ep_003 from scripts)
+    try:
+        db_episodes = list_episodes(db_path=_db_path(), limit=10)
+    except Exception:
+        db_episodes = []
+    try:
+        disk_eps = list_disk_episodes(assets_root=_ASSETS_ROOT_PATH, limit=20)
+        # Supplement: include disk episodes not already in DB list
+        db_ep_ids = {e["episode_id"] for e in db_episodes}
+        for dep in disk_eps:
+            if dep["episode_id"] not in db_ep_ids:
+                db_episodes.append({
+                    "episode_id": dep["episode_id"],
+                    "title":      dep.get("title"),
+                    "topic":      dep.get("title"),
+                    "status":     "complete" if dep.get("has_render") else "partial",
+                    "run_status": "complete" if dep.get("has_render") else "partial",
+                    "total_cost_usd": None,
+                    "created_at": None,
+                    "_disk_only": True,
+                    "qa_verdict": dep.get("qa_verdict"),
+                    "has_render": dep.get("has_render"),
+                })
+        db_episodes = db_episodes[:10]
+    except Exception:
+        pass
+
+    # Next required action derived from factory state
+    next_action = _compute_next_action(state, report, db_episodes)
+
     return render_template(
         "exec_dashboard.html",
         state=state,
@@ -747,6 +869,8 @@ def legacy_dashboard():
         error=err,
         exec_alerts=exec_alerts,
         overview=overview,
+        recent_episodes=db_episodes,
+        next_action=next_action,
     )
 
 
@@ -832,12 +956,14 @@ _PLATFORM_SETUP = {
     },
     "tiktok": {
         "label":        "TikTok",
-        "cred_label":   "TikTok API Key",
+        "cred_label":   "TikTok Access Token",
         "instructions": (
-            "Go to TikTok for Developers → Manage Apps → your app → Keys. "
-            "Copy your Access Token and paste it below."
+            "TikTok uses OAuth 2.0. Go to developers.tiktok.com → "
+            "Manage Apps → your app → Keys & Tokens. "
+            "Generate an Access Token (requires app review for Upload API scope). "
+            "Paste the token below."
         ),
-        "credential_type": "api_key",
+        "credential_type": "oauth2_token",
         "placeholder": "act.abc123...",
     },
     "instagram": {
@@ -1182,13 +1308,261 @@ def run_detail_page(run_id):
 @app.route("/episode/<episode_id>")
 def episode_detail_page(episode_id):
     d = get_episode_detail(episode_id, db_path=_db_path())
+    # Fall back to a minimal dict for disk-only episodes (produced via scripts)
     if d is None:
-        return render_template("not_found.html", kind="Episode", id=episode_id), 404
-    valid_tabs = {"production", "publishing", "thumbnails", "titles", "analytics", "revenue", "learning", "branding"}
+        artifacts = get_episode_artifacts(episode_id, assets_root=_ASSETS_ROOT_PATH)
+        if not artifacts["exists"]:
+            return render_template("not_found.html", kind="Episode", id=episode_id), 404
+        # Minimal dict so episode_detail.html renders without crashing
+        d = _make_disk_episode_detail(episode_id, artifacts)
+    else:
+        # Enrich DB episode with disk artifact info
+        artifacts = get_episode_artifacts(episode_id, assets_root=_ASSETS_ROOT_PATH)
+        d["disk_artifacts"] = artifacts
+
+    valid_tabs = {"production", "publishing", "thumbnails", "titles",
+                  "analytics", "revenue", "learning", "branding", "artifacts"}
     active_tab = request.args.get("tab", "production")
     if active_tab not in valid_tabs:
         active_tab = "production"
     return render_template("episode_detail.html", d=d, active_tab=active_tab)
+
+
+def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
+    """Build a minimal episode detail dict from disk artifacts only."""
+    return {
+        "episode_id":       episode_id,
+        "display_title":    artifacts.get("display_title") or episode_id,
+        "topic":            artifacts.get("display_title"),
+        "status":           "complete" if artifacts["has_render"] else "partial",
+        "status_label":     "Complete" if artifacts["has_render"] else "Partial",
+        "created_at":       None,
+        "published_at":     None,
+        "current_stage":    None,
+        "run_id":           None,
+        "run_status":       None,
+        "run_started_at":   None,
+        "run_completed_at": None,
+        "run_error_message": None,
+        "run_error_hint":   None,
+        "run_duration_fmt": None,
+        "total_cost_usd":   None,
+        "platforms":        [],
+        "stage_groups":     [],
+        "raw_stages":       [],
+        "assets":           [],
+        "publishing":       {"summary": {"published": 0, "failed": 0, "pending": 0, "connected": 0},
+                             "platform_cards": []},
+        "thumbnails":       {"candidates": []},
+        "titles":           {"candidates": []},
+        "analytics":        {"overview": {"has_real_data": False},
+                             "platforms": [],
+                             "health": {"real_row_count": 0, "mock_row_count": 0,
+                                        "missing_platforms": [], "stale_platforms": [],
+                                        "has_mock": False}},
+        "revenue":          {"summary": {"total_cost_usd": None, "total_revenue_usd": None,
+                                          "profit_usd": None, "roi_pct": None,
+                                          "break_even_views": None, "break_even_reason": None,
+                                          "has_cost_data": False, "has_revenue_data": False},
+                             "cost_breakdown": [], "platform_revenue": []},
+        "learning":         {"status": "waiting", "records": []},
+        "branding":         {"checks": [], "recommendations": []},
+        "disk_artifacts":   artifacts,
+        "_disk_only":       True,
+    }
+
+
+@app.route("/episode/<episode_id>/artifacts")
+def episode_artifacts_page(episode_id):
+    """JSON summary of all on-disk artifacts for an episode."""
+    artifacts = get_episode_artifacts(episode_id, assets_root=_ASSETS_ROOT_PATH)
+    if not artifacts["exists"]:
+        return jsonify({"error": "episode artifacts not found"}), 404
+    return jsonify(artifacts)
+
+
+# ---------------------------------------------------------------------------
+# Episode artifact file-serving routes
+# All paths are validated via safe_episode_asset_path (traversal guard).
+# ---------------------------------------------------------------------------
+
+_ASSETS_ROOT_PATH = _ROOT / ".hypogeum-assets"
+
+_MIME = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "png": "image/png",  "webp": "image/webp",
+    "mp4": "video/mp4",  "mp3": "audio/mpeg",
+    "srt": "text/plain", "json": "application/json",
+}
+
+
+def _send_asset(path: Path | None, download_name: str | None = None):
+    """Send a file or 404."""
+    from flask import send_file
+    if path is None:
+        from flask import abort
+        abort(404)
+    kwargs = {"as_attachment": bool(download_name)}
+    if download_name:
+        kwargs["download_name"] = download_name
+    return send_file(str(path), **kwargs)
+
+
+@app.route("/episode/<episode_id>/thumbnail")
+def episode_thumbnail(episode_id: str):
+    """Serve the main thumbnail image for an episode."""
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        path = safe_episode_asset_path(
+            episode_id, "thumbnail", f"main.{ext}",
+            assets_root=_ASSETS_ROOT_PATH,
+        )
+        if path:
+            from flask import send_file
+            return send_file(str(path), mimetype=_MIME.get(ext, "image/jpeg"))
+    from flask import abort
+    abort(404)
+
+
+@app.route("/episode/<episode_id>/render")
+def episode_render(episode_id: str):
+    """Serve the rendered main episode MP4."""
+    path = safe_episode_asset_path(
+        episode_id, "artifact", f"main_{episode_id}.mp4",
+        assets_root=_ASSETS_ROOT_PATH,
+    )
+    if path is None:
+        # main MP4 sits directly in episode dir, not in a subdirectory
+        candidate = (_ASSETS_ROOT_PATH / "episodes" / episode_id / f"main_{episode_id}.mp4").resolve()
+        try:
+            candidate.relative_to((_ASSETS_ROOT_PATH / "episodes" / episode_id).resolve())
+        except ValueError:
+            from flask import abort
+            abort(404)
+        if candidate.exists() and candidate.stat().st_size > 0:
+            path = candidate
+    return _send_asset(path, download_name=f"{episode_id}_main.mp4")
+
+
+@app.route("/episode/<episode_id>/narration")
+def episode_narration(episode_id: str):
+    """Serve the stitched main narration MP3."""
+    path = safe_episode_asset_path(
+        episode_id, "narration", "main_narration.mp3",
+        assets_root=_ASSETS_ROOT_PATH,
+    )
+    return _send_asset(path, download_name=f"{episode_id}_narration.mp3")
+
+
+@app.route("/episode/<episode_id>/captions")
+def episode_captions(episode_id: str):
+    """Serve the main SRT captions file."""
+    path = safe_episode_asset_path(
+        episode_id, "captions", "main.srt",
+        assets_root=_ASSETS_ROOT_PATH,
+    )
+    return _send_asset(path, download_name=f"{episode_id}_captions.srt")
+
+
+@app.route("/episode/<episode_id>/clip/<scene_id>")
+def episode_clip(episode_id: str, scene_id: str):
+    """Serve a specific video clip by scene_id (e.g. sc_s01)."""
+    filename = f"{scene_id}.mp4"
+    path = safe_episode_asset_path(
+        episode_id, "video", filename,
+        assets_root=_ASSETS_ROOT_PATH,
+    )
+    return _send_asset(path, download_name=filename)
+
+
+@app.route("/episode/<episode_id>/artifact/<name>")
+def episode_artifact_json(episode_id: str, name: str):
+    """Serve a JSON package artifact (e.g. 'qa_approval_report')."""
+    # name may be the stem only; try both forms
+    for filename in (f"{name}_{episode_id}.json", f"{name}.json"):
+        path = safe_episode_asset_path(
+            episode_id, "artifact", filename,
+            assets_root=_ASSETS_ROOT_PATH,
+        )
+        if path:
+            from flask import send_file
+            return send_file(str(path), mimetype="application/json")
+    from flask import abort
+    abort(404)
+
+
+# ---------------------------------------------------------------------------
+# Resume API endpoints
+# These spawn the rebuild/resume scripts in a background subprocess so the
+# HTTP request returns immediately with {"ok": true, "status": "started"}.
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess
+
+
+@app.route("/api/episode/<episode_id>/resume/assembly", methods=["POST"])
+def api_episode_resume_assembly(episode_id: str):
+    """
+    Trigger an assembly+QA rebuild for an episode using existing artifacts.
+    Runs rebuild_ep003_assembly_qa.py (or the generic equivalent) as a
+    background subprocess.  Returns immediately — callers poll /run/<run_id>
+    or refresh the episode page to see updated results.
+    """
+    artifacts = get_episode_artifacts(episode_id, assets_root=_ASSETS_ROOT_PATH)
+    if not artifacts["exists"]:
+        return jsonify({"ok": False, "error": "episode not found on disk"}), 404
+
+    script = _ROOT / "scripts" / "rebuild_ep003_assembly_qa.py"
+    if not script.exists():
+        return jsonify({"ok": False, "error": "rebuild script not found"}), 503
+
+    try:
+        import sys as _sys
+        proc = _subprocess.Popen(
+            [_sys.executable, str(script)],
+            cwd=str(_ROOT),
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+        )
+        return jsonify({"ok": True, "status": "started", "pid": proc.pid,
+                        "episode_id": episode_id})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/episode/<episode_id>/resume/narration", methods=["POST"])
+def api_episode_resume_narration(episode_id: str):
+    """
+    Trigger a narration-only resume for an episode.
+    Requires ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in the environment.
+    Spawns resume_narration_ep003.py as a background subprocess.
+    """
+    artifacts = get_episode_artifacts(episode_id, assets_root=_ASSETS_ROOT_PATH)
+    if not artifacts["exists"]:
+        return jsonify({"ok": False, "error": "episode not found on disk"}), 404
+
+    # Preflight check — keys must be present
+    if not os.environ.get("ELEVENLABS_API_KEY"):
+        return jsonify({"ok": False, "error": "ELEVENLABS_API_KEY not set"}), 400
+    if not os.environ.get("ELEVENLABS_VOICE_ID"):
+        return jsonify({"ok": False, "error": "ELEVENLABS_VOICE_ID not set"}), 400
+
+    script = _ROOT / "scripts" / "resume_narration_ep003.py"
+    if not script.exists():
+        return jsonify({"ok": False, "error": "resume script not found"}), 503
+
+    try:
+        import sys as _sys
+        proc = _subprocess.Popen(
+            [_sys.executable, str(script)],
+            cwd=str(_ROOT),
+            env={**os.environ},
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+        )
+        return jsonify({"ok": True, "status": "started", "pid": proc.pid,
+                        "episode_id": episode_id})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/episodes")

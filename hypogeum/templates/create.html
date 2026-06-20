@@ -86,12 +86,12 @@
 {% endif %}
 
 {% if preflight %}
-{% set blockers = preflight.blockers if preflight.blockers else [] %}
-{% if blockers %}
+{% set legacy_blockers = preflight.blockers if preflight.blockers else [] %}
+{% if legacy_blockers %}
 <div class="card" style="border-color: var(--red); margin-bottom: var(--gap);">
-  <div class="card-title" style="color: var(--red);">Production Blocked</div>
+  <div class="card-title" style="color: var(--red);">Acceptance Audit Blocked</div>
   <div class="blocker-list">
-    {% for b in blockers %}
+    {% for b in legacy_blockers %}
     <div class="blocker-item">
       <div class="blocker-dot blocker-dot-err"></div>
       <div>{{ b.message if b.message else b }}</div>
@@ -102,13 +102,38 @@
 {% endif %}
 {% endif %}
 
+{# ── Setup / Production Readiness Preflight ── #}
+{% set setup_blockers = setup_preflight.blockers if setup_preflight and setup_preflight.blockers else [] %}
+{% if setup_blockers %}
+<div class="card" style="border-color: var(--red); margin-bottom: var(--gap);">
+  <div class="card-title" style="color: var(--red);">
+    Factory Not Ready — {{ setup_blockers|length }} Blocker{% if setup_blockers|length != 1 %}s{% endif %}
+  </div>
+  <div class="blocker-list">
+    {% for b in setup_blockers %}
+    <div class="blocker-item">
+      <div class="blocker-dot blocker-dot-err"></div>
+      <div>
+        <strong>{{ b.name }}</strong> — {{ b.message }}
+        {% if b.action %}<div style="font-size:11px; color:var(--muted); margin-top:3px; font-family:monospace;">→ {{ b.action }}</div>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div style="margin-top: 10px; font-size: 12px; color: var(--muted);">
+    <a href="/setup">View full setup checklist →</a>
+  </div>
+</div>
+{% endif %}
+
 {# ── Launch form ── #}
+{% set launch_blocked = missing_reqs or setup_blockers %}
 <div class="card create-form">
   <form method="POST" action="/create/launch">
     <div class="field">
       <label>Channel</label>
       {% if channels %}
-      <select name="channel_id" required>
+      <select name="channel_id" required {% if launch_blocked %}disabled{% endif %}>
         <option value="">— select channel —</option>
         {% for ch in channels %}
         <option value="{{ ch.channel_id }}">{{ ch.name or ch.channel_id }}</option>
@@ -128,7 +153,7 @@
       <label>Topic</label>
       <input type="text" name="topic" id="topic-input"
              placeholder="e.g. The rise and fall of ancient Rome"
-             required maxlength="500">
+             required maxlength="500" {% if launch_blocked %}disabled{% endif %}>
       <div class="hint">Describe what this video should be about.</div>
     </div>
 
@@ -136,13 +161,16 @@
       <label>Video type</label>
       <div class="radio-group" id="video-type-group">
         <label class="radio-opt">
-          <input type="radio" name="video_type" value="long_video" checked> Long video
+          <input type="radio" name="video_type" value="long_video" checked
+                 {% if launch_blocked %}disabled{% endif %}> Long video
         </label>
         <label class="radio-opt">
-          <input type="radio" name="video_type" value="short"> Short
+          <input type="radio" name="video_type" value="short"
+                 {% if launch_blocked %}disabled{% endif %}> Short
         </label>
         <label class="radio-opt">
-          <input type="radio" name="video_type" value="reel"> Reel
+          <input type="radio" name="video_type" value="reel"
+                 {% if launch_blocked %}disabled{% endif %}> Reel
         </label>
       </div>
     </div>
@@ -151,16 +179,20 @@
       <label>Target platforms</label>
       <div class="platform-checks">
         <label class="check-opt">
-          <input type="checkbox" name="platforms" value="youtube" checked> YouTube
+          <input type="checkbox" name="platforms" value="youtube" checked
+                 {% if launch_blocked %}disabled{% endif %}> YouTube
         </label>
         <label class="check-opt">
-          <input type="checkbox" name="platforms" value="tiktok"> TikTok
+          <input type="checkbox" name="platforms" value="tiktok"
+                 {% if launch_blocked %}disabled{% endif %}> TikTok
         </label>
         <label class="check-opt">
-          <input type="checkbox" name="platforms" value="instagram"> Instagram
+          <input type="checkbox" name="platforms" value="instagram"
+                 {% if launch_blocked %}disabled{% endif %}> Instagram
         </label>
         <label class="check-opt">
-          <input type="checkbox" name="platforms" value="facebook"> Facebook
+          <input type="checkbox" name="platforms" value="facebook"
+                 {% if launch_blocked %}disabled{% endif %}> Facebook
         </label>
       </div>
     </div>
@@ -169,13 +201,16 @@
       <label>Quality mode</label>
       <div class="radio-group" id="quality-mode-group">
         <label class="radio-opt">
-          <input type="radio" name="quality_mode" value="economy"> Economy
+          <input type="radio" name="quality_mode" value="economy"
+                 {% if launch_blocked %}disabled{% endif %}> Economy
         </label>
         <label class="radio-opt">
-          <input type="radio" name="quality_mode" value="balanced" checked> Balanced
+          <input type="radio" name="quality_mode" value="balanced" checked
+                 {% if launch_blocked %}disabled{% endif %}> Balanced
         </label>
         <label class="radio-opt">
-          <input type="radio" name="quality_mode" value="premium"> Premium
+          <input type="radio" name="quality_mode" value="premium"
+                 {% if launch_blocked %}disabled{% endif %}> Premium
         </label>
       </div>
       <div class="hint">Economy: fastest, lowest cost. Premium: highest quality, highest cost.</div>
@@ -183,13 +218,15 @@
 
     <div style="padding-top: 8px; border-top: 1px solid var(--border); margin-top: 8px;">
       <button type="submit" class="btn-launch"
-              {% if not channels or missing_reqs %}disabled{% endif %}>
+              {% if launch_blocked %}disabled{% endif %}>
         Start Production
       </button>
-      {% if channels and not missing_reqs %}
+      {% if not launch_blocked %}
       <div class="ready-status ready-ok" style="margin-top: 8px;">Factory ready</div>
       {% else %}
-      <div class="ready-status ready-no" style="margin-top: 8px;">Resolve requirements above before launching</div>
+      <div class="ready-status ready-no" style="margin-top: 8px;">
+        Resolve blockers above before launching. <a href="/setup">Setup checklist →</a>
+      </div>
       {% endif %}
     </div>
   </form>

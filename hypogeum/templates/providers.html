@@ -76,9 +76,9 @@
     <div class="provider-meta">Credits/balance: <em>placeholder — not fetched</em></div>
 
     {% if p.connected %}
-    <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Reconnect</a>
+    <a href="/providers/content/connect/{{ p.id }}" class="btn-provider">Reconnect</a>
     {% else %}
-    <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Connect</a>
+    <a href="/providers/content/connect/{{ p.id }}" class="btn-provider">Connect</a>
     {% endif %}
   </div>
   {% endfor %}

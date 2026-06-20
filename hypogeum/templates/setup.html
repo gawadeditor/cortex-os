@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Factory Setup — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .check-row { display: flex; gap: 10px; padding: 8px 0;
+                 border-bottom: 1px solid var(--border); }
+    .check-row:last-child { border-bottom: none; }
+    .check-icon { width: 20px; flex-shrink: 0; text-align: center; font-size: 14px; }
+    .check-body { flex: 1; min-width: 0; }
+    .check-name { font-weight: 600; font-size: 13px; font-family: monospace; }
+    .check-msg  { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .check-action { font-size: 12px; color: var(--blue); margin-top: 3px;
+                    font-family: monospace; background: var(--bg);
+                    padding: 3px 8px; border-radius: 4px; display: inline-block; }
+    .env-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .env-row  { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .env-name { font-family: monospace; color: var(--text); }
+    .env-ok   { color: var(--green); font-weight: 600; }
+    .env-miss { color: var(--red); font-weight: 600; }
+    .cost-row { display: flex; justify-content: space-between; align-items: center;
+                padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .cost-row:last-child { border-bottom: none; }
+    .cost-label { color: var(--muted); }
+    .cost-value { font-weight: 600; }
+    .signal-row { padding: 8px 0; border-bottom: 1px solid var(--border);
+                  font-size: 12px; }
+    .signal-row:last-child { border-bottom: none; }
+    .signal-type { font-weight: 700; font-family: monospace; color: var(--red); }
+    .signal-msg  { color: var(--muted); margin-top: 2px; }
+    .signal-action { font-size: 11px; color: var(--blue); margin-top: 4px; font-family: monospace; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Factory Setup</h1>
+  {% if preflight.ready %}
+    <span class="badge badge-complete">READY</span>
+  {% else %}
+    <span class="badge badge-failed">{{ preflight.blocker_count }} BLOCKER{% if preflight.blocker_count != 1 %}S{% endif %}</span>
+  {% endif %}
+  {% if preflight.checked_at %}
+    <span class="page-meta">Checked {{ preflight.checked_at[:19] }} UTC</span>
+  {% endif %}
+  <a href="/setup" class="btn" style="margin-left:auto;">Re-run</a>
+</div>
+
+{# ── Status Summary ── #}
+<div class="card">
+  <div class="card-title">Status</div>
+  {% if preflight.ready %}
+    <div class="ok" style="font-size:14px; font-weight:600;">
+      ✓ Factory is ready to run episodes.
+    </div>
+  {% else %}
+    <div class="err" style="font-size:14px; font-weight:600;">
+      ✗ {{ preflight.blocker_count }} blocker{% if preflight.blocker_count != 1 %}s{% endif %} must be resolved before launch.
+    </div>
+    {% if preflight.blockers %}
+    <div style="margin-top:12px;">
+      {% for b in preflight.blockers %}
+      <div style="padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px;">
+        <span class="err">✗ {{ b.name }}</span>
+        <div class="check-msg">{{ b.message }}</div>
+        {% if b.action %}
+        <div class="check-action">→ {{ b.action }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  {% endif %}
+  <div style="margin-top:12px; font-size:12px; color:var(--muted); display:flex; gap:16px;">
+    <a href="/create">Go to Create →</a>
+    <a href="/providers">Manage Providers →</a>
+    <a href="/signals">View Signals →</a>
+  </div>
+</div>
+
+{# ── Environment Variables ── #}
+<div class="card">
+  <div class="card-title">Required Environment Variables</div>
+  <div class="env-grid">
+    {% for var, present in (preflight.env_vars or {}).items() %}
+    <div class="env-row">
+      {% if present %}
+        <span class="env-ok">✓</span>
+      {% else %}
+        <span class="env-miss">✗</span>
+      {% endif %}
+      <span class="env-name">{{ var }}</span>
+    </div>
+    {% else %}
+    <div style="font-size:12px; color:var(--muted);">No env var data available.</div>
+    {% endfor %}
+  </div>
+  {% if not preflight.env_vars or preflight.env_vars.values()|reject|list %}
+  <div style="margin-top:10px; font-size:12px; color:var(--muted);">
+    Set missing vars in your <code>.env</code> file or shell environment, then restart the dashboard.
+  </div>
+  {% endif %}
+</div>
+
+{# ── Budget / Cost ── #}
+<div class="card">
+  <div class="card-title">Budget &amp; Cost</div>
+  <div class="cost-row">
+    <span class="cost-label">Budget ceiling (FINANCE_BUDGET_CEILING_USD)</span>
+    <span class="cost-value {% if not preflight.budget_ceiling_usd %}err{% else %}ok{% endif %}">
+      {% if preflight.budget_ceiling_usd and preflight.budget_ceiling_usd > 0 %}
+        ${{ "%.2f"|format(preflight.budget_ceiling_usd) }}
+      {% else %}
+        Not set
+      {% endif %}
+    </span>
+  </div>
+  <div class="cost-row">
+    <span class="cost-label">Estimated episode cost (economy)</span>
+    <span class="cost-value">${{ "%.0f"|format(preflight.estimated_cost_low) }}</span>
+  </div>
+  <div class="cost-row">
+    <span class="cost-label">Estimated episode cost (premium)</span>
+    <span class="cost-value">${{ "%.0f"|format(preflight.estimated_cost_high) }}</span>
+  </div>
+  {% if preflight.budget_ceiling_usd and preflight.budget_ceiling_usd > 0 %}
+    {% if preflight.budget_ceiling_usd < preflight.estimated_cost_low %}
+    <div class="err" style="margin-top:8px; font-size:12px;">
+      ✗ Ceiling is BELOW estimated cost. Finance gate will block every run.
+      <div class="check-action">→ export FINANCE_BUDGET_CEILING_USD={{ preflight.estimated_cost_high|int }}</div>
+    </div>
+    {% elif preflight.budget_ceiling_usd < preflight.estimated_cost_high %}
+    <div class="warn" style="margin-top:8px; font-size:12px;">
+      ⚠ Ceiling covers economy runs but may be exceeded on premium quality.
+    </div>
+    {% else %}
+    <div class="ok" style="margin-top:8px; font-size:12px;">
+      ✓ Ceiling covers full estimated cost range.
+    </div>
+    {% endif %}
+  {% else %}
+  <div class="err" style="margin-top:8px; font-size:12px;">
+    ✗ No ceiling configured. Set FINANCE_BUDGET_CEILING_USD to allow the finance gate to pass.
+    <div class="check-action">→ export FINANCE_BUDGET_CEILING_USD={{ preflight.estimated_cost_high|int }}</div>
+  </div>
+  {% endif %}
+</div>
+
+{# ── ffmpeg ── #}
+<div class="card">
+  <div class="card-title">ffmpeg</div>
+  {% if preflight.ffmpeg_found %}
+  <div class="ok" style="font-size:13px;">✓ ffmpeg found on PATH</div>
+  {% else %}
+  <div class="err" style="font-size:13px;">✗ ffmpeg not found on PATH</div>
+  <div class="check-action" style="margin-top:6px;">→ brew install ffmpeg</div>
+  {% endif %}
+</div>
+
+{# ── OIS Blocking Signals ── #}
+<div class="card">
+  <div class="card-title">OIS Blocking Signals</div>
+  {% if preflight.active_signals %}
+  <div style="margin-bottom:6px; font-size:12px; color:var(--red); font-weight:600;">
+    {{ preflight.active_signals|length }} active blocking signal{% if preflight.active_signals|length != 1 %}s{% endif %}
+  </div>
+  {% for sig in preflight.active_signals %}
+  <div class="signal-row">
+    <div class="signal-type">{{ sig.signal_type }}</div>
+    <div class="signal-msg">{{ sig.message }}</div>
+    <div class="signal-action">
+      → POST /api/action/resolve-signal/{{ sig.signal_id }}
+      &nbsp;|&nbsp; <a href="/signals">View all signals →</a>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="ok" style="font-size:13px;">✓ No blocking signals</div>
+  {% endif %}
+</div>
+
+{# ── Channel ── #}
+<div class="card">
+  <div class="card-title">Active Channels</div>
+  {% if preflight.active_channel_count and preflight.active_channel_count > 0 %}
+  <div class="ok" style="font-size:13px;">
+    ✓ {{ preflight.active_channel_count }} active channel{% if preflight.active_channel_count != 1 %}s{% endif %}
+  </div>
+  {% else %}
+  <div class="err" style="font-size:13px;">✗ No active channels</div>
+  <div class="check-action" style="margin-top:6px;">→ <a href="/channels">Set up a channel →</a></div>
+  {% endif %}
+</div>
+
+{# ── Full Check Log ── #}
+{% if preflight.checks %}
+<div class="card">
+  <div class="card-title">Full Check Log ({{ preflight.checks|length }} checks)</div>
+  {% for c in preflight.checks %}
+    {% if c.passed %}
+      {% set icon = '✓' %}{% set cls = 'ok' %}
+    {% elif c.tier == 'blocker' %}
+      {% set icon = '✗' %}{% set cls = 'err' %}
+    {% else %}
+      {% set icon = '⚠' %}{% set cls = 'warn' %}
+    {% endif %}
+    <div class="check-row">
+      <div class="check-icon {{ cls }}">{{ icon }}</div>
+      <div class="check-body">
+        <div class="check-name">{{ c.name }}</div>
+        <div class="check-msg">{{ c.message }}</div>
+        {% if c.action and not c.passed %}
+          <div class="check-action">→ {{ c.action }}</div>
+        {% endif %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+</body>
+</html>

@@ -156,6 +156,7 @@ from hypogeum.dashboard_runs import (
     fmt_duration,
 )
 from hypogeum.episode_detail import get_episode_detail
+from hypogeum.setup_preflight import get_setup_preflight_status
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -276,8 +277,18 @@ def create_page():
         preflight = get_preflight_status(db_path=db)
     except Exception:
         preflight = {}
+    try:
+        setup_preflight = get_setup_preflight_status(db_path=db)
+    except Exception:
+        setup_preflight = {"ready": False, "blockers": [], "blocker_count": 0}
     error = request.args.get("error")
-    return render_template("create.html", channels=channels, preflight=preflight, error=error)
+    return render_template(
+        "create.html",
+        channels=channels,
+        preflight=preflight,
+        setup_preflight=setup_preflight,
+        error=error,
+    )
 
 
 @app.route("/create/launch", methods=["POST"])
@@ -341,6 +352,92 @@ _CONTENT_PROVIDERS = [
      "description": "Image generation"},
 ]
 
+_CONTENT_PROVIDER_SETUP = {
+    "openrouter": {
+        "label": "OpenRouter", "description": "LLM model routing",
+        "cred_label": "OpenRouter API Key",
+        "instructions": (
+            "Go to openrouter.ai → Keys → Create Key. "
+            "Paste the key below. Used for all LLM calls (research, script, planning)."
+        ),
+        "placeholder": "sk-or-v1-...",
+        "env_var": "OPENROUTER_API_KEY",
+    },
+    "elevenlabs": {
+        "label": "ElevenLabs", "description": "Voice generation",
+        "cred_label": "ElevenLabs API Key",
+        "instructions": (
+            "Go to elevenlabs.io → Profile → API Key. "
+            "Paste the key below. Also set ELEVENLABS_VOICE_ID to your chosen voice."
+        ),
+        "placeholder": "el_...",
+        "env_var": "ELEVENLABS_API_KEY",
+    },
+    "muapi": {
+        "label": "MUAPI", "description": "Image & video generation",
+        "cred_label": "MUAPI API Key",
+        "instructions": (
+            "Go to muapi.ai → Dashboard → API Keys → Create Key. "
+            "Used for image and video generation (Seedance, Runway, Flux models)."
+        ),
+        "placeholder": "mu-...",
+        "env_var": "MUAPI_API_KEY",
+    },
+    "seedance": {
+        "label": "Seedance", "description": "Video generation via MUAPI",
+        "cred_label": "MUAPI API Key (used for Seedance)",
+        "instructions": (
+            "Seedance is accessed via MUAPI. "
+            "Go to muapi.ai → Dashboard → API Keys → Create Key and paste it below. "
+            "This is the same key as MUAPI — you only need to set it once."
+        ),
+        "placeholder": "mu-...",
+        "env_var": "MUAPI_API_KEY",
+    },
+    "veo": {
+        "label": "Veo", "description": "Video generation",
+        "cred_label": "MUAPI API Key (used for Veo)",
+        "instructions": (
+            "Veo is accessed via MUAPI. "
+            "Go to muapi.ai → Dashboard → API Keys → Create Key and paste it below."
+        ),
+        "placeholder": "mu-...",
+        "env_var": "MUAPI_API_KEY",
+    },
+    "kling": {
+        "label": "Kling", "description": "Video generation",
+        "cred_label": "MUAPI API Key (used for Kling)",
+        "instructions": (
+            "Kling is accessed via MUAPI. "
+            "Go to muapi.ai → Dashboard → API Keys → Create Key and paste it below."
+        ),
+        "placeholder": "mu-...",
+        "env_var": "MUAPI_API_KEY",
+    },
+    "runway": {
+        "label": "Runway", "description": "Video generation",
+        "cred_label": "MUAPI API Key (used for Runway)",
+        "instructions": (
+            "Runway is accessed via MUAPI. "
+            "Go to muapi.ai → Dashboard → API Keys → Create Key and paste it below."
+        ),
+        "placeholder": "mu-...",
+        "env_var": "MUAPI_API_KEY",
+    },
+    "freepik": {
+        "label": "Freepik", "description": "Image generation",
+        "cred_label": "Freepik API Key",
+        "instructions": (
+            "Go to freepik.com → API → Your API key. "
+            "Paste the key below. Used for image generation tasks."
+        ),
+        "placeholder": "fpk-...",
+        "env_var": "FREEPIK_API_KEY",
+    },
+}
+
+_VALID_CONTENT_PROVIDERS = frozenset(_CONTENT_PROVIDER_SETUP)
+
 _PLATFORM_PROVIDERS = [
     {"id": "youtube",   "label": "YouTube",   "auth": "oauth2",
      "description": "Video publishing"},
@@ -389,6 +486,78 @@ def providers_page():
         content_providers=content_providers,
         platform_providers=platform_providers,
     )
+
+
+# ===========================================================================
+# Content Provider Connect (API key entry for AI content providers)
+# ===========================================================================
+
+@app.route("/providers/content/connect/<provider>")
+def content_provider_connect_page(provider: str):
+    if provider not in _VALID_CONTENT_PROVIDERS:
+        return render_template("not_found.html", kind="Provider", id=provider), 404
+    setup = _CONTENT_PROVIDER_SETUP[provider]
+    flash = request.args.get("saved")
+    return render_template(
+        "connect_content_provider.html",
+        provider=provider,
+        setup=setup,
+        flash=flash,
+    )
+
+
+@app.route("/providers/content/connect/<provider>/save", methods=["POST"])
+def content_provider_connect_save(provider: str):
+    if provider not in _VALID_CONTENT_PROVIDERS:
+        return render_template("not_found.html", kind="Provider", id=provider), 404
+    cred  = request.form.get("credential", "").strip()
+    label = request.form.get("label", "").strip()
+    setup = _CONTENT_PROVIDER_SETUP[provider]
+    if not label:
+        label = f"{setup['label']} API key"
+    db = _db_path()
+    if cred:
+        try:
+            existing = list_secret_profiles(provider=provider, db_path=db)
+            active   = [p for p in existing if p.status == "active"]
+            if active:
+                update_secret_profile(
+                    active[0].secret_profile_id,
+                    credential_data=cred,
+                    label=label,
+                    db_path=db,
+                )
+            else:
+                create_secret_profile(
+                    provider=provider,
+                    label=label,
+                    credential_type="api_key",
+                    credential_data=cred,
+                    db_path=db,
+                )
+        except Exception:
+            pass
+    return redirect(
+        url_for("content_provider_connect_page", provider=provider) + "?saved=1"
+    )
+
+
+# ===========================================================================
+# Factory Setup / Production Preflight
+# ===========================================================================
+
+@app.route("/setup")
+def setup_page():
+    preflight = get_setup_preflight_status(db_path=_db_path())
+    return render_template("setup.html", preflight=preflight)
+
+
+@app.route("/api/setup/preflight")
+def api_setup_preflight():
+    try:
+        return jsonify(get_setup_preflight_status(db_path=_db_path()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
 
 
 @app.route("/command")

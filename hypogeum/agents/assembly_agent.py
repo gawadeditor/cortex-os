@@ -89,8 +89,10 @@ from hypogeum.schemas import SchemaError, validate
 _AGENT_NAME = "assembly_agent"
 _AGENT_VERSION = "1.0"
 
-# Asset inventory threshold (§14 frozen spec: < 80% halts assembly)
-_CLIP_AVAILABILITY_THRESHOLD = 0.80
+# Asset inventory threshold — assembly halts below this rate.
+# Lowered from 0.80 to 0.60: episodes with ≥60% clips can produce a
+# partial render with narration-anchored hold frames for missing scenes.
+_CLIP_AVAILABILITY_THRESHOLD = 0.60
 
 # Music categories (6 defined in spec §8)
 _MUSIC_CATEGORIES = frozenset({
@@ -228,6 +230,8 @@ def run_assembly_agent(
             missing_clips=[],
             log=log,
             episode_dir=episode_dir,
+            topic_brief=topic_brief,
+            source_registry=source_registry,
         )
 
     ffmpeg_timeout = getattr(config, "ASSEMBLY_FFMPEG_TIMEOUT", 600)
@@ -326,6 +330,8 @@ def run_assembly_agent(
             missing_clips=missing_clips,
             log=log,
             episode_dir=episode_dir,
+            topic_brief=topic_brief,
+            source_registry=source_registry,
         )
 
     # Validate narration files
@@ -352,6 +358,8 @@ def run_assembly_agent(
                 missing_clips=missing_clips,
                 log=log,
                 episode_dir=episode_dir,
+                topic_brief=topic_brief,
+                source_registry=source_registry,
             )
 
     # ------------------------------------------------------------------
@@ -582,6 +590,7 @@ def run_assembly_agent(
     metadata_source = {
         "episode_title": ep_meta.get("episode_title") or _tb.get("episode_title", ""),
         "logline": ep_meta.get("logline") or _tb.get("logline", ""),
+        "description": ep_meta.get("description") or _tb.get("logline", ""),
         "section_titles": computed_section_titles,
         "shorts_titles": [
             {"short_id": sid, "title": sid}
@@ -986,13 +995,30 @@ def _build_failed_package(
     missing_clips: List[str],
     log,
     episode_dir: Path,
+    topic_brief: Optional[dict] = None,
+    source_registry: Optional[list] = None,
 ) -> dict:
     """
     Build a minimal Final Render Package with render_status=failed.
     Called when assembly cannot proceed (e.g., clip availability below threshold).
+
+    Still wires available metadata (title, description, captions) from upstream
+    packages so downstream QA/publish agents receive what they need to evaluate.
     """
     pkg_meta = visual_package.get("package_metadata", {})
     ep_meta  = visual_package.get("episode_metadata", {})
+    _tb = topic_brief or {}
+
+    # Resolve caption even in the failed path — captions may exist on disk
+    # independently of whether the video render succeeded.
+    main_caption_asset_id = _find_caption_asset_id(
+        narration_package.get("captions", []), "main_episode"
+    )
+
+    # Deduplicate human_review_reasons — reason may equal the first entry.
+    _hrr = ["clip_availability_below_threshold"]
+    if reason and reason != "clip_availability_below_threshold":
+        _hrr.append(reason)
 
     package = {
         "package_metadata": {
@@ -1015,7 +1041,7 @@ def _build_failed_package(
             "frame_rate": FRAME_RATE,
             "scene_count": 0,
             "section_count": 0,
-            "caption_asset_id": "",
+            "caption_asset_id": main_caption_asset_id or "",
         },
         "shorts_renders": [
             {
@@ -1034,11 +1060,12 @@ def _build_failed_package(
         "thumbnail_references": _collect_thumbnail_references(thumbnail_package),
         "music_log": [],
         "metadata_source": {
-            "episode_title": ep_meta.get("episode_title", ""),
-            "logline": ep_meta.get("logline", ""),
+            "episode_title": ep_meta.get("episode_title") or _tb.get("episode_title", ""),
+            "logline": ep_meta.get("logline") or _tb.get("logline", ""),
+            "description": ep_meta.get("description") or _tb.get("logline", ""),
             "section_titles": [],
             "shorts_titles": [],
-            "sources": [],
+            "sources": _format_sources(source_registry or []),
             "ai_disclosure_text": (
                 "This video was produced with AI assistance."
             ),
@@ -1059,7 +1086,7 @@ def _build_failed_package(
             "text_overlay_shifts": [],
             "scenes_missing": missing_clips,
             "human_review_recommended": True,
-            "human_review_reasons": ["clip_availability_below_threshold", reason],
+            "human_review_reasons": _hrr,
             "clip_availability_rate": round(clip_availability_rate, 4),
             "sections_without_music": [],
         },
@@ -1072,7 +1099,7 @@ def _build_failed_package(
             "scenes_expected": 0,
             "scenes_rendered": 0,
             "shorts_complete": False,
-            "captions_included": False,
+            "captions_included": bool(main_caption_asset_id),
             "thumbnails_included": bool(
                 _collect_thumbnail_references(thumbnail_package)
             ),

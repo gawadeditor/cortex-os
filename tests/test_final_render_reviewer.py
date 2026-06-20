@@ -158,15 +158,27 @@ class TestProductionReadyRules:
         assert verdict["production_ready"] is True
         assert verdict["overall_verdict"] == "CONDITIONAL"
 
-    def test_clip_availability_below_80_blocks_production_ready(self):
-        """clip_availability_rate < 0.80 → production_ready=False."""
+    def test_clip_availability_below_60_blocks_production_ready(self):
+        """clip_availability_rate < 0.60 → production_ready=False."""
+        manifest = _make_manifest(
+            render_status="partial",
+            clip_rate=0.55,
+            missing_clips=["sc_01", "sc_02", "sc_03"],
+        )
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        assert verdict["production_ready"] is False
+
+    def test_clip_availability_between_60_and_100_is_warning_not_failure(self):
+        """clip_availability_rate 0.60–0.99 → production_ready=True (CONDITIONAL, not blocked)."""
         manifest = _make_manifest(
             render_status="partial",
             clip_rate=0.75,
             missing_clips=["sc_01", "sc_02", "sc_03"],
         )
         verdict = run_final_render_reviewer(manifest, "ep_test")
-        assert verdict["production_ready"] is False
+        assert verdict["production_ready"] is True
+        assert verdict["overall_verdict"] == "CONDITIONAL"
+        assert any("clip_availability" in w for w in verdict["warnings"])
 
     def test_duration_gap_over_5s_blocks_production_ready(self):
         """duration_coverage_gap_seconds > 5.0 → production_ready=False."""

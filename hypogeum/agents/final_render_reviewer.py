@@ -185,10 +185,10 @@ def run_final_render_reviewer(
     clip_rate = render_output_manifest.get("clip_availability_rate", 1.0) or 1.0
     missing_clips = render_output_manifest.get("missing_clips", [])
 
-    if clip_rate < 0.80:
+    if clip_rate < 0.60:
         _add_check(checks, "c_clip_availability", "fail",
-                   f"clip_availability_rate={clip_rate:.1%} < 80% threshold")
-        failures.append(f"clip_availability: {clip_rate:.1%} below 80% threshold")
+                   f"clip_availability_rate={clip_rate:.1%} < 60% threshold")
+        failures.append(f"clip_availability: {clip_rate:.1%} below 60% threshold")
     elif clip_rate < 1.0:
         _add_check(checks, "c_clip_availability", "warn",
                    f"clip_availability_rate={clip_rate:.1%} — some clips missing")

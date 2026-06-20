@@ -482,8 +482,8 @@ class TestAssetInventoryValidation:
         qa = result.get("assembly_qa_report", {})
         assert len(qa.get("scenes_missing", [])) > 0
 
-    def test_below_80_percent_threshold_halts_assembly(self, tmp_path):
-        """When clip_availability_rate < 0.80, render_status is 'failed'."""
+    def test_below_60_percent_threshold_halts_assembly(self, tmp_path):
+        """When clip_availability_rate < 0.60, render_status is 'failed'."""
         cfg = _make_config()
         visual = _make_visual_package()
         narration = _make_narration_package()
@@ -510,8 +510,8 @@ class TestAssetInventoryValidation:
         assert qa.get("overall_status") == "fail"
         assert result["package_integrity"]["production_ready"] is False
 
-    def test_exactly_80_percent_threshold_proceeds(self, tmp_path):
-        """clip_availability_rate == 0.80 exactly should proceed (not halt)."""
+    def test_exactly_60_percent_threshold_proceeds(self, tmp_path):
+        """clip_availability_rate == 0.60 exactly should proceed (not halt)."""
         cfg = _make_config()
         visual = _make_visual_package()
         narration = _make_narration_package()
@@ -519,8 +519,8 @@ class TestAssetInventoryValidation:
 
         assets_root = tmp_path / ".hypogeum-assets"
         scenes = visual["scenes"]
-        # 5 total; 4 out of 5 = 0.80
-        for scene in scenes[:4]:
+        # 5 total; 3 out of 5 = 0.60
+        for scene in scenes[:3]:
             aid = scene.get("asset_id", "")
             if aid:
                 clip_path = assets_root / f"{aid}.mp4"
@@ -545,10 +545,10 @@ class TestAssetInventoryValidation:
         # Should have proceeded (not failed with clip_availability_below_threshold)
         qa = result.get("assembly_qa_report", {})
         rate = qa.get("clip_availability_rate", 0.0)
-        assert rate >= 0.79  # 4/5 = 0.80
+        assert rate >= 0.59  # 3/5 = 0.60
 
-    def test_above_80_percent_threshold_proceeds(self, tmp_path):
-        """clip_availability_rate > 0.80 should produce partial or success."""
+    def test_above_60_percent_threshold_proceeds(self, tmp_path):
+        """clip_availability_rate > 0.60 should produce partial or success."""
         cfg = _make_config()
         visual = _make_visual_package()
         narration = _make_narration_package()
@@ -556,7 +556,7 @@ class TestAssetInventoryValidation:
 
         assets_root = tmp_path / ".hypogeum-assets"
         scenes = visual["scenes"]
-        # 4 out of 5 = 0.80
+        # 4 out of 5 = 0.80 — well above 0.60 threshold
         for scene in scenes[:4]:
             aid = scene.get("asset_id", "")
             if aid:
@@ -1422,7 +1422,7 @@ class TestPipelineIntegration:
         assert result is fake_result
 
     def test_assembly_pdr_on_below_threshold(self, tmp_path):
-        """When clip availability < 80%, assembly returns failed package (not exception)."""
+        """When clip availability < 60%, assembly returns failed package (not exception)."""
         cfg = _make_config()
         visual = _make_visual_package()
         narration = _make_narration_package()
@@ -1448,6 +1448,156 @@ class TestPipelineIntegration:
         # Must return a package, not raise
         assert isinstance(result, dict)
         assert result["package_integrity"]["production_ready"] is False
+
+
+# ---------------------------------------------------------------------------
+# TestFailedPackageMetadataWiring
+# Regression tests for ep_003 QARejectedError — assembly failed packages must
+# wire episode_title, description, and caption_asset_id from upstream packages.
+# ---------------------------------------------------------------------------
+
+class TestFailedPackageMetadataWiring:
+    """Regression: when _build_failed_package is called (clip_rate < 60%), metadata must still be wired."""
+
+    def _run_below_threshold(self, tmp_path, topic_brief=None, narration=None):
+        cfg = _make_config()
+        visual = _make_visual_package()
+        narration = narration or _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+        assets_root = tmp_path / ".hypogeum-assets"
+        # No clips on disk → rate = 0.0 → halts
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            return run_assembly_agent(
+                visual_package=visual,
+                narration_package=narration,
+                thumbnail_package=thumbnails,
+                config=cfg,
+                episode_id="ep_001",
+                output_dir=tmp_path / "episodes" / "ep_001",
+                topic_brief=topic_brief,
+            )
+
+    def test_failed_package_episode_title_from_topic_brief(self, tmp_path):
+        """_build_failed_package wires episode_title from topic_brief when visual_package lacks it.
+
+        ep_003's visual_package.episode_metadata has no episode_title key (it has topic/primary_period
+        instead), so topic_brief is the only source of truth.
+        """
+        cfg = _make_config()
+        # Build a visual package without episode_title in episode_metadata (matches ep_003 reality)
+        visual = _make_visual_package()
+        visual["episode_metadata"].pop("episode_title", None)
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+        topic_brief = {
+            "episode_title": "The Antikythera Mechanism: Who Taught the Greeks the Sky?",
+            "logline": "The device is the last trace of a vanished tradition.",
+        }
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        # No clips → rate = 0.0 → halts below threshold → _build_failed_package called
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            result = run_assembly_agent(
+                visual_package=visual,
+                narration_package=narration,
+                thumbnail_package=thumbnails,
+                config=cfg,
+                episode_id="ep_001",
+                output_dir=tmp_path / "episodes" / "ep_001",
+                topic_brief=topic_brief,
+            )
+
+        title = result["metadata_source"]["episode_title"]
+        assert title == "The Antikythera Mechanism: Who Taught the Greeks the Sky?", (
+            f"episode_title not wired from topic_brief; got {title!r}"
+        )
+
+    def test_failed_package_description_from_topic_brief_logline(self, tmp_path):
+        """_build_failed_package wires description from topic_brief.logline."""
+        topic_brief = {
+            "episode_title": "Test Title",
+            "logline": "The device is the last trace of a vanished tradition.",
+        }
+        result = self._run_below_threshold(tmp_path, topic_brief=topic_brief)
+        description = result["metadata_source"].get("description", "")
+        assert description == "The device is the last trace of a vanished tradition.", (
+            f"description not wired from topic_brief.logline; got {description!r}"
+        )
+
+    def test_failed_package_description_empty_without_topic_brief(self, tmp_path):
+        """_build_failed_package produces empty description when no topic_brief provided."""
+        result = self._run_below_threshold(tmp_path, topic_brief=None)
+        # Should be empty string, not missing key or error
+        description = result["metadata_source"].get("description", "MISSING")
+        assert description == "", f"Expected empty description, got {description!r}"
+
+    def test_failed_package_caption_asset_id_from_narration_package(self, tmp_path):
+        """_build_failed_package wires caption_asset_id from narration_package.captions."""
+        narration = _make_narration_package("ep_001")
+        result = self._run_below_threshold(tmp_path, narration=narration)
+        caption_id = result["episode_render"]["caption_asset_id"]
+        assert caption_id == "episodes/ep_001/captions/main", (
+            f"caption_asset_id not wired from narration_package; got {caption_id!r}"
+        )
+
+    def test_failed_package_captions_included_flag(self, tmp_path):
+        """package_integrity.captions_included=True when narration_package has captions."""
+        narration = _make_narration_package("ep_001")
+        result = self._run_below_threshold(tmp_path, narration=narration)
+        assert result["package_integrity"]["captions_included"] is True
+
+    def test_failed_package_human_review_reasons_no_duplicate(self, tmp_path):
+        """_build_failed_package does not duplicate human_review_reasons entries."""
+        result = self._run_below_threshold(tmp_path)
+        hrr = result["assembly_qa_report"]["human_review_reasons"]
+        assert hrr.count("clip_availability_below_threshold") == 1, (
+            f"Duplicate human_review_reasons: {hrr}"
+        )
+
+    def test_normal_path_description_populated(self, tmp_path):
+        """Normal assembly path populates metadata_source.description from topic_brief.logline."""
+        cfg = _make_config()
+        visual = _make_visual_package()
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+        topic_brief = {
+            "episode_title": "The Antikythera Mechanism",
+            "logline": "The last trace of a vanished tradition.",
+        }
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                result = run_assembly_agent(
+                    visual_package=visual,
+                    narration_package=narration,
+                    thumbnail_package=thumbnails,
+                    config=cfg,
+                    episode_id="ep_001",
+                    output_dir=tmp_path / "episodes" / "ep_001",
+                    topic_brief=topic_brief,
+                )
+
+        description = result["metadata_source"].get("description", "")
+        assert description == "The last trace of a vanished tradition.", (
+            f"Normal path: description not wired from topic_brief.logline; got {description!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

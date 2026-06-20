@@ -451,7 +451,7 @@ class TestNavAnalyticsPresent:
         assert "/learning"  in text
 
     def test_dashboard_has_analytics_nav(self, flask_client):
-        r = flask_client.get("/")
+        r = flask_client.get("/dashboard")
         self._check_nav(r.get_data(as_text=True))
 
     def test_analytics_page_has_analytics_nav(self, flask_client):

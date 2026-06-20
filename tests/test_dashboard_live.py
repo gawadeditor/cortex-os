@@ -555,13 +555,13 @@ class TestSSERouteReturns:
 
 class TestNavExpandedPhaseD:
     def _check_nav(self, text):
-        assert "/live"     in text
-        assert "/queue"    in text
-        assert "/failures" in text
+        assert "/live"  in text
+        assert "/queue" in text
+        # /failures is in the Command page's Investigate section, not primary nav
 
     def test_dashboard_has_phase_d_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         self._check_nav(r.get_data(as_text=True))
 
     def test_live_page_has_phase_d_nav(self, flask_client):

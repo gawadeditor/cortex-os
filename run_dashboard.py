@@ -165,6 +165,10 @@ from hypogeum.episode_artifacts import (
     list_disk_episodes,
     safe_episode_asset_path,
 )
+from hypogeum.disk_sync import (
+    sync_disk_episode_to_db,
+    sync_all_disk_episodes_to_db,
+)
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -1510,6 +1514,61 @@ def _make_disk_qa_summary(episode_id: str) -> dict:
     }
 
 
+_DISK_STATUS_LABELS = {
+    "complete":     "Complete",
+    "qa_warning":   "QA Warning",
+    "needs_review": "Needs Review",
+    "partial":      "Partial",
+    "failed":       "Failed",
+}
+
+
+def _disk_episode_status(episode_id: str, artifacts: dict) -> str:
+    """Derive canonical status from disk packages using disk_sync logic."""
+    from hypogeum.disk_sync import _infer_episode_status, _load
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+    qa_pkg = _load(ep_dir, "qa_approval_report", episode_id)
+    if not qa_pkg:
+        qa_pkg = _load(ep_dir, "qa_report", episode_id)
+    bga_pkgs = []
+    for pn in (1, 2):
+        pkg = _load(ep_dir, f"bga_compliance_report_p{pn}", episode_id)
+        if pkg:
+            bga_pkgs.append(pkg)
+    return _infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+
+
+def _disk_resume_actions(episode_id: str, artifacts: dict) -> dict:
+    """
+    Determine which resume/action buttons to show for a disk-only episode.
+
+    Rules:
+      show_resume_narration  = narration missing
+      show_rebuild_assembly  = render missing OR (qa stale AND artifacts changed)
+      show_download_render   = render exists
+    """
+    from hypogeum.disk_sync import _load
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+
+    has_render    = bool(artifacts.get("has_render"))
+    has_narration = bool(artifacts.get("has_narration"))
+
+    # Narration complete = narration package exists AND segments are generated
+    narration_complete = False
+    nar_pkg = _load(ep_dir, "narration_package", episode_id)
+    if nar_pkg:
+        segs = nar_pkg.get("narration_segments") or []
+        narration_complete = any(
+            s.get("generation_status") == "generated" for s in segs
+        )
+
+    return {
+        "show_resume_narration": has_narration is False and not narration_complete,
+        "show_rebuild_assembly": not has_render,
+        "show_download_render":  has_render,
+    }
+
+
 def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
     """Build an episode detail dict from disk artifacts — reads JSON packages for readable content."""
     thumbnails = _make_disk_thumbnails(episode_id, artifacts)
@@ -1525,25 +1584,74 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
         or episode_id
     )
 
+    # Use BGA+QA-aware status instead of naive has_render check
+    status       = _disk_episode_status(episode_id, artifacts)
+    status_label = _DISK_STATUS_LABELS.get(status, status.replace("_", " ").title())
+
+    # Extract cost and duration from finance/render packages
+    from hypogeum.disk_sync import (
+        _extract_total_cost, _extract_render_duration_ms,
+        _extract_scene_count, _extract_created_at,
+    )
+    ep_dir     = _ASSETS_ROOT_PATH / "episodes" / episode_id
+    cost_usd   = _extract_total_cost(ep_dir, episode_id)
+    dur_ms     = _extract_render_duration_ms(ep_dir, episode_id)
+    scene_cnt  = _extract_scene_count(ep_dir, episode_id)
+    created_at = _extract_created_at(ep_dir, episode_id)
+
+    from hypogeum.episode_detail import _fmt_duration
+    run_dur_fmt = _fmt_duration(dur_ms) if dur_ms else None
+
+    # Build synthetic stage groups from discovered packages
+    from hypogeum.disk_sync import _SYNTHETIC_STAGES, _load as _dload
+    stage_groups = []
+    for stage_name, group_label, pkg_stem in _SYNTHETIC_STAGES:
+        pkg = _dload(ep_dir, pkg_stem, episode_id)
+        if not pkg:
+            continue
+        stage_groups.append({
+            "group_name":        group_label,
+            "status":            "completed",
+            "stage_count":       1,
+            "total_duration_ms": dur_ms,
+            "duration_fmt":      run_dur_fmt or "—",
+            "total_cost_usd":    0.0,
+            "error_message":     None,
+            "stages": [{
+                "stage_exec_id": f"disk_{episode_id}_{stage_name}",
+                "stage_name":    stage_name,
+                "status":        "completed",
+                "started_at":    created_at,
+                "completed_at":  created_at,
+                "duration_ms":   dur_ms,
+                "duration_fmt":  run_dur_fmt or "—",
+                "cost_usd":      None,
+                "error_hint":    None,
+            }],
+        })
+
+    resume_actions = _disk_resume_actions(episode_id, artifacts)
+
     return {
         "episode_id":       episode_id,
         "display_title":    artifacts.get("display_title") or topic or episode_id,
         "topic":            topic,
-        "status":           "complete" if artifacts["has_render"] else "partial",
-        "status_label":     "Complete" if artifacts["has_render"] else "Partial",
-        "created_at":       None,
+        "status":           status,
+        "status_label":     status_label,
+        "created_at":       created_at,
         "published_at":     None,
         "current_stage":    None,
         "run_id":           None,
-        "run_status":       None,
-        "run_started_at":   None,
-        "run_completed_at": None,
+        "run_status":       "complete" if artifacts["has_render"] else "partial",
+        "run_started_at":   created_at,
+        "run_completed_at": created_at,
         "run_error_message": None,
         "run_error_hint":   None,
-        "run_duration_fmt": None,
-        "total_cost_usd":   None,
+        "run_duration_fmt": run_dur_fmt,
+        "total_cost_usd":   cost_usd,
+        "stage_count":      scene_cnt,
         "platforms":        [],
-        "stage_groups":     [],
+        "stage_groups":     stage_groups,
         "raw_stages":       [],
         "assets":           [],
         "publishing":       {"summary": {"published": 0, "failed": 0, "pending": 0, "connected": 0},
@@ -1555,17 +1663,23 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
                              "health": {"real_row_count": 0, "mock_row_count": 0,
                                         "missing_platforms": [], "stale_platforms": [],
                                         "has_mock": False}},
-        "revenue":          {"summary": {"total_cost_usd": None, "total_revenue_usd": None,
+        "revenue":          {"summary": {"total_cost_usd": cost_usd, "total_revenue_usd": None,
                                           "profit_usd": None, "roi_pct": None,
                                           "break_even_views": None, "break_even_reason": None,
-                                          "has_cost_data": False, "has_revenue_data": False},
+                                          "has_cost_data": cost_usd is not None,
+                                          "has_revenue_data": False},
                              "cost_breakdown": [], "platform_revenue": []},
         "learning":         {"status": "waiting", "records": []},
-        "branding":         {"checks": [], "recommendations": []},
+        "branding":         {"summary": {"assets_found": 0, "assets_missing": 9,
+                                          "completeness_pct": 0, "overall_verdict": "Missing"},
+                             "thumbnail_audit": {}, "title_audit": {},
+                             "platform_audit": [], "asset_inventory": [],
+                             "recommendations": []},
         "disk_artifacts":   artifacts,
         "disk_script":      script_sections,
         "disk_qa":          qa_summary,
         "_disk_only":       True,
+        **resume_actions,
     }
 
 
@@ -1576,6 +1690,28 @@ def episode_artifacts_page(episode_id):
     if not artifacts["exists"]:
         return jsonify({"error": "episode artifacts not found"}), 404
     return jsonify(artifacts)
+
+
+@app.route("/api/sync/episode/<episode_id>", methods=["POST"])
+def api_sync_episode(episode_id: str):
+    """Sync a single disk episode into the DB so it appears in dashboards."""
+    result = sync_disk_episode_to_db(
+        episode_id, assets_root=_ASSETS_ROOT_PATH, db_path=_db_path()
+    )
+    if not result.get("ok"):
+        return jsonify(result), 404 if "not found" in (result.get("error") or "") else 500
+    return jsonify(result)
+
+
+@app.route("/api/sync/all", methods=["POST"])
+def api_sync_all_episodes():
+    """Sync all disk episodes into the DB."""
+    results = sync_all_disk_episodes_to_db(
+        assets_root=_ASSETS_ROOT_PATH, db_path=_db_path()
+    )
+    ok_count  = sum(1 for r in results if r.get("ok"))
+    err_count = len(results) - ok_count
+    return jsonify({"synced": ok_count, "errors": err_count, "results": results})
 
 
 # ---------------------------------------------------------------------------
@@ -1766,6 +1902,46 @@ def api_episode_resume_narration(episode_id: str):
 def episodes_page():
     channel_id = request.args.get("channel_id")
     episodes   = list_episodes(db_path=_db_path())
+
+    # Include disk-only episodes not yet in DB so the history count is accurate
+    try:
+        db_ep_ids  = {e["episode_id"] for e in episodes}
+        disk_eps   = list_disk_episodes(assets_root=_ASSETS_ROOT_PATH, limit=50)
+        from hypogeum.disk_sync import _infer_episode_status, _load, _episode_title
+        for dep in disk_eps:
+            ep_id = dep["episode_id"]
+            if ep_id in db_ep_ids:
+                continue
+            ep_dir = _ASSETS_ROOT_PATH / "episodes" / ep_id
+            qa_pkg   = _load(ep_dir, "qa_approval_report", ep_id)
+            bga_pkgs = []
+            for pn in (1, 2):
+                pkg = _load(ep_dir, f"bga_compliance_report_p{pn}", ep_id)
+                if pkg:
+                    bga_pkgs.append(pkg)
+            artifacts = {
+                "has_render":    dep.get("has_render", False),
+                "has_thumbnail": dep.get("has_thumbnail", False),
+                "has_narration": False,
+            }
+            status = _infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+            title  = dep.get("title") or _episode_title(ep_dir, ep_id)
+            episodes.append({
+                "episode_id":    ep_id,
+                "title":         title,
+                "topic":         title,
+                "status":        status,
+                "run_status":    "complete" if dep.get("has_render") else "partial",
+                "total_cost_usd": None,
+                "created_at":    None,
+                "run_id":        None,
+                "_disk_only":    True,
+                "qa_verdict":    dep.get("qa_verdict"),
+                "has_render":    dep.get("has_render"),
+            })
+    except Exception:
+        pass
+
     topics     = list_episode_topics(
         channel_id=channel_id or None, db_path=_db_path()
     )

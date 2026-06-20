@@ -780,11 +780,11 @@ class TestNavPresent:
         assert "/episodes"  in text
         assert "/approvals" in text
         assert "/signals"   in text
-        assert "/preflight" in text
+        # /preflight is in the Command page's Investigate section, not primary nav
 
     def test_dashboard_has_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         self._nav_links_present(r.get_data(as_text=True))
 
     def test_runs_page_has_nav(self, flask_client):

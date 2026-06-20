@@ -783,38 +783,38 @@ class TestFlaskHtmlRoutes:
 
     def test_dashboard_has_view_link_for_channels(self, flask_client):
         client, ids = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
         assert f"/channel/{ids['channel_id']}" in text
 
     def test_dashboard_has_approve_button(self, flask_client):
         client, ids = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         text = r.get_data(as_text=True)
         assert "Approve" in text or "approve" in text
 
     def test_dashboard_has_reject_button(self, flask_client):
         client, ids = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         text = r.get_data(as_text=True)
         assert "Reject" in text or "reject" in text
 
     def test_dashboard_has_resolve_button_for_signals(self, flask_client):
         client, ids = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         text = r.get_data(as_text=True)
         assert "resolve-signal" in text or "Resolve" in text
 
     def test_dashboard_has_pause_resume_for_schedules(self, flask_client):
         client, ids = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         text = r.get_data(as_text=True)
         assert "paused" in text or "Pause" in text or "Resume" in text or "status" in text
 
     def test_dashboard_postaction_js_present(self, flask_client):
         client, _ = flask_client
-        r = client.get("/")
+        r = client.get("/dashboard")
         text = r.get_data(as_text=True)
         assert "postAction" in text
 

@@ -72,6 +72,7 @@ from hypogeum.muapi import (
     MUAPIUnavailable,
     ReferenceImageResult,
     ThumbnailResult,
+    _apply_wordmark_overlay,
     _build_job_payload,
     _compute_asset_id,
     _mask_url,
@@ -2132,3 +2133,88 @@ class TestReferenceImageAspectRatio:
                     video_aspect_ratio="4:3",
                 )
         mock_post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestWordmarkOverlay — _apply_wordmark_overlay() unit tests
+# ---------------------------------------------------------------------------
+
+def _make_jpeg(path: Path, width: int = 1280, height: int = 720) -> None:
+    """Write a solid-colour JPEG at *path*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (width, height), color=(30, 20, 10)).save(path, format="JPEG", quality=95)
+
+
+class TestWordmarkOverlay:
+    """Unit tests for _apply_wordmark_overlay()."""
+
+    def test_wordmark_overlay_modifies_image(self, tmp_path):
+        """Calling _apply_wordmark_overlay changes pixel data (wordmark is rendered)."""
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _make_jpeg(p)
+        before = Image.open(p).tobytes()
+        _apply_wordmark_overlay(p)
+        after = Image.open(p).tobytes()
+        assert before != after, "Expected wordmark to modify at least one pixel"
+
+    def test_top_hook_placement_pushes_wordmark_lower(self, tmp_path):
+        """With hook_placement='top', the first wordmark line starts below 20% of image height."""
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _make_jpeg(p, width=1280, height=720)
+
+        # Capture the y-coordinate of the first non-background pixel column
+        # by comparing the 'top' result against a blank image row by row.
+        baseline_img = Image.new("RGB", (1280, 720), color=(30, 20, 10))
+
+        _apply_wordmark_overlay(p, hook_placement="top")
+        result = Image.open(p)
+        result_arr = result.load()
+        baseline_arr = baseline_img.load()
+
+        # Find the topmost row that differs from the solid background
+        first_modified_row = None
+        for y in range(720):
+            for x in range(1280):
+                if result_arr[x, y] != baseline_arr[x, y]:
+                    first_modified_row = y
+                    break
+            if first_modified_row is not None:
+                break
+
+        assert first_modified_row is not None, "Wordmark produced no pixels"
+        # Hook band is 20% (144px on 720p). start_y for 'top' is 22% (≈158px).
+        # Allow ±5px for shadow offset below start_y.
+        assert first_modified_row >= round(720 * 0.20) - 5, (
+            f"Wordmark first pixel at row {first_modified_row}, expected ≥ row {round(720 * 0.20) - 5}"
+        )
+
+    def test_post_process_passes_hook_placement_to_wordmark(self, tmp_path):
+        """generate_thumbnail with text_overlay placement='top' passes hook_placement to wordmark."""
+        config = make_config()
+
+        def _write_jpeg(url, dest_path, log):
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (1280, 720), color=(30, 20, 10)).save(dest_path, format="JPEG", quality=95)
+            return True, ""
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", side_effect=_write_jpeg), \
+             patch("hypogeum.muapi._apply_wordmark_overlay") as mock_wm:
+            mock_post.return_value = _mock_submit_ok()
+            mock_get.return_value = _mock_poll_image_completed()
+            generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="Test",
+                aspect_ratio="16:9",
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+                text_overlay={"text": "RISE OF THE PHARAOHS", "placement": "top"},
+            )
+        mock_wm.assert_called_once()
+        _, kwargs = mock_wm.call_args
+        assert kwargs.get("hook_placement") == "top", (
+            f"Expected hook_placement='top', got {kwargs}"
+        )

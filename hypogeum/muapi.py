@@ -909,6 +909,25 @@ _OVERLAY_FONT_CANDIDATES: list[str] = [
     "/System/Library/Fonts/Supplemental/Tahoma Bold.ttf",
 ]
 
+# Fonts tried in order for the channel wordmark (Cinzel-like serif, all-caps).
+# Copperplate is the closest macOS system match to Cinzel SemiBold (small caps, engraved look).
+# Didot and Baskerville are elegant fallbacks; Times New Roman Bold is the last resort.
+_WORDMARK_FONT_CANDIDATES: list[str] = [
+    "/System/Library/Fonts/Supplemental/Copperplate.ttc",
+    "/System/Library/Fonts/Supplemental/Didot.ttc",
+    "/System/Library/Fonts/Supplemental/Baskerville.ttc",
+    "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+]
+
+# Brand palette values used in wordmark compositing.
+# antique_gold: #C49A42 — primary accent (warm gold on dark background)
+# warm_gold:    #E7D6B3 — highlight / HYPOGEUM dominant line
+# parchment_cream: #F5F3EE — for the em-dash decorators around CHRONICLES
+_WORDMARK_COLOR_HYPOGEUM = (231, 214, 179)   # warm_gold #E7D6B3 — dominant line
+_WORDMARK_COLOR_THE_CHRON = (196, 154, 66)   # antique_gold #C49A42 — small lines
+_WORDMARK_SHADOW_COLOR    = (8, 12, 14)      # void_black #080C0E — shadow
+
 
 def _normalize_thumbnail(local_path: Path, aspect_ratio: str) -> None:
     """
@@ -1037,6 +1056,135 @@ def _apply_text_overlay(local_path: Path, text: str, placement: str) -> None:
 
     except Exception:
         # Text overlay is a visual enhancement — never block thumbnail delivery
+        pass
+
+
+def _apply_wordmark_overlay(
+    local_path: Path,
+    hook_placement: Optional[str] = None,
+) -> None:
+    """
+    Composite the three-line THE HYPOGEUM CHRONICLES wordmark onto a thumbnail
+    in place, matching the brand board visual identity.
+
+    Layout (upper-to-mid frame, centred horizontally):
+        THE              — small, antique_gold
+        HYPOGEUM         — large dominant, warm_gold
+        — CHRONICLES —   — medium, antique_gold, em-dash decorators
+
+    Args:
+        local_path:     Absolute path to the JPEG thumbnail (modified in place).
+        hook_placement: "top" | "bottom" | None — position of the hook text band.
+                        When "top", the wordmark starts below the hook band so the
+                        two text elements do not overlap.
+                        When "bottom" or None, wordmark starts at 12% from top.
+
+    Rendering decisions derived from brand_board.jpg and brand_bible_hypogeum.json:
+      - Colour: warm_gold (#E7D6B3) for HYPOGEUM, antique_gold (#C49A42) for THE /
+        CHRONICLES lines, matching the brand board dominant gold treatment
+      - Font: Copperplate (closest macOS system match to Cinzel SemiBold — all-caps
+        serif with engraved character); falls back to Didot → Baskerville → Times
+        New Roman Bold → PIL default
+      - Position: centred, starting at 12% from top (upper-to-mid frame per brand)
+      - Shadow: 2-px offset in void_black (#080C0E) for legibility on dark backgrounds
+      - No opaque band — wordmark sits directly on the image, relying on the
+        dark background produced by the generation prompt
+
+    No-ops silently if PIL is unavailable or local_path does not exist.
+    """
+    if not local_path.exists():
+        return
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        img = Image.open(local_path).convert("RGB")
+        img_w, img_h = img.size
+
+        # ── Font loading ─────────────────────────────────────────────────────
+        def _load_font(size: int) -> ImageFont.FreeTypeFont:
+            for path in _WORDMARK_FONT_CANDIDATES:
+                try:
+                    return ImageFont.truetype(path, size)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        # Size proportional to image height.
+        # HYPOGEUM is the dominant line: ~13% of image height
+        # THE and — CHRONICLES — are smaller: ~7% and ~8%
+        size_hypogeum = max(40, round(img_h * 0.130))
+        size_the      = max(20, round(img_h * 0.068))
+        size_chron    = max(24, round(img_h * 0.080))
+
+        font_hyp   = _load_font(size_hypogeum)
+        font_the   = _load_font(size_the)
+        font_chron = _load_font(size_chron)
+
+        # ── Text lines ───────────────────────────────────────────────────────
+        line_the   = "THE"
+        line_hyp   = "HYPOGEUM"
+        line_chron = "— CHRONICLES —"   # em-dash on each side
+
+        # ── Measure all three lines for centring ─────────────────────────────
+        img_draw = ImageDraw.Draw(img)
+
+        def _text_w(text: str, font) -> int:
+            try:
+                bb = img_draw.textbbox((0, 0), text, font=font)
+                return bb[2] - bb[0]
+            except AttributeError:
+                return img_draw.textsize(text, font=font)[0]
+
+        def _text_h(text: str, font) -> int:
+            try:
+                bb = img_draw.textbbox((0, 0), text, font=font)
+                return bb[3] - bb[1]
+            except AttributeError:
+                return img_draw.textsize(text, font=font)[1]
+
+        w_the   = _text_w(line_the,   font_the)
+        w_hyp   = _text_w(line_hyp,   font_hyp)
+        w_chron = _text_w(line_chron, font_chron)
+
+        h_the   = _text_h(line_the,   font_the)
+        h_hyp   = _text_h(line_hyp,   font_hyp)
+        h_chron = _text_h(line_chron, font_chron)
+
+        # ── Vertical layout ───────────────────────────────────────────────────
+        # The hook text band is 20% of image height (see _apply_text_overlay).
+        # When it sits at the top, shift the wordmark below it to avoid overlap.
+        line_gap  = max(4, round(img_h * 0.014))
+        if hook_placement == "top":
+            start_y = round(img_h * 0.22)
+        else:
+            start_y = round(img_h * 0.12)
+
+        y_the   = start_y
+        y_hyp   = y_the + h_the + line_gap
+        y_chron = y_hyp + h_hyp + line_gap
+
+        # ── Horizontal centring ───────────────────────────────────────────────
+        x_the   = (img_w - w_the)   // 2
+        x_hyp   = (img_w - w_hyp)   // 2
+        x_chron = (img_w - w_chron) // 2
+
+        # ── Draw with shadow pass then colour pass ────────────────────────────
+        shadow = _WORDMARK_SHADOW_COLOR
+        offset = max(1, round(img_h * 0.003))   # ~2px on 720p
+
+        def _draw_line(text, x, y, font, colour):
+            img_draw.text((x + offset, y + offset), text, font=font, fill=shadow)
+            img_draw.text((x, y), text, font=font, fill=colour)
+
+        _draw_line(line_the,   x_the,   y_the,   font_the,   _WORDMARK_COLOR_THE_CHRON)
+        _draw_line(line_hyp,   x_hyp,   y_hyp,   font_hyp,   _WORDMARK_COLOR_HYPOGEUM)
+        _draw_line(line_chron, x_chron, y_chron, font_chron, _WORDMARK_COLOR_THE_CHRON)
+
+        img.save(local_path, format="JPEG", quality=95)
+
+    except Exception:
+        # Wordmark compositing is a visual enhancement — never block thumbnail delivery
         pass
 
 
@@ -1369,6 +1517,17 @@ def _attempt_thumbnail_generation(
                 deliverable_id=deliverable_id,
                 text=text,
                 placement=placement,
+            )
+        # Composite the channel wordmark onto every thumbnail (16:9 main episode only).
+        # Must run after _apply_text_overlay so hook text and wordmark are composited
+        # in the correct layer order (hook text first, wordmark on top).
+        # Wordmark is required by TIG-07 — without it every thumbnail is BLOCKED.
+        if aspect_ratio == "16:9":
+            hook_placement = text_overlay.get("placement") if text_overlay else None
+            _apply_wordmark_overlay(local_path, hook_placement=hook_placement)
+            log.info(
+                "muapi_thumbnail_wordmark_applied",
+                deliverable_id=deliverable_id,
             )
         log.info(
             "muapi_thumbnail_generated",

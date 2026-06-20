@@ -495,7 +495,7 @@
   <div class="ep-topic">Topic: {{ d.topic }}</div>
   {% endif %}
 
-  {# Meta: id · created · published · status #}
+  {# Meta: id · created · published · four-way status #}
   <div class="ep-meta-row">
     <span class="ep-id-chip">{{ d.episode_id }}</span>
     {% if d.created_at %}
@@ -504,11 +504,59 @@
     {% if d.published_at %}
     <span>Published {{ d.published_at[:10] }}</span>
     {% endif %}
-    <span class="badge badge-{{ d.status }}">{{ d.status_label }}</span>
     {% if d.current_stage %}
     <span style="color: var(--blue);">⟳ {{ d.current_stage }}</span>
     {% endif %}
   </div>
+
+  {# Four-way status row (production / release / publish / analytics) #}
+  {% if d.production_status %}
+  <div class="ep-meta-row" style="margin-top:6px; gap:12px; flex-wrap:wrap;">
+    {# Production #}
+    {% set ps = d.production_status %}
+    <span style="font-size:11px; color:var(--muted);">Production:&nbsp;
+      <span style="font-weight:700; color:{% if ps == 'COMPLETE' %}var(--green){% elif ps == 'FAILED' %}var(--red){% else %}var(--muted){% endif %};">{{ ps }}</span>
+    </span>
+    {# Release #}
+    {% set rs = d.release_status %}
+    <span style="font-size:11px; color:var(--muted);">Release:&nbsp;
+      <span style="font-weight:700; color:{% if rs == 'READY' %}var(--green){% elif rs == 'BLOCKED' %}var(--red){% else %}var(--yellow){% endif %};">{{ rs }}</span>
+      {% if d.release_blocker %}
+      <span style="color:var(--muted); font-size:10px;"> — {{ d.release_blocker }}</span>
+      {% endif %}
+    </span>
+    {# Publish #}
+    {% set pub = d.publish_status %}
+    <span style="font-size:11px; color:var(--muted);">Publish:&nbsp;
+      <span style="font-weight:700; color:{% if pub == 'PUBLISHED' %}var(--green){% elif pub == 'READY' %}var(--blue){% elif pub == 'PARTIAL' %}var(--yellow){% else %}var(--muted){% endif %};">{{ pub }}</span>
+    </span>
+    {# Analytics #}
+    {% set anl = d.analytics_status %}
+    <span style="font-size:11px; color:var(--muted);">Analytics:&nbsp;
+      <span style="font-weight:700; color:{% if anl == 'API_CONNECTED' %}var(--green){% elif anl == 'MANUAL_IMPORT' %}var(--blue){% else %}var(--muted){% endif %};">{{ anl }}</span>
+    </span>
+  </div>
+  {# Release blocker banner #}
+  {% if d.release_blocker_label and rs == 'BLOCKED' %}
+  <div style="margin-top:8px; padding:8px 12px; background:#1f0a09; border:1px solid #da3633;
+              border-radius:var(--radius); font-size:12px; color:#ff7b72;">
+    <strong>Release blocked:</strong> {{ d.release_blocker_label }}
+    {% if d.release_blocker == 'THUMBNAIL_TIG_BLOCKED' %}
+    — <a href="?tab=thumbnails" style="color:#ff7b72; text-decoration:underline;">View thumbnail →</a>
+    {% endif %}
+  </div>
+  {% elif d.release_blocker_label and rs == 'PENDING' %}
+  <div style="margin-top:8px; padding:8px 12px; background:#1e1500; border:1px solid #9e6a03;
+              border-radius:var(--radius); font-size:12px; color:#e3b341;">
+    <strong>Pending review:</strong> {{ d.release_blocker_label }}
+  </div>
+  {% endif %}
+  {% else %}
+  {# Fallback single-status badge for DB episodes that don't have 4-way state yet #}
+  <div class="ep-meta-row" style="margin-top:4px;">
+    <span class="badge badge-{{ d.status }}">{{ d.status_label }}</span>
+  </div>
+  {% endif %}
 
   {# Platform pills #}
   {% if d.platforms %}
@@ -993,16 +1041,36 @@ function resumeEpisode(episodeId, kind) {
   <div class="card-title">Thumbnail</div>
   {% if da.get('has_thumbnail') %}
   <div style="display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap;">
+    {% set tig_blocked = d.release_blocker == 'THUMBNAIL_TIG_BLOCKED' %}
     <img src="/episode/{{ d.episode_id }}/thumbnail"
          alt="thumbnail" loading="lazy"
-         style="width:280px; height:157px; object-fit:cover; border-radius:var(--radius); border:1px solid var(--border);">
+         style="width:280px; height:157px; object-fit:cover; border-radius:var(--radius);
+                border:1px solid {% if tig_blocked %}#da3633{% else %}var(--border){% endif %};">
     <div>
-      <div class="ok" style="margin-bottom:8px;">✓ Thumbnail present</div>
+      {% if d.thumbnail_status_label %}
+        {% if tig_blocked %}
+          <div style="color:var(--red); font-weight:600; margin-bottom:6px;">
+            ✗ {{ d.thumbnail_status_label }}
+          </div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
+            Regenerate required before publishing.
+            <a href="?tab=thumbnails" style="color:var(--muted); text-decoration:underline;">View TIG violations →</a>
+          </div>
+        {% elif 'warning' in (d.thumbnail_status_label or '').lower() %}
+          <div style="color:var(--yellow); font-weight:600; margin-bottom:6px;">
+            ⚠ {{ d.thumbnail_status_label }}
+          </div>
+        {% else %}
+          <div class="ok" style="margin-bottom:6px;">✓ {{ d.thumbnail_status_label }}</div>
+        {% endif %}
+      {% else %}
+        <div class="ok" style="margin-bottom:8px;">✓ Thumbnail file present</div>
+      {% endif %}
       <a href="/episode/{{ d.episode_id }}/thumbnail" class="btn" download>⬇ Download</a>
     </div>
   </div>
   {% else %}
-  <div class="muted">No thumbnail found.</div>
+  <div class="muted">No thumbnail file found.</div>
   {% endif %}
 </div>
 
@@ -1080,6 +1148,56 @@ function resumeEpisode(episodeId, kind) {
 {% if active_tab == 'publishing' %}
 {% set pub = d.publishing %}
 {% set summary = pub.summary %}
+
+{# ── Publish readiness checklist — always shown when available ── #}
+{% if pub.checklist %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Publish Readiness</div>
+  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+    {% for item in pub.checklist %}
+    <tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:10px 8px; width:28px; text-align:center;">
+        {% if item.status == 'pass' %}<span style="color:var(--green); font-weight:700;">✓</span>
+        {% elif item.status == 'warn' %}<span style="color:var(--yellow); font-weight:700;">⚠</span>
+        {% elif item.status == 'fail' %}<span style="color:var(--red); font-weight:700;">✗</span>
+        {% else %}<span style="color:var(--muted);">—</span>{% endif %}
+      </td>
+      <td style="padding:10px 8px; font-weight:600; white-space:nowrap;">{{ item.label }}</td>
+      <td style="padding:10px 8px; font-size:12px; color:
+        {% if item.status == 'pass' %}var(--green)
+        {% elif item.status == 'warn' %}var(--yellow)
+        {% elif item.status == 'fail' %}var(--red)
+        {% else %}var(--muted){% endif %};">
+        {{ item.detail }}
+      </td>
+      <td style="padding:10px 8px; text-align:right; white-space:nowrap;">
+        {% if item.action_url %}
+        <a href="{{ item.action_url }}" class="btn" style="font-size:11px;">{{ item.action_label }}</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% set rel_status = d.get('release_status') %}
+  <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);
+              display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+    {% if rel_status == 'READY' %}
+      <span style="color:var(--green); font-weight:700; font-size:13px;">✓ Ready to publish</span>
+      <span class="btn" style="opacity:.4; cursor:not-allowed;" title="Publishing runs via pipeline — not available from this UI">
+        Publish (pipeline only)
+      </span>
+    {% elif rel_status == 'BLOCKED' %}
+      <span style="color:var(--red); font-weight:700; font-size:13px;">
+        ✗ Publish blocked — {{ d.get('release_blocker_label') or d.get('release_blocker') or 'see checklist above' }}
+      </span>
+    {% else %}
+      <span style="color:var(--yellow); font-weight:700; font-size:13px;">
+        ⚠ Review required before publishing
+      </span>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 
 {# Summary header #}
 <div class="pub-summary">
@@ -1212,7 +1330,65 @@ function resumeEpisode(episodeId, kind) {
 </div>
 
 {% else %}
-{# No cards — no outcomes and no credentials #}
+{# No platform outcomes — show publish readiness checklist #}
+{% if pub.checklist %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Publish Readiness</div>
+  {% set all_pass = pub.checklist | selectattr('status', 'in', ['pass', 'warn']) | list | length == pub.checklist | length %}
+  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+    {% for item in pub.checklist %}
+    <tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:10px 8px; width:28px; text-align:center;">
+        {% if item.status == 'pass' %}
+          <span style="color:var(--green); font-weight:700;">✓</span>
+        {% elif item.status == 'warn' %}
+          <span style="color:var(--yellow); font-weight:700;">⚠</span>
+        {% elif item.status == 'fail' %}
+          <span style="color:var(--red); font-weight:700;">✗</span>
+        {% else %}
+          <span style="color:var(--muted);">—</span>
+        {% endif %}
+      </td>
+      <td style="padding:10px 8px; font-weight:600; white-space:nowrap;">{{ item.label }}</td>
+      <td style="padding:10px 8px; color:
+        {% if item.status == 'pass' %}var(--green)
+        {% elif item.status == 'warn' %}var(--yellow)
+        {% elif item.status == 'fail' %}var(--red)
+        {% else %}var(--muted){% endif %}; font-size:12px;">
+        {{ item.detail }}
+      </td>
+      <td style="padding:10px 8px; text-align:right; white-space:nowrap;">
+        {% if item.action_url %}
+        <a href="{{ item.action_url }}" class="btn" style="font-size:11px;">{{ item.action_label }}</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  {% set rel_status = d.get('release_status') %}
+  <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);
+              display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+    {% if rel_status == 'READY' %}
+      <span style="color:var(--green); font-weight:700; font-size:13px;">✓ Ready to publish</span>
+      <span class="btn" style="opacity:.4; cursor:not-allowed;" title="Automated publishing not yet wired to this UI">
+        Publish (pipeline only)
+      </span>
+    {% elif rel_status == 'BLOCKED' %}
+      <span style="color:var(--red); font-weight:700; font-size:13px;">
+        ✗ Publish blocked — {{ d.get('release_blocker_label') or d.get('release_blocker') or 'see checklist' }}
+      </span>
+    {% else %}
+      <span style="color:var(--yellow); font-weight:700; font-size:13px;">
+        ⚠ Review required before publishing
+      </span>
+    {% endif %}
+    <span style="font-size:11px; color:var(--muted); margin-left:auto;">
+      <a href="/platforms/connect/youtube" style="color:var(--muted);">Manage YouTube credential →</a>
+    </span>
+  </div>
+</div>
+{% else %}
 <div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
   No platform connections or publishing records found for this episode.
   <div style="margin-top:12px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
@@ -1222,6 +1398,7 @@ function resumeEpisode(episodeId, kind) {
     <a href="/platforms/connect/facebook"   class="btn">Connect Facebook</a>
   </div>
 </div>
+{% endif %}
 {% endif %}
 
 {% endif %}{# end active_tab == 'publishing' #}
@@ -1467,10 +1644,25 @@ function resumeEpisode(episodeId, kind) {
 </div>
 
 {% else %}
-{# Empty state #}
-<div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
-  No title candidates found for this episode.
-  <div style="margin-top:12px;">
+{# Empty state — distinguish "no title package" from "package exists, no candidates" #}
+<div class="card" style="padding:32px 20px; color:var(--muted);">
+  {% if tl.no_title_package %}
+  <div style="font-size:13px; font-weight:600; color:var(--muted); margin-bottom:8px;">
+    No title package generated
+  </div>
+  <div style="font-size:12px; margin-bottom:14px; line-height:1.6;">
+    The title generation stage did not produce a title package for this episode.
+    The working title from the topic brief is shown in the episode header.
+    To generate title candidates, re-run the episode pipeline from the Script stage.
+  </div>
+  <div style="font-size:11px; color:var(--muted); padding:8px 10px; background:var(--bg);
+              border:1px solid var(--border); border-radius:var(--radius);">
+    Missing stage: <span style="font-family:monospace;">script_engine → title_candidates</span>
+  </div>
+  {% else %}
+  <div style="font-size:13px; margin-bottom:12px;">No title candidates found for this episode.</div>
+  {% endif %}
+  <div style="margin-top:14px;">
     <a href="?tab=production" class="btn">← Back to Production</a>
   </div>
 </div>

@@ -177,6 +177,15 @@ from hypogeum.disk_sync import (
     extract_created_at,
     SYNTHETIC_STAGES,
 )
+from hypogeum.episode_state import (
+    build_episode_state,
+    thumbnail_status_label,
+    PROD_COMPLETE, PROD_PARTIAL, PROD_FAILED,
+    REL_READY, REL_BLOCKED, REL_PENDING,
+    BLOCKER_THUMBNAIL_TIG_BLOCKED,
+    PUB_NOT_READY, PUB_READY, PUB_PUBLISHED, PUB_PARTIAL,
+    ANL_NO_DATA, ANL_MANUAL_IMPORT,
+)
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -527,6 +536,12 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
         entry["verif_latency_ms"] = (v or {}).get("latency_ms")
         # Legacy: True only when verified (not just saved)
         entry["connected"] = vstatus == "verified"
+        # Distinguish real network probes from format/string checks.
+        # youtube probe only checks token string length, not API reachability.
+        # instagram/facebook/tiktok have no probe at all.
+        real_probe_providers = {"openrouter", "elevenlabs", "muapi",
+                                "seedance", "runway", "kling", "veo"}
+        entry["real_probe"] = p["id"] in real_probe_providers
         result.append(entry)
     return result
 
@@ -1359,9 +1374,42 @@ def episode_detail_page(episode_id):
         # Minimal dict so episode_detail.html renders without crashing
         d = _make_disk_episode_detail(episode_id, artifacts)
     else:
-        # Enrich DB episode with disk artifact info
+        # Enrich DB episode with disk artifact info and four-way state
         artifacts = get_episode_artifacts(episode_id, assets_root=_ASSETS_ROOT_PATH)
         d["disk_artifacts"] = artifacts
+        # Compute four-way state from disk packages (even for DB episodes)
+        if artifacts.get("exists"):
+            ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+            _qa_pkg   = load_disk_pkg(ep_dir, "qa_approval_report", episode_id)
+            _tn_pkg   = load_disk_pkg(ep_dir, "thumbnail_package", episode_id)
+            _bga_pkgs = []
+            for _pn in (1, 2):
+                _pkg = load_disk_pkg(ep_dir, f"bga_compliance_report_p{_pn}", episode_id)
+                if _pkg:
+                    _bga_pkgs.append(_pkg)
+            _art = {
+                "has_render":    artifacts.get("has_render", False),
+                "has_thumbnail": artifacts.get("has_thumbnail", False),
+            }
+            _outcomes = [
+                {"publishing_status": p.get("publishing_status"), "platform": p.get("platform")}
+                for p in d.get("platforms", [])
+            ]
+            ep_state = build_episode_state(
+                _qa_pkg, _bga_pkgs, _tn_pkg, _art,
+                publishing_outcomes=_outcomes or None,
+            )
+            d.update(ep_state)
+            d["thumbnail_status_label"] = thumbnail_status_label(_tn_pkg, _art.get("has_thumbnail", False))
+            # Publish checklist for DB episodes too
+            _disk_qa_summary = _make_disk_qa_summary(episode_id)
+            d["publishing"]["checklist"] = _build_disk_publish_checklist(
+                episode_id, ep_state, _disk_qa_summary, artifacts, _tn_pkg
+            )
+            # Titles from disk if no DB titles
+            if not d.get("titles", {}).get("candidates"):
+                _tb = load_disk_pkg(ep_dir, "topic_brief", episode_id)
+                d["titles"] = _extract_disk_title_candidates(episode_id, ep_dir, _tb)
 
     valid_tabs = {"production", "publishing", "thumbnails", "titles",
                   "analytics", "revenue", "learning", "branding", "artifacts"}
@@ -1592,22 +1640,292 @@ def _disk_resume_actions(episode_id: str, artifacts: dict) -> dict:
     }
 
 
+def _extract_disk_title_candidates(
+    episode_id: str,
+    ep_dir,
+    topic_brief: dict,
+) -> dict:
+    """
+    Build a titles dict from disk packages for disk-only episodes.
+
+    Priority:
+      1. topic_brief.episode_title (the working title from EP)
+      2. script_package.episode_metadata.topic
+      No title DB rows exist for disk-only episodes.
+
+    Returns the same shape as episode_detail.get_episode_detail()["titles"].
+    """
+    candidates = []
+
+    title_text = (
+        topic_brief.get("episode_title")
+        or None
+    )
+    if not title_text:
+        sp = load_disk_pkg(ep_dir, "script_package", episode_id)
+        title_text = (sp.get("episode_metadata") or {}).get("topic") or None
+
+    if title_text:
+        from hypogeum.episode_detail import _classify_title_format, _FORMAT_LABELS
+        fmt = _classify_title_format(title_text)
+        candidates.append({
+            "title_id":      f"disk_{episode_id}_title",
+            "episode_id":    episode_id,
+            "title_text":    title_text,
+            "selected":      True,
+            "format_type":   fmt,
+            "format_label":  _FORMAT_LABELS.get(fmt, "Other"),
+            "ctr":           None,
+            "impressions":   None,
+            "views":         None,
+            "performance_status": "awaiting_analytics",
+            "from_disk":     True,
+        })
+        return {
+            "candidates": candidates,
+            "summary": {"count": 1, "has_selected": True, "has_real_data": False},
+            "from_disk": True,
+        }
+
+    return {
+        "candidates": [],
+        "summary": {"count": 0, "has_selected": False, "has_real_data": False},
+        "no_title_package": True,
+        "from_disk": True,
+    }
+
+
+def _build_disk_publish_checklist(
+    episode_id: str,
+    ep_state: dict,
+    qa_summary: dict,
+    artifacts: dict,
+    thumbnail_pkg: dict | None,
+) -> list[dict]:
+    """
+    Build a publish readiness checklist for the Publishing tab of disk-only episodes.
+
+    Each item: {label, status, detail, action_url, action_label}
+    status: pass | fail | warn | missing
+    """
+    checklist = []
+
+    # 1. Render file
+    has_render = bool(artifacts.get("has_render"))
+    checklist.append({
+        "label":        "Video render",
+        "status":       "pass" if has_render else "fail",
+        "detail":       "Render file present" if has_render else "No render file — run assembly",
+        "action_url":   None,
+        "action_label": None,
+    })
+
+    # 2. QA gate
+    qa_verdict  = (qa_summary.get("verdict") or "").upper()
+    qa_approved = bool(qa_summary.get("approved"))
+    if qa_approved and qa_verdict == "WARNING":
+        checklist.append({
+            "label":        "QA gate",
+            "status":       "warn",
+            "detail":       "Approved with warnings — review QA report before publishing",
+            "action_url":   f"/episode/{episode_id}/artifact/qa_approval_report",
+            "action_label": "View QA report",
+        })
+    elif qa_approved:
+        checklist.append({
+            "label":        "QA gate",
+            "status":       "pass",
+            "detail":       "QA approved",
+            "action_url":   None,
+            "action_label": None,
+        })
+    elif qa_summary:
+        checklist.append({
+            "label":        "QA gate",
+            "status":       "fail",
+            "detail":       "QA not approved — see QA report for failures",
+            "action_url":   f"/episode/{episode_id}/artifact/qa_approval_report",
+            "action_label": "View QA report",
+        })
+    else:
+        checklist.append({
+            "label":        "QA gate",
+            "status":       "missing",
+            "detail":       "No QA report found",
+            "action_url":   None,
+            "action_label": None,
+        })
+
+    # 3. Thumbnail brand check (TIG)
+    has_thumbnail = bool(artifacts.get("has_thumbnail"))
+    if thumbnail_pkg:
+        tig = thumbnail_pkg.get("thumbnail_identity_report") or {}
+        tig_verdict = (tig.get("verdict") or "").upper()
+        if tig_verdict == "BLOCKED":
+            violations = tig.get("violations") or []
+            blocking   = [v for v in violations if (v.get("severity") or "").upper() == "BLOCKING"]
+            detail     = f"Brand identity check rejected — {blocking[0]['description'][:80]}" if blocking else "Brand identity check rejected"
+            checklist.append({
+                "label":        "Thumbnail brand check",
+                "status":       "fail",
+                "detail":       detail,
+                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
+                "action_label": "View thumbnail",
+            })
+        elif tig_verdict == "WARNING":
+            checklist.append({
+                "label":        "Thumbnail brand check",
+                "status":       "warn",
+                "detail":       f"{tig.get('warning_count', 0)} warning(s) — review before publishing",
+                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
+                "action_label": "View thumbnail",
+            })
+        elif tig_verdict == "APPROVED":
+            checklist.append({
+                "label":        "Thumbnail brand check",
+                "status":       "pass",
+                "detail":       "Thumbnail approved by brand identity check",
+                "action_url":   None,
+                "action_label": None,
+            })
+        else:
+            checklist.append({
+                "label":        "Thumbnail brand check",
+                "status":       "missing",
+                "detail":       "No brand identity check recorded for thumbnail",
+                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
+                "action_label": "View thumbnail",
+            })
+    elif has_thumbnail:
+        checklist.append({
+            "label":        "Thumbnail brand check",
+            "status":       "missing",
+            "detail":       "Thumbnail file present — no brand check run",
+            "action_url":   None,
+            "action_label": None,
+        })
+    else:
+        checklist.append({
+            "label":        "Thumbnail brand check",
+            "status":       "fail",
+            "detail":       "No thumbnail file",
+            "action_url":   None,
+            "action_label": None,
+        })
+
+    # 4. Captions
+    has_captions = bool(artifacts.get("has_captions"))
+    checklist.append({
+        "label":        "Captions (SRT)",
+        "status":       "pass" if has_captions else "missing",
+        "detail":       "Captions file present" if has_captions else "No captions file found",
+        "action_url":   None,
+        "action_label": None,
+    })
+
+    # 5. YouTube credential
+    try:
+        from hypogeum.credential_manager import list_secret_profiles
+        yt_creds = list_secret_profiles(provider="youtube", db_path=_db_path())
+        yt_active = [c for c in yt_creds if c.status == "active"]
+        if yt_active:
+            checklist.append({
+                "label":        "YouTube credential",
+                "status":       "warn",
+                "detail":       "Credential saved — token format checked only, not verified via API",
+                "action_url":   "/platforms/connect/youtube",
+                "action_label": "Verify credential",
+            })
+        else:
+            checklist.append({
+                "label":        "YouTube credential",
+                "status":       "missing",
+                "detail":       "No YouTube credential saved",
+                "action_url":   "/platforms/connect/youtube",
+                "action_label": "Connect YouTube",
+            })
+    except Exception:
+        checklist.append({
+            "label":        "YouTube credential",
+            "status":       "missing",
+            "detail":       "Could not check credential state",
+            "action_url":   "/platforms/connect/youtube",
+            "action_label": "Connect YouTube",
+        })
+
+    # 6. Release gate summary
+    release_status = ep_state.get("release_status")
+    release_label  = ep_state.get("release_blocker_label")
+    if release_status == REL_READY:
+        checklist.append({
+            "label":        "Release gate",
+            "status":       "pass",
+            "detail":       "All release checks passed — ready to publish",
+            "action_url":   None,
+            "action_label": None,
+        })
+    elif release_status == REL_PENDING:
+        checklist.append({
+            "label":        "Release gate",
+            "status":       "warn",
+            "detail":       release_label or "Pending review before publishing",
+            "action_url":   None,
+            "action_label": None,
+        })
+    else:
+        checklist.append({
+            "label":        "Release gate",
+            "status":       "fail",
+            "detail":       release_label or "Release blocked",
+            "action_url":   None,
+            "action_label": None,
+        })
+
+    return checklist
+
+
 def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
     """Build an episode detail dict from disk artifacts — reads JSON packages for readable content."""
     thumbnails = _make_disk_thumbnails(episode_id, artifacts)
     script_sections = _make_disk_script_sections(episode_id)
     qa_summary = _make_disk_qa_summary(episode_id)
 
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+
+    # Load packages needed for state computation
+    qa_pkg        = load_disk_pkg(ep_dir, "qa_approval_report", episode_id)
+    if not qa_pkg:
+        qa_pkg    = load_disk_pkg(ep_dir, "qa_report", episode_id)
+    thumbnail_pkg = load_disk_pkg(ep_dir, "thumbnail_package", episode_id)
+    bga_pkgs      = []
+    for _pn in (1, 2):
+        _pkg = load_disk_pkg(ep_dir, f"bga_compliance_report_p{_pn}", episode_id)
+        if _pkg:
+            bga_pkgs.append(_pkg)
+
     # Topic / title from narrative or script package
     narrative_pkg = _load_disk_pkg(episode_id, "narrative_package")
+    topic_brief   = load_disk_pkg(ep_dir, "topic_brief", episode_id)
     topic = (
         narrative_pkg.get("episode_title")
         or narrative_pkg.get("topic")
+        or topic_brief.get("episode_title")
         or artifacts.get("display_title")
         or episode_id
     )
 
-    # Use BGA+QA-aware status instead of naive has_render check
+    # Titles from topic brief / script sections (fallback when no DB titles)
+    disk_title_candidates = _extract_disk_title_candidates(episode_id, ep_dir, topic_brief)
+
+    # Four-way state (production/release/publish/analytics)
+    ep_state = build_episode_state(
+        qa_pkg=qa_pkg,
+        bga_pkgs=bga_pkgs,
+        thumbnail_pkg=thumbnail_pkg,
+        artifacts=artifacts,
+    )
+
+    # Single-value legacy status for DB compat and badge rendering
     status       = _disk_episode_status(episode_id, artifacts)
     status_label = _DISK_STATUS_LABELS.get(status, status.replace("_", " ").title())
 
@@ -1657,6 +1975,12 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
 
     resume_actions = _disk_resume_actions(episode_id, artifacts)
 
+    # Thumbnail label: never say "present" for a rejected thumbnail
+    tn_status_label = thumbnail_status_label(thumbnail_pkg, artifacts.get("has_thumbnail", False))
+
+    # Publish checklist for the Publishing tab (disk-only: credential check from DB)
+    publish_checklist = _build_disk_publish_checklist(episode_id, ep_state, qa_summary, artifacts, thumbnail_pkg)
+
     return {
         "episode_id":       episode_id,
         "display_title":    artifacts.get("display_title") or topic or episode_id,
@@ -1675,14 +1999,18 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
         "run_duration_fmt": run_dur_fmt,
         "total_cost_usd":   cost_usd,
         "stage_count":      scene_cnt,
+        # Four-way state (production/release/publish/analytics)
+        **ep_state,
+        "thumbnail_status_label": tn_status_label,
         "platforms":        [],
         "stage_groups":     stage_groups,
         "raw_stages":       [],
         "assets":           [],
         "publishing":       {"summary": {"published": 0, "failed": 0, "pending": 0, "connected": 0},
-                             "platform_cards": []},
+                             "platform_cards": [],
+                             "checklist": publish_checklist},
         "thumbnails":       thumbnails,
-        "titles":           {"candidates": []},
+        "titles":           disk_title_candidates,
         "analytics":        {"overview": {"has_real_data": False},
                              "platforms": [],
                              "health": {"real_row_count": 0, "mock_row_count": 0,
@@ -1923,9 +2251,35 @@ def api_episode_resume_narration(episode_id: str):
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+_TEST_EP_PATTERNS = (
+    "ep_test", "ep_smoke", "ep_review", "ep_val_",
+    "ep_xyz", "_lite",
+)
+
+
+def _is_test_episode(episode_id: str) -> bool:
+    """
+    Return True when episode_id matches a known test/validation naming pattern.
+    Production episodes are ep_000, ep_001, ep_002, ep_003, ep_NNN format.
+    Test episodes use names like ep_test*, ep_smoke*, ep_review*, ep_val_*, ep_xyz.
+    Hash-like IDs (ep_be9664f5 — 8+ hex chars after ep_) are also treated as test.
+    """
+    import re
+    eid = episode_id.lower()
+    for pat in _TEST_EP_PATTERNS:
+        if pat in eid:
+            return True
+    # Hash-like ID: ep_ followed by 7+ hex characters
+    if re.match(r"^ep_[0-9a-f]{7,}$", eid):
+        return True
+    return False
+
+
 @app.route("/episodes")
 def episodes_page():
     channel_id = request.args.get("channel_id")
+    show_test  = request.args.get("show_test", "0").strip() == "1"
+
     episodes   = list_episodes(db_path=_db_path())
 
     # Include disk-only episodes not yet in DB so the history count is accurate
@@ -1967,6 +2321,14 @@ def episodes_page():
     except Exception:
         pass
 
+    # Tag and filter test episodes
+    for ep in episodes:
+        ep["_is_test"] = _is_test_episode(ep["episode_id"])
+
+    test_count   = sum(1 for ep in episodes if ep["_is_test"])
+    if not show_test:
+        episodes = [ep for ep in episodes if not ep["_is_test"]]
+
     topics     = list_episode_topics(
         channel_id=channel_id or None, db_path=_db_path()
     )
@@ -1976,7 +2338,9 @@ def episodes_page():
     return render_template("episodes.html",
                            episodes=episodes, topics=topics,
                            channels=channels, preflight=preflight,
-                           channel_filter=channel_id)
+                           channel_filter=channel_id,
+                           show_test=show_test,
+                           test_count=test_count)
 
 
 @app.route("/episodes/enqueue", methods=["POST"])

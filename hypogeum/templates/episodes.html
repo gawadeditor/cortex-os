@@ -103,7 +103,18 @@
 
 {# ── Episode history ── #}
 <div class="card">
-  <div class="card-title">Episode History ({{ episodes | length }})</div>
+  <div class="card-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+    <span>Episode History ({{ episodes | length }})</span>
+    <span style="font-size:12px; font-weight:400; color:var(--muted);">
+      {% if show_test %}
+        Showing all episodes including test runs.
+        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=0" style="color:var(--muted); text-decoration:underline;">Hide test episodes</a>
+      {% elif test_count > 0 %}
+        {{ test_count }} test episode{{ 's' if test_count != 1 else '' }} hidden.
+        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=1" style="color:var(--muted); text-decoration:underline;">Show test episodes</a>
+      {% endif %}
+    </span>
+  </div>
   {% if episodes %}
   <table>
     <thead>

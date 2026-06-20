@@ -147,7 +147,10 @@
 
     <div class="provider-name">
       {{ p.label }}
-      {% if vstatus == 'verified' %}
+      {% if vstatus == 'verified' and not p.real_probe %}
+        {# YouTube: probe is string-length check only — not a real API call #}
+        <span class="badge-saved">&#x25CF; Credential saved</span>
+      {% elif vstatus == 'verified' %}
         <span class="badge-verified">&#x2713; Verified</span>
       {% elif vstatus == 'failed' %}
         <span class="badge-failed">&#x2717; Failed</span>
@@ -159,6 +162,12 @@
         <span class="badge-missing">Not configured</span>
       {% endif %}
     </div>
+
+    {% if vstatus == 'verified' and not p.real_probe %}
+    <div style="font-size:11px; color:var(--yellow); margin-bottom:4px;">
+      ⓘ Credential saved — token format checked only, not verified via API
+    </div>
+    {% endif %}
 
     <div class="provider-desc">{{ p.description }}</div>
 

@@ -214,9 +214,16 @@
 </div>
 
 {% else %}
-<div class="empty">
-  No analytics data yet.
-  <a href="/analytics/import">Import or seed demo data →</a>
+<div class="empty" style="padding:40px 20px; text-align:center;">
+  <div style="font-size:14px; font-weight:600; color:var(--muted); margin-bottom:10px;">
+    Analytics API not connected
+  </div>
+  <div style="font-size:12px; color:var(--muted); margin-bottom:16px; max-width:440px; margin-left:auto; margin-right:auto; line-height:1.6;">
+    No real platform analytics imported yet. Platform API integrations (YouTube Data API,
+    TikTok Analytics) are not implemented in this version.
+    Import analytics manually from platform CSV exports.
+  </div>
+  <a href="/analytics/import" class="btn">Manual Analytics Import →</a>
 </div>
 {% endif %}
 

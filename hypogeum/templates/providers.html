@@ -5,23 +5,35 @@
   <title>Providers — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
-    .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: var(--gap); }
+    .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: var(--gap); }
     .provider-card { background: var(--surface); border: 1px solid var(--border);
                      border-radius: var(--radius); padding: 16px; }
-    .provider-card-connected { border-color: #2ea043; }
+    .provider-card-verified { border-color: #2ea043; }
+    .provider-card-failed   { border-color: var(--red); }
     .provider-name { font-size: 15px; font-weight: 700; margin-bottom: 4px;
                      display: flex; align-items: center; gap: 8px; }
     .provider-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
-    .provider-badge-connected { font-size: 11px; font-weight: 600; color: var(--green); }
-    .provider-badge-disconnected { font-size: 11px; color: var(--muted); }
-    .provider-auth-type { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
-    .provider-meta { font-size: 11px; color: var(--muted); margin-top: 6px; }
     .provider-cost { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .btn-provider { display: inline-block; margin-top: 10px; padding: 5px 12px;
+    .badge-verified      { font-size: 11px; font-weight: 700; color: var(--green); }
+    .badge-failed        { font-size: 11px; font-weight: 700; color: var(--red); }
+    .badge-saved         { font-size: 11px; font-weight: 700; color: var(--yellow); }
+    .badge-missing       { font-size: 11px; color: var(--muted); }
+    .badge-not-verifiable{ font-size: 11px; color: var(--muted); font-style: italic; }
+    .provider-auth-type { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+    .provider-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .verif-error { font-size: 11px; color: var(--red); margin-top: 3px; font-family: monospace; }
+    .verif-time  { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .btn-provider { display: inline-block; margin-top: 8px; padding: 5px 12px;
                     font-size: 12px; font-weight: 600; border-radius: var(--radius);
                     border: 1px solid var(--border); color: var(--muted); cursor: pointer;
                     background: transparent; font-family: inherit; text-decoration: none; }
     .btn-provider:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
+    .btn-test   { display: inline-block; margin-top: 8px; margin-left: 6px;
+                  padding: 5px 12px; font-size: 12px; font-weight: 600;
+                  border-radius: var(--radius); border: 1px solid var(--border);
+                  color: var(--blue); cursor: pointer; background: transparent;
+                  font-family: inherit; }
+    .btn-test:disabled { opacity: 0.4; cursor: not-allowed; }
     .oauth-fields { margin-top: 10px; padding: 10px 12px; background: var(--bg);
                     border: 1px solid var(--border); border-radius: var(--radius); }
     .oauth-field-row { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
@@ -31,13 +43,6 @@
     .oauth-notice { font-size: 12px; color: var(--yellow); background: #1e1a00;
                     border: 1px solid var(--yellow); border-radius: var(--radius);
                     padding: 8px 10px; margin-top: 8px; }
-    .connect-form input[type="text"],
-    .connect-form input[type="password"] {
-      width: 100%; padding: 5px 8px; font-size: 12px; font-family: monospace;
-      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
-      color: var(--text); margin-top: 4px;
-    }
-    .connect-form input:focus { outline: none; border-color: var(--blue); }
     .section-label { font-size: 12px; font-weight: 700; text-transform: uppercase;
                      letter-spacing: .06em; color: var(--muted); margin: var(--gap) 0 10px; }
   </style>
@@ -47,39 +52,66 @@
 
 <div class="page-header">
   <h1>Providers</h1>
-  <span class="page-meta">Connection status for all content and publishing providers</span>
+  <span class="page-meta">Connection and verification status for all content and publishing providers</span>
+  <a href="/setup" class="btn" style="margin-left:auto;">Factory Setup →</a>
 </div>
 
 {# ── Content Providers ── #}
 <div class="section-label">Content Providers</div>
 <div class="provider-grid">
   {% for p in content_providers %}
-  <div class="provider-card {{ 'provider-card-connected' if p.connected else '' }}">
+  {% set vstatus = p.vstatus %}
+  <div class="provider-card
+    {% if vstatus == 'verified' %}provider-card-verified
+    {% elif vstatus == 'failed' %}provider-card-failed
+    {% endif %}"
+    data-provider-id="{{ p.id }}">
+
     <div class="provider-name">
       {{ p.label }}
-      {% if p.connected %}
-        <span class="provider-badge-connected">&#x2713; Connected</span>
+      {% if vstatus == 'verified' %}
+        <span class="badge-verified">&#x2713; Verified</span>
+      {% elif vstatus == 'failed' %}
+        <span class="badge-failed">&#x2717; Failed</span>
+      {% elif vstatus == 'saved' %}
+        <span class="badge-saved">&#x25CF; Saved</span>
+      {% elif vstatus == 'not_verifiable' %}
+        <span class="badge-not-verifiable">Saved (not verifiable)</span>
       {% else %}
-        <span class="provider-badge-disconnected">Not connected</span>
+        <span class="badge-missing">Not configured</span>
       {% endif %}
     </div>
+
     <div class="provider-desc">{{ p.description }}</div>
     <div class="provider-auth-type">Auth: API key</div>
 
+    {% if p.verif_error %}
+    <div class="verif-error">✗ {{ p.verif_error }}</div>
+    {% endif %}
+    {% if p.verif_checked_at %}
+    <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC
+      {% if p.verif_latency_ms %}({{ p.verif_latency_ms }}ms){% endif %}
+    </div>
+    {% endif %}
+
     {% if p.cost_usd and p.cost_usd > 0 %}
-    <div class="provider-cost">Usage cost tracked: ${{ "%.4f"|format(p.cost_usd) }}</div>
-    {% else %}
-    <div class="provider-meta">No usage recorded</div>
+    <div class="provider-cost">Usage: ${{ "%.4f"|format(p.cost_usd) }}</div>
     {% endif %}
 
-    <div class="provider-meta">Model list: <em>placeholder — not fetched</em></div>
-    <div class="provider-meta">Credits/balance: <em>placeholder — not fetched</em></div>
+    <div style="margin-top:8px;">
+      <a href="/providers/content/connect/{{ p.id }}" class="btn-provider">
+        {{ "Reconnect" if vstatus != 'missing' else "Connect" }}
+      </a>
+      {% if vstatus != 'not_verifiable' %}
+      <button class="btn-test" data-provider="{{ p.id }}"
+              onclick="testProvider(this, '{{ p.id }}')"
+              title="Test the API key with a live call">
+        Test
+      </button>
+      {% endif %}
+    </div>
 
-    {% if p.connected %}
-    <a href="/providers/content/connect/{{ p.id }}" class="btn-provider">Reconnect</a>
-    {% else %}
-    <a href="/providers/content/connect/{{ p.id }}" class="btn-provider">Connect</a>
-    {% endif %}
+    <div class="test-result-{{ p.id }}" style="display:none; margin-top:6px; font-size:12px;"></div>
   </div>
   {% endfor %}
 </div>
@@ -88,26 +120,35 @@
 <div class="section-label" style="margin-top: calc(var(--gap) * 1.5)">Publishing Platforms</div>
 <div class="provider-grid">
   {% for p in platform_providers %}
-  <div class="provider-card {{ 'provider-card-connected' if p.connected else '' }}"
-       data-provider-id="{{ p.id }}">
+  {% set vstatus = p.vstatus %}
+  <div class="provider-card
+    {% if vstatus == 'verified' %}provider-card-verified
+    {% elif vstatus == 'failed' %}provider-card-failed
+    {% endif %}"
+    data-provider-id="{{ p.id }}">
+
     <div class="provider-name">
       {{ p.label }}
-      {% if p.connected %}
-        <span class="provider-badge-connected">&#x2713; Connected</span>
+      {% if vstatus == 'verified' %}
+        <span class="badge-verified">&#x2713; Verified</span>
+      {% elif vstatus == 'failed' %}
+        <span class="badge-failed">&#x2717; Failed</span>
+      {% elif vstatus == 'saved' %}
+        <span class="badge-saved">&#x25CF; Saved</span>
+      {% elif vstatus == 'not_verifiable' %}
+        <span class="badge-not-verifiable">Saved (not verifiable)</span>
       {% else %}
-        <span class="provider-badge-disconnected">Not connected</span>
+        <span class="badge-missing">Not configured</span>
       {% endif %}
     </div>
+
     <div class="provider-desc">{{ p.description }}</div>
 
     {% if p.id == "youtube" %}
-      {# YouTube requires OAuth — never a plain API key paste #}
       <div class="provider-auth-type">Auth: OAuth 2.0</div>
-
       <div class="oauth-notice">
-        OAuth setup required. YouTube uses OAuth 2.0 — not an API key.
+        OAuth setup required. YouTube uses OAuth 2.0 — not a plain API key.
       </div>
-
       <div class="oauth-fields">
         <div class="section-label" style="margin:0 0 8px; font-size:10px">Required OAuth fields</div>
         <div class="oauth-field-row">
@@ -128,51 +169,98 @@
         </div>
         <div class="oauth-field-row">
           <span class="oauth-label">authorization status</span>
-          <span class="oauth-value {{ 'provider-badge-connected' if p.connected else '' }}">
-            {{ "Authorized" if p.connected else "Not authorized" }}
+          <span class="oauth-value {% if vstatus == 'verified' %}badge-verified{% endif %}">
+            {{ "Verified" if vstatus == 'verified' else "Saved" if vstatus == 'saved' else "Not configured" }}
           </span>
         </div>
       </div>
 
-      {% if p.cost_usd and p.cost_usd > 0 %}
-      <div class="provider-cost" style="margin-top:8px">Usage cost tracked: ${{ "%.4f"|format(p.cost_usd) }}</div>
+      {% if p.verif_error %}
+      <div class="verif-error" style="margin-top:6px;">✗ {{ p.verif_error }}</div>
+      {% endif %}
+      {% if p.verif_checked_at %}
+      <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC</div>
       {% endif %}
 
-      <div class="provider-meta" style="margin-top:6px">
-        Automatic pull: <em>not implemented — manual import only</em>
+      <div style="margin-top:8px;">
+        <a href="/platforms/connect/youtube" class="btn-provider">
+          {{ "Re-authorize" if vstatus != 'missing' else "Set up OAuth" }}
+        </a>
+        <button class="btn-test" data-provider="youtube"
+                onclick="testProvider(this, 'youtube')"
+                title="Verify refresh token is present">
+          Test
+        </button>
       </div>
 
-      {% if p.connected %}
-      <a href="/platforms/connect/youtube" class="btn-provider">Re-authorize</a>
-      {% else %}
-      <a href="/platforms/connect/youtube" class="btn-provider">Set up OAuth</a>
-      {% endif %}
-
     {% else %}
-      {# TikTok, Instagram, Facebook — API key #}
       <div class="provider-auth-type">Auth: API key</div>
-
-      {% if p.cost_usd and p.cost_usd > 0 %}
-      <div class="provider-cost">Usage cost tracked: ${{ "%.4f"|format(p.cost_usd) }}</div>
-      {% else %}
-      <div class="provider-meta">No usage recorded</div>
+      {% if p.verif_error %}
+      <div class="verif-error">✗ {{ p.verif_error }}</div>
       {% endif %}
-
-      <div class="provider-meta">Model list: <em>n/a</em></div>
-      <div class="provider-meta">Credits/balance: <em>placeholder — not fetched</em></div>
-
-      {% if p.connected %}
-      <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Reconnect</a>
-      {% else %}
-      <a href="/platforms/connect/{{ p.id }}" class="btn-provider">Connect</a>
+      {% if p.verif_checked_at %}
+      <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC</div>
       {% endif %}
+      <div style="margin-top:8px;">
+        <a href="/platforms/connect/{{ p.id }}" class="btn-provider">
+          {{ "Reconnect" if vstatus != 'missing' else "Connect" }}
+        </a>
+        <button class="btn-test" data-provider="{{ p.id }}"
+                onclick="testProvider(this, '{{ p.id }}')"
+                title="Test the API credential">
+          Test
+        </button>
+      </div>
     {% endif %}
+
+    <div class="test-result-{{ p.id }}" style="display:none; margin-top:6px; font-size:12px;"></div>
   </div>
   {% endfor %}
 </div>
 
 <div style="margin-top: calc(var(--gap) * 2); font-size: 12px; color: var(--muted);">
-  Connections are stored locally. No credentials are sent to external services during provider status checks.
+  Credentials are stored locally. Test calls are lightweight probes (no data generated or billed).
+  &nbsp;|&nbsp; <a href="/setup">Factory Setup →</a>
 </div>
+
+<script>
+function testProvider(btn, provider) {
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  var resultEl = document.querySelector('.test-result-' + provider);
+  if (resultEl) { resultEl.style.display = 'none'; }
+
+  fetch('/api/providers/verify/' + provider, { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = 'Test';
+      if (!resultEl) return;
+      resultEl.style.display = 'block';
+      if (data.status === 'verified') {
+        resultEl.style.color = 'var(--green)';
+        resultEl.textContent = '✓ Verified' + (data.latency_ms ? ' (' + data.latency_ms + 'ms)' : '');
+      } else if (data.status === 'not_verifiable') {
+        resultEl.style.color = 'var(--muted)';
+        resultEl.textContent = 'Not verifiable — ' + (data.error || '');
+      } else if (data.status === 'missing') {
+        resultEl.style.color = 'var(--muted)';
+        resultEl.textContent = 'No credential found';
+      } else {
+        resultEl.style.color = 'var(--red)';
+        resultEl.textContent = '✗ ' + (data.error || 'failed');
+      }
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Test';
+      if (resultEl) {
+        resultEl.style.display = 'block';
+        resultEl.style.color = 'var(--red)';
+        resultEl.textContent = '✗ Network error: ' + err.message;
+      }
+    });
+}
+</script>
 </body>
 </html>

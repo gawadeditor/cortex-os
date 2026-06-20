@@ -157,6 +157,9 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "factories": [
         ("factory_policies", "TEXT"),   # P3-05: JSON policy blob
     ],
+    "publishing_outcomes": [
+        ("url", "TEXT"),
+    ],
 }
 
 
@@ -1968,3 +1971,51 @@ def expire_old_approvals(
         (cutoff_at,),
     )
     return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# provider_verifications table (F15)
+# ---------------------------------------------------------------------------
+
+def upsert_provider_verification(
+    conn: sqlite3.Connection,
+    provider: str,
+    status: str,
+    checked_at: str,
+    latency_ms: Optional[int] = None,
+    error_message: Optional[str] = None,
+    source: str = "env",
+) -> None:
+    """UPSERT a provider verification result (one row per provider)."""
+    conn.execute(
+        """
+        INSERT INTO provider_verifications
+            (provider, status, checked_at, latency_ms, error_message, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider) DO UPDATE SET
+            status        = excluded.status,
+            checked_at    = excluded.checked_at,
+            latency_ms    = excluded.latency_ms,
+            error_message = excluded.error_message,
+            source        = excluded.source
+        """,
+        (provider, status, checked_at, latency_ms, error_message, source),
+    )
+
+
+def get_provider_verification(
+    conn: sqlite3.Connection,
+    provider: str,
+) -> Optional[dict]:
+    """Return the last verification record for a provider, or None."""
+    row = conn.execute(
+        "SELECT * FROM provider_verifications WHERE provider = ?",
+        (provider,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_provider_verifications(conn: sqlite3.Connection) -> dict:
+    """Return {provider: record_dict} for all stored verifications."""
+    rows = conn.execute("SELECT * FROM provider_verifications").fetchall()
+    return {row["provider"]: dict(row) for row in rows}

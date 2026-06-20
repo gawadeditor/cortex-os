@@ -40,6 +40,8 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json as _json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -157,6 +159,7 @@ from hypogeum.dashboard_runs import (
 )
 from hypogeum.episode_detail import get_episode_detail
 from hypogeum.setup_preflight import get_setup_preflight_status
+from hypogeum.provider_verifier import verify_provider, get_all_provider_statuses
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -450,17 +453,32 @@ _PLATFORM_PROVIDERS = [
 ]
 
 
-def _build_providers(provider_list, creds_map, cost_map):
+def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
+    verif_map = verif_map or {}
     result = []
     for p in provider_list:
         entry = dict(p)
         cred = creds_map.get(p["id"])
-        entry["connected"] = cred is not None
         entry["credential_label"] = getattr(cred, "label", None) if cred else None
         entry["cost_usd"] = cost_map.get(p["id"], 0.0)
         if p["id"] == "youtube":
             entry["oauth_client_id"] = None
             entry["oauth_redirect_uri"] = "http://localhost:8080/oauth2callback"
+
+        # Verification status (replaces simple connected bool)
+        v = verif_map.get(p["id"])
+        if v:
+            vstatus = v["status"]
+        elif cred is not None:
+            vstatus = "saved"
+        else:
+            vstatus = "missing"
+        entry["vstatus"] = vstatus  # verified|failed|not_verifiable|saved|missing
+        entry["verif_error"]      = (v or {}).get("error_message") or (v or {}).get("error")
+        entry["verif_checked_at"] = (v or {}).get("checked_at")
+        entry["verif_latency_ms"] = (v or {}).get("latency_ms")
+        # Legacy: True only when verified (not just saved)
+        entry["connected"] = vstatus == "verified"
         result.append(entry)
     return result
 
@@ -479,8 +497,12 @@ def providers_page():
         cost_map = costs.by_provider
     except Exception:
         cost_map = {}
-    content_providers  = _build_providers(list(_CONTENT_PROVIDERS),  creds_map, cost_map)
-    platform_providers = _build_providers(list(_PLATFORM_PROVIDERS), creds_map, cost_map)
+    try:
+        verif_map = get_all_provider_statuses(db_path=db)
+    except Exception:
+        verif_map = {}
+    content_providers  = _build_providers(list(_CONTENT_PROVIDERS),  creds_map, cost_map, verif_map)
+    platform_providers = _build_providers(list(_PLATFORM_PROVIDERS), creds_map, cost_map, verif_map)
     return render_template(
         "providers.html",
         content_providers=content_providers,
@@ -548,8 +570,14 @@ def content_provider_connect_save(provider: str):
 
 @app.route("/setup")
 def setup_page():
-    preflight = get_setup_preflight_status(db_path=_db_path())
-    return render_template("setup.html", preflight=preflight)
+    db = _db_path()
+    preflight = get_setup_preflight_status(db_path=db)
+    try:
+        provider_statuses = get_all_provider_statuses(db_path=db)
+    except Exception:
+        provider_statuses = {}
+    return render_template("setup.html", preflight=preflight,
+                           provider_statuses=provider_statuses)
 
 
 @app.route("/api/setup/preflight")
@@ -558,6 +586,85 @@ def api_setup_preflight():
         return jsonify(get_setup_preflight_status(db_path=_db_path()))
     except Exception as exc:
         return jsonify({"error": str(exc)}), 503
+
+
+# ---------------------------------------------------------------------------
+# Budget ceiling write-back
+# ---------------------------------------------------------------------------
+
+_ENV_PATH = _ROOT / ".env"
+_BUDGET_KEY = "FINANCE_BUDGET_CEILING_USD"
+
+
+def _update_budget_ceiling(new_ceiling: float) -> dict:
+    """
+    Write FINANCE_BUDGET_CEILING_USD to .env and update os.environ.
+
+    Replaces the existing line in .env (preserving comments) or appends.
+    Returns {"ok": True, "new_ceiling": float} on success.
+    """
+    if new_ceiling < 0 or new_ceiling > 9999:
+        return {"ok": False, "error": "ceiling must be between 0 and 9999"}
+
+    # Read existing .env
+    try:
+        if _ENV_PATH.exists():
+            lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()
+        else:
+            lines = []
+    except Exception as exc:
+        return {"ok": False, "error": f"Cannot read .env: {exc}"}
+
+    new_line = f"{_BUDGET_KEY}={new_ceiling:.2f}"
+    replaced = False
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(f"{_BUDGET_KEY}="):
+            lines[i] = new_line
+            replaced = True
+            break
+    if not replaced:
+        lines.append(new_line)
+
+    try:
+        _ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as exc:
+        return {"ok": False, "error": f"Cannot write .env: {exc}"}
+
+    # Update running process immediately (no restart needed)
+    os.environ[_BUDGET_KEY] = f"{new_ceiling:.2f}"
+
+    return {"ok": True, "new_ceiling": new_ceiling}
+
+
+@app.route("/api/setup/budget-ceiling", methods=["POST"])
+def api_setup_budget_ceiling():
+    body = request.get_json(silent=True) or {}
+    try:
+        new_ceiling = float(body.get("ceiling", -1))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "ceiling must be a number"}), 400
+    result = _update_budget_ceiling(new_ceiling)
+    return jsonify(result), 200 if result["ok"] else 400
+
+
+# ---------------------------------------------------------------------------
+# Provider verification
+# ---------------------------------------------------------------------------
+
+@app.route("/api/providers/verify/<provider>", methods=["POST"])
+def api_providers_verify(provider: str):
+    known = (
+        set(p["id"] for p in _CONTENT_PROVIDERS) |
+        set(p["id"] for p in _PLATFORM_PROVIDERS)
+    )
+    if provider not in known:
+        return jsonify({"ok": False, "error": f"unknown provider {provider!r}"}), 404
+    try:
+        result = verify_provider(provider, db_path=_db_path())
+        return jsonify({"ok": True, **result})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/command")

@@ -82,5 +82,50 @@
   </form>
 </div>
 
+{% if flash %}
+<div class="card connect-card" style="margin-top:var(--gap);">
+  <div class="card-title">Test Connection</div>
+  <p style="font-size:13px; color:var(--muted);">
+    Verify the saved key makes a successful API call to {{ setup.label }}.
+  </p>
+  <button class="btn" id="test-btn" onclick="testConn()">Test Connection</button>
+  <div id="test-result" style="margin-top:8px; font-size:13px; display:none;"></div>
+</div>
+
+<script>
+function testConn() {
+  var btn = document.getElementById('test-btn');
+  var res = document.getElementById('test-result');
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  res.style.display = 'none';
+  fetch('/api/providers/verify/{{ provider }}', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = 'Test Again';
+      res.style.display = 'block';
+      if (data.status === 'verified') {
+        res.style.color = 'var(--green)';
+        res.textContent = '✓ Verified' + (data.latency_ms ? ' (' + data.latency_ms + 'ms)' : '');
+      } else if (data.status === 'not_verifiable') {
+        res.style.color = 'var(--muted)';
+        res.textContent = 'Not verifiable for this provider.';
+      } else {
+        res.style.color = 'var(--red)';
+        res.textContent = '✗ ' + (data.error || 'verification failed');
+      }
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Test Again';
+      res.style.display = 'block';
+      res.style.color = 'var(--red)';
+      res.textContent = '✗ Network error: ' + err.message;
+    });
+}
+</script>
+{% endif %}
+
 </body>
 </html>

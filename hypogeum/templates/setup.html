@@ -31,6 +31,23 @@
     .signal-type { font-weight: 700; font-family: monospace; color: var(--red); }
     .signal-msg  { color: var(--muted); margin-top: 2px; }
     .signal-action { font-size: 11px; color: var(--blue); margin-top: 4px; font-family: monospace; }
+    .ceiling-form { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .ceiling-input { width: 100px; padding: 5px 8px; font-size: 13px;
+                     background: var(--bg); border: 1px solid var(--border);
+                     border-radius: var(--radius); color: var(--text); font-family: monospace; }
+    .ceiling-input:focus { outline: none; border-color: var(--blue); }
+    .ceiling-msg { font-size: 12px; margin-top: 4px; }
+    .provider-verif-row { display: flex; align-items: center; gap: 8px;
+                          padding: 6px 0; border-bottom: 1px solid var(--border);
+                          font-size: 12px; }
+    .provider-verif-row:last-child { border-bottom: none; }
+    .pv-name  { font-family: monospace; width: 120px; flex-shrink: 0; }
+    .pv-badge-verified      { color: var(--green); font-weight: 700; }
+    .pv-badge-failed        { color: var(--red);   font-weight: 700; }
+    .pv-badge-saved         { color: var(--yellow); }
+    .pv-badge-missing       { color: var(--muted);  }
+    .pv-badge-not-verifiable{ color: var(--muted);  font-style: italic; }
+    .pv-error { color: var(--red); font-size: 11px; font-family: monospace; }
   </style>
 </head>
 <body>
@@ -109,8 +126,9 @@
 <div class="card">
   <div class="card-title">Budget &amp; Cost</div>
   <div class="cost-row">
-    <span class="cost-label">Budget ceiling (FINANCE_BUDGET_CEILING_USD)</span>
-    <span class="cost-value {% if not preflight.budget_ceiling_usd %}err{% else %}ok{% endif %}">
+    <span class="cost-label">Current ceiling (FINANCE_BUDGET_CEILING_USD)</span>
+    <span class="cost-value {% if not preflight.budget_ceiling_usd %}err{% else %}ok{% endif %}"
+          id="current-ceiling-display">
       {% if preflight.budget_ceiling_usd and preflight.budget_ceiling_usd > 0 %}
         ${{ "%.2f"|format(preflight.budget_ceiling_usd) }}
       {% else %}
@@ -119,34 +137,46 @@
     </span>
   </div>
   <div class="cost-row">
-    <span class="cost-label">Estimated episode cost (economy)</span>
-    <span class="cost-value">${{ "%.0f"|format(preflight.estimated_cost_low) }}</span>
-  </div>
-  <div class="cost-row">
-    <span class="cost-label">Estimated episode cost (premium)</span>
-    <span class="cost-value">${{ "%.0f"|format(preflight.estimated_cost_high) }}</span>
+    <span class="cost-label">Estimated episode cost (economy → premium)</span>
+    <span class="cost-value">${{ "%.0f"|format(preflight.estimated_cost_low) }} – ${{ "%.0f"|format(preflight.estimated_cost_high) }}</span>
   </div>
   {% if preflight.budget_ceiling_usd and preflight.budget_ceiling_usd > 0 %}
     {% if preflight.budget_ceiling_usd < preflight.estimated_cost_low %}
-    <div class="err" style="margin-top:8px; font-size:12px;">
-      ✗ Ceiling is BELOW estimated cost. Finance gate will block every run.
-      <div class="check-action">→ export FINANCE_BUDGET_CEILING_USD={{ preflight.estimated_cost_high|int }}</div>
+    <div class="err" style="margin-top:8px; font-size:12px;" id="ceiling-status">
+      ✗ Ceiling is BELOW estimated cost — pipeline BLOCKED at finance gate.
     </div>
     {% elif preflight.budget_ceiling_usd < preflight.estimated_cost_high %}
-    <div class="warn" style="margin-top:8px; font-size:12px;">
+    <div class="warn" style="margin-top:8px; font-size:12px;" id="ceiling-status">
       ⚠ Ceiling covers economy runs but may be exceeded on premium quality.
     </div>
     {% else %}
-    <div class="ok" style="margin-top:8px; font-size:12px;">
+    <div class="ok" style="margin-top:8px; font-size:12px;" id="ceiling-status">
       ✓ Ceiling covers full estimated cost range.
     </div>
     {% endif %}
   {% else %}
-  <div class="err" style="margin-top:8px; font-size:12px;">
-    ✗ No ceiling configured. Set FINANCE_BUDGET_CEILING_USD to allow the finance gate to pass.
-    <div class="check-action">→ export FINANCE_BUDGET_CEILING_USD={{ preflight.estimated_cost_high|int }}</div>
+  <div class="err" style="margin-top:8px; font-size:12px;" id="ceiling-status">
+    ✗ No ceiling configured — pipeline BLOCKED at finance gate.
   </div>
   {% endif %}
+
+  <div style="margin-top:14px; border-top:1px solid var(--border); padding-top:10px;">
+    <div style="font-size:12px; color:var(--muted); margin-bottom:6px; font-weight:600;">
+      Update ceiling (writes to .env and takes effect immediately):
+    </div>
+    <div class="ceiling-form">
+      <span style="font-size:13px;">$</span>
+      <input type="number" id="ceiling-input" class="ceiling-input"
+             value="{{ "%.0f"|format(preflight.budget_ceiling_usd) if preflight.budget_ceiling_usd else '' }}"
+             placeholder="{{ preflight.estimated_cost_high|int }}"
+             min="0" max="9999" step="1">
+      <button class="btn" onclick="updateCeiling()">Save</button>
+      <span id="ceiling-save-msg" class="ceiling-msg"></span>
+    </div>
+    <div style="font-size:11px; color:var(--muted); margin-top:4px;">
+      Recommended minimum: ${{ preflight.estimated_cost_high|int }}
+    </div>
+  </div>
 </div>
 
 {# ── ffmpeg ── #}
@@ -220,6 +250,71 @@
   {% endfor %}
 </div>
 {% endif %}
+
+{# ── Provider Verification Status ── #}
+{% if provider_statuses %}
+<div class="card">
+  <div class="card-title">Provider Verification Status
+    <a href="/providers" style="font-size:11px; font-weight:400; margin-left:8px; color:var(--blue);">Manage →</a>
+  </div>
+  {% for provider, v in provider_statuses.items() %}
+  <div class="provider-verif-row">
+    <span class="pv-name">{{ provider }}</span>
+    {% if v.status == 'verified' %}
+      <span class="pv-badge-verified">✓ Verified</span>
+      {% if v.latency_ms %}<span style="font-size:10px; color:var(--muted);">({{ v.latency_ms }}ms)</span>{% endif %}
+    {% elif v.status == 'failed' %}
+      <span class="pv-badge-failed">✗ Failed</span>
+      {% if v.error %}<span class="pv-error">{{ v.error }}</span>{% endif %}
+    {% elif v.status == 'not_verifiable' %}
+      <span class="pv-badge-not-verifiable">Saved (no probe)</span>
+    {% elif v.status == 'saved' %}
+      <span class="pv-badge-saved">● Saved, not tested</span>
+    {% else %}
+      <span class="pv-badge-missing">Not configured</span>
+    {% endif %}
+    {% if v.checked_at %}
+      <span style="font-size:10px; color:var(--muted); margin-left:auto;">{{ v.checked_at[:10] }}</span>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script>
+function updateCeiling() {
+  var val = parseFloat(document.getElementById('ceiling-input').value);
+  var msg = document.getElementById('ceiling-save-msg');
+  if (isNaN(val) || val < 0) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'Enter a valid number';
+    return;
+  }
+  msg.style.color = 'var(--muted)';
+  msg.textContent = 'Saving…';
+  fetch('/api/setup/budget-ceiling', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ceiling: val})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.ok) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = '✓ Saved. Reload to refresh status.';
+      var disp = document.getElementById('current-ceiling-display');
+      if (disp) disp.textContent = '$' + val.toFixed(2);
+    } else {
+      msg.style.color = 'var(--red)';
+      msg.textContent = '✗ ' + (data.error || 'save failed');
+    }
+  })
+  .catch(function(err) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = '✗ ' + err.message;
+  });
+}
+</script>
 
 </body>
 </html>

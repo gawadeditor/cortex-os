@@ -1110,6 +1110,7 @@ CREATE TABLE IF NOT EXISTS publishing_outcomes (
                                  ('success','failed','pending','skipped','unknown')),
     platform_video_id   TEXT,
     published_at        TEXT,
+    url                 TEXT,
     failure_reason      TEXT,
     recorded_at         TEXT NOT NULL,
     metadata_version    TEXT NOT NULL DEFAULT 'v1',
@@ -1206,4 +1207,29 @@ CREATE TABLE IF NOT EXISTS channel_profile_settings (
     created_at          TEXT,
     updated_at          TEXT,
     metadata_version    TEXT NOT NULL DEFAULT 'v1'
+);
+
+-- ===========================================================================
+-- F15: Provider Verifications
+-- One row per provider (UPSERT). Stores the most recent verification result
+-- so the dashboard can distinguish Missing / Saved / Verified / Failed /
+-- Not verifiable without making a live API call on every page load.
+--
+-- status: 'verified'        — last probe succeeded
+--         'failed'          — last probe returned error or non-2xx
+--         'not_verifiable'  — no probe implementation for this provider
+--         'pending'         — credential exists but never tested
+-- source: 'env'             — credential came from environment variable
+--         'secret_profile'  — credential came from secret_profiles table
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS provider_verifications (
+    provider      TEXT NOT NULL PRIMARY KEY,
+    status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(status IN ('verified','failed','not_verifiable','pending')),
+    checked_at    TEXT NOT NULL,
+    latency_ms    INTEGER,
+    error_message TEXT,
+    source        TEXT NOT NULL DEFAULT 'env'
+                      CHECK(source IN ('env','secret_profile'))
 );

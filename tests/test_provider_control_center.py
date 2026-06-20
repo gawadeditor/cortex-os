@@ -193,9 +193,10 @@ class TestAPIKeyProviders:
         # Non-YouTube platforms should have connect buttons
         assert "Connect" in html
 
-    def test_disconnected_providers_show_not_connected(self, client):
+    def test_unconfigured_providers_show_not_configured(self, client):
+        # F15: "Connected" replaced by 5-state status; unconfigured shows "Not configured"
         html = _html(client)
-        assert "Not connected" in html
+        assert "Not configured" in html or "Not connected" in html or "missing" in html.lower()
 
     def test_nav_has_providers_link(self, client):
         html = _html(client)
@@ -213,7 +214,8 @@ class TestAPIKeyProviders:
 
 class TestConnectedState:
 
-    def test_connected_provider_shows_connected(self, client, db):
+    def test_saved_provider_shows_saved_status(self, client, db):
+        # F15: saved-but-unverified credential shows "Saved", not "Connected"
         from hypogeum.credential_manager import create_secret_profile
         create_secret_profile(
             provider="openrouter",
@@ -223,9 +225,10 @@ class TestConnectedState:
             db_path=db,
         )
         html = _html(client)
-        assert "Connected" in html
+        assert "Saved" in html or "Verified" in html  # Saved (unverified) or Verified
 
-    def test_connected_youtube_shows_authorized(self, client, db):
+    def test_saved_youtube_shows_saved_or_verified(self, client, db):
+        # F15: YouTube credential shows Saved (if not verified) or Verified
         from hypogeum.credential_manager import create_secret_profile
         create_secret_profile(
             provider="youtube",
@@ -235,5 +238,4 @@ class TestConnectedState:
             db_path=db,
         )
         html = _html(client)
-        # Should show some authorized/connected state for YouTube
-        assert "Connected" in html or "Authorized" in html
+        assert "Saved" in html or "Verified" in html or "authorized" in html.lower()

@@ -902,11 +902,19 @@ _THUMBNAIL_TARGETS: dict[str, tuple[int, int]] = {
 }
 
 # Fonts tried in order for text overlay rendering (first found wins).
+# Preference: Raleway-like clean light/regular sans-serif. Heavy Impact-style
+# fonts were replaced after brand audit — the subtitle must be clean and
+# integrated, not a caption slapped over the image.
 _OVERLAY_FONT_CANDIDATES: list[str] = [
-    "/System/Library/Fonts/Supplemental/Impact.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Black.ttf",
-    "/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf",
-    "/System/Library/Fonts/Supplemental/Tahoma Bold.ttf",
+    "/Library/Fonts/Raleway-Regular.ttf",                                # ideal if installed
+    "/Library/Fonts/Raleway-Light.ttf",
+    "/System/Library/Fonts/Supplemental/Gill Sans.ttc",                  # clean macOS sans
+    "/System/Library/Fonts/Helvetica Neue.ttc",                          # light/regular fallback
+    "/System/Library/Fonts/Avenir.ttc",                                   # clean geometric sans
+    "/System/Library/Fonts/Supplemental/Optima.ttc",                     # elegant fallback
+    "/System/Library/Fonts/Supplemental/Futura.ttc",
+    "/System/Library/Fonts/Supplemental/Trebuchet MS.ttf",               # weight-neutral fallback
+    "/System/Library/Fonts/Supplemental/Tahoma Bold.ttf",               # last resort
 ]
 
 # Fonts tried in order for the channel wordmark (Cinzel-like serif, all-caps).
@@ -1003,9 +1011,11 @@ def _apply_text_overlay(local_path: Path, text: str, placement: str) -> None:
 
         display_text = text.strip().upper()
 
-        # Band height: 20% of image height (captures 2 lines if needed, readable single line)
-        band_h = max(60, round(img_h * 0.20))
-        font_size = max(32, round(img_h * 0.085))
+        # Band height: 11% of image height — slimmer, more integrated, less caption-like.
+        # Font: smaller and lighter than the former Impact/bold style.
+        # Was 20% band / 8.5% font (produced oversized white caption look).
+        band_h = max(36, round(img_h * 0.11))
+        font_size = max(18, round(img_h * 0.048))
 
         # Load font — try candidates in order, fall back to PIL default
         font = None
@@ -1045,12 +1055,20 @@ def _apply_text_overlay(local_path: Path, text: str, placement: str) -> None:
         text_x = (img_w - text_w) // 2
         text_y = band_y + (band_h - text_h) // 2 - max(0, round(img_h * 0.005))
 
-        # Shadow pass (dark, offset 2px)
-        shadow_color = (0, 0, 0)
-        draw.text((text_x + 2, text_y + 2), display_text, font=font, fill=shadow_color)
+        # Text colour: warm parchment-cream instead of pure bright white.
+        # Bright white (#FFFFFF) was flagged by TIG-W02 and violates brand palette
+        # (brand specifies aged parchment #F5E6C8 / warm cream tones, not clinical white).
+        _TEXT_COLOR = (240, 218, 174)   # aged parchment — brand-aligned warm cream
+        _WARN_IF_WHITE = (255, 255, 255)
 
-        # Main text pass (white)
-        draw.text((text_x, text_y), display_text, font=font, fill=(255, 255, 255))
+        text_color = _TEXT_COLOR
+
+        # Shadow pass (dark, 1px offset — thinner than old 2px, matches lighter style)
+        shadow_color = (8, 8, 8)
+        draw.text((text_x + 1, text_y + 1), display_text, font=font, fill=shadow_color)
+
+        # Main text pass (warm cream)
+        draw.text((text_x, text_y), display_text, font=font, fill=text_color)
 
         img_out.save(local_path, format="JPEG", quality=95)
 
@@ -1110,12 +1128,14 @@ def _apply_wordmark_overlay(
                     continue
             return ImageFont.load_default()
 
-        # Size proportional to image height.
-        # HYPOGEUM is the dominant line: ~13% of image height
-        # THE and — CHRONICLES — are smaller: ~7% and ~8%
-        size_hypogeum = max(40, round(img_h * 0.130))
-        size_the      = max(20, round(img_h * 0.068))
-        size_chron    = max(24, round(img_h * 0.080))
+        # Wordmark target: 8–10% of total thumbnail area (1280×720 = 921,600 px²).
+        # Previous sizes produced a wordmark that dominated the frame (25–30% of height).
+        # New sizes produce a clean small-brand watermark: story first, brand second.
+        # At 720p: HYPOGEUM ≈ 40px, THE ≈ 20px, CHRONICLES ≈ 22px, total ≈ 88px
+        # Footprint ≈ 900 × 88 ≈ 79,200 px² ≈ 8.6% of frame area.
+        size_hypogeum = max(18, round(img_h * 0.055))
+        size_the      = max(10, round(img_h * 0.027))
+        size_chron    = max(12, round(img_h * 0.030))
 
         font_hyp   = _load_font(size_hypogeum)
         font_the   = _load_font(size_the)

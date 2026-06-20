@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agents.thumbnail_generation_agent import generate_thumbnails
+from hypogeum.agents.thumbnail_killer_concept_validator import validate_concept_quality
 from hypogeum.agents.thumbnail_prompt_validator import (
     PromptDistinctnessError,
     validate_prompt_distinctness,
@@ -168,7 +169,7 @@ def run_thumbnail_director(
     )
 
     # ------------------------------------------------------------------
-    # Pre-generation distinctness gate
+    # Pre-generation distinctness gate (both modes)
     # ------------------------------------------------------------------
     main_candidates_for_validation = (
         generation_plan.get("main_episode", {}).get("ranked_candidates", [])
@@ -185,6 +186,23 @@ def run_thumbnail_director(
             "td_prompt_distinctness_warnings",
             warnings=distinctness_result["warnings"],
         )
+
+    # ------------------------------------------------------------------
+    # Pre-generation concept quality gate (concept_driven_mode only)
+    # ------------------------------------------------------------------
+    if concept_brief is not None:
+        quality_result = validate_concept_quality(main_candidates_for_validation)
+        if not quality_result["passed"]:
+            log.error(
+                "td_concept_quality_failed",
+                failures=quality_result["failures"],
+                concept_driven=True,
+            )
+        if quality_result["warnings"]:
+            log.warn(
+                "td_concept_quality_warnings",
+                warnings=quality_result["warnings"],
+            )
 
     # ------------------------------------------------------------------
     # BGA Pass 2 — brand compliance gate (before image generation spend)

@@ -57,6 +57,13 @@
   <span class="page-meta">Launch a new production run</span>
 </div>
 
+{% if error %}
+<div class="card" style="border-color: var(--red); margin-bottom: var(--gap);">
+  <div class="card-title" style="color: var(--red);">Launch Error</div>
+  <div style="font-size: 13px; margin-top: 4px;">{{ error }}</div>
+</div>
+{% endif %}
+
 {# ── Requirements check ── #}
 {% set missing_reqs = [] %}
 {% if not channels %}{% set _ = missing_reqs.append("No channels configured — set up a channel first") %}{% endif %}

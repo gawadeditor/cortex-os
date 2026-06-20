@@ -276,23 +276,34 @@ def create_page():
         preflight = get_preflight_status(db_path=db)
     except Exception:
         preflight = {}
-    return render_template("create.html", channels=channels, preflight=preflight)
+    error = request.args.get("error")
+    return render_template("create.html", channels=channels, preflight=preflight, error=error)
 
 
 @app.route("/create/launch", methods=["POST"])
 def create_launch():
+    from urllib.parse import quote_plus
     channel_id   = request.form.get("channel_id", "").strip()
     topic        = request.form.get("topic", "").strip()
     video_type   = request.form.get("video_type", "long_video")
     quality_mode = request.form.get("quality_mode", "balanced")
     platforms    = request.form.getlist("platforms")
-    # Production launch is not yet wired to the pipeline runner.
-    # Redirect back with a flash indicating the job was queued.
-    if channel_id and topic:
-        result = enqueue_topic(channel_id, topic, priority=0, db_path=_db_path())
-        code = "ok" if result["ok"] else result.get("code", "error")
-        return redirect(url_for("create_page") + f"?launched={code}")
-    return redirect(url_for("create_page") + "?launched=invalid")
+
+    from hypogeum.production_launcher import launch_episode_from_dashboard
+    result = launch_episode_from_dashboard(
+        channel_id=channel_id,
+        topic=topic,
+        video_type=video_type,
+        quality_mode=quality_mode,
+        platforms=platforms,
+        db_path=_db_path(),
+    )
+
+    if result["status"] == "launched":
+        return redirect(url_for("episode_detail_page", episode_id=result["episode_id"]))
+
+    error_str = "; ".join(result.get("missing", ["unknown error"]))
+    return redirect(url_for("create_page") + f"?error={quote_plus(error_str)}")
 
 
 @app.route("/channels")

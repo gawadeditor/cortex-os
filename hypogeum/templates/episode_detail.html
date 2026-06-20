@@ -1409,25 +1409,67 @@ function resumeEpisode(episodeId, kind) {
 {% if active_tab == 'thumbnails' %}
 {% set tn = d.thumbnails %}
 
+{# ── A/B/C Candidate count warning ──────────────────────────────────────── #}
+{% if tn.candidate_warning %}
+<div style="margin-bottom:var(--gap); padding:12px 16px; background:#1f0a09;
+            border:1px solid #da3633; border-radius:var(--radius); font-size:13px; color:#ff7b72;">
+  <strong>⚠ Insufficient thumbnail candidates:</strong>
+  {{ tn.candidate_warning_msg }}
+  <div style="font-size:12px; color:var(--muted); margin-top:4px;">
+    Re-run the thumbnail director to generate all 3 candidates for A/B/C comparison testing.
+  </div>
+</div>
+{% elif tn.candidates and tn.candidates_required %}
+<div style="margin-bottom:12px; font-size:12px; color:var(--muted);">
+  {{ tn.candidates_count }}/{{ tn.candidates_required }} candidates —
+  {% if tn.candidates_count == tn.candidates_required %}
+    <span style="color:var(--green);">A/B/C ready</span>
+  {% else %}
+    <span style="color:var(--yellow);">incomplete</span>
+  {% endif %}
+  <span style="margin-left:8px; color:var(--muted); font-size:11px;">
+    ⓘ Rotation not automated — manual selection required. YouTube API switching not implemented.
+  </span>
+</div>
+{% endif %}
+
 {% if tn.candidates %}
 <div class="tn-grid">
   {% for c in tn.candidates %}
 
-  {# Derive border style from selected + performance #}
+  {# Derive card style: BLOCKED = red border, selected+approved = green, else neutral #}
   {% set is_sel = c.selected %}
-  <div class="tn-card {% if is_sel %}tn-card-selected{% endif %}">
+  {% set is_blocked = c.bga_verdict == 'BLOCKED' %}
+  {% set card_extra_style = "" %}
+  {% if is_blocked %}
+    {% set card_border = "border-color:#da3633 !important;" %}
+  {% elif is_sel and c.bga_verdict == 'APPROVED' %}
+    {% set card_border = "border-color:#2ea043;" %}
+  {% else %}
+    {% set card_border = "" %}
+  {% endif %}
+  <div class="tn-card {% if is_sel and not is_blocked %}tn-card-selected{% endif %}"
+       style="{{ card_border }}">
 
     {# Image area ─────────────────────────────────────────────── #}
-    <div class="tn-image-box">
-      {% if c.selected %}
-        {# Selected thumbnail — serve via the artifact route so it renders as an image #}
-        <img src="/episode/{{ d.episode_id }}/thumbnail"
-             alt="thumbnail" loading="lazy"
-             style="width:100%; height:100%; object-fit:cover; border-radius:0;"
+    <div class="tn-image-box"
+         style="{% if is_blocked %}border:2px solid #da3633; opacity:0.85;{% endif %}">
+      {% set img_src = None %}
+      {% if c.rank == 1 and is_sel %}
+        {% set img_src = "/episode/" ~ d.episode_id ~ "/thumbnail" %}
+      {% elif c.file_path %}
+        {# candidate_<rank>.jpg served via artifact route — use image_path if local #}
+        {% set img_src = "/episode/" ~ d.episode_id ~ "/thumbnail/candidate/" ~ c.rank %}
+      {% elif c.image_path %}
+        {% set img_src = "/episode/" ~ d.episode_id ~ "/thumbnail" %}
+      {% endif %}
+      {% if img_src %}
+        <img src="{{ img_src }}"
+             alt="Candidate {{ c.rank }}" loading="lazy"
+             style="width:100%; height:100%; object-fit:cover; border-radius:0;
+                    {% if is_blocked %}filter:grayscale(20%) brightness(0.85);{% endif %}"
              onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
         <div class="tn-image-placeholder" style="display:none;">No preview</div>
-      {% elif c.image_path %}
-        <div class="tn-image-path">{{ c.image_path }}</div>
       {% else %}
         <div class="tn-image-placeholder">No preview available</div>
       {% endif %}
@@ -1437,19 +1479,31 @@ function resumeEpisode(episodeId, kind) {
 
       {# Badges ──────────────────────────────────────────────── #}
       <div class="tn-badges">
+        {# Rank badge #}
+        <span class="badge" style="background:var(--surface); color:var(--muted); border:1px solid var(--border);">
+          Candidate {{ c.rank }}
+        </span>
+
         {% if is_sel %}
-          {# "Selected" badge changes meaning based on BGA verdict #}
+          {# Status reflects rejection — never show green badge for rejected thumbnail #}
           {% if c.bga_verdict == 'BLOCKED' %}
-            <span class="badge badge-blocked">Selected — BGA Blocked</span>
+            <span class="badge badge-blocked">Generated — Rejected</span>
           {% elif c.bga_verdict == 'WARNING' %}
-            <span class="badge badge-qa_warning">Selected — BGA Warning</span>
+            <span class="badge badge-qa_warning">Selected — Warnings</span>
+          {% elif c.bga_verdict == 'APPROVED' %}
+            <span class="badge badge-completed">Selected — Approved</span>
           {% else %}
-            <span class="badge badge-completed">Selected thumbnail</span>
+            <span class="badge badge-skipped">Selected — Not verified</span>
           {% endif %}
+        {% else %}
+          <span class="badge badge-skipped">{{ c.status | default('pending') | capitalize }}</span>
         {% endif %}
+
         {% if c.unverified %}
-          <span class="badge badge-degraded">Unverified — file not found</span>
+          <span class="badge badge-degraded">File not found</span>
         {% endif %}
+
+        {# TIG verdict — always shown when available #}
         {% if c.bga_verdict == 'BLOCKED' %}
           <span class="badge badge-blocked">TIG: Blocked</span>
         {% elif c.bga_verdict == 'WARNING' %}
@@ -1457,6 +1511,8 @@ function resumeEpisode(episodeId, kind) {
         {% elif c.bga_verdict == 'APPROVED' %}
           <span class="badge badge-ready">TIG: Approved</span>
         {% endif %}
+
+        {# Performance badges #}
         {% if c.performance_status == 'winner' %}
           <span class="badge badge-completed">Best CTR</span>
         {% elif c.performance_status == 'underperformed' %}
@@ -1468,9 +1524,12 @@ function resumeEpisode(episodeId, kind) {
         {% endif %}
       </div>
 
-      {# BGA violations (when blocked) ────────────────────────── #}
+      {# TIG violations (when blocked) — prominent red block #}
       {% if c.bga_violations %}
       <div style="margin-bottom:8px; padding:8px 10px; background:#1f0a09; border:1px solid #da3633; border-radius:var(--radius);">
+        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--red); font-weight:700; margin-bottom:5px;">
+          TIG Violations — regeneration required
+        </div>
         {% for v in c.bga_violations %}
         <div style="font-size:11px; line-height:1.5; margin-bottom:3px;
           color:{% if v.severity == 'BLOCKING' %}var(--red){% else %}var(--yellow){% endif %};">

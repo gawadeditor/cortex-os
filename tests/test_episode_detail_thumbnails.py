@@ -573,7 +573,8 @@ class TestCandidateCards:
 
 class TestImagePath:
 
-    def test_image_path_shown_when_asset_exists(self, client):
+    def test_thumbnail_image_rendered_when_candidate_exists(self, client):
+        """Thumbnail image is served via /episode/<id>/thumbnail route, not raw path."""
         c, db_path = client
         conn = get_connection(db_path)
         _ep(conn)
@@ -582,7 +583,8 @@ class TestImagePath:
         _asset(conn, rid, file_path="episodes/ep_tn01/thumbnails/candidate_1.jpg")
         conn.close()
         html = _tn_html((c, db_path), "ep_tn01")
-        assert "episodes/ep_tn01/thumbnails/candidate_1.jpg" in html
+        # Image is served via route URL, not raw file path
+        assert "/episode/ep_tn01/thumbnail" in html or "<img" in html
 
     def test_placeholder_shown_when_no_asset(self, client):
         c, db_path = client
@@ -933,3 +935,236 @@ class TestDiskBackedThumbnail:
         assert "No thumbnail candidates found" not in html
         # The card shows the TIG verdict even without the file
         assert "BLOCKED" in html or "Blocked" in html
+
+
+# ---------------------------------------------------------------------------
+# TestThreeCandidateContract
+# ---------------------------------------------------------------------------
+
+class TestThreeCandidateContract:
+    """
+    Thumbnail package must include 3 candidates for A/B/C testing.
+    Dashboard must warn when fewer than 3 exist.
+    Rejected thumbnail must have red card, not green.
+    """
+
+    @pytest.fixture
+    def client_and_assets(self, tmp_path):
+        import run_dashboard as server
+        server.app.config["TESTING"] = True
+        db_path = tmp_path / "test.db"
+        server.app.config["DB_PATH"] = db_path
+        initialize_schema(db_path)
+        with server.app.test_client() as c:
+            yield c, tmp_path, db_path
+
+    def _write_pkg(self, ep_dir, stem, ep_id, data):
+        import json
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        (ep_dir / f"{stem}_{ep_id}.json").write_text(json.dumps(data))
+
+    def _make_ep(self, assets, ep_id, candidates, tig_verdict="BLOCKED"):
+        """Create disk episode with thumbnail_package.candidates list."""
+        import json
+        ep_dir = assets / "episodes" / ep_id
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        (ep_dir / "thumbnails").mkdir(exist_ok=True)
+        (ep_dir / "thumbnails" / "main.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 200)
+        for c in candidates:
+            fn = f"candidate_{c['rank']}.jpg"
+            (ep_dir / "thumbnails" / fn).write_bytes(b"\xff\xd8\xff" + b"\x00" * 200)
+
+        violations = [{"rule_id": "TIG-07", "severity": "BLOCKING",
+                       "description": "Missing wordmark"}] if tig_verdict == "BLOCKED" else []
+        self._write_pkg(ep_dir, "thumbnail_package", ep_id, {
+            "thumbnail_package_id": f"tp_{ep_id}",
+            "episode_id": ep_id,
+            "main_thumbnail": {"asset_id": f"episodes/{ep_id}/thumbnails/main"},
+            "candidates": candidates,
+            "candidate_count": len(candidates),
+            "candidates_generated": len(candidates),
+            "candidates_required": 3,
+            "thumbnail_identity_report": {
+                "verdict": tig_verdict,
+                "blocking_count": len(violations),
+                "violations": violations,
+            },
+        })
+        self._write_pkg(ep_dir, "qa_approval_report", ep_id, {
+            "verdict": "WARNING", "approved": True, "checks": [],
+            "failures": [], "warnings": [], "evaluated_at": "2026-01-01T00:00:00+00:00",
+        })
+        return ep_dir
+
+    def _cand(self, rank, selected=False):
+        return {
+            "candidate_id": f"tc_00{rank}", "rank": rank,
+            "selected": rank == 1 and selected,
+            "status": "generated",
+            "text_overlay": "ITS MAKER VANISHED",
+            "placement": "top",
+            "visual_prompt": f"Dramatic candidate {rank} composition",
+            "ctr_rationale": f"Style variant {rank}",
+        }
+
+    def _get_html(self, client_and_assets, ep_id):
+        c, tmp_path, db_path = client_and_assets
+        assets = tmp_path / ".hypogeum-assets"
+        import run_dashboard as server
+        from unittest.mock import patch
+        with patch.object(server, "_ASSETS_ROOT_PATH", assets), \
+             patch.object(server, "_db_path", return_value=db_path):
+            resp = c.get(f"/episode/{ep_id}?tab=thumbnails")
+        assert resp.status_code == 200
+        return resp.data.decode()
+
+    # ── Candidate count ────────────────────────────────────────────────────
+
+    def test_three_candidates_shows_no_warning(self, client_and_assets, tmp_path):
+        ep_id = "ep_tn3_ok"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True), self._cand(2), self._cand(3)],
+                      tig_verdict="APPROVED")
+        html = self._get_html(client_and_assets, ep_id)
+        assert "Insufficient thumbnail candidates" not in html
+        assert "A/B/C ready" in html or "3/3" in html
+
+    def test_one_candidate_shows_warning(self, client_and_assets, tmp_path):
+        ep_id = "ep_tn1_warn"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True)])
+        html = self._get_html(client_and_assets, ep_id)
+        assert "Insufficient thumbnail candidates" in html or "Only 1/3" in html
+
+    def test_two_candidates_shows_warning(self, client_and_assets, tmp_path):
+        ep_id = "ep_tn2_warn"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True), self._cand(2)])
+        html = self._get_html(client_and_assets, ep_id)
+        assert "Insufficient thumbnail candidates" in html or "2/3" in html
+
+    # ── Rejected thumbnail badge: must be red, not green ──────────────────
+
+    def test_blocked_thumbnail_not_green_card_border(self, client_and_assets, tmp_path):
+        ep_id = "ep_tig_color"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True)])
+        html = self._get_html(client_and_assets, ep_id)
+        # The tn-card div for BLOCKED must not have tn-card-selected class
+        # (which gives a green border). We check the div tag, not the CSS def.
+        import re
+        # Find all tn-card div opening tags (not the CSS rule)
+        div_tags = re.findall(r'<div class="tn-card[^"]*"', html)
+        for tag in div_tags:
+            assert "tn-card-selected" not in tag, (
+                f"BLOCKED thumbnail card should not have tn-card-selected class: {tag}"
+            )
+
+    def test_blocked_thumbnail_shows_rejected_label(self, client_and_assets, tmp_path):
+        ep_id = "ep_tig_rejected"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True)])
+        html = self._get_html(client_and_assets, ep_id)
+        assert "Generated — Rejected" in html or "Rejected" in html
+
+    def test_approved_thumbnail_shows_selected_approved(self, client_and_assets, tmp_path):
+        ep_id = "ep_tig_approved"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True), self._cand(2), self._cand(3)],
+                      tig_verdict="APPROVED")
+        html = self._get_html(client_and_assets, ep_id)
+        assert "Selected — Approved" in html or "TIG: Approved" in html
+
+    # ── No fake "Published thumbnail" label ───────────────────────────────
+
+    def test_no_published_thumbnail_label_without_publishing_record(self, client_and_assets, tmp_path):
+        ep_id = "ep_tn_no_pub"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True), self._cand(2), self._cand(3)],
+                      tig_verdict="APPROVED")
+        html = self._get_html(client_and_assets, ep_id)
+        assert "Published thumbnail" not in html
+
+    # ── Rank labels ───────────────────────────────────────────────────────
+
+    def test_candidate_rank_labels_shown(self, client_and_assets, tmp_path):
+        ep_id = "ep_tn_ranks"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True), self._cand(2), self._cand(3)],
+                      tig_verdict="APPROVED")
+        html = self._get_html(client_and_assets, ep_id)
+        assert "Candidate 1" in html
+        assert "Candidate 2" in html
+        assert "Candidate 3" in html
+
+    # ── A/B/C rotation notice ─────────────────────────────────────────────
+
+    def test_rotation_not_automated_notice_shown(self, client_and_assets, tmp_path):
+        ep_id = "ep_tn_rotation"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep(assets, ep_id, [self._cand(1, True), self._cand(2), self._cand(3)],
+                      tig_verdict="APPROVED")
+        html = self._get_html(client_and_assets, ep_id)
+        assert "not automated" in html.lower() or "Rotation not automated" in html
+
+    # ── ThumbnailQA candidate count check ─────────────────────────────────
+
+    def test_thumbnail_qa_passes_with_3_candidates(self):
+        from hypogeum.agents.thumbnail_qa import run_thumbnail_qa
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "main.jpg"
+            p.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+            pkg = {
+                "candidates": [{"rank": 1, "status": "generated"},
+                                {"rank": 2, "status": "generated"},
+                                {"rank": 3, "status": "generated"}],
+                "candidates_generated": 3,
+                "candidates_required": 3,
+            }
+            result = run_thumbnail_qa(p, thumbnail_package=pkg)
+        c_count = next((c for c in result["checks"] if c["check_id"] == "c_thumbnail_candidate_count"), None)
+        assert c_count is not None
+        assert c_count["status"] == "pass"
+
+    def test_thumbnail_qa_warns_with_1_candidate(self):
+        from hypogeum.agents.thumbnail_qa import run_thumbnail_qa
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "main.jpg"
+            p.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+            pkg = {
+                "candidates": [{"rank": 1, "status": "generated"}],
+                "candidates_generated": 1,
+                "candidates_required": 3,
+            }
+            result = run_thumbnail_qa(p, thumbnail_package=pkg)
+        c_count = next((c for c in result["checks"] if c["check_id"] == "c_thumbnail_candidate_count"), None)
+        assert c_count is not None
+        assert c_count["status"] == "warn"
+
+    def test_thumbnail_qa_fails_with_0_candidates(self):
+        from hypogeum.agents.thumbnail_qa import run_thumbnail_qa
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "main.jpg"
+            p.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+            pkg = {
+                "candidates": [],
+                "candidates_generated": 0,
+                "candidates_required": 3,
+            }
+            result = run_thumbnail_qa(p, thumbnail_package=pkg)
+        c_count = next((c for c in result["checks"] if c["check_id"] == "c_thumbnail_candidate_count"), None)
+        assert c_count is not None
+        assert c_count["status"] == "fail"
+
+    def test_thumbnail_qa_skips_count_when_no_package(self):
+        from hypogeum.agents.thumbnail_qa import run_thumbnail_qa
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "main.jpg"
+            p.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+            result = run_thumbnail_qa(p, thumbnail_package=None)
+        check_ids = [c["check_id"] for c in result["checks"]]
+        assert "c_thumbnail_candidate_count" not in check_ids

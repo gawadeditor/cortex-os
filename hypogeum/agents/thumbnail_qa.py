@@ -46,11 +46,15 @@ _EXPECTED_DIMS: dict[str, tuple[int, int]] = {
 # Public API
 # ---------------------------------------------------------------------------
 
+REQUIRED_MAIN_CANDIDATES = 3
+
+
 def run_thumbnail_qa(
     thumbnail_local_path: Path,
     aspect_ratio: str = "16:9",
     asset_class: Optional[str] = None,
     generation_plan: Optional[dict] = None,
+    thumbnail_package: Optional[dict] = None,
 ) -> dict:
     """
     Run all thumbnail QA checks and return a thumbnail_qa_report dict.
@@ -61,6 +65,8 @@ def run_thumbnail_qa(
         asset_class:          Value of ThumbnailResult.asset_class (optional).
         generation_plan:      thumbnail_generation_plan dict from Phase 1 (optional).
                               When provided, check D verifies text_overlay presence.
+        thumbnail_package:    thumbnail_package dict (optional). When provided,
+                              check E verifies that 3 candidates were generated.
 
     Returns:
         dict with overall_status ("pass"|"warn"|"fail"), checks, warnings, failures.
@@ -173,6 +179,36 @@ def run_thumbnail_qa(
             _add_check(checks, "c_thumbnail_text_overlay", "pass",
                        f"rank-1 candidate has text_overlay: {overlay_text!r} "
                        f"(placement={overlay_placement!r}) — rendered via PIL onto image")
+
+    # ------------------------------------------------------------------
+    # Check E — Candidate Count (3 required for A/B/C testing)
+    # ------------------------------------------------------------------
+    if thumbnail_package is not None:
+        candidates_generated = thumbnail_package.get("candidates_generated", None)
+        candidates_required  = thumbnail_package.get("candidates_required", REQUIRED_MAIN_CANDIDATES)
+        candidate_list       = thumbnail_package.get("candidates", [])
+        actual_count         = len(candidate_list) if candidate_list is not None else 0
+
+        if candidates_generated is not None:
+            actual_count = candidates_generated
+
+        if actual_count >= candidates_required:
+            _add_check(checks, "c_thumbnail_candidate_count", "pass",
+                       f"{actual_count}/{candidates_required} thumbnail candidates generated")
+        elif actual_count == 0:
+            _add_check(checks, "c_thumbnail_candidate_count", "fail",
+                       f"0/{candidates_required} thumbnail candidates generated — no candidates produced")
+            failures.append(
+                f"thumbnail_candidate_count: 0 candidates generated, {candidates_required} required"
+            )
+        else:
+            _add_check(checks, "c_thumbnail_candidate_count", "warn",
+                       f"only {actual_count}/{candidates_required} thumbnail candidates generated — "
+                       f"A/B/C testing requires {candidates_required}")
+            warnings.append(
+                f"thumbnail_candidate_count: {actual_count}/{candidates_required} candidates — "
+                "regenerate to reach 3 for A/B/C comparison"
+            )
 
     # ------------------------------------------------------------------
     # Overall status

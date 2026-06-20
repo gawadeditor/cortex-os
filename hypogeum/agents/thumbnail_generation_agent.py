@@ -72,41 +72,93 @@ def generate_thumbnails(
     """
     Execute Phase 2 MUAPI thumbnail generation for all deliverables.
 
-    Iterates ranked candidates for main episode and each Short. For each
-    candidate, up to _MAX_ATTEMPTS_PER_CANDIDATE generation attempts are made.
-    First success records the asset_id and moves to the next deliverable.
-    All candidates exhausted → deliverable recorded as failed (ok=False).
+    Main episode: generates ALL ranked candidates (A/B/C for comparison), not
+    just the first success. Each candidate is saved as candidate_<rank>.jpg so
+    the dashboard can present all three for operator review and A/B testing.
+    The rank-1 candidate is also copied to main.jpg for pipeline compatibility.
+
+    Shorts: still uses first-success model (cost control).
 
     Args:
-        generation_plan: Validated thumbnail_generation_plan dict from
-                         thumbnail_prompt_writer.
+        generation_plan: Validated thumbnail_generation_plan dict.
         config:          Loaded Config instance.
         episode_id:      Episode identifier.
         output_dir:      Episode output directory.
         log:             Caller-provided logger.
-        budget_guard:    Optional M5.6 budget guardrail.
+        budget_guard:    Optional budget guardrail.
 
     Returns:
         dict with keys:
-            main_asset_id  — str asset_id (or failed placeholder)
-            main_ok        — bool True iff main succeeded
-            short_results  — list of (short_id, asset_id, ok) tuples
+            main_asset_id     — str asset_id of rank-1 candidate (or failed placeholder)
+            main_ok           — bool True iff rank-1 succeeded
+            main_candidates   — list of {rank, candidate_id, asset_id, ok, file_path}
+            short_results     — list of (short_id, asset_id, ok) tuples
 
     Raises:
-        MUAPIAuthFailure     — propagated immediately (halt).
-        MUAPIQuotaExhausted  — propagated immediately (halt).
-        MUAPIBudgetExhausted — propagated immediately (halt).
+        MUAPIAuthFailure / MUAPIQuotaExhausted / MUAPIBudgetExhausted — halt immediately.
     """
     log.info("td_muapi_phase_started")
 
-    main_asset_id, main_ok = _generate_for_deliverable(
-        deliverable_id="main",
-        ranked_candidates=generation_plan["main_episode"]["ranked_candidates"],
-        config=config,
-        episode_id=episode_id,
-        output_dir=output_dir,
-        log=log,
-        budget_guard=budget_guard,
+    ranked_candidates = generation_plan["main_episode"]["ranked_candidates"]
+    sorted_main = sorted(ranked_candidates, key=lambda c: c.get("rank", 999))
+
+    main_candidates: list[dict] = []
+    main_asset_id = f"episodes/{episode_id}/thumbnails/main"  # fallback placeholder
+    main_ok = False
+
+    for candidate in sorted_main:
+        rank = candidate.get("rank", 999)
+        candidate_id = candidate.get("candidate_id", f"cand_{rank}")
+        deliverable_id = f"candidate_{rank}"
+
+        asset_id, ok = _generate_for_deliverable(
+            deliverable_id=deliverable_id,
+            ranked_candidates=[candidate],
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+            log=log,
+            budget_guard=budget_guard,
+        )
+
+        # If successful, the file was written to thumbnails/<deliverable_id>.jpg
+        # Rename / copy to ensure consistent candidate_<rank>.jpg naming
+        thumb_dir = output_dir / "thumbnails"
+        gen_path  = thumb_dir / f"{deliverable_id}.jpg"
+        cand_path = thumb_dir / f"candidate_{rank}.jpg"
+        if ok and gen_path.exists() and gen_path != cand_path:
+            gen_path.rename(cand_path)
+            file_path = f"episodes/{episode_id}/thumbnails/candidate_{rank}.jpg"
+        elif ok and cand_path.exists():
+            file_path = f"episodes/{episode_id}/thumbnails/candidate_{rank}.jpg"
+        else:
+            file_path = None
+
+        main_candidates.append({
+            "rank":         rank,
+            "candidate_id": candidate_id,
+            "asset_id":     asset_id,
+            "ok":           ok,
+            "file_path":    file_path,
+            "text_overlay": candidate.get("text_overlay"),
+            "placement":    (candidate.get("text_overlay") or {}).get("placement"),
+            "image_prompt": candidate.get("image_prompt"),
+            "ctr_rationale": candidate.get("ctr_rationale"),
+        })
+
+        # rank-1 becomes the primary (main.jpg) for pipeline compatibility
+        if rank == 1:
+            main_ok = ok
+            main_asset_id = asset_id
+            if ok and cand_path.exists():
+                import shutil
+                shutil.copy2(str(cand_path), str(thumb_dir / "main.jpg"))
+                log.info("td_main_thumbnail_set", rank=rank, asset_id=asset_id)
+
+    log.info(
+        "td_all_candidates_generated",
+        total=len(main_candidates),
+        succeeded=sum(1 for c in main_candidates if c["ok"]),
     )
 
     short_results: list[tuple[str, str, bool]] = []
@@ -124,9 +176,10 @@ def generate_thumbnails(
         short_results.append((short_id, asset_id, ok))
 
     return {
-        "main_asset_id": main_asset_id,
-        "main_ok": main_ok,
-        "short_results": short_results,
+        "main_asset_id":   main_asset_id,
+        "main_ok":         main_ok,
+        "main_candidates": main_candidates,
+        "short_results":   short_results,
     }
 
 

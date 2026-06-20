@@ -168,19 +168,27 @@ def run_thumbnail_director(
         log=log,
         budget_guard=budget_guard,
     )
-    main_asset_id = gen_result["main_asset_id"]
-    main_ok = gen_result["main_ok"]
-    short_results = gen_result["short_results"]
+    main_asset_id   = gen_result["main_asset_id"]
+    main_ok         = gen_result["main_ok"]
+    main_candidates = gen_result.get("main_candidates", [])
+    short_results   = gen_result["short_results"]
 
     # ------------------------------------------------------------------
     # Thumbnail QA (Task F) — post-generation checks before package build
     # ------------------------------------------------------------------
     main_thumb_local = _resolve_output_dir / "thumbnails" / "main.jpg"
+    # Partial package for candidate count check — full package built after TIG
+    _partial_pkg_for_qa = {
+        "candidates":           package_candidates,
+        "candidates_generated": sum(1 for c in package_candidates if c["status"] == "generated"),
+        "candidates_required":  3,
+    }
     thumbnail_qa_report = run_thumbnail_qa(
         thumbnail_local_path=main_thumb_local,
         aspect_ratio="16:9",
         asset_class="thumbnail_image",
         generation_plan=generation_plan,
+        thumbnail_package=_partial_pkg_for_qa,
     )
     log.info(
         "td_thumbnail_qa",
@@ -226,12 +234,33 @@ def run_thumbnail_director(
     # ------------------------------------------------------------------
     production_ready = main_ok and all(ok for _, _, ok in short_results) and not tig_blocks
 
+    # Build candidates list for dashboard A/B/C display and QA
+    package_candidates = []
+    for c in main_candidates:
+        overlay_raw = c.get("text_overlay") or {}
+        package_candidates.append({
+            "candidate_id":  c["candidate_id"],
+            "rank":          c["rank"],
+            "selected":      c["rank"] == 1 and c.get("ok", False),
+            "status":        "generated" if c.get("ok") else "failed",
+            "asset_id":      c.get("asset_id"),
+            "file_path":     c.get("file_path"),
+            "text_overlay":  overlay_raw.get("text") if isinstance(overlay_raw, dict) else overlay_raw,
+            "placement":     overlay_raw.get("placement") if isinstance(overlay_raw, dict) else None,
+            "visual_prompt": c.get("image_prompt"),
+            "ctr_rationale": c.get("ctr_rationale"),
+        })
+
     thumbnail_package = {
         "thumbnail_package_id": f"tp_{episode_id}",
         "episode_id": episode_id,
         "main_thumbnail": {
             "asset_id": main_asset_id,
         },
+        "candidates": package_candidates,
+        "candidate_count": len(package_candidates),
+        "candidates_generated": sum(1 for c in package_candidates if c["status"] == "generated"),
+        "candidates_required": 3,
         "short_thumbnails": [
             {"short_id": sid, "asset_id": aid}
             for sid, aid, _ in short_results

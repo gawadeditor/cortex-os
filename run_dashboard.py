@@ -1537,12 +1537,25 @@ def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
         ))
 
     has_selected = any(c["selected"] for c in candidates)
+    required = pkg.get("candidates_required", 3)
+    generated = pkg.get("candidates_generated", len([c for c in candidates if not c["unverified"]]))
+    missing   = max(0, required - len(candidates))
+
     return {
-        "candidates": candidates,
-        "summary": {"count": len(candidates), "has_selected": has_selected, "has_real_data": False},
-        "bga_verdict": bga_verdict,
-        "bga_violations": bga_violations,
-        "from_disk": True,
+        "candidates":         candidates,
+        "summary":            {"count": len(candidates), "has_selected": has_selected, "has_real_data": False},
+        "bga_verdict":        bga_verdict,
+        "bga_violations":     bga_violations,
+        "from_disk":          True,
+        # A/B/C testing status
+        "candidates_required": required,
+        "candidates_count":    len(candidates),
+        "candidates_missing":  missing,
+        "candidate_warning":   missing > 0,
+        "candidate_warning_msg": (
+            f"Only {len(candidates)}/{required} thumbnail candidate{'s' if len(candidates) != 1 else ''} generated — "
+            f"A/B/C testing requires {required}"
+        ) if missing > 0 else None,
     }
 
 
@@ -2207,10 +2220,28 @@ def _send_asset(path: Path | None, download_name: str | None = None):
 
 @app.route("/episode/<episode_id>/thumbnail")
 def episode_thumbnail(episode_id: str):
-    """Serve the main thumbnail image for an episode."""
+    """Serve the main (rank-1) thumbnail image for an episode."""
     for ext in ("jpg", "jpeg", "png", "webp"):
         path = safe_episode_asset_path(
             episode_id, "thumbnail", f"main.{ext}",
+            assets_root=_ASSETS_ROOT_PATH,
+        )
+        if path:
+            from flask import send_file
+            return send_file(str(path), mimetype=_MIME.get(ext, "image/jpeg"))
+    from flask import abort
+    abort(404)
+
+
+@app.route("/episode/<episode_id>/thumbnail/candidate/<int:rank>")
+def episode_thumbnail_candidate(episode_id: str, rank: int):
+    """Serve a specific thumbnail candidate (candidate_<rank>.jpg)."""
+    if rank < 1 or rank > 10:
+        from flask import abort
+        abort(400)
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        path = safe_episode_asset_path(
+            episode_id, "thumbnail", f"candidate_{rank}.{ext}",
             assets_root=_ASSETS_ROOT_PATH,
         )
         if path:

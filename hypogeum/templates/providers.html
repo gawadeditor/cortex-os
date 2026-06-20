@@ -83,6 +83,23 @@
     </div>
 
     <div class="provider-desc">{{ p.description }}</div>
+
+    {% if p.muapi_backed %}
+    {# MUAPI-backed provider — no separate credential needed #}
+    <div class="provider-auth-type">Configured through MUAPI</div>
+    {% if vstatus == 'verified' %}
+      <div style="font-size:12px; color:var(--green); margin-top:4px;">✓ Reachable via MUAPI</div>
+    {% elif vstatus == 'muapi_configured' %}
+      <div style="font-size:12px; color:var(--yellow); margin-top:4px;">
+        MUAPI key saved — <a href="/providers/content/connect/muapi" style="color:var(--yellow);">verify MUAPI →</a>
+      </div>
+    {% else %}
+      <div style="font-size:12px; color:var(--muted); margin-top:4px;">
+        Requires MUAPI key — <a href="/providers/content/connect/muapi">configure MUAPI →</a>
+      </div>
+    {% endif %}
+
+    {% else %}
     <div class="provider-auth-type">Auth: API key</div>
 
     {% if p.verif_error %}
@@ -112,6 +129,7 @@
     </div>
 
     <div class="test-result-{{ p.id }}" style="display:none; margin-top:6px; font-size:12px;"></div>
+    {% endif %}
   </div>
   {% endfor %}
 </div>
@@ -144,20 +162,18 @@
 
     <div class="provider-desc">{{ p.description }}</div>
 
-    {% if p.id == "youtube" %}
+    {# Auth type + setup instructions #}
+    {% if p.auth == "oauth2" %}
       <div class="provider-auth-type">Auth: OAuth 2.0</div>
+      {% if p.id == "youtube" %}
       <div class="oauth-notice">
-        OAuth setup required. YouTube uses OAuth 2.0 — not a plain API key.
+        YouTube uses OAuth 2.0 — not a plain API key. Set up OAuth credentials in Google Cloud Console.
       </div>
       <div class="oauth-fields">
         <div class="section-label" style="margin:0 0 8px; font-size:10px">Required OAuth fields</div>
         <div class="oauth-field-row">
           <span class="oauth-label">client_id</span>
           <span class="oauth-value">{{ p.oauth_client_id or "— not configured —" }}</span>
-        </div>
-        <div class="oauth-field-row">
-          <span class="oauth-label">client_secret</span>
-          <span class="oauth-value">{{ "••••••••" if p.oauth_client_id else "— not configured —" }}</span>
         </div>
         <div class="oauth-field-row">
           <span class="oauth-label">redirect_uri</span>
@@ -167,51 +183,41 @@
           <span class="oauth-label">scopes</span>
           <span class="oauth-value">youtube.upload, youtube.readonly</span>
         </div>
-        <div class="oauth-field-row">
-          <span class="oauth-label">authorization status</span>
-          <span class="oauth-value {% if vstatus == 'verified' %}badge-verified{% endif %}">
-            {{ "Verified" if vstatus == 'verified' else "Saved" if vstatus == 'saved' else "Not configured" }}
-          </span>
-        </div>
       </div>
-
-      {% if p.verif_error %}
-      <div class="verif-error" style="margin-top:6px;">✗ {{ p.verif_error }}</div>
-      {% endif %}
-      {% if p.verif_checked_at %}
-      <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC</div>
-      {% endif %}
-
-      <div style="margin-top:8px;">
-        <a href="/platforms/connect/youtube" class="btn-provider">
-          {{ "Re-authorize" if vstatus != 'missing' else "Set up OAuth" }}
-        </a>
-        <button class="btn-test" data-provider="youtube"
-                onclick="testProvider(this, 'youtube')"
-                title="Verify refresh token is present">
-          Test
-        </button>
+      {% elif p.id == "tiktok" %}
+      <div class="oauth-notice">
+        TikTok uses OAuth 2.0. Go to developers.tiktok.com → Manage Apps → Keys &amp; Tokens.
+        Generate an Access Token (requires app review for Upload API scope).
+        Paste the token in the connect form.
       </div>
-
+      {% else %}
+      <div class="oauth-notice">
+        {{ p.label }} uses OAuth 2.0. Complete the authorization flow before publishing.
+      </div>
+      {% endif %}
     {% else %}
       <div class="provider-auth-type">Auth: API key</div>
-      {% if p.verif_error %}
-      <div class="verif-error">✗ {{ p.verif_error }}</div>
-      {% endif %}
-      {% if p.verif_checked_at %}
-      <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC</div>
-      {% endif %}
-      <div style="margin-top:8px;">
-        <a href="/platforms/connect/{{ p.id }}" class="btn-provider">
-          {{ "Reconnect" if vstatus != 'missing' else "Connect" }}
-        </a>
-        <button class="btn-test" data-provider="{{ p.id }}"
-                onclick="testProvider(this, '{{ p.id }}')"
-                title="Test the API credential">
-          Test
-        </button>
-      </div>
     {% endif %}
+
+    {% if p.verif_error %}
+    <div class="verif-error" style="margin-top:6px;">✗ {{ p.verif_error }}</div>
+    {% endif %}
+    {% if p.verif_checked_at %}
+    <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC</div>
+    {% endif %}
+
+    <div style="margin-top:8px;">
+      <a href="/platforms/connect/{{ p.id }}" class="btn-provider">
+        {% if vstatus == 'verified' %}Re-authorize
+        {% elif vstatus == 'saved' %}Reconnect
+        {% else %}Connect{% endif %}
+      </a>
+      <button class="btn-test" data-provider="{{ p.id }}"
+              onclick="testProvider(this, '{{ p.id }}')"
+              title="Verify credential">
+        Test
+      </button>
+    </div>
 
     <div class="test-result-{{ p.id }}" style="display:none; margin-top:6px; font-size:12px;"></div>
   </div>

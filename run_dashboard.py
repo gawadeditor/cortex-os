@@ -91,7 +91,7 @@ from hypogeum.credential_manager import (
 
 _PLATFORM_CRED_TYPE = {
     "youtube":   "oauth2_token",
-    "tiktok":    "api_key",
+    "tiktok":    "oauth2_token",
     "instagram": "api_key",
     "facebook":  "api_key",
 }
@@ -353,15 +353,15 @@ _CONTENT_PROVIDERS = [
     {"id": "elevenlabs", "label": "ElevenLabs", "auth": "api_key",
      "description": "Voice generation"},
     {"id": "muapi",      "label": "MUAPI",      "auth": "api_key",
-     "description": "Image & video generation"},
+     "description": "Image & video generation hub"},
     {"id": "seedance",   "label": "Seedance",   "auth": "api_key",
-     "description": "Video generation via MUAPI"},
+     "description": "Video generation", "muapi_backed": True},
     {"id": "veo",        "label": "Veo",        "auth": "api_key",
-     "description": "Video generation"},
+     "description": "Video generation", "muapi_backed": True},
     {"id": "kling",      "label": "Kling",      "auth": "api_key",
-     "description": "Video generation"},
+     "description": "Video generation", "muapi_backed": True},
     {"id": "runway",     "label": "Runway",     "auth": "api_key",
-     "description": "Video generation"},
+     "description": "Video generation", "muapi_backed": True},
     {"id": "freepik",    "label": "Freepik",    "auth": "api_key",
      "description": "Image generation"},
 ]
@@ -455,7 +455,7 @@ _VALID_CONTENT_PROVIDERS = frozenset(_CONTENT_PROVIDER_SETUP)
 _PLATFORM_PROVIDERS = [
     {"id": "youtube",   "label": "YouTube",   "auth": "oauth2",
      "description": "Video publishing"},
-    {"id": "tiktok",    "label": "TikTok",    "auth": "api_key",
+    {"id": "tiktok",    "label": "TikTok",    "auth": "oauth2",
      "description": "Short video publishing"},
     {"id": "instagram", "label": "Instagram", "auth": "api_key",
      "description": "Reels & posts"},
@@ -469,7 +469,12 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
     result = []
     for p in provider_list:
         entry = dict(p)
-        cred = creds_map.get(p["id"])
+        muapi_backed = bool(p.get("muapi_backed"))
+        entry["muapi_backed"] = muapi_backed
+
+        # For MUAPI-backed providers, derive status from MUAPI credential
+        lookup_id = "muapi" if muapi_backed else p["id"]
+        cred = creds_map.get(lookup_id)
         entry["credential_label"] = getattr(cred, "label", None) if cred else None
         entry["cost_usd"] = cost_map.get(p["id"], 0.0)
         if p["id"] == "youtube":
@@ -477,14 +482,25 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
             entry["oauth_redirect_uri"] = "http://localhost:8080/oauth2callback"
 
         # Verification status (replaces simple connected bool)
-        v = verif_map.get(p["id"])
-        if v:
-            vstatus = v["status"]
-        elif cred is not None:
-            vstatus = "saved"
+        v = verif_map.get(lookup_id)
+        if muapi_backed:
+            # MUAPI-backed: status comes from MUAPI probe; never show "missing" for the sub-provider
+            muapi_cred = creds_map.get("muapi")
+            if v and v.get("status") == "verified":
+                vstatus = "verified"
+            elif muapi_cred is not None:
+                vstatus = "muapi_configured"
+            else:
+                vstatus = "missing"
         else:
-            vstatus = "missing"
-        entry["vstatus"] = vstatus  # verified|failed|not_verifiable|saved|missing
+            if v:
+                vstatus = v["status"]
+            elif cred is not None:
+                vstatus = "saved"
+            else:
+                vstatus = "missing"
+
+        entry["vstatus"] = vstatus  # verified|failed|not_verifiable|saved|missing|muapi_configured
         entry["verif_error"]      = (v or {}).get("error_message") or (v or {}).get("error")
         entry["verif_checked_at"] = (v or {}).get("checked_at")
         entry["verif_latency_ms"] = (v or {}).get("latency_ms")
@@ -1328,12 +1344,191 @@ def episode_detail_page(episode_id):
     return render_template("episode_detail.html", d=d, active_tab=active_tab)
 
 
+def _load_disk_pkg(episode_id: str, stem: str) -> dict:
+    """Load a JSON package from the episode disk directory. Returns {} on any error."""
+    import json as _j
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+    path = ep_dir / f"{stem}_{episode_id}.json"
+    if not path.exists():
+        return {}
+    try:
+        return _j.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
+    """Build thumbnails dict from thumbnail_package on disk."""
+    pkg = _load_disk_pkg(episode_id, "thumbnail_package")
+    if not pkg:
+        return {"candidates": [], "summary": {"count": 0, "has_selected": False, "has_real_data": False}}
+
+    # Build candidate list from package candidates or fall back to main_thumbnail
+    raw_cands = pkg.get("candidates") or []
+    thumb_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id / "thumbnails"
+
+    # Read BGA identity report
+    identity = pkg.get("thumbnail_identity_report") or {}
+    bga_verdict = identity.get("verdict")
+    bga_violations = identity.get("violations") or []
+
+    def _base_cand(rank, selected, text_overlay, placement, visual_prompt,
+                   img_file, unverified, score, score_reason, bga_v, bga_viol):
+        return {
+            "rank":             rank,
+            "text_overlay":     text_overlay,
+            "placement":        placement,
+            "visual_prompt":    visual_prompt,
+            "selected":         selected,
+            "image_path":       img_file,
+            "unverified":       unverified,
+            "score":            score,
+            "score_reason":     score_reason,
+            "bga_verdict":      bga_v,
+            "bga_violations":   bga_viol,
+            # Performance fields — not available for disk-only
+            "ctr":              None,
+            "impressions":      None,
+            "views":            None,
+            "performance_status": "awaiting_analytics" if selected else "not_published",
+            "linked_platforms": [],
+            "model":            None,
+            "seed":             None,
+        }
+
+    candidates = []
+    if raw_cands:
+        for i, c in enumerate(raw_cands):
+            file_candidates = [f"candidate_{i+1}.jpg", f"candidate_{i+1}.png",
+                               f"candidate_{i+1}.webp", f"rank_{c.get('rank',i+1)}.jpg"]
+            img_file = None
+            for fn in file_candidates:
+                p = thumb_dir / fn
+                if p.exists() and p.stat().st_size > 0:
+                    img_file = str(p)
+                    break
+            is_sel = bool(c.get("selected"))
+            candidates.append(_base_cand(
+                rank=c.get("rank", i + 1),
+                selected=is_sel,
+                text_overlay=c.get("text_overlay"),
+                placement=c.get("placement"),
+                visual_prompt=(c.get("visual_prompt") or "")[:160] or None,
+                img_file=img_file,
+                unverified=img_file is None,
+                score=c.get("score"),
+                score_reason=c.get("score_reason"),
+                bga_v=bga_verdict if is_sel else None,
+                bga_viol=bga_violations if is_sel else [],
+            ))
+    else:
+        img_path = None
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            p = thumb_dir / f"main.{ext}"
+            if p.exists() and p.stat().st_size > 0:
+                img_path = str(p)
+                break
+        candidates.append(_base_cand(
+            rank=1,
+            selected=True,
+            text_overlay=None,
+            placement=None,
+            visual_prompt=None,
+            img_file=img_path,
+            unverified=img_path is None,
+            score=None,
+            score_reason=None,
+            bga_v=bga_verdict,
+            bga_viol=bga_violations,
+        ))
+
+    has_selected = any(c["selected"] for c in candidates)
+    return {
+        "candidates": candidates,
+        "summary": {"count": len(candidates), "has_selected": has_selected, "has_real_data": False},
+        "bga_verdict": bga_verdict,
+        "bga_violations": bga_violations,
+        "from_disk": True,
+    }
+
+
+def _make_disk_script_sections(episode_id: str) -> list:
+    """Extract readable script sections from script_package JSON."""
+    pkg = _load_disk_pkg(episode_id, "script_package")
+    if not pkg:
+        return []
+    sections = []
+    # Try scenes list
+    scenes = pkg.get("scenes") or pkg.get("script_scenes") or []
+    if scenes:
+        for sc in scenes:
+            sid = sc.get("scene_id") or sc.get("id") or ""
+            narration = sc.get("narration_text") or sc.get("narration") or sc.get("text") or ""
+            visual = sc.get("visual_description") or sc.get("visual") or ""
+            if narration or visual:
+                sections.append({
+                    "scene_id": sid,
+                    "narration": narration[:600] if narration else None,
+                    "visual": visual[:300] if visual else None,
+                })
+    # Fallback: hook/intro
+    hook = pkg.get("hook") or pkg.get("intro_hook") or ""
+    if hook and not sections:
+        sections.append({"scene_id": "hook", "narration": hook[:300], "visual": None})
+    return sections[:8]  # show first 8 scenes
+
+
+def _make_disk_qa_summary(episode_id: str) -> dict:
+    """Extract readable QA summary from qa_approval_report JSON."""
+    pkg = _load_disk_pkg(episode_id, "qa_approval_report")
+    if not pkg:
+        pkg = _load_disk_pkg(episode_id, "qa_report")
+    if not pkg:
+        return {}
+    verdict = pkg.get("verdict") or pkg.get("overall_verdict") or pkg.get("status")
+    approved = pkg.get("approved")
+    checks = pkg.get("checks") or pkg.get("qa_checks") or []
+    issues = pkg.get("issues") or pkg.get("failures") or []
+    warnings = pkg.get("warnings") or []
+
+    readable_checks = []
+    for c in checks[:12]:
+        if isinstance(c, dict):
+            readable_checks.append({
+                "name":   c.get("check_id") or c.get("name") or c.get("check") or "",
+                "status": c.get("status") or ("pass" if c.get("passed") else "fail"),
+                "detail": (c.get("detail") or c.get("message") or "")[:200],
+            })
+
+    return {
+        "verdict":  verdict,
+        "approved": approved,
+        "checks":   readable_checks,
+        "issues":   [str(i)[:200] for i in issues[:5]],
+        "warnings": [str(w)[:200] for w in warnings[:5]],
+        "check_count": len(checks),
+    }
+
+
 def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
-    """Build a minimal episode detail dict from disk artifacts only."""
+    """Build an episode detail dict from disk artifacts — reads JSON packages for readable content."""
+    thumbnails = _make_disk_thumbnails(episode_id, artifacts)
+    script_sections = _make_disk_script_sections(episode_id)
+    qa_summary = _make_disk_qa_summary(episode_id)
+
+    # Topic / title from narrative or script package
+    narrative_pkg = _load_disk_pkg(episode_id, "narrative_package")
+    topic = (
+        narrative_pkg.get("episode_title")
+        or narrative_pkg.get("topic")
+        or artifacts.get("display_title")
+        or episode_id
+    )
+
     return {
         "episode_id":       episode_id,
-        "display_title":    artifacts.get("display_title") or episode_id,
-        "topic":            artifacts.get("display_title"),
+        "display_title":    artifacts.get("display_title") or topic or episode_id,
+        "topic":            topic,
         "status":           "complete" if artifacts["has_render"] else "partial",
         "status_label":     "Complete" if artifacts["has_render"] else "Partial",
         "created_at":       None,
@@ -1353,7 +1548,7 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
         "assets":           [],
         "publishing":       {"summary": {"published": 0, "failed": 0, "pending": 0, "connected": 0},
                              "platform_cards": []},
-        "thumbnails":       {"candidates": []},
+        "thumbnails":       thumbnails,
         "titles":           {"candidates": []},
         "analytics":        {"overview": {"has_real_data": False},
                              "platforms": [],
@@ -1368,6 +1563,8 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
         "learning":         {"status": "waiting", "records": []},
         "branding":         {"checks": [], "recommendations": []},
         "disk_artifacts":   artifacts,
+        "disk_script":      script_sections,
+        "disk_qa":          qa_summary,
         "_disk_only":       True,
     }
 

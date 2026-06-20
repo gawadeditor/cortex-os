@@ -56,9 +56,11 @@ _APPROVAL_LABELS: dict[str, str] = {
 # Factory Health / Needs Attention / Primary CTA helpers
 # ---------------------------------------------------------------------------
 
-def _build_factory_health(active_count: int, queue_size: int) -> dict:
+def _build_factory_health(active_count: int, queue_size: int, failed_count: int = 0) -> dict:
     """Translate production state into operator-readable factory health."""
-    if active_count > 0:
+    if failed_count > 0:
+        status = "Degraded"
+    elif active_count > 0:
         status = "Ready"
     elif queue_size > 0:
         status = "Ready"
@@ -68,6 +70,7 @@ def _build_factory_health(active_count: int, queue_size: int) -> dict:
         "status_label": status,
         "active_count": active_count,
         "queued_count": queue_size,
+        "failed_count": failed_count,
     }
 
 
@@ -289,6 +292,7 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
 
     # ── DB queries: real analytics only ──────────────────────────────────────
     failed_run_id: Optional[str] = None
+    failed_run_count: int = 0
     try:
         from hypogeum.db import get_connection
         conn = get_connection(db)
@@ -296,7 +300,8 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
             _load_recent_episodes(conn, result)
             _load_real_analytics_summary(conn, result)
             _load_current_episode_title(conn, result)
-            failed_run_id = _load_failed_run_id(conn)
+            failed_run_id    = _load_failed_run_id(conn)
+            failed_run_count = _load_failed_run_count(conn)
         finally:
             conn.close()
     except Exception:
@@ -305,7 +310,7 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
     # ── Factory health, needs attention, primary CTA ──────────────────────────
     active_count = 1 if result["production"].get("current_episode") else 0
     result["factory_health"] = _build_factory_health(
-        active_count, result["production"]["queue_size"]
+        active_count, result["production"]["queue_size"], failed_run_count
     )
     result["needs_attention"] = _build_needs_attention(
         result["platform_state"],
@@ -437,6 +442,21 @@ def _load_failed_run_id(conn) -> Optional[str]:
         return row["run_id"] if row else None
     except Exception:
         return None
+
+
+def _load_failed_run_count(conn) -> int:
+    """Return the count of failed runs in the last 48 hours."""
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt FROM runs
+            WHERE status = 'failed'
+              AND started_at >= datetime('now', '-48 hours')
+            """
+        ).fetchone()
+        return int(row["cnt"]) if row and row["cnt"] else 0
+    except Exception:
+        return 0
 
 
 def _load_real_analytics_summary(conn, result: dict) -> None:

@@ -660,6 +660,168 @@
   {% endfor %}
 </div>
 
+{% elif d._disk_only %}
+
+{# ── Disk-only episode: show production state from JSON packages ── #}
+
+{# QA verdict banner #}
+{% set qa = d.disk_qa %}
+{% if qa and qa.verdict %}
+<div style="margin-bottom:var(--gap); padding:14px 16px; border-radius:var(--radius);
+            border-left: 4px solid
+            {% if qa.verdict in ('APPROVED','PASS','pass') %}#2ea043
+            {% elif qa.verdict in ('WARNING','warn') %}#9e6a03
+            {% else %}#da3633{% endif %};
+            background:var(--surface); border:1px solid var(--border);">
+  <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; margin-bottom:6px;">
+    QA Report
+  </div>
+  <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+    <span style="font-size:15px; font-weight:700;
+      color:{% if qa.verdict in ('APPROVED','PASS','pass') %}var(--green)
+            {% elif qa.verdict in ('WARNING','warn') %}var(--yellow)
+            {% else %}var(--red){% endif %}">
+      {{ qa.verdict }}
+    </span>
+    {% if qa.check_count is defined %}
+    <span style="font-size:12px; color:var(--muted)">{{ qa.check_count }} checks</span>
+    {% endif %}
+    {% if qa.issues %}
+    <span style="font-size:12px; color:var(--red)">{{ qa.issues|length }} issue(s)</span>
+    {% endif %}
+  </div>
+  {% if qa.checks %}
+  <details style="margin-top:10px;">
+    <summary style="font-size:12px; cursor:pointer; color:var(--muted);">Show checks</summary>
+    <div style="margin-top:8px;">
+      {% for c in qa.checks %}
+      <div style="display:flex; gap:8px; font-size:12px; padding:3px 0; border-bottom:1px solid var(--border);">
+        <span style="color:{% if c.status in ('pass','PASS') %}var(--green){% elif c.status in ('warn','WARNING') %}var(--yellow){% else %}var(--red){% endif %}; flex-shrink:0;">
+          {% if c.status in ('pass','PASS') %}✓{% elif c.status in ('warn','WARNING') %}⚠{% else %}✗{% endif %}
+        </span>
+        <span style="flex:1; min-width:0;">
+          <span style="color:var(--muted); font-family:monospace; font-size:11px;">{{ c.name }}</span>
+          {% if c.detail %} — {{ c.detail }}{% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% if qa.issues %}
+  <div style="margin-top:8px;">
+    {% for issue in qa.issues %}
+    <div style="font-size:12px; color:var(--red); padding:3px 0;">✗ {{ issue }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{# Thumbnail status from package #}
+{% if d.thumbnails and d.thumbnails.candidates %}
+{% set tn = d.thumbnails.candidates | selectattr('selected') | list | first %}
+{% if not tn %}{% set tn = d.thumbnails.candidates[0] %}{% endif %}
+{% if tn %}
+<div style="margin-bottom:var(--gap); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;">
+  <div style="padding:14px 16px 10px;">
+    <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; margin-bottom:8px;">
+      Thumbnail
+      {% if tn.unverified %}<span style="color:var(--yellow); margin-left:6px;">⚠ Unverified — file not resolved</span>{% endif %}
+    </div>
+    <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start;">
+      {% if not tn.unverified %}
+      <img src="/episode/{{ d.episode_id }}/thumbnail"
+           style="width:200px; aspect-ratio:16/9; object-fit:cover; border-radius:var(--radius); border:1px solid var(--border);"
+           alt="Thumbnail" onerror="this.style.display='none'">
+      {% else %}
+      <div style="width:200px; aspect-ratio:16/9; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); display:flex; align-items:center; justify-content:center;">
+        <span style="font-size:11px; color:var(--muted);">Image not found</span>
+      </div>
+      {% endif %}
+      <div style="flex:1; min-width:180px;">
+        {% if tn.text_overlay %}
+        <div style="font-size:13px; font-weight:600; margin-bottom:6px;">{{ tn.text_overlay }}</div>
+        {% endif %}
+        {% if tn.visual_prompt %}
+        <div style="font-size:12px; color:var(--muted); margin-bottom:8px; line-height:1.5;">{{ tn.visual_prompt }}</div>
+        {% endif %}
+        {% if tn.bga_verdict %}
+        <div style="font-size:12px; margin-top:4px;">
+          BGA: <span style="font-weight:700;
+            color:{% if tn.bga_verdict == 'APPROVED' %}var(--green)
+                  {% elif tn.bga_verdict == 'WARNING' %}var(--yellow)
+                  {% else %}var(--red){% endif %}">{{ tn.bga_verdict }}</span>
+          {% if tn.bga_violations %}
+          <span style="color:var(--muted); font-size:11px;">({{ tn.bga_violations|length }} violation{{ '' if tn.bga_violations|length == 1 else 's' }})</span>
+          {% endif %}
+        </div>
+        {% if tn.bga_violations %}
+        <ul style="margin:6px 0 0 14px; padding:0; font-size:11px; color:var(--muted);">
+          {% for v in tn.bga_violations %}
+          <li style="margin-bottom:2px; color:{% if v.severity == 'BLOCKING' %}var(--red){% else %}var(--yellow){% endif %};">
+            {{ v.severity }}: {{ v.description }}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+{# Script sections #}
+{% if d.disk_script %}
+<div style="margin-bottom:var(--gap); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px;">
+  <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; margin-bottom:12px;">
+    Script — {{ d.disk_script|length }} scene(s)
+  </div>
+  {% for sc in d.disk_script %}
+  <div style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+    {% if sc.scene_id %}
+    <div style="font-size:11px; font-family:monospace; color:var(--blue); margin-bottom:5px;">{{ sc.scene_id }}</div>
+    {% endif %}
+    {% if sc.narration %}
+    <div style="font-size:13px; line-height:1.6; color:var(--text);">{{ sc.narration }}</div>
+    {% endif %}
+    {% if sc.visual %}
+    <div style="font-size:12px; color:var(--muted); margin-top:6px; font-style:italic;">
+      Visual: {{ sc.visual }}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# Artifact links — readable access to all JSON packages #}
+{% if d.disk_artifacts and d.disk_artifacts.json_artifacts %}
+<div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px; margin-bottom:var(--gap);">
+  <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; margin-bottom:10px;">
+    Production Packages
+  </div>
+  <div style="display:flex; flex-wrap:wrap; gap:8px;">
+    {% for art in d.disk_artifacts.json_artifacts %}
+    <a href="/episode/{{ d.episode_id }}/artifact/{{ art.stem }}"
+       class="btn" style="font-size:11px; padding:3px 10px;"
+       title="{{ art.size_kb }}KB">
+      {{ art.label }}
+    </a>
+    {% endfor %}
+  </div>
+  {% if d.disk_artifacts.has_render %}
+  <div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+    <a href="/episode/{{ d.episode_id }}/render" class="btn btn-approve"
+       style="font-size:12px;">
+      ▶ Download render ({{ d.disk_artifacts.render_size_mb }}MB)
+    </a>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% else %}
 <div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
   {% if d.run_id %}
@@ -1101,6 +1263,16 @@ function resumeEpisode(episodeId, kind) {
         {% if is_sel %}
           <span class="badge badge-completed">Published thumbnail</span>
         {% endif %}
+        {% if c.unverified %}
+          <span class="badge badge-degraded">Unverified — file not found</span>
+        {% endif %}
+        {% if c.bga_verdict == 'BLOCKED' %}
+          <span class="badge badge-blocked">BGA: Blocked</span>
+        {% elif c.bga_verdict == 'WARNING' %}
+          <span class="badge badge-warning">BGA: Warning</span>
+        {% elif c.bga_verdict == 'APPROVED' %}
+          <span class="badge badge-ready">BGA: Approved</span>
+        {% endif %}
         {% if c.performance_status == 'winner' %}
           <span class="badge badge-completed">Best CTR</span>
         {% elif c.performance_status == 'underperformed' %}
@@ -1111,6 +1283,18 @@ function resumeEpisode(episodeId, kind) {
           <span class="badge badge-skipped">Not published</span>
         {% endif %}
       </div>
+
+      {# BGA violations (when blocked) ────────────────────────── #}
+      {% if c.bga_violations %}
+      <div style="margin-bottom:8px; padding:8px 10px; background:#1f0a09; border:1px solid #da3633; border-radius:var(--radius);">
+        {% for v in c.bga_violations %}
+        <div style="font-size:11px; line-height:1.5; margin-bottom:3px;
+          color:{% if v.severity == 'BLOCKING' %}var(--red){% else %}var(--yellow){% endif %};">
+          {{ v.severity }}: {{ v.description }}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
 
       {# Performance data (selected candidate only) ──────────── #}
       {% if c.ctr is not none %}

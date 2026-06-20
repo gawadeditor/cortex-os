@@ -282,6 +282,26 @@
   {% endif %}
 </div>
 
+{# ═══════════════════════════════════════════════════════════════
+   NEXT REQUIRED ACTION  (surfaced early — operator control room)
+═══════════════════════════════════════════════════════════════ #}
+{% if next_action %}
+<div class="next-action next-action-{{ next_action.urgency }} exec-section">
+  <div class="next-action-icon">
+    {% if next_action.urgency == 'critical' %}🚫
+    {% elif next_action.urgency == 'warning' %}⚠️
+    {% else %}▶{% endif %}
+  </div>
+  <div class="next-action-body">
+    <div class="next-action-label">{{ next_action.label }}</div>
+    {% if next_action.detail %}
+    <div class="next-action-detail">{{ next_action.detail }}</div>
+    {% endif %}
+  </div>
+  <a href="{{ next_action.url }}" class="btn" style="flex-shrink:0;">Go →</a>
+</div>
+{% endif %}
+
 {# ═════════════════════════════════════════════════════════════════
    2. CONNECTED PLATFORMS
 ══════════════════════════════════════════════════════════════════ #}
@@ -592,6 +612,40 @@
 {% endif %}
 
 {# ═════════════════════════════════════════════════════════════════
+   7c. QUEUE SUMMARY
+══════════════════════════════════════════════════════════════════ #}
+{% set fh = overview.factory_health if overview and overview.factory_health else {} %}
+{% if fh and (fh.queued_count > 0 or fh.failed_count > 0 or fh.active_count > 0) %}
+<div class="card exec-section">
+  <div class="card-title" style="margin-bottom:8px;">Run Queue</div>
+  <div style="display:flex; gap:20px; flex-wrap:wrap; font-size:13px; align-items:center;">
+    {% if fh.active_count > 0 %}
+    <div style="display:flex; align-items:center; gap:6px;">
+      <span class="pulse"></span>
+      <span><strong>{{ fh.active_count }}</strong> in production</span>
+      <a href="/live" class="btn" style="font-size:11px; padding:2px 8px; margin-left:4px;">Live →</a>
+    </div>
+    {% endif %}
+    {% if fh.queued_count > 0 %}
+    <div style="color:var(--blue);">
+      <strong>{{ fh.queued_count }}</strong> queued
+      <a href="/create" class="btn" style="font-size:11px; padding:2px 8px; margin-left:4px;">Start →</a>
+    </div>
+    {% endif %}
+    {% if fh.failed_count > 0 %}
+    <div style="color:var(--red);">
+      <strong>{{ fh.failed_count }}</strong> failed
+      <a href="/runs?status=failed" class="btn btn-reject" style="font-size:11px; padding:2px 8px; margin-left:4px;">Review →</a>
+    </div>
+    {% endif %}
+    {% if not fh.active_count and not fh.queued_count and not fh.failed_count %}
+    <span style="color:var(--muted)">No active or queued runs.</span>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ═════════════════════════════════════════════════════════════════
    8. OPERATIONS  (internal — collapsed)
 ══════════════════════════════════════════════════════════════════ #}
 <details class="exec-section">
@@ -630,26 +684,6 @@
     </div>
   </div>
 </details>
-
-{# ═══════════════════════════════════════════════════════════════
-   NEXT REQUIRED ACTION
-═══════════════════════════════════════════════════════════════ #}
-{% if next_action %}
-<div class="next-action next-action-{{ next_action.urgency }} exec-section">
-  <div class="next-action-icon">
-    {% if next_action.urgency == 'critical' %}🚫
-    {% elif next_action.urgency == 'warning' %}⚠️
-    {% else %}▶{% endif %}
-  </div>
-  <div class="next-action-body">
-    <div class="next-action-label">{{ next_action.label }}</div>
-    {% if next_action.detail %}
-    <div class="next-action-detail">{{ next_action.detail }}</div>
-    {% endif %}
-  </div>
-  <a href="{{ next_action.url }}" class="btn" style="flex-shrink:0;">Go →</a>
-</div>
-{% endif %}
 
 {# ═══════════════════════════════════════════════════════════════
    LATEST EPISODES

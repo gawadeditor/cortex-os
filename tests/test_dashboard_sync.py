@@ -804,7 +804,12 @@ class TestSyncAPIEndpoints:
 # ---------------------------------------------------------------------------
 
 class TestThumbnailBlockedStatus:
-    """TIG-blocked thumbnail_identity_report → needs_thumbnail, not complete or qa_warning."""
+    """
+    TIG-blocked thumbnail → release_blocker=THUMBNAIL_TIG_BLOCKED in four-way state.
+    The legacy infer_episode_status never returns needs_thumbnail — TIG is a release
+    blocker, not a production-phase status. Production status stays 'complete'
+    (or 'qa_warning') when TIG rejects the thumbnail.
+    """
 
     def _blocked_thumbnail_pkg(self):
         return {
@@ -829,37 +834,49 @@ class TestThumbnailBlockedStatus:
             "package_integrity": {"production_ready": True},
         }
 
-    def test_tig_blocked_gives_needs_thumbnail(self):
+    def test_tig_blocked_legacy_status_is_complete(self):
+        """TIG blocked: legacy infer_episode_status returns 'complete' (not needs_thumbnail)."""
         qa  = {"verdict": "APPROVED", "approved": True}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
         tn  = self._blocked_thumbnail_pkg()
-        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "needs_thumbnail"
+        # Legacy status ignores TIG — production phase is complete
+        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "complete"
 
-    def test_tig_blocked_overrides_qa_warning(self):
-        """QA warning + TIG blocked → needs_thumbnail, not qa_warning."""
+    def test_tig_blocked_sets_release_blocker_in_four_way_state(self):
+        """TIG blocked → build_episode_state gives release_blocker=THUMBNAIL_TIG_BLOCKED."""
+        from hypogeum.episode_state import build_episode_state, BLOCKER_THUMBNAIL_TIG_BLOCKED, REL_BLOCKED
+        qa  = {"verdict": "APPROVED", "approved": True}
+        bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
+        art = {"has_render": True}
+        tn  = self._blocked_thumbnail_pkg()
+        state = build_episode_state(qa, bga, tn, art)
+        assert state["release_blocker"] == BLOCKER_THUMBNAIL_TIG_BLOCKED
+        assert state["release_status"]  == REL_BLOCKED
+
+    def test_tig_blocked_with_qa_warning_legacy_status_is_qa_warning(self):
+        """QA warning + TIG blocked: legacy status = qa_warning (ignores TIG)."""
         qa  = {"verdict": "WARNING", "approved": True}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
         tn  = self._blocked_thumbnail_pkg()
-        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "needs_thumbnail"
+        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "qa_warning"
 
-    def test_tig_approved_allows_complete(self):
+    def test_tig_approved_legacy_status_is_complete(self):
         qa  = {"verdict": "APPROVED", "approved": True}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
         tn  = self._approved_thumbnail_pkg()
         assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "complete"
 
-    def test_no_thumbnail_pkg_does_not_trigger_needs_thumbnail(self):
-        """If no thumbnail_package present, status should not be needs_thumbnail."""
+    def test_no_thumbnail_pkg_legacy_status_is_complete(self):
         qa  = {"verdict": "APPROVED", "approved": True}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
         assert infer_episode_status(qa, bga, art, thumbnail_pkg=None) == "complete"
 
-    def test_script_bga_blocked_takes_priority_over_tig(self):
-        """Script BGA BLOCKED → needs_review, even if TIG would give needs_thumbnail."""
+    def test_script_bga_blocked_still_gives_needs_review(self):
+        """Script BGA BLOCKED → needs_review regardless of TIG."""
         qa  = {"verdict": "APPROVED", "approved": True}
         bga = [{"outcome": "BLOCKED", "violations": [
             {"rule_id": "BGA-01", "severity": "BLOCKING", "description": "brand mismatch"}
@@ -868,13 +885,16 @@ class TestThumbnailBlockedStatus:
         tn  = self._blocked_thumbnail_pkg()
         assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "needs_review"
 
-    def test_sync_ep003_like_gets_needs_thumbnail(self, tmp_path):
-        """Fixture matching ep_003: QA warning approved + BGA-script approved + TIG blocked."""
+    def test_sync_ep003_like_writes_qa_warning_not_needs_thumbnail(self, tmp_path):
+        """
+        Fixture matching ep_003: QA warning approved + BGA-script approved + TIG blocked.
+        DB status must be 'qa_warning' (not 'needs_thumbnail') because status reflects
+        production phase. TIG blocker is in the four-way view-layer state only.
+        """
         assets  = tmp_path / "assets"
         db_path = tmp_path / "test.db"
         initialize_schema(db_path)
-        from tests.test_dashboard_sync import _make_ep_dir
-        _make_ep_dir(assets, "ep_tig_003")
+        _make_ep_dir(assets, "ep_tig_003", qa_verdict="WARNING", qa_approved=True)
 
         # Overwrite thumbnail_package with a BLOCKED TIG
         import json
@@ -892,14 +912,16 @@ class TestThumbnailBlockedStatus:
         }))
 
         result = sync_disk_episode_to_db("ep_tig_003", assets_root=assets, db_path=db_path)
-        assert result["status"] == "needs_thumbnail"
+        # Legacy status is qa_warning (QA approved with warnings; TIG blocker is view-layer)
+        assert result["status"] == "qa_warning"
+        assert result["status"] != "needs_thumbnail"
 
         conn = get_connection(db_path)
         row = conn.execute(
             "SELECT status FROM episodes WHERE episode_id = 'ep_tig_003'"
         ).fetchone()
         conn.close()
-        assert row["status"] == "needs_thumbnail"
+        assert row["status"] == "qa_warning"
 
 
 # ---------------------------------------------------------------------------

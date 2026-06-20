@@ -24,13 +24,19 @@ Public API
     extract_created_at(ep_dir, episode_id)                -> str
     SYNTHETIC_STAGES                                      -> list[(stage_name, group_label, pkg_stem)]
 
-Status semantics
+Status semantics  (legacy episodes.status column — broad production state only)
 ----------------
-    COMPLETE      render + QA approved + BGA approved + no blocking violations
-    QA_WARNING    render + QA approved-with-warnings + BGA approved
-    NEEDS_REVIEW  BGA BLOCKED, QA failed, or missing publish metadata
-    PARTIAL       some artifacts exist but render/QA not complete
-    FAILED        pipeline explicitly failed
+    complete      render present + QA approved + script BGA approved
+    qa_warning    render present + QA approved-with-warnings
+    needs_review  QA failed or script BGA blocked
+    partial       some artifacts exist but render/QA not complete
+    failed        pipeline explicitly failed
+
+  NOTE: TIG thumbnail rejection is NOT surfaced here. It lives in the four-way
+  state model (hypogeum/episode_state.py) as release_blocker=THUMBNAIL_TIG_BLOCKED.
+  An episode whose thumbnail is TIG-rejected still has production_status=COMPLETE
+  and legacy status='complete' (or 'qa_warning'), with release_status=BLOCKED.
+  This matches how the DB pipeline writes status: it never writes needs_thumbnail.
 """
 
 from __future__ import annotations
@@ -98,27 +104,25 @@ def infer_episode_status(
     qa_pkg: dict,
     bga_pkgs: list[dict],
     artifacts: dict,
-    thumbnail_pkg: Optional[dict] = None,
+    thumbnail_pkg: Optional[dict] = None,  # kept for API compat — no longer used here
 ) -> str:
     """
-    Derive canonical episode status from QA + BGA-script + TIG-thumbnail + artifact flags.
+    Derive the broad legacy episodes.status from QA + script-BGA + artifact flags.
 
-    Priority order (highest to lowest):
-        partial        — no render file
-        needs_review   — script BGA blocked / QA failed
-        needs_thumbnail — render + QA pass + script BGA pass, but TIG blocked thumbnail
-        qa_warning     — render + QA approved-with-warnings + all gates pass
-        complete       — render + QA approved + all gates pass
+    Returns one of: partial | needs_review | qa_warning | complete
 
-    bga_pkgs:       bga_compliance_report_p1 / p2 — checks script/narrative content
-    thumbnail_pkg:  thumbnail_package — contains thumbnail_identity_report (TIG visual check)
+    TIG thumbnail rejection is intentionally NOT returned here. It is a release
+    blocker (see hypogeum/episode_state.py → BLOCKER_THUMBNAIL_TIG_BLOCKED), not
+    a production-phase status. An episode with a TIG-blocked thumbnail still has
+    production_status=COMPLETE. The `thumbnail_pkg` parameter is accepted for
+    backwards API compatibility but is ignored in this function.
     """
     has_render = bool(artifacts.get("has_render"))
 
     if not has_render:
         return "partial"
 
-    # Check script BGA verdict (any BLOCKED pass → NEEDS_REVIEW)
+    # Check script BGA verdict (any BLOCKED pass → needs_review)
     for bga in bga_pkgs:
         outcome = (bga.get("outcome") or "").upper()
         blocking = (bga.get("summary") or {}).get("blocking_count", 0)
@@ -139,15 +143,6 @@ def infer_episode_status(
 
     if not qa_approved:
         return "needs_review"
-
-    # Check thumbnail TIG verdict (thumbnail_identity_report inside thumbnail_package)
-    # This is a separate check from script BGA — it tests the actual generated image.
-    if thumbnail_pkg:
-        tig = thumbnail_pkg.get("thumbnail_identity_report") or {}
-        tig_verdict = (tig.get("verdict") or "").upper()
-        tig_blocking = tig.get("blocking_count", 0)
-        if tig_verdict == "BLOCKED" or tig_blocking > 0:
-            return "needs_thumbnail"
 
     if qa_verdict == "WARNING":
         return "qa_warning"

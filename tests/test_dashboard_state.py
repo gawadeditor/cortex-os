@@ -377,7 +377,7 @@ class TestPublishChecklist:
         assert resp.status_code == 200
         body = resp.data.decode()
         assert "Publish Readiness" in body
-        assert "Thumbnail brand check" in body
+        assert "Thumbnail" in body and ("brand" in body.lower() or "TIG" in body)
         assert "Release gate" in body
 
     def test_publish_checklist_shows_tig_blocked(self, client):

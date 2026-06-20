@@ -1586,12 +1586,11 @@ def _make_disk_qa_summary(episode_id: str) -> dict:
 
 
 _DISK_STATUS_LABELS = {
-    "complete":          "Complete",
-    "qa_warning":        "QA Warning",
-    "needs_review":      "Needs Review",
-    "needs_thumbnail":   "Needs Thumbnail",
-    "partial":           "Partial",
-    "failed":            "Failed",
+    "complete":     "Complete",
+    "qa_warning":   "QA Warning",
+    "needs_review": "Needs Review",
+    "partial":      "Partial",
+    "failed":       "Failed",
 }
 
 
@@ -1703,10 +1702,21 @@ def _build_disk_publish_checklist(
     thumbnail_pkg: dict | None,
 ) -> list[dict]:
     """
-    Build a publish readiness checklist for the Publishing tab of disk-only episodes.
+    Build a publish readiness checklist for the Publishing tab.
 
     Each item: {label, status, detail, action_url, action_label}
     status: pass | fail | warn | missing
+
+    Checklist order:
+      1. Video render
+      2. QA gate
+      3. Title present
+      4. Description present
+      5. Thumbnail file (separate from brand approval)
+      6. Thumbnail brand check (TIG) — clearly distinct from file existence
+      7. Captions (SRT)
+      8. YouTube credential state
+      9. Release gate (summary)
     """
     checklist = []
 
@@ -1756,64 +1766,146 @@ def _build_disk_publish_checklist(
             "action_label": None,
         })
 
-    # 3. Thumbnail brand check (TIG)
-    has_thumbnail = bool(artifacts.get("has_thumbnail"))
-    if thumbnail_pkg:
-        tig = thumbnail_pkg.get("thumbnail_identity_report") or {}
-        tig_verdict = (tig.get("verdict") or "").upper()
-        if tig_verdict == "BLOCKED":
-            violations = tig.get("violations") or []
-            blocking   = [v for v in violations if (v.get("severity") or "").upper() == "BLOCKING"]
-            detail     = f"Brand identity check rejected — {blocking[0]['description'][:80]}" if blocking else "Brand identity check rejected"
-            checklist.append({
-                "label":        "Thumbnail brand check",
-                "status":       "fail",
-                "detail":       detail,
-                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
-                "action_label": "View thumbnail",
-            })
-        elif tig_verdict == "WARNING":
-            checklist.append({
-                "label":        "Thumbnail brand check",
-                "status":       "warn",
-                "detail":       f"{tig.get('warning_count', 0)} warning(s) — review before publishing",
-                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
-                "action_label": "View thumbnail",
-            })
-        elif tig_verdict == "APPROVED":
-            checklist.append({
-                "label":        "Thumbnail brand check",
-                "status":       "pass",
-                "detail":       "Thumbnail approved by brand identity check",
-                "action_url":   None,
-                "action_label": None,
-            })
-        else:
-            checklist.append({
-                "label":        "Thumbnail brand check",
-                "status":       "missing",
-                "detail":       "No brand identity check recorded for thumbnail",
-                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
-                "action_label": "View thumbnail",
-            })
-    elif has_thumbnail:
+    # 3. Title present
+    # Check QA report's c_metadata_complete check, then fall back to topic_brief
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+    topic_brief = load_disk_pkg(ep_dir, "topic_brief", episode_id)
+    title_text  = topic_brief.get("episode_title") or None
+    if not title_text:
+        sp = load_disk_pkg(ep_dir, "script_package", episode_id)
+        title_text = (sp.get("episode_metadata") or {}).get("topic") or None
+    # Also check QA metadata check
+    _meta_check = next(
+        (c for c in (qa_summary.get("checks") or [])
+         if c.get("check_id") == "c_metadata_complete" and c.get("status") == "pass"),
+        None,
+    )
+    if _meta_check or title_text:
         checklist.append({
-            "label":        "Thumbnail brand check",
+            "label":        "Title",
+            "status":       "pass",
+            "detail":       (f'"{title_text[:60]}"' if title_text else "Title confirmed present by QA"),
+            "action_url":   f"/episode/{episode_id}?tab=titles",
+            "action_label": "View titles",
+        })
+    else:
+        checklist.append({
+            "label":        "Title",
             "status":       "missing",
-            "detail":       "Thumbnail file present — no brand check run",
+            "detail":       "No title found in topic brief or script package",
+            "action_url":   f"/episode/{episode_id}?tab=titles",
+            "action_label": "View titles",
+        })
+
+    # 4. Description present
+    _desc_check = next(
+        (c for c in (qa_summary.get("checks") or [])
+         if c.get("check_id") == "c_description_present" and c.get("status") == "pass"),
+        None,
+    )
+    logline = topic_brief.get("logline") or None
+    if _desc_check:
+        checklist.append({
+            "label":        "Description",
+            "status":       "pass",
+            "detail":       "Description confirmed present by QA",
+            "action_url":   None,
+            "action_label": None,
+        })
+    elif logline:
+        checklist.append({
+            "label":        "Description",
+            "status":       "warn",
+            "detail":       "Topic logline available as description draft (not yet in publish metadata)",
             "action_url":   None,
             "action_label": None,
         })
     else:
         checklist.append({
-            "label":        "Thumbnail brand check",
-            "status":       "fail",
-            "detail":       "No thumbnail file",
+            "label":        "Description",
+            "status":       "missing",
+            "detail":       "No description found — required for YouTube publish",
             "action_url":   None,
             "action_label": None,
         })
 
-    # 4. Captions
+    # 5. Thumbnail file (separate from brand approval — file existence only)
+    has_thumbnail = bool(artifacts.get("has_thumbnail"))
+    if has_thumbnail:
+        checklist.append({
+            "label":        "Thumbnail file",
+            "status":       "pass",
+            "detail":       "Thumbnail file present on disk",
+            "action_url":   f"/episode/{episode_id}?tab=thumbnails",
+            "action_label": "View",
+        })
+    else:
+        checklist.append({
+            "label":        "Thumbnail file",
+            "status":       "fail",
+            "detail":       "No thumbnail file on disk",
+            "action_url":   None,
+            "action_label": None,
+        })
+
+    # 6. Thumbnail brand approval (TIG) — clearly distinct from file existence
+    if not has_thumbnail:
+        checklist.append({
+            "label":        "Thumbnail brand approval (TIG)",
+            "status":       "fail",
+            "detail":       "Cannot check — no thumbnail file",
+            "action_url":   None,
+            "action_label": None,
+        })
+    elif thumbnail_pkg:
+        tig = thumbnail_pkg.get("thumbnail_identity_report") or {}
+        tig_verdict = (tig.get("verdict") or "").upper()
+        if tig_verdict == "BLOCKED":
+            violations = tig.get("violations") or []
+            blocking   = [v for v in violations if (v.get("severity") or "").upper() == "BLOCKING"]
+            detail     = f"File exists but TIG rejected — {blocking[0]['description'][:70]}" if blocking else "File exists but TIG rejected"
+            checklist.append({
+                "label":        "Thumbnail brand approval (TIG)",
+                "status":       "fail",
+                "detail":       detail,
+                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
+                "action_label": "View violations",
+            })
+        elif tig_verdict == "WARNING":
+            n_warn = tig.get("warning_count", 0)
+            checklist.append({
+                "label":        "Thumbnail brand approval (TIG)",
+                "status":       "warn",
+                "detail":       f"File exists — TIG approved with {n_warn} warning(s)",
+                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
+                "action_label": "View warnings",
+            })
+        elif tig_verdict == "APPROVED":
+            checklist.append({
+                "label":        "Thumbnail brand approval (TIG)",
+                "status":       "pass",
+                "detail":       "File exists — approved by brand identity check",
+                "action_url":   None,
+                "action_label": None,
+            })
+        else:
+            checklist.append({
+                "label":        "Thumbnail brand approval (TIG)",
+                "status":       "missing",
+                "detail":       "File exists — no TIG check recorded",
+                "action_url":   f"/episode/{episode_id}?tab=thumbnails",
+                "action_label": "View thumbnail",
+            })
+    else:
+        checklist.append({
+            "label":        "Thumbnail brand approval (TIG)",
+            "status":       "missing",
+            "detail":       "File exists — no thumbnail package found (TIG not run)",
+            "action_url":   None,
+            "action_label": None,
+        })
+
+    # 7. Captions
     has_captions = bool(artifacts.get("has_captions"))
     checklist.append({
         "label":        "Captions (SRT)",
@@ -1823,7 +1915,7 @@ def _build_disk_publish_checklist(
         "action_label": None,
     })
 
-    # 5. YouTube credential
+    # 8. YouTube credential
     try:
         from hypogeum.credential_manager import list_secret_profiles
         yt_creds = list_secret_profiles(provider="youtube", db_path=_db_path())
@@ -1832,9 +1924,9 @@ def _build_disk_publish_checklist(
             checklist.append({
                 "label":        "YouTube credential",
                 "status":       "warn",
-                "detail":       "Credential saved — token format checked only, not verified via API",
+                "detail":       "Credential saved — token format checked only, not verified via live API",
                 "action_url":   "/platforms/connect/youtube",
-                "action_label": "Verify credential",
+                "action_label": "Verify",
             })
         else:
             checklist.append({
@@ -1853,7 +1945,7 @@ def _build_disk_publish_checklist(
             "action_label": "Connect YouTube",
         })
 
-    # 6. Release gate summary
+    # 9. Release gate summary
     release_status = ep_state.get("release_status")
     release_label  = ep_state.get("release_blocker_label")
     if release_status == REL_READY:

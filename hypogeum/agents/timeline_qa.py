@@ -139,10 +139,16 @@ def run_timeline_qa(
 
     # ------------------------------------------------------------------
     # Check B — Freeze/Hold Duration
+    #
+    # Only evaluate entries where a clip EXISTS on disk. Missing clips are
+    # already surfaced in the scenes_missing list and in the clip_availability
+    # check — double-counting them here produces spurious hold failures.
     # ------------------------------------------------------------------
     hold_offenders: list[dict] = []
 
     for entry in all_entries:
+        if entry.clip_path is None or not entry.clip_path.exists():
+            continue  # missing clip — already captured in scenes_missing
         hold_seconds = max(0.0, entry.duration_seconds - entry.clip_duration_seconds)
         if hold_seconds > 0.5:  # ignore sub-second rounding noise
             hold_offenders.append({

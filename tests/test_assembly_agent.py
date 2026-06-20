@@ -2031,14 +2031,18 @@ class TestHoldBasedAssembly:
     Unit tests for _build_ffmpeg_concat_command are in test_video_renderer.py.
     """
 
-    def test_qa_duration_coverage_check_fails_when_coverage_gap_exceeds_threshold(self, tmp_path):
+    def test_qa_duration_coverage_missing_clip_does_not_cause_fail(self, tmp_path):
         """
-        When missing clips leave a narration coverage gap > 5s,
-        the c_duration_coverage QA check status is 'fail'.
+        A missing clip does NOT cause c_duration_coverage to fail.
+        Missing clips are already captured in scenes_missing and clip_availability_rate.
+        Only an existing-but-too-short clip with hold > 20s causes a failure.
+
         Setup: 5 scenes (2 main + 3 shorts), only 1 main clip present.
         Main narration: b_001=4.5s (clip present) + b_002=5.5s (clip MISSING).
-        Gap = 5.5s > 5.0s → fail.
-        Clip availability: 4/5 = 80% → assembly proceeds (not halted).
+        Hold for sc_001: max(0, 4.5 - actual_clip_dur). Probe fails on fake file → 0 hold.
+        Missing sc_002 contributes 0 to hold_gap (skip in existing-clips computation).
+        → c_duration_coverage should be 'pass' (no hold gap from existing clips > 20s).
+        Clip availability: 4/5 = 80% → assembly proceeds (above 60% threshold).
         """
         cfg = _make_config()
         visual = _make_visual_package()
@@ -2079,9 +2083,10 @@ class TestHoldBasedAssembly:
             None,
         )
         assert dur_check is not None, "c_duration_coverage check missing from qa_report"
-        # Gap = 5.5s (b_002 beat, clip missing) > 5.0 threshold → fail
-        assert dur_check.get("status") == "fail", (
-            f"Expected fail; detail: {dur_check.get('detail')}"
+        # Missing clip (sc_002) must NOT drive duration_coverage to 'fail'.
+        # It is already captured in scenes_missing / clip_availability_rate.
+        assert dur_check.get("status") in ("pass", "warn"), (
+            f"Missing clip should not cause duration_coverage fail; got: {dur_check}"
         )
 
     def test_qa_duration_coverage_check_passes_when_all_clips_present(self, tmp_path):

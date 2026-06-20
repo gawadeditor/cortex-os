@@ -180,21 +180,36 @@ class TestProductionReadyRules:
         assert verdict["overall_verdict"] == "CONDITIONAL"
         assert any("clip_availability" in w for w in verdict["warnings"])
 
-    def test_duration_gap_over_5s_blocks_production_ready(self):
-        """duration_coverage_gap_seconds > 5.0 → production_ready=False."""
-        manifest = _make_manifest(coverage_gap=6.0)
+    def test_max_scene_hold_over_20s_blocks_production_ready(self):
+        """max_scene_hold_seconds > 20.0 → production_ready=False (aligned with Timeline QA threshold)."""
+        manifest = {**_make_manifest(), "max_scene_hold_seconds": 21.0, "duration_coverage_gap_seconds": 21.0}
         verdict = run_final_render_reviewer(manifest, "ep_test")
         assert verdict["production_ready"] is False
         assert any("duration_coverage" in f for f in verdict["failures"])
 
-    def test_duration_gap_under_5s_does_not_block(self):
-        """duration_coverage_gap_seconds ≤ 5.0 → production_ready not blocked by gap."""
-        manifest = _make_manifest(coverage_gap=3.0)
+    def test_max_scene_hold_under_20s_does_not_block(self):
+        """max_scene_hold_seconds <= 20.0 → production_ready not blocked."""
+        manifest = {**_make_manifest(), "max_scene_hold_seconds": 19.0, "duration_coverage_gap_seconds": 32.0}
         verdict = run_final_render_reviewer(manifest, "ep_test")
-        # Gap alone (≤5s) is a warning, not a failure
+        # Large aggregate gap but max single-scene hold is under threshold → warning only
         assert any("duration_coverage" in w for w in verdict["warnings"])
-        # production_ready still True (other checks pass)
         assert verdict["production_ready"] is True
+
+    def test_coverage_gap_without_max_hold_field_is_warning_only(self):
+        """Aggregate duration_coverage_gap > 5s without max_scene_hold_seconds is a warning (not failure)."""
+        manifest = _make_manifest(coverage_gap=6.0)  # no max_scene_hold_seconds field
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        # Without max_scene_hold field, falls back to coverage_gap (6.0s < 20s) → WARN only
+        assert any("duration_coverage" in w for w in verdict["warnings"])
+        assert verdict["production_ready"] is True
+
+    def test_duration_gap_zero_passes(self):
+        """duration_coverage_gap_seconds = 0 → no duration check failure or warning."""
+        manifest = _make_manifest(coverage_gap=0.0)
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        assert verdict["production_ready"] is True
+        assert not any("duration_coverage" in f for f in verdict["failures"])
+        assert not any("duration_coverage" in w for w in verdict["warnings"])
 
     def test_no_shorts_configured_passes(self):
         """Empty shorts_renders list → production_ready not blocked."""
@@ -412,20 +427,21 @@ class TestMusicCoverage:
 
 class TestDurationCoverage:
 
-    def test_gap_exactly_5s_is_warning_not_failure(self):
-        """Gap of exactly 5.0s is at the threshold — warn (not > 5.0 so not fail, but > 0 so warn)."""
-        manifest = _make_manifest(coverage_gap=5.0)
+    def test_gap_under_20s_is_warning_not_failure(self):
+        """Aggregate gap of 5.0s with no max_scene_hold → warning only (max_hold fallback < 20s)."""
+        manifest = _make_manifest(coverage_gap=5.0)  # no max_scene_hold_seconds → falls back to 5.0
         verdict = run_final_render_reviewer(manifest, "ep_test")
-        # 5.0 is not > 5.0 → doesn't fail; but 5.0 > 0.0 → warn
+        # max_hold falls back to coverage_gap=5.0 < 20.0 → warn only
         c_dur = next(c for c in verdict["checks"] if c["check_id"] == "c_duration_coverage")
         assert c_dur["status"] == "warn"
-        assert verdict["production_ready"] is True  # warn doesn't block
+        assert verdict["production_ready"] is True
 
-    def test_gap_5_001s_fails(self):
-        """Gap just over 5.0s triggers failure."""
-        manifest = _make_manifest(coverage_gap=5.001)
+    def test_max_scene_hold_over_20s_fails(self):
+        """max_scene_hold_seconds > 20.0 → failure (aligns with Timeline QA per-scene threshold)."""
+        manifest = {**_make_manifest(coverage_gap=21.0), "max_scene_hold_seconds": 21.0}
         verdict = run_final_render_reviewer(manifest, "ep_test")
         assert verdict["production_ready"] is False
+        assert any("duration_coverage" in f for f in verdict["failures"])
 
     def test_zero_gap_passes(self):
         manifest = _make_manifest(coverage_gap=0.0)
@@ -671,6 +687,7 @@ class TestBuildRenderOutputManifestHelper:
         assert manifest["main_render"]["file_size_bytes"] == 0
 
     def test_coverage_gap_computed_correctly(self, tmp_path):
+        """duration_coverage_gap_seconds reflects hold_gap_dur (hold from existing clips), not total-covered."""
         main = tmp_path / "main.mp4"
         main.write_bytes(b"\x00" * 100)
         manifest = _build_render_output_manifest(
@@ -684,6 +701,7 @@ class TestBuildRenderOutputManifestHelper:
             ffmpeg_errors=[],
             total_narration_dur=115.0,
             covered_dur=110.0,
+            hold_gap_dur=5.0,  # explicit hold gap from existing-but-short clips
         )
         assert manifest["duration_coverage_gap_seconds"] == 5.0
 

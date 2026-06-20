@@ -162,6 +162,24 @@ def render_episode(
     if render_status == "success" and clip_availability_rate < 1.0:
         render_status = "partial"
 
+    # duration_coverage_gap = aggregate hold time from clips that EXIST but are
+    # shorter than their narration beat. Missing clips are already in missing_clips
+    # and clip_availability_rate — including their time in the gap double-counts.
+    # max_scene_hold_seconds = worst-case single-scene hold for existing clips,
+    # used by the Final Render Reviewer to match the Timeline QA per-scene threshold.
+    existing_holds = [
+        max(0.0, e.duration_seconds - e.clip_duration_seconds)
+        for e in main_timeline
+        if e.clip_path is not None and e.clip_path.exists()
+    ]
+    hold_gap_dur = sum(existing_holds)
+    max_scene_hold = max(existing_holds) if existing_holds else 0.0
+    covered_dur = sum(
+        e.duration_seconds
+        for e in main_timeline
+        if e.clip_path is not None and e.clip_path.exists()
+    )
+
     return _build_render_output_manifest(
         episode_id=episode_id,
         render_status=render_status,
@@ -172,11 +190,9 @@ def render_episode(
         sections_without_music=sections_without_music,
         ffmpeg_errors=ffmpeg_errors,
         total_narration_dur=sum_timeline_duration(main_timeline),
-        covered_dur=sum(
-            e.duration_seconds
-            for e in main_timeline
-            if e.clip_path is not None and e.clip_path.exists()
-        ),
+        covered_dur=covered_dur,
+        hold_gap_dur=hold_gap_dur,
+        max_scene_hold=max_scene_hold,
     )
 
 
@@ -502,6 +518,8 @@ def _build_render_output_manifest(
     ffmpeg_errors: List[str],
     total_narration_dur: float,
     covered_dur: float,
+    hold_gap_dur: float = 0.0,
+    max_scene_hold: float = 0.0,
 ) -> dict:
     """
     Build the render_output_manifest — a factual record of what Video Renderer produced.
@@ -509,6 +527,12 @@ def _build_render_output_manifest(
     This manifest is the canonical input to Final Render Reviewer.
     Contains only file facts and render metrics; no QA verdicts.
     production_ready is NOT set here — that is Final Render Reviewer's responsibility.
+
+    duration_coverage_gap_seconds: aggregate hold time from clips that EXIST but are
+        shorter than their narration beat. Missing clips are not counted — they are
+        captured in missing_clips and clip_availability_rate.
+    max_scene_hold_seconds: worst-case single-scene hold for existing clips.
+        Used by the Final Render Reviewer alongside the Timeline QA per-scene threshold.
     """
     main_exists = main_output_path.exists() and main_output_path.stat().st_size > 0
     main_size   = main_output_path.stat().st_size if main_output_path.exists() else 0
@@ -523,8 +547,6 @@ def _build_render_output_manifest(
             "file_exists":      exists,
             "file_size_bytes":  size,
         })
-
-    coverage_gap = max(0.0, total_narration_dur - covered_dur)
 
     return {
         "manifest_id":               f"rom_{episode_id}",
@@ -541,7 +563,8 @@ def _build_render_output_manifest(
         "missing_clips":             missing_clips,
         "sections_without_music":    sections_without_music,
         "ffmpeg_errors":             ffmpeg_errors,
-        "duration_coverage_gap_seconds": round(coverage_gap, 3),
+        "duration_coverage_gap_seconds": round(hold_gap_dur, 3),
+        "max_scene_hold_seconds":        round(max_scene_hold, 3),
         "total_narration_seconds":       round(total_narration_dur, 3),
         "covered_narration_seconds":     round(covered_dur, 3),
         # Resolution/frame-rate facts — consumed by assembly_agent for Final Render Package

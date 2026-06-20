@@ -195,27 +195,37 @@ class TestCheckClipAspectRatio:
 # ---------------------------------------------------------------------------
 
 class TestCheckHoldDuration:
+    """Check B: hold_duration only applies to entries where a clip EXISTS on disk.
+    Missing clips (clip_path=None or absent) are excluded — they are already captured
+    in scenes_missing and clip_availability_rate. Use tmp_path fixtures to provide
+    real clip files so the disk-presence check works correctly."""
 
-    def test_hold_below_threshold_passes(self):
-        """hold_seconds = 5s → below 10s warn threshold → pass."""
-        entry = _make_entry(duration_seconds=13.0, clip_duration_seconds=8.0)
+    def test_hold_below_threshold_passes(self, tmp_path):
+        """hold_seconds = 5s (clip exists, narration > clip) → below 10s warn → pass."""
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=13.0, clip_duration_seconds=8.0, clip_path=clip)
         plan = _make_plan([entry])
         report = run_timeline_qa(plan, hold_warn_threshold_seconds=10.0)
         check = next(c for c in report["checks"] if c["check_id"] == "c_hold_duration")
         assert check["status"] == "pass"
 
-    def test_hold_above_warn_threshold_warns(self):
+    def test_hold_above_warn_threshold_warns(self, tmp_path):
         """hold_seconds = 14s (narration 22s − clip 8s) → exceeds 10s → warn."""
-        entry = _make_entry(duration_seconds=22.605, clip_duration_seconds=8.0)
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=22.605, clip_duration_seconds=8.0, clip_path=clip)
         plan = _make_plan([entry])
         report = run_timeline_qa(plan, hold_warn_threshold_seconds=10.0)
         check = next(c for c in report["checks"] if c["check_id"] == "c_hold_duration")
         assert check["status"] == "warn"
         assert len(report["hold_offenders"]) >= 1
 
-    def test_hold_above_fail_threshold_fails(self):
+    def test_hold_above_fail_threshold_fails(self, tmp_path):
         """hold_seconds = 25s → exceeds 20s fail threshold → fail."""
-        entry = _make_entry(duration_seconds=33.0, clip_duration_seconds=8.0)
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=33.0, clip_duration_seconds=8.0, clip_path=clip)
         plan = _make_plan([entry])
         report = run_timeline_qa(plan, hold_fail_threshold_seconds=20.0)
         check = next(c for c in report["checks"] if c["check_id"] == "c_hold_duration")
@@ -223,29 +233,53 @@ class TestCheckHoldDuration:
         assert report["overall_status"] == "fail"
         assert any("hold_duration" in f for f in report["failures"])
 
-    def test_hold_offenders_sorted_by_worst_first(self):
+    def test_missing_clip_not_counted_in_hold(self):
+        """Entry with clip_path=None is excluded from hold computation (ep_003 regression)."""
+        # Narration beat is 32s, spec clip would be 8s → 24s "hold" — but since clip
+        # is MISSING, it must NOT count as a hold failure.
+        entry = _make_entry(duration_seconds=32.357, clip_duration_seconds=8.0, clip_path=None)
+        plan = _make_plan([entry])
+        report = run_timeline_qa(plan, hold_fail_threshold_seconds=20.0)
+        check = next(c for c in report["checks"] if c["check_id"] == "c_hold_duration")
+        assert check["status"] == "pass", (
+            "Missing clip must not trigger hold_duration fail; "
+            f"got {check['status']}: {check['detail']}"
+        )
+        assert report["hold_offenders"] == []
+
+    def test_hold_offenders_sorted_by_worst_first(self, tmp_path):
         """Offenders list is sorted worst hold first."""
-        e1 = _make_entry(scene_id="sc_001", duration_seconds=30.0, clip_duration_seconds=8.0)
-        e2 = _make_entry(scene_id="sc_002", duration_seconds=20.0, clip_duration_seconds=8.0)
-        e3 = _make_entry(scene_id="sc_003", duration_seconds=25.0, clip_duration_seconds=8.0)
+        clips = []
+        for i in range(3):
+            c = tmp_path / f"clip_{i}.mp4"
+            c.write_bytes(b"FAKEVIDEO")
+            clips.append(c)
+        e1 = _make_entry(scene_id="sc_001", duration_seconds=30.0, clip_duration_seconds=8.0, clip_path=clips[0])
+        e2 = _make_entry(scene_id="sc_002", duration_seconds=20.0, clip_duration_seconds=8.0, clip_path=clips[1])
+        e3 = _make_entry(scene_id="sc_003", duration_seconds=25.0, clip_duration_seconds=8.0, clip_path=clips[2])
         plan = _make_plan([e1, e2, e3])
         report = run_timeline_qa(plan, hold_warn_threshold_seconds=5.0)
         holds = [h["hold_seconds"] for h in report["hold_offenders"]]
         assert holds == sorted(holds, reverse=True)
 
-    def test_hold_of_zero_not_in_offenders(self):
+    def test_hold_of_zero_not_in_offenders(self, tmp_path):
         """Entry where clip matches narration exactly → no offender."""
-        entry = _make_entry(duration_seconds=8.0, clip_duration_seconds=8.0)
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=8.0, clip_duration_seconds=8.0, clip_path=clip)
         plan = _make_plan([entry])
         report = run_timeline_qa(plan)
         assert report["hold_offenders"] == []
 
-    def test_hold_report_contains_scene_id_and_seconds(self):
+    def test_hold_report_contains_scene_id_and_seconds(self, tmp_path):
         """Offender dict includes scene_id, hold_seconds, duration_seconds, clip_duration_seconds."""
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
         entry = _make_entry(
             scene_id="sc_smoke_01",
             duration_seconds=22.605,
             clip_duration_seconds=8.0,
+            clip_path=clip,
         )
         plan = _make_plan([entry])
         report = run_timeline_qa(plan, hold_warn_threshold_seconds=10.0)

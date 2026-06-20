@@ -605,15 +605,19 @@ def run_assembly_agent(
 
     # Duration coverage — for assembly_qa_report checks only.
     # human_review_recommended and review_reasons come from Final Render Reviewer.
+    # Use max_scene_hold_seconds with the Timeline QA 20s threshold to stay consistent
+    # with timeline_qa Check B. The aggregate duration_coverage_gap may be large for
+    # partial renders; it is the per-scene maximum that determines severity.
     _total_narration_dur = render_manifest["total_narration_seconds"]
     _covered_dur = render_manifest["covered_narration_seconds"]
     _coverage_gap = render_manifest["duration_coverage_gap_seconds"]
-    _dur_check_status = "fail" if _coverage_gap > 5.0 else "pass"
+    _max_scene_hold = render_manifest.get("max_scene_hold_seconds", _coverage_gap) or _coverage_gap
+    _dur_check_status = "fail" if _max_scene_hold > 20.0 else "pass"
 
     # QA report overall_status
     if render_status == "failed" or _dur_check_status == "fail":
         qa_overall = "fail"
-    elif render_status == "partial" or sections_without_music or missing_clips:
+    elif render_status == "partial" or sections_without_music or missing_clips or _coverage_gap > 0:
         qa_overall = "warn"
     else:
         qa_overall = "pass"
@@ -669,7 +673,8 @@ def run_assembly_agent(
                     "detail": (
                         f"narration={_total_narration_dur:.1f}s "
                         f"covered={_covered_dur:.1f}s "
-                        f"gap={_coverage_gap:.1f}s"
+                        f"hold_gap={_coverage_gap:.1f}s "
+                        f"max_scene_hold={_max_scene_hold:.1f}s"
                     ),
                 },
             ],

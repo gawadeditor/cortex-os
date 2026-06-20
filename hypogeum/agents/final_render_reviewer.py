@@ -200,17 +200,34 @@ def run_final_render_reviewer(
 
     # ------------------------------------------------------------------
     # Check 5 — Duration coverage gap
+    #
+    # max_scene_hold_seconds is the worst-case single-scene hold (narration
+    # outlasting an existing clip). Aligned with Timeline QA's per-scene fail
+    # threshold (20s) so the two checks are consistent.
+    # duration_coverage_gap_seconds is the aggregate hold across all scenes —
+    # used as a warning when holds are present but none exceeds the fail threshold.
     # ------------------------------------------------------------------
     coverage_gap = render_output_manifest.get("duration_coverage_gap_seconds", 0.0) or 0.0
-    if coverage_gap > 5.0:
+    max_hold = render_output_manifest.get("max_scene_hold_seconds", coverage_gap) or coverage_gap
+
+    if max_hold > 20.0:
         _add_check(checks, "c_duration_coverage", "fail",
-                   f"duration_coverage_gap={coverage_gap:.1f}s > 5s threshold")
-        failures.append(f"duration_coverage: {coverage_gap:.1f}s gap exceeds 5s threshold")
+                   f"max_scene_hold={max_hold:.1f}s > 20s threshold "
+                   f"(aggregate_gap={coverage_gap:.1f}s)")
+        failures.append(
+            f"duration_coverage: max scene hold {max_hold:.1f}s exceeds 20s threshold"
+        )
         human_review_reasons.append("duration_coverage_gap")
     elif coverage_gap > 0.0:
         _add_check(checks, "c_duration_coverage", "warn",
-                   f"duration_coverage_gap={coverage_gap:.1f}s")
-        warnings.append(f"duration_coverage: minor gap of {coverage_gap:.1f}s")
+                   f"duration_coverage_gap={coverage_gap:.1f}s "
+                   f"(max_scene_hold={max_hold:.1f}s)")
+        warnings.append(
+            f"duration_coverage: aggregate hold gap {coverage_gap:.1f}s "
+            f"(max single-scene: {max_hold:.1f}s)"
+        )
+        if max_hold > 10.0:
+            human_review_reasons.append("duration_coverage_gap")
     else:
         _add_check(checks, "c_duration_coverage", "pass", "no duration coverage gap")
 

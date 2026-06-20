@@ -406,7 +406,15 @@ def _validate_thumbnail_generation_plan(p: dict) -> None:
     _req_str(p, s, "thumbnail_generation_plan_id")
     _req_str(p, s, "episode_id")
     main = _req_dict(p, s, "main_episode")
-    main_cands = _req_list(main, s, "ranked_candidates", path="main_episode", min_length=1)
+    raw_main_cands = main.get("ranked_candidates")
+    if not isinstance(raw_main_cands, list):
+        raise SchemaError(s, "main_episode.ranked_candidates", "must be a list")
+    if len(raw_main_cands) != 3:
+        raise SchemaError(
+            s, "main_episode.ranked_candidates",
+            f"must have exactly 3 entries for A/B/C testing (got {len(raw_main_cands)})"
+        )
+    main_cands = raw_main_cands
     for i, c in enumerate(main_cands):
         path = f"main_episode.ranked_candidates[{i}]"
         if not isinstance(c, dict):
@@ -415,19 +423,17 @@ def _validate_thumbnail_generation_plan(p: dict) -> None:
         _req_str(c, s, "image_prompt",  path=path)
         _req(c, s, "rank", int, path=path)
         _req_in(c, s, "aspect_ratio", ("16:9",), path=path)
-        # Rank-1 main episode candidate MUST have text_overlay (non-null) —
-        # ensures every published main episode thumbnail carries an on-screen hook.
-        if c.get("rank") == 1:
-            overlay = c.get("text_overlay")
-            if overlay is None:
-                raise SchemaError(
-                    s, f"{path}.text_overlay",
-                    "rank-1 main_episode candidate must have non-null text_overlay "
-                    "(title text is required for main episode thumbnails)"
-                )
-            _validate_text_overlay(overlay, s, f"{path}.text_overlay")
-        elif "text_overlay" in c and c["text_overlay"] is not None:
-            _validate_text_overlay(c["text_overlay"], s, f"{path}.text_overlay")
+        # ALL three main episode candidates MUST have non-null text_overlay —
+        # every candidate carries its own hook text so any of the three can be
+        # published without missing the on-screen title band.
+        overlay = c.get("text_overlay")
+        if overlay is None:
+            raise SchemaError(
+                s, f"{path}.text_overlay",
+                "all main_episode candidates must have non-null text_overlay "
+                "(hook text required on every generated candidate)"
+            )
+        _validate_text_overlay(overlay, s, f"{path}.text_overlay")
     shorts = _req_exact(p, s, "shorts", 3, allow_zero=True)
     for i, sh in enumerate(shorts):
         path = f"shorts[{i}]"
@@ -460,6 +466,23 @@ def _validate_thumbnail_package(p: dict) -> None:
             raise SchemaError(s, path, "each short_thumbnail must be a dict")
         _req_str(st, s, "short_id", path=path)
         _req_str(st, s, "asset_id", path=path)
+    # Validate candidates[] — the A/B/C set generated for dashboard display and QA.
+    # Must be present and non-empty; count may be less than 3 in smoke-test mode.
+    cands = p.get("candidates")
+    if cands is None:
+        raise SchemaError(s, "candidates", "missing required field")
+    if not isinstance(cands, list):
+        raise SchemaError(s, "candidates", "must be a list")
+    if len(cands) < 1:
+        raise SchemaError(s, "candidates", "must have at least 1 entry")
+    for i, c in enumerate(cands):
+        cpath = f"candidates[{i}]"
+        if not isinstance(c, dict):
+            raise SchemaError(s, cpath, "each candidate must be a dict")
+        _req_str(c, s, "candidate_id", path=cpath)
+        _req(c, s, "rank", int, path=cpath)
+        _req(c, s, "selected", bool, path=cpath)
+        _req_str(c, s, "status", path=cpath)
     _req_dict(p, s, "package_integrity")
     pi = p["package_integrity"]
     _req(pi, s, "production_ready", bool, path="package_integrity")

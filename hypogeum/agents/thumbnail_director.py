@@ -174,10 +174,28 @@ def run_thumbnail_director(
     short_results   = gen_result["short_results"]
 
     # ------------------------------------------------------------------
-    # Thumbnail QA (Task F) — post-generation checks before package build
+    # Build candidates list for dashboard A/B/C display and QA
     # ------------------------------------------------------------------
     main_thumb_local = _resolve_output_dir / "thumbnails" / "main.jpg"
-    # Partial package for candidate count check — full package built after TIG
+    package_candidates = []
+    for c in main_candidates:
+        overlay_raw = c.get("text_overlay") or {}
+        package_candidates.append({
+            "candidate_id":  c["candidate_id"],
+            "rank":          c["rank"],
+            "selected":      c["rank"] == 1 and c.get("ok", False),
+            "status":        "generated" if c.get("ok") else "failed",
+            "asset_id":      c.get("asset_id"),
+            "file_path":     c.get("file_path"),
+            "text_overlay":  overlay_raw.get("text") if isinstance(overlay_raw, dict) else overlay_raw,
+            "placement":     overlay_raw.get("placement") if isinstance(overlay_raw, dict) else None,
+            "visual_prompt": c.get("image_prompt"),
+            "ctr_rationale": c.get("ctr_rationale"),
+        })
+
+    # ------------------------------------------------------------------
+    # Thumbnail QA (Task F) — post-generation checks before package build
+    # ------------------------------------------------------------------
     _partial_pkg_for_qa = {
         "candidates":           package_candidates,
         "candidates_generated": sum(1 for c in package_candidates if c["status"] == "generated"),
@@ -229,27 +247,7 @@ def run_thumbnail_director(
                     fail_open=False,
                 )
 
-    # ------------------------------------------------------------------
-    # Build and validate Thumbnail Package
-    # ------------------------------------------------------------------
     production_ready = main_ok and all(ok for _, _, ok in short_results) and not tig_blocks
-
-    # Build candidates list for dashboard A/B/C display and QA
-    package_candidates = []
-    for c in main_candidates:
-        overlay_raw = c.get("text_overlay") or {}
-        package_candidates.append({
-            "candidate_id":  c["candidate_id"],
-            "rank":          c["rank"],
-            "selected":      c["rank"] == 1 and c.get("ok", False),
-            "status":        "generated" if c.get("ok") else "failed",
-            "asset_id":      c.get("asset_id"),
-            "file_path":     c.get("file_path"),
-            "text_overlay":  overlay_raw.get("text") if isinstance(overlay_raw, dict) else overlay_raw,
-            "placement":     overlay_raw.get("placement") if isinstance(overlay_raw, dict) else None,
-            "visual_prompt": c.get("image_prompt"),
-            "ctr_rationale": c.get("ctr_rationale"),
-        })
 
     thumbnail_package = {
         "thumbnail_package_id": f"tp_{episode_id}",

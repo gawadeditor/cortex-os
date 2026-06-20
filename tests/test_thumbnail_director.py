@@ -171,7 +171,11 @@ def _make_handoff_brief(episode_id: str = "ep_001") -> dict:
 
 
 def _make_generation_plan(episode_id: str = "ep_001") -> dict:
-    """Minimal valid thumbnail_generation_plan returned by Claude mock."""
+    """Minimal valid thumbnail_generation_plan returned by Claude mock.
+
+    Exactly 3 main_episode ranked_candidates (A/B/C contract).
+    All 3 must have non-null text_overlay per the brand contract.
+    """
     return {
         "thumbnail_generation_plan_id": f"tgp_{episode_id}",
         "episode_id": episode_id,
@@ -181,9 +185,9 @@ def _make_generation_plan(episode_id: str = "ep_001") -> dict:
                     "candidate_id": "tc_001",
                     "rank": 1,
                     "image_prompt": (
-                        "Tall pharaoh in white linen robes with double crown, "
-                        "seated on golden throne, ornate New Kingdom throne room, "
-                        "wide establishing shot, warm torchlight, solemn authority"
+                        "Ancient Egyptian interior vault, warm amber torchlight pooling "
+                        "on carved sandstone walls, near-black void surrounding, "
+                        "wide atmospheric depth, dramatic chiaroscuro, empty chamber"
                     ),
                     "aspect_ratio": "16:9",
                     "ctr_rationale": "Highest candidate_strength_score; curiosity gap served.",
@@ -193,13 +197,25 @@ def _make_generation_plan(episode_id: str = "ep_001") -> dict:
                     "candidate_id": "tc_002",
                     "rank": 2,
                     "image_prompt": (
-                        "Ancient Egyptian throne room in deep shadow, empty golden throne "
-                        "centre-frame, hieroglyph-covered columns, dramatic chiaroscuro, "
-                        "atmosphere of concealed power, wide establishing shot"
+                        "Ancient Egyptian temple ruins at dusk, crumbling pylons against "
+                        "near-black sky, warm golden-hour light raking across stone, "
+                        "deep atmospheric perspective, wide establishing shot"
                     ),
                     "aspect_ratio": "16:9",
-                    "ctr_rationale": "Symbolic fallback; strong curiosity gap.",
-                    "text_overlay": None,
+                    "ctr_rationale": "Exterior ruins variant; strong atmospheric depth.",
+                    "text_overlay": {"text": "Who was he hiding?", "placement": "bottom"},
+                },
+                {
+                    "candidate_id": "td_ep_001_style_C",
+                    "rank": 3,
+                    "image_prompt": (
+                        "Lone shadowed human silhouette standing at base of massive "
+                        "ancient stone pylon, near-black background, warm amber key "
+                        "light from one side, scale contrast emphasising monumental age"
+                    ),
+                    "aspect_ratio": "16:9",
+                    "ctr_rationale": "Silhouette scale contrast; reinforces mystery and grandeur.",
+                    "text_overlay": {"text": "Who was he hiding?", "placement": "bottom"},
                 },
             ]
         },
@@ -273,6 +289,11 @@ def _make_thumbnail_result(deliverable_id: str = "main", episode_id: str = "ep_0
     )
 
 
+def _success_side_effect(deliverable_id: str, episode_id: str = "ep_001", **kwargs) -> ThumbnailResult:
+    """Universal generate_thumbnail side-effect: succeeds for any deliverable_id."""
+    return _make_thumbnail_result(deliverable_id, episode_id)
+
+
 # ---------------------------------------------------------------------------
 # TestTDSuccess
 # ---------------------------------------------------------------------------
@@ -286,12 +307,7 @@ class TestTDSuccess:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             result = run_thumbnail_director(brief, config, "ep_001", tmp_path)
 
         assert isinstance(result, dict)
@@ -304,31 +320,23 @@ class TestTDSuccess:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
         assert result["package_integrity"]["production_ready"] is True
 
     def test_main_thumbnail_asset_id_in_package(self, tmp_path):
+        """rank-1 candidate (candidate_1) becomes the main_thumbnail asset_id."""
         config = make_config()
         plan = _make_generation_plan()
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
-        assert result["main_thumbnail"]["asset_id"] == "episodes/ep_001/thumbnails/main"
+        # rank-1 is generated as candidate_1; its asset_id becomes main_thumbnail
+        assert result["main_thumbnail"]["asset_id"] == "episodes/ep_001/thumbnails/candidate_1"
 
 
 # ---------------------------------------------------------------------------
@@ -343,12 +351,7 @@ class TestTDShortsDelivery:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
         assert len(result["short_thumbnails"]) == 3
@@ -359,12 +362,7 @@ class TestTDShortsDelivery:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
         short_ids = [s["short_id"] for s in result["short_thumbnails"]]
@@ -376,12 +374,7 @@ class TestTDShortsDelivery:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
         asset_ids = [s["asset_id"] for s in result["short_thumbnails"]]
@@ -404,12 +397,7 @@ class TestTDPackageWrite:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
         assert (tmp_path / "thumbnail_package_ep_001.json").exists()
@@ -420,12 +408,7 @@ class TestTDPackageWrite:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
         data = json.loads((tmp_path / "thumbnail_package_ep_001.json").read_text())
@@ -444,12 +427,7 @@ class TestTDSchemaValidation:
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=[
-                       _make_thumbnail_result("main"),
-                       _make_thumbnail_result("sh_01"),
-                       _make_thumbnail_result("sh_02"),
-                       _make_thumbnail_result("sh_03"),
-                   ]):
+                   side_effect=_success_side_effect):
             result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
         validate("thumbnail_package", result)  # must not raise
@@ -462,7 +440,7 @@ class TestTDSchemaValidation:
 class TestTDCandidateRanking:
 
     def test_rank_1_attempted_first(self, tmp_path):
-        """generate_thumbnail is called with rank-1 candidate's prompt first."""
+        """generate_thumbnail is called with candidate_1 (rank-1) first."""
         config = make_config()
         plan = _make_generation_plan()
         call_prompts = []
@@ -476,54 +454,50 @@ class TestTDCandidateRanking:
                    side_effect=capture_gen):
             run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
-        # First call must be for "main" using rank-1 prompt
-        assert call_prompts[0][0] == "main"
+        # In A/B/C model: first call is candidate_1 with rank-1 prompt
+        assert call_prompts[0][0] == "candidate_1"
         rank1_prompt = plan["main_episode"]["ranked_candidates"][0]["image_prompt"]
         assert call_prompts[0][1] == rank1_prompt
 
-    def test_rank_2_attempted_when_rank_1_fails_all_attempts(self, tmp_path):
-        """When rank-1 fails _MAX_ATTEMPTS_PER_CANDIDATE times, rank-2 is tried."""
+    def test_all_three_main_candidates_generated(self, tmp_path):
+        """All 3 main candidates (candidate_1/2/3) are always generated for A/B/C testing."""
         config = make_config()
-
-        # Plan with 2 main candidates
         plan = _make_generation_plan()
-        rank2_prompt = plan["main_episode"]["ranked_candidates"][1]["image_prompt"]
+        main_deliverable_ids = []
 
-        call_prompts = []
-
-        def capturing_gen(deliverable_id, image_prompt, **kwargs):
-            call_prompts.append((deliverable_id, image_prompt))
-            if deliverable_id == "main" and image_prompt != rank2_prompt:
-                raise MUAPIError("simulated failure")
+        def capture_gen(deliverable_id, **kwargs):
+            if deliverable_id.startswith("candidate_"):
+                main_deliverable_ids.append(deliverable_id)
             return _make_thumbnail_result(deliverable_id)
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
-                   side_effect=capturing_gen):
+                   side_effect=capture_gen):
             result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
-        # rank-2 prompt must have been called for "main"
-        main_prompts = [p for d, p in call_prompts if d == "main"]
-        assert rank2_prompt in main_prompts
+        # All 3 candidates generated regardless of success/failure
+        assert sorted(main_deliverable_ids) == ["candidate_1", "candidate_2", "candidate_3"]
         assert result["package_integrity"]["production_ready"] is True
 
-    def test_rank_1_success_stops_iteration(self, tmp_path):
-        """If rank-1 succeeds on attempt 1, rank-2 is never called."""
+    def test_rank_1_success_sets_production_ready(self, tmp_path):
+        """When all candidates succeed, production_ready reflects rank-1 success."""
         config = make_config()
         plan = _make_generation_plan()
-        call_count = {"main": 0}
+        call_count = {"candidate": 0}
 
         def counting_gen(deliverable_id, **kwargs):
-            if deliverable_id == "main":
-                call_count["main"] += 1
+            if deliverable_id.startswith("candidate_"):
+                call_count["candidate"] += 1
             return _make_thumbnail_result(deliverable_id)
 
         with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
              patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
                    side_effect=counting_gen):
-            run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
+            result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
-        assert call_count["main"] == 1  # only rank-1, first attempt
+        # All 3 candidates generated (one per main candidate)
+        assert call_count["candidate"] == 3
+        assert result["package_integrity"]["production_ready"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +574,8 @@ class TestTDAllCandidatesFail:
         plan = _make_generation_plan()
 
         def fail_main(deliverable_id, **kwargs):
-            if deliverable_id == "main":
+            # In A/B/C model, main candidates are candidate_1/2/3 not "main"
+            if deliverable_id.startswith("candidate_"):
                 raise MUAPIError("main generation failed")
             return _make_thumbnail_result(deliverable_id)
 
@@ -784,7 +759,7 @@ class TestTDGenerateThumbnailArgs:
         main_aspect_ratios = []
 
         def capture(deliverable_id, aspect_ratio, **kwargs):
-            if deliverable_id == "main":
+            if deliverable_id.startswith("candidate_"):
                 main_aspect_ratios.append(aspect_ratio)
             return _make_thumbnail_result(deliverable_id)
 
@@ -793,7 +768,9 @@ class TestTDGenerateThumbnailArgs:
                    side_effect=capture):
             run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
 
-        assert main_aspect_ratios == ["16:9"]
+        # All 3 main candidates use 16:9
+        assert all(ar == "16:9" for ar in main_aspect_ratios)
+        assert len(main_aspect_ratios) == 3
 
     def test_shorts_use_9_16_aspect_ratio(self, tmp_path):
         config = make_config()
@@ -801,7 +778,7 @@ class TestTDGenerateThumbnailArgs:
         short_aspect_ratios = []
 
         def capture(deliverable_id, aspect_ratio, **kwargs):
-            if deliverable_id != "main":
+            if deliverable_id.startswith("sh_"):
                 short_aspect_ratios.append(aspect_ratio)
             return _make_thumbnail_result(deliverable_id)
 
@@ -914,6 +891,37 @@ class TestThumbnailGenerationPlanSchema:
         with pytest.raises(SchemaError):
             validate("thumbnail_generation_plan", p)
 
+    def test_main_candidates_exactly_2_raises(self):
+        """Fewer than 3 main candidates violates the A/B/C contract."""
+        p = self._make_valid_plan()
+        p["main_episode"]["ranked_candidates"] = p["main_episode"]["ranked_candidates"][:2]
+        with pytest.raises(SchemaError, match="exactly 3"):
+            validate("thumbnail_generation_plan", p)
+
+    def test_main_candidates_exactly_4_raises(self):
+        """More than 3 main candidates also violates the A/B/C contract."""
+        p = self._make_valid_plan()
+        extra = dict(p["main_episode"]["ranked_candidates"][0])
+        extra["candidate_id"] = "tc_extra"
+        extra["rank"] = 4
+        p["main_episode"]["ranked_candidates"].append(extra)
+        with pytest.raises(SchemaError, match="exactly 3"):
+            validate("thumbnail_generation_plan", p)
+
+    def test_all_main_candidates_must_have_text_overlay(self):
+        """rank-2 with null text_overlay must raise — all 3 are required to have it."""
+        p = self._make_valid_plan()
+        p["main_episode"]["ranked_candidates"][1]["text_overlay"] = None
+        with pytest.raises(SchemaError, match="text_overlay"):
+            validate("thumbnail_generation_plan", p)
+
+    def test_rank_1_text_overlay_still_required(self):
+        """rank-1 null text_overlay is still rejected (baseline regression)."""
+        p = self._make_valid_plan()
+        p["main_episode"]["ranked_candidates"][0]["text_overlay"] = None
+        with pytest.raises(SchemaError, match="text_overlay"):
+            validate("thumbnail_generation_plan", p)
+
 
 # ---------------------------------------------------------------------------
 # TestTDSmokeTestMode — 1-candidate cap when SMOKE_TEST_MODE=true
@@ -974,8 +982,8 @@ class TestTDSmokeTestMode:
     def test_smoke_mode_caps_to_one_candidate(self, tmp_path):
         cfg = _make_smoke_td_config()
         plan = _make_generation_plan()
-        # Ensure the plan has 2 candidates
-        assert len(plan["main_episode"]["ranked_candidates"]) == 2
+        # Ensure the plan has 3 candidates (A/B/C contract)
+        assert len(plan["main_episode"]["ranked_candidates"]) == 3
 
         result_plan = self._run_td(cfg, plan, tmp_path)
         assert len(result_plan["main_episode"]["ranked_candidates"]) == 1
@@ -990,10 +998,10 @@ class TestTDSmokeTestMode:
     def test_smoke_mode_off_does_not_cap(self, tmp_path):
         cfg = make_config()  # SMOKE_TEST_MODE defaults to False
         plan = _make_generation_plan()
-        assert len(plan["main_episode"]["ranked_candidates"]) == 2
+        assert len(plan["main_episode"]["ranked_candidates"]) == 3
 
         result_plan = self._run_td(cfg, plan, tmp_path)
-        assert len(result_plan["main_episode"]["ranked_candidates"]) == 2
+        assert len(result_plan["main_episode"]["ranked_candidates"]) == 3
 
 
 # ---------------------------------------------------------------------------

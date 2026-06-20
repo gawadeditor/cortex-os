@@ -402,6 +402,11 @@ def _thumbnail_package() -> dict:
             {"short_id": "sh_003", "asset_id": "episodes/ep_001/thumbnails/sh_003.jpg",
              "format": "9:16"},
         ],
+        "candidates": [
+            {"candidate_id": "tc_001", "rank": 1, "selected": True,  "status": "generated"},
+            {"candidate_id": "tc_002", "rank": 2, "selected": False, "status": "generated"},
+            {"candidate_id": "tc_003", "rank": 3, "selected": False, "status": "failed"},
+        ],
         "package_integrity": {"production_ready": True},
     }
 
@@ -1264,6 +1269,42 @@ class TestThumbnailPackage:
     def test_production_ready_must_be_bool(self):
         p = copy.deepcopy(_thumbnail_package())
         p["package_integrity"]["production_ready"] = 1
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_missing_candidates_raises(self):
+        """thumbnail_package must include candidates[] for A/B/C dashboard display."""
+        with pytest.raises(SchemaError, match="candidates"):
+            validate(self.S, _drop(_thumbnail_package(), "candidates"))
+
+    def test_empty_candidates_raises(self):
+        """candidates[] must have at least 1 entry."""
+        p = copy.deepcopy(_thumbnail_package())
+        p["candidates"] = []
+        with pytest.raises(SchemaError, match="candidates"):
+            validate(self.S, p)
+
+    def test_candidate_missing_candidate_id_raises(self):
+        p = copy.deepcopy(_thumbnail_package())
+        del p["candidates"][0]["candidate_id"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_candidate_missing_rank_raises(self):
+        p = copy.deepcopy(_thumbnail_package())
+        del p["candidates"][1]["rank"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_candidate_missing_selected_raises(self):
+        p = copy.deepcopy(_thumbnail_package())
+        del p["candidates"][0]["selected"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_candidate_missing_status_raises(self):
+        p = copy.deepcopy(_thumbnail_package())
+        del p["candidates"][2]["status"]
         with pytest.raises(SchemaError):
             validate(self.S, p)
 

@@ -15,7 +15,14 @@ Public API
     sync_disk_episode_to_db(episode_id, assets_root=None, db_path=None) -> dict
     sync_all_disk_episodes_to_db(assets_root=None, db_path=None)        -> list[dict]
 
-    _infer_episode_status(qa_pkg, bga_pkgs, artifacts) -> str
+    infer_episode_status(qa_pkg, bga_pkgs, artifacts)    -> str
+    load_disk_pkg(ep_dir, stem, episode_id)               -> dict
+    episode_title_from_disk(ep_dir, episode_id)           -> str | None
+    extract_total_cost(ep_dir, episode_id)                -> float | None
+    extract_render_duration_ms(ep_dir, episode_id)        -> int | None
+    extract_scene_count(ep_dir, episode_id)               -> int
+    extract_created_at(ep_dir, episode_id)                -> str
+    SYNTHETIC_STAGES                                      -> list[(stage_name, group_label, pkg_stem)]
 
 Status semantics
 ----------------
@@ -29,7 +36,6 @@ Status semantics
 from __future__ import annotations
 
 import json
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -41,7 +47,7 @@ _DEFAULT_DB      = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 # Stages we synthesise from disk packages so the production tab isn't empty.
 # Each entry maps (stage_name, group_label, package_stem) — package_stem is
 # used only for a cost comment; we can't recover per-stage costs from disk.
-_SYNTHETIC_STAGES = [
+SYNTHETIC_STAGES = [
     ("research_director",       "Research",    "research_package"),
     ("narrative_architect",     "Script",      "narrative_package"),
     ("script_engine",           "Script",      "script_package"),
@@ -57,7 +63,7 @@ _SYNTHETIC_STAGES = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load(ep_dir: Path, stem: str, episode_id: str) -> dict:
+def load_disk_pkg(ep_dir: Path, stem: str, episode_id: str) -> dict:
     """Read <stem>_<episode_id>.json; also tries <stem>.json. Returns {} on error."""
     for name in (f"{stem}_{episode_id}.json", f"{stem}.json"):
         p = ep_dir / name
@@ -69,11 +75,15 @@ def _load(ep_dir: Path, stem: str, episode_id: str) -> dict:
     return {}
 
 
+# Private alias kept for internal use within this module
+_load = load_disk_pkg
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _episode_title(ep_dir: Path, episode_id: str) -> Optional[str]:
+def episode_title_from_disk(ep_dir: Path, episode_id: str) -> Optional[str]:
     """Best available episode title from disk packages."""
     for stem in ("topic_brief", "narrative_package", "script_package"):
         pkg = _load(ep_dir, stem, episode_id)
@@ -84,7 +94,7 @@ def _episode_title(ep_dir: Path, episode_id: str) -> Optional[str]:
     return None
 
 
-def _infer_episode_status(
+def infer_episode_status(
     qa_pkg: dict,
     bga_pkgs: list[dict],
     artifacts: dict,
@@ -115,13 +125,12 @@ def _infer_episode_status(
         if outcome == "BLOCKED" or blocking > 0 or has_blocking_violation:
             return "needs_review"
 
-    # Check QA verdict
-    qa_verdict = (qa_pkg.get("verdict") or "").upper()
-    qa_approved = bool(qa_pkg.get("approved"))
-
+    # Check QA verdict — guard must come before any attribute access
     if not qa_pkg:
-        # No QA report at all — render exists but unverified
         return "needs_review"
+
+    qa_verdict  = (qa_pkg.get("verdict") or "").upper()
+    qa_approved = bool(qa_pkg.get("approved"))
 
     if not qa_approved:
         return "needs_review"
@@ -132,7 +141,7 @@ def _infer_episode_status(
     return "complete"
 
 
-def _extract_total_cost(ep_dir: Path, episode_id: str) -> Optional[float]:
+def extract_total_cost(ep_dir: Path, episode_id: str) -> Optional[float]:
     """
     Sum estimated spend from finance authorization packages.
     Falls back to 0.0 if no finance package found.
@@ -148,7 +157,7 @@ def _extract_total_cost(ep_dir: Path, episode_id: str) -> Optional[float]:
     return round(total, 4) if found else None
 
 
-def _extract_render_duration_ms(ep_dir: Path, episode_id: str) -> Optional[int]:
+def extract_render_duration_ms(ep_dir: Path, episode_id: str) -> Optional[int]:
     """Extract episode video duration in milliseconds from final_render_package."""
     pkg = _load(ep_dir, "final_render_package", episode_id)
     ep_render = pkg.get("episode_render") or {}
@@ -165,7 +174,7 @@ def _extract_render_duration_ms(ep_dir: Path, episode_id: str) -> Optional[int]:
     return None
 
 
-def _extract_scene_count(ep_dir: Path, episode_id: str) -> int:
+def extract_scene_count(ep_dir: Path, episode_id: str) -> int:
     """Count scenes from final_render_package or script_package."""
     pkg = _load(ep_dir, "final_render_package", episode_id)
     ep_render = pkg.get("episode_render") or {}
@@ -177,7 +186,7 @@ def _extract_scene_count(ep_dir: Path, episode_id: str) -> int:
     return len(segs)
 
 
-def _extract_created_at(ep_dir: Path, episode_id: str) -> str:
+def extract_created_at(ep_dir: Path, episode_id: str) -> str:
     """
     Best available creation timestamp. Falls back to directory mtime.
     """
@@ -251,12 +260,12 @@ def sync_disk_episode_to_db(
         "has_narration": has_narration,
     }
 
-    status     = _infer_episode_status(qa_pkg, bga_pkgs, artifacts)
-    title      = _episode_title(ep_dir, episode_id)
-    created_at = _extract_created_at(ep_dir, episode_id)
-    cost_usd   = _extract_total_cost(ep_dir, episode_id)
-    dur_ms     = _extract_render_duration_ms(ep_dir, episode_id)
-    scene_cnt  = _extract_scene_count(ep_dir, episode_id)
+    status     = infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+    title      = episode_title_from_disk(ep_dir, episode_id)
+    created_at = extract_created_at(ep_dir, episode_id)
+    cost_usd   = extract_total_cost(ep_dir, episode_id)
+    dur_ms     = extract_render_duration_ms(ep_dir, episode_id)
+    scene_cnt  = extract_scene_count(ep_dir, episode_id)
 
     # ── Synthetic run_id ─────────────────────────────────────────────────────
     # If a real run was never recorded, create a deterministic synthetic id
@@ -316,7 +325,7 @@ def sync_disk_episode_to_db(
         ).fetchone()[0]
 
         if existing_stage_count == 0:
-            for stage_name, _group, pkg_stem in _SYNTHETIC_STAGES:
+            for stage_name, _group, pkg_stem in SYNTHETIC_STAGES:
                 pkg = _load(ep_dir, pkg_stem, episode_id)
                 stage_exists = bool(pkg)
                 if not stage_exists:

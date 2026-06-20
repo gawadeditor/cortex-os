@@ -168,6 +168,14 @@ from hypogeum.episode_artifacts import (
 from hypogeum.disk_sync import (
     sync_disk_episode_to_db,
     sync_all_disk_episodes_to_db,
+    infer_episode_status,
+    load_disk_pkg,
+    episode_title_from_disk,
+    extract_total_cost,
+    extract_render_duration_ms,
+    extract_scene_count,
+    extract_created_at,
+    SYNTHETIC_STAGES,
 )
 
 # ---------------------------------------------------------------------------
@@ -1525,17 +1533,16 @@ _DISK_STATUS_LABELS = {
 
 def _disk_episode_status(episode_id: str, artifacts: dict) -> str:
     """Derive canonical status from disk packages using disk_sync logic."""
-    from hypogeum.disk_sync import _infer_episode_status, _load
     ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
-    qa_pkg = _load(ep_dir, "qa_approval_report", episode_id)
+    qa_pkg = load_disk_pkg(ep_dir, "qa_approval_report", episode_id)
     if not qa_pkg:
-        qa_pkg = _load(ep_dir, "qa_report", episode_id)
+        qa_pkg = load_disk_pkg(ep_dir, "qa_report", episode_id)
     bga_pkgs = []
     for pn in (1, 2):
-        pkg = _load(ep_dir, f"bga_compliance_report_p{pn}", episode_id)
+        pkg = load_disk_pkg(ep_dir, f"bga_compliance_report_p{pn}", episode_id)
         if pkg:
             bga_pkgs.append(pkg)
-    return _infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+    return infer_episode_status(qa_pkg, bga_pkgs, artifacts)
 
 
 def _disk_resume_actions(episode_id: str, artifacts: dict) -> dict:
@@ -1547,7 +1554,6 @@ def _disk_resume_actions(episode_id: str, artifacts: dict) -> dict:
       show_rebuild_assembly  = render missing OR (qa stale AND artifacts changed)
       show_download_render   = render exists
     """
-    from hypogeum.disk_sync import _load
     ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
 
     has_render    = bool(artifacts.get("has_render"))
@@ -1555,7 +1561,7 @@ def _disk_resume_actions(episode_id: str, artifacts: dict) -> dict:
 
     # Narration complete = narration package exists AND segments are generated
     narration_complete = False
-    nar_pkg = _load(ep_dir, "narration_package", episode_id)
+    nar_pkg = load_disk_pkg(ep_dir, "narration_package", episode_id)
     if nar_pkg:
         segs = nar_pkg.get("narration_segments") or []
         narration_complete = any(
@@ -1589,46 +1595,48 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
     status_label = _DISK_STATUS_LABELS.get(status, status.replace("_", " ").title())
 
     # Extract cost and duration from finance/render packages
-    from hypogeum.disk_sync import (
-        _extract_total_cost, _extract_render_duration_ms,
-        _extract_scene_count, _extract_created_at,
-    )
     ep_dir     = _ASSETS_ROOT_PATH / "episodes" / episode_id
-    cost_usd   = _extract_total_cost(ep_dir, episode_id)
-    dur_ms     = _extract_render_duration_ms(ep_dir, episode_id)
-    scene_cnt  = _extract_scene_count(ep_dir, episode_id)
-    created_at = _extract_created_at(ep_dir, episode_id)
+    cost_usd   = extract_total_cost(ep_dir, episode_id)
+    dur_ms     = extract_render_duration_ms(ep_dir, episode_id)
+    scene_cnt  = extract_scene_count(ep_dir, episode_id)
+    created_at = extract_created_at(ep_dir, episode_id)
 
-    from hypogeum.episode_detail import _fmt_duration
-    run_dur_fmt = _fmt_duration(dur_ms) if dur_ms else None
+    run_dur_fmt = fmt_duration(dur_ms) if dur_ms else None
 
-    # Build synthetic stage groups from discovered packages
-    from hypogeum.disk_sync import _SYNTHETIC_STAGES, _load as _dload
-    stage_groups = []
-    for stage_name, group_label, pkg_stem in _SYNTHETIC_STAGES:
-        pkg = _dload(ep_dir, pkg_stem, episode_id)
+    # Build synthetic stage groups from discovered packages.
+    # Multiple stages sharing a group_label (Script, Visuals) must be merged
+    # into one group entry — not appended as separate rows.
+    _groups_by_label: dict[str, dict] = {}
+    for stage_name, group_label, pkg_stem in SYNTHETIC_STAGES:
+        pkg = load_disk_pkg(ep_dir, pkg_stem, episode_id)
         if not pkg:
             continue
-        stage_groups.append({
-            "group_name":        group_label,
-            "status":            "completed",
-            "stage_count":       1,
-            "total_duration_ms": dur_ms,
-            "duration_fmt":      run_dur_fmt or "—",
-            "total_cost_usd":    0.0,
-            "error_message":     None,
-            "stages": [{
-                "stage_exec_id": f"disk_{episode_id}_{stage_name}",
-                "stage_name":    stage_name,
-                "status":        "completed",
-                "started_at":    created_at,
-                "completed_at":  created_at,
-                "duration_ms":   dur_ms,
-                "duration_fmt":  run_dur_fmt or "—",
-                "cost_usd":      None,
-                "error_hint":    None,
-            }],
-        })
+        stage_row = {
+            "stage_exec_id": f"disk_{episode_id}_{stage_name}",
+            "stage_name":    stage_name,
+            "status":        "completed",
+            "started_at":    created_at,
+            "completed_at":  created_at,
+            "duration_ms":   dur_ms,
+            "duration_fmt":  run_dur_fmt or "—",
+            "cost_usd":      None,
+            "error_hint":    None,
+        }
+        if group_label in _groups_by_label:
+            _groups_by_label[group_label]["stages"].append(stage_row)
+            _groups_by_label[group_label]["stage_count"] += 1
+        else:
+            _groups_by_label[group_label] = {
+                "group_name":        group_label,
+                "status":            "completed",
+                "stage_count":       1,
+                "total_duration_ms": dur_ms,
+                "duration_fmt":      run_dur_fmt or "—",
+                "total_cost_usd":    0.0,
+                "error_message":     None,
+                "stages":            [stage_row],
+            }
+    stage_groups = list(_groups_by_label.values())
 
     resume_actions = _disk_resume_actions(episode_id, artifacts)
 
@@ -1907,16 +1915,15 @@ def episodes_page():
     try:
         db_ep_ids  = {e["episode_id"] for e in episodes}
         disk_eps   = list_disk_episodes(assets_root=_ASSETS_ROOT_PATH, limit=50)
-        from hypogeum.disk_sync import _infer_episode_status, _load, _episode_title
         for dep in disk_eps:
             ep_id = dep["episode_id"]
             if ep_id in db_ep_ids:
                 continue
             ep_dir = _ASSETS_ROOT_PATH / "episodes" / ep_id
-            qa_pkg   = _load(ep_dir, "qa_approval_report", ep_id)
+            qa_pkg   = load_disk_pkg(ep_dir, "qa_approval_report", ep_id)
             bga_pkgs = []
             for pn in (1, 2):
-                pkg = _load(ep_dir, f"bga_compliance_report_p{pn}", ep_id)
+                pkg = load_disk_pkg(ep_dir, f"bga_compliance_report_p{pn}", ep_id)
                 if pkg:
                     bga_pkgs.append(pkg)
             artifacts = {
@@ -1924,8 +1931,8 @@ def episodes_page():
                 "has_thumbnail": dep.get("has_thumbnail", False),
                 "has_narration": False,
             }
-            status = _infer_episode_status(qa_pkg, bga_pkgs, artifacts)
-            title  = dep.get("title") or _episode_title(ep_dir, ep_id)
+            status = infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+            title  = dep.get("title") or episode_title_from_disk(ep_dir, ep_id)
             episodes.append({
                 "episode_id":    ep_id,
                 "title":         title,

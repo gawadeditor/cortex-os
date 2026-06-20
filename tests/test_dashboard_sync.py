@@ -4,7 +4,7 @@ tests/test_dashboard_sync.py — Disk-to-DB sync layer tests.
 Coverage:
     TestDiskSyncImport        — sync_disk_episode_to_db populates DB correctly
     TestSyncIdempotency       — running sync twice never duplicates rows
-    TestEpisodeStatusLogic    — _infer_episode_status maps BGA/QA to correct status
+    TestEpisodeStatusLogic    — infer_episode_status maps BGA/QA to correct status
     TestSyncAllDiskEpisodes   — sync_all_disk_episodes_to_db finds multiple episodes
     TestEpisodesPageWithDisk  — /episodes shows disk episodes that aren't in DB
     TestEpisodeDetailFromDB   — /episode/<id> after sync shows real duration/cost/stages
@@ -27,10 +27,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hypogeum.disk_sync import (
     sync_disk_episode_to_db,
     sync_all_disk_episodes_to_db,
-    _infer_episode_status,
-    _extract_total_cost,
-    _extract_render_duration_ms,
-    _load,
+    infer_episode_status,
+    extract_total_cost,
+    extract_render_duration_ms,
+    load_disk_pkg,
 )
 from hypogeum.db import get_connection, initialize_schema
 
@@ -354,19 +354,19 @@ class TestSyncIdempotency:
 # ---------------------------------------------------------------------------
 
 class TestEpisodeStatusLogic:
-    """_infer_episode_status returns correct status for each scenario."""
+    """infer_episode_status returns correct status for each scenario."""
 
     def test_complete_when_render_qa_approved_bga_approved(self):
         qa  = {"verdict": "APPROVED", "approved": True}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
-        assert _infer_episode_status(qa, bga, art) == "complete"
+        assert infer_episode_status(qa, bga, art) == "complete"
 
     def test_qa_warning_when_approved_with_warnings(self):
         qa  = {"verdict": "WARNING", "approved": True}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
-        assert _infer_episode_status(qa, bga, art) == "qa_warning"
+        assert infer_episode_status(qa, bga, art) == "qa_warning"
 
     def test_needs_review_when_bga_blocked(self):
         qa  = {"verdict": "APPROVED", "approved": True}
@@ -376,7 +376,7 @@ class TestEpisodeStatusLogic:
             "summary": {"blocking_count": 1},
         }]
         art = {"has_render": True}
-        assert _infer_episode_status(qa, bga, art) == "needs_review"
+        assert infer_episode_status(qa, bga, art) == "needs_review"
 
     def test_needs_review_when_bga_has_blocking_violation(self):
         qa  = {"verdict": "APPROVED", "approved": True}
@@ -386,32 +386,32 @@ class TestEpisodeStatusLogic:
             "summary": {"blocking_count": 0},
         }]
         art = {"has_render": True}
-        assert _infer_episode_status(qa, bga, art) == "needs_review"
+        assert infer_episode_status(qa, bga, art) == "needs_review"
 
     def test_needs_review_when_qa_not_approved(self):
         qa  = {"verdict": "FAILED", "approved": False}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
-        assert _infer_episode_status(qa, bga, art) == "needs_review"
+        assert infer_episode_status(qa, bga, art) == "needs_review"
 
     def test_partial_when_no_render(self):
         qa  = {"verdict": "APPROVED", "approved": True}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": False}
-        assert _infer_episode_status(qa, bga, art) == "partial"
+        assert infer_episode_status(qa, bga, art) == "partial"
 
     def test_needs_review_when_no_qa_report_but_render_exists(self):
         qa  = {}
         bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
         art = {"has_render": True}
-        assert _infer_episode_status(qa, bga, art) == "needs_review"
+        assert infer_episode_status(qa, bga, art) == "needs_review"
 
     def test_complete_with_no_bga_reports(self):
         qa  = {"verdict": "APPROVED", "approved": True}
         bga = []
         art = {"has_render": True}
         # No BGA reports → treat as approved (no violations found)
-        assert _infer_episode_status(qa, bga, art) == "complete"
+        assert infer_episode_status(qa, bga, art) == "complete"
 
     def test_sync_status_persisted_to_db(self, tmp_path):
         assets = tmp_path / "assets"
@@ -645,7 +645,7 @@ class TestBGABlockedStatus:
             "summary": {"blocking_count": 0},  # but violation has blocking severity
         }]
         art = {"has_render": True}
-        assert _infer_episode_status(qa, bga, art) == "needs_review"
+        assert infer_episode_status(qa, bga, art) == "needs_review"
 
     def test_bga_flag_violation_does_not_block(self):
         qa  = {"verdict": "APPROVED", "approved": True}
@@ -656,7 +656,7 @@ class TestBGABlockedStatus:
         }]
         art = {"has_render": True}
         # FLAG severity should NOT prevent complete
-        assert _infer_episode_status(qa, bga, art) == "complete"
+        assert infer_episode_status(qa, bga, art) == "complete"
 
 
 # ---------------------------------------------------------------------------

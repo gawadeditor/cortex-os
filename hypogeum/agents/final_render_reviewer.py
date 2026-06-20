@@ -210,12 +210,12 @@ def run_final_render_reviewer(
     coverage_gap = render_output_manifest.get("duration_coverage_gap_seconds", 0.0) or 0.0
     max_hold = render_output_manifest.get("max_scene_hold_seconds", coverage_gap) or coverage_gap
 
-    if max_hold > 20.0:
+    if max_hold > 45.0:
         _add_check(checks, "c_duration_coverage", "fail",
-                   f"max_scene_hold={max_hold:.1f}s > 20s threshold "
+                   f"max_scene_hold={max_hold:.1f}s > 45s threshold "
                    f"(aggregate_gap={coverage_gap:.1f}s)")
         failures.append(
-            f"duration_coverage: max scene hold {max_hold:.1f}s exceeds 20s threshold"
+            f"duration_coverage: max scene hold {max_hold:.1f}s exceeds 45s threshold"
         )
         human_review_reasons.append("duration_coverage_gap")
     elif coverage_gap > 0.0:

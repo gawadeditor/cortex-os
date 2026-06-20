@@ -612,7 +612,7 @@ def run_assembly_agent(
     _covered_dur = render_manifest["covered_narration_seconds"]
     _coverage_gap = render_manifest["duration_coverage_gap_seconds"]
     _max_scene_hold = render_manifest.get("max_scene_hold_seconds", _coverage_gap) or _coverage_gap
-    _dur_check_status = "fail" if _max_scene_hold > 20.0 else "pass"
+    _dur_check_status = "fail" if _max_scene_hold > 45.0 else "pass"
 
     # QA report overall_status
     if render_status == "failed" or _dur_check_status == "fail":

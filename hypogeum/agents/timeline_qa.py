@@ -44,9 +44,15 @@ from hypogeum.agents.timeline_builder import TimelinePlan, TimelineEntry
 _EXPECTED_MAIN_RATIO: float = 16 / 9
 _ASPECT_RATIO_TOLERANCE: float = 0.05
 
-# Hold thresholds
-_DEFAULT_HOLD_WARN_SECONDS: float = 10.0
-_DEFAULT_HOLD_FAIL_SECONDS: float = 20.0
+# Hold thresholds.
+# warn=20s flags holds that are noticeable in documentary-style narration.
+# fail=45s reserves hard failure for truly broken renders (e.g. generator
+# returned a 2s clip against a 60s narration beat).  The prior fail threshold
+# of 20s was calibrated for ep_smoke_01's single 14s anomaly; long-form
+# documentary episodes with 8s clips and 20-40s narration beats systematically
+# exceed 20s — those should be warnings, not blocking failures.
+_DEFAULT_HOLD_WARN_SECONDS: float = 20.0
+_DEFAULT_HOLD_FAIL_SECONDS: float = 45.0
 
 
 # ---------------------------------------------------------------------------

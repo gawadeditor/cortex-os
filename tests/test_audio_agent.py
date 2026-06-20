@@ -44,8 +44,11 @@ from hypogeum.elevenlabs import (
 )
 from hypogeum.agents.audio_agent import (
     AudioAgentError,
+    _beat_file_exists,
+    _build_existing_stub,
     _collect_main_beats,
     _collect_shorts_beats,
+    resume_narration_agent,
     run_audio_agent,
 )
 from hypogeum.agents.voice_generation_operator import _make_segment_record
@@ -1154,3 +1157,297 @@ class TestBeatCap:
         cfg = _make_config()  # default: SMOKE_TEST_MAX_NARRATION_BEATS=0
         beats = self._run_and_capture_beats(cfg, tmp_path)
         assert len(beats) == 3
+
+
+# ---------------------------------------------------------------------------
+# TestResumeNarrationAgent
+# Regression: audio-only resume skips existing beats and generates missing ones.
+# Covers the ep_003 scenario where 3/35 beats existed and 32 were missing.
+# ---------------------------------------------------------------------------
+
+# Minimal script with 4 beats: 2 will be "existing", 2 will be "missing"
+_RESUME_SCRIPT = {
+    "episode_metadata": {"episode_id": "ep_resume", "episode_title": "Resume Test"},
+    "sections": [
+        {
+            "section_id": "s01",
+            "title": "Hook",
+            "narration_beats": [
+                {"beat_id": "b_001", "text": "First beat — already generated."},
+                {"beat_id": "b_002", "text": "Second beat — already generated."},
+                {"beat_id": "b_003", "text": "Third beat — MISSING."},
+                {"beat_id": "b_004", "text": "Fourth beat — MISSING."},
+            ],
+        }
+    ],
+    "shorts_scripts": [],
+    "traceability_manifest": {},
+    "script_integrity": {},
+}
+
+_RESUME_EXISTING_PACKAGE = {
+    "package_metadata": {"narration_package_id": "np_ep_resume", "episode_id": "ep_resume"},
+    "voice_configuration": {
+        "voice_id": "voice-abc",
+        "model_id": "eleven_multilingual_v2",
+        "environment_source": "ELEVENLABS_VOICE_ID",
+    },
+    "narration_segments": [
+        {
+            "segment_id": "seg_b_001",
+            "beat_reference": "b_001",
+            "source_type": "main_episode",
+            "generation_status": "generated",
+            "audio_asset_id": "episodes/ep_resume/narration/b_001",
+            "duration_seconds": 5.0,
+            "character_cost": 30,
+            "alignment_source": "tts",
+            "word_count": 5,
+        },
+        {
+            "segment_id": "seg_b_002",
+            "beat_reference": "b_002",
+            "source_type": "main_episode",
+            "generation_status": "generated",
+            "audio_asset_id": "episodes/ep_resume/narration/b_002",
+            "duration_seconds": 4.5,
+            "character_cost": 30,
+            "alignment_source": "tts",
+            "word_count": 5,
+        },
+    ],
+    "stitched_tracks": [
+        {
+            "track_id": "track_main_ep_resume",
+            "audio_asset_id": "episodes/ep_resume/narration/main_narration",
+            "source_type": "main_episode",
+        }
+    ],
+    "captions": [
+        {
+            "caption_id": "cap_main_ep_resume",
+            "srt_asset_id": "episodes/ep_resume/captions/main",
+            "caption_method": "elevenlabs_alignment",
+            "has_content": True,
+        }
+    ],
+    "audio_qa_report": {
+        "overall_status": "pass",
+        "total_beats": 2,
+        "beats_generated": 2,
+        "beats_failed": 0,
+        "failure_rate": 0.0,
+        "total_characters_billed": 60,
+    },
+    "package_integrity": {"production_ready": True},
+}
+
+
+def _setup_existing_beats(tmp_path: Path, beat_ids: list[str]) -> None:
+    """Write fake .mp3 files for beats already on disk."""
+    narration_dir = tmp_path / "narration"
+    narration_dir.mkdir(parents=True, exist_ok=True)
+    for bid in beat_ids:
+        (narration_dir / f"{bid}.mp3").write_bytes(b"\xff\xfb\x90\x00" * 50)
+
+
+class TestResumeNarrationAgent:
+    """
+    Audio-only resume skips beats with files on disk and generates only missing beats.
+    Regression for ep_003 partial narration state (3/35 beats present).
+    """
+
+    def _run_resume(self, tmp_path, existing_beat_ids=("b_001", "b_002"), generated_ids=("b_003", "b_004")):
+        cfg = _make_config()
+        _setup_existing_beats(tmp_path, existing_beat_ids)
+        generated_calls = []
+
+        def _side_effect(beat_id, text, config, episode_id, output_dir, **kwargs):
+            generated_calls.append(beat_id)
+            return _fake_result(beat_id, output_dir)
+
+        with patch(
+            "hypogeum.agents.audio_agent._generate_beat_safe",
+            side_effect=lambda beat, config, episode_id, output_dir, previous_request_ids, log: (
+                _side_effect(
+                    beat["beat_id"], beat.get("text", ""),
+                    config, episode_id, output_dir,
+                )
+            )
+        ), patch(
+            "hypogeum.agents.audio_agent.run_caption_agent",
+            return_value={"captions": [
+                {"caption_id": "cap_main_ep_resume", "srt_asset_id": "episodes/ep_resume/captions/main",
+                 "caption_method": "elevenlabs_alignment", "has_content": True}
+            ]},
+        ), patch(
+            "hypogeum.agents.audio_agent.run_audio_qa",
+            return_value={
+                "overall_status": "pass",
+                "production_ready": True,
+                "beats_failed": 0,
+                "total_beats": 4,
+                "failure_rate": 0.0,
+                "total_characters_billed": 120,
+            },
+        ):
+            result = resume_narration_agent(
+                script_package=_RESUME_SCRIPT,
+                existing_narration_package=_RESUME_EXISTING_PACKAGE,
+                config=cfg,
+                episode_id="ep_resume",
+                output_dir=tmp_path,
+                skip_shorts=True,
+            )
+        return result, generated_calls
+
+    def test_existing_beats_not_regenerated(self, tmp_path):
+        """Beats with files on disk AND in the existing package are skipped."""
+        result, generated = self._run_resume(tmp_path)
+        assert "b_001" not in generated, "b_001 already exists — must not be regenerated"
+        assert "b_002" not in generated, "b_002 already exists — must not be regenerated"
+
+    def test_missing_beats_are_generated(self, tmp_path):
+        """Beats absent from disk are generated via ElevenLabs."""
+        result, generated = self._run_resume(tmp_path)
+        assert "b_003" in generated, "b_003 is missing — must be generated"
+        assert "b_004" in generated, "b_004 is missing — must be generated"
+
+    def test_all_beats_present_in_output_package(self, tmp_path):
+        """Output narration_package contains segments for all 4 beats."""
+        result, _ = self._run_resume(tmp_path)
+        beat_refs = {s["beat_reference"] for s in result.get("narration_segments", [])}
+        assert beat_refs == {"b_001", "b_002", "b_003", "b_004"}
+
+    def test_existing_segments_marked_generated_in_output(self, tmp_path):
+        """Stubs for existing beats are emitted with generation_status=generated."""
+        result, _ = self._run_resume(tmp_path)
+        segs_by_id = {s["beat_reference"]: s for s in result["narration_segments"]}
+        assert segs_by_id["b_001"]["generation_status"] == "generated"
+        assert segs_by_id["b_002"]["generation_status"] == "generated"
+
+    def test_missing_beats_marked_generated_in_output(self, tmp_path):
+        """Newly generated beats are emitted with generation_status=generated."""
+        result, _ = self._run_resume(tmp_path)
+        segs_by_id = {s["beat_reference"]: s for s in result["narration_segments"]}
+        assert segs_by_id["b_003"]["generation_status"] == "generated"
+        assert segs_by_id["b_004"]["generation_status"] == "generated"
+
+    def test_package_written_to_disk(self, tmp_path):
+        """narration_package_ep_resume.json is written to disk."""
+        self._run_resume(tmp_path)
+        assert (tmp_path / "narration_package_ep_resume.json").exists()
+
+    def test_main_narration_restitched(self, tmp_path):
+        """main_narration.mp3 is rewritten with content from all beats."""
+        self._run_resume(tmp_path)
+        main_path = tmp_path / "narration" / "main_narration.mp3"
+        assert main_path.exists()
+        assert main_path.stat().st_size > 0
+
+    def test_auth_failure_propagates(self, tmp_path):
+        """ElevenLabsAuthFailure raised during generation propagates out."""
+        from hypogeum.elevenlabs import ElevenLabsAuthFailure
+        _setup_existing_beats(tmp_path, ["b_001", "b_002"])
+        cfg = _make_config()
+
+        with patch(
+            "hypogeum.agents.audio_agent._generate_beat_safe",
+            side_effect=lambda **kwargs: (_ for _ in ()).throw(ElevenLabsAuthFailure()),
+        ), pytest.raises(ElevenLabsAuthFailure):
+            resume_narration_agent(
+                script_package=_RESUME_SCRIPT,
+                existing_narration_package=_RESUME_EXISTING_PACKAGE,
+                config=cfg,
+                episode_id="ep_resume",
+                output_dir=tmp_path,
+                skip_shorts=True,
+            )
+
+    def test_beat_without_package_record_not_skipped(self, tmp_path):
+        """A beat with a file on disk but NO package record is regenerated (stale file guard)."""
+        # Write b_001 on disk but NOT record it in the existing package
+        _setup_existing_beats(tmp_path, ["b_001"])
+        cfg = _make_config()
+        generated_calls = []
+
+        # existing package has NO segments at all
+        empty_existing = {
+            **_RESUME_EXISTING_PACKAGE,
+            "narration_segments": [],
+        }
+
+        def _side(beat, config, episode_id, output_dir, previous_request_ids, log):
+            generated_calls.append(beat["beat_id"])
+            return _fake_result(beat["beat_id"], output_dir)
+
+        with patch("hypogeum.agents.audio_agent._generate_beat_safe", side_effect=_side), \
+             patch("hypogeum.agents.audio_agent.run_caption_agent", return_value={"captions": []}), \
+             patch("hypogeum.agents.audio_agent.run_audio_qa", return_value={
+                 "overall_status": "pass", "production_ready": True,
+                 "beats_failed": 0, "total_beats": 4, "failure_rate": 0.0,
+                 "total_characters_billed": 0,
+             }):
+            resume_narration_agent(
+                script_package=_RESUME_SCRIPT,
+                existing_narration_package=empty_existing,
+                config=cfg,
+                episode_id="ep_resume",
+                output_dir=tmp_path,
+                skip_shorts=True,
+            )
+
+        # All 4 beats must be generated — even b_001 which has a stale file
+        assert "b_001" in generated_calls, (
+            "b_001 has a stale file but no package record — must be regenerated"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestBeatFileExists / TestBuildExistingStub
+# ---------------------------------------------------------------------------
+
+class TestBeatFileHelpers:
+    """Unit tests for _beat_file_exists and _build_existing_stub."""
+
+    def test_beat_file_exists_true_when_both_conditions_met(self, tmp_path):
+        """Returns True when segment is in existing_segments AND mp3 file exists."""
+        (tmp_path / "narration").mkdir()
+        (tmp_path / "narration" / "b_001.mp3").write_bytes(b"audio")
+        existing = {"b_001": {"generation_status": "generated", "duration_seconds": 5.0}}
+        assert _beat_file_exists("b_001", "ep_001", tmp_path, existing) is True
+
+    def test_beat_file_exists_false_when_no_package_record(self, tmp_path):
+        """Returns False when file exists on disk but NOT in existing_segments."""
+        (tmp_path / "narration").mkdir()
+        (tmp_path / "narration" / "b_001.mp3").write_bytes(b"audio")
+        assert _beat_file_exists("b_001", "ep_001", tmp_path, {}) is False
+
+    def test_beat_file_exists_false_when_file_missing(self, tmp_path):
+        """Returns False when package record exists but file is missing on disk."""
+        existing = {"b_001": {"generation_status": "generated", "duration_seconds": 5.0}}
+        assert _beat_file_exists("b_001", "ep_001", tmp_path, existing) is False
+
+    def test_beat_file_exists_false_when_file_empty(self, tmp_path):
+        """Returns False when file exists but is zero bytes."""
+        (tmp_path / "narration").mkdir()
+        (tmp_path / "narration" / "b_001.mp3").write_bytes(b"")
+        existing = {"b_001": {"generation_status": "generated", "duration_seconds": 5.0}}
+        assert _beat_file_exists("b_001", "ep_001", tmp_path, existing) is False
+
+    def test_build_existing_stub_correct_fields(self, tmp_path):
+        """_build_existing_stub produces NarrationSegmentResult with disk path and stored duration."""
+        (tmp_path / "narration").mkdir()
+        (tmp_path / "narration" / "b_001.mp3").write_bytes(b"audio")
+        stub = _build_existing_stub(
+            beat_id="b_001",
+            episode_id="ep_001",
+            output_dir=tmp_path,
+            existing_seg={"duration_seconds": 27.6, "character_cost": 428},
+        )
+        assert stub.beat_id == "b_001"
+        assert stub.duration_seconds == pytest.approx(27.6)
+        assert stub.character_cost == 428
+        assert stub.word_timings == []
+        assert stub.alignment_source == "none"
+        assert stub.local_path == tmp_path / "narration" / "b_001.mp3"

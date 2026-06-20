@@ -488,6 +488,82 @@ def _validate_thumbnail_package(p: dict) -> None:
     _req(pi, s, "production_ready", bool, path="package_integrity")
 
 
+# ---------------------------------------------------------------------------
+# Thumbnail concept brief — produced by the Thumbnail Strategy Skill (Phase 1)
+# ---------------------------------------------------------------------------
+
+_PERMITTED_EMOTIONAL_TRIGGERS = frozenset({
+    "awe", "dread", "impossibility", "betrayal", "discovery", "scale", "loss",
+})
+
+
+def _validate_thumbnail_concept_brief(p: dict) -> None:
+    s = "thumbnail_concept_brief"
+    _req_str(p, s, "thumbnail_concept_brief_id")
+    _req_str(p, s, "episode_id")
+    _req_str(p, s, "central_viewer_question")
+
+    raw = p.get("concepts")
+    if not isinstance(raw, list):
+        raise SchemaError(s, "concepts", "must be a list")
+    if len(raw) != 3:
+        raise SchemaError(
+            s, "concepts",
+            f"must have exactly 3 entries for A/B/C testing (got {len(raw)})"
+        )
+
+    seen_triggers: set[str] = set()
+    seen_ids: set[str] = set()
+
+    for i, c in enumerate(raw):
+        path = f"concepts[{i}]"
+        if not isinstance(c, dict):
+            raise SchemaError(s, path, "each concept must be a dict")
+
+        _req_str(c, s, "concept_id",        path=path)
+        _req_str(c, s, "concept_name",       path=path)
+        _req_str(c, s, "viewer_promise",     path=path)
+        _req_str(c, s, "curiosity_gap",      path=path)
+        _req_str(c, s, "visual_thesis",      path=path)
+
+        # emotional_trigger: must be a permitted value, unique across concepts
+        trigger = c.get("emotional_trigger")
+        if not isinstance(trigger, str) or not trigger:
+            raise SchemaError(s, f"{path}.emotional_trigger", "missing required field")
+        if trigger not in _PERMITTED_EMOTIONAL_TRIGGERS:
+            raise SchemaError(
+                s, f"{path}.emotional_trigger",
+                f"must be one of {sorted(_PERMITTED_EMOTIONAL_TRIGGERS)}, got {trigger!r}"
+            )
+        if trigger in seen_triggers:
+            raise SchemaError(
+                s, f"{path}.emotional_trigger",
+                f"emotional_trigger '{trigger}' already used — each concept must use a "
+                "distinct emotional register"
+            )
+        seen_triggers.add(trigger)
+
+        # concept_id: must be unique
+        cid = c["concept_id"]
+        if cid in seen_ids:
+            raise SchemaError(
+                s, f"{path}.concept_id",
+                f"concept_id '{cid}' is duplicated — all concept_ids must be unique"
+            )
+        seen_ids.add(cid)
+
+        # suggested_hook_text: required, 3–5 words
+        hook = c.get("suggested_hook_text")
+        if not isinstance(hook, str) or not hook.strip():
+            raise SchemaError(s, f"{path}.suggested_hook_text", "missing required field")
+        word_count = len(hook.strip().split())
+        if word_count < 3 or word_count > 5:
+            raise SchemaError(
+                s, f"{path}.suggested_hook_text",
+                f"must be 3–5 words (got {word_count}): {hook!r}"
+            )
+
+
 def _validate_narration_package(p: dict) -> None:
     s = "narration_package"
     _req_dict(p, s, "package_metadata")
@@ -903,6 +979,7 @@ _VALIDATORS = {
     "script_package":            _validate_script_package,
     "visual_package":            _validate_visual_package,
     "thumbnail_handoff_brief":       _validate_thumbnail_handoff_brief,
+    "thumbnail_concept_brief":       _validate_thumbnail_concept_brief,
     "thumbnail_generation_plan":     _validate_thumbnail_generation_plan,
     "thumbnail_package":             _validate_thumbnail_package,
     "narration_package":         _validate_narration_package,

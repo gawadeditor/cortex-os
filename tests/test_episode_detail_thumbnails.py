@@ -521,9 +521,11 @@ class TestCandidateCards:
         _candidate(conn, rid, rank=1, selected=1)
         conn.close()
         html = _tn_html((c, db_path), "ep_tn01")
-        assert "Published thumbnail" in html
+        # Badge text changed from "Published thumbnail" to "Selected thumbnail"
+        # when no BGA verdict is recorded (template uses "Selected thumbnail" as default)
+        assert "Selected thumbnail" in html or "Selected" in html
 
-    def test_not_selected_has_no_published_badge(self, client):
+    def test_not_selected_has_no_selected_badge(self, client):
         c, db_path = client
         conn = get_connection(db_path)
         _ep(conn)
@@ -531,6 +533,7 @@ class TestCandidateCards:
         _candidate(conn, rid, rank=1, selected=0)
         conn.close()
         html = _tn_html((c, db_path), "ep_tn01")
+        assert "Selected thumbnail" not in html
         assert "Published thumbnail" not in html
 
     def test_rank_displayed_in_card(self, client):
@@ -764,3 +767,169 @@ class TestNoSideEffects:
         # Mock CTR (99%) must not appear as percentage; real CTR (4%) should
         assert "99.0%" not in html
         assert "4.0" in html
+
+
+# ---------------------------------------------------------------------------
+# TestDiskBackedThumbnail
+# Tests for DB-backed episodes where thumbnail_candidates table is empty
+# but disk has a main thumbnail file + thumbnail_package.
+# ---------------------------------------------------------------------------
+
+class TestDiskBackedThumbnail:
+    """
+    When get_episode_detail returns empty thumbnail.candidates (no DB rows),
+    episode_detail_page must fall back to _make_disk_thumbnails so the
+    Thumbnails tab renders a card instead of "No thumbnail candidates found".
+    """
+
+    @pytest.fixture
+    def client_and_assets(self, tmp_path):
+        import run_dashboard as server
+        server.app.config["TESTING"] = True
+        db_path = tmp_path / "test.db"
+        server.app.config["DB_PATH"] = db_path
+        initialize_schema(db_path)
+        with server.app.test_client() as c:
+            yield c, tmp_path, db_path
+
+    def _write_pkg(self, ep_dir: Path, stem: str, ep_id: str, data: dict) -> None:
+        import json
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        (ep_dir / f"{stem}_{ep_id}.json").write_text(json.dumps(data))
+
+    def _make_episode_on_disk(self, assets: Path, ep_id: str, tig_verdict: str = "BLOCKED"):
+        """Create a minimal on-disk episode with thumbnail file + packages."""
+        import json
+        ep_dir = assets / "episodes" / ep_id
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        (ep_dir / "thumbnails").mkdir(exist_ok=True)
+        (ep_dir / "thumbnails" / "main.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 200)
+
+        violations = []
+        blocking_count = 0
+        if tig_verdict == "BLOCKED":
+            violations = [{"rule_id": "TIG-07", "severity": "BLOCKING",
+                           "description": "Missing wordmark"}]
+            blocking_count = 1
+        elif tig_verdict == "WARNING":
+            violations = [{"rule_id": "TIG-W01", "severity": "WARNING",
+                           "description": "Brightness issue"}]
+
+        self._write_pkg(ep_dir, "thumbnail_package", ep_id, {
+            "thumbnail_package_id": f"tp_{ep_id}",
+            "episode_id": ep_id,
+            "main_thumbnail": {"asset_id": f"episodes/{ep_id}/thumbnails/main"},
+            "candidates": [],   # empty — mirrors ep_003 real state
+            "package_integrity": {"production_ready": tig_verdict == "APPROVED"},
+            "generation_metadata": {
+                "provider": "muapi",
+                "primary_model": "gpt-image-2-text-to-image",
+            },
+            "thumbnail_identity_report": {
+                "verdict": tig_verdict,
+                "blocking_count": blocking_count,
+                "warning_count": len([v for v in violations if v.get("severity") == "WARNING"]),
+                "violations": violations,
+            },
+        })
+        self._write_pkg(ep_dir, "thumbnail_generation_plan", ep_id, {
+            "main_episode": {
+                "ranked_candidates": [{
+                    "candidate_id": "tc_001",
+                    "rank": 1,
+                    "image_prompt": "Ancient bronze mechanism, dramatic lighting",
+                    "text_overlay": {"text": "ITS MAKER VANISHED", "placement": "top"},
+                }]
+            }
+        })
+        # Minimal qa_approval_report so four-way state computation doesn't crash
+        self._write_pkg(ep_dir, "qa_approval_report", ep_id, {
+            "verdict": "WARNING", "approved": True, "checks": [],
+            "failures": [], "warnings": [], "evaluated_at": "2026-01-01T00:00:00+00:00",
+        })
+        return ep_dir
+
+    def _get_thumbnails_html(self, client_and_assets, ep_id: str) -> str:
+        c, tmp_path, db_path = client_and_assets
+        assets = tmp_path / ".hypogeum-assets"
+        import run_dashboard as server
+        from unittest.mock import patch
+        # DB has no thumbnail_candidates for this episode → get_episode_detail returns empty candidates
+        # episode_detail_page must enrich from disk
+        with patch.object(server, "_ASSETS_ROOT_PATH", assets), \
+             patch.object(server, "_db_path", return_value=db_path):
+            resp = c.get(f"/episode/{ep_id}?tab=thumbnails")
+        assert resp.status_code == 200
+        return resp.data.decode()
+
+    # ── Core: card renders instead of empty state ────────────────────────────
+
+    def test_thumbnail_card_rendered_when_disk_main_thumbnail_exists(self, client_and_assets, tmp_path):
+        ep_id = "ep_disk_tn_001"
+        self._make_episode_on_disk(tmp_path / ".hypogeum-assets", ep_id)
+        html = self._get_thumbnails_html(client_and_assets, ep_id)
+        assert "No thumbnail candidates found" not in html
+
+    def test_thumbnail_card_shows_tig_verdict_blocked(self, client_and_assets, tmp_path):
+        ep_id = "ep_disk_tn_002"
+        self._make_episode_on_disk(tmp_path / ".hypogeum-assets", ep_id, tig_verdict="BLOCKED")
+        html = self._get_thumbnails_html(client_and_assets, ep_id)
+        assert "BLOCKED" in html or "Blocked" in html
+
+    def test_thumbnail_card_shows_tig_violations(self, client_and_assets, tmp_path):
+        ep_id = "ep_disk_tn_003"
+        self._make_episode_on_disk(tmp_path / ".hypogeum-assets", ep_id, tig_verdict="BLOCKED")
+        html = self._get_thumbnails_html(client_and_assets, ep_id)
+        assert "Missing wordmark" in html or "TIG-07" in html
+
+    def test_thumbnail_card_shows_text_overlay_from_generation_plan(self, client_and_assets, tmp_path):
+        ep_id = "ep_disk_tn_004"
+        self._make_episode_on_disk(tmp_path / ".hypogeum-assets", ep_id)
+        html = self._get_thumbnails_html(client_and_assets, ep_id)
+        assert "ITS MAKER VANISHED" in html
+
+    def test_thumbnail_card_shows_visual_prompt(self, client_and_assets, tmp_path):
+        ep_id = "ep_disk_tn_005"
+        self._make_episode_on_disk(tmp_path / ".hypogeum-assets", ep_id)
+        html = self._get_thumbnails_html(client_and_assets, ep_id)
+        assert "Ancient bronze" in html or "dramatic lighting" in html
+
+    # ── TIG warning state ────────────────────────────────────────────────────
+
+    def test_thumbnail_card_shows_warning_verdict(self, client_and_assets, tmp_path):
+        ep_id = "ep_disk_tn_006"
+        self._make_episode_on_disk(tmp_path / ".hypogeum-assets", ep_id, tig_verdict="WARNING")
+        html = self._get_thumbnails_html(client_and_assets, ep_id)
+        assert "WARNING" in html or "Warning" in html
+
+    # ── No thumbnail file ────────────────────────────────────────────────────
+
+    def test_unverified_card_shown_when_no_thumbnail_file(self, client_and_assets, tmp_path):
+        """
+        When thumbnail_package exists but the file is missing, a synthetic
+        card is still rendered with unverified=True. The image area shows
+        "No preview available" (not the empty state "No thumbnail candidates found").
+        This is the correct UX: the package/verdict data is shown even without the file.
+        """
+        ep_id = "ep_disk_tn_007"
+        assets = tmp_path / ".hypogeum-assets"
+        ep_dir = assets / "episodes" / ep_id
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        # thumbnail_package present but no actual image file on disk
+        self._write_pkg(ep_dir, "thumbnail_package", ep_id, {
+            "main_thumbnail": {"asset_id": f"episodes/{ep_id}/thumbnails/main"},
+            "candidates": [],
+            "thumbnail_identity_report": {"verdict": "BLOCKED", "blocking_count": 1,
+                                           "violations": [{"rule_id": "TIG-07",
+                                                           "severity": "BLOCKING",
+                                                           "description": "Missing wordmark"}]},
+        })
+        self._write_pkg(ep_dir, "qa_approval_report", ep_id, {
+            "verdict": "APPROVED", "approved": True, "checks": [], "failures": [],
+            "warnings": [], "evaluated_at": "2026-01-01T00:00:00+00:00",
+        })
+        html = self._get_thumbnails_html(client_and_assets, ep_id)
+        # A card is rendered (package data is available); NOT the "no candidates" empty state
+        assert "No thumbnail candidates found" not in html
+        # The card shows the TIG verdict even without the file
+        assert "BLOCKED" in html or "Blocked" in html

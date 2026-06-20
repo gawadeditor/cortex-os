@@ -1411,6 +1411,11 @@ def episode_detail_page(episode_id):
                 _tb = load_disk_pkg(ep_dir, "topic_brief", episode_id)
                 d["titles"] = _extract_disk_title_candidates(episode_id, ep_dir, _tb)
 
+            # Thumbnails from disk when DB has no candidates (thumbnail_candidates table
+            # is only populated by the live pipeline; disk-synced episodes have none)
+            if not d.get("thumbnails", {}).get("candidates") and artifacts.get("has_thumbnail"):
+                d["thumbnails"] = _make_disk_thumbnails(episode_id, artifacts)
+
     valid_tabs = {"production", "publishing", "thumbnails", "titles",
                   "analytics", "revenue", "learning", "branding", "artifacts"}
     active_tab = request.args.get("tab", "production")
@@ -1471,6 +1476,19 @@ def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
             "seed":             None,
         }
 
+    # Pull text_overlay / visual_prompt from generation plan rank-1 candidate
+    # when thumbnail_package.candidates is empty (common for disk-synced episodes).
+    _gen_plan = _load_disk_pkg(episode_id, "thumbnail_generation_plan")
+    _gen_ranked = (_gen_plan.get("main_episode") or {}).get("ranked_candidates") or []
+    _gen_rank1 = _gen_ranked[0] if _gen_ranked else {}
+    _gen_overlay_raw = _gen_rank1.get("text_overlay") or {}
+    _gen_text_overlay = (
+        _gen_overlay_raw.get("text") if isinstance(_gen_overlay_raw, dict)
+        else str(_gen_overlay_raw)
+    ) or None
+    _gen_placement    = _gen_overlay_raw.get("placement") if isinstance(_gen_overlay_raw, dict) else None
+    _gen_visual       = (_gen_rank1.get("image_prompt") or "")[:160] or None
+
     candidates = []
     if raw_cands:
         for i, c in enumerate(raw_cands):
@@ -1497,6 +1515,7 @@ def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
                 bga_viol=bga_violations if is_sel else [],
             ))
     else:
+        # No candidates in package — synthesise one from main_thumbnail + generation plan
         img_path = None
         for ext in ("jpg", "jpeg", "png", "webp"):
             p = thumb_dir / f"main.{ext}"
@@ -1506,9 +1525,9 @@ def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
         candidates.append(_base_cand(
             rank=1,
             selected=True,
-            text_overlay=None,
-            placement=None,
-            visual_prompt=None,
+            text_overlay=_gen_text_overlay,
+            placement=_gen_placement,
+            visual_prompt=_gen_visual,
             img_file=img_path,
             unverified=img_path is None,
             score=None,

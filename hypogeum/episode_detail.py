@@ -66,17 +66,18 @@ _ERROR_HINTS: dict[str, str] = {
 
 # Map pipeline status codes to operator labels
 _STATUS_LABELS: dict[str, str] = {
-    "complete":      "Complete",
-    "completed":     "Complete",
-    "qa_warning":    "QA Warning",
-    "needs_review":  "Needs Review",
-    "partial":       "Partial",
-    "failed":        "Failed",
-    "running":       "In Production",
-    "queued":        "Queued",
-    "paused":        "Paused",
-    "skipped":       "Skipped",
-    "pending":       "Pending",
+    "complete":          "Complete",
+    "completed":         "Complete",
+    "qa_warning":        "QA Warning",
+    "needs_review":      "Needs Review",
+    "needs_thumbnail":   "Needs Thumbnail",
+    "partial":           "Partial",
+    "failed":            "Failed",
+    "running":           "In Production",
+    "queued":            "Queued",
+    "paused":            "Paused",
+    "skipped":           "Skipped",
+    "pending":           "Pending",
 }
 
 # Map publishing status codes to operator labels

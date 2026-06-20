@@ -1261,17 +1261,24 @@ function resumeEpisode(episodeId, kind) {
       {# Badges ──────────────────────────────────────────────── #}
       <div class="tn-badges">
         {% if is_sel %}
-          <span class="badge badge-completed">Published thumbnail</span>
+          {# "Selected" badge changes meaning based on BGA verdict #}
+          {% if c.bga_verdict == 'BLOCKED' %}
+            <span class="badge badge-blocked">Selected — BGA Blocked</span>
+          {% elif c.bga_verdict == 'WARNING' %}
+            <span class="badge badge-qa_warning">Selected — BGA Warning</span>
+          {% else %}
+            <span class="badge badge-completed">Selected thumbnail</span>
+          {% endif %}
         {% endif %}
         {% if c.unverified %}
           <span class="badge badge-degraded">Unverified — file not found</span>
         {% endif %}
         {% if c.bga_verdict == 'BLOCKED' %}
-          <span class="badge badge-blocked">BGA: Blocked</span>
+          <span class="badge badge-blocked">TIG: Blocked</span>
         {% elif c.bga_verdict == 'WARNING' %}
-          <span class="badge badge-warning">BGA: Warning</span>
+          <span class="badge badge-warning">TIG: Warning</span>
         {% elif c.bga_verdict == 'APPROVED' %}
-          <span class="badge badge-ready">BGA: Approved</span>
+          <span class="badge badge-ready">TIG: Approved</span>
         {% endif %}
         {% if c.performance_status == 'winner' %}
           <span class="badge badge-completed">Best CTR</span>

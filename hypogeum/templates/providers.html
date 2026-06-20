@@ -167,34 +167,49 @@
       <div class="provider-auth-type">Auth: OAuth 2.0</div>
       {% if p.id == "youtube" %}
       <div class="oauth-notice">
-        YouTube uses OAuth 2.0 — not a plain API key. Set up OAuth credentials in Google Cloud Console.
+        YouTube uses OAuth 2.0. Set up client credentials in Google Cloud Console, complete the
+        consent flow offline, then paste the refresh token in the connect form.
       </div>
       <div class="oauth-fields">
-        <div class="section-label" style="margin:0 0 8px; font-size:10px">Required OAuth fields</div>
+        <div class="section-label" style="margin:0 0 8px; font-size:10px">Required env vars</div>
         <div class="oauth-field-row">
-          <span class="oauth-label">client_id</span>
+          <span class="oauth-label">YOUTUBE_CLIENT_ID</span>
           <span class="oauth-value">{{ p.oauth_client_id or "— not configured —" }}</span>
         </div>
         <div class="oauth-field-row">
-          <span class="oauth-label">redirect_uri</span>
-          <span class="oauth-value">{{ p.oauth_redirect_uri or "http://localhost:8080/oauth2callback" }}</span>
+          <span class="oauth-label">YOUTUBE_CLIENT_SECRET</span>
+          <span class="oauth-value">— set in environment —</span>
         </div>
         <div class="oauth-field-row">
-          <span class="oauth-label">scopes</span>
+          <span class="oauth-label">YOUTUBE_REFRESH_TOKEN</span>
+          <span class="oauth-value">{{ "✓ stored" if vstatus != 'missing' else "— not configured —" }}</span>
+        </div>
+        <div class="oauth-field-row">
+          <span class="oauth-label">Scopes required</span>
           <span class="oauth-value">youtube.upload, youtube.readonly</span>
         </div>
       </div>
       {% elif p.id == "tiktok" %}
       <div class="oauth-notice">
         TikTok uses OAuth 2.0. Go to developers.tiktok.com → Manage Apps → Keys &amp; Tokens.
-        Generate an Access Token (requires app review for Upload API scope).
-        Paste the token in the connect form.
+        Generate an access token. Requires app review approval for the Video Upload scope
+        before publishing is possible. Paste the token in the connect form.
       </div>
-      {% else %}
-      <div class="oauth-notice">
-        {{ p.label }} uses OAuth 2.0. Complete the authorization flow before publishing.
+      {% if p.test_note %}
+      <div style="font-size:11px; color:var(--muted); margin-top:6px;">
+        ⓘ {{ p.test_note }}
       </div>
       {% endif %}
+      {% endif %}
+    {% elif p.auth == "oauth2_meta" %}
+      <div class="provider-auth-type">Auth: Meta Graph API (OAuth 2.0 derived token)</div>
+      <div class="oauth-notice">
+        {{ p.label }} uses the Meta Graph API. Generate a long-lived page/user access token
+        from Meta for Developers → your app → Tools → Graph API Explorer.
+        {% if p.requires %}
+        Required: {{ p.requires | join(', ') }}.
+        {% endif %}
+      </div>
     {% else %}
       <div class="provider-auth-type">Auth: API key</div>
     {% endif %}
@@ -212,11 +227,17 @@
         {% elif vstatus == 'saved' %}Reconnect
         {% else %}Connect{% endif %}
       </a>
+      {% if p.id not in ('tiktok', 'instagram', 'facebook') %}
       <button class="btn-test" data-provider="{{ p.id }}"
               onclick="testProvider(this, '{{ p.id }}')"
               title="Verify credential">
         Test
       </button>
+      {% else %}
+      <span style="font-size:11px; color:var(--muted); margin-left:8px;">
+        Verified at publish time
+      </span>
+      {% endif %}
     </div>
 
     <div class="test-result-{{ p.id }}" style="display:none; margin-top:6px; font-size:12px;"></div>

@@ -98,22 +98,27 @@ def infer_episode_status(
     qa_pkg: dict,
     bga_pkgs: list[dict],
     artifacts: dict,
+    thumbnail_pkg: Optional[dict] = None,
 ) -> str:
     """
-    Derive canonical episode status from QA + BGA + artifact flags.
+    Derive canonical episode status from QA + BGA-script + TIG-thumbnail + artifact flags.
 
-    COMPLETE     = render present + QA approved + all BGA passes approved
-    QA_WARNING   = render present + QA approved but has warnings + BGA approved
-    NEEDS_REVIEW = BGA BLOCKED, QA failed, or render present but unverified
-    PARTIAL      = some files but render or QA missing
-    FAILED       = explicit failed state
+    Priority order (highest to lowest):
+        partial        — no render file
+        needs_review   — script BGA blocked / QA failed
+        needs_thumbnail — render + QA pass + script BGA pass, but TIG blocked thumbnail
+        qa_warning     — render + QA approved-with-warnings + all gates pass
+        complete       — render + QA approved + all gates pass
+
+    bga_pkgs:       bga_compliance_report_p1 / p2 — checks script/narrative content
+    thumbnail_pkg:  thumbnail_package — contains thumbnail_identity_report (TIG visual check)
     """
     has_render = bool(artifacts.get("has_render"))
 
     if not has_render:
         return "partial"
 
-    # Check BGA verdict (any BLOCKED pass → NEEDS_REVIEW)
+    # Check script BGA verdict (any BLOCKED pass → NEEDS_REVIEW)
     for bga in bga_pkgs:
         outcome = (bga.get("outcome") or "").upper()
         blocking = (bga.get("summary") or {}).get("blocking_count", 0)
@@ -134,6 +139,15 @@ def infer_episode_status(
 
     if not qa_approved:
         return "needs_review"
+
+    # Check thumbnail TIG verdict (thumbnail_identity_report inside thumbnail_package)
+    # This is a separate check from script BGA — it tests the actual generated image.
+    if thumbnail_pkg:
+        tig = thumbnail_pkg.get("thumbnail_identity_report") or {}
+        tig_verdict = (tig.get("verdict") or "").upper()
+        tig_blocking = tig.get("blocking_count", 0)
+        if tig_verdict == "BLOCKED" or tig_blocking > 0:
+            return "needs_thumbnail"
 
     if qa_verdict == "WARNING":
         return "qa_warning"
@@ -237,7 +251,8 @@ def sync_disk_episode_to_db(
     initialize_schema(db)
 
     # ── Read packages ────────────────────────────────────────────────────────
-    qa_pkg   = _load(ep_dir, "qa_approval_report", episode_id)
+    qa_pkg        = _load(ep_dir, "qa_approval_report", episode_id)
+    thumbnail_pkg = _load(ep_dir, "thumbnail_package", episode_id)
     bga_pkgs = []
     for pass_num in (1, 2):
         pkg = _load(ep_dir, f"bga_compliance_report_p{pass_num}", episode_id)
@@ -260,7 +275,7 @@ def sync_disk_episode_to_db(
         "has_narration": has_narration,
     }
 
-    status     = infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+    status     = infer_episode_status(qa_pkg, bga_pkgs, artifacts, thumbnail_pkg=thumbnail_pkg)
     title      = episode_title_from_disk(ep_dir, episode_id)
     created_at = extract_created_at(ep_dir, episode_id)
     cost_usd   = extract_total_cost(ep_dir, episode_id)

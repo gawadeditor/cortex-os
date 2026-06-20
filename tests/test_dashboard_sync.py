@@ -4,11 +4,12 @@ tests/test_dashboard_sync.py — Disk-to-DB sync layer tests.
 Coverage:
     TestDiskSyncImport        — sync_disk_episode_to_db populates DB correctly
     TestSyncIdempotency       — running sync twice never duplicates rows
-    TestEpisodeStatusLogic    — infer_episode_status maps BGA/QA to correct status
+    TestEpisodeStatusLogic    — infer_episode_status maps BGA/QA/TIG to correct status
+    TestThumbnailBlockedStatus — TIG BLOCKED thumbnail → needs_thumbnail status
     TestSyncAllDiskEpisodes   — sync_all_disk_episodes_to_db finds multiple episodes
     TestEpisodesPageWithDisk  — /episodes shows disk episodes that aren't in DB
     TestEpisodeDetailFromDB   — /episode/<id> after sync shows real duration/cost/stages
-    TestBGABlockedStatus      — BGA BLOCKED prevents COMPLETE status
+    TestBGABlockedStatus      — script BGA BLOCKED prevents COMPLETE status
     TestResumeButtonLogic     — resume buttons only shown when relevant
     TestSyncAPIEndpoints      — POST /api/sync/episode/<id> and /api/sync/all work
 """
@@ -796,3 +797,236 @@ class TestSyncAPIEndpoints:
         ).fetchone()[0]
         conn.close()
         assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# TestThumbnailBlockedStatus
+# ---------------------------------------------------------------------------
+
+class TestThumbnailBlockedStatus:
+    """TIG-blocked thumbnail_identity_report → needs_thumbnail, not complete or qa_warning."""
+
+    def _blocked_thumbnail_pkg(self):
+        return {
+            "thumbnail_identity_report": {
+                "verdict": "BLOCKED",
+                "blocking_count": 1,
+                "violations": [
+                    {"rule_id": "TIG-07", "severity": "BLOCKING",
+                     "description": "Missing wordmark"},
+                ],
+            },
+            "package_integrity": {"production_ready": False},
+        }
+
+    def _approved_thumbnail_pkg(self):
+        return {
+            "thumbnail_identity_report": {
+                "verdict": "APPROVED",
+                "blocking_count": 0,
+                "violations": [],
+            },
+            "package_integrity": {"production_ready": True},
+        }
+
+    def test_tig_blocked_gives_needs_thumbnail(self):
+        qa  = {"verdict": "APPROVED", "approved": True}
+        bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
+        art = {"has_render": True}
+        tn  = self._blocked_thumbnail_pkg()
+        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "needs_thumbnail"
+
+    def test_tig_blocked_overrides_qa_warning(self):
+        """QA warning + TIG blocked → needs_thumbnail, not qa_warning."""
+        qa  = {"verdict": "WARNING", "approved": True}
+        bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
+        art = {"has_render": True}
+        tn  = self._blocked_thumbnail_pkg()
+        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "needs_thumbnail"
+
+    def test_tig_approved_allows_complete(self):
+        qa  = {"verdict": "APPROVED", "approved": True}
+        bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
+        art = {"has_render": True}
+        tn  = self._approved_thumbnail_pkg()
+        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "complete"
+
+    def test_no_thumbnail_pkg_does_not_trigger_needs_thumbnail(self):
+        """If no thumbnail_package present, status should not be needs_thumbnail."""
+        qa  = {"verdict": "APPROVED", "approved": True}
+        bga = [{"outcome": "APPROVED", "violations": [], "summary": {"blocking_count": 0}}]
+        art = {"has_render": True}
+        assert infer_episode_status(qa, bga, art, thumbnail_pkg=None) == "complete"
+
+    def test_script_bga_blocked_takes_priority_over_tig(self):
+        """Script BGA BLOCKED → needs_review, even if TIG would give needs_thumbnail."""
+        qa  = {"verdict": "APPROVED", "approved": True}
+        bga = [{"outcome": "BLOCKED", "violations": [
+            {"rule_id": "BGA-01", "severity": "BLOCKING", "description": "brand mismatch"}
+        ], "summary": {"blocking_count": 1}}]
+        art = {"has_render": True}
+        tn  = self._blocked_thumbnail_pkg()
+        assert infer_episode_status(qa, bga, art, thumbnail_pkg=tn) == "needs_review"
+
+    def test_sync_ep003_like_gets_needs_thumbnail(self, tmp_path):
+        """Fixture matching ep_003: QA warning approved + BGA-script approved + TIG blocked."""
+        assets  = tmp_path / "assets"
+        db_path = tmp_path / "test.db"
+        initialize_schema(db_path)
+        from tests.test_dashboard_sync import _make_ep_dir
+        _make_ep_dir(assets, "ep_tig_003")
+
+        # Overwrite thumbnail_package with a BLOCKED TIG
+        import json
+        ep_dir = assets / "episodes" / "ep_tig_003"
+        (ep_dir / "thumbnail_package_ep_tig_003.json").write_text(json.dumps({
+            "thumbnail_package_id": "tp_ep_tig_003",
+            "episode_id": "ep_tig_003",
+            "package_integrity": {"production_ready": False},
+            "thumbnail_identity_report": {
+                "verdict": "BLOCKED",
+                "blocking_count": 1,
+                "violations": [{"rule_id": "TIG-07", "severity": "BLOCKING",
+                                "description": "Missing wordmark"}],
+            },
+        }))
+
+        result = sync_disk_episode_to_db("ep_tig_003", assets_root=assets, db_path=db_path)
+        assert result["status"] == "needs_thumbnail"
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT status FROM episodes WHERE episode_id = 'ep_tig_003'"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "needs_thumbnail"
+
+
+# ---------------------------------------------------------------------------
+# TestProviderUITruth
+# ---------------------------------------------------------------------------
+
+class TestProviderUITruth:
+    """Provider page never lies about implementation status or auth type."""
+
+    @pytest.fixture
+    def client(self):
+        import run_dashboard as server
+        server.app.config["TESTING"] = True
+        with server.app.test_client() as c:
+            yield c
+
+    def test_instagram_not_shown_as_api_key(self, client):
+        with patch("run_dashboard.list_secret_profiles", return_value=[]), \
+             patch("run_dashboard.get_all_provider_statuses", return_value={}):
+            resp = client.get("/providers")
+        body = resp.data.decode()
+        # Instagram must NOT say "Auth: API key"
+        # It must say OAuth or Meta Graph API
+        assert "oauth2_meta" not in body or "Meta Graph API" in body
+
+    def test_facebook_not_shown_as_api_key(self, client):
+        with patch("run_dashboard.list_secret_profiles", return_value=[]), \
+             patch("run_dashboard.get_all_provider_statuses", return_value={}):
+            resp = client.get("/providers")
+        body = resp.data.decode()
+        assert "Meta Graph API" in body
+
+    def test_tiktok_no_active_test_button(self, client):
+        """TikTok must not show a Test button that silently returns not_verifiable."""
+        with patch("run_dashboard.list_secret_profiles", return_value=[]), \
+             patch("run_dashboard.get_all_provider_statuses", return_value={}):
+            resp = client.get("/providers")
+        body = resp.data.decode()
+        assert "Verified at publish time" in body
+
+    def test_youtube_shows_oauth2(self, client):
+        with patch("run_dashboard.list_secret_profiles", return_value=[]), \
+             patch("run_dashboard.get_all_provider_statuses", return_value={}):
+            resp = client.get("/providers")
+        body = resp.data.decode()
+        assert "OAuth 2.0" in body
+
+    def test_instagram_cred_type_is_oauth2_token(self):
+        import run_dashboard as s
+        assert s._PLATFORM_CRED_TYPE["instagram"] == "oauth2_token"
+
+    def test_facebook_cred_type_is_oauth2_token(self):
+        import run_dashboard as s
+        assert s._PLATFORM_CRED_TYPE["facebook"] == "oauth2_token"
+
+    def test_tiktok_cred_type_is_oauth2_token(self):
+        import run_dashboard as s
+        assert s._PLATFORM_CRED_TYPE["tiktok"] == "oauth2_token"
+
+    def test_muapi_backed_providers_still_grouped_under_muapi(self, client):
+        with patch("run_dashboard.list_secret_profiles", return_value=[]), \
+             patch("run_dashboard.get_all_provider_statuses", return_value={}):
+            resp = client.get("/providers")
+        body = resp.data.decode()
+        assert "Configured through MUAPI" in body
+
+    def test_platform_providers_auth_field_not_api_key(self):
+        """No platform provider should have auth=api_key — they all use OAuth tokens."""
+        import run_dashboard as s
+        for p in s._PLATFORM_PROVIDERS:
+            assert p.get("auth") != "api_key", \
+                f"{p['id']} has auth=api_key — must be oauth2 or oauth2_meta"
+
+
+# ---------------------------------------------------------------------------
+# TestNavigation
+# ---------------------------------------------------------------------------
+
+class TestNavigation:
+    """Important routes must include the dashboard navigation shell."""
+
+    @pytest.fixture
+    def client(self):
+        import run_dashboard as server
+        server.app.config["TESTING"] = True
+        with server.app.test_client() as c:
+            yield c
+
+    def _has_nav(self, resp) -> bool:
+        body = resp.data.decode()
+        return "site-nav" in body or "nav-brand" in body or "Factory OS" in body
+
+    def test_dashboard_has_nav(self, client):
+        with patch("run_dashboard.get_factory_state", side_effect=Exception("no db")), \
+             patch("run_dashboard.assess_factory", side_effect=Exception("no db")):
+            resp = client.get("/dashboard")
+        assert self._has_nav(resp)
+
+    def test_episodes_has_nav(self, client):
+        with patch("run_dashboard.list_episodes", return_value=[]), \
+             patch("run_dashboard.list_disk_episodes", return_value=[]):
+            resp = client.get("/episodes")
+        assert self._has_nav(resp)
+
+    def test_providers_has_nav(self, client):
+        with patch("run_dashboard.list_secret_profiles", return_value=[]), \
+             patch("run_dashboard.get_all_provider_statuses", return_value={}):
+            resp = client.get("/providers")
+        assert self._has_nav(resp)
+
+    def test_channel_detail_has_nav(self, client, tmp_path):
+        with patch("run_dashboard.get_channel_detail", return_value=None):
+            resp = client.get("/channel/ch_test")
+        # 404 page should also have nav
+        assert self._has_nav(resp)
+
+    def test_not_found_has_nav(self, client, tmp_path):
+        resp = client.get("/episode/totally_nonexistent_xyz789")
+        # 404 page; nav should be present
+        assert self._has_nav(resp)
+
+    def test_brand_edit_has_nav(self, client):
+        with patch("run_dashboard.get_brand_detail", return_value=None):
+            resp = client.get("/brand/br_nonexistent/edit")
+        assert self._has_nav(resp)
+
+    def test_model_edit_has_nav(self, client):
+        with patch("run_dashboard.get_model_detail", return_value=None):
+            resp = client.get("/model/md_nonexistent/edit")
+        assert self._has_nav(resp)

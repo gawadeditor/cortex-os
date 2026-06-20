@@ -92,8 +92,8 @@ from hypogeum.credential_manager import (
 _PLATFORM_CRED_TYPE = {
     "youtube":   "oauth2_token",
     "tiktok":    "oauth2_token",
-    "instagram": "api_key",
-    "facebook":  "api_key",
+    "instagram": "oauth2_token",
+    "facebook":  "oauth2_token",
 }
 _PLATFORM_DISPLAY = {
     "youtube": "YouTube", "tiktok": "TikTok",
@@ -466,13 +466,22 @@ _VALID_CONTENT_PROVIDERS = frozenset(_CONTENT_PROVIDER_SETUP)
 
 _PLATFORM_PROVIDERS = [
     {"id": "youtube",   "label": "YouTube",   "auth": "oauth2",
-     "description": "Video publishing"},
+     "description": "Video publishing",
+     "upload_implemented": True},
     {"id": "tiktok",    "label": "TikTok",    "auth": "oauth2",
-     "description": "Short video publishing"},
-    {"id": "instagram", "label": "Instagram", "auth": "api_key",
-     "description": "Reels & posts"},
-    {"id": "facebook",  "label": "Facebook",  "auth": "api_key",
-     "description": "Video posts"},
+     "description": "Short video publishing",
+     "upload_implemented": True,
+     "test_note": "Availability checked at publish time via creator info API"},
+    {"id": "instagram", "label": "Instagram", "auth": "oauth2_meta",
+     "description": "Reels via Meta Graph API",
+     "upload_implemented": True,
+     "requires": ["META_APP_ID", "META_APP_SECRET", "META_ACCESS_TOKEN",
+                  "META_INSTAGRAM_ACCOUNT_ID"]},
+    {"id": "facebook",  "label": "Facebook",  "auth": "oauth2_meta",
+     "description": "Video posts via Meta Graph API",
+     "upload_implemented": True,
+     "requires": ["META_APP_ID", "META_APP_SECRET", "META_ACCESS_TOKEN",
+                  "META_FACEBOOK_PAGE_ID"]},
 ]
 
 
@@ -996,22 +1005,28 @@ _PLATFORM_SETUP = {
     },
     "instagram": {
         "label":        "Instagram",
-        "cred_label":   "Instagram Graph API Token",
+        "cred_label":   "Meta Long-Lived Access Token",
         "instructions": (
-            "Go to Meta for Developers → your app → Instagram → Generate Token. "
-            "Paste the long-lived access token below."
+            "Instagram uses the Meta Graph API (OAuth 2.0 derived token). "
+            "In Meta for Developers → your app → Tools → Graph API Explorer: "
+            "select your app, grant instagram_basic + instagram_content_publish scopes, "
+            "generate a long-lived page/user token, then paste it below. "
+            "Also set META_INSTAGRAM_ACCOUNT_ID to your Instagram Business account ID."
         ),
-        "credential_type": "api_key",
+        "credential_type": "oauth2_token",
         "placeholder": "EAAGm...",
     },
     "facebook": {
         "label":        "Facebook",
-        "cred_label":   "Facebook Page Access Token",
+        "cred_label":   "Meta Long-Lived Page Access Token",
         "instructions": (
-            "Go to Meta for Developers → your app → Tools → Graph API Explorer. "
-            "Select your Page and generate a long-lived token. Paste it below."
+            "Facebook uses the Meta Graph API (OAuth 2.0 derived token). "
+            "In Meta for Developers → your app → Tools → Graph API Explorer: "
+            "select your Page, grant pages_manage_posts + pages_read_engagement scopes, "
+            "generate a long-lived page token, then paste it below. "
+            "Also set META_FACEBOOK_PAGE_ID to your Facebook Page ID."
         ),
-        "credential_type": "api_key",
+        "credential_type": "oauth2_token",
         "placeholder": "EAAGm...",
     },
 }
@@ -1523,11 +1538,12 @@ def _make_disk_qa_summary(episode_id: str) -> dict:
 
 
 _DISK_STATUS_LABELS = {
-    "complete":     "Complete",
-    "qa_warning":   "QA Warning",
-    "needs_review": "Needs Review",
-    "partial":      "Partial",
-    "failed":       "Failed",
+    "complete":          "Complete",
+    "qa_warning":        "QA Warning",
+    "needs_review":      "Needs Review",
+    "needs_thumbnail":   "Needs Thumbnail",
+    "partial":           "Partial",
+    "failed":            "Failed",
 }
 
 
@@ -1537,12 +1553,13 @@ def _disk_episode_status(episode_id: str, artifacts: dict) -> str:
     qa_pkg = load_disk_pkg(ep_dir, "qa_approval_report", episode_id)
     if not qa_pkg:
         qa_pkg = load_disk_pkg(ep_dir, "qa_report", episode_id)
+    thumbnail_pkg = load_disk_pkg(ep_dir, "thumbnail_package", episode_id)
     bga_pkgs = []
     for pn in (1, 2):
         pkg = load_disk_pkg(ep_dir, f"bga_compliance_report_p{pn}", episode_id)
         if pkg:
             bga_pkgs.append(pkg)
-    return infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+    return infer_episode_status(qa_pkg, bga_pkgs, artifacts, thumbnail_pkg=thumbnail_pkg)
 
 
 def _disk_resume_actions(episode_id: str, artifacts: dict) -> dict:
@@ -1920,7 +1937,8 @@ def episodes_page():
             if ep_id in db_ep_ids:
                 continue
             ep_dir = _ASSETS_ROOT_PATH / "episodes" / ep_id
-            qa_pkg   = load_disk_pkg(ep_dir, "qa_approval_report", ep_id)
+            qa_pkg        = load_disk_pkg(ep_dir, "qa_approval_report", ep_id)
+            thumbnail_pkg = load_disk_pkg(ep_dir, "thumbnail_package", ep_id)
             bga_pkgs = []
             for pn in (1, 2):
                 pkg = load_disk_pkg(ep_dir, f"bga_compliance_report_p{pn}", ep_id)
@@ -1931,7 +1949,7 @@ def episodes_page():
                 "has_thumbnail": dep.get("has_thumbnail", False),
                 "has_narration": False,
             }
-            status = infer_episode_status(qa_pkg, bga_pkgs, artifacts)
+            status = infer_episode_status(qa_pkg, bga_pkgs, artifacts, thumbnail_pkg=thumbnail_pkg)
             title  = dep.get("title") or episode_title_from_disk(ep_dir, ep_id)
             episodes.append({
                 "episode_id":    ep_id,

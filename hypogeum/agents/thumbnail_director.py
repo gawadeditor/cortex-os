@@ -67,6 +67,10 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agents.thumbnail_generation_agent import generate_thumbnails
+from hypogeum.agents.thumbnail_prompt_validator import (
+    PromptDistinctnessError,
+    validate_prompt_distinctness,
+)
 from hypogeum.agents.thumbnail_prompt_writer import write_thumbnail_prompts
 from hypogeum.agents.thumbnail_qa import run_thumbnail_qa
 from hypogeum.config import Config
@@ -132,13 +136,55 @@ def run_thumbnail_director(
     # ------------------------------------------------------------------
     # Phase 1 — Claude planning (delegated to thumbnail_prompt_writer)
     # ------------------------------------------------------------------
+    # Concept-driven mode: if a thumbnail_concept_brief exists on disk for
+    # this episode, load it and pass it to the prompt writer. The TD system
+    # prompt (SECTION 11C) will instruct Claude to build prompts from the
+    # three marketing concepts instead of from VPD scene candidates.
+    concept_brief: Optional[dict] = None
+    concept_brief_path = _resolve_output_dir / f"thumbnail_concept_brief_{episode_id}.json"
+    if concept_brief_path.exists():
+        try:
+            concept_brief = json.loads(concept_brief_path.read_text(encoding="utf-8"))
+            log.info(
+                "td_concept_brief_loaded",
+                episode_id=episode_id,
+                concepts_count=len(concept_brief.get("concepts", [])),
+                triggers=[
+                    c.get("emotional_trigger")
+                    for c in concept_brief.get("concepts", [])
+                ],
+            )
+        except Exception as exc:
+            log.warn("td_concept_brief_load_failed", error=str(exc))
+            concept_brief = None
+
     generation_plan = write_thumbnail_prompts(
         handoff_brief=handoff_brief,
+        concept_brief=concept_brief,
         config=config,
         episode_id=episode_id,
         output_dir=_resolve_output_dir,
         log=log,
     )
+
+    # ------------------------------------------------------------------
+    # Pre-generation distinctness gate
+    # ------------------------------------------------------------------
+    main_candidates_for_validation = (
+        generation_plan.get("main_episode", {}).get("ranked_candidates", [])
+    )
+    distinctness_result = validate_prompt_distinctness(main_candidates_for_validation)
+    if not distinctness_result["passed"]:
+        log.error(
+            "td_prompt_distinctness_failed",
+            failures=distinctness_result["failures"],
+            concept_driven=concept_brief is not None,
+        )
+    if distinctness_result["warnings"]:
+        log.warn(
+            "td_prompt_distinctness_warnings",
+            warnings=distinctness_result["warnings"],
+        )
 
     # ------------------------------------------------------------------
     # BGA Pass 2 — brand compliance gate (before image generation spend)

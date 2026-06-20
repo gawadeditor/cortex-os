@@ -252,6 +252,58 @@ ATMOSPHERE LANGUAGE SUBSTITUTIONS:
 
 ---
 
+SECTION 11C — CONCEPT-DRIVEN MODE
+
+When the input_package contains a "thumbnail_concept_brief" key, that brief is the authoritative creative source. The three marketing concepts override VPD thumbnail candidates as the basis for image_prompt writing.
+
+ACTIVATION: concept-driven mode is active when input_package.thumbnail_concept_brief is a non-null dict with a "concepts" array of exactly 3 entries.
+
+MAPPING (fixed — do not reorder):
+  concepts[0] → rank 1 (primary candidate, most likely to be published)
+  concepts[1] → rank 2
+  concepts[2] → rank 3
+
+For each concept, build the image_prompt from these concept fields:
+
+1. visual_thesis — the PRIMARY compositional anchor. It describes WHY the image creates tension, not what is in the frame. Your job is to translate it into a specific cinematic scene that embodies the tension. The visual_thesis is an abstraction; the image_prompt is its concrete realisation.
+
+2. emotional_trigger — determines the atmosphere, lighting register, and the EMOTIONAL FEEL of the scene:
+   - impossibility: object suspended in pure darkness or void, precise but contextless, surrounded by absence
+   - betrayal:      something concealed or half-visible; a location that implies removal or suppression; absence where presence is expected
+   - loss:          solitary remnant in vast empty space; the last of something against a background that implies all the rest is gone
+   - awe:           vast scale that dwarfs the viewer; grandeur; the sublime; architecture or cosmos that makes objects small
+   - dread:         deep shadow with an unseen threat; something that should not be there; ominous calm
+   - discovery:     first light on a hidden subject; emergence from darkness; something seen for the first time
+   - scale:         tiny object against enormous ancient backdrop; the specific contrast of small artefact and immense world
+
+3. curiosity_gap — the unresolved question this image must make VISIBLE. The scene should make the viewer sense this gap without resolving it. Ask: what visual element in the scene creates the gap?
+
+4. viewer_promise — the emotional register and narrative implied by the image. Write the scene so a viewer would believe this promise.
+
+5. suggested_hook_text — use as text_overlay.text for this candidate EXACTLY AS WRITTEN (capitalise as given). Do not substitute, paraphrase, or unify hook texts across candidates.
+
+CRITICAL — DO NOT USE A COMMON PREFIX:
+All three image_prompts must begin with a DIFFERENT visual starting point. The three emotional triggers map to three different scene architectures. If all three prompts begin with the same noun phrase, they will produce near-identical images.
+
+FORBIDDEN pattern (all three starting the same way):
+  rank-1: "Corroded bronze fragments in a near-black chamber..."
+  rank-2: "Corroded bronze fragments on a stone plinth..."
+  rank-3: "Corroded bronze fragments beside a Babylonian tablet..."
+
+REQUIRED pattern (each starting from a different visual idea):
+  rank-1 (impossibility): "A single ancient artifact of impossible precision, suspended in pure void, its gear teeth casting geometric shadows — no context, no origin, only the object and the question..."
+  rank-2 (betrayal): "An empty stone archive shelf under amber torchlight — the outline of a small object still faintly visible in the dust where it once rested, now gone without explanation..."
+  rank-3 (loss): "A corroded bronze fragment caught in the last amber light of an ancient fire, the vast darkness of the harbour behind it swallowing everything else that was once known..."
+
+DO NOT attempt to maintain primary_subject_identity as a mandatory visual element across all three candidates. The subject appears where the concept's visual_thesis demands it — not as a forced prefix. Concept B (betrayal) might show the ABSENCE of the subject. Concept C (loss) might show the subject as a tiny speck against vast emptiness. Only concept A might show the subject in close-up, if impossibility demands it.
+
+After writing all three prompts, verify:
+- The first five words of prompt A are different from the first five words of prompt B and C.
+- The hook text for each candidate matches the concept's suggested_hook_text exactly.
+- Each prompt evokes a different emotional register.
+
+---
+
 SECTION 12 — FAILURE CONDITIONS
 
 Main episode requires EXACTLY 3 ranked_candidates. If the Handoff Brief has fewer than 3 candidates:

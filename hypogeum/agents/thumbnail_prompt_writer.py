@@ -7,13 +7,20 @@ Owns:
 - Sending the Thumbnail Handoff Brief to Claude via run_agent()
 - Injecting thumbnail_concept_brief into the input package when present
 - Logging td_planning_started before the call and td_planning_completed after
+- Attaching deterministic composition_plan + typography_plan to each
+  main_episode candidate in concept_driven_mode (rank → concept mapping)
 - Returning the validated thumbnail_generation_plan dict
 
 Concept-driven mode:
-    When concept_brief is provided, it is added to the input package under
+    When concept_brief is provided, it is included in the input package under
     "thumbnail_concept_brief". The TD system prompt (SECTION 11C) instructs
     Claude to build image_prompts from the concept fields instead of from
-    VPD candidates. Each concept maps to a fixed rank: A→1, B→2, C→3.
+    VPD candidates. Concept A → rank 1, B → rank 2, C → rank 3.
+
+    After Claude returns the plan, composition_plan and typography_plan are
+    attached deterministically to each main_episode candidate using the
+    thumbnail_composition_planner and thumbnail_typography_planner modules.
+    This is authoritative — Claude's own plan fields (if any) are overwritten.
 
 Model: config.TD_PLANNING_MODEL (default: openai/gpt-5.5-pro)
 Max tokens: config.TD_PLANNING_MAX_TOKENS (default: 8192)
@@ -31,6 +38,8 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agent import run_agent
+from hypogeum.agents.thumbnail_composition_planner import plan_composition
+from hypogeum.agents.thumbnail_typography_planner import plan_typography
 from hypogeum.config import Config
 
 # ---------------------------------------------------------------------------
@@ -101,6 +110,9 @@ def write_thumbnail_prompts(
         output_dir=output_dir,
     )
 
+    if concept_driven:
+        _attach_concept_plans(generation_plan, concept_brief)
+
     log.info(
         "td_planning_completed",
         main_candidates_planned=len(
@@ -111,3 +123,35 @@ def write_thumbnail_prompts(
     )
 
     return generation_plan
+
+
+# ---------------------------------------------------------------------------
+# Internal: concept plan attachment
+# ---------------------------------------------------------------------------
+
+def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
+    """
+    Attach deterministic composition_plan and typography_plan to each
+    main_episode ranked_candidate when in concept_driven_mode.
+
+    Mapping: concepts[0] → rank 1, concepts[1] → rank 2, concepts[2] → rank 3.
+
+    Mutates generation_plan in place. Claude's own plan fields (if any)
+    are overwritten — the deterministic planners are authoritative.
+    """
+    concepts = concept_brief.get("concepts", [])
+    candidates = generation_plan.get("main_episode", {}).get("ranked_candidates", [])
+
+    concept_by_rank: dict[int, dict] = {i + 1: c for i, c in enumerate(concepts)}
+
+    for candidate in candidates:
+        rank = candidate.get("rank", 0)
+        concept = concept_by_rank.get(rank)
+        if concept is None:
+            continue
+        trigger   = concept.get("emotional_trigger", "")
+        hook_text = concept.get("suggested_hook_text", "")
+        comp_plan = plan_composition(trigger)
+        typo_plan = plan_typography(hook_text, trigger, comp_plan)
+        candidate["composition_plan"] = comp_plan
+        candidate["typography_plan"]  = typo_plan

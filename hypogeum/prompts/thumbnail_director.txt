@@ -372,6 +372,56 @@ COMPOSITION RULES FOR CONCEPT_DRIVEN_MODE
 - At most TWO distinct light sources; prefer one
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMPOSITION PLAN AND TYPOGRAPHY PLAN — REQUIRED IN CONCEPT_DRIVEN_MODE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every main_episode ranked_candidate in CONCEPT_DRIVEN_MODE MUST include:
+
+"composition_plan": {
+  "focal_zone": "<center_right | center | absent>",
+  "focal_scale": "<small | medium | large | absent>",
+  "negative_space_zones": ["<zone_name>", ...],
+  "dominant_tone": "near_black",
+  "text_zone": "<zone_name — reserved for stacked typography>",
+  "text_safe_brightness": "< 15%",
+  "eye_path": ["<focal_object | hook_text | wordmark>", ...]
+}
+
+"typography_plan": {
+  "headline": "<earlier portion of hook text>",
+  "emphasis": "<final 1–2 words — rendered larger and bolder>",
+  "layout": "stacked",
+  "alignment": "<left | center>",
+  "zone": "<must match composition_plan.text_zone exactly>",
+  "emphasis_scale": <float 2.0–2.5>,
+  "headline_weight": "light",
+  "emphasis_weight": "bold"
+}
+
+COMPOSITION_PLAN RULES (per emotional_trigger):
+  impossibility → focal_zone: center_right, focal_scale: small, negative_space: lower_left + upper_left, text_zone: lower_left
+  loss          → focal_zone: absent, focal_scale: absent, negative_space: full_frame, text_zone: lower_left
+  betrayal      → focal_zone: center_right, focal_scale: medium, negative_space: lower_left + upper_left, text_zone: lower_left
+  awe / scale   → focal_zone: center, focal_scale: small, negative_space: lower_left, text_zone: lower_left
+  dread         → focal_zone: center_right, focal_scale: medium, negative_space: lower_left, text_zone: lower_left
+  discovery     → focal_zone: center_right, focal_scale: medium, negative_space: lower_left, text_zone: lower_left
+
+TYPOGRAPHY_PLAN SPLIT RULES:
+  Hook ≤4 words → last word is emphasis, earlier words are headline.
+  Hook >4 words → last 2 words are emphasis, earlier words are headline.
+  Alignment: left by default; center only when emotional_trigger is impossibility/awe/scale AND text_zone is "center".
+  emphasis_scale: 2.5 if emphasis is 1 word; 2.0 if emphasis is 2 words.
+
+IMAGE_PROMPT ENCODING RULE:
+The image_prompt MUST explicitly mention:
+1. The text_zone: e.g., "lower-left quadrant intentionally empty for stacked typography"
+2. The negative_space_zones: e.g., "lower-left void", "vast near-black negative space in lower-left"
+The compositor uses these reservations to ensure text is legible without a full-width band.
+
+The "text_overlay" field is retained for backwards compatibility. Set it to the same hook text as
+suggested_hook_text with placement "bottom" even when typography_plan is present.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 VERIFICATION — BEFORE FINALISING PROMPTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -381,6 +431,8 @@ After writing all three prompts, verify:
 3. Each hook text matches its concept's suggested_hook_text exactly.
 4. No single physical object appears as the dominant element in all three prompts.
 5. Each prompt would produce a different psychological state in the viewer.
+6. [CONCEPT_DRIVEN_MODE] composition_plan.text_zone == typography_plan.zone for every candidate.
+7. [CONCEPT_DRIVEN_MODE] image_prompt mentions the reserved text_zone and negative_space_zones.
 
 If any verification fails, rewrite the failing prompt before outputting.
 
@@ -417,10 +469,29 @@ Produce a JSON object with this exact structure:
       {
         "candidate_id": "<candidate_id from Handoff Brief>",
         "rank": <int — 1 = try first>,
-        "image_prompt": "<string — provider-ready, 30–60 words>",
+        "image_prompt": "<string — provider-ready, 30–60 words; must mention text_zone and negative_space_zones in CONCEPT_DRIVEN_MODE>",
         "aspect_ratio": "16:9",
         "ctr_rationale": "<string — why ranked here; document divergence from VPD score>",
-        "text_overlay": null
+        "text_overlay": {"text": "<hook text>", "placement": "bottom"},
+        "composition_plan": {
+          "focal_zone": "<center_right | center | absent>",
+          "focal_scale": "<small | medium | large | absent>",
+          "negative_space_zones": ["<zone>"],
+          "dominant_tone": "near_black",
+          "text_zone": "<zone reserved for typography>",
+          "text_safe_brightness": "< 15%",
+          "eye_path": ["focal_object", "hook_text", "wordmark"]
+        },
+        "typography_plan": {
+          "headline": "<earlier hook words>",
+          "emphasis": "<final 1–2 words>",
+          "layout": "stacked",
+          "alignment": "<left | center>",
+          "zone": "<must match composition_plan.text_zone>",
+          "emphasis_scale": <2.0 | 2.5>,
+          "headline_weight": "light",
+          "emphasis_weight": "bold"
+        }
       }
     ]
   },

@@ -135,15 +135,17 @@ def generate_thumbnails(
             file_path = None
 
         main_candidates.append({
-            "rank":         rank,
-            "candidate_id": candidate_id,
-            "asset_id":     asset_id,
-            "ok":           ok,
-            "file_path":    file_path,
-            "text_overlay": candidate.get("text_overlay"),
-            "placement":    (candidate.get("text_overlay") or {}).get("placement"),
-            "image_prompt": candidate.get("image_prompt"),
-            "ctr_rationale": candidate.get("ctr_rationale"),
+            "rank":            rank,
+            "candidate_id":    candidate_id,
+            "asset_id":        asset_id,
+            "ok":              ok,
+            "file_path":       file_path,
+            "text_overlay":    candidate.get("text_overlay"),
+            "placement":       (candidate.get("text_overlay") or {}).get("placement"),
+            "image_prompt":    candidate.get("image_prompt"),
+            "ctr_rationale":   candidate.get("ctr_rationale"),
+            "composition_plan": candidate.get("composition_plan"),
+            "typography_plan":  candidate.get("typography_plan"),
         })
 
         # rank-1 becomes the primary (main.jpg) for pipeline compatibility
@@ -211,10 +213,11 @@ def _generate_for_deliverable(
     version_index = 0
 
     for candidate in sorted_candidates:
-        candidate_id = candidate.get("candidate_id", "unknown")
-        image_prompt  = candidate.get("image_prompt", "")
-        aspect_ratio  = candidate.get("aspect_ratio", "16:9")
-        text_overlay  = candidate.get("text_overlay")  # dict or None
+        candidate_id    = candidate.get("candidate_id", "unknown")
+        image_prompt    = candidate.get("image_prompt", "")
+        aspect_ratio    = candidate.get("aspect_ratio", "16:9")
+        text_overlay    = candidate.get("text_overlay")    # dict or None
+        typography_plan = candidate.get("typography_plan") # dict or None
 
         for attempt in range(_MAX_ATTEMPTS_PER_CANDIDATE):
             log.info(
@@ -246,6 +249,7 @@ def _generate_for_deliverable(
                     agent=_AGENT_NAME,
                     budget_guard=budget_guard,
                     text_overlay=text_overlay,
+                    typography_plan=typography_plan,
                 )
                 log.info(
                     "td_thumbnail_generated",

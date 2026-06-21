@@ -68,6 +68,7 @@ from typing import Optional
 
 from hypogeum.agents.thumbnail_generation_agent import generate_thumbnails
 from hypogeum.agents.thumbnail_killer_concept_validator import validate_concept_quality
+from hypogeum.agents.thumbnail_plan_validator import validate_all_candidates_pre_generation
 from hypogeum.agents.thumbnail_prompt_validator import (
     PromptDistinctnessError,
     validate_prompt_distinctness,
@@ -205,6 +206,16 @@ def run_thumbnail_director(
             )
 
     # ------------------------------------------------------------------
+    # Pre-generation composition/typography plan validator
+    # ------------------------------------------------------------------
+    plan_validation = validate_all_candidates_pre_generation(main_candidates_for_validation)
+    if not plan_validation["passed"]:
+        log.warn(
+            "td_plan_validation_warnings",
+            failures=plan_validation["failures"],
+        )
+
+    # ------------------------------------------------------------------
     # BGA Pass 2 — brand compliance gate (before image generation spend)
     # ------------------------------------------------------------------
     if config.BGA_ENABLED:
@@ -245,16 +256,18 @@ def run_thumbnail_director(
     for c in main_candidates:
         overlay_raw = c.get("text_overlay") or {}
         package_candidates.append({
-            "candidate_id":  c["candidate_id"],
-            "rank":          c["rank"],
-            "selected":      c["rank"] == 1 and c.get("ok", False),
-            "status":        "generated" if c.get("ok") else "failed",
-            "asset_id":      c.get("asset_id"),
-            "file_path":     c.get("file_path"),
-            "text_overlay":  overlay_raw.get("text") if isinstance(overlay_raw, dict) else overlay_raw,
-            "placement":     overlay_raw.get("placement") if isinstance(overlay_raw, dict) else None,
-            "visual_prompt": c.get("image_prompt"),
-            "ctr_rationale": c.get("ctr_rationale"),
+            "candidate_id":    c["candidate_id"],
+            "rank":            c["rank"],
+            "selected":        c["rank"] == 1 and c.get("ok", False),
+            "status":          "generated" if c.get("ok") else "failed",
+            "asset_id":        c.get("asset_id"),
+            "file_path":       c.get("file_path"),
+            "text_overlay":    overlay_raw.get("text") if isinstance(overlay_raw, dict) else overlay_raw,
+            "placement":       overlay_raw.get("placement") if isinstance(overlay_raw, dict) else None,
+            "visual_prompt":   c.get("image_prompt"),
+            "ctr_rationale":   c.get("ctr_rationale"),
+            "composition_plan": c.get("composition_plan"),
+            "typography_plan":  c.get("typography_plan"),
         })
 
     # ------------------------------------------------------------------

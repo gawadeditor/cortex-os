@@ -1208,6 +1208,136 @@ def _apply_wordmark_overlay(
         pass
 
 
+def _apply_typography_plan(local_path: Path, typography_plan: dict) -> None:
+    """
+    Render stacked typography from a typography_plan onto a thumbnail in place.
+
+    Replaces the legacy full-width text overlay band. Renders headline + emphasis
+    in the zone reserved by the composition_plan, with:
+      - Small localized dark backing only behind the text (no full-width band)
+      - Headline: smaller, lighter weight
+      - Emphasis: larger (headline_size × emphasis_scale), bold
+      - Warm cream/gold colour palette (never pure white)
+      - Alignment: left or center per typography_plan.alignment
+
+    No-ops silently if PIL is unavailable, local_path does not exist, or both
+    headline and emphasis are empty.
+    """
+    headline       = str(typography_plan.get("headline", "")).strip().upper()
+    emphasis       = str(typography_plan.get("emphasis", "")).strip().upper()
+    alignment      = typography_plan.get("alignment", "left")
+    zone           = typography_plan.get("zone", "lower_left")
+    emphasis_scale = float(typography_plan.get("emphasis_scale", 2.5))
+
+    if not headline and not emphasis:
+        return
+    if not local_path.exists():
+        return
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        img = Image.open(local_path).convert("RGB")
+        img_w, img_h = img.size
+
+        # Zone → pixel anchor (top-left corner of text block)
+        _ZONE_ANCHORS: dict[str, tuple[float, float]] = {
+            "lower_left":   (0.07, 0.68),
+            "lower_right":  (0.52, 0.68),
+            "lower_center": (0.15, 0.68),
+            "upper_left":   (0.07, 0.15),
+            "upper_right":  (0.52, 0.15),
+            "upper_center": (0.15, 0.15),
+            "center":       (0.15, 0.42),
+            "full_frame":   (0.07, 0.68),  # fall back to lower_left for text
+        }
+        ax_frac, ay_frac = _ZONE_ANCHORS.get(zone, (0.07, 0.68))
+        anchor_x = round(img_w * ax_frac)
+        anchor_y = round(img_h * ay_frac)
+
+        # Font sizes: headline base ≈ 4.5% of height; emphasis scaled up
+        base_size  = max(16, round(img_h * 0.045))
+        emph_size  = max(20, round(base_size * emphasis_scale))
+
+        def _load_font(size: int) -> "ImageFont.FreeTypeFont":
+            for fp in _OVERLAY_FONT_CANDIDATES:
+                try:
+                    return ImageFont.truetype(fp, size)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        font_head = _load_font(base_size)
+        font_emph = _load_font(emph_size)
+
+        # Measure text dimensions
+        draw = ImageDraw.Draw(img.convert("RGBA"))
+
+        def _measure(text: str, font) -> tuple[int, int]:
+            try:
+                bb = draw.textbbox((0, 0), text, font=font)
+                return bb[2] - bb[0], bb[3] - bb[1]
+            except AttributeError:
+                return draw.textsize(text, font=font)
+
+        head_w, head_h = _measure(headline, font_head) if headline else (0, 0)
+        emph_w, emph_h = _measure(emphasis, font_emph) if emphasis else (0, 0)
+        line_gap = max(4, round(img_h * 0.01))
+
+        block_w = max(head_w, emph_w)
+        block_h = (head_h + line_gap + emph_h) if (headline and emphasis) else (head_h or emph_h)
+
+        # Horizontal position by alignment
+        max_x = img_w - round(img_w * 0.07)
+        if alignment == "center":
+            center_x = img_w // 2
+            head_x = center_x - head_w // 2
+            emph_x = center_x - emph_w // 2
+        elif alignment == "right":
+            head_x = max_x - head_w
+            emph_x = max_x - emph_w
+        else:  # left
+            head_x = anchor_x
+            emph_x = anchor_x
+
+        head_y = anchor_y
+        emph_y = anchor_y + head_h + line_gap if headline else anchor_y
+
+        # Localized dark backing (only behind text block, not full-width)
+        pad_x, pad_y = round(img_w * 0.025), round(img_h * 0.012)
+        back_x1 = min(head_x, emph_x) - pad_x
+        back_y1 = head_y - pad_y
+        back_x2 = min(head_x, emph_x) + block_w + pad_x
+        back_y2 = head_y + block_h + pad_y
+
+        img_rgba = img.convert("RGBA")
+        backing  = Image.new("RGBA", (back_x2 - back_x1, back_y2 - back_y1), (8, 6, 4, 170))
+        img_rgba.paste(backing, (back_x1, back_y1), backing)
+        img_out  = img_rgba.convert("RGB")
+        draw_out = ImageDraw.Draw(img_out)
+
+        # Colours: warm cream for headline, warm gold for emphasis
+        _HEAD_COLOR  = (210, 195, 160)  # slightly dimmer warm cream (lighter weight feel)
+        _EMPH_COLOR  = (240, 218, 174)  # aged parchment — main brand warm cream
+        _SHADOW      = (8, 8, 8)
+        shadow_off   = max(1, round(img_h * 0.002))
+
+        def _draw_text(text: str, x: int, y: int, font, colour: tuple) -> None:
+            draw_out.text((x + shadow_off, y + shadow_off), text, font=font, fill=_SHADOW)
+            draw_out.text((x, y), text, font=font, fill=colour)
+
+        if headline:
+            _draw_text(headline, head_x, head_y, font_head, _HEAD_COLOR)
+        if emphasis:
+            _draw_text(emphasis, emph_x, emph_y, font_emph, _EMPH_COLOR)
+
+        img_out.save(local_path, format="JPEG", quality=95)
+
+    except Exception:
+        # Typography rendering is a visual enhancement — never block thumbnail delivery
+        pass
+
+
 def generate_thumbnail(
     deliverable_id: str,
     image_prompt: str,
@@ -1219,6 +1349,7 @@ def generate_thumbnail(
     agent: Optional[str] = None,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
     text_overlay: Optional[dict] = None,
+    typography_plan: Optional[dict] = None,
 ) -> ThumbnailResult:
     """
     Generate a thumbnail image for one deliverable (main episode or a Short).
@@ -1237,9 +1368,14 @@ def generate_thumbnail(
         output_dir:     Episode asset directory (.hypogeum-assets/episodes/{ep_id}/).
         agent:          Optional agent name for log correlation.
         budget_guard:   Optional M5.6 budget guard. Blocks if episode budget is exceeded.
-        text_overlay:   Optional dict with "text" (str) and "placement" ("top"|"bottom").
-                        When provided, a rendered text band is composited onto the
-                        normalized image before saving.
+        text_overlay:     Optional dict with "text" (str) and "placement" ("top"|"bottom").
+                          Legacy compositor. When typography_plan is provided this is
+                          ignored for the text rendering step (typography_plan takes
+                          authority) but retained for schema backwards compatibility.
+        typography_plan:  Optional dict from thumbnail_typography_planner. When present,
+                          _apply_typography_plan() is called instead of _apply_text_overlay(),
+                          rendering stacked headline + emphasis in the reserved zone with a
+                          localized dark backing (no full-width band).
 
     Returns:
         ThumbnailResult with asset_id and local_path.
@@ -1267,6 +1403,7 @@ def generate_thumbnail(
         episode_id=episode_id,
         budget_guard=budget_guard,
         text_overlay=text_overlay,
+        typography_plan=typography_plan,
         log=log,
     )
     return ThumbnailResult(
@@ -1513,12 +1650,15 @@ def _attempt_thumbnail_generation(
     budget_guard: Optional[MUAPIBudgetGuard],
     text_overlay: Optional[dict],
     log,
+    typography_plan: Optional[dict] = None,
 ) -> tuple[str, bool]:
     """
     Attempt thumbnail generation with primary_model; fall back to fallback_model on failure.
 
     After a successful download: normalizes to canonical pixel dimensions, then composites
-    the text overlay band if requested.
+    text onto the image. When typography_plan is present, _apply_typography_plan() is used
+    (stacked headline+emphasis, localized backing, no full-width band). When only text_overlay
+    is present, _apply_text_overlay() is used (legacy full-width band path).
 
     Returns (model_used, used_fallback).
     Raises MUAPIError if all attempts fail.
@@ -1528,7 +1668,18 @@ def _attempt_thumbnail_generation(
 
     def _post_process(model: str, used_fallback: bool) -> tuple[str, bool]:
         _normalize_thumbnail(local_path, aspect_ratio)
-        if text_overlay:
+        if typography_plan:
+            # Concept-driven mode: stacked typography in reserved zone, no full-width band.
+            _apply_typography_plan(local_path, typography_plan)
+            log.info(
+                "muapi_thumbnail_typography_plan_applied",
+                deliverable_id=deliverable_id,
+                zone=typography_plan.get("zone"),
+                headline=typography_plan.get("headline"),
+                emphasis=typography_plan.get("emphasis"),
+            )
+        elif text_overlay:
+            # Legacy mode: full-width band with centred text.
             text = text_overlay.get("text", "")
             placement = text_overlay.get("placement", "bottom")
             _apply_text_overlay(local_path, text, placement)
@@ -1539,9 +1690,8 @@ def _attempt_thumbnail_generation(
                 placement=placement,
             )
         # Composite the channel wordmark onto every thumbnail (16:9 main episode only).
-        # Must run after _apply_text_overlay so hook text and wordmark are composited
-        # in the correct layer order (hook text first, wordmark on top).
-        # Wordmark is required by TIG-07 — without it every thumbnail is BLOCKED.
+        # Must run after text compositing so hook text and wordmark are in the correct
+        # layer order. Wordmark required by TIG-07.
         if aspect_ratio == "16:9":
             hook_placement = text_overlay.get("placement") if text_overlay else None
             _apply_wordmark_overlay(local_path, hook_placement=hook_placement)

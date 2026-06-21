@@ -1,21 +1,43 @@
 """
-tests/test_provider_registry.py — Phase 1A provider registry tests
+tests/test_provider_registry.py — Phase 1A–1D provider registry tests
 
 Tests:
-  TestProviderCatalog
+  TestProviderCatalog (Phase 1A)
     test_openai_in_catalog_without_asset_versions
-        OpenAI appears in get_provider_catalog() even with an empty DB and no env key.
-
     test_openrouter_has_image_capability
-        OpenRouter ProviderCatalogEntry lists "image" in capabilities.
-
     test_muapi_delegated_providers_labelled
-        Seedance, Veo, Kling, Runway are labelled access_mode="muapi_delegated".
+    test_all_nine_required_providers_present
+    test_catalog_shows_configured_openai_when_key_set
 
-  TestThumbnailProviderDispatch
+  TestThumbnailProviderDispatch (Phase 1A)
     test_openai_dispatch_calls_openai_function
-        generate_thumbnail() with THUMBNAIL_IMAGE_PROVIDER=openai calls
-        _generate_thumbnail_openai(), not _attempt_thumbnail_generation().
+    test_openrouter_dispatch_calls_openrouter_function
+    test_muapi_default_dispatch_unchanged
+
+  TestOpenRouterEndpointCorrectness (Phase 1B correction)
+    test_openrouter_function_does_not_use_images_generations_endpoint
+    test_openrouter_function_uses_chat_completions_endpoint
+    test_openrouter_function_uses_modalities
+    test_openrouter_function_does_not_use_response_format_b64_json_in_payload
+    test_discover_openrouter_image_models_uses_correct_query_param
+
+  TestProviderReadinessModel (Phase 1D)
+    test_openai_appears_on_providers_page_with_operational_readiness
+        OpenAI entry has both credential_status and operational_readiness.
+    test_openrouter_card_shows_both_llm_and_image_capabilities
+        OpenRouter capabilities include both "llm" and "image".
+    test_muapi_operational_readiness_distinct_from_credential_status
+        MUAPI has separate credential_status and operational_readiness fields.
+    test_seedance_veo_kling_runway_have_both_access_modes
+        Each provider has a muapi_delegated entry AND a direct_placeholder entry.
+    test_direct_placeholders_have_credential_key_name
+        Official/direct placeholder entries have credential_key_name set.
+    test_muapi_delegated_readiness_inherits_from_muapi
+        Delegated providers show muapi_dependent or ready_via_muapi based on MUAPI.
+    test_smoke_test_success_sets_operational_readiness_ready
+        A success smoke test result drives OR_READY for the provider.
+    test_smoke_test_403_sets_auth_failed_readiness
+        A 403 error in the smoke test drives OR_AUTH_FAILED for the provider.
 
     test_openrouter_dispatch_calls_openrouter_function
         generate_thumbnail() with THUMBNAIL_IMAGE_PROVIDER=openrouter calls
@@ -43,6 +65,17 @@ from hypogeum.config import Config
 from hypogeum.dashboard_api import (
     ProviderCatalogEntry,
     get_provider_catalog,
+    OR_READY,
+    OR_NOT_TESTED,
+    OR_AUTH_FAILED,
+    OR_BILLING_FAILED,
+    OR_SKIPPED_NO_KEY,
+    OR_MUAPI_DEPENDENT,
+    OR_READY_VIA_MUAPI,
+    OR_MUAPI_NOT_READY,
+    OR_NOT_CONFIGURED,
+    _derive_operational_readiness,
+    _PROVIDER_CATALOG_META,
 )
 import inspect
 
@@ -368,3 +401,204 @@ class TestOpenRouterEndpointCorrectness:
             "_discover_openrouter_image_models must call "
             "GET /api/v1/models?output_modalities=image"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestProviderReadinessModel  (Phase 1D)
+# ---------------------------------------------------------------------------
+
+class TestProviderReadinessModel:
+    """Phase 1D: two-row status model and direct-placeholder entries."""
+
+    def test_openai_appears_on_providers_page_with_operational_readiness(self, tmp_path):
+        """
+        OpenAI entry must have both credential_status and operational_readiness.
+        Both fields are present and non-empty even with no env key and no smoke test.
+        """
+        db = tmp_path / "test.db"
+        env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            catalog = get_provider_catalog(db_path=db)
+
+        entry = next((e for e in catalog if e.provider == "openai"), None)
+        assert entry is not None, "OpenAI not found in provider catalog"
+        assert entry.credential_status, "credential_status must be non-empty"
+        assert entry.operational_readiness, "operational_readiness must be non-empty"
+        # These are two distinct fields with independent values
+        assert hasattr(entry, "credential_status")
+        assert hasattr(entry, "operational_readiness")
+
+    def test_openrouter_card_shows_both_llm_and_image_capabilities(self, tmp_path):
+        """
+        OpenRouter must list both 'llm' and 'image' in capabilities — it handles
+        both chat completions (LLM routing) and image generation.
+        """
+        db = tmp_path / "test.db"
+        catalog = get_provider_catalog(db_path=db)
+        entry = next((e for e in catalog if e.provider == "openrouter"), None)
+        assert entry is not None
+        assert "llm" in entry.capabilities, (
+            f"OpenRouter must list 'llm' capability. Got: {entry.capabilities}"
+        )
+        assert "image" in entry.capabilities, (
+            f"OpenRouter must list 'image' capability. Got: {entry.capabilities}"
+        )
+
+    def test_muapi_operational_readiness_distinct_from_credential_status(self, tmp_path):
+        """
+        MUAPI has two separate status dimensions:
+          credential_status     — result of the lightweight probe (e.g. probe endpoint 404)
+          operational_readiness — result of smoke test generation attempt (e.g. auth_failed)
+
+        These must be different fields and must not be the same string
+        when a smoke test has been run with a credential failure.
+        The test injects a smoke result showing 403 and verifies both are present.
+        """
+        import json as _json
+
+        # Write a fake smoke report showing MUAPI had a 403 on generation
+        smoke_dir = tmp_path / ".hypogeum-assets" / "provider_smoke_tests"
+        smoke_dir.mkdir(parents=True)
+        report = {
+            "providers": {
+                "muapi": {
+                    "provider": "muapi",
+                    "status": "error_submit",
+                    "model": "gpt-image-2-text-to-image",
+                    "endpoint": "https://api.muapi.ai/api/v1/gpt-image-2-text-to-image",
+                    "latency_ms": 1200,
+                    "error": "403 Client Error: Forbidden",
+                }
+            }
+        }
+        (smoke_dir / "provider_live_smoke_report.json").write_text(_json.dumps(report))
+
+        # Patch _load_smoke_test_results to use our fake report
+        with patch(
+            "hypogeum.dashboard_api._load_smoke_test_results",
+            return_value=report["providers"],
+        ):
+            db = tmp_path / "test.db"
+            catalog = get_provider_catalog(db_path=db)
+
+        muapi = next((e for e in catalog if e.provider == "muapi"), None)
+        assert muapi is not None
+        # Both fields must exist
+        assert hasattr(muapi, "credential_status")
+        assert hasattr(muapi, "operational_readiness")
+        # Operational readiness must reflect the 403 → auth_failed
+        assert muapi.operational_readiness == OR_AUTH_FAILED, (
+            f"MUAPI 403 smoke test should set OR_AUTH_FAILED. Got: {muapi.operational_readiness}"
+        )
+        # credential_status is independent (from verifier probe, not from generation)
+        # They should not be the same string (credential_status is about probe, OR is about generation)
+        # (unless by coincidence both are "failed" — but their *meaning* is different)
+        assert muapi.credential_status != muapi.operational_readiness, (
+            "credential_status and operational_readiness should represent different checks. "
+            f"Both are '{muapi.credential_status}' — check derivation logic."
+        )
+
+    def test_seedance_veo_kling_runway_have_both_access_modes(self, tmp_path):
+        """
+        Each of Seedance, Veo, Kling, Runway must appear TWICE in the catalog:
+          1. As access_mode='muapi_delegated' (currently active path)
+          2. As access_mode='direct_placeholder' (future official API slot)
+        """
+        db = tmp_path / "test.db"
+        catalog = get_provider_catalog(db_path=db)
+        by_provider = {e.provider: e for e in catalog}
+
+        for name in ("seedance", "veo", "kling", "runway"):
+            delegated_key  = name
+            placeholder_key = f"{name}_official"
+
+            assert delegated_key in by_provider, (
+                f"'{delegated_key}' (muapi_delegated entry) missing from catalog"
+            )
+            assert placeholder_key in by_provider, (
+                f"'{placeholder_key}' (direct_placeholder) missing from catalog. "
+                f"Each provider needs its own future credential slot."
+            )
+
+            delegated   = by_provider[delegated_key]
+            placeholder = by_provider[placeholder_key]
+
+            assert delegated.access_mode == "muapi_delegated", (
+                f"{delegated_key}.access_mode should be 'muapi_delegated', got {delegated.access_mode!r}"
+            )
+            assert placeholder.access_mode == "direct_placeholder", (
+                f"{placeholder_key}.access_mode should be 'direct_placeholder', got {placeholder.access_mode!r}"
+            )
+            assert placeholder.operational_readiness == OR_NOT_CONFIGURED, (
+                f"{placeholder_key} should have OR_NOT_CONFIGURED readiness. Got: {placeholder.operational_readiness}"
+            )
+
+    def test_direct_placeholders_have_credential_key_name(self, tmp_path):
+        """
+        Official (direct_placeholder) provider entries must have a credential_key_name
+        documenting which env var would authenticate them when implemented.
+        """
+        db = tmp_path / "test.db"
+        catalog = get_provider_catalog(db_path=db)
+        by_provider = {e.provider: e for e in catalog}
+
+        for name in ("seedance_official", "veo_official", "kling_official", "runway_official"):
+            assert name in by_provider, f"'{name}' missing from catalog"
+            entry = by_provider[name]
+            assert entry.credential_key_name, (
+                f"{name}.credential_key_name must be set (future env var). Got: {entry.credential_key_name!r}"
+            )
+
+    def test_muapi_delegated_readiness_inherits_from_muapi(self, tmp_path):
+        """
+        When MUAPI smoke test shows success, delegated providers (Seedance etc.)
+        should show OR_READY_VIA_MUAPI. When MUAPI is not tested, they show OR_MUAPI_DEPENDENT.
+        """
+        # Case 1: MUAPI not tested → delegated = muapi_dependent
+        with patch("hypogeum.dashboard_api._load_smoke_test_results", return_value={}):
+            db = tmp_path / "test.db"
+            catalog = get_provider_catalog(db_path=db)
+        by_p = {e.provider: e for e in catalog}
+        for name in ("seedance", "veo", "kling", "runway"):
+            entry = by_p[name]
+            assert entry.operational_readiness == OR_MUAPI_DEPENDENT, (
+                f"{name} should be OR_MUAPI_DEPENDENT when MUAPI untested. "
+                f"Got: {entry.operational_readiness}"
+            )
+
+        # Case 2: MUAPI smoke test passed → delegated = ready_via_muapi
+        with patch("hypogeum.dashboard_api._load_smoke_test_results", return_value={
+            "muapi": {"status": "success", "model": "gpt-image-2-text-to-image", "latency_ms": 5000}
+        }):
+            catalog2 = get_provider_catalog(db_path=db)
+        by_p2 = {e.provider: e for e in catalog2}
+        for name in ("seedance", "veo", "kling", "runway"):
+            entry2 = by_p2[name]
+            assert entry2.operational_readiness == OR_READY_VIA_MUAPI, (
+                f"{name} should be OR_READY_VIA_MUAPI when MUAPI passed. "
+                f"Got: {entry2.operational_readiness}"
+            )
+
+    def test_smoke_test_success_sets_operational_readiness_ready(self):
+        """
+        _derive_operational_readiness() with a success smoke result returns OR_READY.
+        """
+        meta  = {"access_mode": "direct"}
+        smoke = {"status": "success", "model": "gpt-image-1", "latency_ms": 3000}
+        readiness, note = _derive_operational_readiness("openai", meta, smoke, OR_NOT_TESTED)
+        assert readiness == OR_READY, f"Expected OR_READY, got {readiness!r}"
+        assert note is not None and "gpt-image-1" in note
+
+    def test_smoke_test_403_sets_auth_failed_readiness(self):
+        """
+        _derive_operational_readiness() with a 403 error in smoke result returns OR_AUTH_FAILED.
+        """
+        meta  = {"access_mode": "direct"}
+        smoke = {
+            "status": "error_submit",
+            "model": "gpt-image-2-text-to-image",
+            "error": "403 Client Error: Forbidden for url: https://api.muapi.ai/api/v1/...",
+        }
+        readiness, note = _derive_operational_readiness("muapi", meta, smoke, OR_NOT_TESTED)
+        assert readiness == OR_AUTH_FAILED, f"Expected OR_AUTH_FAILED, got {readiness!r}"
+        assert note is not None

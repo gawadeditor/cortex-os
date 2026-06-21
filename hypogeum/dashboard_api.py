@@ -153,27 +153,64 @@ class ProviderHealthSummary:
     total_cost_usd: float
 
 
+# ---------------------------------------------------------------------------
+# Operational readiness constants
+# These are the values for ProviderCatalogEntry.operational_readiness.
+# They feed the UI "Row 2: Operational readiness" display.
+# ---------------------------------------------------------------------------
+
+OR_READY              = "ready"               # live smoke test passed
+OR_READY_VIA_MUAPI    = "ready_via_muapi"     # delegated, MUAPI smoke test passed
+OR_NOT_TESTED         = "not_tested"          # no smoke test result on record
+OR_SKIPPED_NO_KEY     = "skipped_missing_key" # smoke test skipped — no credential
+OR_AUTH_FAILED        = "auth_failed"         # key present, generation returned 401/403
+OR_GENERATION_FAILED  = "generation_failed"   # key valid, generation returned other error
+OR_BILLING_FAILED     = "billing_or_credits_failed"  # 402 / credits exhausted
+OR_MUAPI_DEPENDENT    = "muapi_dependent"     # delegated; MUAPI not yet tested
+OR_MUAPI_NOT_READY    = "unavailable_muapi_not_ready"  # delegated; MUAPI test failed
+OR_NOT_CONFIGURED     = "not_configured"      # placeholder — direct API not yet supported
+
+
 @dataclass
 class ProviderCatalogEntry:
     """
-    Combined credential status + usage stats for one provider.
+    Combined credential status + operational readiness for one provider.
+
+    Two status rows are exposed for dashboard display:
+
+      Row 1 — credential_status: result of the lightweight HTTP probe
+        "verified"        — probe succeeded
+        "saved"           — key present, never probed
+        "missing"         — no credential found
+        "failed"          — probe returned error (may be wrong probe endpoint)
+        "not_verifiable"  — no probe implemented (freepik)
+
+      Row 2 — operational_readiness: result of Phase 1C smoke test (or derived)
+        See OR_* constants above.
 
     Always present for every known provider regardless of whether it has
-    generated any assets yet. This is the data source for the Providers
-    dashboard page.
+    generated any assets yet. This is the correct data source for the Providers
+    dashboard page — not asset_versions alone.
     """
-    provider:          str
-    display_name:      str
-    capabilities:      list           # e.g. ["image"], ["llm", "image"], ["video"]
-    access_mode:       str            # "direct" | "muapi_delegated"
-    delegate_via:      Optional[str]  # "muapi" when access_mode == "muapi_delegated"
-    credential_status: str            # "verified"|"saved"|"missing"|"failed"|"not_verifiable"
-    has_env_var:       bool
-    is_configured:     bool           # has_env_var or has_secret_profile
-    total_attempts:    int            # from asset_versions; 0 if never used
-    failure_count:     int
-    failure_rate:      float
-    total_cost_usd:    float
+    provider:               str
+    display_name:           str
+    capabilities:           list          # e.g. ["image"], ["llm", "image"], ["video"]
+    access_mode:            str           # "direct"|"muapi_delegated"|"direct_placeholder"
+    delegate_via:           Optional[str] # "muapi" when access_mode == "muapi_delegated"
+    credential_status:      str           # Row 1: verifier probe result
+    has_env_var:            bool
+    is_configured:          bool          # has_env_var or has_secret_profile
+    total_attempts:         int           # from asset_versions; 0 if never used
+    failure_count:          int
+    failure_rate:           float
+    total_cost_usd:         float
+    # Row 2: operational readiness (defaults keep backward compatibility)
+    operational_readiness:  str                = OR_NOT_TESTED
+    operational_note:       Optional[str]      = None
+    smoke_test_status:      Optional[str]      = None
+    smoke_test_model:       Optional[str]      = None
+    smoke_test_latency_ms:  Optional[int]      = None
+    credential_key_name:    Optional[str]      = None  # env var that would enable direct access
 
 
 @dataclass
@@ -600,36 +637,213 @@ def get_provider_health(db_path: Optional[Path] = None) -> list:
 # Provider Catalog — combined credential + usage view
 # ---------------------------------------------------------------------------
 
-# Static metadata for every known provider. This is the authoritative list
-# that makes providers visible before any asset has been generated.
+# Static metadata for every known provider.
+# access_mode values:
+#   "direct"            — has its own API key and client code
+#   "muapi_delegated"   — accessed via the MUAPI aggregator
+#   "direct_placeholder"— direct API not yet implemented; future credential slot
+# credential_key_name   — the env var that would authenticate this provider
 _PROVIDER_CATALOG_META: dict[str, dict] = {
-    "openai":     {"display_name": "OpenAI",      "capabilities": ["image"],          "access_mode": "direct",           "delegate_via": None},
-    "openrouter": {"display_name": "OpenRouter",   "capabilities": ["llm", "image"],   "access_mode": "direct",           "delegate_via": None},
-    "muapi":      {"display_name": "MUAPI",        "capabilities": ["image", "video"], "access_mode": "direct",           "delegate_via": None},
-    "elevenlabs": {"display_name": "ElevenLabs",   "capabilities": ["audio"],          "access_mode": "direct",           "delegate_via": None},
-    "freepik":    {"display_name": "Freepik",      "capabilities": ["image"],          "access_mode": "direct",           "delegate_via": None},
-    "seedance":   {"display_name": "Seedance",     "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
-    "veo":        {"display_name": "Veo",          "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
-    "kling":      {"display_name": "Kling",        "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
-    "runway":     {"display_name": "Runway",       "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
-    "youtube":    {"display_name": "YouTube",      "capabilities": ["publishing"],     "access_mode": "direct",           "delegate_via": None},
+    # --- Content generation (direct) ---
+    "openai":     {
+        "display_name":      "OpenAI",
+        "capabilities":      ["image"],
+        "access_mode":       "direct",
+        "delegate_via":      None,
+        "credential_key_name": "OPENAI_API_KEY",
+    },
+    "openrouter": {
+        "display_name":      "OpenRouter",
+        "capabilities":      ["llm", "image"],
+        "access_mode":       "direct",
+        "delegate_via":      None,
+        "credential_key_name": "OPENROUTER_API_KEY",
+    },
+    "muapi":      {
+        "display_name":      "MUAPI",
+        "capabilities":      ["image", "video"],
+        "access_mode":       "direct",
+        "delegate_via":      None,
+        "credential_key_name": "MUAPI_API_KEY",
+    },
+    "elevenlabs": {
+        "display_name":      "ElevenLabs",
+        "capabilities":      ["audio"],
+        "access_mode":       "direct",
+        "delegate_via":      None,
+        "credential_key_name": "ELEVENLABS_API_KEY",
+    },
+    "freepik":    {
+        "display_name":      "Freepik",
+        "capabilities":      ["image"],
+        "access_mode":       "direct",
+        "delegate_via":      None,
+        "credential_key_name": "FREEPIK_API_KEY",
+    },
+    # --- Video providers: accessed via MUAPI aggregator ---
+    "seedance":   {
+        "display_name":      "Seedance",
+        "capabilities":      ["video"],
+        "access_mode":       "muapi_delegated",
+        "delegate_via":      "muapi",
+        "credential_key_name": "MUAPI_API_KEY",
+    },
+    "veo":        {
+        "display_name":      "Veo",
+        "capabilities":      ["video"],
+        "access_mode":       "muapi_delegated",
+        "delegate_via":      "muapi",
+        "credential_key_name": "MUAPI_API_KEY",
+    },
+    "kling":      {
+        "display_name":      "Kling",
+        "capabilities":      ["video"],
+        "access_mode":       "muapi_delegated",
+        "delegate_via":      "muapi",
+        "credential_key_name": "MUAPI_API_KEY",
+    },
+    "runway":     {
+        "display_name":      "Runway",
+        "capabilities":      ["video"],
+        "access_mode":       "muapi_delegated",
+        "delegate_via":      "muapi",
+        "credential_key_name": "MUAPI_API_KEY",
+    },
+    # --- Direct provider placeholders (future — not yet implemented) ---
+    # Each has its own credential slot for when direct API access is added.
+    "seedance_official": {
+        "display_name":      "Seedance (Official)",
+        "capabilities":      ["video"],
+        "access_mode":       "direct_placeholder",
+        "delegate_via":      None,
+        "credential_key_name": "SEEDANCE_API_KEY",
+    },
+    "veo_official":      {
+        "display_name":      "Veo (Official)",
+        "capabilities":      ["video"],
+        "access_mode":       "direct_placeholder",
+        "delegate_via":      None,
+        "credential_key_name": "VEO_API_KEY",
+    },
+    "kling_official":    {
+        "display_name":      "Kling (Official)",
+        "capabilities":      ["video"],
+        "access_mode":       "direct_placeholder",
+        "delegate_via":      None,
+        "credential_key_name": "KLING_API_KEY",
+    },
+    "runway_official":   {
+        "display_name":      "Runway (Official)",
+        "capabilities":      ["video"],
+        "access_mode":       "direct_placeholder",
+        "delegate_via":      None,
+        "credential_key_name": "RUNWAY_API_KEY",
+    },
+    # --- Publishing ---
+    "youtube":    {
+        "display_name":      "YouTube",
+        "capabilities":      ["publishing"],
+        "access_mode":       "direct",
+        "delegate_via":      None,
+        "credential_key_name": "YOUTUBE_REFRESH_TOKEN",
+    },
 }
+
+
+def _load_smoke_test_results() -> dict:
+    """
+    Load Phase 1C smoke test results from the report file if present.
+
+    Returns {provider: result_dict} or {} if the file doesn't exist.
+    Non-blocking.
+    """
+    import json as _json
+    report = _PROJECT_ROOT / ".hypogeum-assets" / "provider_smoke_tests" / "provider_live_smoke_report.json"
+    try:
+        if report.exists():
+            return _json.loads(report.read_text()).get("providers", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _derive_operational_readiness(
+    provider: str,
+    meta: dict,
+    smoke: dict,
+    muapi_readiness: str,
+) -> tuple[str, Optional[str]]:
+    """
+    Return (operational_readiness, note) for one provider.
+
+    Rules:
+      direct_placeholder  → OR_NOT_CONFIGURED (no implementation yet)
+      muapi_delegated     → inherit from muapi_readiness
+      direct (no smoke)   → OR_NOT_TESTED
+      direct (smoke hit)  → derive from smoke result
+    """
+    access_mode = meta.get("access_mode", "direct")
+
+    # Placeholders are never callable
+    if access_mode == "direct_placeholder":
+        return OR_NOT_CONFIGURED, "Direct API not yet implemented."
+
+    # MUAPI-delegated providers inherit MUAPI's generation readiness
+    if access_mode == "muapi_delegated":
+        if muapi_readiness == OR_READY:
+            return OR_READY_VIA_MUAPI, "Available via MUAPI aggregator."
+        if muapi_readiness in (OR_AUTH_FAILED, OR_BILLING_FAILED, OR_GENERATION_FAILED):
+            return OR_MUAPI_NOT_READY, f"MUAPI generation not ready: {muapi_readiness}."
+        # MUAPI not tested yet — status is muapi_dependent
+        return OR_MUAPI_DEPENDENT, "Availability depends on MUAPI generation readiness."
+
+    # Direct provider: derive from smoke test
+    if not smoke:
+        return OR_NOT_TESTED, None
+
+    status = smoke.get("status", "")
+    error  = str(smoke.get("error", ""))
+    model  = smoke.get("model", "")
+    latency = smoke.get("latency_ms")
+
+    if status == "success":
+        note = f"Smoke test passed — model: {model}"
+        if latency is not None:
+            note += f", {latency} ms"
+        return OR_READY, note
+
+    if "skipped" in status:
+        return OR_SKIPPED_NO_KEY, smoke.get("note") or "No credential set."
+
+    # Classify error
+    if "402" in error or "billing" in error.lower() or "credit" in error.lower():
+        return OR_BILLING_FAILED, f"Billing/credits: {error[:120]}"
+
+    if any(code in error for code in ("401", "403")) or "not authorized" in error.lower() or "auth" in error.lower():
+        return OR_AUTH_FAILED, f"Auth rejected (check key + credits): {error[:120]}"
+
+    if status.startswith("error"):
+        return OR_GENERATION_FAILED, f"{status}: {error[:120]}"
+
+    return OR_NOT_TESTED, None
 
 
 def get_provider_catalog(db_path: Optional[Path] = None) -> list:
     """
     Return a ProviderCatalogEntry for every known provider.
 
-    Merges three sources:
-      1. _PROVIDER_CATALOG_META — static capabilities / access-mode labels
-      2. provider_verifier.get_all_provider_statuses() — credential status from env + DB
-      3. asset_versions table — actual usage stats (0 for providers never used)
+    Merges four sources:
+      1. _PROVIDER_CATALOG_META    — static capabilities / access-mode labels
+      2. provider_verifier         — credential status (Row 1)
+      3. smoke test report         — operational readiness (Row 2)
+      4. asset_versions table      — usage stats (0 for providers never used)
 
-    Always includes all providers from _PROVIDER_CATALOG_META regardless of
-    whether they have generated any assets. This is the correct data source
+    Always includes all providers from _PROVIDER_CATALOG_META — including
+    direct_placeholder entries and MUAPI-delegated entries — regardless of
+    whether any assets have been generated. This is the correct data source
     for the Providers dashboard page.
 
-    Non-blocking: on any error returns empty list.
+    Non-blocking: returns [] on any error.
     """
     try:
         from hypogeum.provider_verifier import get_all_provider_statuses
@@ -637,7 +851,9 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
     except Exception:
         statuses = {}
 
-    # Usage stats from asset_versions, keyed by provider
+    smoke_results = _load_smoke_test_results()
+
+    # Usage stats from asset_versions
     usage: dict[str, dict] = {}
     try:
         conn = get_connection(_resolve_db_path(db_path))
@@ -662,25 +878,48 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
     except Exception:
         pass
 
+    # Pass 1: build all entries; derive MUAPI's operational_readiness first
+    # so delegated providers can inherit it in Pass 2.
+    muapi_smoke    = smoke_results.get("muapi", {})
+    muapi_readiness, _ = _derive_operational_readiness("muapi", {"access_mode": "direct"}, muapi_smoke, OR_NOT_TESTED)
+
     catalog: list[ProviderCatalogEntry] = []
     for provider, meta in _PROVIDER_CATALOG_META.items():
         st    = statuses.get(provider, {})
         u     = usage.get(provider, {"total": 0, "failures": 0, "total_cost": 0.0})
         total = u["total"]
         fails = u["failures"]
+
+        smoke = smoke_results.get(provider, {})
+        op_readiness, op_note = _derive_operational_readiness(
+            provider, meta, smoke, muapi_readiness
+        )
+
+        smoke_st      = smoke.get("status")
+        smoke_model   = smoke.get("model")
+        smoke_latency = smoke.get("latency_ms")
+
         catalog.append(ProviderCatalogEntry(
-            provider          = provider,
-            display_name      = meta["display_name"],
-            capabilities      = meta["capabilities"],
-            access_mode       = meta["access_mode"],
-            delegate_via      = meta["delegate_via"],
-            credential_status = st.get("status", "missing"),
-            has_env_var       = st.get("has_env_var", False),
-            is_configured     = st.get("has_env_var", False) or st.get("has_secret_profile", False),
-            total_attempts    = total,
-            failure_count     = fails,
-            failure_rate      = _safe_rate(fails, total),
-            total_cost_usd    = round(u["total_cost"], 6),
+            provider              = provider,
+            display_name          = meta["display_name"],
+            capabilities          = meta["capabilities"],
+            access_mode           = meta["access_mode"],
+            delegate_via          = meta["delegate_via"],
+            credential_status     = st.get("status", "missing"),
+            has_env_var           = st.get("has_env_var", False),
+            is_configured         = (
+                st.get("has_env_var", False) or st.get("has_secret_profile", False)
+            ),
+            total_attempts        = total,
+            failure_count         = fails,
+            failure_rate          = _safe_rate(fails, total),
+            total_cost_usd        = round(u["total_cost"], 6),
+            operational_readiness = op_readiness,
+            operational_note      = op_note,
+            smoke_test_status     = smoke_st,
+            smoke_test_model      = smoke_model,
+            smoke_test_latency_ms = smoke_latency,
+            credential_key_name   = meta.get("credential_key_name"),
         ))
     return catalog
 

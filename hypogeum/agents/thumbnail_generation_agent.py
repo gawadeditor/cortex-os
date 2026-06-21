@@ -213,11 +213,12 @@ def _generate_for_deliverable(
     version_index = 0
 
     for candidate in sorted_candidates:
-        candidate_id    = candidate.get("candidate_id", "unknown")
-        image_prompt    = candidate.get("image_prompt", "")
-        aspect_ratio    = candidate.get("aspect_ratio", "16:9")
-        text_overlay    = candidate.get("text_overlay")    # dict or None
-        typography_plan = candidate.get("typography_plan") # dict or None
+        candidate_id          = candidate.get("candidate_id", "unknown")
+        image_prompt          = candidate.get("image_prompt", "")
+        aspect_ratio          = candidate.get("aspect_ratio", "16:9")
+        text_overlay          = candidate.get("text_overlay")           # dict or None
+        typography_plan       = candidate.get("typography_plan")        # dict or None
+        typography_integration = candidate.get("typography_integration", "composited")
 
         for attempt in range(_MAX_ATTEMPTS_PER_CANDIDATE):
             log.info(
@@ -250,6 +251,7 @@ def _generate_for_deliverable(
                     budget_guard=budget_guard,
                     text_overlay=text_overlay,
                     typography_plan=typography_plan,
+                    typography_integration=typography_integration,
                 )
                 log.info(
                     "td_thumbnail_generated",

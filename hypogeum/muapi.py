@@ -1356,6 +1356,7 @@ def generate_thumbnail(
     budget_guard: Optional[MUAPIBudgetGuard] = None,
     text_overlay: Optional[dict] = None,
     typography_plan: Optional[dict] = None,
+    typography_integration: str = "composited",
 ) -> ThumbnailResult:
     """
     Generate a thumbnail image for one deliverable (main episode or a Short).
@@ -1410,6 +1411,7 @@ def generate_thumbnail(
         budget_guard=budget_guard,
         text_overlay=text_overlay,
         typography_plan=typography_plan,
+        typography_integration=typography_integration,
         log=log,
     )
     return ThumbnailResult(
@@ -1657,25 +1659,35 @@ def _attempt_thumbnail_generation(
     text_overlay: Optional[dict],
     log,
     typography_plan: Optional[dict] = None,
+    typography_integration: str = "composited",
 ) -> tuple[str, bool]:
     """
     Attempt thumbnail generation with primary_model; fall back to fallback_model on failure.
 
-    After a successful download: normalizes to canonical pixel dimensions, then composites
-    text onto the image. When typography_plan is present, _apply_typography_plan() is used
-    (stacked headline+emphasis, localized backing, no full-width band). When only text_overlay
-    is present, _apply_text_overlay() is used (legacy full-width band path).
+    typography_integration controls the text compositing path:
+      "embedded"   — image was generated with text inside it; PIL typography is skipped.
+                     Only the wordmark overlay is applied via PIL.
+      "composited" — PIL renders typography on top of the generated image (legacy path).
 
     Returns (model_used, used_fallback).
     Raises MUAPIError if all attempts fail.
     Raises MUAPIAuthFailure / MUAPIQuotaExhausted on halt conditions.
     """
     local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+    integrated = (typography_integration == "embedded")
 
     def _post_process(model: str, used_fallback: bool) -> tuple[str, bool]:
         _normalize_thumbnail(local_path, aspect_ratio)
-        if typography_plan:
-            # Concept-driven mode: stacked typography in reserved zone, no full-width band.
+        if integrated:
+            # Integrated typography mode: image contains text rendered by the model.
+            # PIL compositor is disabled — trust the image. Wordmark only.
+            log.info(
+                "muapi_thumbnail_integrated_typography",
+                deliverable_id=deliverable_id,
+                note="PIL text compositor skipped — typography embedded in generated image",
+            )
+        elif typography_plan:
+            # Composited mode: PIL renders stacked headline+emphasis on image surface.
             _apply_typography_plan(local_path, typography_plan)
             log.info(
                 "muapi_thumbnail_typography_plan_applied",
@@ -1685,7 +1697,7 @@ def _attempt_thumbnail_generation(
                 emphasis=typography_plan.get("emphasis"),
             )
         elif text_overlay:
-            # Legacy mode: full-width band with centred text.
+            # Legacy mode: PIL renders single-line text on image surface.
             text = text_overlay.get("text", "")
             placement = text_overlay.get("placement", "bottom")
             _apply_text_overlay(local_path, text, placement)
@@ -1695,11 +1707,11 @@ def _attempt_thumbnail_generation(
                 text=text,
                 placement=placement,
             )
-        # Composite the channel wordmark onto every thumbnail (16:9 main episode only).
-        # Must run after text compositing so hook text and wordmark are in the correct
-        # layer order. Wordmark required by TIG-07.
+        # Wordmark always composited via PIL (TIG-07 requirement).
         if aspect_ratio == "16:9":
-            hook_placement = text_overlay.get("placement") if text_overlay else None
+            hook_placement = None if integrated else (
+                text_overlay.get("placement") if text_overlay else None
+            )
             _apply_wordmark_overlay(local_path, hook_placement=hook_placement)
             log.info(
                 "muapi_thumbnail_wordmark_applied",

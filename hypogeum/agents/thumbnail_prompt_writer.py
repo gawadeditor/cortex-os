@@ -134,10 +134,12 @@ def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
     Attach deterministic composition_plan and typography_plan to each
     main_episode ranked_candidate when in concept_driven_mode.
 
-    Mapping: concepts[0] → rank 1, concepts[1] → rank 2, concepts[2] → rank 3.
+    When composition_plan.typography_integration == "embedded", also appends
+    an integrated typography block to the image_prompt so the image model
+    renders the hook text as part of the image — not as a post-composite overlay.
 
-    Mutates generation_plan in place. Claude's own plan fields (if any)
-    are overwritten — the deterministic planners are authoritative.
+    Mapping: concepts[0] → rank 1, concepts[1] → rank 2, concepts[2] → rank 3.
+    Mutates generation_plan in place.
     """
     concepts = concept_brief.get("concepts", [])
     candidates = generation_plan.get("main_episode", {}).get("ranked_candidates", [])
@@ -153,5 +155,63 @@ def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
         hook_text = concept.get("suggested_hook_text", "")
         comp_plan = plan_composition(trigger)
         typo_plan = plan_typography(hook_text, trigger, comp_plan)
-        candidate["composition_plan"] = comp_plan
-        candidate["typography_plan"]  = typo_plan
+        candidate["composition_plan"]     = comp_plan
+        candidate["typography_plan"]      = typo_plan
+        candidate["typography_integration"] = comp_plan.get("typography_integration", "composited")
+
+        if comp_plan.get("typography_integration") == "embedded":
+            candidate["image_prompt"] = _embed_typography_in_prompt(
+                base_prompt=candidate.get("image_prompt", ""),
+                typography_plan=typo_plan,
+            )
+
+
+def _embed_typography_in_prompt(base_prompt: str, typography_plan: dict) -> str:
+    """
+    Append an integrated typography instruction block to a base image_prompt.
+
+    The instruction tells the image model to render the hook text INSIDE the
+    generated image — not as a subtitle or overlay, but as physically integrated
+    text that receives the scene's lighting, shadows, and depth.
+
+    The PIL compositor will skip typography rendering when typography_integration
+    is "embedded", trusting the image model to have rendered it correctly.
+    """
+    headline      = typography_plan.get("headline", "").upper()
+    emphasis      = typography_plan.get("emphasis", "").upper()
+    zone          = typography_plan.get("zone", "lower_left")
+    emph_scale    = typography_plan.get("emphasis_scale", 1.7)
+
+    zone_desc = {
+        "lower_left":  "bottom-left quadrant of the frame",
+        "lower_right": "bottom-right quadrant of the frame",
+        "lower_center":"bottom-center of the frame",
+        "center":      "center of the frame",
+    }.get(zone, "bottom-left quadrant of the frame")
+
+    # Describe the hierarchy: headline small above, emphasis huge below
+    if headline and emphasis:
+        text_block = (
+            f'"{headline}" in smaller, lighter weight on one line, '
+            f'with "{emphasis}" in enormous dominant bold letters directly below it'
+        )
+    elif emphasis:
+        text_block = f'"{emphasis}" in enormous dominant bold letters'
+    else:
+        return base_prompt
+
+    integration_block = (
+        f" — INTEGRATED TYPOGRAPHY: in the {zone_desc}, large bold text reads: "
+        f"{text_block}. "
+        f"The {emphasis!r} word is dramatically larger than {headline!r} "
+        f"(approximately {emph_scale:.0f}× taller). "
+        f"The text is physically part of the image — it receives realistic shadows, "
+        f"warm amber light from the scene's key light source, and depth that matches "
+        f"the surrounding environment. "
+        f"The text is NOT a subtitle, NOT an overlay, NOT in a box, NOT a lower-third. "
+        f"It feels designed together with the image. "
+        f"Text color: warm cream or aged parchment (#F5E3B9), matching the scene's warm palette. "
+        f"Text must be fully legible and correctly spelled."
+    )
+
+    return base_prompt.rstrip(" ,;.") + integration_block

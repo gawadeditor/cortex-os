@@ -358,6 +358,23 @@ Use suggested_hook_text as text_overlay.text exactly as written.
 HARD RULES — CONCEPT_DRIVEN_MODE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INTEGRATED TYPOGRAPHY MODE — CONCEPT_DRIVEN_MODE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+In CONCEPT_DRIVEN_MODE, the hook text must be rendered INSIDE the image by the image generation model — not added later as a separate overlay. The pipeline will handle embedding the text instruction into your image_prompt automatically. Your job is to write the scene description that sets up the correct layout and space for the text.
+
+HOW THE TEXT IS EMBEDDED:
+The pipeline will automatically append an INTEGRATED TYPOGRAPHY block to each image_prompt you write. That block tells the image model:
+  - The exact words to render (headline small, emphasis huge)
+  - That the text is physically part of the image with scene lighting and shadows
+  - That it is NOT a subtitle, overlay, or UI element
+
+YOUR RESPONSIBILITY:
+Write the scene description so the LEFT 35-40% of frame has enough dark, relatively featureless area for the large text to land on. The subject (mechanism, figure, environment) occupies the RIGHT 60% of frame. The left zone must be dark enough that warm cream text will be clearly legible on it.
+
+The composition_plan.text_zone and composition_plan.negative_space_zones encode this. Your image_prompt must describe the scene in a way that produces a naturally dark left zone — not by describing the text, but by describing the composition of the scene that creates that space.
+
 MANDATORY ZONE RESERVATIONS — EVERY IMAGE PROMPT MUST INCLUDE THESE EXACT PHRASES:
 
   TOP ZONE: "top 12% of frame is pure near-black or very deep shadow — completely clear of all subject detail, objects, inscriptions, or figures — reserved for wordmark overlay"

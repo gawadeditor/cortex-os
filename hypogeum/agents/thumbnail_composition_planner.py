@@ -53,6 +53,7 @@ _TRIGGER_MAP: dict[str, dict] = {
         "environment_level":            "contextual",
         "contrast_mechanism":           "object_vs_world",
         "subject_readability_at_320px": "critical",
+        "typography_integration":       "embedded",
     },
     "loss": {
         "focal_zone":                   "center",
@@ -63,6 +64,7 @@ _TRIGGER_MAP: dict[str, dict] = {
         "environment_level":            "suggestive",
         "contrast_mechanism":           "silhouette",
         "subject_readability_at_320px": "required",
+        "typography_integration":       "embedded",
     },
     "betrayal": {
         "focal_zone":                   "center_right",
@@ -73,6 +75,7 @@ _TRIGGER_MAP: dict[str, dict] = {
         "environment_level":            "contextual",
         "contrast_mechanism":           "human_vs_artifact",
         "subject_readability_at_320px": "critical",
+        "typography_integration":       "embedded",
     },
     "discovery": {
         "focal_zone":                   "center_right",
@@ -83,6 +86,7 @@ _TRIGGER_MAP: dict[str, dict] = {
         "environment_level":            "contextual",
         "contrast_mechanism":           "object_vs_world",
         "subject_readability_at_320px": "critical",
+        "typography_integration":       "embedded",
     },
     "awe": {
         "focal_zone":                   "center_right",
@@ -93,6 +97,7 @@ _TRIGGER_MAP: dict[str, dict] = {
         "environment_level":            "cinematic",
         "contrast_mechanism":           "scale_contrast",
         "subject_readability_at_320px": "required",
+        "typography_integration":       "embedded",
     },
     "scale": {
         "focal_zone":                   "center_right",
@@ -103,6 +108,7 @@ _TRIGGER_MAP: dict[str, dict] = {
         "environment_level":            "cinematic",
         "contrast_mechanism":           "scale_contrast",
         "subject_readability_at_320px": "required",
+        "typography_integration":       "embedded",
     },
     "dread": {
         "focal_zone":                   "center_right",
@@ -113,6 +119,7 @@ _TRIGGER_MAP: dict[str, dict] = {
         "environment_level":            "suggestive",
         "contrast_mechanism":           "rim_light",
         "subject_readability_at_320px": "critical",
+        "typography_integration":       "embedded",
     },
 }
 
@@ -125,6 +132,7 @@ _FALLBACK: dict = {
     "environment_level":            "contextual",
     "contrast_mechanism":           "object_vs_world",
     "subject_readability_at_320px": "required",
+    "typography_integration":       "composited",
 }
 
 
@@ -161,4 +169,5 @@ def plan_composition(emotional_trigger: str) -> dict:
             "subject_readability_at_320px",
             _DEFAULTS["subject_readability_at_320px"],
         ),
+        "typography_integration":       base.get("typography_integration", "composited"),
     }

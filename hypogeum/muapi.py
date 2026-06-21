@@ -1343,6 +1343,187 @@ def _apply_typography_plan(local_path: Path, typography_plan: dict) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Direct provider image generation functions
+# ---------------------------------------------------------------------------
+
+def _generate_thumbnail_openai(
+    deliverable_id: str,
+    image_prompt: str,
+    aspect_ratio: str,
+    config: "Config",
+    local_path: Path,
+    log,
+) -> str:
+    """
+    Generate a thumbnail via the OpenAI Images API directly.
+
+    POST {OPENAI_IMAGE_BASE_URL}/images/generations
+    Model: config.OPENAI_IMAGE_MODEL (default: gpt-image-2)
+    Response format: b64_json (avoids a second download round-trip)
+
+    Size mapping:
+        16:9 → 1536x1024 (landscape; closest native gpt-image-2 size)
+        9:16 → 1024x1536 (portrait)
+        1:1  → 1024x1024
+
+    Returns the model slug used. Raises MUAPIAuthFailure on 401,
+    MUAPIError on any other failure.
+    """
+    import json
+    import base64
+    import urllib.request
+    import urllib.error
+
+    if not config.OPENAI_API_KEY:
+        raise MUAPIAuthFailure()
+
+    size_map = {"16:9": "1536x1024", "9:16": "1024x1536"}
+    size = size_map.get(aspect_ratio, "1024x1024")
+    model = config.OPENAI_IMAGE_MODEL
+
+    payload = json.dumps({
+        "model":           model,
+        "prompt":          image_prompt,
+        "n":               1,
+        "size":            size,
+        "quality":         config.THUMBNAIL_IMAGE_QUALITY,  # "high"
+        "response_format": "b64_json",
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{config.OPENAI_IMAGE_BASE_URL}/images/generations",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+            "Content-Type":  "application/json",
+        },
+        method="POST",
+    )
+
+    log.info("openai_thumbnail_submit", deliverable_id=deliverable_id,
+             model=model, size=size)
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        if exc.code == 401:
+            raise MUAPIAuthFailure()
+        if exc.code == 402:
+            raise MUAPIQuotaExhausted()
+        raise MUAPIError(
+            f"OpenAI Images API HTTP {exc.code} for {deliverable_id!r}: {body}"
+        )
+
+    data = result.get("data", [])
+    if not data or not data[0].get("b64_json"):
+        raise MUAPIError(
+            f"OpenAI Images API returned no image data for {deliverable_id!r}"
+        )
+
+    image_bytes = base64.b64decode(data[0]["b64_json"])
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_bytes(image_bytes)
+
+    if local_path.stat().st_size < _MIN_IMAGE_BYTES:
+        raise MUAPIError(
+            f"OpenAI image suspiciously small ({local_path.stat().st_size} B) "
+            f"for {deliverable_id!r}"
+        )
+
+    log.info("openai_thumbnail_generated", deliverable_id=deliverable_id,
+             model=model, size_kb=round(local_path.stat().st_size / 1024))
+    return model
+
+
+def _generate_thumbnail_openrouter(
+    deliverable_id: str,
+    image_prompt: str,
+    aspect_ratio: str,
+    config: "Config",
+    local_path: Path,
+    log,
+) -> str:
+    """
+    Generate a thumbnail via OpenRouter's image generation endpoint.
+
+    POST https://openrouter.ai/api/v1/images/generations
+    Model: config.OPENROUTER_IMAGE_MODEL (default: openai/gpt-image-2)
+
+    OpenRouter proxies the OpenAI Images API; the payload and response shape
+    are identical to the direct OpenAI path. Returns the model slug used.
+    Raises MUAPIAuthFailure on 401, MUAPIError on any other failure.
+    """
+    import json
+    import base64
+    import urllib.request
+    import urllib.error
+
+    if not config.OPENROUTER_API_KEY:
+        raise MUAPIAuthFailure()
+
+    size_map = {"16:9": "1536x1024", "9:16": "1024x1536"}
+    size = size_map.get(aspect_ratio, "1024x1024")
+    model = config.OPENROUTER_IMAGE_MODEL
+
+    payload = json.dumps({
+        "model":           model,
+        "prompt":          image_prompt,
+        "n":               1,
+        "size":            size,
+        "quality":         config.THUMBNAIL_IMAGE_QUALITY,
+        "response_format": "b64_json",
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/images/generations",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+            "Content-Type":  "application/json",
+            "HTTP-Referer":  config.OPENROUTER_APP_URL or "https://hypogeum.ai",
+            "X-Title":       config.OPENROUTER_APP_NAME or "hypogeum-brain",
+        },
+        method="POST",
+    )
+
+    log.info("openrouter_thumbnail_submit", deliverable_id=deliverable_id,
+             model=model, size=size)
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        if exc.code == 401:
+            raise MUAPIAuthFailure()
+        if exc.code == 402:
+            raise MUAPIQuotaExhausted()
+        raise MUAPIError(
+            f"OpenRouter Images API HTTP {exc.code} for {deliverable_id!r}: {body}"
+        )
+
+    data = result.get("data", [])
+    if not data or not data[0].get("b64_json"):
+        raise MUAPIError(
+            f"OpenRouter Images API returned no image data for {deliverable_id!r}"
+        )
+
+    image_bytes = base64.b64decode(data[0]["b64_json"])
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_bytes(image_bytes)
+
+    if local_path.stat().st_size < _MIN_IMAGE_BYTES:
+        raise MUAPIError(
+            f"OpenRouter image suspiciously small ({local_path.stat().st_size} B) "
+            f"for {deliverable_id!r}"
+        )
+
+    log.info("openrouter_thumbnail_generated", deliverable_id=deliverable_id,
+             model=model, size_kb=round(local_path.stat().st_size / 1024))
+    return model
+
+
 def generate_thumbnail(
     deliverable_id: str,
     image_prompt: str,
@@ -1393,8 +1574,56 @@ def generate_thumbnail(
         MUAPIError           — Image generation or download failed.
     """
     log = get_logger(episode_id=episode_id, agent=agent or "muapi")
+    provider = config.THUMBNAIL_IMAGE_PROVIDER  # "muapi" | "openai" | "openrouter"
 
-    # Resolve primary model from new config fields; fall back to legacy MUAPI_IMAGE_MODEL.
+    # ── Direct provider dispatch ──────────────────────────────────────────────
+    if provider == "openai":
+        local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+        model = _generate_thumbnail_openai(
+            deliverable_id=deliverable_id,
+            image_prompt=image_prompt,
+            aspect_ratio=aspect_ratio,
+            config=config,
+            local_path=local_path,
+            log=log,
+        )
+        _normalize_thumbnail(local_path, aspect_ratio)
+        if aspect_ratio == "16:9":
+            _apply_wordmark_overlay(local_path)
+        log.info("thumbnail_generated", deliverable_id=deliverable_id,
+                 model=model, provider="openai")
+        return ThumbnailResult(
+            asset_id=f"episodes/{episode_id}/thumbnails/{deliverable_id}",
+            local_path=local_path,
+            model_used=model,
+            provider_used="openai",
+            used_fallback=False,
+        )
+
+    if provider == "openrouter":
+        local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+        model = _generate_thumbnail_openrouter(
+            deliverable_id=deliverable_id,
+            image_prompt=image_prompt,
+            aspect_ratio=aspect_ratio,
+            config=config,
+            local_path=local_path,
+            log=log,
+        )
+        _normalize_thumbnail(local_path, aspect_ratio)
+        if aspect_ratio == "16:9":
+            _apply_wordmark_overlay(local_path)
+        log.info("thumbnail_generated", deliverable_id=deliverable_id,
+                 model=model, provider="openrouter")
+        return ThumbnailResult(
+            asset_id=f"episodes/{episode_id}/thumbnails/{deliverable_id}",
+            local_path=local_path,
+            model_used=model,
+            provider_used="openrouter",
+            used_fallback=False,
+        )
+
+    # ── Default: MUAPI path (existing behaviour, unchanged) ───────────────────
     primary_model = config.THUMBNAIL_IMAGE_MODEL
     fallback_model = config.THUMBNAIL_FALLBACK_MODEL  # may be empty string
 

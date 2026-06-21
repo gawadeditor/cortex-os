@@ -154,6 +154,29 @@ class ProviderHealthSummary:
 
 
 @dataclass
+class ProviderCatalogEntry:
+    """
+    Combined credential status + usage stats for one provider.
+
+    Always present for every known provider regardless of whether it has
+    generated any assets yet. This is the data source for the Providers
+    dashboard page.
+    """
+    provider:          str
+    display_name:      str
+    capabilities:      list           # e.g. ["image"], ["llm", "image"], ["video"]
+    access_mode:       str            # "direct" | "muapi_delegated"
+    delegate_via:      Optional[str]  # "muapi" when access_mode == "muapi_delegated"
+    credential_status: str            # "verified"|"saved"|"missing"|"failed"|"not_verifiable"
+    has_env_var:       bool
+    is_configured:     bool           # has_env_var or has_secret_profile
+    total_attempts:    int            # from asset_versions; 0 if never used
+    failure_count:     int
+    failure_rate:      float
+    total_cost_usd:    float
+
+
+@dataclass
 class ArchiveSummary:
     """State of the archive_index table."""
     total_archived:       int
@@ -245,8 +268,8 @@ class FactoryState:
     channels:        list
     agent_health:    list
     model_usage:     list
-    provider_health: list
-    archive:         ArchiveSummary
+    provider_health:  list
+    archive:          ArchiveSummary
     recall:          RecallSummary
     learning:        LearningSummary
     costs:           CostSummary
@@ -258,6 +281,7 @@ class FactoryState:
     active_signals:   list = field(default_factory=list)
     schedules:        list = field(default_factory=list)
     pending_approvals: list = field(default_factory=list)
+    provider_catalog: list = field(default_factory=list)  # list[ProviderCatalogEntry]
     metadata_version: str = METADATA_VERSION
 
 
@@ -570,6 +594,95 @@ def get_provider_health(db_path: Optional[Path] = None) -> list:
         ]
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Provider Catalog — combined credential + usage view
+# ---------------------------------------------------------------------------
+
+# Static metadata for every known provider. This is the authoritative list
+# that makes providers visible before any asset has been generated.
+_PROVIDER_CATALOG_META: dict[str, dict] = {
+    "openai":     {"display_name": "OpenAI",      "capabilities": ["image"],          "access_mode": "direct",           "delegate_via": None},
+    "openrouter": {"display_name": "OpenRouter",   "capabilities": ["llm", "image"],   "access_mode": "direct",           "delegate_via": None},
+    "muapi":      {"display_name": "MUAPI",        "capabilities": ["image", "video"], "access_mode": "direct",           "delegate_via": None},
+    "elevenlabs": {"display_name": "ElevenLabs",   "capabilities": ["audio"],          "access_mode": "direct",           "delegate_via": None},
+    "freepik":    {"display_name": "Freepik",      "capabilities": ["image"],          "access_mode": "direct",           "delegate_via": None},
+    "seedance":   {"display_name": "Seedance",     "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
+    "veo":        {"display_name": "Veo",          "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
+    "kling":      {"display_name": "Kling",        "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
+    "runway":     {"display_name": "Runway",       "capabilities": ["video"],          "access_mode": "muapi_delegated",  "delegate_via": "muapi"},
+    "youtube":    {"display_name": "YouTube",      "capabilities": ["publishing"],     "access_mode": "direct",           "delegate_via": None},
+}
+
+
+def get_provider_catalog(db_path: Optional[Path] = None) -> list:
+    """
+    Return a ProviderCatalogEntry for every known provider.
+
+    Merges three sources:
+      1. _PROVIDER_CATALOG_META — static capabilities / access-mode labels
+      2. provider_verifier.get_all_provider_statuses() — credential status from env + DB
+      3. asset_versions table — actual usage stats (0 for providers never used)
+
+    Always includes all providers from _PROVIDER_CATALOG_META regardless of
+    whether they have generated any assets. This is the correct data source
+    for the Providers dashboard page.
+
+    Non-blocking: on any error returns empty list.
+    """
+    try:
+        from hypogeum.provider_verifier import get_all_provider_statuses
+        statuses = get_all_provider_statuses(db_path)
+    except Exception:
+        statuses = {}
+
+    # Usage stats from asset_versions, keyed by provider
+    usage: dict[str, dict] = {}
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            rows = conn.execute("""
+                SELECT
+                    provider,
+                    COUNT(*)                                           AS total,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)  AS failures,
+                    SUM(COALESCE(cost_usd, 0))                        AS total_cost
+                FROM asset_versions
+                GROUP BY provider
+            """).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            usage[r["provider"]] = {
+                "total":      r["total"]      or 0,
+                "failures":   r["failures"]   or 0,
+                "total_cost": r["total_cost"] or 0.0,
+            }
+    except Exception:
+        pass
+
+    catalog: list[ProviderCatalogEntry] = []
+    for provider, meta in _PROVIDER_CATALOG_META.items():
+        st    = statuses.get(provider, {})
+        u     = usage.get(provider, {"total": 0, "failures": 0, "total_cost": 0.0})
+        total = u["total"]
+        fails = u["failures"]
+        catalog.append(ProviderCatalogEntry(
+            provider          = provider,
+            display_name      = meta["display_name"],
+            capabilities      = meta["capabilities"],
+            access_mode       = meta["access_mode"],
+            delegate_via      = meta["delegate_via"],
+            credential_status = st.get("status", "missing"),
+            has_env_var       = st.get("has_env_var", False),
+            is_configured     = st.get("has_env_var", False) or st.get("has_secret_profile", False),
+            total_attempts    = total,
+            failure_count     = fails,
+            failure_rate      = _safe_rate(fails, total),
+            total_cost_usd    = round(u["total_cost"], 6),
+        ))
+    return catalog
 
 
 # ===========================================================================
@@ -1050,8 +1163,9 @@ def get_factory_state(
     channels        = get_channel_summaries(db_path)
     agent_health    = get_agent_health(db_path)
     model_usage     = get_model_usage(db_path)
-    provider_health = get_provider_health(db_path)
-    archive         = get_archive_summary(db_path)
+    provider_health   = get_provider_health(db_path)
+    provider_catalog  = get_provider_catalog(db_path)
+    archive           = get_archive_summary(db_path)
     recall          = get_recall_summary(db_path)
     learning        = get_learning_summary(db_path)
     costs           = get_cost_summary(db_path)
@@ -1079,6 +1193,7 @@ def get_factory_state(
         agent_health      = agent_health,
         model_usage       = model_usage,
         provider_health   = provider_health,
+        provider_catalog  = provider_catalog,
         archive           = archive,
         recall            = recall,
         learning          = learning,

@@ -11,6 +11,7 @@ Credential source priority:
 
 Providers that share the MUAPI key (seedance, runway, kling, veo) are tested
 via the MUAPI probe. freepik has no stable probe — marked not_verifiable.
+openai is a direct provider using OPENAI_API_KEY (image generation + Whisper).
 
 Public API:
     verify_provider(provider, db_path=None) -> dict
@@ -41,6 +42,7 @@ STATUS_NOT_VERIFIABLE = "not_verifiable"
 
 # Env var name for each provider's credential
 _PROVIDER_ENV_VAR: dict[str, str] = {
+    "openai":     "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "elevenlabs": "ELEVENLABS_API_KEY",
     "muapi":      "MUAPI_API_KEY",
@@ -71,6 +73,27 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 # HTTP probes (standalone — do not depend on SecretProfile)
 # ---------------------------------------------------------------------------
+
+def _probe_openai(key: str) -> tuple[bool, Optional[str], int]:
+    """GET https://api.openai.com/v1/models — lightweight auth check."""
+    import urllib.request
+    import urllib.error
+    t0 = time.monotonic()
+    try:
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if resp.status == 200:
+                return True, None, latency_ms
+            return False, f"HTTP {resp.status}", latency_ms
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}", int((time.monotonic() - t0) * 1000)
+    except Exception as exc:
+        return False, str(exc)[:120], int((time.monotonic() - t0) * 1000)
+
 
 def _probe_openrouter(key: str) -> tuple[bool, Optional[str], int]:
     """Returns (success, error, latency_ms)."""
@@ -142,6 +165,7 @@ def _probe_youtube(key: str) -> tuple[bool, Optional[str], int]:
 
 
 _PROBES = {
+    "openai":     _probe_openai,
     "openrouter": _probe_openrouter,
     "elevenlabs": _probe_elevenlabs,
     "muapi":      _probe_muapi,

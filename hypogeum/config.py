@@ -79,7 +79,8 @@ class MilestoneConfigError(RuntimeError):
 # Each entry: (attribute_name, human-readable purpose shown in error messages)
 # Only hard-required variables appear here. Optional and conditional vars are omitted.
 # TikTok vars are not listed — pipeline degrades gracefully; use Config.tiktok_available.
-# OPENAI_API_KEY is not listed — only needed if Whisper fallback fires at runtime.
+# OPENAI_API_KEY is not listed — only needed if Whisper fallback fires at runtime,
+# or if THUMBNAIL_IMAGE_PROVIDER=openai for direct image generation.
 # ---------------------------------------------------------------------------
 
 _MILESTONE_REQUIREMENTS: dict[str, list[tuple[str, str]]] = {
@@ -226,6 +227,7 @@ class Config:
     OPENROUTER_APP_NAME: str
     OPENROUTER_APP_URL: Optional[str]
     OPENROUTER_FALLBACK_MODEL: Optional[str]
+    OPENROUTER_IMAGE_MODEL: str        # default: openai/gpt-image-2 (THUMBNAIL_IMAGE_PROVIDER=openrouter)
     ANTHROPIC_API_KEY: Optional[str]  # Required when OpenRouter fallback is triggered
 
     # ------------------------------------------------------------------
@@ -311,9 +313,12 @@ class Config:
     ELEVENLABS_MUSIC_DEFAULT_DURATION: int # default: 120 (seconds; multiply by 1000 for API ms)
 
     # ------------------------------------------------------------------
-    # OpenAI Whisper (conditional — only if Whisper fallback is triggered)
+    # OpenAI — direct image generation (THUMBNAIL_IMAGE_PROVIDER=openai)
+    #          + Whisper fallback for caption alignment
     # ------------------------------------------------------------------
     OPENAI_API_KEY: Optional[str]
+    OPENAI_IMAGE_BASE_URL: str         # default: https://api.openai.com/v1
+    OPENAI_IMAGE_MODEL: str            # default: gpt-image-2
     WHISPER_MODEL: str                 # default: whisper-1
 
     # ------------------------------------------------------------------
@@ -375,6 +380,9 @@ class Config:
         )
         self.OPENROUTER_APP_URL = _get_optional("OPENROUTER_APP_URL")
         self.OPENROUTER_FALLBACK_MODEL = _get_optional("OPENROUTER_FALLBACK_MODEL")
+        self.OPENROUTER_IMAGE_MODEL = _get_optional(
+            "OPENROUTER_IMAGE_MODEL", default="openai/gpt-image-2"
+        )
         self.ANTHROPIC_API_KEY = _get_optional("ANTHROPIC_API_KEY")
 
         # --- Perplexity ---
@@ -484,8 +492,12 @@ class Config:
             "ELEVENLABS_MUSIC_DEFAULT_DURATION", default=120
         )
 
-        # --- OpenAI Whisper ---
+        # --- OpenAI (direct image + Whisper) ---
         self.OPENAI_API_KEY = _get_optional("OPENAI_API_KEY")
+        self.OPENAI_IMAGE_BASE_URL = _get_optional(
+            "OPENAI_IMAGE_BASE_URL", default="https://api.openai.com/v1"
+        )
+        self.OPENAI_IMAGE_MODEL = _get_optional("OPENAI_IMAGE_MODEL", default="gpt-image-2")
         self.WHISPER_MODEL = _get_optional("WHISPER_MODEL", default="whisper-1")
 
         # --- YouTube ---

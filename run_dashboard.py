@@ -160,6 +160,11 @@ from hypogeum.dashboard_runs import (
 from hypogeum.episode_detail import get_episode_detail
 from hypogeum.setup_preflight import get_setup_preflight_status
 from hypogeum.provider_verifier import verify_provider, get_all_provider_statuses
+from hypogeum.provider_comparison import (
+    run_provider_comparison,
+    get_comparison_result,
+    COMPARISON_PROMPT,
+)
 from hypogeum.episode_artifacts import (
     get_episode_artifacts,
     list_disk_episodes,
@@ -603,12 +608,20 @@ def providers_page():
         verif_map = {}
     platform_providers = _build_providers(list(_PLATFORM_PROVIDERS), creds_map, cost_map, verif_map)
 
+    # Phase 1G — most recent comparison result (None if none run yet)
+    try:
+        last_comparison = get_comparison_result(db_path=db)
+    except Exception:
+        last_comparison = None
+
     return render_template(
         "providers.html",
         ai_providers=ai_providers,
         video_provider_pairs=video_provider_pairs,
         platform_providers=platform_providers,
         connectable_providers=_VALID_CONTENT_PROVIDERS,
+        last_comparison=last_comparison,
+        comparison_prompt=COMPARISON_PROMPT,
     )
 
 
@@ -767,6 +780,65 @@ def api_providers_verify(provider: str):
         return jsonify({"ok": True, **result})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/providers/compare", methods=["POST"])
+def api_providers_compare():
+    """
+    Phase 1G: Run a controlled thumbnail generation comparison across image providers.
+
+    Credentials resolved via Secret Profile → env fallback per provider.
+    Executes synchronously (generation takes 15–60s per provider).
+    Returns the full result set when done.
+    """
+    body = request.get_json(silent=True) or {}
+    providers = body.get("providers") or ["openai", "openrouter", "muapi"]
+    valid = {"openai", "openrouter", "muapi"}
+    providers = [p for p in providers if p in valid]
+    if not providers:
+        return jsonify({"ok": False, "error": "no valid providers specified"}), 400
+    try:
+        run = run_provider_comparison(db_path=_db_path(), providers=providers)
+        return jsonify({
+            "ok":          True,
+            "run_id":      run.run_id,
+            "run_at":      run.run_at,
+            "completed_at": run.completed_at,
+            "prompt":      run.prompt,
+            "results":     run.results,
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/providers/compare/results")
+def api_providers_compare_results():
+    """Return the most recent completed comparison run from DB."""
+    try:
+        result = get_comparison_result(db_path=_db_path())
+        if result is None:
+            return jsonify({"ok": True, "run": None})
+        return jsonify({"ok": True, "run": result})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/providers/compare/image/<run_id>/<provider>")
+def api_providers_compare_image(run_id: str, provider: str):
+    """Serve a generated comparison thumbnail image."""
+    import re
+    from flask import send_file, abort
+    if not re.fullmatch(r"[0-9a-f\-]{36}", run_id):
+        abort(400)
+    if provider not in ("openai", "openrouter", "muapi"):
+        abort(400)
+    img_path = (
+        _ROOT / ".hypogeum-assets" / "provider_comparisons"
+        / run_id / f"thumb_{provider}.jpg"
+    )
+    if not img_path.exists():
+        abort(404)
+    return send_file(str(img_path), mimetype="image/jpeg")
 
 
 @app.route("/command")

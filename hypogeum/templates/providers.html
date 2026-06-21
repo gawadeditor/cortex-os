@@ -97,6 +97,43 @@
     .provider-auth-type { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
     .verif-error        { font-size: 11px; color: var(--red); margin-top: 3px; font-family: monospace; }
     .verif-time         { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+    /* Provider Comparison (Phase 1G) */
+    .cmp-section        { margin-top: calc(var(--gap) * 2); }
+    .cmp-run-bar        { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                          margin: 10px 0 16px; }
+    .btn-compare        { padding: 7px 16px; font-size: 13px; font-weight: 600;
+                          border-radius: var(--radius); border: 1px solid var(--blue);
+                          color: var(--blue); cursor: pointer; background: transparent;
+                          font-family: inherit; }
+    .btn-compare:hover  { background: rgba(88,166,255,.08); }
+    .btn-compare:disabled { opacity: 0.45; cursor: not-allowed; }
+    .cmp-status         { font-size: 12px; color: var(--muted); }
+    .cmp-prompt-box     { font-size: 11px; color: var(--muted); background: var(--bg);
+                          border: 1px solid var(--border); border-radius: var(--radius);
+                          padding: 8px 10px; font-family: monospace; line-height: 1.5;
+                          margin-bottom: 14px; white-space: pre-wrap; word-break: break-word; }
+    .cmp-grid           { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr));
+                          gap: var(--gap); margin-top: 10px; }
+    .cmp-card           { background: var(--surface); border: 1px solid var(--border);
+                          border-radius: var(--radius); padding: 14px; }
+    .cmp-card-ok        { border-color: #2ea043; }
+    .cmp-card-fail      { border-color: var(--red); }
+    .cmp-card-skip      { opacity: 0.65; border-style: dashed; }
+    .cmp-thumb          { width: 100%; aspect-ratio: 16/9; object-fit: cover;
+                          border-radius: 3px; margin-bottom: 10px; background: #111; }
+    .cmp-thumb-ph       { width: 100%; aspect-ratio: 16/9; background: #111;
+                          border-radius: 3px; margin-bottom: 10px;
+                          display: flex; align-items: center; justify-content: center;
+                          font-size: 12px; color: var(--muted); }
+    .cmp-name           { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+    .cmp-meta           { font-size: 11px; color: var(--muted); line-height: 1.6; font-family: monospace; }
+    .cmp-meta span      { display: block; }
+    .cmp-err            { font-size: 11px; color: var(--red); margin-top: 6px;
+                          font-family: monospace; word-break: break-word; }
+    .cmp-src-badge      { font-size: 10px; padding: 1px 5px; border-radius: 3px;
+                          background: #1a2a1a; color: #6ab46a; border: 1px solid #2a442a; }
+    .cmp-src-badge-env  { background: #1a1a2a; color: #6a6ae8; border-color: #2a2a6a; }
   </style>
 </head>
 <body>
@@ -357,6 +394,76 @@
 </div>
 
 
+{% macro cmp_card(r, run_id) %}
+{% set ok   = r.status == 'success' %}
+{% set skip = r.status == 'skipped_no_key' %}
+<div class="cmp-card{% if ok %} cmp-card-ok{% elif skip %} cmp-card-skip{% else %} cmp-card-fail{% endif %}">
+  {% if ok %}
+  <img class="cmp-thumb"
+       src="/api/providers/compare/image/{{ run_id }}/{{ r.provider }}"
+       alt="{{ r.provider }} thumbnail">
+  {% else %}
+  <div class="cmp-thumb-ph">{{ 'No credential' if skip else r.status }}</div>
+  {% endif %}
+  <div class="cmp-name">{{ r.provider }}</div>
+  <div class="cmp-meta">
+    {% if r.model %}<span>Model: {{ r.model }}</span>{% endif %}
+    {% if r.latency_ms is not none %}<span>Latency: {{ r.latency_ms }}ms</span>{% endif %}
+    {% if r.estimated_cost_usd is not none %}<span>Est. cost: ${{ "%.3f"|format(r.estimated_cost_usd) }}</span>{% endif %}
+    {% if r.credential_source %}
+    <span>Source:
+      {% if r.credential_source == 'secret_profile' %}
+        <span class="cmp-src-badge">Secret Profile</span>
+      {% else %}
+        <span class="cmp-src-badge cmp-src-badge-env">env var</span>
+      {% endif %}
+    </span>
+    {% endif %}
+  </div>
+  {% if r.error %}<div class="cmp-err">✗ {{ r.error[:160] }}</div>{% endif %}
+</div>
+{% endmacro %}
+
+{# ─────────────────────────────────────────────────────────── #}
+{# Phase 1G — Provider Comparison                               #}
+{# ─────────────────────────────────────────────────────────── #}
+<div class="cmp-section">
+  <div class="section-label">Provider Comparison</div>
+
+  <div class="cmp-run-bar">
+    <button class="btn-compare" id="btn-compare" onclick="runComparison()">
+      Run Comparison
+    </button>
+    <span class="cmp-status" id="cmp-status">
+      {% if last_comparison %}
+        Last run: {{ last_comparison.completed_at[:19] | replace('T',' ') }} UTC
+      {% else %}
+        No comparison run yet.
+      {% endif %}
+    </span>
+  </div>
+
+  <details style="margin-bottom:12px;">
+    <summary style="font-size:11px; color:var(--muted); cursor:pointer;">
+      Fixed benchmark prompt (identical for all providers)
+    </summary>
+    <div class="cmp-prompt-box" style="margin-top:6px;">{{ comparison_prompt }}</div>
+  </details>
+
+  <div class="cmp-grid" id="cmp-grid">
+    {% if last_comparison and last_comparison.results %}
+      {% for r in last_comparison.results %}
+        {{ cmp_card(r, last_comparison.run_id) }}
+      {% endfor %}
+    {% else %}
+      <div style="font-size:13px; color:var(--muted); padding:8px 0;">
+        Click <strong>Run Comparison</strong> to generate a thumbnail through each configured image provider.
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+
 <div style="margin-top: calc(var(--gap) * 2); font-size: 12px; color: var(--muted);">
   Credentials are stored locally. Test calls are lightweight probes (no data generated or billed).
   Generation readiness shows the result of the last Phase 1C smoke test.
@@ -400,6 +507,68 @@ function testProvider(btn, provider) {
         resultEl.textContent = '✗ Network error: ' + err.message;
       }
     });
+}
+
+function runComparison() {
+  var btn = document.getElementById('btn-compare');
+  var status = document.getElementById('cmp-status');
+  var grid = document.getElementById('cmp-grid');
+
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  status.textContent = 'Generating thumbnails — this takes 30–120s per provider…';
+  grid.innerHTML = '<div style="font-size:13px;color:var(--muted);padding:8px 0;">Generation in progress…</div>';
+
+  fetch('/api/providers/compare', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providers: ['openai', 'openrouter', 'muapi'] })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = 'Run Comparison';
+      if (!data.ok) {
+        status.textContent = '✗ Error: ' + (data.error || 'unknown');
+        grid.innerHTML = '';
+        return;
+      }
+      var ts = (data.completed_at || '').replace('T', ' ').slice(0, 19) + ' UTC';
+      status.textContent = 'Last run: ' + ts;
+      grid.innerHTML = buildGrid(data.results, data.run_id);
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Run Comparison';
+      status.textContent = '✗ Network error: ' + err.message;
+    });
+}
+
+function buildGrid(results, runId) {
+  if (!results || !results.length) return '<div style="color:var(--muted)">No results.</div>';
+  return results.map(function(r) {
+    var ok   = r.status === 'success';
+    var skip = r.status === 'skipped_no_key';
+    var cls  = ok ? 'cmp-card-ok' : (skip ? 'cmp-card-skip' : 'cmp-card-fail');
+    var imgHtml = ok
+      ? '<img class="cmp-thumb" src="/api/providers/compare/image/' + runId + '/' + r.provider + '" alt="' + r.provider + ' thumbnail">'
+      : '<div class="cmp-thumb-ph">' + (skip ? 'No credential' : r.status) + '</div>';
+    var srcBadge = r.credential_source === 'secret_profile'
+      ? '<span class="cmp-src-badge">Secret Profile</span>'
+      : '<span class="cmp-src-badge cmp-src-badge-env">env var</span>';
+    var meta = [
+      r.model   ? '<span>Model: ' + r.model + '</span>'                : '',
+      r.latency_ms != null ? '<span>Latency: ' + r.latency_ms + 'ms</span>' : '',
+      r.estimated_cost_usd != null ? '<span>Est. cost: $' + r.estimated_cost_usd.toFixed(3) + '</span>' : '',
+      r.credential_source  ? '<span>Source: ' + srcBadge + '</span>'  : '',
+    ].filter(Boolean).join('');
+    var errHtml = r.error ? '<div class="cmp-err">✗ ' + r.error + '</div>' : '';
+    return '<div class="cmp-card ' + cls + '">'
+      + imgHtml
+      + '<div class="cmp-name">' + r.provider + '</div>'
+      + '<div class="cmp-meta">' + meta + '</div>'
+      + errHtml
+      + '</div>';
+  }).join('');
 }
 </script>
 </body>

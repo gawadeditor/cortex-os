@@ -2019,3 +2019,75 @@ def get_all_provider_verifications(conn: sqlite3.Connection) -> dict:
     """Return {provider: record_dict} for all stored verifications."""
     rows = conn.execute("SELECT * FROM provider_verifications").fetchall()
     return {row["provider"]: dict(row) for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# provider_comparison_runs table (Phase 1G)
+# ---------------------------------------------------------------------------
+
+def insert_provider_comparison_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    run_at: str,
+    prompt: str,
+) -> None:
+    """Insert a new comparison run with status='running'."""
+    conn.execute(
+        """
+        INSERT INTO provider_comparison_runs (run_id, run_at, prompt, status)
+        VALUES (?, ?, ?, 'running')
+        """,
+        (run_id, run_at, prompt),
+    )
+
+
+def complete_provider_comparison_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    results: list,
+    completed_at: str,
+) -> None:
+    """Mark a comparison run completed and store per-provider results."""
+    conn.execute(
+        """
+        UPDATE provider_comparison_runs
+        SET status='completed', results_json=?, completed_at=?
+        WHERE run_id=?
+        """,
+        (json.dumps(results), completed_at, run_id),
+    )
+
+
+def get_latest_provider_comparison(conn: sqlite3.Connection) -> Optional[dict]:
+    """Return the most recent completed comparison run, or None."""
+    row = conn.execute(
+        """
+        SELECT * FROM provider_comparison_runs
+        WHERE status = 'completed'
+        ORDER BY completed_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    if d.get("results_json"):
+        d["results"] = json.loads(d["results_json"])
+    else:
+        d["results"] = []
+    return d
+
+
+def list_provider_comparison_runs(conn: sqlite3.Connection, limit: int = 10) -> list:
+    """Return the most recent comparison runs (newest first)."""
+    rows = conn.execute(
+        """
+        SELECT run_id, run_at, status, completed_at,
+               LENGTH(prompt) AS prompt_len
+        FROM provider_comparison_runs
+        ORDER BY run_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]

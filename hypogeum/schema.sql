@@ -1233,3 +1233,20 @@ CREATE TABLE IF NOT EXISTS provider_verifications (
     source        TEXT NOT NULL DEFAULT 'env'
                       CHECK(source IN ('env','secret_profile'))
 );
+
+-- ===========================================================================
+-- provider_comparison_runs — Phase 1G
+-- One row per operator-triggered thumbnail provider comparison.
+-- results_json holds a JSON array of per-provider result objects:
+--   [{provider, model, status, latency_ms, estimated_cost_usd,
+--     output_path, error, credential_source}, ...]
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS provider_comparison_runs (
+    run_id       TEXT NOT NULL PRIMARY KEY,
+    run_at       TEXT NOT NULL,
+    prompt       TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'running'
+                     CHECK(status IN ('running','completed','failed')),
+    results_json TEXT,
+    completed_at TEXT
+);

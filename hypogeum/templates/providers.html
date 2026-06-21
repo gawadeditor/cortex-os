@@ -394,14 +394,18 @@
 </div>
 
 
-{% macro cmp_card(r, run_id) %}
-{% set ok   = r.status == 'success' %}
+{% macro cmp_card(r, run_id, ctype) %}
+{% set ok   = r.status in ('success', 'ready') %}
 {% set skip = r.status == 'skipped_no_key' %}
 <div class="cmp-card{% if ok %} cmp-card-ok{% elif skip %} cmp-card-skip{% else %} cmp-card-fail{% endif %}">
-  {% if ok %}
+  {% if ok and ctype == 'image' %}
   <img class="cmp-thumb"
        src="/api/providers/compare/image/{{ run_id }}/{{ r.provider }}"
        alt="{{ r.provider }} thumbnail">
+  {% elif ctype == 'video' %}
+  <div class="cmp-thumb-ph" style="{% if ok %}border: 1px solid var(--green); color:var(--green);{% elif skip %}color:var(--muted);{% else %}color:var(--red);{% endif %}">
+    {% if ok %}✓ Ready{% elif skip %}No credential{% else %}{{ r.status }}{% endif %}
+  </div>
   {% else %}
   <div class="cmp-thumb-ph">{{ 'No credential' if skip else r.status }}</div>
   {% endif %}
@@ -431,14 +435,18 @@
   <div class="section-label">Provider Comparison</div>
 
   <div class="cmp-run-bar">
-    <button class="btn-compare" id="btn-compare" onclick="runComparison()">
-      Run Comparison
+    <button class="btn-compare" id="btn-img-compare" onclick="runImageComparison()">
+      Run Image Comparison
+    </button>
+    <button class="btn-compare" id="btn-vid-compare" onclick="runVideoCheck()"
+            style="margin-left:0;">
+      Run Video Readiness Check
     </button>
     <span class="cmp-status" id="cmp-status">
       {% if last_comparison %}
-        Last run: {{ last_comparison.completed_at[:19] | replace('T',' ') }} UTC
+        Image last run: {{ last_comparison.completed_at[:19] | replace('T',' ') }} UTC
       {% else %}
-        No comparison run yet.
+        No image comparison run yet.
       {% endif %}
     </span>
   </div>
@@ -450,14 +458,42 @@
     <div class="cmp-prompt-box" style="margin-top:6px;">{{ comparison_prompt }}</div>
   </details>
 
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+              color:var(--muted); margin:12px 0 6px;">Image Providers</div>
   <div class="cmp-grid" id="cmp-grid">
     {% if last_comparison and last_comparison.results %}
       {% for r in last_comparison.results %}
-        {{ cmp_card(r, last_comparison.run_id) }}
+        {{ cmp_card(r, last_comparison.run_id, "image") }}
       {% endfor %}
     {% else %}
       <div style="font-size:13px; color:var(--muted); padding:8px 0;">
-        Click <strong>Run Comparison</strong> to generate a thumbnail through each configured image provider.
+        Click <strong>Run Image Comparison</strong> to generate a thumbnail through each configured image provider.
+      </div>
+    {% endif %}
+  </div>
+
+  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+              color:var(--muted); margin:16px 0 6px;">
+    Video Providers
+    <span style="font-weight:400; text-transform:none; letter-spacing:0;">
+      — credential check only, no generation
+    </span>
+  </div>
+  <span class="cmp-status" id="vid-status" style="display:block; margin-bottom:8px;">
+    {% if last_video_check %}
+      Last check: {{ last_video_check.completed_at[:19] | replace('T',' ') }} UTC
+    {% else %}
+      No readiness check run yet.
+    {% endif %}
+  </span>
+  <div class="cmp-grid" id="vid-grid">
+    {% if last_video_check and last_video_check.results %}
+      {% for r in last_video_check.results %}
+        {{ cmp_card(r, last_video_check.run_id, "video") }}
+      {% endfor %}
+    {% else %}
+      <div style="font-size:13px; color:var(--muted); padding:8px 0;">
+        Click <strong>Run Video Readiness Check</strong> to probe credentials for each video provider.
       </div>
     {% endif %}
   </div>
@@ -509,8 +545,8 @@ function testProvider(btn, provider) {
     });
 }
 
-function runComparison() {
-  var btn = document.getElementById('btn-compare');
+function runImageComparison() {
+  var btn = document.getElementById('btn-img-compare');
   var status = document.getElementById('cmp-status');
   var grid = document.getElementById('cmp-grid');
 
@@ -521,37 +557,78 @@ function runComparison() {
 
   fetch('/api/providers/compare', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ providers: ['openai', 'openrouter', 'muapi'] })
+    body: JSON.stringify({})
   })
     .then(function(r) { return r.json(); })
     .then(function(data) {
       btn.disabled = false;
-      btn.textContent = 'Run Comparison';
+      btn.textContent = 'Run Image Comparison';
       if (!data.ok) {
         status.textContent = '✗ Error: ' + (data.error || 'unknown');
         grid.innerHTML = '';
         return;
       }
       var ts = (data.completed_at || '').replace('T', ' ').slice(0, 19) + ' UTC';
-      status.textContent = 'Last run: ' + ts;
-      grid.innerHTML = buildGrid(data.results, data.run_id);
+      status.textContent = 'Image last run: ' + ts;
+      grid.innerHTML = buildGrid(data.results, data.run_id, 'image');
     })
     .catch(function(err) {
       btn.disabled = false;
-      btn.textContent = 'Run Comparison';
+      btn.textContent = 'Run Image Comparison';
       status.textContent = '✗ Network error: ' + err.message;
     });
 }
 
-function buildGrid(results, runId) {
+function runVideoCheck() {
+  var btn = document.getElementById('btn-vid-compare');
+  var status = document.getElementById('vid-status');
+  var grid = document.getElementById('vid-grid');
+
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  status.textContent = 'Probing video provider credentials…';
+  grid.innerHTML = '<div style="font-size:13px;color:var(--muted);padding:8px 0;">Credential check in progress…</div>';
+
+  fetch('/api/providers/compare/video', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = 'Run Video Readiness Check';
+      if (!data.ok) {
+        status.textContent = '✗ Error: ' + (data.error || 'unknown');
+        grid.innerHTML = '';
+        return;
+      }
+      var ts = (data.completed_at || '').replace('T', ' ').slice(0, 19) + ' UTC';
+      status.textContent = 'Last check: ' + ts;
+      grid.innerHTML = buildGrid(data.results, data.run_id, 'video');
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Run Video Readiness Check';
+      status.textContent = '✗ Network error: ' + err.message;
+    });
+}
+
+function buildGrid(results, runId, ctype) {
   if (!results || !results.length) return '<div style="color:var(--muted)">No results.</div>';
   return results.map(function(r) {
-    var ok   = r.status === 'success';
+    var ok   = r.status === 'success' || r.status === 'ready';
     var skip = r.status === 'skipped_no_key';
     var cls  = ok ? 'cmp-card-ok' : (skip ? 'cmp-card-skip' : 'cmp-card-fail');
-    var imgHtml = ok
-      ? '<img class="cmp-thumb" src="/api/providers/compare/image/' + runId + '/' + r.provider + '" alt="' + r.provider + ' thumbnail">'
-      : '<div class="cmp-thumb-ph">' + (skip ? 'No credential' : r.status) + '</div>';
+    var imgHtml;
+    if (ok && ctype === 'image') {
+      imgHtml = '<img class="cmp-thumb" src="/api/providers/compare/image/' + runId + '/' + r.provider + '" alt="' + r.provider + ' thumbnail">';
+    } else if (ctype === 'video') {
+      var vidStyle = ok ? 'border:1px solid var(--green);color:var(--green)' : (skip ? 'color:var(--muted)' : 'color:var(--red)');
+      var vidText  = ok ? '✓ Ready' : (skip ? 'No credential' : r.status);
+      imgHtml = '<div class="cmp-thumb-ph" style="' + vidStyle + '">' + vidText + '</div>';
+    } else {
+      imgHtml = '<div class="cmp-thumb-ph">' + (skip ? 'No credential' : r.status) + '</div>';
+    }
     var srcBadge = r.credential_source === 'secret_profile'
       ? '<span class="cmp-src-badge">Secret Profile</span>'
       : '<span class="cmp-src-badge cmp-src-badge-env">env var</span>';

@@ -709,35 +709,34 @@ _PROVIDER_CATALOG_META: dict[str, dict] = {
         "delegate_via":      "muapi",
         "credential_key_name": "MUAPI_API_KEY",
     },
-    # --- Seedance 2.0 Official: BytePlus ModelArk direct provider (Phase 1H) ---
+    # --- Official direct providers (Phase 1H / Phase 1J) ---
     "seedance_official": {
-        "display_name":      "Seedance 2.0 (BytePlus ModelArk)",
-        "capabilities":      ["video"],
-        "access_mode":       "direct",
-        "delegate_via":      None,
+        "display_name":        "Seedance 2.0 (BytePlus ModelArk)",
+        "capabilities":        ["video"],
+        "access_mode":         "direct",
+        "delegate_via":        None,
         "credential_key_name": "BYTEPLUS_ARK_API_KEY",
     },
-    # --- Remaining direct provider placeholders (future — not yet implemented) ---
-    "veo_official":      {
-        "display_name":      "Veo (Official)",
-        "capabilities":      ["video"],
-        "access_mode":       "direct_placeholder",
-        "delegate_via":      None,
-        "credential_key_name": "VEO_API_KEY",
+    "runway_official": {
+        "display_name":        "Runway (Official)",
+        "capabilities":        ["video"],
+        "access_mode":         "direct",
+        "delegate_via":        None,
+        "credential_key_name": "RUNWAY_API_KEY",
     },
-    "kling_official":    {
-        "display_name":      "Kling (Official)",
-        "capabilities":      ["video"],
-        "access_mode":       "direct_placeholder",
-        "delegate_via":      None,
+    "kling_official": {
+        "display_name":        "Kling (Official)",
+        "capabilities":        ["video"],
+        "access_mode":         "direct",
+        "delegate_via":        None,
         "credential_key_name": "KLING_API_KEY",
     },
-    "runway_official":   {
-        "display_name":      "Runway (Official)",
-        "capabilities":      ["video"],
-        "access_mode":       "direct_placeholder",
-        "delegate_via":      None,
-        "credential_key_name": "RUNWAY_API_KEY",
+    "veo_official": {
+        "display_name":        "Veo (Google)",
+        "capabilities":        ["video"],
+        "access_mode":         "direct",
+        "delegate_via":        None,
+        "credential_key_name": "GOOGLE_API_KEY",
     },
     # --- Publishing ---
     "youtube":    {
@@ -746,6 +745,27 @@ _PROVIDER_CATALOG_META: dict[str, dict] = {
         "access_mode":       "direct",
         "delegate_via":      None,
         "credential_key_name": "YOUTUBE_REFRESH_TOKEN",
+    },
+    "facebook": {
+        "display_name":        "Facebook",
+        "capabilities":        ["publishing"],
+        "access_mode":         "direct",
+        "delegate_via":        None,
+        "credential_key_name": "META_ACCESS_TOKEN",
+    },
+    "instagram": {
+        "display_name":        "Instagram",
+        "capabilities":        ["publishing"],
+        "access_mode":         "direct",
+        "delegate_via":        None,
+        "credential_key_name": "META_ACCESS_TOKEN",
+    },
+    "tiktok": {
+        "display_name":        "TikTok",
+        "capabilities":        ["publishing"],
+        "access_mode":         "direct",
+        "delegate_via":        None,
+        "credential_key_name": "TIKTOK_ACCESS_TOKEN",
     },
 }
 

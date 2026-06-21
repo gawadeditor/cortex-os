@@ -160,6 +160,9 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "publishing_outcomes": [
         ("url", "TEXT"),
     ],
+    "provider_comparison_runs": [
+        ("comparison_type", "TEXT NOT NULL DEFAULT 'image'"),  # Phase 1J: 'image'|'video'
+    ],
 }
 
 
@@ -2030,14 +2033,15 @@ def insert_provider_comparison_run(
     run_id: str,
     run_at: str,
     prompt: str,
+    comparison_type: str = "image",
 ) -> None:
     """Insert a new comparison run with status='running'."""
     conn.execute(
         """
-        INSERT INTO provider_comparison_runs (run_id, run_at, prompt, status)
-        VALUES (?, ?, ?, 'running')
+        INSERT INTO provider_comparison_runs (run_id, run_at, prompt, status, comparison_type)
+        VALUES (?, ?, ?, 'running', ?)
         """,
-        (run_id, run_at, prompt),
+        (run_id, run_at, prompt, comparison_type),
     )
 
 
@@ -2058,15 +2062,19 @@ def complete_provider_comparison_run(
     )
 
 
-def get_latest_provider_comparison(conn: sqlite3.Connection) -> Optional[dict]:
-    """Return the most recent completed comparison run, or None."""
+def get_latest_provider_comparison(
+    conn: sqlite3.Connection,
+    comparison_type: str = "image",
+) -> Optional[dict]:
+    """Return the most recent completed comparison run of the given type, or None."""
     row = conn.execute(
         """
         SELECT * FROM provider_comparison_runs
-        WHERE status = 'completed'
+        WHERE status = 'completed' AND comparison_type = ?
         ORDER BY completed_at DESC
         LIMIT 1
-        """
+        """,
+        (comparison_type,),
     ).fetchone()
     if row is None:
         return None

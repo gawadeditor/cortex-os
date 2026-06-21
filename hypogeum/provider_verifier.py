@@ -46,13 +46,21 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "openrouter":        "OPENROUTER_API_KEY",
     "elevenlabs":        "ELEVENLABS_API_KEY",
     "muapi":             "MUAPI_API_KEY",
-    "seedance":          "MUAPI_API_KEY",          # Seedance is accessed via MUAPI
+    "seedance":          "MUAPI_API_KEY",          # delegated via MUAPI
     "runway":            "MUAPI_API_KEY",
     "kling":             "MUAPI_API_KEY",
     "veo":               "MUAPI_API_KEY",
     "freepik":           "FREEPIK_API_KEY",
     "youtube":           "YOUTUBE_REFRESH_TOKEN",
-    "seedance_official": "BYTEPLUS_ARK_API_KEY",   # Phase 1H — direct BytePlus ModelArk
+    "seedance_official": "BYTEPLUS_ARK_API_KEY",   # Phase 1H
+    # Phase 1J — official direct providers
+    "runway_official":   "RUNWAY_API_KEY",
+    "kling_official":    "KLING_API_KEY",
+    "veo_official":      "GOOGLE_API_KEY",
+    # Phase 1J — publishing providers (probe via access token)
+    "facebook":          "META_ACCESS_TOKEN",
+    "instagram":         "META_ACCESS_TOKEN",
+    "tiktok":            "TIKTOK_ACCESS_TOKEN",
 }
 
 # Providers that delegate their probe to another provider's test
@@ -64,7 +72,8 @@ _VERIFY_VIA: dict[str, str] = {
 }
 
 # Providers with no HTTP probe (not_verifiable)
-_NOT_VERIFIABLE = frozenset({"freepik"})
+# freepik removed — now has a real probe (Phase 1J)
+_NOT_VERIFIABLE: frozenset = frozenset()
 
 
 def _now_iso() -> str:
@@ -166,12 +175,127 @@ def _probe_youtube(key: str) -> tuple[bool, Optional[str], int]:
 
 
 def _probe_byteplus_ark(key: str) -> tuple[bool, Optional[str], int]:
-    """
-    Validate a BytePlus ModelArk API key via GET /models (lightweight, no generation cost).
-    Phase 1H — Seedance 2.0 official direct provider.
-    """
+    """Validate a BytePlus ModelArk API key (Phase 1H)."""
     from hypogeum.byteplus_ark import probe_credential
     return probe_credential(key)
+
+
+def _probe_freepik(key: str) -> tuple[bool, Optional[str], int]:
+    """
+    Validate a Freepik API key via the AI resources endpoint (Phase 1J).
+    GET https://api.freepik.com/v1/ai/resources?page_size=1
+    """
+    import urllib.request
+    import urllib.error
+    t0 = time.monotonic()
+    try:
+        req = urllib.request.Request(
+            "https://api.freepik.com/v1/ai/resources?page_size=1",
+            headers={"X-Freepik-API-Key": key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if resp.status == 200:
+                return True, None, latency_ms
+            return False, f"HTTP {resp.status}", latency_ms
+    except urllib.error.HTTPError as exc:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if exc.code in (401, 403):
+            return False, f"HTTP {exc.code} — invalid API key", latency_ms
+        # 404 means key accepted, endpoint differs — still counts as verified
+        if exc.code == 404:
+            return True, None, latency_ms
+        return False, f"HTTP {exc.code}", latency_ms
+    except Exception as exc:
+        return False, str(exc)[:120], int((time.monotonic() - t0) * 1000)
+
+
+def _probe_runway_official(key: str) -> tuple[bool, Optional[str], int]:
+    """Validate a Runway ML API key (Phase 1J)."""
+    from hypogeum.runway_official import probe_credential
+    return probe_credential(key)
+
+
+def _probe_kling_official(key: str) -> tuple[bool, Optional[str], int]:
+    """Validate a Kling AI key (Phase 1J). Format: key_id:key_secret"""
+    from hypogeum.kling_official import probe_credential
+    return probe_credential(key)
+
+
+def _probe_veo_official(key: str) -> tuple[bool, Optional[str], int]:
+    """Validate a Google API key for Veo (Phase 1J)."""
+    from hypogeum.veo_official import probe_credential
+    return probe_credential(key)
+
+
+def _probe_meta_token(credential: str) -> tuple[bool, Optional[str], int]:
+    """
+    Validate a Meta Graph API access token.
+    Works for both facebook and instagram providers (same token).
+    Probes GET https://graph.facebook.com/v19.0/me?access_token={token}
+    """
+    import urllib.request
+    import urllib.error
+    import json as _json
+    # credential may be raw token or JSON blob from multi-field form
+    token = credential
+    try:
+        blob = _json.loads(credential)
+        token = blob.get("META_ACCESS_TOKEN", credential)
+    except Exception:
+        pass
+    t0 = time.monotonic()
+    try:
+        req = urllib.request.Request(
+            f"https://graph.facebook.com/v19.0/me?access_token={token}&fields=id",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if resp.status == 200:
+                return True, None, latency_ms
+            return False, f"HTTP {resp.status}", latency_ms
+    except urllib.error.HTTPError as exc:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        return False, f"HTTP {exc.code}: {body}", latency_ms
+    except Exception as exc:
+        return False, str(exc)[:120], int((time.monotonic() - t0) * 1000)
+
+
+def _probe_tiktok(credential: str) -> tuple[bool, Optional[str], int]:
+    """
+    Validate a TikTok access token.
+    credential may be raw token or JSON blob {"TIKTOK_ACCESS_TOKEN": "..."}.
+    """
+    import urllib.request
+    import urllib.error
+    import json as _json
+    token = credential
+    try:
+        blob = _json.loads(credential)
+        token = blob.get("TIKTOK_ACCESS_TOKEN", credential)
+    except Exception:
+        pass
+    t0 = time.monotonic()
+    try:
+        req = urllib.request.Request(
+            "https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if resp.status == 200:
+                return True, None, latency_ms
+            return False, f"HTTP {resp.status}", latency_ms
+    except urllib.error.HTTPError as exc:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        return False, f"HTTP {exc.code}", latency_ms
+    except Exception as exc:
+        return False, str(exc)[:120], int((time.monotonic() - t0) * 1000)
 
 
 _PROBES = {
@@ -179,12 +303,19 @@ _PROBES = {
     "openrouter":        _probe_openrouter,
     "elevenlabs":        _probe_elevenlabs,
     "muapi":             _probe_muapi,
-    "seedance":          _probe_muapi,           # same key — delegated via MUAPI
+    "seedance":          _probe_muapi,              # delegated via MUAPI
     "runway":            _probe_muapi,
     "kling":             _probe_muapi,
     "veo":               _probe_muapi,
+    "freepik":           _probe_freepik,            # Phase 1J — now has real probe
     "youtube":           _probe_youtube,
-    "seedance_official": _probe_byteplus_ark,    # Phase 1H — direct BytePlus ModelArk
+    "seedance_official": _probe_byteplus_ark,       # Phase 1H
+    "runway_official":   _probe_runway_official,    # Phase 1J
+    "kling_official":    _probe_kling_official,     # Phase 1J
+    "veo_official":      _probe_veo_official,       # Phase 1J
+    "facebook":          _probe_meta_token,         # Phase 1J — publishing
+    "instagram":         _probe_meta_token,         # Phase 1J — publishing
+    "tiktok":            _probe_tiktok,             # Phase 1J — publishing
 }
 
 

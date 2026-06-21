@@ -320,6 +320,13 @@ class Config:
     BYTEPLUS_ARK_MODEL: str      # default: seedance-1-lite
 
     # ------------------------------------------------------------------
+    # Phase 1J — Official direct providers
+    # ------------------------------------------------------------------
+    RUNWAY_API_KEY:     Optional[str]   # Runway ML official API
+    KLING_API_KEY:      Optional[str]   # Kling AI — format: "key_id:key_secret"
+    GOOGLE_API_KEY:     Optional[str]   # Google Veo / Gemini API
+
+    # ------------------------------------------------------------------
     # OpenAI — direct image generation (THUMBNAIL_IMAGE_PROVIDER=openai)
     #          + Whisper fallback for caption alignment
     # ------------------------------------------------------------------
@@ -498,6 +505,11 @@ class Config:
         self.ELEVENLABS_MUSIC_DEFAULT_DURATION = _get_int(
             "ELEVENLABS_MUSIC_DEFAULT_DURATION", default=120
         )
+
+        # --- Phase 1J official providers ---
+        self.RUNWAY_API_KEY  = _get_optional("RUNWAY_API_KEY")
+        self.KLING_API_KEY   = _get_optional("KLING_API_KEY")
+        self.GOOGLE_API_KEY  = _get_optional("GOOGLE_API_KEY")
 
         # --- BytePlus ModelArk (Phase 1H) ---
         self.BYTEPLUS_ARK_API_KEY = _get_optional("BYTEPLUS_ARK_API_KEY")

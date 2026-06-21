@@ -162,8 +162,13 @@ from hypogeum.setup_preflight import get_setup_preflight_status
 from hypogeum.provider_verifier import verify_provider, get_all_provider_statuses
 from hypogeum.provider_comparison import (
     run_provider_comparison,
+    run_video_readiness_check,
     get_comparison_result,
     COMPARISON_PROMPT,
+    COMPARISON_TYPE_IMAGE,
+    COMPARISON_TYPE_VIDEO,
+    DEFAULT_IMAGE_PROVIDERS,
+    DEFAULT_VIDEO_PROVIDERS,
 )
 from hypogeum.episode_artifacts import (
     get_episode_artifacts,
@@ -390,10 +395,22 @@ _CONTENT_PROVIDERS = [
      "description": "Video generation", "muapi_backed": True},
     {"id": "runway",     "label": "Runway",     "auth": "api_key",
      "description": "Video generation", "muapi_backed": True},
-    {"id": "freepik",           "label": "Freepik",                      "auth": "api_key",
+    {"id": "freepik",           "label": "Freepik",                         "auth": "api_key",
      "description": "Image generation"},
     {"id": "seedance_official", "label": "Seedance 2.0 (BytePlus ModelArk)", "auth": "api_key",
      "description": "Official Seedance video generation"},
+    {"id": "runway_official",   "label": "Runway (Official)",                "auth": "api_key",
+     "description": "Runway ML video generation"},
+    {"id": "kling_official",    "label": "Kling (Official)",                 "auth": "api_key",
+     "description": "Kling AI video generation"},
+    {"id": "veo_official",      "label": "Veo (Google)",                     "auth": "api_key",
+     "description": "Google Veo video generation"},
+    {"id": "facebook",          "label": "Facebook",                         "auth": "api_key",
+     "description": "Facebook video publishing"},
+    {"id": "instagram",         "label": "Instagram",                        "auth": "api_key",
+     "description": "Instagram Reels publishing"},
+    {"id": "tiktok",            "label": "TikTok",                           "auth": "api_key",
+     "description": "TikTok video publishing"},
 ]
 
 _CONTENT_PROVIDER_SETUP = {
@@ -501,6 +518,83 @@ _CONTENT_PROVIDER_SETUP = {
         ),
         "placeholder": "ark-...",
         "env_var": "BYTEPLUS_ARK_API_KEY",
+    },
+    "runway_official": {
+        "label": "Runway (Official)",
+        "description": "Runway ML Gen3 official video generation API",
+        "cred_label": "Runway API Key",
+        "instructions": (
+            "Go to app.runwayml.com → Settings → API Keys → Create a new key. "
+            "Stored as RUNWAY_API_KEY. Used for direct Gen3 Turbo video generation "
+            "without MUAPI as intermediary."
+        ),
+        "placeholder": "key-...",
+        "env_var": "RUNWAY_API_KEY",
+    },
+    "kling_official": {
+        "label": "Kling (Official)",
+        "description": "Kling AI official video generation API (Kuaishou)",
+        "cred_label": "Kling API Key",
+        "instructions": (
+            "Go to klingai.com → API → Manage API → Create Key. "
+            "Enter your Access Key ID and Access Key Secret separated by a colon: "
+            "'access_key_id:access_key_secret'. "
+            "Stored as KLING_API_KEY. JWT authentication is generated automatically."
+        ),
+        "placeholder": "key_id:key_secret",
+        "env_var": "KLING_API_KEY",
+    },
+    "veo_official": {
+        "label": "Veo (Google)",
+        "description": "Google Veo video generation via Gemini API",
+        "cred_label": "Google API Key",
+        "instructions": (
+            "Go to aistudio.google.com → Get API key → Create API key. "
+            "Stored as GOOGLE_API_KEY. Used for Google Veo video generation "
+            "and Gemini model access."
+        ),
+        "placeholder": "AIza...",
+        "env_var": "GOOGLE_API_KEY",
+    },
+    "facebook": {
+        "label": "Facebook",
+        "description": "Facebook video publishing via Meta Graph API",
+        "cred_label": "Meta Access Token",
+        "instructions": (
+            "Generate a long-lived Page access token from Meta for Developers "
+            "(developers.facebook.com → Tools → Graph API Explorer). "
+            "Requires META_APP_ID and META_FACEBOOK_PAGE_ID to publish. "
+            "Stored as META_ACCESS_TOKEN. Also set META_APP_ID and META_FACEBOOK_PAGE_ID "
+            "in your environment or via their own Secret Profiles."
+        ),
+        "placeholder": "EAA...",
+        "env_var": "META_ACCESS_TOKEN",
+    },
+    "instagram": {
+        "label": "Instagram",
+        "description": "Instagram Reels publishing via Meta Graph API",
+        "cred_label": "Meta Access Token",
+        "instructions": (
+            "Generate a long-lived Instagram Page access token from Meta for Developers. "
+            "Same token works for both Facebook and Instagram if you have correct permissions. "
+            "Also set META_INSTAGRAM_ACCOUNT_ID and META_APP_ID. "
+            "Stored as META_ACCESS_TOKEN."
+        ),
+        "placeholder": "EAA...",
+        "env_var": "META_ACCESS_TOKEN",
+    },
+    "tiktok": {
+        "label": "TikTok",
+        "description": "TikTok video publishing via TikTok for Developers",
+        "cred_label": "TikTok Access Token",
+        "instructions": (
+            "Generate an access token from developers.tiktok.com → Manage Apps → "
+            "your app → Authorization. "
+            "Stored as TIKTOK_ACCESS_TOKEN. Also set TIKTOK_CLIENT_KEY and "
+            "TIKTOK_CLIENT_SECRET in your environment."
+        ),
+        "placeholder": "act.xyz...",
+        "env_var": "TIKTOK_ACCESS_TOKEN",
     },
 }
 
@@ -624,11 +718,17 @@ def providers_page():
         verif_map = {}
     platform_providers = _build_providers(list(_PLATFORM_PROVIDERS), creds_map, cost_map, verif_map)
 
-    # Phase 1G — most recent comparison result (None if none run yet)
+    # Phase 1G/1J — most recent comparison results
     try:
-        last_comparison = get_comparison_result(db_path=db)
+        last_comparison = get_comparison_result(db_path=db,
+                                                comparison_type=COMPARISON_TYPE_IMAGE)
     except Exception:
         last_comparison = None
+    try:
+        last_video_check = get_comparison_result(db_path=db,
+                                                 comparison_type=COMPARISON_TYPE_VIDEO)
+    except Exception:
+        last_video_check = None
 
     return render_template(
         "providers.html",
@@ -638,6 +738,9 @@ def providers_page():
         connectable_providers=_VALID_CONTENT_PROVIDERS,
         last_comparison=last_comparison,
         comparison_prompt=COMPARISON_PROMPT,
+        last_video_check=last_video_check,
+        default_image_providers=DEFAULT_IMAGE_PROVIDERS,
+        default_video_providers=DEFAULT_VIDEO_PROVIDERS,
     )
 
 
@@ -801,28 +904,71 @@ def api_providers_verify(provider: str):
 @app.route("/api/providers/compare", methods=["POST"])
 def api_providers_compare():
     """
-    Phase 1G: Run a controlled thumbnail generation comparison across image providers.
+    Phase 1G/1J: Run a controlled thumbnail generation comparison across image providers.
 
     Credentials resolved via Secret Profile → env fallback per provider.
     Executes synchronously (generation takes 15–60s per provider).
     Returns the full result set when done.
     """
     body = request.get_json(silent=True) or {}
-    providers = body.get("providers") or ["openai", "openrouter", "muapi"]
-    valid = {"openai", "openrouter", "muapi"}
+    providers = body.get("providers") or DEFAULT_IMAGE_PROVIDERS
+    valid = set(DEFAULT_IMAGE_PROVIDERS)
     providers = [p for p in providers if p in valid]
     if not providers:
         return jsonify({"ok": False, "error": "no valid providers specified"}), 400
     try:
         run = run_provider_comparison(db_path=_db_path(), providers=providers)
         return jsonify({
-            "ok":          True,
-            "run_id":      run.run_id,
-            "run_at":      run.run_at,
+            "ok":           True,
+            "run_id":       run.run_id,
+            "run_at":       run.run_at,
             "completed_at": run.completed_at,
-            "prompt":      run.prompt,
-            "results":     run.results,
+            "prompt":       run.prompt,
+            "results":      run.results,
+            "comparison_type": COMPARISON_TYPE_IMAGE,
         })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/providers/compare/video", methods=["POST"])
+def api_providers_compare_video():
+    """
+    Phase 1J: Video provider readiness check.
+
+    Probes credentials for all configured video providers without generating any video.
+    Returns credential_status, operational_readiness, model, latency, cost estimate.
+    """
+    body = request.get_json(silent=True) or {}
+    providers = body.get("providers") or DEFAULT_VIDEO_PROVIDERS
+    valid = set(DEFAULT_VIDEO_PROVIDERS)
+    providers = [p for p in providers if p in valid]
+    if not providers:
+        return jsonify({"ok": False, "error": "no valid video providers specified"}), 400
+    try:
+        run = run_video_readiness_check(db_path=_db_path(), providers=providers)
+        return jsonify({
+            "ok":           True,
+            "run_id":       run.run_id,
+            "run_at":       run.run_at,
+            "completed_at": run.completed_at,
+            "prompt":       run.prompt,
+            "results":      run.results,
+            "comparison_type": COMPARISON_TYPE_VIDEO,
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/providers/compare/video/results")
+def api_providers_compare_video_results():
+    """Return the most recent completed video readiness check from DB."""
+    try:
+        result = get_comparison_result(db_path=_db_path(),
+                                       comparison_type=COMPARISON_TYPE_VIDEO)
+        if result is None:
+            return jsonify({"ok": True, "run": None})
+        return jsonify({"ok": True, "run": result})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 

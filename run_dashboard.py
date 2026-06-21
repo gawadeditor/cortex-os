@@ -1460,6 +1460,10 @@ def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
             "placement":        placement,
             "visual_prompt":    visual_prompt,
             "selected":         selected,
+            # file_path must be set so the template's {% elif c.file_path %} branch
+            # routes each card to /thumbnail/candidate/<rank> instead of falling
+            # through to {% elif c.image_path %} which always serves main.jpg.
+            "file_path":        img_file,
             "image_path":       img_file,
             "unverified":       unverified,
             "score":            score,
@@ -1492,8 +1496,14 @@ def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
     candidates = []
     if raw_cands:
         for i, c in enumerate(raw_cands):
-            file_candidates = [f"candidate_{i+1}.jpg", f"candidate_{i+1}.png",
-                               f"candidate_{i+1}.webp", f"rank_{c.get('rank',i+1)}.jpg"]
+            # Resolve by rank (authoritative) then fall back to position index.
+            cand_rank = c.get("rank", i + 1)
+            file_candidates = [
+                f"candidate_{cand_rank}.jpg", f"candidate_{cand_rank}.png",
+                f"candidate_{cand_rank}.webp",
+                # Legacy fallback: position-based names
+                f"candidate_{i+1}.jpg",
+            ]
             img_file = None
             for fn in file_candidates:
                 p = thumb_dir / fn
@@ -1502,7 +1512,7 @@ def _make_disk_thumbnails(episode_id: str, artifacts: dict) -> dict:
                     break
             is_sel = bool(c.get("selected"))
             candidates.append(_base_cand(
-                rank=c.get("rank", i + 1),
+                rank=cand_rank,
                 selected=is_sel,
                 text_overlay=c.get("text_overlay"),
                 placement=c.get("placement"),

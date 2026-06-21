@@ -1168,3 +1168,177 @@ class TestThreeCandidateContract:
             result = run_thumbnail_qa(p, thumbnail_package=None)
         check_ids = [c["check_id"] for c in result["checks"]]
         assert "c_thumbnail_candidate_count" not in check_ids
+
+
+# ===========================================================================
+# TestDistinctCandidateImageURLs
+# ===========================================================================
+
+class TestDistinctCandidateImageURLs:
+    """
+    Regression test: dashboard/API must return three DISTINCT image URLs/paths
+    for three thumbnail candidates.
+
+    Bug: _make_disk_thumbnails set image_path but not file_path. The template's
+    {% elif c.file_path %} branch (which routes to /thumbnail/candidate/<rank>)
+    was never reached. The fallback {% elif c.image_path %} branch always
+    returned /thumbnail (main.jpg) for every candidate.
+
+    Fix: _base_cand now sets file_path = img_file so the per-candidate route
+    fires for each rank.
+    """
+
+    @pytest.fixture
+    def client_and_assets(self, tmp_path):
+        import run_dashboard as server
+        server.app.config["TESTING"] = True
+        db_path = tmp_path / "test.db"
+        server.app.config["DB_PATH"] = db_path
+        initialize_schema(db_path)
+        with server.app.test_client() as c:
+            yield c, tmp_path, db_path
+
+    def _write_pkg(self, ep_dir, stem, ep_id, data):
+        import json
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        (ep_dir / f"{stem}_{ep_id}.json").write_text(json.dumps(data))
+
+    def _make_ep_with_three_candidates(self, assets: Path, ep_id: str) -> Path:
+        ep_dir = assets / "episodes" / ep_id
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        thumb_dir = ep_dir / "thumbnails"
+        thumb_dir.mkdir(exist_ok=True)
+        # Write distinct image bytes for main + each candidate
+        (thumb_dir / "main.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 200)
+        for rank in (1, 2, 3):
+            (thumb_dir / f"candidate_{rank}.jpg").write_bytes(
+                b"\xff\xd8\xff" + bytes([rank]) * 200
+            )
+        self._write_pkg(ep_dir, "thumbnail_package", ep_id, {
+            "thumbnail_package_id": f"tp_{ep_id}",
+            "episode_id": ep_id,
+            "main_thumbnail": {"asset_id": f"episodes/{ep_id}/thumbnails/candidate_1"},
+            "candidates": [
+                {"candidate_id": f"tc_{r}", "rank": r, "selected": r == 1,
+                 "status": "generated", "text_overlay": f"HOOK {r}", "placement": "bottom",
+                 "visual_prompt": f"Prompt {r}", "ctr_rationale": f"Reason {r}",
+                 "file_path": f"episodes/{ep_id}/thumbnails/candidate_{r}.jpg",
+                 "asset_id": f"episodes/{ep_id}/thumbnails/candidate_{r}"}
+                for r in (1, 2, 3)
+            ],
+            "candidate_count": 3,
+            "candidates_generated": 3,
+            "candidates_required": 3,
+            "package_integrity": {"production_ready": True},
+            "thumbnail_identity_report": {
+                "verdict": "APPROVED", "blocking_count": 0,
+                "warning_count": 0, "violations": [],
+            },
+        })
+        self._write_pkg(ep_dir, "qa_approval_report", ep_id, {
+            "verdict": "APPROVED", "approved": True, "checks": [],
+            "failures": [], "warnings": [],
+            "evaluated_at": "2026-01-01T00:00:00+00:00",
+        })
+        return ep_dir
+
+    def _get_html(self, client_and_assets, ep_id):
+        c, tmp_path, db_path = client_and_assets
+        assets = tmp_path / ".hypogeum-assets"
+        import run_dashboard as server
+        from unittest.mock import patch
+        with patch.object(server, "_ASSETS_ROOT_PATH", assets), \
+             patch.object(server, "_db_path", return_value=db_path):
+            resp = c.get(f"/episode/{ep_id}?tab=thumbnails")
+        assert resp.status_code == 200
+        return resp.data.decode()
+
+    def test_three_candidates_have_distinct_image_urls(self, client_and_assets, tmp_path):
+        """Dashboard HTML must contain three distinct image URLs — one per candidate rank."""
+        ep_id = "ep_dist_01"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep_with_three_candidates(assets, ep_id)
+        html = self._get_html(client_and_assets, ep_id)
+
+        import re
+        # Collect all img src attributes from the thumbnail grid
+        img_srcs = re.findall(r'<img\s[^>]*src="([^"]+)"', html)
+        # Filter to only thumbnail-serving URLs for this episode
+        thumb_srcs = [s for s in img_srcs if f"/episode/{ep_id}/thumbnail" in s]
+
+        assert len(thumb_srcs) >= 3, (
+            f"Expected at least 3 thumbnail img tags, found {len(thumb_srcs)}: {thumb_srcs}"
+        )
+        # All three must be distinct (not all the same URL)
+        assert len(set(thumb_srcs)) >= 3, (
+            f"All 3 thumbnail cards show the same URL — bug not fixed.\n"
+            f"URLs found: {thumb_srcs}"
+        )
+
+    def test_candidate_1_selected_uses_main_thumbnail_route(self, client_and_assets, tmp_path):
+        """Selected rank-1 card uses /thumbnail (main.jpg) — template intentional behaviour."""
+        ep_id = "ep_dist_02"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep_with_three_candidates(assets, ep_id)
+        html = self._get_html(client_and_assets, ep_id)
+        # Rank-1 selected → /thumbnail (main.jpg copy of candidate_1), not /thumbnail/candidate/1.
+        # This is correct — main.jpg is always rank-1 so the URL remains the canonical endpoint.
+        assert f"/episode/{ep_id}/thumbnail" in html
+
+    def test_candidate_2_uses_candidate_route(self, client_and_assets, tmp_path):
+        """Candidate 2 card uses /thumbnail/candidate/2."""
+        ep_id = "ep_dist_03"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep_with_three_candidates(assets, ep_id)
+        html = self._get_html(client_and_assets, ep_id)
+        assert f"/episode/{ep_id}/thumbnail/candidate/2" in html
+
+    def test_candidate_3_uses_candidate_route(self, client_and_assets, tmp_path):
+        """Candidate 3 card uses /thumbnail/candidate/3."""
+        ep_id = "ep_dist_04"
+        assets = tmp_path / ".hypogeum-assets"
+        self._make_ep_with_three_candidates(assets, ep_id)
+        html = self._get_html(client_and_assets, ep_id)
+        assert f"/episode/{ep_id}/thumbnail/candidate/3" in html
+
+    def test_make_disk_thumbnails_sets_file_path_not_none(self, tmp_path):
+        """_make_disk_thumbnails must return file_path on each candidate when file exists."""
+        import json
+        import run_dashboard as server
+        from unittest.mock import patch
+
+        assets = tmp_path / ".hypogeum-assets"
+        ep_id = "ep_fp_check"
+        self._make_ep_with_three_candidates(assets, ep_id)
+
+        with patch.object(server, "_ASSETS_ROOT_PATH", assets):
+            result = server._make_disk_thumbnails(ep_id, {"has_thumbnail": True})
+
+        candidates = result["candidates"]
+        assert len(candidates) == 3
+        for c in candidates:
+            assert c.get("file_path") is not None, (
+                f"Candidate rank={c['rank']} has file_path=None — "
+                "template will fall back to main.jpg for all cards"
+            )
+
+    def test_make_disk_thumbnails_candidate_ranks_distinct_files(self, tmp_path):
+        """Each candidate dict must reference a different file (not all main.jpg)."""
+        import run_dashboard as server
+        from unittest.mock import patch
+
+        assets = tmp_path / ".hypogeum-assets"
+        ep_id = "ep_fp_distinct"
+        self._make_ep_with_three_candidates(assets, ep_id)
+
+        with patch.object(server, "_ASSETS_ROOT_PATH", assets):
+            result = server._make_disk_thumbnails(ep_id, {"has_thumbnail": True})
+
+        file_paths = [c["file_path"] for c in result["candidates"] if c.get("file_path")]
+        assert len(set(file_paths)) == len(file_paths), (
+            f"Duplicate file_paths across candidates: {file_paths}"
+        )
+        for i, fp in enumerate(file_paths):
+            assert "main.jpg" not in fp, (
+                f"Candidate {i+1} file_path points to main.jpg instead of candidate_{i+1}.jpg"
+            )

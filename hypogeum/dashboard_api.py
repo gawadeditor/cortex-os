@@ -895,6 +895,18 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
             provider, meta, smoke, muapi_readiness
         )
 
+        is_configured = (
+            st.get("has_env_var", False) or st.get("has_secret_profile", False)
+        )
+
+        # If the smoke test was skipped because there was no key at that moment,
+        # but the provider IS now configured (env var OR saved secret profile),
+        # upgrade readiness to OR_NOT_TESTED so the UI doesn't permanently show
+        # "Skipped — no key" after a key is connected.
+        if op_readiness == OR_SKIPPED_NO_KEY and is_configured:
+            op_readiness = OR_NOT_TESTED
+            op_note = "Credential saved — run smoke test to confirm generation works."
+
         smoke_st      = smoke.get("status")
         smoke_model   = smoke.get("model")
         smoke_latency = smoke.get("latency_ms")
@@ -907,9 +919,7 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
             delegate_via          = meta["delegate_via"],
             credential_status     = st.get("status", "missing"),
             has_env_var           = st.get("has_env_var", False),
-            is_configured         = (
-                st.get("has_env_var", False) or st.get("has_secret_profile", False)
-            ),
+            is_configured         = is_configured,
             total_attempts        = total,
             failure_count         = fails,
             failure_rate          = _safe_rate(fails, total),

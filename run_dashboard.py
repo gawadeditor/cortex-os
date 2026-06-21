@@ -369,6 +369,8 @@ def settings_page():
 
 
 _CONTENT_PROVIDERS = [
+    {"id": "openai",     "label": "OpenAI",     "auth": "api_key",
+     "description": "Direct image generation"},
     {"id": "openrouter", "label": "OpenRouter", "auth": "api_key",
      "description": "LLM model routing"},
     {"id": "elevenlabs", "label": "ElevenLabs", "auth": "api_key",

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 import hypogeum.asset_registry as _asset_registry
+from hypogeum.agents.thumbnail_compositor import generate_and_composite
 from hypogeum.config import Config
 from hypogeum.muapi import (
     MUAPIAuthFailure,
@@ -110,6 +111,46 @@ def generate_thumbnails(
         rank = candidate.get("rank", 999)
         candidate_id = candidate.get("candidate_id", f"cand_{rank}")
         deliverable_id = f"candidate_{rank}"
+
+        # Composite mode: multi-layer generation + PIL compositing
+        if candidate.get("composite_mode") and candidate.get("layer_prompts"):
+            log.info("td_composite_mode_started", deliverable_id=deliverable_id)
+            ok = generate_and_composite(
+                candidate=candidate,
+                config=config,
+                episode_id=episode_id,
+                output_dir=output_dir,
+                deliverable_id=deliverable_id,
+                log=log,
+            )
+            thumb_dir = output_dir / "thumbnails"
+            cand_path = thumb_dir / f"candidate_{rank}.jpg"
+            asset_id  = (
+                f"episodes/{episode_id}/thumbnails/{deliverable_id}"
+                if ok else
+                f"episodes/{episode_id}/thumbnails/{deliverable_id}_failed"
+            )
+            file_path = f"episodes/{episode_id}/thumbnails/candidate_{rank}.jpg" if ok else None
+            main_candidates.append({
+                "rank":              rank,
+                "candidate_id":      candidate_id,
+                "asset_id":          asset_id,
+                "ok":                ok,
+                "file_path":         file_path,
+                "text_overlay":      candidate.get("text_overlay"),
+                "image_prompt":      candidate.get("image_prompt"),
+                "ctr_rationale":     candidate.get("ctr_rationale"),
+                "composition_plan":  candidate.get("composition_plan"),
+                "typography_plan":   candidate.get("typography_plan"),
+                "composite_mode":    True,
+            })
+            if rank == 1:
+                main_ok = ok
+                main_asset_id = asset_id
+                if ok and cand_path.exists():
+                    import shutil
+                    shutil.copy2(str(cand_path), str(thumb_dir / "main.jpg"))
+            continue
 
         asset_id, ok = _generate_for_deliverable(
             deliverable_id=deliverable_id,

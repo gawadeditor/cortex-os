@@ -39,6 +39,7 @@ from typing import Optional
 
 from hypogeum.agent import run_agent
 from hypogeum.agents.thumbnail_composition_planner import plan_composition
+from hypogeum.agents.thumbnail_compositor import build_layer_prompts
 from hypogeum.agents.thumbnail_typography_planner import plan_typography
 from hypogeum.config import Config
 
@@ -164,6 +165,9 @@ def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
                 base_prompt=candidate.get("image_prompt", ""),
                 typography_plan=typo_plan,
             )
+            # Build multi-layer prompts for the compositor pipeline
+            candidate["layer_prompts"] = build_layer_prompts(concept, comp_plan)
+            candidate["composite_mode"] = True
 
 
 def _embed_typography_in_prompt(base_prompt: str, typography_plan: dict) -> str:

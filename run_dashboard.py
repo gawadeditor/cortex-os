@@ -1520,6 +1520,192 @@ def platform_connect_save_form(platform: str):
 
 
 # ===========================================================================
+# YouTube OAuth 2.0 authorization code flow
+# ===========================================================================
+
+_YT_OAUTH_SCOPES = " ".join([
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+])
+
+_YT_AUTH_URL   = "https://accounts.google.com/o/oauth2/v2/auth"
+_YT_TOKEN_URL  = "https://oauth2.googleapis.com/token"
+
+
+def _yt_redirect_uri() -> str:
+    """Build the OAuth callback URL for the current request host."""
+    # host_url includes trailing slash: http://localhost:5001/
+    base = request.host_url.rstrip("/")
+    return f"{base}/platforms/youtube/oauth_callback"
+
+
+@app.route("/platforms/youtube/authorize")
+def youtube_oauth_authorize():
+    """
+    Start the YouTube OAuth 2.0 authorization code flow.
+
+    Redirects the user to Google's consent screen. Uses prompt=consent
+    and access_type=offline so Google issues a refresh_token even if the
+    user previously granted access.
+
+    Redirect URI: http://{host}/platforms/youtube/oauth_callback
+    Scopes:       yt-analytics.readonly
+    """
+    import urllib.parse
+    from hypogeum.config import Config as _Cfg
+    try:
+        cfg = _Cfg()
+    except Exception as exc:
+        return f"Config error: {exc}", 500
+
+    if not (cfg.YOUTUBE_CLIENT_ID and cfg.YOUTUBE_CLIENT_SECRET):
+        return ("YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set "
+                "before starting the OAuth flow."), 400
+
+    params = {
+        "client_id":     cfg.YOUTUBE_CLIENT_ID,
+        "redirect_uri":  _yt_redirect_uri(),
+        "response_type": "code",
+        "scope":         _YT_OAUTH_SCOPES,
+        "access_type":   "offline",
+        "prompt":        "consent",   # force refresh_token to be issued
+    }
+    auth_url = _YT_AUTH_URL + "?" + urllib.parse.urlencode(params)
+    return redirect(auth_url)
+
+
+@app.route("/platforms/youtube/oauth_callback")
+def youtube_oauth_callback():
+    """
+    Handle the Google OAuth 2.0 callback.
+
+    Exchanges authorization code for access_token + refresh_token.
+    Stores the refresh_token in a SecretProfile with
+    credential_type='oauth2_refresh_token' so sync_youtube_analytics
+    can use it without requiring a manual .env edit.
+
+    Success → redirects to /providers?youtube_authorized=1
+    Error   → renders youtube_oauth_result.html with trace info
+    """
+    import requests as _req
+    from hypogeum.config import Config as _Cfg
+
+    # Google error redirect (user denied, etc.)
+    error = request.args.get("error")
+    if error:
+        return render_template(
+            "youtube_oauth_result.html",
+            ok=False,
+            error=error,
+            error_description=request.args.get("error_description", ""),
+            redirect_uri=_yt_redirect_uri(),
+            scope=_YT_OAUTH_SCOPES,
+        ), 400
+
+    code = request.args.get("code")
+    if not code:
+        return render_template(
+            "youtube_oauth_result.html",
+            ok=False,
+            error="no_code",
+            error_description="No authorization code in callback parameters.",
+            redirect_uri=_yt_redirect_uri(),
+            scope=_YT_OAUTH_SCOPES,
+        ), 400
+
+    try:
+        cfg = _Cfg()
+    except Exception as exc:
+        return render_template(
+            "youtube_oauth_result.html",
+            ok=False, error="config_error",
+            error_description=str(exc),
+            redirect_uri=_yt_redirect_uri(),
+            scope=_YT_OAUTH_SCOPES,
+        ), 500
+
+    redirect_uri = _yt_redirect_uri()
+    token_payload = {
+        "code":          code,
+        "client_id":     cfg.YOUTUBE_CLIENT_ID,
+        "client_secret": cfg.YOUTUBE_CLIENT_SECRET,
+        "redirect_uri":  redirect_uri,
+        "grant_type":    "authorization_code",
+    }
+
+    try:
+        tok_resp = _req.post(_YT_TOKEN_URL, data=token_payload, timeout=15)
+        token_data = tok_resp.json()
+    except Exception as exc:
+        return render_template(
+            "youtube_oauth_result.html",
+            ok=False, error="network_error",
+            error_description=str(exc),
+            redirect_uri=redirect_uri,
+            scope=_YT_OAUTH_SCOPES,
+        ), 502
+
+    if not tok_resp.ok:
+        return render_template(
+            "youtube_oauth_result.html",
+            ok=False,
+            error=token_data.get("error", "token_exchange_failed"),
+            error_description=token_data.get("error_description", ""),
+            redirect_uri=redirect_uri,
+            scope=_YT_OAUTH_SCOPES,
+            client_id=cfg.YOUTUBE_CLIENT_ID,
+        ), 400
+
+    refresh_token = token_data.get("refresh_token", "")
+    if not refresh_token:
+        return render_template(
+            "youtube_oauth_result.html",
+            ok=False, error="no_refresh_token",
+            error_description=(
+                "Token exchange succeeded but no refresh_token was returned. "
+                "Ensure prompt=consent is sent and the app has not previously "
+                "been authorized (or revoke access and retry)."
+            ),
+            redirect_uri=redirect_uri,
+            scope=_YT_OAUTH_SCOPES,
+        ), 400
+
+    # Persist: upsert a SecretProfile using credential_type='oauth2_token' with
+    # label='youtube-oauth-refresh' to distinguish from a pasted access token.
+    db = _db_path()
+    try:
+        existing = list_secret_profiles(provider="youtube", db_path=db)
+        refresh_profiles = [
+            p for p in existing
+            if p.label == "youtube-oauth-refresh" and p.status == "active"
+        ]
+        if refresh_profiles:
+            update_secret_profile(
+                refresh_profiles[0].secret_profile_id,
+                credential_data=refresh_token,
+                label="youtube-oauth-refresh",
+                db_path=db,
+            )
+        else:
+            create_secret_profile(
+                provider="youtube",
+                label="youtube-oauth-refresh",
+                credential_type="oauth2_token",
+                credential_data=refresh_token,
+                db_path=db,
+            )
+    except Exception as exc:
+        return render_template(
+            "youtube_oauth_result.html",
+            ok=False, error="db_error",
+            error_description=str(exc),
+            redirect_uri=redirect_uri,
+            scope=_YT_OAUTH_SCOPES,
+        ), 500
+
+    return redirect(url_for("providers_page") + "?youtube_authorized=1")
+
+
+# ===========================================================================
 # Phase B — Read / detail routes (GET, read-only)
 # ===========================================================================
 

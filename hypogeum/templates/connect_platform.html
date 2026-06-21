@@ -41,9 +41,31 @@
   <h1>Connect {{ setup.label }}</h1>
 </div>
 
+{% if platform == "youtube" %}
+<div class="card connect-card" style="border-color:#2ea043; margin-bottom:var(--gap);">
+  <div class="card-title" style="color:#3fb950;">Re-authorize with Google</div>
+  <p class="instructions">
+    The fastest way to connect YouTube is through the automated OAuth flow.
+    Clicking the button below opens Google's consent screen; after approval
+    Factory OS stores the refresh token automatically — no manual copy-paste needed.
+  </p>
+  <div style="margin-bottom:10px; font-size:12px; color:var(--muted);">
+    Scope requested: <code>yt-analytics.readonly</code><br>
+    Redirect URI: <code>{{ request.host_url | trim('/') }}/platforms/youtube/oauth_callback</code><br>
+    <span style="color:#d29922;">&#x26A0;&ensp;This redirect URI must be listed in your Google Cloud Console project
+    (APIs &amp; Services → Credentials → your OAuth 2.0 client ID → Authorized redirect URIs).</span>
+  </div>
+  <a href="/platforms/youtube/authorize" class="btn btn-save">Authorize with Google →</a>
+</div>
+
+<div class="card connect-card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Or paste credentials manually</div>
+  <p class="instructions">{{ setup.instructions }}</p>
+{% else %}
 <div class="card connect-card">
   <div class="card-title">What you need</div>
   <p class="instructions">{{ setup.instructions }}</p>
+{% endif %}
 
   <div class="warning-note">
     &#x26A0;&ensp;This stores the credential locally. No live API calls are made now.
@@ -78,3 +100,4 @@
 
 </body>
 </html>
+

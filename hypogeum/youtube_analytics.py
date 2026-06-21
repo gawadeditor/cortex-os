@@ -189,9 +189,26 @@ def sync_youtube_analytics(
     synced_episodes: list[str] = []
     skipped_count = 0
 
-    # 1. Refresh token
+    # 1. Resolve refresh token: DB SecretProfile takes priority over env config.
+    #    The OAuth callback stores it as credential_type='oauth2_refresh_token'.
+    effective_config = config
     try:
-        access_token = refresh_youtube_token(config)
+        from hypogeum.credential_manager import list_secret_profiles as _lsp
+        profiles = _lsp(provider="youtube", db_path=resolved_db)
+        stored = [
+            p for p in profiles
+            if p.label == "youtube-oauth-refresh" and p.status == "active"
+        ]
+        if stored:
+            import copy as _copy
+            effective_config = _copy.copy(config)
+            effective_config.YOUTUBE_REFRESH_TOKEN = stored[0].credential_data
+    except Exception:
+        pass   # fall back to config as-is
+
+    # 2. Refresh access token
+    try:
+        access_token = refresh_youtube_token(effective_config)
     except (HardFailureError, SoftFailureError) as exc:
         return {
             "ok": False,
@@ -211,7 +228,7 @@ def sync_youtube_analytics(
             "episodes": [],
         }
 
-    # 2. Discover published videos
+    # 3. Discover published videos
     try:
         conn = get_connection(resolved_db)
         try:
@@ -235,12 +252,12 @@ def sync_youtube_analytics(
             "episodes": [],
         }
 
-    # 3. Date range
+    # 4. Date range
     today = datetime.now(timezone.utc).date()
     start_date = (today - timedelta(days=window_days)).isoformat()
     end_date = today.isoformat()
 
-    # 4. Fetch and store per video
+    # 5. Fetch and store per video
     for row in rows:
         episode_id = row["episode_id"]
         raw_video_id = row["platform_video_id"] or ""

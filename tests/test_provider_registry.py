@@ -44,8 +44,12 @@ from hypogeum.dashboard_api import (
     ProviderCatalogEntry,
     get_provider_catalog,
 )
+import inspect
+
 from hypogeum.muapi import (
     ThumbnailResult,
+    _generate_thumbnail_openrouter,
+    _discover_openrouter_image_models,
     generate_thumbnail,
 )
 
@@ -292,3 +296,75 @@ class TestThumbnailProviderDispatch:
         mock_openai.assert_not_called()
         mock_or.assert_not_called()
         assert result.provider_used == "muapi"
+
+
+# ---------------------------------------------------------------------------
+# TestOpenRouterEndpointCorrectness
+# ---------------------------------------------------------------------------
+
+class TestOpenRouterEndpointCorrectness:
+    """
+    Phase 1B correction: OpenRouter image generation must use
+    POST /api/v1/chat/completions with modalities, NOT /api/v1/images/generations.
+    """
+
+    def test_openrouter_function_does_not_use_images_generations_endpoint(self):
+        """
+        Inspect the source of _generate_thumbnail_openrouter to assert that
+        /api/v1/images/generations does not appear anywhere in the implementation.
+
+        This test fails if someone accidentally reverts to the invalid endpoint.
+        """
+        source = inspect.getsource(_generate_thumbnail_openrouter)
+        assert "/api/v1/images/generations" not in source, (
+            "_generate_thumbnail_openrouter must NOT use /api/v1/images/generations. "
+            "OpenRouter image generation uses POST /api/v1/chat/completions with modalities."
+        )
+
+    def test_openrouter_function_uses_chat_completions_endpoint(self):
+        """
+        Inspect the source of _generate_thumbnail_openrouter to assert that
+        /api/v1/chat/completions IS used.
+        """
+        source = inspect.getsource(_generate_thumbnail_openrouter)
+        assert "/api/v1/chat/completions" in source, (
+            "_generate_thumbnail_openrouter must use POST /api/v1/chat/completions. "
+            "Found source does not contain the correct endpoint."
+        )
+
+    def test_openrouter_function_uses_modalities(self):
+        """
+        Inspect the source to assert that modalities: ["image"] is present in payload.
+        """
+        source = inspect.getsource(_generate_thumbnail_openrouter)
+        assert "modalities" in source, (
+            "_generate_thumbnail_openrouter payload must include 'modalities' key "
+            "per OpenRouter image generation API."
+        )
+
+    def test_openrouter_function_does_not_use_response_format_b64_json_in_payload(self):
+        """
+        The old /images/generations endpoint used response_format='b64_json' in the payload.
+        The chat/completions endpoint does not use this field.
+        Inspecting payload construction to ensure it's absent from the dict literal.
+        """
+        source = inspect.getsource(_generate_thumbnail_openrouter)
+        # The payload dict should NOT contain "response_format" as a key
+        # (that was an /images/generations field)
+        # We check the payload construction specifically — the string "response_format"
+        # might appear in comments, so we look for the dict key pattern.
+        assert '"response_format"' not in source, (
+            "_generate_thumbnail_openrouter should not send 'response_format' in payload. "
+            "That field belongs to the old /images/generations API, not chat/completions."
+        )
+
+    def test_discover_openrouter_image_models_uses_correct_query_param(self):
+        """
+        _discover_openrouter_image_models() must call the model discovery endpoint
+        with output_modalities=image query parameter.
+        """
+        source = inspect.getsource(_discover_openrouter_image_models)
+        assert "output_modalities=image" in source, (
+            "_discover_openrouter_image_models must call "
+            "GET /api/v1/models?output_modalities=image"
+        )

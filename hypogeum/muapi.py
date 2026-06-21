@@ -1439,6 +1439,30 @@ def _generate_thumbnail_openai(
     return model
 
 
+def _discover_openrouter_image_models(api_key: str) -> list:
+    """
+    Query OpenRouter for models that support image output.
+
+    GET https://openrouter.ai/api/v1/models?output_modalities=image
+
+    Returns a list of model ID strings, or [] on any error.
+    Does not raise — caller decides how to handle an empty list.
+    """
+    import json
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/models?output_modalities=image",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return [m["id"] for m in body.get("data", []) if m.get("id")]
+    except Exception:
+        return []
+
+
 def _generate_thumbnail_openrouter(
     deliverable_id: str,
     image_prompt: str,
@@ -1448,18 +1472,27 @@ def _generate_thumbnail_openrouter(
     log,
 ) -> str:
     """
-    Generate a thumbnail via OpenRouter's image generation endpoint.
+    Generate a thumbnail via OpenRouter's chat completions endpoint with image modality.
 
-    POST https://openrouter.ai/api/v1/images/generations
-    Model: config.OPENROUTER_IMAGE_MODEL (default: openai/gpt-image-1)
+    Per OpenRouter docs, image generation uses:
+      POST https://openrouter.ai/api/v1/chat/completions
+      with modalities: ["image"] or ["image", "text"]
 
-    VERIFICATION STATUS (as of 2025):
-      endpoint    POST https://openrouter.ai/api/v1/images/generations  ✓ CONFIRMED
-      auth        Authorization: Bearer {key}                            ✓ CONFIRMED
-      headers     HTTP-Referer, X-Title                                  ✓ CONFIRMED
-      model       openai/gpt-image-1                                     ✓ CONFIRMED format
-      response_format b64_json   UNVERIFIED — OpenRouter may return url only;
-                                 parser accepts both (b64_json preferred, url fallback)
+    Note: the OpenAI-style images endpoint does not exist on OpenRouter.
+
+    VERIFICATION STATUS:
+      endpoint    POST /api/v1/chat/completions       CONFIRMED (OpenRouter docs)
+      auth        Authorization: Bearer               CONFIRMED
+      headers     HTTP-Referer, X-Title               CONFIRMED
+      modalities  ["image"]                           CONFIRMED (OpenRouter docs)
+      model       openai/gpt-image-1                  CONFIRMED format; availability UNVERIFIED
+      response    choices[0].message.content[]        UNVERIFIED exact shape
+                  image part: type="image_url", image_url.url = CDN or data: URI
+      model_discovery  GET /api/v1/models?output_modalities=image  CONFIRMED (OpenRouter docs)
+
+    Response parser handles:
+      - data: URI  "data:image/png;base64,<b64>"  → base64 decode → write
+      - plain URL  "https://..."                  → _download_file() → write
 
     Raises MUAPIAuthFailure on 401, MUAPIError on any other failure.
     """
@@ -1471,21 +1504,16 @@ def _generate_thumbnail_openrouter(
     if not config.OPENROUTER_API_KEY:
         raise MUAPIAuthFailure()
 
-    size_map = {"16:9": "1536x1024", "9:16": "1024x1536"}
-    size = size_map.get(aspect_ratio, "1024x1024")
     model = config.OPENROUTER_IMAGE_MODEL
 
     payload = json.dumps({
-        "model":           model,
-        "prompt":          image_prompt,
-        "n":               1,
-        "size":            size,
-        "quality":         config.THUMBNAIL_IMAGE_QUALITY,
-        "response_format": "b64_json",
+        "model":      model,
+        "messages":   [{"role": "user", "content": image_prompt}],
+        "modalities": ["image"],
     }).encode("utf-8")
 
     req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/images/generations",
+        "https://openrouter.ai/api/v1/chat/completions",
         data=payload,
         headers={
             "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
@@ -1496,8 +1524,7 @@ def _generate_thumbnail_openrouter(
         method="POST",
     )
 
-    log.info("openrouter_thumbnail_submit", deliverable_id=deliverable_id,
-             model=model, size=size)
+    log.info("openrouter_thumbnail_submit", deliverable_id=deliverable_id, model=model)
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             result = json.loads(resp.read().decode("utf-8"))
@@ -1508,29 +1535,55 @@ def _generate_thumbnail_openrouter(
         if exc.code == 402:
             raise MUAPIQuotaExhausted()
         raise MUAPIError(
-            f"OpenRouter Images API HTTP {exc.code} for {deliverable_id!r}: {body}"
+            f"OpenRouter chat/completions HTTP {exc.code} for {deliverable_id!r}: {body}"
         )
 
-    data = result.get("data", [])
-    if not data:
+    # Extract image from choices[0].message.content (array of parts)
+    choices = result.get("choices", [])
+    if not choices:
         raise MUAPIError(
-            f"OpenRouter Images API returned empty data[] for {deliverable_id!r}"
+            f"OpenRouter returned no choices for {deliverable_id!r}. "
+            f"Raw keys: {list(result.keys())}"
         )
-    entry = data[0]
-    # b64_json is preferred; fall back to url download (OpenRouter b64_json unverified)
+
+    content = choices[0].get("message", {}).get("content", [])
+    if isinstance(content, str):
+        # Some models return content as a plain string — not expected for image modality
+        raise MUAPIError(
+            f"OpenRouter returned text content, not image, for {deliverable_id!r}. "
+            f"Verify model supports image modality: {config.OPENROUTER_IMAGE_MODEL}"
+        )
+
+    image_url: Optional[str] = None
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "image_url":
+            image_url = (part.get("image_url") or {}).get("url", "")
+            break
+
+    if not image_url:
+        raise MUAPIError(
+            f"OpenRouter: no image_url part found in content for {deliverable_id!r}. "
+            f"Content parts: {[p.get('type') for p in content if isinstance(p, dict)]}"
+        )
+
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    if entry.get("b64_json"):
-        local_path.write_bytes(base64.b64decode(entry["b64_json"]))
-    elif entry.get("url"):
-        success, reason = _download_file(entry["url"], local_path, log)
+
+    if image_url.startswith("data:"):
+        # data: URI — "data:image/png;base64,<b64data>"
+        try:
+            b64_part = image_url.split(",", 1)[1]
+            local_path.write_bytes(base64.b64decode(b64_part))
+        except Exception as exc:
+            raise MUAPIError(
+                f"OpenRouter: failed to decode data URI for {deliverable_id!r}: {exc}"
+            )
+    else:
+        # Plain CDN URL
+        success, reason = _download_file(image_url, local_path, log)
         if not success:
             raise MUAPIError(
                 f"OpenRouter image download failed for {deliverable_id!r}: {reason}"
             )
-    else:
-        raise MUAPIError(
-            f"OpenRouter Images API: no b64_json or url in response for {deliverable_id!r}"
-        )
 
     if local_path.stat().st_size < _MIN_IMAGE_BYTES:
         raise MUAPIError(

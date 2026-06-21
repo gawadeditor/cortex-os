@@ -1,6 +1,6 @@
 {
   "report_version": "1.0",
-  "generated_at": "2026-06-21T10:40:29.563633+00:00",
+  "generated_at": "2026-06-21T10:47:02.985882+00:00",
   "summary": {
     "providers_checked": [
       "openai",
@@ -15,11 +15,11 @@
       "openrouter"
     ],
     "total_issues": 2,
-    "total_warnings": 1,
+    "total_warnings": 2,
     "blocking_issues": {
       "openrouter": [
-        "b64_json response support unverified \u2014 parser has url fallback but needs live test",
-        "openai/gpt-image-1 model availability on OpenRouter needs verification"
+        "response shape unverified \u2014 choices[0].message.content image_url format needs live test",
+        "openai/gpt-image-1 model availability on OpenRouter needs verification via model discovery"
       ]
     }
   },
@@ -92,39 +92,58 @@
     },
     "openrouter": {
       "provider": "openrouter",
-      "endpoint": "https://openrouter.ai/api/v1/images/generations",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "invalid_endpoint_note": "https://openrouter.ai/api/v1/images/generations \u2014 DOES NOT EXIST on OpenRouter",
       "method": "POST",
       "auth_header_shape": "Authorization: Bearer ***",
       "extra_headers": {
         "HTTP-Referer": "<OPENROUTER_APP_URL>",
         "X-Title": "<OPENROUTER_APP_NAME>"
       },
+      "modalities": [
+        "image"
+      ],
+      "model_discovery_url": "GET https://openrouter.ai/api/v1/models?output_modalities=image",
       "payload_16_9": {
         "model": "openai/gpt-image-1",
-        "prompt": "<IMAGE_PROMPT>",
-        "n": 1,
-        "size": "1536x1024",
-        "quality": "high",
-        "response_format": "b64_json"
+        "messages": [
+          {
+            "role": "user",
+            "content": "<IMAGE_PROMPT>"
+          }
+        ],
+        "modalities": [
+          "image"
+        ]
       },
       "payload_9_16": {
         "model": "openai/gpt-image-1",
-        "prompt": "<IMAGE_PROMPT>",
-        "n": 1,
-        "size": "1024x1536",
-        "quality": "high",
-        "response_format": "b64_json"
+        "messages": [
+          {
+            "role": "user",
+            "content": "<IMAGE_PROMPT>"
+          }
+        ],
+        "modalities": [
+          "image"
+        ]
       },
       "response_parser": {
-        "primary": "result['data'][0]['b64_json'] \u2192 base64.decode \u2192 write_bytes",
-        "fallback": "result['data'][0]['url'] \u2192 _download_file() \u2192 write_bytes",
-        "b64_json_verified": false,
-        "url_fallback_verified": true
+        "step_1": "result['choices'][0]['message']['content'] \u2192 list of parts",
+        "step_2": "find part where type == 'image_url'",
+        "step_3a": "if url starts with 'data:' \u2192 base64 decode after comma",
+        "step_3b": "else \u2192 _download_file(url) \u2192 write_bytes",
+        "shape_verified": false,
+        "note": "UNVERIFIED \u2014 response shape documented but not live-tested"
       },
       "verification": {
-        "endpoint": {
+        "endpoint_chat_completions": {
           "status": "CONFIRMED",
           "source": "OpenRouter docs"
+        },
+        "endpoint_images_generations": {
+          "status": "INVALID \u2014 does not exist on OpenRouter",
+          "note": "Phase 1A incorrectly assumed this endpoint. Corrected in Phase 1B."
         },
         "auth": {
           "status": "CONFIRMED",
@@ -134,34 +153,31 @@
           "status": "CONFIRMED",
           "source": "OpenRouter attribution requirement"
         },
+        "modalities_param": {
+          "status": "CONFIRMED",
+          "source": "OpenRouter docs"
+        },
         "model_format": {
           "status": "CONFIRMED",
           "source": "OpenRouter provider/model convention"
         },
-        "model_openai_gpt_image_1": {
-          "status": "LIKELY",
-          "note": "openai/gpt-image-1 follows OpenRouter convention; availability depends on OpenRouter having listed this model"
-        },
-        "b64_json_support": {
+        "model_availability": {
           "status": "UNVERIFIED",
-          "note": "OpenRouter may return url only. Implementation uses b64_json-first with url fallback."
-        },
-        "sizes": {
-          "status": "LIKELY",
-          "note": "Proxied from OpenAI; likely same"
+          "note": "Use GET /api/v1/models?output_modalities=image to list available models"
         },
         "response_shape": {
-          "status": "LIKELY",
-          "note": "OpenAI-compatible; may vary"
+          "status": "UNVERIFIED",
+          "note": "Expected: choices[0].message.content[].type='image_url'. Parser handles data: URI (base64) and plain URL. Needs live test."
         }
       },
       "ready_to_call": false,
       "issues": [
-        "b64_json response support unverified \u2014 parser has url fallback but needs live test",
-        "openai/gpt-image-1 model availability on OpenRouter needs verification"
+        "response shape unverified \u2014 choices[0].message.content image_url format needs live test",
+        "openai/gpt-image-1 model availability on OpenRouter needs verification via model discovery"
       ],
       "warnings": [
-        "response_format=b64_json is UNVERIFIED for OpenRouter. Parser accepts b64_json first, url second. Run live test before production use."
+        "response shape UNVERIFIED: expecting choices[0].message.content[].type='image_url'. Parser handles data: URI and plain URL. Needs live test before production use.",
+        "Model availability UNVERIFIED: run GET GET https://openrouter.ai/api/v1/models?output_modalities=image to confirm openai/gpt-image-1 is listed."
       ]
     },
     "muapi": {
@@ -229,5 +245,10 @@
     "openrouter_model": "openai/gpt-image-1  (OpenRouter provider/model format)",
     "muapi_model_slug": "gpt-image-2-text-to-image  (MUAPI internal \u2014 NOT an OpenAI name)",
     "note": "gpt-image-2 does not exist as an OpenAI API model. It is MUAPI's internal naming convention for their GPT-Image wrapper service."
+  },
+  "endpoint_corrections": {
+    "openrouter_phase_1a_error": "/api/v1/images/generations was used in Phase 1A \u2014 this endpoint does not exist on OpenRouter.",
+    "openrouter_phase_1b_correction": "Corrected to POST /api/v1/chat/completions with modalities: ['image'] per OpenRouter docs.",
+    "model_discovery": "Use GET /api/v1/models?output_modalities=image to list available OpenRouter image models."
   }
 }

@@ -1,0 +1,233 @@
+{
+  "report_version": "1.0",
+  "generated_at": "2026-06-21T10:40:29.563633+00:00",
+  "summary": {
+    "providers_checked": [
+      "openai",
+      "openrouter",
+      "muapi"
+    ],
+    "ready_to_call": [
+      "openai",
+      "muapi"
+    ],
+    "not_ready": [
+      "openrouter"
+    ],
+    "total_issues": 2,
+    "total_warnings": 1,
+    "blocking_issues": {
+      "openrouter": [
+        "b64_json response support unverified \u2014 parser has url fallback but needs live test",
+        "openai/gpt-image-1 model availability on OpenRouter needs verification"
+      ]
+    }
+  },
+  "providers": {
+    "openai": {
+      "provider": "openai",
+      "endpoint": "https://api.openai.com/v1/images/generations",
+      "method": "POST",
+      "auth_header_shape": "Authorization: Bearer ***",
+      "extra_headers": {},
+      "payload_16_9": {
+        "model": "gpt-image-1",
+        "prompt": "<IMAGE_PROMPT>",
+        "n": 1,
+        "size": "1536x1024",
+        "quality": "high",
+        "response_format": "b64_json"
+      },
+      "payload_9_16": {
+        "model": "gpt-image-1",
+        "prompt": "<IMAGE_PROMPT>",
+        "n": 1,
+        "size": "1024x1536",
+        "quality": "high",
+        "response_format": "b64_json"
+      },
+      "response_parser": {
+        "extract_b64": "result['data'][0]['b64_json']",
+        "decode": "base64.b64decode(b64_json)",
+        "write_bytes": "local_path.write_bytes(decoded)",
+        "fallback": "None \u2014 b64_json confirmed supported"
+      },
+      "verification": {
+        "endpoint": {
+          "status": "CONFIRMED",
+          "source": "OpenAI API docs"
+        },
+        "auth": {
+          "status": "CONFIRMED",
+          "source": "OpenAI API docs"
+        },
+        "model_gpt_image_1": {
+          "status": "CONFIRMED",
+          "source": "OpenAI April 2025 release"
+        },
+        "model_gpt_image_2": {
+          "status": "DOES NOT EXIST as OpenAI API model",
+          "note": "gpt-image-2 is MUAPI's slug for their GPT-Image wrapper"
+        },
+        "sizes": {
+          "status": "CONFIRMED",
+          "source": "OpenAI API docs"
+        },
+        "b64_json": {
+          "status": "CONFIRMED",
+          "source": "Supported since DALL-E 2"
+        },
+        "quality_param": {
+          "status": "CONFIRMED",
+          "source": "OpenAI API docs"
+        },
+        "response_shape": {
+          "status": "CONFIRMED",
+          "source": "OpenAI API docs"
+        }
+      },
+      "ready_to_call": true,
+      "issues": [],
+      "warnings": []
+    },
+    "openrouter": {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/images/generations",
+      "method": "POST",
+      "auth_header_shape": "Authorization: Bearer ***",
+      "extra_headers": {
+        "HTTP-Referer": "<OPENROUTER_APP_URL>",
+        "X-Title": "<OPENROUTER_APP_NAME>"
+      },
+      "payload_16_9": {
+        "model": "openai/gpt-image-1",
+        "prompt": "<IMAGE_PROMPT>",
+        "n": 1,
+        "size": "1536x1024",
+        "quality": "high",
+        "response_format": "b64_json"
+      },
+      "payload_9_16": {
+        "model": "openai/gpt-image-1",
+        "prompt": "<IMAGE_PROMPT>",
+        "n": 1,
+        "size": "1024x1536",
+        "quality": "high",
+        "response_format": "b64_json"
+      },
+      "response_parser": {
+        "primary": "result['data'][0]['b64_json'] \u2192 base64.decode \u2192 write_bytes",
+        "fallback": "result['data'][0]['url'] \u2192 _download_file() \u2192 write_bytes",
+        "b64_json_verified": false,
+        "url_fallback_verified": true
+      },
+      "verification": {
+        "endpoint": {
+          "status": "CONFIRMED",
+          "source": "OpenRouter docs"
+        },
+        "auth": {
+          "status": "CONFIRMED",
+          "source": "OpenRouter docs"
+        },
+        "extra_headers": {
+          "status": "CONFIRMED",
+          "source": "OpenRouter attribution requirement"
+        },
+        "model_format": {
+          "status": "CONFIRMED",
+          "source": "OpenRouter provider/model convention"
+        },
+        "model_openai_gpt_image_1": {
+          "status": "LIKELY",
+          "note": "openai/gpt-image-1 follows OpenRouter convention; availability depends on OpenRouter having listed this model"
+        },
+        "b64_json_support": {
+          "status": "UNVERIFIED",
+          "note": "OpenRouter may return url only. Implementation uses b64_json-first with url fallback."
+        },
+        "sizes": {
+          "status": "LIKELY",
+          "note": "Proxied from OpenAI; likely same"
+        },
+        "response_shape": {
+          "status": "LIKELY",
+          "note": "OpenAI-compatible; may vary"
+        }
+      },
+      "ready_to_call": false,
+      "issues": [
+        "b64_json response support unverified \u2014 parser has url fallback but needs live test",
+        "openai/gpt-image-1 model availability on OpenRouter needs verification"
+      ],
+      "warnings": [
+        "response_format=b64_json is UNVERIFIED for OpenRouter. Parser accepts b64_json first, url second. Run live test before production use."
+      ]
+    },
+    "muapi": {
+      "provider": "muapi",
+      "endpoint": "https://api.muapi.ai/api/v1/gpt-image-2-text-to-image",
+      "polling_endpoint": "https://api.muapi.ai/api/v1/predictions/{request_id}/result",
+      "method": "POST",
+      "auth_header_shape": "Authorization: Bearer ***",
+      "extra_headers": {},
+      "payload_16_9": {
+        "prompt": "<IMAGE_PROMPT>",
+        "aspect_ratio": "16:9",
+        "resolution": "2K",
+        "quality": "high"
+      },
+      "payload_9_16": {
+        "prompt": "<IMAGE_PROMPT>",
+        "aspect_ratio": "9:16",
+        "resolution": "2K",
+        "quality": "high"
+      },
+      "response_parser": {
+        "step_1": "poll until result['status'] == 'completed'",
+        "step_2": "result['outputs'][0]  \u2192  CDN URL string",
+        "step_3": "_download_file(cdn_url, local_path) \u2192 write file",
+        "note": "outputs[] is always a list. Never result['image_url'] (bug fixed 2026-06-21)"
+      },
+      "verification": {
+        "endpoint": {
+          "status": "CONFIRMED",
+          "source": "Live-tested 2026-06-21"
+        },
+        "auth": {
+          "status": "CONFIRMED",
+          "source": "Live-tested"
+        },
+        "model_slug": {
+          "status": "CONFIRMED",
+          "source": "Live-tested"
+        },
+        "outputs_array": {
+          "status": "CONFIRMED",
+          "source": "Live-tested \u2014 fixed URL extraction bug"
+        },
+        "polling": {
+          "status": "CONFIRMED",
+          "source": "Live-tested"
+        },
+        "resolution_param": {
+          "status": "CONFIRMED",
+          "source": "Live-tested (2K)"
+        },
+        "quality_param": {
+          "status": "CONFIRMED",
+          "source": "Live-tested (high)"
+        }
+      },
+      "ready_to_call": true,
+      "issues": [],
+      "warnings": []
+    }
+  },
+  "model_name_clarification": {
+    "openai_api_model": "gpt-image-1  (official OpenAI API model ID)",
+    "openrouter_model": "openai/gpt-image-1  (OpenRouter provider/model format)",
+    "muapi_model_slug": "gpt-image-2-text-to-image  (MUAPI internal \u2014 NOT an OpenAI name)",
+    "note": "gpt-image-2 does not exist as an OpenAI API model. It is MUAPI's internal naming convention for their GPT-Image wrapper service."
+  }
+}

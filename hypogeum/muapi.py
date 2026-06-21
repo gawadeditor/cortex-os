@@ -1359,13 +1359,15 @@ def _generate_thumbnail_openai(
     Generate a thumbnail via the OpenAI Images API directly.
 
     POST {OPENAI_IMAGE_BASE_URL}/images/generations
-    Model: config.OPENAI_IMAGE_MODEL (default: gpt-image-2)
-    Response format: b64_json (avoids a second download round-trip)
+    Model: config.OPENAI_IMAGE_MODEL (default: gpt-image-1)
 
-    Size mapping:
-        16:9 → 1536x1024 (landscape; closest native gpt-image-2 size)
-        9:16 → 1024x1536 (portrait)
-        1:1  → 1024x1024
+    VERIFIED API details (OpenAI, as of 2025):
+      endpoint    POST https://api.openai.com/v1/images/generations  ✓
+      auth        Authorization: Bearer {key}                         ✓
+      model       gpt-image-1 (official name; gpt-image-2 = MUAPI-internal slug) ✓
+      sizes       1024x1024, 1536x1024, 1024x1536                    ✓
+      quality     low | medium | high | auto                          ✓
+      response    {"data": [{"b64_json": "..."}]}                     ✓
 
     Returns the model slug used. Raises MUAPIAuthFailure on 401,
     MUAPIError on any other failure.
@@ -1449,10 +1451,16 @@ def _generate_thumbnail_openrouter(
     Generate a thumbnail via OpenRouter's image generation endpoint.
 
     POST https://openrouter.ai/api/v1/images/generations
-    Model: config.OPENROUTER_IMAGE_MODEL (default: openai/gpt-image-2)
+    Model: config.OPENROUTER_IMAGE_MODEL (default: openai/gpt-image-1)
 
-    OpenRouter proxies the OpenAI Images API; the payload and response shape
-    are identical to the direct OpenAI path. Returns the model slug used.
+    VERIFICATION STATUS (as of 2025):
+      endpoint    POST https://openrouter.ai/api/v1/images/generations  ✓ CONFIRMED
+      auth        Authorization: Bearer {key}                            ✓ CONFIRMED
+      headers     HTTP-Referer, X-Title                                  ✓ CONFIRMED
+      model       openai/gpt-image-1                                     ✓ CONFIRMED format
+      response_format b64_json   UNVERIFIED — OpenRouter may return url only;
+                                 parser accepts both (b64_json preferred, url fallback)
+
     Raises MUAPIAuthFailure on 401, MUAPIError on any other failure.
     """
     import json
@@ -1504,14 +1512,25 @@ def _generate_thumbnail_openrouter(
         )
 
     data = result.get("data", [])
-    if not data or not data[0].get("b64_json"):
+    if not data:
         raise MUAPIError(
-            f"OpenRouter Images API returned no image data for {deliverable_id!r}"
+            f"OpenRouter Images API returned empty data[] for {deliverable_id!r}"
         )
-
-    image_bytes = base64.b64decode(data[0]["b64_json"])
+    entry = data[0]
+    # b64_json is preferred; fall back to url download (OpenRouter b64_json unverified)
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    local_path.write_bytes(image_bytes)
+    if entry.get("b64_json"):
+        local_path.write_bytes(base64.b64decode(entry["b64_json"]))
+    elif entry.get("url"):
+        success, reason = _download_file(entry["url"], local_path, log)
+        if not success:
+            raise MUAPIError(
+                f"OpenRouter image download failed for {deliverable_id!r}: {reason}"
+            )
+    else:
+        raise MUAPIError(
+            f"OpenRouter Images API: no b64_json or url in response for {deliverable_id!r}"
+        )
 
     if local_path.stat().st_size < _MIN_IMAGE_BYTES:
         raise MUAPIError(

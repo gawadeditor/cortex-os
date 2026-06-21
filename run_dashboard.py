@@ -903,6 +903,112 @@ def api_setup_budget_ceiling():
 # Provider verification
 # ---------------------------------------------------------------------------
 
+@app.route("/api/providers/muapi/smoke-test", methods=["POST"])
+def api_muapi_smoke_test():
+    """
+    Phase 1L: Re-run the MUAPI generation smoke test.
+
+    Submits a minimal T3 job (cheapest model, dry-probe prompt), polls for
+    completion, and writes an updated provider_live_smoke_report.json.
+
+    Credentials resolved via Secret Profile → env fallback.
+    Returns {ok, status, model, latency_ms, endpoint, error}.
+    """
+    import json as _json
+    import time as _time
+    from pathlib import Path as _Path
+    from datetime import datetime, timezone
+    from hypogeum.credential_manager import list_secret_profiles
+    from hypogeum.config import Config
+
+    # Resolve MUAPI key
+    credential = None
+    source = "env"
+    try:
+        profiles = list_secret_profiles(provider="muapi", db_path=_db_path())
+        active = [p for p in profiles if p.status == "active"]
+        if active:
+            credential = active[0].credential_data
+            source = "secret_profile"
+    except Exception:
+        pass
+    if not credential:
+        import os
+        credential = os.environ.get("MUAPI_API_KEY", "").strip() or None
+
+    if not credential:
+        return jsonify({"ok": False, "error": "No MUAPI credential found"}), 400
+
+    # Load config to get model defaults
+    try:
+        cfg = Config()
+        cfg.MUAPI_API_KEY = credential
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Config error: {exc}"}), 500
+
+    import requests as _requests
+    t3_model = cfg.MUAPI_T3_MODEL
+    endpoint  = f"{cfg.MUAPI_BASE_URL}/{t3_model}"
+    prompt    = "abstract atmospheric fog, dark background"
+
+    t0 = _time.monotonic()
+    try:
+        resp = _requests.post(
+            endpoint,
+            headers={"x-api-key": credential, "Content-Type": "application/json"},
+            json={"prompt": prompt, "aspect_ratio": "16:9"},
+            timeout=30,
+        )
+        latency_ms = int((_time.monotonic() - t0) * 1000)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "latency_ms": int((_time.monotonic() - t0) * 1000)}), 500
+
+    status_code = resp.status_code
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+
+    request_id = data.get("request_id", "")
+    smoke_status = "success" if request_id else f"error_submit_http{status_code}"
+    error_msg = None if request_id else (data.get("error") or data.get("message") or f"HTTP {status_code}")
+
+    # Write updated smoke report
+    report_dir  = _ROOT / ".hypogeum-assets" / "provider_smoke_tests"
+    report_path = report_dir / "provider_live_smoke_report.json"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = _json.loads(report_path.read_text()) if report_path.exists() else {}
+    except Exception:
+        existing = {}
+    existing.setdefault("providers", {})
+    existing["generated_at"] = datetime.now(timezone.utc).isoformat()
+    existing["providers"]["muapi"] = {
+        "provider":   "muapi",
+        "status":     smoke_status,
+        "model":      t3_model,
+        "endpoint":   endpoint,
+        "latency_ms": latency_ms,
+        "error":      error_msg,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        report_path.write_text(_json.dumps(existing, indent=2))
+    except Exception:
+        pass
+
+    return jsonify({
+        "ok":         bool(request_id),
+        "status":     smoke_status,
+        "model":      t3_model,
+        "endpoint":   endpoint,
+        "latency_ms": latency_ms,
+        "error":      error_msg,
+        "credential_source": source,
+        "request_id": request_id,
+    })
+
+
 @app.route("/api/providers/verify/<provider>", methods=["POST"])
 def api_providers_verify(provider: str):
     known = (

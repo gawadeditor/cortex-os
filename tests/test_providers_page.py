@@ -131,14 +131,12 @@ class TestMuapiDualStatus:
 
     def test_muapi_operational_note_visible(self):
         """
-        When MUAPI smoke test result shows 403, the page must include
-        an operational note explaining the auth failure.
-        Inject a fake smoke result for this test.
+        When MUAPI smoke test result shows 403, the page must show a generation
+        failure indicator — not auth_failed (403 from generation is model access,
+        not credential rejection). Credential and generation rows are independent.
         """
-        import json
         os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
         from run_dashboard import app
-        from hypogeum.dashboard_api import get_provider_catalog
 
         fake_smoke = {
             "muapi": {
@@ -148,14 +146,20 @@ class TestMuapiDualStatus:
                 "error":    "403 Client Error: Forbidden",
             }
         }
-        with patch("hypogeum.dashboard_api._load_smoke_test_results", return_value=fake_smoke):
+        with patch("hypogeum.dashboard_api._load_smoke_test_results_with_age",
+                   return_value=(fake_smoke, 0.1)):  # fresh — no staleness downgrade
             with app.test_client() as client:
                 resp = client.get("/providers")
         html = resp.data.decode("utf-8")
-        # Page should contain the auth_failed operational readiness indicator
-        assert "Auth failed" in html or "auth_failed" in html or "403" in html, (
-            "MUAPI 403 auth failure not surfaced on providers page. "
-            "The operational readiness note should mention the 403."
+        # 403 from generation endpoint → generation_failed (not auth_failed)
+        assert "Generation failed" in html or "generation_failed" in html or "403" in html, (
+            "MUAPI 403 generation failure not surfaced on providers page. "
+            "The operational readiness note should mention the generation failure."
+        )
+        # 403 from generation must NOT show as auth_failed (that is only for 401)
+        assert "Auth failed (403)" not in html, (
+            "MUAPI 403 from generation endpoint must not show 'Auth failed (403)'. "
+            "Only 401 is a credential rejection. 403 is a model access issue."
         )
 
 
@@ -331,4 +335,219 @@ class TestOperationalReadinessWithSecretProfile:
         assert openai_entry.operational_readiness == OR_NOT_TESTED, (
             "OR_SKIPPED_NO_KEY must be upgraded when has_env_var=True. "
             f"Got: {openai_entry.operational_readiness}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1L — MUAPI false failure state tests
+# ---------------------------------------------------------------------------
+
+class TestMuapiFalseFailurePhase1L:
+    """
+    Phase 1L: Verify that MUAPI dashboard state is correctly distinguished
+    between credential failures (401), generation failures (403/model error),
+    and stale smoke results. The smoke test previously used wrong auth header
+    (Authorization: Bearer instead of x-api-key), causing false 403 failures.
+
+    Key invariants:
+      - 403 from generation endpoint → generation_failed (not auth_failed)
+      - Stale smoke failure (>SMOKE_MAX_AGE_DAYS) → needs_retest
+      - Credential row reflects verifier probe only (independent of smoke)
+      - Secret Profile key is preferred over env var
+    """
+
+    def test_stale_muapi_smoke_failure_becomes_needs_retest(self, tmp_path):
+        """
+        A MUAPI smoke failure older than SMOKE_MAX_AGE_DAYS must be downgraded
+        to needs_retest — it must never permanently show auth_failed.
+        """
+        from hypogeum.dashboard_api import (
+            get_provider_catalog, OR_AUTH_FAILED, OR_NEEDS_RETEST, SMOKE_MAX_AGE_DAYS,
+        )
+
+        stale_smoke = {
+            "muapi": {
+                "status": "error_submit",
+                "model": "gpt-image-2-text-to-image",
+                "latency_ms": 1087,
+                "error": "401 Unauthorized",
+            }
+        }
+        age_days = SMOKE_MAX_AGE_DAYS + 1  # older than threshold
+
+        db = tmp_path / "test.db"
+        with patch("hypogeum.provider_verifier.get_all_provider_statuses", return_value={}), \
+             patch("hypogeum.dashboard_api._load_smoke_test_results_with_age",
+                   return_value=(stale_smoke, age_days)):
+            catalog = get_provider_catalog(db_path=db)
+
+        muapi = next(e for e in catalog if e.provider == "muapi")
+        assert muapi.operational_readiness != OR_AUTH_FAILED, (
+            f"Stale MUAPI smoke failure must not permanently show auth_failed. "
+            f"Got: {muapi.operational_readiness}"
+        )
+        assert muapi.operational_readiness == OR_NEEDS_RETEST, (
+            f"Stale MUAPI smoke failure must show needs_retest. "
+            f"Got: {muapi.operational_readiness}"
+        )
+
+    def test_working_credential_with_stale_smoke_failure_shows_needs_retest(self, tmp_path):
+        """
+        When MUAPI credential is verified (status='verified') but the smoke test
+        result is stale and shows a generation failure, the dashboard must show
+        needs_retest — not auth_failed or generation_failed.
+        """
+        from hypogeum.dashboard_api import (
+            get_provider_catalog, OR_NEEDS_RETEST, OR_AUTH_FAILED, OR_GENERATION_FAILED,
+            SMOKE_MAX_AGE_DAYS,
+        )
+
+        stale_smoke = {
+            "muapi": {
+                "status": "error_submit",
+                "model": "gpt-image-2-text-to-image",
+                "latency_ms": 500,
+                "error": "403 Client Error: Forbidden",
+            }
+        }
+        fake_statuses = {
+            "muapi": {
+                "status": "verified",
+                "has_env_var": True,
+                "has_secret_profile": False,
+                "not_verifiable": False,
+            }
+        }
+        age_days = SMOKE_MAX_AGE_DAYS + 2  # stale
+
+        db = tmp_path / "test.db"
+        with patch("hypogeum.provider_verifier.get_all_provider_statuses",
+                   return_value=fake_statuses), \
+             patch("hypogeum.dashboard_api._load_smoke_test_results_with_age",
+                   return_value=(stale_smoke, age_days)):
+            catalog = get_provider_catalog(db_path=db)
+
+        muapi = next(e for e in catalog if e.provider == "muapi")
+        assert muapi.operational_readiness not in (OR_AUTH_FAILED, OR_GENERATION_FAILED), (
+            f"Stale smoke failure with working credential must not show as "
+            f"auth_failed or generation_failed. Got: {muapi.operational_readiness}"
+        )
+        assert muapi.operational_readiness == OR_NEEDS_RETEST, (
+            f"Expected needs_retest. Got: {muapi.operational_readiness}"
+        )
+        assert muapi.credential_status == "verified", (
+            "Credential row must reflect verifier result, not smoke test result. "
+            f"Got: {muapi.credential_status}"
+        )
+
+    def test_403_from_generation_is_generation_failed_not_auth_failed(self, tmp_path):
+        """
+        A 403 from the MUAPI generation endpoint in the smoke test must map to
+        generation_failed — not auth_failed. Only 401 is a credential rejection.
+        403 means the key reached the server but the model/tier is restricted.
+        """
+        from hypogeum.dashboard_api import (
+            get_provider_catalog, OR_AUTH_FAILED, OR_GENERATION_FAILED,
+        )
+
+        fresh_smoke = {
+            "muapi": {
+                "status": "error_submit",
+                "model": "gpt-image-2-text-to-image",
+                "latency_ms": 1087,
+                "error": "403 Client Error: Forbidden",
+            }
+        }
+
+        db = tmp_path / "test.db"
+        with patch("hypogeum.provider_verifier.get_all_provider_statuses", return_value={}), \
+             patch("hypogeum.dashboard_api._load_smoke_test_results_with_age",
+                   return_value=(fresh_smoke, 0.0)):  # fresh — no staleness
+            catalog = get_provider_catalog(db_path=db)
+
+        muapi = next(e for e in catalog if e.provider == "muapi")
+        assert muapi.operational_readiness != OR_AUTH_FAILED, (
+            "403 from generation endpoint must NOT map to auth_failed. "
+            "Only 401 is a credential rejection."
+        )
+        assert muapi.operational_readiness == OR_GENERATION_FAILED, (
+            f"403 from generation endpoint must map to generation_failed. "
+            f"Got: {muapi.operational_readiness}"
+        )
+
+    def test_smoke_403_does_not_affect_credential_status(self, tmp_path):
+        """
+        A 403 in the smoke test (generation failure) must not contaminate the
+        credential row. The credential status comes from the verifier probe only.
+        """
+        from hypogeum.dashboard_api import get_provider_catalog
+
+        fresh_smoke = {
+            "muapi": {
+                "status": "error_submit",
+                "model": "gpt-image-2-text-to-image",
+                "latency_ms": 1000,
+                "error": "403 Client Error: Forbidden",
+            }
+        }
+        fake_statuses = {
+            "muapi": {
+                "status": "verified",
+                "has_env_var": True,
+                "has_secret_profile": False,
+                "not_verifiable": False,
+            }
+        }
+
+        db = tmp_path / "test.db"
+        with patch("hypogeum.provider_verifier.get_all_provider_statuses",
+                   return_value=fake_statuses), \
+             patch("hypogeum.dashboard_api._load_smoke_test_results_with_age",
+                   return_value=(fresh_smoke, 0.0)):
+            catalog = get_provider_catalog(db_path=db)
+
+        muapi = next(e for e in catalog if e.provider == "muapi")
+        assert muapi.credential_status == "verified", (
+            "Smoke test 403 must not affect the credential_status row. "
+            f"credential_status must reflect verifier result only. "
+            f"Got: {muapi.credential_status}"
+        )
+
+    def test_secret_profile_key_preferred_over_env_var(self, tmp_path):
+        """
+        verify_provider('muapi') must use Secret Profile credential over env var
+        when both are present. The source field in the result must be 'secret_profile'.
+        """
+        from hypogeum.provider_verifier import verify_provider, STATUS_VERIFIED, _PROBES
+        from hypogeum.db import initialize_schema
+        from unittest.mock import MagicMock
+
+        db = tmp_path / "sp_test.db"
+        initialize_schema(db)
+
+        secret_key = "secret-profile-key-muapi-sp-12345"
+        fake_profile = type("SP", (), {
+            "status": "active",
+            "credential_data": secret_key,
+            "secret_profile_id": "sp-001",
+            "provider": "muapi",
+        })()
+
+        mock_probe = MagicMock(return_value=(True, None, 55))
+        fake_probes = dict(_PROBES)
+        fake_probes["muapi"] = mock_probe
+
+        with patch("hypogeum.credential_manager.list_secret_profiles",
+                   return_value=[fake_profile]), \
+             patch("hypogeum.provider_verifier._PROBES", fake_probes), \
+             patch.dict("os.environ", {"MUAPI_API_KEY": "env-key-should-not-be-used"}):
+            result = verify_provider("muapi", db_path=db)
+
+        assert result["source"] == "secret_profile", (
+            "Secret Profile must be preferred over env var when both are present. "
+            f"Got source: {result['source']}"
+        )
+        mock_probe.assert_called_once_with(secret_key)
+        assert result["status"] == STATUS_VERIFIED, (
+            f"Expected verified. Got: {result['status']}"
         )

@@ -163,12 +163,18 @@ OR_READY              = "ready"               # live smoke test passed
 OR_READY_VIA_MUAPI    = "ready_via_muapi"     # delegated, MUAPI smoke test passed
 OR_NOT_TESTED         = "not_tested"          # no smoke test result on record
 OR_SKIPPED_NO_KEY     = "skipped_missing_key" # smoke test skipped — no credential
-OR_AUTH_FAILED        = "auth_failed"         # key present, generation returned 401/403
-OR_GENERATION_FAILED  = "generation_failed"   # key valid, generation returned other error
+OR_AUTH_FAILED        = "auth_failed"         # key present, generation returned 401 (credential invalid)
+OR_GENERATION_FAILED  = "generation_failed"   # credential valid; generation failed (403/model error)
 OR_BILLING_FAILED     = "billing_or_credits_failed"  # 402 / credits exhausted
+OR_NEEDS_RETEST       = "needs_retest"        # smoke result stale (>SMOKE_MAX_AGE_DAYS)
 OR_MUAPI_DEPENDENT    = "muapi_dependent"     # delegated; MUAPI not yet tested
 OR_MUAPI_NOT_READY    = "unavailable_muapi_not_ready"  # delegated; MUAPI test failed
 OR_NOT_CONFIGURED     = "not_configured"      # placeholder — direct API not yet supported
+
+# Smoke test results older than this many days are treated as stale.
+# Stale failed results show "Needs retest" rather than permanently marking
+# the provider as failed — the model list or endpoint may have changed.
+SMOKE_MAX_AGE_DAYS = 7
 
 
 @dataclass
@@ -211,6 +217,7 @@ class ProviderCatalogEntry:
     smoke_test_model:       Optional[str]      = None
     smoke_test_latency_ms:  Optional[int]      = None
     credential_key_name:    Optional[str]      = None  # env var that would enable direct access
+    smoke_age_days:         Optional[float]    = None  # age of smoke report in days; None = no report
 
 
 @dataclass
@@ -777,14 +784,37 @@ def _load_smoke_test_results() -> dict:
     Returns {provider: result_dict} or {} if the file doesn't exist.
     Non-blocking.
     """
+    providers, _ = _load_smoke_test_results_with_age()
+    return providers
+
+
+def _load_smoke_test_results_with_age() -> tuple[dict, Optional[float]]:
+    """
+    Load smoke test results and return (providers_dict, age_days).
+
+    age_days is None if the report does not exist or has no timestamp.
+    Non-blocking.
+    """
     import json as _json
+    from datetime import datetime, timezone
+
     report = _PROJECT_ROOT / ".hypogeum-assets" / "provider_smoke_tests" / "provider_live_smoke_report.json"
     try:
-        if report.exists():
-            return _json.loads(report.read_text()).get("providers", {})
+        if not report.exists():
+            return {}, None
+        data = _json.loads(report.read_text())
+        providers = data.get("providers", {})
+        generated_at = data.get("generated_at")
+        if generated_at:
+            try:
+                dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+                age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+                return providers, age_days
+            except Exception:
+                pass
+        return providers, None
     except Exception:
-        pass
-    return {}
+        return {}, None
 
 
 def _derive_operational_readiness(
@@ -835,12 +865,21 @@ def _derive_operational_readiness(
     if "skipped" in status:
         return OR_SKIPPED_NO_KEY, smoke.get("note") or "No credential set."
 
-    # Classify error
+    # Classify error: distinguish credential failures (401) from generation
+    # failures (403 = model permission / quota, 5xx = API errors).
+    # 403 from a GENERATION endpoint does NOT mean the credential is bad —
+    # it means the model/endpoint is not accessible with this account tier.
+    # Only 401 is a definitive credential rejection.
     if "402" in error or "billing" in error.lower() or "credit" in error.lower():
         return OR_BILLING_FAILED, f"Billing/credits: {error[:120]}"
 
-    if any(code in error for code in ("401", "403")) or "not authorized" in error.lower() or "auth" in error.lower():
-        return OR_AUTH_FAILED, f"Auth rejected (check key + credits): {error[:120]}"
+    if "401" in error or "not authorized" in error.lower():
+        return OR_AUTH_FAILED, f"Credential rejected (401 — check key): {error[:120]}"
+
+    if "403" in error:
+        return OR_GENERATION_FAILED, (
+            f"Generation forbidden (403 — model access or account tier issue): {error[:120]}"
+        )
 
     if status.startswith("error"):
         return OR_GENERATION_FAILED, f"{status}: {error[:120]}"
@@ -871,7 +910,8 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
     except Exception:
         statuses = {}
 
-    smoke_results = _load_smoke_test_results()
+    smoke_results, smoke_age_days = _load_smoke_test_results_with_age()
+    smoke_is_stale = (smoke_age_days is not None and smoke_age_days > SMOKE_MAX_AGE_DAYS)
 
     # Usage stats from asset_versions
     usage: dict[str, dict] = {}
@@ -901,11 +941,17 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
     # Pass 1: build all entries; derive MUAPI's operational_readiness first
     # so delegated providers can inherit it in Pass 2.
     muapi_smoke    = smoke_results.get("muapi", {})
+    muapi_st       = statuses.get("muapi", {})
     muapi_readiness, _ = _derive_operational_readiness("muapi", {"access_mode": "direct"}, muapi_smoke, OR_NOT_TESTED)
 
     catalog: list[ProviderCatalogEntry] = []
     for provider, meta in _PROVIDER_CATALOG_META.items():
-        st    = statuses.get(provider, {})
+        # For MUAPI-delegated providers, use MUAPI's credential status:
+        # they all share the MUAPI key and should reflect the same probe result.
+        if meta.get("access_mode") == "muapi_delegated":
+            st = muapi_st
+        else:
+            st = statuses.get(provider, {})
         u     = usage.get(provider, {"total": 0, "failures": 0, "total_cost": 0.0})
         total = u["total"]
         fails = u["failures"]
@@ -926,6 +972,15 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
         if op_readiness == OR_SKIPPED_NO_KEY and is_configured:
             op_readiness = OR_NOT_TESTED
             op_note = "Credential saved — run smoke test to confirm generation works."
+
+        # Stale smoke results should not permanently mark a provider as failed.
+        # If the report is older than SMOKE_MAX_AGE_DAYS, downgrade failure states
+        # to OR_NEEDS_RETEST so the UI prompts re-testing rather than assuming
+        # the provider is broken.
+        if smoke_is_stale and op_readiness in (OR_AUTH_FAILED, OR_GENERATION_FAILED, OR_BILLING_FAILED):
+            age_str = f"{smoke_age_days:.0f}d" if smoke_age_days is not None else "?"
+            op_readiness = OR_NEEDS_RETEST
+            op_note = f"Smoke result stale ({age_str} old) — re-run smoke test to confirm current status."
 
         smoke_st      = smoke.get("status")
         smoke_model   = smoke.get("model")
@@ -950,6 +1005,7 @@ def get_provider_catalog(db_path: Optional[Path] = None) -> list:
             smoke_test_model      = smoke_model,
             smoke_test_latency_ms = smoke_latency,
             credential_key_name   = meta.get("credential_key_name"),
+            smoke_age_days        = round(smoke_age_days, 1) if smoke_age_days is not None else None,
         ))
     return catalog
 

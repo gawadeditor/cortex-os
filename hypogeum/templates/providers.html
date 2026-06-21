@@ -56,6 +56,7 @@
     .or-muapi-dep       { font-size: 11px; color: var(--muted); }
     .or-muapi-no        { font-size: 11px; font-weight: 700; color: var(--red); }
     .or-not-cfg         { font-size: 11px; color: var(--muted); font-style: italic; }
+    .or-needs-retest    { font-size: 11px; font-weight: 700; color: var(--yellow); }
 
     /* Credential key name */
     .cred-key-row       { font-size: 11px; color: var(--muted); margin-top: 5px; font-family: monospace; }
@@ -183,6 +184,8 @@
     <span class="or-muapi-dep">Depends on MUAPI</span>
   {% elif readiness == 'unavailable_muapi_not_ready' %}
     <span class="or-muapi-no">&#x2717; MUAPI not ready</span>
+  {% elif readiness == 'needs_retest' %}
+    <span class="or-needs-retest">&#x26A0; Needs retest</span>
   {% elif readiness == 'not_configured' %}
     <span class="or-not-cfg">Placeholder — not implemented</span>
   {% else %}
@@ -251,6 +254,13 @@
   <div class="provider-cost">Smoke test: {{ entry.smoke_test_latency_ms }}ms — {{ entry.smoke_test_model }}</div>
   {% endif %}
 
+  {# Stale smoke report age — shown when result is unreliable #}
+  {% if entry.operational_readiness == 'needs_retest' and entry.smoke_age_days %}
+  <div class="provider-cost" style="color:var(--yellow);">
+    Smoke result {{ entry.smoke_age_days|int }}d old — re-run to confirm current status.
+  </div>
+  {% endif %}
+
   {# Usage cost #}
   {% if entry.total_cost_usd and entry.total_cost_usd > 0 %}
   <div class="provider-cost">Usage: ${{ "%.4f"|format(entry.total_cost_usd) }}</div>
@@ -273,6 +283,13 @@
     <button class="btn-test" onclick="testProvider(this, '{{ entry.provider }}')"
             title="Test credential with live probe">Test</button>
     <div class="test-result" id="tr-{{ entry.provider }}"></div>
+    {% endif %}
+    {# MUAPI: offer a smoke-test re-run when result is stale or failed #}
+    {% if entry.provider == 'muapi' and entry.operational_readiness in ('needs_retest','generation_failed','not_tested') %}
+    <button class="btn-provider" id="btn-muapi-smoke"
+            onclick="runMuapiSmokeTest(this)"
+            title="Re-run generation smoke test (submits a T3 job)">Smoke Test</button>
+    <div id="muapi-smoke-result" style="font-size:12px; margin-top:4px; display:none;"></div>
     {% endif %}
   </div>
   {% endif %}
@@ -627,6 +644,33 @@ function runVideoCheck() {
       btn.disabled = false;
       btn.textContent = 'Run Video Readiness Check';
       status.textContent = '✗ Network error: ' + err.message;
+    });
+}
+
+function runMuapiSmokeTest(btn) {
+  var res = document.getElementById('muapi-smoke-result');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  if (res) { res.style.display = 'none'; }
+  fetch('/api/providers/muapi/smoke-test', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = 'Smoke Test';
+      if (!res) return;
+      res.style.display = 'block';
+      if (data.ok) {
+        res.style.color = 'var(--green)';
+        res.textContent = '✓ Smoke passed — model: ' + data.model + ' (' + data.latency_ms + 'ms) source: ' + data.credential_source;
+      } else {
+        res.style.color = 'var(--red)';
+        res.textContent = '✗ ' + (data.error || 'failed') + (data.model ? ' [' + data.model + ']' : '');
+      }
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Smoke Test';
+      if (res) { res.style.display = 'block'; res.style.color = 'var(--red)'; res.textContent = '✗ ' + err.message; }
     });
 }
 

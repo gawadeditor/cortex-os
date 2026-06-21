@@ -147,13 +147,22 @@ def _probe_elevenlabs(key: str) -> tuple[bool, Optional[str], int]:
 
 
 def _probe_muapi(key: str) -> tuple[bool, Optional[str], int]:
+    """
+    Validate an MUAPI key via GET /api/v1/user/balance.
+
+    MUAPI auth: x-api-key header (NOT Authorization: Bearer).
+    Falls back to a no-cost model-list call if the balance endpoint
+    returns 404 (endpoint may not exist on all MUAPI tiers).
+    """
     import urllib.request
     import urllib.error
     t0 = time.monotonic()
+    # Correct header: x-api-key, not Authorization: Bearer
+    _headers = {"x-api-key": key}
     try:
         req = urllib.request.Request(
             "https://api.muapi.ai/api/v1/user/balance",
-            headers={"Authorization": f"Bearer {key}"},
+            headers=_headers,
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             latency_ms = int((time.monotonic() - t0) * 1000)
@@ -161,7 +170,40 @@ def _probe_muapi(key: str) -> tuple[bool, Optional[str], int]:
                 return True, None, latency_ms
             return False, f"HTTP {resp.status}", latency_ms
     except urllib.error.HTTPError as exc:
-        return False, f"HTTP {exc.code}", int((time.monotonic() - t0) * 1000)
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if exc.code == 401:
+            return False, "HTTP 401 — invalid API key", latency_ms
+        if exc.code == 404:
+            # Balance endpoint absent on this MUAPI tier — key may still be valid.
+            # Try the models list as a secondary no-cost probe.
+            return _probe_muapi_models(key, t0)
+        # 403 from balance = key format may be wrong or insufficient tier
+        return False, f"HTTP {exc.code}", latency_ms
+    except Exception as exc:
+        return False, str(exc)[:120], int((time.monotonic() - t0) * 1000)
+
+
+def _probe_muapi_models(key: str, t0: float) -> tuple[bool, Optional[str], int]:
+    """
+    Secondary MUAPI probe: GET /api/v1/models with x-api-key.
+    Used when the balance endpoint returns 404.
+    """
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(
+            "https://api.muapi.ai/api/v1/models",
+            headers={"x-api-key": key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            return (resp.status in (200, 201)), None if resp.status in (200, 201) else f"HTTP {resp.status}", latency_ms
+    except urllib.error.HTTPError as exc:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if exc.code == 401:
+            return False, "HTTP 401 — invalid API key", latency_ms
+        # Any other response (403/404) means key reached server — treat as saved/unverifiable
+        return False, f"HTTP {exc.code} from /models", latency_ms
     except Exception as exc:
         return False, str(exc)[:120], int((time.monotonic() - t0) * 1000)
 

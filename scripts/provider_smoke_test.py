@@ -426,13 +426,14 @@ def smoke_muapi(config: Config) -> dict:
     _save(out_dir, "request.json", {
         "endpoint": endpoint,
         "method":   "POST",
-        "headers":  {"Authorization": "Bearer ***", "Content-Type": "application/json"},
+        "headers":  {"x-api-key": "***", "Content-Type": "application/json"},
         "payload":  payload,
         "polling":  f"{poll_base}/{{request_id}}/result",
     })
 
     requests = _get_requests()
-    auth_header = {"Authorization": f"Bearer {config.MUAPI_API_KEY}", "Content-Type": "application/json"}
+    # MUAPI auth: x-api-key header — NOT Authorization: Bearer (which returns 403)
+    auth_header = {"x-api-key": config.MUAPI_API_KEY, "Content-Type": "application/json"}
 
     # Submit
     t0 = time.monotonic()

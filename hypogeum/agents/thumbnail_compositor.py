@@ -341,10 +341,86 @@ def _composite_layers(
     # ── Vignette ──────────────────────────────────────────────────────
     result = _apply_vignette(result, strength=0.55)
 
+    # ── Shadow floor clamp ────────────────────────────────────────────
+    # Screen-blend compositing raises dark pixels; warm grade lifts them
+    # further. This step crushes shadow/midtone pixels back toward
+    # warm near-black, targeting ~65% pixels below brightness 25.
+    result = _shadow_floor_clamp(result, gamma=1.8, warm_floor=(8, 5, 2))
+
     result.save(output_path, format="JPEG", quality=95)
 
 
-def _apply_vignette(img: Image.Image, strength: float = 0.55) -> Image.Image:
+def _shadow_floor_clamp(
+    img: "Image.Image",
+    gamma: float = 1.8,
+    warm_floor: tuple = (8, 5, 2),
+) -> "Image.Image":
+    """
+    Crush shadow and midtone pixels toward warm near-black.
+
+    Applies a gamma > 1 curve using per-pixel luma as the scale driver:
+        scale = (luma / 255) ^ (gamma - 1)
+
+    This compresses luminance non-linearly — shadows are crushed hardest,
+    highlights are barely touched:
+        luma 50  → ~17  (near-black)
+        luma 75  → ~28  (near-black)
+        luma 100 → ~44  (dark shadow, 25-49 bucket)
+        luma 150 → ~88  (midtone, preserved)
+        luma 200 → ~165 (highlight, near-untouched)
+        luma 255 → 255  (pure highlight, unchanged)
+
+    R:G:B ratio is preserved per pixel (warm tint unchanged) because the
+    scale factor is derived from luma and applied identically to all channels.
+    warm_floor prevents any pixel from going pure-black; (8, 5, 2) retains a
+    trace of warm amber in the deepest shadow zones.
+
+    Uses numpy when available for vectorised speed. Falls back to a
+    per-channel PIL LUT (slightly hue-shifting but fast and correct enough).
+
+    Target: ~65% of output pixels below brightness 25.
+    """
+    from PIL import Image as _Image
+
+    try:
+        import numpy as np
+
+        arr = np.array(img, dtype=np.float32)
+        r_f = arr[:, :, 0]
+        g_f = arr[:, :, 1]
+        b_f = arr[:, :, 2]
+
+        luma = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
+
+        # Per-pixel scale: (luma/255)^(gamma-1); avoid div-by-zero at luma=0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scale = np.where(luma > 0, (luma / 255.0) ** (gamma - 1.0), 0.0)
+
+        new_r = np.clip(r_f * scale, warm_floor[0], 255.0)
+        new_g = np.clip(g_f * scale, warm_floor[1], 255.0)
+        new_b = np.clip(b_f * scale, warm_floor[2], 255.0)
+
+        out = np.stack([new_r, new_g, new_b], axis=2).astype(np.uint8)
+        return _Image.fromarray(out, "RGB")
+
+    except ImportError:
+        # PIL-only fallback: per-channel LUT (luma-unaware, slight hue shift)
+        exp = gamma
+        factor = 255.0 ** (1.0 - (exp - 1.0))  # normalisation constant
+        lut = [
+            max(warm_floor[0], int((i ** exp) / (255 ** (exp - 1))))
+            for i in range(256)
+        ]
+        r_ch, g_ch, b_ch = img.split()
+        lut_g = [max(warm_floor[1], int((i ** exp) / (255 ** (exp - 1)))) for i in range(256)]
+        lut_b = [max(warm_floor[2], int((i ** exp) / (255 ** (exp - 1)))) for i in range(256)]
+        r_ch = r_ch.point(lut)
+        g_ch = g_ch.point(lut_g)
+        b_ch = b_ch.point(lut_b)
+        return _Image.merge("RGB", (r_ch, g_ch, b_ch))
+
+
+def _apply_vignette(img: "Image.Image", strength: float = 0.55) -> "Image.Image":
     """Radial vignette: darken corners, preserve center."""
     from PIL import Image, ImageDraw
     import math

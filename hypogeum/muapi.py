@@ -1670,11 +1670,96 @@ def generate_thumbnail(
         MUAPIError           — Image generation or download failed.
     """
     log = get_logger(episode_id=episode_id, agent=agent or "muapi")
-    provider = config.THUMBNAIL_IMAGE_PROVIDER  # "muapi" | "openai" | "openrouter"
 
-    # ── Direct provider dispatch ──────────────────────────────────────────────
+    # Provider priority chain: primary → fallback1 → fallback2
+    # Defaults: openrouter → openai → muapi (configurable via env vars)
+    _chain_raw = [
+        config.THUMBNAIL_IMAGE_PROVIDER,
+        config.THUMBNAIL_FALLBACK_PROVIDER,
+        config.THUMBNAIL_FALLBACK2_PROVIDER,
+    ]
+    # Deduplicate preserving order; drop empty strings
+    _seen: set = set()
+    provider_chain = []
+    for _p in _chain_raw:
+        if _p and _p not in _seen:
+            _seen.add(_p)
+            provider_chain.append(_p)
+
+    last_exc: Optional[Exception] = None
+    for attempt_idx, provider in enumerate(provider_chain):
+        is_fallback = attempt_idx > 0
+        try:
+            result = _generate_thumbnail_one_provider(
+                provider=provider,
+                deliverable_id=deliverable_id,
+                image_prompt=image_prompt,
+                aspect_ratio=aspect_ratio,
+                config=config,
+                output_dir=output_dir,
+                episode_id=episode_id,
+                budget_guard=budget_guard,
+                text_overlay=text_overlay,
+                typography_plan=typography_plan,
+                typography_integration=typography_integration,
+                log=log,
+                is_fallback=is_fallback,
+            )
+            if is_fallback:
+                log.info(
+                    "thumbnail_provider_fallback_succeeded",
+                    provider=provider,
+                    fallback_index=attempt_idx,
+                    original_error=str(last_exc)[:120] if last_exc else None,
+                )
+            return result
+        except MUAPIBudgetExhausted:
+            raise  # budget constraint — never fall through
+        except Exception as exc:
+            last_exc = exc
+            log.warn(
+                "thumbnail_provider_failed_trying_next",
+                provider=provider,
+                fallback_index=attempt_idx,
+                next_provider=provider_chain[attempt_idx + 1] if attempt_idx + 1 < len(provider_chain) else None,
+                error=str(exc)[:160],
+            )
+
+    # Re-raise the original exception from the last provider so callers
+    # receive the specific type (MUAPIAuthFailure, MUAPIQuotaExhausted, etc.)
+    # rather than a generic MUAPIError wrapper.
+    if last_exc is not None:
+        raise last_exc  # type: ignore[misc]
+    raise MUAPIError("All thumbnail providers exhausted")
+
+
+# ---------------------------------------------------------------------------
+# Internal: single-provider thumbnail dispatch
+# ---------------------------------------------------------------------------
+
+def _generate_thumbnail_one_provider(
+    provider: str,
+    deliverable_id: str,
+    image_prompt: str,
+    aspect_ratio: str,
+    config: "Config",
+    output_dir: Path,
+    episode_id: str,
+    budget_guard: Optional[MUAPIBudgetGuard],
+    text_overlay: Optional[dict],
+    typography_plan: Optional[dict],
+    typography_integration: str,
+    log,
+    is_fallback: bool,
+) -> "ThumbnailResult":
+    """
+    Try one thumbnail provider. Returns ThumbnailResult on success.
+    Raises on any failure — caller decides whether to try the next provider.
+    MUAPIBudgetExhausted is always re-raised by the caller without retrying.
+    """
+    local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+
     if provider == "openai":
-        local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
         model = _generate_thumbnail_openai(
             deliverable_id=deliverable_id,
             image_prompt=image_prompt,
@@ -1687,17 +1772,16 @@ def generate_thumbnail(
         if aspect_ratio == "16:9":
             _apply_wordmark_overlay(local_path)
         log.info("thumbnail_generated", deliverable_id=deliverable_id,
-                 model=model, provider="openai")
+                 model=model, provider="openai", used_fallback=is_fallback)
         return ThumbnailResult(
             asset_id=f"episodes/{episode_id}/thumbnails/{deliverable_id}",
             local_path=local_path,
             model_used=model,
             provider_used="openai",
-            used_fallback=False,
+            used_fallback=is_fallback,
         )
 
     if provider == "openrouter":
-        local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
         model = _generate_thumbnail_openrouter(
             deliverable_id=deliverable_id,
             image_prompt=image_prompt,
@@ -1710,20 +1794,20 @@ def generate_thumbnail(
         if aspect_ratio == "16:9":
             _apply_wordmark_overlay(local_path)
         log.info("thumbnail_generated", deliverable_id=deliverable_id,
-                 model=model, provider="openrouter")
+                 model=model, provider="openrouter", used_fallback=is_fallback)
         return ThumbnailResult(
             asset_id=f"episodes/{episode_id}/thumbnails/{deliverable_id}",
             local_path=local_path,
             model_used=model,
             provider_used="openrouter",
-            used_fallback=False,
+            used_fallback=is_fallback,
         )
 
-    # ── Default: MUAPI path (existing behaviour, unchanged) ───────────────────
+    # Default: MUAPI path (also handles any unrecognised provider name)
     primary_model = config.THUMBNAIL_IMAGE_MODEL
-    fallback_model = config.THUMBNAIL_FALLBACK_MODEL  # may be empty string
+    fallback_model = config.THUMBNAIL_FALLBACK_MODEL  # MUAPI-internal model fallback
 
-    image_model, used_fallback = _attempt_thumbnail_generation(
+    image_model, used_muapi_fallback = _attempt_thumbnail_generation(
         deliverable_id=deliverable_id,
         image_prompt=image_prompt,
         aspect_ratio=aspect_ratio,
@@ -1743,7 +1827,7 @@ def generate_thumbnail(
         local_path=output_dir / "thumbnails" / f"{deliverable_id}.jpg",
         model_used=image_model,
         provider_used="muapi",
-        used_fallback=used_fallback,
+        used_fallback=is_fallback or used_muapi_fallback,
     )
 
 

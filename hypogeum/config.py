@@ -247,12 +247,13 @@ class Config:
     MUAPI_T3_MODEL: str                       # default: veo3-fast-text-to-video
     MUAPI_I2V_MODEL: str                      # default: veo3-image-to-video
     MUAPI_IMAGE_MODEL: str                    # legacy alias — use THUMBNAIL_IMAGE_MODEL
-    THUMBNAIL_IMAGE_PROVIDER: str             # default: muapi
-    THUMBNAIL_IMAGE_MODEL: str               # default: gpt-image-2-text-to-image
+    THUMBNAIL_IMAGE_PROVIDER: str             # default: openrouter (primary)
+    THUMBNAIL_IMAGE_MODEL: str               # default: gpt-image-2-text-to-image (MUAPI path only)
     THUMBNAIL_IMAGE_RESOLUTION: str          # default: 2K (GPT Image 2 only)
     THUMBNAIL_IMAGE_QUALITY: str             # default: high (GPT Image 2 only)
-    THUMBNAIL_FALLBACK_PROVIDER: str         # default: muapi
-    THUMBNAIL_FALLBACK_MODEL: str            # default: flux-2-dev
+    THUMBNAIL_FALLBACK_PROVIDER: str         # default: openai  (fallback #1 when primary fails)
+    THUMBNAIL_FALLBACK2_PROVIDER: str        # default: muapi   (fallback #2 when fallback #1 fails)
+    THUMBNAIL_FALLBACK_MODEL: str            # default: flux-2-dev (MUAPI-internal model fallback)
     MUAPI_DEFAULT_TIER: int                   # default: 2 (VPD routing fallback)
     MUAPI_TIMEOUT_SECONDS: int                # default: 120
     MUAPI_POLL_INTERVAL_SECONDS: int          # default: 5
@@ -414,13 +415,14 @@ class Config:
         self.MUAPI_T3_MODEL = _get_optional("MUAPI_T3_MODEL", default="veo3-fast-text-to-video")
         self.MUAPI_I2V_MODEL = _get_optional("MUAPI_I2V_MODEL", default="veo3-image-to-video")
         self.MUAPI_IMAGE_MODEL = _get_optional("MUAPI_IMAGE_MODEL", default="flux-2-dev")  # legacy
-        self.THUMBNAIL_IMAGE_PROVIDER = _get_optional("THUMBNAIL_IMAGE_PROVIDER", default="muapi")
+        self.THUMBNAIL_IMAGE_PROVIDER = _get_optional("THUMBNAIL_IMAGE_PROVIDER", default="openrouter")
         self.THUMBNAIL_IMAGE_MODEL = _get_optional(
             "THUMBNAIL_IMAGE_MODEL", default="gpt-image-2-text-to-image"
         )
         self.THUMBNAIL_IMAGE_RESOLUTION = _get_optional("THUMBNAIL_IMAGE_RESOLUTION", default="2K")
         self.THUMBNAIL_IMAGE_QUALITY = _get_optional("THUMBNAIL_IMAGE_QUALITY", default="high")
-        self.THUMBNAIL_FALLBACK_PROVIDER = _get_optional("THUMBNAIL_FALLBACK_PROVIDER", default="muapi")
+        self.THUMBNAIL_FALLBACK_PROVIDER = _get_optional("THUMBNAIL_FALLBACK_PROVIDER", default="openai")
+        self.THUMBNAIL_FALLBACK2_PROVIDER = _get_optional("THUMBNAIL_FALLBACK2_PROVIDER", default="muapi")
         self.THUMBNAIL_FALLBACK_MODEL = _get_optional("THUMBNAIL_FALLBACK_MODEL", default="flux-2-dev")
         self.MUAPI_DEFAULT_TIER = _get_int("MUAPI_DEFAULT_TIER", default=2)
         self.MUAPI_TIMEOUT_SECONDS = _get_int("MUAPI_TIMEOUT_SECONDS", default=120)

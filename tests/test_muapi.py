@@ -67,6 +67,7 @@ from hypogeum.muapi import (
     _ASSET_CLASS_THUMBNAIL,
     AssetClassError,
     MUAPIAuthFailure,
+    MUAPIBudgetExhausted,
     MUAPIError,
     MUAPIQuotaExhausted,
     MUAPIUnavailable,
@@ -111,6 +112,10 @@ _ALL_ENV_VARS = [
     "TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_ACCESS_TOKEN", "TIKTOK_OPEN_ID",
     "META_APP_ID", "META_APP_SECRET", "META_ACCESS_TOKEN", "META_INSTAGRAM_ACCOUNT_ID",
     "META_FACEBOOK_PAGE_ID", "META_GRAPH_API_VERSION", "META_STAGING_BASE_URL",
+    # Thumbnail provider chain — must be cleared before Config() so dotenv doesn't
+    # repopulate them with production values, then re-set to muapi for MUAPI-path tests.
+    "THUMBNAIL_IMAGE_PROVIDER", "THUMBNAIL_FALLBACK_PROVIDER",
+    "THUMBNAIL_FALLBACK2_PROVIDER", "THUMBNAIL_FALLBACK_MODEL",
 ]
 
 
@@ -141,6 +146,12 @@ def make_config(
     os.environ["MUAPI_MAX_POLL_ATTEMPTS"] = str(max_poll_attempts)
     # Explicitly enable paid fallbacks in tests — default changed to False in M5.6
     os.environ["MUAPI_ALLOW_PAID_FALLBACKS"] = "true"
+    # Pin thumbnail provider to muapi so existing MUAPI-path tests are unaffected
+    # by the production default change (openrouter → openai → muapi).
+    os.environ["THUMBNAIL_IMAGE_PROVIDER"] = "muapi"
+    os.environ["THUMBNAIL_FALLBACK_PROVIDER"] = "muapi"
+    os.environ["THUMBNAIL_FALLBACK2_PROVIDER"] = "muapi"
+    os.environ["THUMBNAIL_FALLBACK_MODEL"] = "flux-2-dev"
     try:
         return Config()
     finally:
@@ -2374,3 +2385,233 @@ class TestGenerateThumbnailOpenAI:
                     local_path=tmp_path / "out.jpg",
                     log=MagicMock(),
                 )
+
+
+# ---------------------------------------------------------------------------
+# TestThumbnailProviderChain — provider priority: openrouter → openai → muapi
+# ---------------------------------------------------------------------------
+
+class TestThumbnailProviderChain:
+    """
+    Tests for the 3-tier thumbnail provider fallback chain.
+
+    Default priority: openrouter (primary) → openai (fallback #1) → muapi (fallback #2).
+    Each provider is tried in order; failure falls through to the next.
+    MUAPIBudgetExhausted halts the chain immediately (never falls through).
+    """
+
+    def _make_config(self, primary="openrouter", fallback1="openai", fallback2="muapi"):
+        cfg = MagicMock()
+        cfg.THUMBNAIL_IMAGE_PROVIDER = primary
+        cfg.THUMBNAIL_FALLBACK_PROVIDER = fallback1
+        cfg.THUMBNAIL_FALLBACK2_PROVIDER = fallback2
+        cfg.THUMBNAIL_FALLBACK_MODEL = "flux-2-dev"
+        cfg.THUMBNAIL_IMAGE_MODEL = "gpt-image-2-text-to-image"
+        cfg.OPENROUTER_API_KEY = "or-key"
+        cfg.OPENAI_API_KEY = "sk-key"
+        cfg.MUAPI_API_KEY = "muapi-key"
+        cfg.OPENROUTER_IMAGE_MODEL = "openai/gpt-5-image-mini"
+        cfg.OPENAI_IMAGE_MODEL = "gpt-image-1"
+        cfg.OPENAI_IMAGE_BASE_URL = "https://api.openai.com/v1"
+        cfg.THUMBNAIL_IMAGE_QUALITY = "high"
+        cfg.OPENROUTER_APP_URL = None
+        cfg.OPENROUTER_APP_NAME = "hypogeum-brain"
+        cfg.THUMBNAIL_IMAGE_RESOLUTION = "2K"
+        cfg.MUAPI_DRY_RUN = False
+        return cfg
+
+    def test_openrouter_is_called_first_by_default(self, tmp_path):
+        """With default config, openrouter must be attempted before openai and muapi."""
+        from hypogeum.muapi import generate_thumbnail
+
+        call_order = []
+
+        def _fake_openrouter(*a, **kw):
+            call_order.append("openrouter")
+            return "openai/gpt-5-image-mini"
+
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter), \
+             patch("hypogeum.muapi._generate_thumbnail_openai") as mock_openai, \
+             patch("hypogeum.muapi._attempt_thumbnail_generation") as mock_muapi, \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            result = generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=self._make_config(),
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert call_order == ["openrouter"], "openrouter must be called first"
+        mock_openai.assert_not_called(), "openai must not be called when openrouter succeeds"
+        mock_muapi.assert_not_called(), "muapi must not be called when openrouter succeeds"
+        assert result.provider_used == "openrouter"
+        assert result.used_fallback is False
+
+    def test_openai_called_when_openrouter_fails(self, tmp_path):
+        """When openrouter raises, openai must be attempted next."""
+        from hypogeum.muapi import generate_thumbnail
+
+        call_order = []
+
+        def _fake_openrouter(*a, **kw):
+            call_order.append("openrouter")
+            raise MUAPIError("openrouter unavailable")
+
+        def _fake_openai(*a, **kw):
+            call_order.append("openai")
+            return "gpt-image-1"
+
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter), \
+             patch("hypogeum.muapi._generate_thumbnail_openai", side_effect=_fake_openai), \
+             patch("hypogeum.muapi._attempt_thumbnail_generation") as mock_muapi, \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            result = generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=self._make_config(),
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert call_order == ["openrouter", "openai"], (
+            f"Expected [openrouter, openai], got {call_order}"
+        )
+        mock_muapi.assert_not_called(), "muapi must not be called when openai succeeds"
+        assert result.provider_used == "openai"
+        assert result.used_fallback is True
+
+    def test_muapi_called_when_openrouter_and_openai_fail(self, tmp_path):
+        """When openrouter and openai both fail, muapi must be attempted last."""
+        from hypogeum.muapi import generate_thumbnail
+
+        call_order = []
+
+        def _fake_openrouter(*a, **kw):
+            call_order.append("openrouter")
+            raise MUAPIError("openrouter unavailable")
+
+        def _fake_openai(*a, **kw):
+            call_order.append("openai")
+            raise MUAPIError("openai unavailable")
+
+        def _fake_muapi(*a, **kw):
+            call_order.append("muapi")
+            return ("gpt-image-2-text-to-image", False)
+
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter), \
+             patch("hypogeum.muapi._generate_thumbnail_openai", side_effect=_fake_openai), \
+             patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            result = generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=self._make_config(),
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert call_order == ["openrouter", "openai", "muapi"], (
+            f"Expected full chain [openrouter, openai, muapi], got {call_order}"
+        )
+        assert result.provider_used == "muapi"
+        assert result.used_fallback is True
+
+    def test_budget_exhausted_halts_chain_immediately(self, tmp_path):
+        """MUAPIBudgetExhausted must never fall through to the next provider."""
+        from hypogeum.muapi import generate_thumbnail
+
+        def _fake_openrouter(*a, **kw):
+            raise MUAPIBudgetExhausted("over budget")
+
+        with patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter), \
+             patch("hypogeum.muapi._generate_thumbnail_openai") as mock_openai, \
+             patch("hypogeum.muapi._attempt_thumbnail_generation") as mock_muapi:
+            with pytest.raises(MUAPIBudgetExhausted):
+                generate_thumbnail(
+                    deliverable_id="main",
+                    image_prompt="test",
+                    aspect_ratio="16:9",
+                    config=self._make_config(),
+                    episode_id="ep_001",
+                    output_dir=tmp_path,
+                )
+
+        mock_openai.assert_not_called(), "openai must NOT be tried after MUAPIBudgetExhausted"
+        mock_muapi.assert_not_called(), "muapi must NOT be tried after MUAPIBudgetExhausted"
+
+    def test_all_providers_fail_raises_muapi_error(self, tmp_path):
+        """When all three providers fail, the last provider's exception is re-raised."""
+        from hypogeum.muapi import generate_thumbnail
+
+        with patch("hypogeum.muapi._generate_thumbnail_openrouter",
+                   side_effect=MUAPIError("or fail")), \
+             patch("hypogeum.muapi._generate_thumbnail_openai",
+                   side_effect=MUAPIError("oai fail")), \
+             patch("hypogeum.muapi._attempt_thumbnail_generation",
+                   side_effect=MUAPIError("muapi fail")):
+            with pytest.raises(MUAPIError, match="muapi fail"):
+                generate_thumbnail(
+                    deliverable_id="main",
+                    image_prompt="test",
+                    aspect_ratio="16:9",
+                    config=self._make_config(),
+                    episode_id="ep_001",
+                    output_dir=tmp_path,
+                )
+
+    def test_chain_deduplicates_repeated_provider(self, tmp_path):
+        """If primary and fallback1 are the same provider, it is only tried once."""
+        from hypogeum.muapi import generate_thumbnail
+
+        call_count = [0]
+
+        def _fake_openrouter(*a, **kw):
+            call_count[0] += 1
+            raise MUAPIError("fail")
+
+        # Set primary=openrouter, fallback1=openrouter (duplicate), fallback2=muapi
+        cfg = self._make_config(primary="openrouter", fallback1="openrouter", fallback2="muapi")
+
+        def _fake_muapi(*a, **kw):
+            return ("gpt-image-2-text-to-image", False)
+
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter), \
+             patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            result = generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=cfg,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert call_count[0] == 1, (
+            f"Duplicate provider openrouter must only be called once, got {call_count[0]}"
+        )
+        assert result.provider_used == "muapi"

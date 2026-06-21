@@ -998,9 +998,8 @@ def _apply_text_overlay(local_path: Path, text: str, placement: str) -> None:
     """
     Render a text overlay band on a thumbnail image in place.
 
-    Draws a semi-transparent dark band across the full width at the top or
-    bottom of the image, then renders the text centered in the band in white
-    uppercase using a bold system font.
+    Renders hook text directly on the image with no background band.
+    Legibility comes from bold font, stroke outline, and drop shadow only.
 
     Args:
         local_path: Absolute path to the JPEG thumbnail (modified in place).
@@ -1025,15 +1024,12 @@ def _apply_text_overlay(local_path: Path, text: str, placement: str) -> None:
 
         display_text = text.strip().upper()
 
-        # Band height: 11% of image height — slimmer, more integrated, less caption-like.
-        # Font: smaller and lighter than the former Impact/bold style.
-        # Was 20% band / 8.5% font (produced oversized white caption look).
-        band_h = max(36, round(img_h * 0.11))
-        font_size = max(18, round(img_h * 0.048))
+        # No background band — text sits directly on image.
+        # Legibility from font size, stroke, and shadow only.
+        font_size = max(24, round(img_h * 0.065))
 
-        # Load font — try candidates in order, fall back to PIL default
         font = None
-        for font_path in _OVERLAY_FONT_CANDIDATES:
+        for font_path in _OVERLAY_BOLD_FONT_CANDIDATES:
             try:
                 font = ImageFont.truetype(font_path, font_size)
                 break
@@ -1042,47 +1038,36 @@ def _apply_text_overlay(local_path: Path, text: str, placement: str) -> None:
         if font is None:
             font = ImageFont.load_default()
 
-        # Create semi-transparent overlay band
-        overlay = Image.new("RGBA", (img_w, band_h), (12, 8, 4, 195))  # dark warm brown, 76% opacity
-        img_rgba = img.convert("RGBA")
-
-        if placement == "top":
-            img_rgba.paste(overlay, (0, 0), overlay)
-            band_y = 0
-        else:  # "bottom" (default)
-            img_rgba.paste(overlay, (0, img_h - band_h), overlay)
-            band_y = img_h - band_h
-
-        # Draw text on the composited image
-        img_out = img_rgba.convert("RGB")
+        img_out = img.convert("RGB")
         draw = ImageDraw.Draw(img_out)
 
-        # Measure text for centering
+        # Position: bottom-left, same zone as typography_plan default
+        pad_x = round(img_w * 0.07)
+        pad_y = round(img_h * 0.08)
         try:
             bbox = draw.textbbox((0, 0), display_text, font=font)
-            text_w = bbox[2] - bbox[0]
             text_h = bbox[3] - bbox[1]
         except AttributeError:
-            # Older PIL fallback
-            text_w, text_h = draw.textsize(display_text, font=font)
+            _, text_h = draw.textsize(display_text, font=font)
 
-        text_x = (img_w - text_w) // 2
-        text_y = band_y + (band_h - text_h) // 2 - max(0, round(img_h * 0.005))
+        text_x = pad_x
+        if placement == "top":
+            text_y = pad_y
+        else:
+            text_y = img_h - text_h - pad_y
 
-        # Text colour: warm parchment-cream instead of pure bright white.
-        # Bright white (#FFFFFF) was flagged by TIG-W02 and violates brand palette
-        # (brand specifies aged parchment #F5E6C8 / warm cream tones, not clinical white).
-        _TEXT_COLOR = (240, 218, 174)   # aged parchment — brand-aligned warm cream
-        _WARN_IF_WHITE = (255, 255, 255)
+        _TEXT_COLOR = (245, 225, 175)  # warm parchment
+        _STROKE     = (8, 5, 2)
+        _SHADOW     = (4, 2, 0)
+        shadow_off  = max(3, round(img_h * 0.004))
 
-        text_color = _TEXT_COLOR
-
-        # Shadow pass (dark, 1px offset — thinner than old 2px, matches lighter style)
-        shadow_color = (8, 8, 8)
-        draw.text((text_x + 1, text_y + 1), display_text, font=font, fill=shadow_color)
-
-        # Main text pass (warm cream)
-        draw.text((text_x, text_y), display_text, font=font, fill=text_color)
+        # Stroke pass — 8 directions, 2px distance
+        for dist in (2, 1):
+            for dx, dy in ((-dist, 0), (dist, 0), (0, -dist), (0, dist),
+                           (-dist, -dist), (dist, -dist), (-dist, dist), (dist, dist)):
+                draw.text((text_x + dx, text_y + dy), display_text, font=font, fill=_STROKE)
+        draw.text((text_x + shadow_off, text_y + shadow_off), display_text, font=font, fill=_SHADOW)
+        draw.text((text_x, text_y), display_text, font=font, fill=_TEXT_COLOR)
 
         img_out.save(local_path, format="JPEG", quality=95)
 
@@ -1320,39 +1305,31 @@ def _apply_typography_plan(local_path: Path, typography_plan: dict) -> None:
         head_y = anchor_y
         emph_y = anchor_y + head_h + line_gap if headline else anchor_y
 
-        # Dark backing — localized, not full-width
-        pad_x = round(img_w * 0.025)
-        pad_y = round(img_h * 0.015)
-        bx1 = min(head_x, emph_x) - pad_x
-        by1 = head_y - pad_y
-        bx2 = min(head_x, emph_x) + block_w + pad_x
-        by2 = head_y + block_h + pad_y
-
-        img_rgba = img.convert("RGBA")
-        backing  = Image.new("RGBA", (max(1, bx2 - bx1), max(1, by2 - by1)), (6, 4, 2, 185))
-        img_rgba.paste(backing, (bx1, by1), backing)
-        img_out  = img_rgba.convert("RGB")
+        # No backing box — legibility comes from stroke, shadow, and font weight only.
+        img_out  = img.convert("RGB")
         draw_out = ImageDraw.Draw(img_out)
 
-        _HEAD_COLOR = (210, 195, 160)   # warm cream — headline (recedes)
-        _EMPH_COLOR = (245, 225, 175)   # bright warm parchment — emphasis (pops)
-        _SHADOW     = (6, 4, 2)
-        _STROKE     = (30, 20, 10)      # near-black stroke for legibility on any bg
-        shadow_off  = max(2, round(img_h * 0.003))
+        _HEAD_COLOR = (210, 195, 160)   # warm cream — headline
+        _EMPH_COLOR = (245, 225, 175)   # bright warm parchment — emphasis
+        _SHADOW     = (4, 2, 0)         # near-black shadow
+        _STROKE     = (8, 5, 2)         # very dark stroke for contrast on any background
+        shadow_off  = max(3, round(img_h * 0.004))  # slightly heavier shadow; no backing to rely on
 
         def _draw_emphasis(text: str, x: int, y: int, font) -> None:
             if use_stroke:
-                # 1px stroke pass (outline) around all sides
-                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1),
-                                (-1, -1), (1, -1), (-1, 1), (1, 1)):
-                    draw_out.text((x + dx, y + dy), text, font=font, fill=_STROKE)
-            # Shadow
+                # 2px stroke: two passes at offset 1 and 2 in all 8 directions
+                for dist in (2, 1):
+                    for dx, dy in ((-dist, 0), (dist, 0), (0, -dist), (0, dist),
+                                   (-dist, -dist), (dist, -dist), (-dist, dist), (dist, dist)):
+                        draw_out.text((x + dx, y + dy), text, font=font, fill=_STROKE)
             draw_out.text((x + shadow_off, y + shadow_off), text, font=font, fill=_SHADOW)
-            # Main text
             draw_out.text((x, y), text, font=font, fill=_EMPH_COLOR)
 
         def _draw_headline(text: str, x: int, y: int, font) -> None:
-            draw_out.text((x + 1, y + 1), text, font=font, fill=_SHADOW)
+            # Headline also gets a stroke pass for legibility without backing
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                draw_out.text((x + dx, y + dy), text, font=font, fill=_STROKE)
+            draw_out.text((x + 2, y + 2), text, font=font, fill=_SHADOW)
             draw_out.text((x, y), text, font=font, fill=_HEAD_COLOR)
 
         if headline:

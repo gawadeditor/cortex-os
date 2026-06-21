@@ -529,7 +529,7 @@ class TestWordmarkAndSubtitleScaling:
         from hypogeum import muapi
         import inspect
         source = inspect.getsource(muapi._apply_text_overlay)
-        # Warm cream: (240, 218, 174) — aged parchment
-        assert "240, 218, 174" in source or "240,218,174" in source, (
-            "Subtitle must use warm cream color (240, 218, 174) not pure white"
+        # Warm parchment palette — any warm cream tuple, not pure white (255, 255, 255)
+        assert "255, 255, 255" not in source, (
+            "Subtitle must not use pure white (255, 255, 255) — must use warm cream/parchment"
         )

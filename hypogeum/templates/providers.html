@@ -5,46 +5,98 @@
   <title>Providers — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
-    .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: var(--gap); }
-    .provider-card { background: var(--surface); border: 1px solid var(--border);
-                     border-radius: var(--radius); padding: 16px; }
-    .provider-card-verified { border-color: #2ea043; }
-    .provider-card-failed   { border-color: var(--red); }
-    .provider-name { font-size: 15px; font-weight: 700; margin-bottom: 4px;
-                     display: flex; align-items: center; gap: 8px; }
-    .provider-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
-    .provider-cost { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .badge-verified      { font-size: 11px; font-weight: 700; color: var(--green); }
-    .badge-failed        { font-size: 11px; font-weight: 700; color: var(--red); }
-    .badge-saved         { font-size: 11px; font-weight: 700; color: var(--yellow); }
-    .badge-missing       { font-size: 11px; color: var(--muted); }
-    .badge-not-verifiable{ font-size: 11px; color: var(--muted); font-style: italic; }
-    .provider-auth-type { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
-    .provider-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
-    .verif-error { font-size: 11px; color: var(--red); margin-top: 3px; font-family: monospace; }
-    .verif-time  { font-size: 10px; color: var(--muted); margin-top: 2px; }
-    .btn-provider { display: inline-block; margin-top: 8px; padding: 5px 12px;
-                    font-size: 12px; font-weight: 600; border-radius: var(--radius);
-                    border: 1px solid var(--border); color: var(--muted); cursor: pointer;
-                    background: transparent; font-family: inherit; text-decoration: none; }
+    /* Grid + card shell */
+    .provider-grid      { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: var(--gap); }
+    .provider-card      { background: var(--surface); border: 1px solid var(--border);
+                          border-radius: var(--radius); padding: 16px; }
+    .provider-card-ok   { border-color: #2ea043; }
+    .provider-card-fail { border-color: var(--red); }
+    .provider-card-ph   { opacity: 0.65; border-style: dashed; }  /* placeholder */
+
+    /* Header row */
+    .pc-header          { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+    .pc-name            { font-size: 15px; font-weight: 700; }
+
+    /* Access-mode badge */
+    .badge-direct-ph    { font-size: 10px; padding: 2px 6px; border-radius: 3px;
+                          background: #2a2a2a; color: var(--muted); border: 1px solid var(--border); }
+    .badge-muapi-del    { font-size: 10px; padding: 2px 6px; border-radius: 3px;
+                          background: #001a3d; color: #4c9de8; border: 1px solid #1e4a7c; }
+
+    /* Capability pills */
+    .cap-row            { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+    .cap-pill           { font-size: 10px; padding: 2px 7px; border-radius: 99px;
+                          background: #1a2a1a; color: #6ab46a; border: 1px solid #2a442a; }
+    .cap-pill-llm       { background: #1a1a2a; color: #6a6ae8; border-color: #2a2a6a; }
+    .cap-pill-audio     { background: #2a1a1a; color: #e87a4a; border-color: #6a2a1a; }
+    .cap-pill-pub       { background: #1a2a2a; color: #4ac4c4; border-color: #1a5a5a; }
+
+    /* Two-row status table */
+    .status-table       { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+    .status-table td    { padding: 3px 0; vertical-align: top; }
+    .status-label-cell  { color: var(--muted); width: 90px; padding-right: 8px; white-space: nowrap; }
+    .status-note        { font-size: 11px; color: var(--muted); margin-top: 3px;
+                          font-family: monospace; word-break: break-word; }
+
+    /* Credential status badges */
+    .badge-verified     { font-size: 11px; font-weight: 700; color: var(--green); }
+    .badge-saved        { font-size: 11px; font-weight: 700; color: var(--yellow); }
+    .badge-failed       { font-size: 11px; font-weight: 700; color: var(--red); }
+    .badge-missing      { font-size: 11px; color: var(--muted); }
+    .badge-nv           { font-size: 11px; color: var(--muted); font-style: italic; }
+
+    /* Operational readiness badges */
+    .or-ready           { font-size: 11px; font-weight: 700; color: var(--green); }
+    .or-ready-muapi     { font-size: 11px; font-weight: 700; color: #4ac4c4; }
+    .or-not-tested      { font-size: 11px; color: var(--muted); }
+    .or-skipped         { font-size: 11px; color: var(--muted); }
+    .or-auth-fail       { font-size: 11px; font-weight: 700; color: var(--red); }
+    .or-gen-fail        { font-size: 11px; font-weight: 700; color: var(--yellow); }
+    .or-billing         { font-size: 11px; font-weight: 700; color: var(--yellow); }
+    .or-muapi-dep       { font-size: 11px; color: var(--muted); }
+    .or-muapi-no        { font-size: 11px; font-weight: 700; color: var(--red); }
+    .or-not-cfg         { font-size: 11px; color: var(--muted); font-style: italic; }
+
+    /* Credential key name */
+    .cred-key-row       { font-size: 11px; color: var(--muted); margin-top: 5px; font-family: monospace; }
+
+    /* Usage */
+    .provider-cost      { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    /* Actions */
+    .pc-actions         { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .btn-provider       { display: inline-block; padding: 5px 12px; font-size: 12px; font-weight: 600;
+                          border-radius: var(--radius); border: 1px solid var(--border);
+                          color: var(--muted); cursor: pointer; background: transparent;
+                          font-family: inherit; text-decoration: none; }
     .btn-provider:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
-    .btn-test   { display: inline-block; margin-top: 8px; margin-left: 6px;
-                  padding: 5px 12px; font-size: 12px; font-weight: 600;
-                  border-radius: var(--radius); border: 1px solid var(--border);
-                  color: var(--blue); cursor: pointer; background: transparent;
-                  font-family: inherit; }
-    .btn-test:disabled { opacity: 0.4; cursor: not-allowed; }
-    .oauth-fields { margin-top: 10px; padding: 10px 12px; background: var(--bg);
-                    border: 1px solid var(--border); border-radius: var(--radius); }
-    .oauth-field-row { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+    .btn-test           { display: inline-block; padding: 5px 12px; font-size: 12px; font-weight: 600;
+                          border-radius: var(--radius); border: 1px solid var(--border);
+                          color: var(--blue); cursor: pointer; background: transparent;
+                          font-family: inherit; }
+    .btn-test:disabled  { opacity: 0.4; cursor: not-allowed; }
+    .test-result        { display: none; margin-top: 6px; font-size: 12px; }
+
+    /* Dividers */
+    .section-label      { font-size: 12px; font-weight: 700; text-transform: uppercase;
+                          letter-spacing: .06em; color: var(--muted); margin: var(--gap) 0 10px; }
+
+    /* Video provider pair block */
+    .video-pair         { display: contents; }
+
+    /* OAuth fields (publishing) */
+    .oauth-fields       { margin-top: 10px; padding: 10px 12px; background: var(--bg);
+                          border: 1px solid var(--border); border-radius: var(--radius); }
+    .oauth-field-row    { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
     .oauth-field-row:last-child { margin-bottom: 0; }
-    .oauth-label { font-size: 11px; color: var(--muted); font-weight: 600; }
-    .oauth-value { font-size: 12px; color: var(--text); font-family: monospace; }
-    .oauth-notice { font-size: 12px; color: var(--yellow); background: #1e1a00;
-                    border: 1px solid var(--yellow); border-radius: var(--radius);
-                    padding: 8px 10px; margin-top: 8px; }
-    .section-label { font-size: 12px; font-weight: 700; text-transform: uppercase;
-                     letter-spacing: .06em; color: var(--muted); margin: var(--gap) 0 10px; }
+    .oauth-label        { font-size: 11px; color: var(--muted); font-weight: 600; }
+    .oauth-value        { font-size: 12px; color: var(--text); font-family: monospace; }
+    .oauth-notice       { font-size: 12px; color: var(--yellow); background: #1e1a00;
+                          border: 1px solid var(--yellow); border-radius: var(--radius);
+                          padding: 8px 10px; margin-top: 8px; }
+    .provider-auth-type { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+    .verif-error        { font-size: 11px; color: var(--red); margin-top: 3px; font-family: monospace; }
+    .verif-time         { font-size: 10px; color: var(--muted); margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -52,210 +104,262 @@
 
 <div class="page-header">
   <h1>Providers</h1>
-  <span class="page-meta">Connection and verification status for all content and publishing providers</span>
+  <span class="page-meta">Credential and generation readiness for all providers</span>
   <a href="/setup" class="btn" style="margin-left:auto;">Factory Setup →</a>
 </div>
 
-{# ── Content Providers ── #}
-<div class="section-label">Content Providers</div>
-<div class="provider-grid">
-  {% for p in content_providers %}
-  {% set vstatus = p.vstatus %}
-  <div class="provider-card
-    {% if vstatus == 'verified' %}provider-card-verified
-    {% elif vstatus == 'failed' %}provider-card-failed
-    {% endif %}"
-    data-provider-id="{{ p.id }}">
 
-    <div class="provider-name">
-      {{ p.label }}
-      {% if vstatus == 'verified' %}
-        <span class="badge-verified">&#x2713; Verified</span>
-      {% elif vstatus == 'failed' %}
-        <span class="badge-failed">&#x2717; Failed</span>
-      {% elif vstatus == 'saved' %}
-        <span class="badge-saved">&#x25CF; Saved</span>
-      {% elif vstatus == 'not_verifiable' %}
-        <span class="badge-not-verifiable">Saved (not verifiable)</span>
-      {% else %}
-        <span class="badge-missing">Not configured</span>
-      {% endif %}
-    </div>
+{# ─────────────────────────────────────────────────────────── #}
+{# Macros                                                       #}
+{# ─────────────────────────────────────────────────────────── #}
 
-    <div class="provider-desc">{{ p.description }}</div>
+{% macro cred_badge(status) %}
+  {% if status == 'verified' %}
+    <span class="badge-verified">&#x2713; Verified</span>
+  {% elif status == 'failed' %}
+    <span class="badge-failed">&#x2717; Failed</span>
+  {% elif status == 'saved' %}
+    <span class="badge-saved">&#x25CF; Saved</span>
+  {% elif status == 'not_verifiable' %}
+    <span class="badge-nv">Saved (no probe)</span>
+  {% else %}
+    <span class="badge-missing">Not configured</span>
+  {% endif %}
+{% endmacro %}
 
-    {% if p.muapi_backed %}
-    {# MUAPI-backed provider — no separate credential needed #}
-    <div class="provider-auth-type">Configured through MUAPI</div>
-    {% if vstatus == 'verified' %}
-      <div style="font-size:12px; color:var(--green); margin-top:4px;">✓ Reachable via MUAPI</div>
-    {% elif vstatus == 'muapi_configured' %}
-      <div style="font-size:12px; color:var(--yellow); margin-top:4px;">
-        MUAPI key saved — <a href="/providers/content/connect/muapi" style="color:var(--yellow);">verify MUAPI →</a>
-      </div>
-    {% else %}
-      <div style="font-size:12px; color:var(--muted); margin-top:4px;">
-        Requires MUAPI key — <a href="/providers/content/connect/muapi">configure MUAPI →</a>
-      </div>
-    {% endif %}
+{% macro or_badge(readiness) %}
+  {% if readiness == 'ready' %}
+    <span class="or-ready">&#x2713; Ready</span>
+  {% elif readiness == 'ready_via_muapi' %}
+    <span class="or-ready-muapi">&#x2713; Ready via MUAPI</span>
+  {% elif readiness == 'not_tested' %}
+    <span class="or-not-tested">Not tested</span>
+  {% elif readiness == 'skipped_missing_key' %}
+    <span class="or-skipped">Skipped — no key</span>
+  {% elif readiness == 'auth_failed' %}
+    <span class="or-auth-fail">&#x2717; Auth failed (403)</span>
+  {% elif readiness == 'generation_failed' %}
+    <span class="or-gen-fail">&#x2717; Generation failed</span>
+  {% elif readiness == 'billing_or_credits_failed' %}
+    <span class="or-billing">&#x2717; Credits / billing</span>
+  {% elif readiness == 'muapi_dependent' %}
+    <span class="or-muapi-dep">Depends on MUAPI</span>
+  {% elif readiness == 'unavailable_muapi_not_ready' %}
+    <span class="or-muapi-no">&#x2717; MUAPI not ready</span>
+  {% elif readiness == 'not_configured' %}
+    <span class="or-not-cfg">Placeholder — not implemented</span>
+  {% else %}
+    <span class="or-not-tested">{{ readiness }}</span>
+  {% endif %}
+{% endmacro %}
 
-    {% else %}
-    <div class="provider-auth-type">Auth: API key</div>
+{% macro cap_pill(cap) %}
+  {% if cap == 'llm' %}
+    <span class="cap-pill cap-pill-llm">LLM routing</span>
+  {% elif cap == 'image' %}
+    <span class="cap-pill">Image generation</span>
+  {% elif cap == 'video' %}
+    <span class="cap-pill">Video generation</span>
+  {% elif cap == 'audio' %}
+    <span class="cap-pill cap-pill-audio">Audio / TTS</span>
+  {% elif cap == 'publishing' %}
+    <span class="cap-pill cap-pill-pub">Publishing</span>
+  {% else %}
+    <span class="cap-pill">{{ cap }}</span>
+  {% endif %}
+{% endmacro %}
 
-    {% if p.verif_error %}
-    <div class="verif-error">✗ {{ p.verif_error }}</div>
-    {% endif %}
-    {% if p.verif_checked_at %}
-    <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC
-      {% if p.verif_latency_ms %}({{ p.verif_latency_ms }}ms){% endif %}
-    </div>
-    {% endif %}
+{% macro provider_card(entry) %}
+{% set is_ph = entry.access_mode == 'direct_placeholder' %}
+{% set is_del = entry.access_mode == 'muapi_delegated' %}
+{% set ok = entry.operational_readiness in ('ready', 'ready_via_muapi') %}
+{% set fail = entry.operational_readiness in ('auth_failed','generation_failed','billing_or_credits_failed','unavailable_muapi_not_ready') %}
+<div class="provider-card{% if ok %} provider-card-ok{% elif fail %} provider-card-fail{% elif is_ph %} provider-card-ph{% endif %}"
+     data-provider="{{ entry.provider }}">
 
-    {% if p.cost_usd and p.cost_usd > 0 %}
-    <div class="provider-cost">Usage: ${{ "%.4f"|format(p.cost_usd) }}</div>
-    {% endif %}
-
-    <div style="margin-top:8px;">
-      <a href="/providers/content/connect/{{ p.id }}" class="btn-provider">
-        {{ "Reconnect" if vstatus != 'missing' else "Connect" }}
-      </a>
-      {% if vstatus != 'not_verifiable' %}
-      <button class="btn-test" data-provider="{{ p.id }}"
-              onclick="testProvider(this, '{{ p.id }}')"
-              title="Test the API key with a live call">
-        Test
-      </button>
-      {% endif %}
-    </div>
-
-    <div class="test-result-{{ p.id }}" style="display:none; margin-top:6px; font-size:12px;"></div>
+  {# Header: name + access-mode tag #}
+  <div class="pc-header">
+    <span class="pc-name">{{ entry.display_name }}</span>
+    {% if is_del %}
+      <span class="badge-muapi-del">via MUAPI</span>
+    {% elif is_ph %}
+      <span class="badge-direct-ph">Official API — not yet implemented</span>
     {% endif %}
   </div>
+
+  {# Capabilities #}
+  <div class="cap-row">
+    {% for cap in entry.capabilities %}{{ cap_pill(cap) }}{% endfor %}
+  </div>
+
+  {# Two-row status table #}
+  <table class="status-table">
+    <tr>
+      <td class="status-label-cell">Credential</td>
+      <td>{{ cred_badge(entry.credential_status) }}</td>
+    </tr>
+    <tr>
+      <td class="status-label-cell">Generation</td>
+      <td>{{ or_badge(entry.operational_readiness) }}</td>
+    </tr>
+  </table>
+
+  {# Operational note (e.g. "Auth rejected (check key + credits): 403 Client Error…") #}
+  {% if entry.operational_note and not is_ph %}
+  <div class="status-note">{{ entry.operational_note[:160] }}</div>
+  {% endif %}
+
+  {# Smoke test latency if successful #}
+  {% if entry.smoke_test_latency_ms and entry.operational_readiness in ('ready','ready_via_muapi') %}
+  <div class="provider-cost">Smoke test: {{ entry.smoke_test_latency_ms }}ms — {{ entry.smoke_test_model }}</div>
+  {% endif %}
+
+  {# Usage cost #}
+  {% if entry.total_cost_usd and entry.total_cost_usd > 0 %}
+  <div class="provider-cost">Usage: ${{ "%.4f"|format(entry.total_cost_usd) }}</div>
+  {% endif %}
+
+  {# Credential key name #}
+  {% if entry.credential_key_name %}
+  <div class="cred-key-row">Env: {{ entry.credential_key_name }}</div>
+  {% endif %}
+
+  {# Actions — only for direct and muapi_delegated with connect form #}
+  {% if not is_ph %}
+  <div class="pc-actions">
+    {% if entry.provider in connectable_providers %}
+    <a href="/providers/content/connect/{{ entry.provider }}" class="btn-provider">
+      {{ "Reconnect" if entry.is_configured else "Connect" }}
+    </a>
+    {% endif %}
+    {% if entry.access_mode == 'direct' %}
+    <button class="btn-test" onclick="testProvider(this, '{{ entry.provider }}')"
+            title="Test credential with live probe">Test</button>
+    <div class="test-result" id="tr-{{ entry.provider }}"></div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+</div>
+{% endmacro %}
+
+
+{# ─────────────────────────────────────────────────────────── #}
+{# AI / Content Providers                                       #}
+{# ─────────────────────────────────────────────────────────── #}
+<div class="section-label">AI Content Providers</div>
+<div class="provider-grid">
+  {% for entry in ai_providers %}
+    {{ provider_card(entry) }}
   {% endfor %}
 </div>
 
-{# ── Publishing Platforms ── #}
-<div class="section-label" style="margin-top: calc(var(--gap) * 1.5)">Publishing Platforms</div>
+
+{# ─────────────────────────────────────────────────────────── #}
+{# Video Providers (pairs: MUAPI-delegated + official placeholder) #}
+{# ─────────────────────────────────────────────────────────── #}
+<div class="section-label" style="margin-top: calc(var(--gap) * 1.5);">
+  Video Providers
+  <span style="font-weight:400; font-size:11px; text-transform:none; letter-spacing:0;">
+    — each provider shows via-MUAPI access (current) and direct official API slot (future)
+  </span>
+</div>
+<div class="provider-grid">
+  {% for pair in video_provider_pairs %}
+    {% if pair.delegated %}{{ provider_card(pair.delegated) }}{% endif %}
+    {% if pair.official %}{{ provider_card(pair.official) }}{% endif %}
+  {% endfor %}
+</div>
+
+
+{# ─────────────────────────────────────────────────────────── #}
+{# Publishing Platforms                                          #}
+{# ─────────────────────────────────────────────────────────── #}
+<div class="section-label" style="margin-top: calc(var(--gap) * 1.5);">Publishing Platforms</div>
 <div class="provider-grid">
   {% for p in platform_providers %}
   {% set vstatus = p.vstatus %}
   <div class="provider-card
-    {% if vstatus == 'verified' %}provider-card-verified
-    {% elif vstatus == 'failed' %}provider-card-failed
+    {% if vstatus == 'verified' %}provider-card-ok
+    {% elif vstatus == 'failed' %}provider-card-fail
     {% endif %}"
     data-provider-id="{{ p.id }}">
 
-    <div class="provider-name">
-      {{ p.label }}
-      {% if vstatus == 'verified' and not p.real_probe %}
-        {# YouTube: probe is string-length check only — not a real API call #}
-        <span class="badge-saved">&#x25CF; Credential saved</span>
-      {% elif vstatus == 'verified' %}
-        <span class="badge-verified">&#x2713; Verified</span>
-      {% elif vstatus == 'failed' %}
-        <span class="badge-failed">&#x2717; Failed</span>
-      {% elif vstatus == 'saved' %}
-        <span class="badge-saved">&#x25CF; Saved</span>
-      {% elif vstatus == 'not_verifiable' %}
-        <span class="badge-not-verifiable">Saved (not verifiable)</span>
-      {% else %}
-        <span class="badge-missing">Not configured</span>
-      {% endif %}
+    <div class="pc-header">
+      <span class="pc-name">{{ p.label }}</span>
     </div>
+    <div class="cap-row"><span class="cap-pill cap-pill-pub">Publishing</span></div>
+
+    <table class="status-table">
+      <tr>
+        <td class="status-label-cell">Credential</td>
+        <td>
+          {% if vstatus == 'verified' and not p.real_probe %}
+            <span class="badge-saved">&#x25CF; Saved</span>
+          {% elif vstatus == 'verified' %}
+            <span class="badge-verified">&#x2713; Verified</span>
+          {% elif vstatus == 'failed' %}
+            <span class="badge-failed">&#x2717; Failed</span>
+          {% elif vstatus == 'saved' %}
+            <span class="badge-saved">&#x25CF; Saved</span>
+          {% else %}
+            <span class="badge-missing">Not configured</span>
+          {% endif %}
+        </td>
+      </tr>
+    </table>
 
     {% if vstatus == 'verified' and not p.real_probe %}
-    <div style="font-size:11px; color:var(--yellow); margin-bottom:4px;">
-      ⓘ Credential saved — token format checked only, not verified via API
-    </div>
+    <div class="status-note">Token format checked only — not verified via API</div>
     {% endif %}
 
-    <div class="provider-desc">{{ p.description }}</div>
-
-    {# Auth type + setup instructions #}
-    {% if p.auth == "oauth2" %}
-      <div class="provider-auth-type">Auth: OAuth 2.0</div>
-      {% if p.id == "youtube" %}
-      <div class="oauth-notice">
-        YouTube uses OAuth 2.0. Set up client credentials in Google Cloud Console, complete the
-        consent flow offline, then paste the refresh token in the connect form.
+    {% if p.id == "youtube" %}
+    <div class="oauth-fields" style="margin-top:8px;">
+      <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:8px;">Required env vars</div>
+      <div class="oauth-field-row">
+        <span class="oauth-label">YOUTUBE_CLIENT_ID</span>
+        <span class="oauth-value">{{ p.oauth_client_id or "— not configured —" }}</span>
       </div>
-      <div class="oauth-fields">
-        <div class="section-label" style="margin:0 0 8px; font-size:10px">Required env vars</div>
-        <div class="oauth-field-row">
-          <span class="oauth-label">YOUTUBE_CLIENT_ID</span>
-          <span class="oauth-value">{{ p.oauth_client_id or "— not configured —" }}</span>
-        </div>
-        <div class="oauth-field-row">
-          <span class="oauth-label">YOUTUBE_CLIENT_SECRET</span>
-          <span class="oauth-value">— set in environment —</span>
-        </div>
-        <div class="oauth-field-row">
-          <span class="oauth-label">YOUTUBE_REFRESH_TOKEN</span>
-          <span class="oauth-value">{{ "✓ stored" if vstatus != 'missing' else "— not configured —" }}</span>
-        </div>
-        <div class="oauth-field-row">
-          <span class="oauth-label">Scopes required</span>
-          <span class="oauth-value">youtube.upload, youtube.readonly</span>
-        </div>
+      <div class="oauth-field-row">
+        <span class="oauth-label">YOUTUBE_CLIENT_SECRET</span>
+        <span class="oauth-value">— set in environment —</span>
       </div>
-      {% elif p.id == "tiktok" %}
-      <div class="oauth-notice">
-        TikTok uses OAuth 2.0. Go to developers.tiktok.com → Manage Apps → Keys &amp; Tokens.
-        Generate an access token. Requires app review approval for the Video Upload scope
-        before publishing is possible. Paste the token in the connect form.
+      <div class="oauth-field-row">
+        <span class="oauth-label">YOUTUBE_REFRESH_TOKEN</span>
+        <span class="oauth-value">{{ "✓ stored" if vstatus != 'missing' else "— not configured —" }}</span>
       </div>
-      {% if p.test_note %}
-      <div style="font-size:11px; color:var(--muted); margin-top:6px;">
-        ⓘ {{ p.test_note }}
-      </div>
-      {% endif %}
-      {% endif %}
-    {% elif p.auth == "oauth2_meta" %}
-      <div class="provider-auth-type">Auth: Meta Graph API (OAuth 2.0 derived token)</div>
-      <div class="oauth-notice">
-        {{ p.label }} uses the Meta Graph API. Generate a long-lived page/user access token
-        from Meta for Developers → your app → Tools → Graph API Explorer.
-        {% if p.requires %}
-        Required: {{ p.requires | join(', ') }}.
-        {% endif %}
-      </div>
-    {% else %}
-      <div class="provider-auth-type">Auth: API key</div>
+    </div>
+    {% elif p.auth == 'oauth2_meta' %}
+    <div class="oauth-notice" style="margin-top:8px;">
+      {{ p.label }} uses Meta Graph API. Generate a long-lived token from Meta for Developers.
+      {% if p.requires %}Required: {{ p.requires | join(', ') }}.{% endif %}
+    </div>
     {% endif %}
 
     {% if p.verif_error %}
-    <div class="verif-error" style="margin-top:6px;">✗ {{ p.verif_error }}</div>
-    {% endif %}
-    {% if p.verif_checked_at %}
-    <div class="verif-time">Last checked: {{ p.verif_checked_at[:19] }} UTC</div>
+    <div class="verif-error">✗ {{ p.verif_error }}</div>
     {% endif %}
 
-    <div style="margin-top:8px;">
+    <div class="pc-actions">
       <a href="/platforms/connect/{{ p.id }}" class="btn-provider">
-        {% if vstatus == 'verified' %}Re-authorize
-        {% elif vstatus == 'saved' %}Reconnect
-        {% else %}Connect{% endif %}
+        {% if vstatus == 'verified' %}Re-authorize{% elif vstatus == 'saved' %}Reconnect{% else %}Connect{% endif %}
       </a>
       {% if p.id not in ('tiktok', 'instagram', 'facebook') %}
-      <button class="btn-test" data-provider="{{ p.id }}"
-              onclick="testProvider(this, '{{ p.id }}')"
-              title="Verify credential">
-        Test
-      </button>
+      <button class="btn-test" onclick="testProvider(this, '{{ p.id }}')"
+              title="Verify credential">Test</button>
+      <div class="test-result" id="tr-{{ p.id }}"></div>
       {% else %}
-      <span style="font-size:11px; color:var(--muted); margin-left:8px;">
-        Verified at publish time
-      </span>
+      <span style="font-size:11px; color:var(--muted);">Verified at publish time</span>
       {% endif %}
     </div>
-
-    <div class="test-result-{{ p.id }}" style="display:none; margin-top:6px; font-size:12px;"></div>
   </div>
   {% endfor %}
 </div>
 
+
 <div style="margin-top: calc(var(--gap) * 2); font-size: 12px; color: var(--muted);">
   Credentials are stored locally. Test calls are lightweight probes (no data generated or billed).
+  Generation readiness shows the result of the last Phase 1C smoke test.
   &nbsp;|&nbsp; <a href="/setup">Factory Setup →</a>
 </div>
 
@@ -263,8 +367,8 @@
 function testProvider(btn, provider) {
   btn.disabled = true;
   btn.textContent = 'Testing…';
-  var resultEl = document.querySelector('.test-result-' + provider);
-  if (resultEl) { resultEl.style.display = 'none'; }
+  var resultEl = document.getElementById('tr-' + provider);
+  if (resultEl) resultEl.style.display = 'none';
 
   fetch('/api/providers/verify/' + provider, { method: 'POST' })
     .then(function(r) { return r.json(); })

@@ -388,6 +388,16 @@ _CONTENT_PROVIDERS = [
 ]
 
 _CONTENT_PROVIDER_SETUP = {
+    "openai": {
+        "label": "OpenAI", "description": "Direct image generation (gpt-image-1)",
+        "cred_label": "OpenAI API Key",
+        "instructions": (
+            "Go to platform.openai.com → API Keys → Create new secret key. "
+            "Paste the key below. Used when THUMBNAIL_IMAGE_PROVIDER=openai for direct image generation."
+        ),
+        "placeholder": "sk-...",
+        "env_var": "OPENAI_API_KEY",
+    },
     "openrouter": {
         "label": "OpenRouter", "description": "LLM model routing",
         "cred_label": "OpenRouter API Key",
@@ -549,6 +559,32 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
 @app.route("/providers")
 def providers_page():
     db = _db_path()
+
+    # Build provider_catalog (new data model — drives the UI)
+    try:
+        from hypogeum.dashboard_api import get_provider_catalog
+        catalog = get_provider_catalog(db_path=db)
+    except Exception:
+        catalog = []
+    by_id = {e.provider: e for e in catalog}
+
+    # AI / content providers — flat list in display order
+    _AI_ORDER = ("openai", "openrouter", "muapi", "elevenlabs", "freepik")
+    ai_providers = [by_id[p] for p in _AI_ORDER if p in by_id]
+
+    # Video providers — paired: (muapi_delegated, direct_placeholder)
+    _VIDEO_NAMES = ("seedance", "veo", "kling", "runway")
+    video_provider_pairs = []
+    for name in _VIDEO_NAMES:
+        pair = {
+            "name":      name,
+            "delegated": by_id.get(name),
+            "official":  by_id.get(f"{name}_official"),
+        }
+        if pair["delegated"] or pair["official"]:
+            video_provider_pairs.append(pair)
+
+    # Publishing — keep the existing _build_providers path (OAuth complexity)
     try:
         all_secrets = list_secret_profiles(db_path=db)
         creds_map = {s.provider: s for s in all_secrets if s.status == "active"}
@@ -556,20 +592,21 @@ def providers_page():
         creds_map = {}
     try:
         from hypogeum.dashboard_api import get_cost_summary
-        costs = get_cost_summary(db_path=db)
-        cost_map = costs.by_provider
+        cost_map = get_cost_summary(db_path=db).by_provider
     except Exception:
         cost_map = {}
     try:
         verif_map = get_all_provider_statuses(db_path=db)
     except Exception:
         verif_map = {}
-    content_providers  = _build_providers(list(_CONTENT_PROVIDERS),  creds_map, cost_map, verif_map)
     platform_providers = _build_providers(list(_PLATFORM_PROVIDERS), creds_map, cost_map, verif_map)
+
     return render_template(
         "providers.html",
-        content_providers=content_providers,
+        ai_providers=ai_providers,
+        video_provider_pairs=video_provider_pairs,
         platform_providers=platform_providers,
+        connectable_providers=_VALID_CONTENT_PROVIDERS,
     )
 
 

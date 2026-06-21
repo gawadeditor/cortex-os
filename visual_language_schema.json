@@ -1,0 +1,357 @@
+{
+  "schema_version": "1.0",
+  "system": "hypogeum_visual_language",
+  "extracted_from": "hypogeum/brand/references/image.png",
+  "extracted_date": "2026-06-21",
+  "applies_to": ["thumbnail_director", "image_prompt_director", "video_prompt_director"],
+
+  "subject_hierarchy": {
+    "eye_path_order": ["hook_text", "hero_subject", "environment", "wordmark"],
+    "subjects": {
+      "hook_text": {
+        "eye_priority": 1,
+        "frame_area_pct": 22,
+        "position": "left_35pct",
+        "dominance_mechanism": "contrast_ratio",
+        "note": "Text wins eye-priority through contrast, not through size"
+      },
+      "hero_subject": {
+        "eye_priority": 2,
+        "frame_area_pct_min": 30,
+        "frame_area_pct_max": 40,
+        "position": "right_55_to_65pct",
+        "dominance_mechanism": "detail_density_and_scale"
+      },
+      "environment": {
+        "eye_priority": 3,
+        "frame_area_pct": 40,
+        "position": "full_frame_background",
+        "dominance_mechanism": "none — recessive, textured, dark"
+      },
+      "wordmark": {
+        "eye_priority": 4,
+        "frame_area_pct": 2,
+        "position": "top_center",
+        "note": "Overlay applied in production, not rendered in the scene"
+      }
+    }
+  },
+
+  "layer_hierarchy": {
+    "foreground": {
+      "elements": ["stone_fragments", "tool_handles", "pottery_edges", "debris"],
+      "depth_meters": [0, 0.5],
+      "sharpness": "slight_softness",
+      "temperature": "warm_ambient_spill",
+      "frame_rule": "partially_cut_off_by_bottom_edge",
+      "required": true
+    },
+    "midground": {
+      "elements": ["hero_subject", "embedding_stone", "typography"],
+      "depth_meters": [0.5, 2.0],
+      "sharpness": "sharp — focal_plane",
+      "temperature": "warm_amber_key_lit",
+      "occlusion_required": true,
+      "required": true
+    },
+    "background": {
+      "elements": ["chamber_walls", "carved_diagrams", "stone_niches", "ancient_shelving"],
+      "depth_meters": [2.0, 8.0],
+      "sharpness": "soft — texture_visible_not_sharp",
+      "brightness_max_avg_rgb": 40,
+      "required": true
+    },
+    "atmosphere": {
+      "elements": ["torch_bloom_upper_left", "volumetric_dust", "warm_particles", "vignette"],
+      "sharpness": "non-physical",
+      "temperature": "orange_amber",
+      "vignette_strength": 0.55,
+      "corner_brightness_max": 10,
+      "required": true
+    }
+  },
+
+  "depth_model": {
+    "focal_plane": "hero_subject_face",
+    "blur_zones": {
+      "in_focus": "hero_subject_and_typography",
+      "soft_foreground": "debris_and_tool_edges",
+      "soft_background": "chamber_walls",
+      "lost_detail": "deep_corners"
+    },
+    "depth_of_field_factor": {
+      "value": "1.5_to_2.0",
+      "note": "Subtle separation — not portrait bokeh. Preserve background texture."
+    },
+    "occlusion": {
+      "required": true,
+      "description": "Hero subject partially embedded in or emerging from stone at one or more edges",
+      "minimum_edges_occluded": 1,
+      "preferred_occlusion_edge": "left",
+      "effect": "creates_discovery_reading_not_product_shot"
+    },
+    "silhouette_test": {
+      "description": "Hero subject must be identifiable in B&W silhouette at 320px thumbnail width",
+      "required_readability": "category_level",
+      "example": "Readable as 'large circular ancient machine'"
+    }
+  },
+
+  "lighting_model": {
+    "key_light": {
+      "source_type": "torch_or_oil_lamp",
+      "position": "upper_left_off_camera",
+      "direction_degrees": 45,
+      "color_temperature_K": 2400,
+      "color_hex_approx": "#D4620A",
+      "character": "raking — travels nearly parallel to subject surface to reveal texture",
+      "fall_off": "rapid — right side falls to near-black"
+    },
+    "rim_light": {
+      "position": "right_edge_of_hero_subject",
+      "purpose": "silhouette_separation_from_background",
+      "intensity": "subtle",
+      "color": "slightly_cooler_than_key",
+      "degrees_from_key": 130
+    },
+    "practical_light": {
+      "type": "torch_flame",
+      "position": "upper_left_visible_in_frame",
+      "visibility": "required — must be visible or strongly implied",
+      "bloom_area": "top_left_10pct_of_frame",
+      "color": "saturated_orange_amber"
+    },
+    "fill_light": {
+      "intensity": "near_zero",
+      "rule": "Shadows must be dark. Fill destroys chiaroscuro."
+    },
+    "shadow_behavior": {
+      "density": "near_black",
+      "shadow_rgb_range_min": [5, 3, 1],
+      "shadow_rgb_range_max": [30, 20, 10],
+      "shadow_temperature": "warm — not grey, not blue",
+      "edge_type": "soft_gradient"
+    },
+    "calibration": {
+      "torch_zone_avg_rgb": [103, 55, 11],
+      "upper_left_corner_avg_rgb": [70, 37, 7],
+      "lower_right_corner_avg_rgb": [21, 11, 2],
+      "wordmark_zone_avg_rgb": [13, 10, 6],
+      "pct_pixels_below_brightness_25": 66
+    }
+  },
+
+  "color_model": {
+    "primary_palette": [
+      {"name": "deep_black",    "hex": "#080500", "rgb": [8, 5, 0],       "role": "shadow_base"},
+      {"name": "dark_amber",    "hex": "#614520", "rgb": [97, 69, 32],    "role": "warm_shadow_midtone"},
+      {"name": "gold_dark",     "hex": "#908633", "rgb": [144, 134, 51],  "role": "aged_gold_secondary"},
+      {"name": "gold_light",    "hex": "#C7B680", "rgb": [199, 182, 128], "role": "primary_gold_text_highlights"},
+      {"name": "warm_white",    "hex": "#E8D4A0", "rgb": [232, 212, 160], "role": "maximum_highlight_near_specular"}
+    ],
+    "secondary_palette": [
+      {"name": "verdigris",     "hex": "#6B8040", "role": "aged_bronze_patina_only"},
+      {"name": "torch_orange",  "hex": "#D4620A", "role": "practical_light_source"},
+      {"name": "stone_texture", "hex": "#3D2810", "role": "wall_and_stone_surfaces"}
+    ],
+    "forbidden_colors": [
+      {"name": "cool_grey",     "reason": "reads as studio not underground"},
+      {"name": "pure_blue",     "reason": "destroys warm atmosphere"},
+      {"name": "pure_white",    "reason": "no surface in the scene should be pure white"},
+      {"name": "saturated_red", "reason": "outside brand palette"},
+      {"name": "pure_black",    "reason": "must have warm tint even in darkest shadow"}
+    ],
+    "contrast_axis": {
+      "description": "Warm amber illumination vs deep warm shadow — luminance only, no hue contrast",
+      "primary": "warm_lit_vs_warm_dark",
+      "forbidden_axis": "warm_vs_cool"
+    },
+    "temperature_split": {
+      "lit_areas_K": 2400,
+      "shadow_areas_K": 3500,
+      "note": "Even shadows are warm. No area is cool."
+    },
+    "channel_constraints": {
+      "red_blue_ratio_minimum": 2.5,
+      "applies_to": "all_illuminated_areas",
+      "note": "R/B ratio > 2.5 in lit areas. Shadow areas: R/B > 2.0 minimum."
+    }
+  },
+
+  "typography_relationship": {
+    "text_vs_subject_balance": {
+      "text_frame_area_pct": 22,
+      "subject_frame_area_pct": 38,
+      "text_eye_priority": "first — despite smaller area, wins on contrast",
+      "breathing_gap_pct": [5, 8],
+      "text_must_not_overlap_subject": true
+    },
+    "scale_ratios": {
+      "emphasis_to_headline_height_ratio_min": 2.5,
+      "emphasis_to_headline_height_ratio_target": 3.0,
+      "measured_in_reference": 3.2,
+      "emphasis_height_pct_of_frame": [30, 35],
+      "headline_height_pct_of_frame": [10, 12]
+    },
+    "integration_method": {
+      "mode": "material_integrated",
+      "properties": [
+        "letter_surface_matches_scene_material (cracked stone, aged gold)",
+        "text_receives_key_light_from_same_direction_as_scene",
+        "text_casts_shadow_onto_background",
+        "text_is_NOT_a_flat_graphic_overlay"
+      ]
+    },
+    "positioning": {
+      "text_left_boundary_pct": 2,
+      "text_right_boundary_pct": 35,
+      "headline_vertical_position": "upper_text_zone",
+      "emphasis_vertical_position": "lower_text_zone",
+      "text_zone_vertical_range": [0.12, 0.90]
+    },
+    "typography_font_style": {
+      "headline": {"weight": "light_to_regular", "style": "serif", "brand_font": "Cinzel"},
+      "emphasis": {"weight": "bold_to_extrabold",  "style": "serif", "brand_font": "Cinzel Semibold"}
+    },
+    "forbidden": [
+      "text_backing_box",
+      "text_panel",
+      "lower_third_styling",
+      "subtitle_styling",
+      "pure_white_text",
+      "text_overlapping_hero_subject"
+    ]
+  },
+
+  "thumbnail_laws": [
+    {
+      "id": "LAW_01",
+      "name": "66% Darkness Rule",
+      "rule": "66% or more of image pixels must be below brightness 25 (near-black)",
+      "measurement": "pixel brightness histogram",
+      "threshold": 0.66,
+      "failure_mode": "Image reads as well-lit room, not underground discovery"
+    },
+    {
+      "id": "LAW_02",
+      "name": "Single Warm Key Light — No Fill",
+      "rule": "One warm key light, near-zero fill. Shadows must be deep.",
+      "failure_mode": "Multiple light sources or fill light destroys chiaroscuro"
+    },
+    {
+      "id": "LAW_03",
+      "name": "Text Reads First at 320px",
+      "rule": "Hook text must be the first eye attractor at 320px thumbnail width",
+      "mechanism": "warm_gold_vs_near_black_contrast",
+      "failure_mode": "Mechanism competes with or beats text for first attention"
+    },
+    {
+      "id": "LAW_04",
+      "name": "Hero Subject Is Discoverable, Not Displayed",
+      "rule": "Hero subject must be partially embedded in or emerging from environment",
+      "occlusion_edges_min": 1,
+      "failure_mode": "Subject floats freely on clean background — reads as product shot"
+    },
+    {
+      "id": "LAW_05",
+      "name": "No Empty Voids",
+      "rule": "Dark zones must be dark AND textured. Pure black (#000000) areas forbidden.",
+      "failure_mode": "Large flat-black areas read as compositing artifacts or missing assets"
+    },
+    {
+      "id": "LAW_06",
+      "name": "All Color Is Warm",
+      "rule": "No cool colors anywhere. Red/Blue ratio > 2.5 in all lit areas.",
+      "exception": "Vanishing trace of cool in deepest shadow — not visible at thumbnail scale",
+      "failure_mode": "Shadow areas go cool grey/blue — destroys warm underground atmosphere"
+    },
+    {
+      "id": "LAW_07",
+      "name": "Left-Text Right-Subject Composition Axis",
+      "rule": "Text always left (≤35% of frame). Subject always right (≥55% rightward). Never inverted.",
+      "failure_mode": "Inverted or centered composition breaks designed eye-path"
+    },
+    {
+      "id": "LAW_08",
+      "name": "Zone Compliance",
+      "rule": "Top 12% near-pure black (wordmark overlay zone). Bottom 10% clean.",
+      "top_zone_max_avg_brightness": 20,
+      "bottom_zone_constraint": "no_text_no_subject_detail",
+      "failure_mode": "Content in reserved zones — wordmark becomes illegible"
+    },
+    {
+      "id": "LAW_09",
+      "name": "Silhouette Test",
+      "rule": "Hero subject must be identifiable in B&W silhouette at 320px width",
+      "test": "convert_to_BW_scale_to_320px_identify_category",
+      "failure_mode": "Subject blends into background at thumbnail scale"
+    },
+    {
+      "id": "LAW_10",
+      "name": "Four Layers Required for Premium",
+      "rule": "Premium thumbnail requires: base_scene + hero_subject + fx + typography layers",
+      "validator": "thumbnail_compositor.validate_premium_thumbnail()",
+      "failure_mode": "Single-pass generation cannot optimize all four dimensions simultaneously"
+    }
+  ],
+
+  "prompt_constraints": {
+    "thumbnail_director": {
+      "preamble": "The Hypogeum Chronicles visual language requires the following constraints on all premium main-episode thumbnails:",
+      "constraints": [
+        "Composition: text left 35%, hero subject right 55-65%, 5-8% breathing gap between them.",
+        "Darkness: 60-70% of the frame is near-black. Light is surgical — used only on focal subjects.",
+        "Key light: single warm amber torch from upper-left (2200K-2700K). No fill. Deep shadows.",
+        "Practical: torch flame or lamp glow visible in upper-left of frame.",
+        "Subject: partially embedded in stone at one or more edges. Not a product shot.",
+        "Text: aged gold material (cracked stone surface), receives scene lighting, no backing box.",
+        "Color: all warm. R/B ratio > 2.5 in lit areas. No cool grey, no blue, no pure black voids.",
+        "Zones: top 12% near-pure black. Bottom 10% clean. Four corners near-black (vignette).",
+        "Text scale: emphasis word 3× taller than headline. Both serif, warm gold, material-integrated.",
+        "Silhouette: hero subject identifiable in B&W at 320px width."
+      ]
+    },
+    "image_prompt_director": {
+      "preamble": "All episode hero images and B-roll stills follow the Hypogeum Chronicles visual language:",
+      "constraints": [
+        "Environment: dark underground stone chamber or ancient vault. Near-black overall.",
+        "Lighting: single warm torch or oil lamp from upper-left. Deep chiaroscuro. No fill.",
+        "Atmosphere: volumetric torch light, warm dust particles, strong vignette on all corners.",
+        "Subject occlusion: partially embedded in or emerging from environment — not displayed.",
+        "Color: all warm amber. No cool tones. Even deepest shadows have warm undertone.",
+        "Depth: four layers — foreground debris, midground subject, background walls, atmospheric haze.",
+        "Foreground: stone fragments or tools partially cut off by frame edge.",
+        "Background: rough stone walls with faint carved detail — dark, textured, not competing.",
+        "No empty black voids — dark areas must have stone grain or atmospheric texture."
+      ]
+    },
+    "video_prompt_director": {
+      "preamble": "All video shots in The Hypogeum Chronicles series follow this visual language for consistency with the thumbnail and brand:",
+      "constraints": [
+        "Color grade: deep warm amber. Single-source torch/lamp lighting. No ambient fill.",
+        "Shadow depth: 60-70% of frame near-black. Light placed surgically on subject and focal detail.",
+        "Practical lights: torch flames, oil lamps, or candle light — visible in frame when possible.",
+        "Camera movement: slow and deliberate. Reveals through movement, not through brightness.",
+        "Depth: always establish foreground / midground / background separation.",
+        "Subject integration: subjects emerge from or are embedded in environment — not isolated.",
+        "Atmosphere: dust particles in light beams, volumetric haze, warm amber god rays.",
+        "Vignette: all shots receive darkened corners in grade — center is focal, edges recede.",
+        "No cool tones: no blue sky, no grey ambient, no fluorescent sources. Everything warm.",
+        "Stone surfaces: rough, carved texture. Bronze/copper objects: warm patina with verdigris accents."
+      ]
+    }
+  },
+
+  "composite_gap_analysis": {
+    "reference_vs_ep003_A_layered": {
+      "near_black_pixel_pct": {"reference": 66, "composite": 42, "gap": "composite_too_bright"},
+      "left_text_zone_avg_brightness": {"reference": 58, "composite": 89, "gap": "screen_blend_lifting_darks"},
+      "torch_practical_visible": {"reference": true, "composite": false, "gap": "minor"},
+      "hero_subject_occlusion": {"reference": "left_edge_embedded_in_stone", "composite": "floating_right", "gap": "critical"},
+      "silhouette_at_320px": {"reference": "strong", "composite": "strong", "gap": "none"},
+      "text_material": {"reference": "cracked_stone_gold", "composite": "cracked_stone_gold", "gap": "close_match"},
+      "zone_compliance": {"reference": "clean", "composite": "minor_glow_in_top_zone", "gap": "minor"}
+    },
+    "primary_fix": "Compositor warmth grade is brightening shadow areas too aggressively. Reference achieves 66% near-black; composite achieves ~42%. Reduce contrast enhance, increase vignette strength, or add a shadow-floor clamp step that hard-clips pixels below 30 brightness to the range (8-20, 5-14, 2-8) before final save."
+  }
+}

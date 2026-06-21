@@ -3,6 +3,21 @@ hypogeum/agents/thumbnail_generation_agent.py — Thumbnail MUAPI generation (Pr
 
 Extracted from thumbnail_director.py Phase 2.
 
+Thumbnail mode routing
+----------------------
+PREMIUM  (multi_layer_composite)   — candidate["composite_mode"] = True AND layer_prompts present.
+    Routed to generate_and_composite() in thumbnail_compositor.
+    4 focused MUAPI calls (base_scene, hero_subject, fx, typography) + PIL screen-blend composite.
+    Main path for all premium main-episode thumbnails.
+
+FAST     (single_pass_integrated)  — candidate["composite_mode"] falsy, typography_integration=embedded.
+    Routed to _generate_for_deliverable() → generate_thumbnail() with embedded typography prompt.
+    Single MUAPI call. Used for rapid iteration, cost-capped runs, shorts.
+
+LEGACY   (pil_composited_text)     — candidate["composite_mode"] falsy, typography_integration=composited.
+    Routed to _generate_for_deliverable() → generate_thumbnail() + PIL text overlay.
+    Fallback only.
+
 Owns:
 - Iterating ranked candidates for each deliverable (main + shorts) in rank order
 - Per-candidate retry loop: up to _MAX_ATTEMPTS_PER_CANDIDATE attempts per candidate

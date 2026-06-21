@@ -1,22 +1,34 @@
 """
 hypogeum/agents/thumbnail_compositor.py — Multi-layer thumbnail compositor
 
-Evolves the thumbnail pipeline from single-pass image generation to a
-layered compositing workflow:
+Thumbnail mode registry
+-----------------------
+THUMBNAIL_MODE_PREMIUM  = "multi_layer_composite"
+    Main path for all premium main-episode thumbnails.
+    Generates 4 independent layers via MUAPI, composites with PIL screen-blend.
+    Required layers: base_scene, hero_subject, fx, typography.
+    Use generate_and_composite() with candidate["composite_mode"] = True.
 
+THUMBNAIL_MODE_FAST     = "single_pass_integrated"
+    Fast/low-cost mode. Single MUAPI call with embedded typography instruction.
+    Used for rapid iteration, cost-capped runs, or shorts.
+    Falls through the _generate_for_deliverable() path in thumbnail_generation_agent.
+
+THUMBNAIL_MODE_LEGACY   = "pil_composited_text"
+    Fallback only. Single image generation + PIL text overlay (old behaviour).
+    Only reached when typography_plan is present but composite_mode is False.
+
+Layered compositing workflow (PREMIUM only):
   Layer 1 — base_scene:    Environment plate only (no subject, no text)
   Layer 2 — hero_subject:  Isolated subject on dark background
   Layer 3 — fx:            Atmospheric effects on black (screen blended)
   Layer 4 — typography:    Distressed gold text on black (screen blended)
-  → PIL composite → color grade → vignette → wordmark
-
-This produces thumbnail-design quality instead of scene-generation quality
-because each layer is optimised for its single job and compositing with
-screen blend mode gives natural integration.
+  → PIL composite → color grade → vignette
 
 Public API:
     build_layer_prompts(concept, composition_plan) -> dict
-    generate_and_composite(candidate, config, episode_id, output_dir, log) -> Path
+    generate_and_composite(candidate, config, episode_id, output_dir, deliverable_id, log) -> bool
+    validate_premium_thumbnail(output_dir, deliverable_id) -> dict
 """
 from __future__ import annotations
 
@@ -25,6 +37,15 @@ from typing import Optional
 
 from hypogeum.config import Config
 from hypogeum.muapi import _generate_thumbnail_with_model, _normalize_thumbnail
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail mode constants
+# ---------------------------------------------------------------------------
+
+THUMBNAIL_MODE_PREMIUM = "multi_layer_composite"    # main path
+THUMBNAIL_MODE_FAST    = "single_pass_integrated"   # fast/cost mode
+THUMBNAIL_MODE_LEGACY  = "pil_composited_text"      # fallback only
 
 
 # ---------------------------------------------------------------------------
@@ -398,3 +419,52 @@ def generate_and_composite(
              output=str(out_path),
              size_kb=round(out_path.stat().st_size / 1024) if out_path.exists() else 0)
     return out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Validator
+# ---------------------------------------------------------------------------
+
+def validate_premium_thumbnail(output_dir: Path, deliverable_id: str) -> dict:
+    """
+    Validate that a premium (multi_layer_composite) thumbnail is complete.
+
+    Checks for:
+      - All four layer files under thumbnails/layers/
+      - Final composite at thumbnails/{deliverable_id}.jpg
+
+    Returns:
+        {
+          "valid": bool,
+          "deliverable_id": str,
+          "layers": {layer_name: {"path": str, "exists": bool, "size_kb": int}},
+          "composite": {"path": str, "exists": bool, "size_kb": int},
+          "missing": [str],   # names of missing items
+        }
+    """
+    layer_dir = output_dir / "thumbnails" / LAYERS_SUBDIR
+    composite  = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+
+    layers_result: dict = {}
+    missing: list[str] = []
+
+    for name in LAYER_NAMES:
+        p = layer_dir / f"{deliverable_id}_{name}.jpg"
+        exists = p.exists()
+        size_kb = round(p.stat().st_size / 1024) if exists else 0
+        layers_result[name] = {"path": str(p), "exists": exists, "size_kb": size_kb}
+        if not exists:
+            missing.append(f"layer:{name}")
+
+    comp_exists = composite.exists()
+    comp_size   = round(composite.stat().st_size / 1024) if comp_exists else 0
+    if not comp_exists:
+        missing.append("composite")
+
+    return {
+        "valid":          len(missing) == 0,
+        "deliverable_id": deliverable_id,
+        "layers":         layers_result,
+        "composite":      {"path": str(composite), "exists": comp_exists, "size_kb": comp_size},
+        "missing":        missing,
+    }

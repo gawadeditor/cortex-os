@@ -116,8 +116,7 @@ _IMAGE_MODELS: frozenset[str] = frozenset({
     "flux-kontext-dev-i2i",
 })
 
-# GPT Image 2 models — different payload (resolution + quality) and response shape
-# (output.image_url string, not outputs[] list)
+# GPT Image 2 models — require resolution + quality in payload (outputs[] same as others)
 _GPT_IMAGE_2_MODELS: frozenset[str] = frozenset({
     "gpt-image-2-text-to-image",
     "gpt-image-2-image-to-image",
@@ -1612,18 +1611,13 @@ def _generate_thumbnail_with_model(
             f"(model={model}): {failure_reason}"
         )
 
-    # Extract image URL — response shape differs by model family
-    if model in _GPT_IMAGE_2_MODELS:
-        # GPT Image 2: result is {"image_url": "https://...", ...}
-        image_url = result.get("image_url", "")
-    else:
-        # Flux et al: result is {"outputs": ["https://..."], ...}
-        outputs = result.get("outputs", [])
-        if not outputs:
-            raise MUAPIError(
-                f"Thumbnail result has no outputs[] for {deliverable_id!r} (model={model})"
-            )
-        image_url = outputs[0] if isinstance(outputs[0], str) else outputs[0].get("url", "")
+    # Extract image URL — all models return outputs[] array via MUAPI
+    outputs = result.get("outputs", [])
+    if not outputs:
+        raise MUAPIError(
+            f"Thumbnail result has no outputs[] for {deliverable_id!r} (model={model})"
+        )
+    image_url = outputs[0] if isinstance(outputs[0], str) else outputs[0].get("url", "")
 
     if not image_url:
         raise MUAPIError(

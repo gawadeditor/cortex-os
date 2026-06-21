@@ -3376,14 +3376,64 @@ def analytics_episode_page(episode_id):
 def analytics_import_page():
     from hypogeum.dashboard_api import get_channel_summaries
     from hypogeum.dashboard_runs import list_episodes
+    from hypogeum.youtube_analytics import get_last_youtube_sync
     channels = get_channel_summaries(db_path=_db_path())
     episodes = list_episodes(db_path=_db_path(), limit=50)
     overview = get_analytics_overview(db_path=_db_path())
     flash    = request.args.get("import_result")
+    # YouTube connection state — token present in config or env
+    youtube_connected = False
+    try:
+        from hypogeum.config import Config as _Cfg
+        _cfg = _Cfg()
+        youtube_connected = bool(
+            _cfg.YOUTUBE_REFRESH_TOKEN
+            and _cfg.YOUTUBE_CLIENT_ID
+            and _cfg.YOUTUBE_CLIENT_SECRET
+        )
+    except Exception:
+        pass
+    youtube_last_synced = get_last_youtube_sync(db_path=_db_path())
     return render_template("analytics_import.html",
                            channels=channels, episodes=episodes,
                            valid_platforms=sorted(_VALID_PLATFORMS),
-                           flash=flash, overview=overview)
+                           flash=flash, overview=overview,
+                           youtube_connected=youtube_connected,
+                           youtube_last_synced=youtube_last_synced)
+
+
+@app.route("/api/analytics/sync/youtube", methods=["POST"])
+def api_analytics_sync_youtube():
+    """
+    Refresh YouTube OAuth token and pull real analytics for all published videos.
+    Stores results in platform_analytics with source='api'.
+    Returns {ok, synced_count, skipped_count, errors, synced_at, episodes}.
+    """
+    from hypogeum.youtube_analytics import sync_youtube_analytics
+    from hypogeum.config import Config as _Cfg
+    try:
+        cfg = _Cfg()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Config error: {exc}"}), 500
+
+    if not (cfg.YOUTUBE_REFRESH_TOKEN
+            and cfg.YOUTUBE_CLIENT_ID
+            and cfg.YOUTUBE_CLIENT_SECRET):
+        return jsonify({
+            "ok": False,
+            "error": "YouTube not connected — YOUTUBE_REFRESH_TOKEN, "
+                     "YOUTUBE_CLIENT_ID, and YOUTUBE_CLIENT_SECRET are required.",
+        }), 400
+
+    window_days = 28
+    if request.is_json and request.json:
+        try:
+            window_days = int(request.json.get("window_days", 28))
+        except (TypeError, ValueError):
+            pass
+    result = sync_youtube_analytics(cfg, db_path=_db_path(), window_days=window_days)
+    status = 200 if result.get("ok") else 502
+    return jsonify(result), status
 
 
 @app.route("/analytics/import", methods=["POST"])

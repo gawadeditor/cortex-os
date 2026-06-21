@@ -46,8 +46,8 @@
 </div>
 
 <div class="page-header">
-  <h1>Import Analytics</h1>
-  <span class="page-meta">Add real or demo performance data for any episode</span>
+  <h1>Analytics</h1>
+  <span class="page-meta">Sync from YouTube or import data manually</span>
 </div>
 
 {# Flash messages #}
@@ -72,17 +72,89 @@
 </div>
 {% endif %}
 
-{# ── Import guidance ── #}
+{# ── YouTube auto-sync section (shown when connected) ── #}
+{% if youtube_connected %}
+<div class="card" style="margin-bottom:var(--gap); padding:14px 16px; border-color:#2ea043;">
+  <div class="card-title" style="color:#3fb950;">YouTube Analytics Sync</div>
+  <div style="font-size:13px; color:var(--muted); margin-bottom:10px; line-height:1.6;">
+    YouTube is connected. Pull real performance data for all published videos automatically —
+    no manual export or paste required.
+    {% if youtube_last_synced %}
+    <br><span style="font-size:12px;">Last synced: <strong style="color:var(--text);">{{ youtube_last_synced[:19] | replace("T", " ") }} UTC</strong></span>
+    {% else %}
+    <br><span style="font-size:12px; color:#d29922;">Never synced — click below to fetch your first real analytics.</span>
+    {% endif %}
+  </div>
+  <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+    <button id="btn-yt-sync" class="btn btn-save" onclick="syncYouTube(event)" style="min-width:180px;">
+      Sync YouTube Analytics
+    </button>
+    <span id="yt-sync-status" style="font-size:13px; color:var(--muted);"></span>
+  </div>
+  <div id="yt-sync-result" style="margin-top:10px; font-size:12px; display:none;"></div>
+</div>
+{% else %}
+<div class="card" style="margin-bottom:var(--gap); padding:12px 16px; opacity:.75;">
+  <div class="card-title">YouTube Analytics Sync</div>
+  <div style="font-size:13px; color:var(--muted);">
+    Connect YouTube on the
+    <a href="/platforms/connect/youtube">Platforms page</a>
+    to enable automatic analytics sync.
+    Until then, use manual import below.
+  </div>
+</div>
+{% endif %}
+
+<script>
+function syncYouTube(event) {
+  event.preventDefault();
+  var btn = document.getElementById('btn-yt-sync');
+  var status = document.getElementById('yt-sync-status');
+  var result = document.getElementById('yt-sync-result');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  status.textContent = '';
+  result.style.display = 'none';
+  fetch('/api/analytics/sync/youtube', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({window_days: 28}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    btn.textContent = 'Sync YouTube Analytics';
+    if (d.ok) {
+      status.textContent = '✓ Synced ' + d.synced_count + ' video' + (d.synced_count !== 1 ? 's' : '');
+      status.style.color = '#3fb950';
+      if (d.errors && d.errors.length > 0) {
+        result.style.display = 'block';
+        result.style.color = '#d29922';
+        result.textContent = 'Warnings: ' + d.errors.join('; ');
+      }
+      if (d.synced_count > 0) {
+        setTimeout(function() { window.location.reload(); }, 1500);
+      }
+    } else {
+      status.textContent = '✗ Sync failed: ' + (d.error || 'unknown error');
+      status.style.color = 'var(--red)';
+    }
+  })
+  .catch(function(e) {
+    btn.disabled = false;
+    btn.textContent = 'Sync YouTube Analytics';
+    status.textContent = '✗ Network error: ' + e.message;
+    status.style.color = 'var(--red)';
+  });
+}
+</script>
+
+{# ── Manual Import section ── #}
 <div class="card" style="margin-bottom:var(--gap); padding:12px 16px;">
-  <div class="card-title">How to import</div>
-  <div style="display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted);">
-    <div><strong style="color:var(--text);">1.</strong> Select the episode and platform below.</div>
-    <div><strong style="color:var(--text);">2.</strong> Choose an import method — demo data for testing, or paste your real export.</div>
-    <div><strong style="color:var(--text);">3.</strong> Submit. Insights are extracted automatically.</div>
-    <div style="margin-top:4px; font-size:12px;">
-      Real data: export CSV or JSON from your platform dashboard and paste it directly.
-      Data imported here does not connect to or affect any social platform.
-    </div>
+  <div class="card-title">Manual Import</div>
+  <div style="font-size:13px; color:var(--muted);">
+    Use this if YouTube sync is unavailable, or to import data from TikTok, Instagram, or Facebook.
+    Export CSV or JSON from your platform dashboard and paste it below.
   </div>
 </div>
 

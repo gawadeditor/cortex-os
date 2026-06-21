@@ -282,23 +282,36 @@
 
 
 {# ─────────────────────────────────────────────────────────── #}
-{# AI / Content Providers                                       #}
+{# AI Image Providers                                            #}
 {# ─────────────────────────────────────────────────────────── #}
-<div class="section-label">AI Content Providers</div>
+<div class="section-label">AI Image Providers</div>
 <div class="provider-grid">
-  {% for entry in ai_providers %}
+  {% for entry in ai_image_providers %}
     {{ provider_card(entry) }}
   {% endfor %}
 </div>
 
 
 {# ─────────────────────────────────────────────────────────── #}
-{# Video Providers (pairs: MUAPI-delegated + official placeholder) #}
+{# AI Audio Providers                                            #}
+{# ─────────────────────────────────────────────────────────── #}
+{% if ai_audio_providers %}
+<div class="section-label" style="margin-top: calc(var(--gap) * 1.5);">AI Audio Providers</div>
+<div class="provider-grid">
+  {% for entry in ai_audio_providers %}
+    {{ provider_card(entry) }}
+  {% endfor %}
+</div>
+{% endif %}
+
+
+{# ─────────────────────────────────────────────────────────── #}
+{# Video Providers (pairs: MUAPI-delegated + direct official)    #}
 {# ─────────────────────────────────────────────────────────── #}
 <div class="section-label" style="margin-top: calc(var(--gap) * 1.5);">
   Video Providers
   <span style="font-weight:400; font-size:11px; text-transform:none; letter-spacing:0;">
-    — each provider shows via-MUAPI access (current) and direct official API slot (future)
+    — left: via MUAPI aggregator &nbsp;|&nbsp; right: direct official API
   </span>
 </div>
 <div class="provider-grid">
@@ -367,9 +380,12 @@
       </div>
     </div>
     {% elif p.auth == 'oauth2_meta' %}
-    <div class="oauth-notice" style="margin-top:8px;">
-      {{ p.label }} uses Meta Graph API. Generate a long-lived token from Meta for Developers.
-      {% if p.requires %}Required: {{ p.requires | join(', ') }}.{% endif %}
+    <div class="status-note" style="margin-top:6px;">
+      Meta Graph API. Required: {{ p.requires | join(', ') if p.requires else 'META_ACCESS_TOKEN' }}.
+    </div>
+    {% elif p.id == 'tiktok' %}
+    <div class="status-note" style="margin-top:6px;">
+      TikTok for Developers. Required: TIKTOK_ACCESS_TOKEN, TIKTOK_CLIENT_KEY.
     </div>
     {% endif %}
 
@@ -379,15 +395,16 @@
 
     <div class="pc-actions">
       <a href="/platforms/connect/{{ p.id }}" class="btn-provider">
-        {% if vstatus == 'verified' %}Re-authorize{% elif vstatus == 'saved' %}Reconnect{% else %}Connect{% endif %}
+        {% if vstatus == 'verified' %}Re-authorize{% elif vstatus == 'saved' %}Reconnect{% else %}OAuth Setup{% endif %}
       </a>
-      {% if p.id not in ('tiktok', 'instagram', 'facebook') %}
-      <button class="btn-test" onclick="testProvider(this, '{{ p.id }}')"
-              title="Verify credential">Test</button>
-      <div class="test-result" id="tr-{{ p.id }}"></div>
-      {% else %}
-      <span style="font-size:11px; color:var(--muted);">Verified at publish time</span>
+      {# Secret Profile credential flow for Meta + TikTok providers (Phase 1J) #}
+      {% if p.id in publishing_sp_providers %}
+      <a href="/providers/content/connect/{{ p.id }}" class="btn-provider"
+         title="Save credential via Secret Profile">Save Credential</a>
       {% endif %}
+      <button class="btn-test" onclick="testProvider(this, '{{ p.id }}')"
+              title="Verify credential via live API probe">Test</button>
+      <div class="test-result" id="tr-{{ p.id }}"></div>
     </div>
   </div>
   {% endfor %}

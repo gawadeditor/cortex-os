@@ -665,9 +665,13 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
         entry["connected"] = vstatus == "verified"
         # Distinguish real network probes from format/string checks.
         # youtube probe only checks token string length, not API reachability.
-        # instagram/facebook/tiktok have no probe at all.
-        real_probe_providers = {"openrouter", "elevenlabs", "muapi",
-                                "seedance", "runway", "kling", "veo"}
+        # facebook/instagram/tiktok now have Meta Graph API / TikTok API probes (Phase 1J).
+        real_probe_providers = {
+            "openrouter", "elevenlabs", "muapi",
+            "seedance", "runway", "kling", "veo",
+            "seedance_official", "runway_official", "kling_official", "veo_official",
+            "freepik", "facebook", "instagram", "tiktok",
+        }
         entry["real_probe"] = p["id"] in real_probe_providers
         result.append(entry)
     return result
@@ -685,9 +689,16 @@ def providers_page():
         catalog = []
     by_id = {e.provider: e for e in catalog}
 
-    # AI / content providers — flat list in display order
-    _AI_ORDER = ("openai", "openrouter", "muapi", "elevenlabs", "freepik")
-    ai_providers = [by_id[p] for p in _AI_ORDER if p in by_id]
+    # AI image providers — the four image-generation providers
+    _AI_IMAGE_ORDER = ("openai", "openrouter", "muapi", "freepik")
+    ai_image_providers = [by_id[p] for p in _AI_IMAGE_ORDER if p in by_id]
+
+    # AI audio providers — separate section
+    _AI_AUDIO_ORDER = ("elevenlabs",)
+    ai_audio_providers = [by_id[p] for p in _AI_AUDIO_ORDER if p in by_id]
+
+    # Legacy alias kept so any template references to ai_providers still resolve
+    ai_providers = ai_image_providers
 
     # Video providers — paired: (muapi_delegated, direct_placeholder)
     _VIDEO_NAMES = ("seedance", "veo", "kling", "runway")
@@ -730,12 +741,18 @@ def providers_page():
     except Exception:
         last_video_check = None
 
+    # Providers with Secret Profile connect forms in the Publishing section
+    publishing_sp_providers = {"facebook", "instagram", "tiktok"}
+
     return render_template(
         "providers.html",
-        ai_providers=ai_providers,
+        ai_providers=ai_providers,               # legacy alias = ai_image_providers
+        ai_image_providers=ai_image_providers,
+        ai_audio_providers=ai_audio_providers,
         video_provider_pairs=video_provider_pairs,
         platform_providers=platform_providers,
         connectable_providers=_VALID_CONTENT_PROVIDERS,
+        publishing_sp_providers=publishing_sp_providers,
         last_comparison=last_comparison,
         comparison_prompt=COMPARISON_PROMPT,
         last_video_check=last_video_check,

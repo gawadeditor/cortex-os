@@ -227,7 +227,7 @@ class Config:
     OPENROUTER_APP_NAME: str
     OPENROUTER_APP_URL: Optional[str]
     OPENROUTER_FALLBACK_MODEL: Optional[str]
-    OPENROUTER_IMAGE_MODEL: str        # default: openai/gpt-image-1 (THUMBNAIL_IMAGE_PROVIDER=openrouter)
+    OPENROUTER_IMAGE_MODEL: str        # default: openai/gpt-5-image-mini (THUMBNAIL_IMAGE_PROVIDER=openrouter)
     ANTHROPIC_API_KEY: Optional[str]  # Required when OpenRouter fallback is triggered
 
     # ------------------------------------------------------------------
@@ -381,7 +381,7 @@ class Config:
         self.OPENROUTER_APP_URL = _get_optional("OPENROUTER_APP_URL")
         self.OPENROUTER_FALLBACK_MODEL = _get_optional("OPENROUTER_FALLBACK_MODEL")
         self.OPENROUTER_IMAGE_MODEL = _get_optional(
-            "OPENROUTER_IMAGE_MODEL", default="openai/gpt-image-1"
+            "OPENROUTER_IMAGE_MODEL", default="openai/gpt-5-image-mini"
         )
         self.ANTHROPIC_API_KEY = _get_optional("ANTHROPIC_API_KEY")
 

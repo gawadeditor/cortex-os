@@ -1486,8 +1486,10 @@ def _generate_thumbnail_openrouter(
       headers     HTTP-Referer, X-Title               CONFIRMED
       modalities  ["image"]                           CONFIRMED (OpenRouter docs)
       model       openai/gpt-image-1                  CONFIRMED format; availability UNVERIFIED
-      response    choices[0].message.content[]        UNVERIFIED exact shape
-                  image part: type="image_url", image_url.url = CDN or data: URI
+      response    choices[0].message.images[]         LIVE-TESTED 2026-06-21
+                  content is null; image is in message.images[0].image_url.url
+                  as a data: URI (base64). Parser also checks message.content[]
+                  as fallback for other models.
       model_discovery  GET /api/v1/models?output_modalities=image  CONFIRMED (OpenRouter docs)
 
     Response parser handles:
@@ -1538,7 +1540,15 @@ def _generate_thumbnail_openrouter(
             f"OpenRouter chat/completions HTTP {exc.code} for {deliverable_id!r}: {body}"
         )
 
-    # Extract image from choices[0].message.content (array of parts)
+    # Extract image URL from response.
+    #
+    # LIVE-TESTED response shape (Phase 1C smoke test, 2026-06-21):
+    #   choices[0].message.content  = null
+    #   choices[0].message.images   = [{"type":"image_url","image_url":{"url":"data:..."}}]
+    #
+    # The image is in message.images[], NOT message.content[].
+    # content is null. We check images[] first, then content[] as fallback
+    # for any future model that returns image parts in content instead.
     choices = result.get("choices", [])
     if not choices:
         raise MUAPIError(
@@ -1546,24 +1556,37 @@ def _generate_thumbnail_openrouter(
             f"Raw keys: {list(result.keys())}"
         )
 
-    content = choices[0].get("message", {}).get("content", [])
-    if isinstance(content, str):
-        # Some models return content as a plain string — not expected for image modality
-        raise MUAPIError(
-            f"OpenRouter returned text content, not image, for {deliverable_id!r}. "
-            f"Verify model supports image modality: {config.OPENROUTER_IMAGE_MODEL}"
-        )
-
+    message   = choices[0].get("message", {})
     image_url: Optional[str] = None
-    for part in content:
-        if isinstance(part, dict) and part.get("type") == "image_url":
-            image_url = (part.get("image_url") or {}).get("url", "")
-            break
+
+    # Primary: message.images[] (observed behaviour with openai/gpt-5-image-mini)
+    images = message.get("images") or []
+    for img in images:
+        if isinstance(img, dict) and img.get("type") == "image_url":
+            image_url = (img.get("image_url") or {}).get("url", "")
+            if image_url:
+                break
+
+    # Fallback: message.content[] parts (anticipated behaviour for other models)
+    if not image_url:
+        content = message.get("content") or []
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    image_url = (part.get("image_url") or {}).get("url", "")
+                    if image_url:
+                        break
+        elif isinstance(content, str) and content:
+            raise MUAPIError(
+                f"OpenRouter returned text content, not image, for {deliverable_id!r}. "
+                f"Model may not support image modality: {config.OPENROUTER_IMAGE_MODEL}"
+            )
 
     if not image_url:
         raise MUAPIError(
-            f"OpenRouter: no image_url part found in content for {deliverable_id!r}. "
-            f"Content parts: {[p.get('type') for p in content if isinstance(p, dict)]}"
+            f"OpenRouter: no image URL found in message.images or message.content "
+            f"for {deliverable_id!r}. "
+            f"Message keys: {list(message.keys())}"
         )
 
     local_path.parent.mkdir(parents=True, exist_ok=True)

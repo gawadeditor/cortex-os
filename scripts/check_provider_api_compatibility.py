@@ -72,10 +72,15 @@ PROVIDER_API_SPECS = {
         "modalities":         ["image"],
         "model_discovery":    "GET https://openrouter.ai/api/v1/models?output_modalities=image",
         "response_shape": {
-            "choices": [{"message": {"content": [
-                {"type": "image_url", "image_url": {"url": "<data:image/...;base64,...> or <https://...>"}}
-            ]}}]
+            "choices": [{"message": {
+                "content": None,
+                "images": [{"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]
+            }}]
         },
+        "response_shape_note": (
+            "LIVE-TESTED 2026-06-21: content=null, image in message.images[0].image_url.url "
+            "as base64 data URI. Parser checks images[] first, content[] as fallback."
+        ),
         "verification": {
             "endpoint_chat_completions": {"status": "CONFIRMED", "source": "OpenRouter docs"},
             "endpoint_images_generations": {
@@ -87,20 +92,18 @@ PROVIDER_API_SPECS = {
             "modalities_param": {"status": "CONFIRMED",    "source": "OpenRouter docs"},
             "model_format":     {"status": "CONFIRMED",    "source": "OpenRouter provider/model convention"},
             "model_availability": {
-                "status": "UNVERIFIED",
-                "note":   "Use GET /api/v1/models?output_modalities=image to list available models"
+                "status": "CONFIRMED",
+                "note":   "openai/gpt-5-image-mini confirmed available. "
+                          "Use GET /api/v1/models?output_modalities=image for full list."
             },
             "response_shape":   {
-                "status": "UNVERIFIED",
-                "note":   "Expected: choices[0].message.content[].type='image_url'. "
-                          "Parser handles data: URI (base64) and plain URL. Needs live test."
+                "status": "CONFIRMED",
+                "source": "Phase 1C live smoke test 2026-06-21",
+                "note":   "Image in message.images[], not message.content[]. content is null."
             },
         },
-        "ready_to_call": False,
-        "blocking_issues": [
-            "response shape unverified — choices[0].message.content image_url format needs live test",
-            "openai/gpt-image-1 model availability on OpenRouter needs verification via model discovery",
-        ],
+        "ready_to_call": True,
+        "blocking_issues": [],
     },
 
     "muapi": {
@@ -238,22 +241,15 @@ def _check_openrouter() -> dict:
     if "/" not in spec["model"]:
         issues.append("OpenRouter model must be 'provider/model' format")
 
-    warnings.append(
-        "response shape UNVERIFIED: expecting choices[0].message.content[].type='image_url'. "
-        "Parser handles data: URI and plain URL. Needs live test before production use."
-    )
-    warnings.append(
-        f"Model availability UNVERIFIED: run GET {spec['model_discovery']} "
-        "to confirm openai/gpt-image-1 is listed."
-    )
-
     response_parser = {
-        "step_1":   "result['choices'][0]['message']['content'] → list of parts",
-        "step_2":   "find part where type == 'image_url'",
-        "step_3a":  "if url starts with 'data:' → base64 decode after comma",
+        "step_1":   "result['choices'][0]['message']['images'] → list of image parts",
+        "step_2":   "find entry where type == 'image_url' → image_url.url",
+        "step_3a":  "if url starts with 'data:' → base64 decode after comma → write_bytes",
         "step_3b":  "else → _download_file(url) → write_bytes",
-        "shape_verified": False,
-        "note": "UNVERIFIED — response shape documented but not live-tested",
+        "fallback": "if images[] empty/missing, check content[] for image_url parts",
+        "shape_verified": True,
+        "source": "Phase 1C live smoke test 2026-06-21",
+        "note": "message.content is null; image is in message.images[0].image_url.url as data URI",
     }
 
     return {
@@ -269,7 +265,7 @@ def _check_openrouter() -> dict:
         "payload_9_16":           payload_9_16,
         "response_parser":        response_parser,
         "verification":           spec["verification"],
-        "ready_to_call":          False,
+        "ready_to_call":          len(issues) == 0,
         "issues":                 issues,
         "warnings":               warnings,
     }

@@ -2218,3 +2218,159 @@ class TestWordmarkOverlay:
         assert kwargs.get("hook_placement") == "top", (
             f"Expected hook_placement='top', got {kwargs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestGenerateThumbnailOpenAI — regression for gpt-image-1 parameter support
+# ---------------------------------------------------------------------------
+
+class TestGenerateThumbnailOpenAI:
+    """
+    Regression tests for _generate_thumbnail_openai.
+
+    gpt-image-1 does NOT support response_format (DALL-E 2/3 only).
+    Sending it causes: "Unknown parameter: response_format".
+    The function must omit response_format and parse data[0].b64_json
+    from the default response shape.
+    """
+
+    def _make_openai_response(self, b64_data: str = ""):
+        """Minimal OpenAI gpt-image-1 response body with a valid-sized image."""
+        import json, base64
+        if not b64_data:
+            # 2 KB of zero bytes — satisfies _MIN_IMAGE_BYTES=1000
+            b64_data = base64.b64encode(b"\x00" * 2000).decode("utf-8")
+        body = json.dumps({"data": [{"b64_json": b64_data}]}).encode("utf-8")
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.read.return_value = body
+        return mock_resp
+
+    def test_response_format_not_in_payload(self, tmp_path):
+        """response_format must NOT be sent — gpt-image-1 rejects it."""
+        from hypogeum.muapi import _generate_thumbnail_openai
+
+        config = MagicMock()
+        config.OPENAI_API_KEY = "sk-test"
+        config.OPENAI_IMAGE_MODEL = "gpt-image-1"
+        config.OPENAI_IMAGE_BASE_URL = "https://api.openai.com/v1"
+        config.THUMBNAIL_IMAGE_QUALITY = "high"
+
+        captured_payload = {}
+
+        def _fake_urlopen(req, timeout=None):
+            import json as _json
+            captured_payload.update(_json.loads(req.data.decode("utf-8")))
+            return self._make_openai_response()
+
+        local_path = tmp_path / "out.jpg"
+        log = MagicMock()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            _generate_thumbnail_openai(
+                deliverable_id="cmp",
+                image_prompt="test prompt",
+                aspect_ratio="16:9",
+                config=config,
+                local_path=local_path,
+                log=log,
+            )
+
+        assert "response_format" not in captured_payload, (
+            "response_format must NOT be sent to gpt-image-1 — it is a DALL-E 2/3 "
+            "parameter and causes 'Unknown parameter: response_format' on gpt-image-1."
+        )
+
+    def test_correct_parameters_sent(self, tmp_path):
+        """Verify the payload contains the parameters gpt-image-1 does accept."""
+        from hypogeum.muapi import _generate_thumbnail_openai
+
+        config = MagicMock()
+        config.OPENAI_API_KEY = "sk-test"
+        config.OPENAI_IMAGE_MODEL = "gpt-image-1"
+        config.OPENAI_IMAGE_BASE_URL = "https://api.openai.com/v1"
+        config.THUMBNAIL_IMAGE_QUALITY = "high"
+
+        captured_payload = {}
+
+        def _fake_urlopen(req, timeout=None):
+            import json as _json
+            captured_payload.update(_json.loads(req.data.decode("utf-8")))
+            return self._make_openai_response()
+
+        local_path = tmp_path / "out.jpg"
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            _generate_thumbnail_openai(
+                deliverable_id="cmp",
+                image_prompt="test prompt",
+                aspect_ratio="16:9",
+                config=MagicMock(
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_IMAGE_MODEL="gpt-image-1",
+                    OPENAI_IMAGE_BASE_URL="https://api.openai.com/v1",
+                    THUMBNAIL_IMAGE_QUALITY="high",
+                ),
+                local_path=local_path,
+                log=MagicMock(),
+            )
+
+        assert captured_payload.get("model") == "gpt-image-1"
+        assert captured_payload.get("size") == "1536x1024"   # 16:9 → 1536x1024
+        assert captured_payload.get("quality") == "high"
+        assert captured_payload.get("n") == 1
+
+    def test_b64_json_decoded_and_written(self, tmp_path):
+        """Image bytes from data[0].b64_json are written to local_path."""
+        import base64
+        from hypogeum.muapi import _generate_thumbnail_openai
+
+        raw_bytes = b"\xff\xd8\xff" + b"\x00" * 1500   # fake JPEG header + padding (>_MIN_IMAGE_BYTES)
+        b64 = base64.b64encode(raw_bytes).decode("utf-8")
+
+        def _fake_urlopen(req, timeout=None):
+            return self._make_openai_response(b64_data=b64)
+
+        local_path = tmp_path / "out.jpg"
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            _generate_thumbnail_openai(
+                deliverable_id="cmp",
+                image_prompt="test prompt",
+                aspect_ratio="16:9",
+                config=MagicMock(
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_IMAGE_MODEL="gpt-image-1",
+                    OPENAI_IMAGE_BASE_URL="https://api.openai.com/v1",
+                    THUMBNAIL_IMAGE_QUALITY="high",
+                ),
+                local_path=local_path,
+                log=MagicMock(),
+            )
+
+        assert local_path.exists(), "Image file must be written to local_path"
+        assert local_path.read_bytes() == raw_bytes
+
+    def test_401_raises_muapi_auth_failure(self, tmp_path):
+        """401 from OpenAI must raise MUAPIAuthFailure."""
+        import urllib.error
+        from hypogeum.muapi import _generate_thumbnail_openai
+
+        fp = BytesIO(b"Unauthorized")
+        exc = urllib.error.HTTPError("", 401, "Unauthorized", {}, fp)
+
+        with patch("urllib.request.urlopen", side_effect=exc):
+            with pytest.raises(MUAPIAuthFailure):
+                _generate_thumbnail_openai(
+                    deliverable_id="cmp",
+                    image_prompt="test",
+                    aspect_ratio="16:9",
+                    config=MagicMock(
+                        OPENAI_API_KEY="sk-bad",
+                        OPENAI_IMAGE_MODEL="gpt-image-1",
+                        OPENAI_IMAGE_BASE_URL="https://api.openai.com/v1",
+                        THUMBNAIL_IMAGE_QUALITY="high",
+                    ),
+                    local_path=tmp_path / "out.jpg",
+                    log=MagicMock(),
+                )

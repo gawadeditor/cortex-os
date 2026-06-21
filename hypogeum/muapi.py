@@ -1385,12 +1385,13 @@ def _generate_thumbnail_openai(
     model = config.OPENAI_IMAGE_MODEL
 
     payload = json.dumps({
-        "model":           model,
-        "prompt":          image_prompt,
-        "n":               1,
-        "size":            size,
-        "quality":         config.THUMBNAIL_IMAGE_QUALITY,  # "high"
-        "response_format": "b64_json",
+        "model":   model,
+        "prompt":  image_prompt,
+        "n":       1,
+        "size":    size,
+        "quality": config.THUMBNAIL_IMAGE_QUALITY,  # "high"
+        # response_format is not supported by gpt-image-1 (DALL-E 2/3 only).
+        # gpt-image-1 always returns b64_json without this parameter.
     }).encode("utf-8")
 
     req = urllib.request.Request(

@@ -70,6 +70,7 @@ from hypogeum.agents.thumbnail_generation_agent import generate_thumbnails
 from hypogeum.agents.thumbnail_killer_concept_validator import validate_concept_quality
 from hypogeum.agents.thumbnail_plan_validator import (
     validate_all_candidates_pre_generation,
+    validate_all_prompts_zone_reservations,
     validate_ctr_readability,
 )
 from hypogeum.agents.thumbnail_prompt_validator import (
@@ -232,6 +233,21 @@ def run_thumbnail_director(
         log.warn(
             "td_ctr_readability_warnings",
             warnings=ctr_validation["warnings"],
+        )
+
+    # ------------------------------------------------------------------
+    # Zone reservation gate — top 12% wordmark + bottom 10% clean
+    # ------------------------------------------------------------------
+    zone_validation = validate_all_prompts_zone_reservations(main_candidates_for_validation)
+    if not zone_validation["passed"]:
+        log.error(
+            "td_zone_reservation_failed",
+            failures=zone_validation["failures"],
+        )
+    if zone_validation["warnings"]:
+        log.warn(
+            "td_zone_reservation_warnings",
+            warnings=zone_validation["warnings"],
         )
 
     # ------------------------------------------------------------------

@@ -225,6 +225,89 @@ def validate_ctr_readability(candidates: list[dict]) -> dict:
     }
 
 
+def validate_prompt_zone_reservations(candidate: dict) -> dict:
+    """
+    Pre-generation validator: checks that the image_prompt includes the mandatory
+    zone reservation phrases for the top 12% (wordmark) and bottom 10% (clean base).
+
+    Image generation models hallucinate text, inscriptions, and decorative marks
+    when prompts do not explicitly forbid them. These phrases must appear verbatim.
+
+    Returns:
+        {"passed": bool, "errors": list[str], "warnings": list[str]}
+    """
+    prompt = candidate.get("image_prompt", "").lower()
+    errors:   list[str] = []
+    warnings: list[str] = []
+
+    # Top 12% wordmark zone — must be reserved
+    top_zone_phrases = ["top 12%", "top 10%", "top 15%", "wordmark zone", "wordmark area",
+                        "upper 12%", "clear of all subject", "clear of subject"]
+    if not any(p in prompt for p in top_zone_phrases):
+        errors.append(
+            "image_prompt does not reserve the top 12% wordmark zone. "
+            "Add: 'top 12% of frame is pure near-black, completely clear of all subject detail, "
+            "reserved for wordmark overlay'"
+        )
+
+    # Bottom 10% clean zone — must forbid model-generated text
+    bottom_zone_phrases = [
+        "bottom 10%", "bottom 12%", "bottom 8%",
+        "no text", "no inscription", "no inscriptions", "no caption", "no captions",
+        "no symbols", "no labels", "no lettering", "no writing",
+        "no model-generated text", "no generated text", "completely empty",
+        "no marks", "no decorative marks",
+    ]
+    if not any(p in prompt for p in bottom_zone_phrases):
+        warnings.append(
+            "image_prompt does not explicitly forbid model-generated text in the bottom zone. "
+            "Add: 'bottom 10% of frame completely empty — no inscriptions, no symbols, no captions, "
+            "no labels' to prevent hallucinated text."
+        )
+
+    # Inscription invitation — words that invite model to render text on image
+    inscription_invitations = [
+        "inscribed with", "inscriptions on", "text on", "writing on", "carved letters",
+        "greek letters", "greek text", "latin text", "symbols carved", "engraved text",
+        "readable text", "legible text",
+    ]
+    found = [p for p in inscription_invitations if p in prompt]
+    if found:
+        warnings.append(
+            f"image_prompt contains language that may invite hallucinated text: {found}. "
+            "Remove these phrases or add 'no visible text or inscriptions anywhere in frame'."
+        )
+
+    return {
+        "passed":   len(errors) == 0,
+        "errors":   errors,
+        "warnings": warnings,
+    }
+
+
+def validate_all_prompts_zone_reservations(candidates: list[dict]) -> dict:
+    """
+    Run validate_prompt_zone_reservations on all candidates.
+
+    Returns:
+        {"passed": bool, "failures": list[dict], "warnings": list[dict]}
+    """
+    failures: list[dict] = []
+    warnings: list[dict] = []
+    for c in candidates:
+        result = validate_prompt_zone_reservations(c)
+        cid = c.get("candidate_id", "unknown")
+        if not result["passed"]:
+            failures.append({"candidate_id": cid, "errors": result["errors"]})
+        if result["warnings"]:
+            warnings.append({"candidate_id": cid, "warnings": result["warnings"]})
+    return {
+        "passed":   len(failures) == 0,
+        "failures": failures,
+        "warnings": warnings,
+    }
+
+
 def _infer_trigger_from_candidate(candidate: dict) -> str:
     """Attempt to infer emotional trigger from text_overlay hook text."""
     overlay = candidate.get("text_overlay") or {}

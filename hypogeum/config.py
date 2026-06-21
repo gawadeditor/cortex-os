@@ -313,6 +313,13 @@ class Config:
     ELEVENLABS_MUSIC_DEFAULT_DURATION: int # default: 120 (seconds; multiply by 1000 for API ms)
 
     # ------------------------------------------------------------------
+    # BytePlus ModelArk — Seedance 2.0 official direct provider (Phase 1H)
+    # ------------------------------------------------------------------
+    BYTEPLUS_ARK_API_KEY: Optional[str]
+    BYTEPLUS_ARK_BASE_URL: str   # default: international endpoint
+    BYTEPLUS_ARK_MODEL: str      # default: seedance-1-lite
+
+    # ------------------------------------------------------------------
     # OpenAI — direct image generation (THUMBNAIL_IMAGE_PROVIDER=openai)
     #          + Whisper fallback for caption alignment
     # ------------------------------------------------------------------
@@ -491,6 +498,14 @@ class Config:
         self.ELEVENLABS_MUSIC_DEFAULT_DURATION = _get_int(
             "ELEVENLABS_MUSIC_DEFAULT_DURATION", default=120
         )
+
+        # --- BytePlus ModelArk (Phase 1H) ---
+        self.BYTEPLUS_ARK_API_KEY = _get_optional("BYTEPLUS_ARK_API_KEY")
+        self.BYTEPLUS_ARK_BASE_URL = _get_optional(
+            "BYTEPLUS_ARK_BASE_URL",
+            default="https://ark.ap-southeast.bytepluses.com/api/v3",
+        )
+        self.BYTEPLUS_ARK_MODEL = _get_optional("BYTEPLUS_ARK_MODEL", default="seedance-1-lite")
 
         # --- OpenAI (direct image + Whisper) ---
         self.OPENAI_API_KEY = _get_optional("OPENAI_API_KEY")

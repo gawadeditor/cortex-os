@@ -390,8 +390,10 @@ _CONTENT_PROVIDERS = [
      "description": "Video generation", "muapi_backed": True},
     {"id": "runway",     "label": "Runway",     "auth": "api_key",
      "description": "Video generation", "muapi_backed": True},
-    {"id": "freepik",    "label": "Freepik",    "auth": "api_key",
+    {"id": "freepik",           "label": "Freepik",                      "auth": "api_key",
      "description": "Image generation"},
+    {"id": "seedance_official", "label": "Seedance 2.0 (BytePlus ModelArk)", "auth": "api_key",
+     "description": "Official Seedance video generation"},
 ]
 
 _CONTENT_PROVIDER_SETUP = {
@@ -485,6 +487,20 @@ _CONTENT_PROVIDER_SETUP = {
         ),
         "placeholder": "fpk-...",
         "env_var": "FREEPIK_API_KEY",
+    },
+    "seedance_official": {
+        "label": "Seedance 2.0 (BytePlus ModelArk)",
+        "description": "Official Seedance 2.0 video generation via BytePlus ModelArk",
+        "cred_label": "BytePlus ModelArk API Key",
+        "instructions": (
+            "Go to the BytePlus ModelArk console → API Keys → Create Key. "
+            "This is the direct official API for Seedance 2.0 — separate from MUAPI. "
+            "Stored as BYTEPLUS_ARK_API_KEY. "
+            "Set BYTEPLUS_ARK_MODEL to the Seedance model ID from your console "
+            "(default: seedance-1-lite)."
+        ),
+        "placeholder": "ark-...",
+        "env_var": "BYTEPLUS_ARK_API_KEY",
     },
 }
 

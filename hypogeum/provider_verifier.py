@@ -42,16 +42,17 @@ STATUS_NOT_VERIFIABLE = "not_verifiable"
 
 # Env var name for each provider's credential
 _PROVIDER_ENV_VAR: dict[str, str] = {
-    "openai":     "OPENAI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "elevenlabs": "ELEVENLABS_API_KEY",
-    "muapi":      "MUAPI_API_KEY",
-    "seedance":   "MUAPI_API_KEY",   # Seedance is accessed via MUAPI
-    "runway":     "MUAPI_API_KEY",
-    "kling":      "MUAPI_API_KEY",
-    "veo":        "MUAPI_API_KEY",
-    "freepik":    "FREEPIK_API_KEY",
-    "youtube":    "YOUTUBE_REFRESH_TOKEN",
+    "openai":            "OPENAI_API_KEY",
+    "openrouter":        "OPENROUTER_API_KEY",
+    "elevenlabs":        "ELEVENLABS_API_KEY",
+    "muapi":             "MUAPI_API_KEY",
+    "seedance":          "MUAPI_API_KEY",          # Seedance is accessed via MUAPI
+    "runway":            "MUAPI_API_KEY",
+    "kling":             "MUAPI_API_KEY",
+    "veo":               "MUAPI_API_KEY",
+    "freepik":           "FREEPIK_API_KEY",
+    "youtube":           "YOUTUBE_REFRESH_TOKEN",
+    "seedance_official": "BYTEPLUS_ARK_API_KEY",   # Phase 1H — direct BytePlus ModelArk
 }
 
 # Providers that delegate their probe to another provider's test
@@ -164,16 +165,26 @@ def _probe_youtube(key: str) -> tuple[bool, Optional[str], int]:
     return False, "Token appears empty or too short", int((time.monotonic() - t0) * 1000)
 
 
+def _probe_byteplus_ark(key: str) -> tuple[bool, Optional[str], int]:
+    """
+    Validate a BytePlus ModelArk API key via GET /models (lightweight, no generation cost).
+    Phase 1H — Seedance 2.0 official direct provider.
+    """
+    from hypogeum.byteplus_ark import probe_credential
+    return probe_credential(key)
+
+
 _PROBES = {
-    "openai":     _probe_openai,
-    "openrouter": _probe_openrouter,
-    "elevenlabs": _probe_elevenlabs,
-    "muapi":      _probe_muapi,
-    "seedance":   _probe_muapi,   # same key
-    "runway":     _probe_muapi,
-    "kling":      _probe_muapi,
-    "veo":        _probe_muapi,
-    "youtube":    _probe_youtube,
+    "openai":            _probe_openai,
+    "openrouter":        _probe_openrouter,
+    "elevenlabs":        _probe_elevenlabs,
+    "muapi":             _probe_muapi,
+    "seedance":          _probe_muapi,           # same key — delegated via MUAPI
+    "runway":            _probe_muapi,
+    "kling":             _probe_muapi,
+    "veo":               _probe_muapi,
+    "youtube":           _probe_youtube,
+    "seedance_official": _probe_byteplus_ark,    # Phase 1H — direct BytePlus ModelArk
 }
 
 

@@ -709,15 +709,15 @@ _PROVIDER_CATALOG_META: dict[str, dict] = {
         "delegate_via":      "muapi",
         "credential_key_name": "MUAPI_API_KEY",
     },
-    # --- Direct provider placeholders (future — not yet implemented) ---
-    # Each has its own credential slot for when direct API access is added.
+    # --- Seedance 2.0 Official: BytePlus ModelArk direct provider (Phase 1H) ---
     "seedance_official": {
-        "display_name":      "Seedance (Official)",
+        "display_name":      "Seedance 2.0 (BytePlus ModelArk)",
         "capabilities":      ["video"],
-        "access_mode":       "direct_placeholder",
+        "access_mode":       "direct",
         "delegate_via":      None,
-        "credential_key_name": "SEEDANCE_API_KEY",
+        "credential_key_name": "BYTEPLUS_ARK_API_KEY",
     },
+    # --- Remaining direct provider placeholders (future — not yet implemented) ---
     "veo_official":      {
         "display_name":      "Veo (Official)",
         "capabilities":      ["video"],

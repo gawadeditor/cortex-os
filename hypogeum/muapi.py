@@ -1803,7 +1803,12 @@ def _generate_thumbnail_one_provider(
             used_fallback=is_fallback,
         )
 
-    # Default: MUAPI path (also handles any unrecognised provider name)
+    if provider != "muapi":
+        raise ValueError(
+            f"Unknown thumbnail provider {provider!r}. "
+            f"Valid values: 'openrouter', 'openai', 'muapi'."
+        )
+
     primary_model = config.THUMBNAIL_IMAGE_MODEL
     fallback_model = config.THUMBNAIL_FALLBACK_MODEL  # MUAPI-internal model fallback
 

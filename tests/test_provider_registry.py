@@ -602,3 +602,154 @@ class TestProviderReadinessModel:
         readiness, note = _derive_operational_readiness("muapi", meta, smoke, OR_NOT_TESTED)
         assert readiness == OR_AUTH_FAILED, f"Expected OR_AUTH_FAILED, got {readiness!r}"
         assert note is not None
+
+
+# ---------------------------------------------------------------------------
+# TestThumbnailConfigDefaults — point 2: new field has correct code-level default
+# ---------------------------------------------------------------------------
+
+class TestThumbnailConfigDefaults:
+    """
+    Verify that THUMBNAIL_FALLBACK2_PROVIDER is a recognized config field and
+    that all three chain fields default correctly in code (independent of .env).
+    """
+
+    def _config_no_dotenv(self, extra_env: dict | None = None) -> Config:
+        """Return a Config instance with dotenv loading suppressed."""
+        env = {"OPENROUTER_API_KEY": "test"}
+        if extra_env:
+            env.update(extra_env)
+        with patch("hypogeum.config._load_dotenv"), \
+             patch.dict(os.environ, env, clear=True):
+            return Config()
+
+    def test_thumbnail_image_provider_defaults_to_openrouter(self):
+        """Code default for THUMBNAIL_IMAGE_PROVIDER must be 'openrouter'."""
+        cfg = self._config_no_dotenv()
+        assert cfg.THUMBNAIL_IMAGE_PROVIDER == "openrouter", (
+            f"Expected default 'openrouter', got {cfg.THUMBNAIL_IMAGE_PROVIDER!r}. "
+            "This is the primary thumbnail provider after the 2026-06-21 comparison."
+        )
+
+    def test_thumbnail_fallback_provider_defaults_to_openai(self):
+        """Code default for THUMBNAIL_FALLBACK_PROVIDER must be 'openai'."""
+        cfg = self._config_no_dotenv()
+        assert cfg.THUMBNAIL_FALLBACK_PROVIDER == "openai", (
+            f"Expected default 'openai', got {cfg.THUMBNAIL_FALLBACK_PROVIDER!r}."
+        )
+
+    def test_thumbnail_fallback2_provider_defaults_to_muapi(self):
+        """Code default for THUMBNAIL_FALLBACK2_PROVIDER must be 'muapi'."""
+        cfg = self._config_no_dotenv()
+        assert cfg.THUMBNAIL_FALLBACK2_PROVIDER == "muapi", (
+            f"Expected default 'muapi', got {cfg.THUMBNAIL_FALLBACK2_PROVIDER!r}."
+        )
+
+    def test_thumbnail_fallback2_provider_is_overridable_via_env(self):
+        """THUMBNAIL_FALLBACK2_PROVIDER must be overridable via environment variable."""
+        cfg = self._config_no_dotenv({"THUMBNAIL_FALLBACK2_PROVIDER": "openrouter"})
+        assert cfg.THUMBNAIL_FALLBACK2_PROVIDER == "openrouter"
+
+    def test_chain_order_is_openrouter_openai_muapi_by_default(self):
+        """The three default fields assemble to the expected priority chain."""
+        cfg = self._config_no_dotenv()
+        chain = [
+            cfg.THUMBNAIL_IMAGE_PROVIDER,
+            cfg.THUMBNAIL_FALLBACK_PROVIDER,
+            cfg.THUMBNAIL_FALLBACK2_PROVIDER,
+        ]
+        assert chain == ["openrouter", "openai", "muapi"], (
+            f"Expected ['openrouter', 'openai', 'muapi'], got {chain}."
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestThumbnailProviderUnknown — point 4: unknown provider raises ValueError
+# ---------------------------------------------------------------------------
+
+class TestThumbnailProviderUnknown:
+    """
+    Verify that passing an unrecognised provider name to _generate_thumbnail_one_provider
+    raises ValueError immediately — not silently routed through MUAPI.
+    """
+
+    def test_unknown_provider_raises_value_error(self, tmp_path):
+        """An unknown provider string must raise ValueError, not fall through to MUAPI."""
+        from hypogeum.muapi import _generate_thumbnail_one_provider
+
+        cfg = _make_config(
+            **{
+                "THUMBNAIL_IMAGE_PROVIDER": "muapi",
+                "THUMBNAIL_FALLBACK_MODEL": "flux-2-dev",
+            }
+        )
+
+        with pytest.raises(ValueError, match="Unknown thumbnail provider"):
+            _generate_thumbnail_one_provider(
+                provider="bogus_provider",
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=cfg,
+                output_dir=tmp_path,
+                episode_id="ep_001",
+                budget_guard=None,
+                text_overlay=None,
+                typography_plan=None,
+                typography_integration="none",
+                log=MagicMock(),
+                is_fallback=False,
+            )
+
+    def test_unknown_provider_error_names_the_bad_value(self, tmp_path):
+        """The ValueError message must include the offending provider name."""
+        from hypogeum.muapi import _generate_thumbnail_one_provider
+
+        cfg = _make_config(**{"THUMBNAIL_IMAGE_PROVIDER": "muapi"})
+
+        with pytest.raises(ValueError, match="typo_provider"):
+            _generate_thumbnail_one_provider(
+                provider="typo_provider",
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=cfg,
+                output_dir=tmp_path,
+                episode_id="ep_001",
+                budget_guard=None,
+                text_overlay=None,
+                typography_plan=None,
+                typography_integration="none",
+                log=MagicMock(),
+                is_fallback=False,
+            )
+
+    def test_known_providers_do_not_raise_value_error(self, tmp_path):
+        """The three valid names must NOT raise ValueError (they raise MUAPIError on real failure)."""
+        from hypogeum.muapi import _generate_thumbnail_one_provider, MUAPIError
+
+        cfg = _make_config(**{"THUMBNAIL_IMAGE_PROVIDER": "muapi"})
+
+        for provider in ("openrouter", "openai", "muapi"):
+            with patch("hypogeum.muapi._generate_thumbnail_openrouter",
+                       side_effect=MUAPIError("no key")), \
+                 patch("hypogeum.muapi._generate_thumbnail_openai",
+                       side_effect=MUAPIError("no key")), \
+                 patch("hypogeum.muapi._attempt_thumbnail_generation",
+                       side_effect=MUAPIError("no key")):
+                with pytest.raises(MUAPIError):  # fails but NOT as ValueError
+                    _generate_thumbnail_one_provider(
+                        provider=provider,
+                        deliverable_id="main",
+                        image_prompt="test",
+                        aspect_ratio="16:9",
+                        config=cfg,
+                        output_dir=tmp_path,
+                        episode_id="ep_001",
+                        budget_guard=None,
+                        text_overlay=None,
+                        typography_plan=None,
+                        typography_integration="none",
+                        log=MagicMock(),
+                        is_fallback=False,
+                    )

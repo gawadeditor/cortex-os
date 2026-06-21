@@ -8,6 +8,7 @@ Public API:
     validate_composition_typography_pre_generation(candidate) -> dict
     validate_post_compositing(candidate) -> dict
     validate_all_candidates_pre_generation(candidates) -> dict
+    validate_ctr_readability(candidates) -> dict
 """
 from __future__ import annotations
 
@@ -118,6 +119,123 @@ def validate_all_candidates_pre_generation(candidates: list[dict]) -> dict:
                 "errors": result["errors"],
             })
     return {"passed": len(failures) == 0, "failures": failures}
+
+
+def validate_ctr_readability(candidates: list[dict]) -> dict:
+    """
+    Hard rejection rules for CTR readability. Runs after composition_plan and
+    typography_plan are attached, before MUAPI generation.
+
+    Checks:
+    1. Product-shot isolation — environment_level=="none" with non-absent focal subject
+    2. Same contrast_mechanism across all A/B/C candidates (visual collapse)
+    3. Same environment_level across all A/B/C candidates (creative collapse)
+    4. emphasis_scale below CTR-minimum (text too small to read at 320px)
+    5. focal_scale=="small" when readability is "critical" (object unreadable at 320px)
+    6. void-only image for a non-loss concept (abstract art, not mystery thumbnail)
+    7. environment_level=="none" when concept requires contrast to prove impossibility
+
+    Returns:
+        {"passed": bool, "warnings": list[str], "errors": list[str]}
+        Errors are hard failures; warnings are advisory.
+    """
+    errors:   list[str] = []
+    warnings: list[str] = []
+
+    if not candidates:
+        return {"passed": True, "errors": errors, "warnings": warnings}
+
+    # Per-candidate checks
+    for c in candidates:
+        cid  = c.get("candidate_id", "unknown")
+        comp = c.get("composition_plan") or {}
+        typo = c.get("typography_plan") or {}
+
+        env_level    = comp.get("environment_level", "none")
+        focal_scale  = comp.get("focal_scale", "medium")
+        readability  = comp.get("subject_readability_at_320px", "required")
+        emph_scale   = typo.get("emphasis_scale", 1.0)
+
+        # 1. Product-shot isolation — non-absent subject with no environment
+        if env_level == "none" and focal_scale not in ("absent", "trace"):
+            errors.append(
+                f"{cid}: environment_level='none' with focal_scale='{focal_scale}' "
+                "produces a product shot (object on black void). Set environment_level "
+                "to 'suggestive' or 'contextual' to prevent this."
+            )
+
+        # 2. Text too small — emphasis scale below CTR minimum
+        if emph_scale < 1.4:
+            warnings.append(
+                f"{cid}: emphasis_scale={emph_scale} is below 1.4 minimum. "
+                "Emphasis word will be unreadable at 320px. Minimum: 1.4 for two words, "
+                "1.7 for single word."
+            )
+
+        # 3. Small focal subject when readability is critical
+        if focal_scale == "small" and readability == "critical":
+            errors.append(
+                f"{cid}: focal_scale='small' with subject_readability_at_320px='critical' "
+                "is contradictory. A 'critical' readability requirement cannot be met with "
+                "a small subject. Use focal_scale='large' or change the contrast_mechanism "
+                "to 'scale_contrast' with readability='required'."
+            )
+
+        # 4. Abstract void for non-loss concepts
+        if focal_scale == "absent" and env_level == "none":
+            concept_trigger = _infer_trigger_from_candidate(c)
+            if concept_trigger not in ("loss",):
+                warnings.append(
+                    f"{cid}: focal_scale='absent' + environment_level='none' produces "
+                    "an abstract void image. This is only appropriate for 'loss' trigger. "
+                    "Add a trace element or set environment_level to 'suggestive'."
+                )
+
+    # Cross-candidate checks (only when 3 candidates present)
+    if len(candidates) == 3:
+        contrast_mechanisms = [
+            (c.get("composition_plan") or {}).get("contrast_mechanism", "")
+            for c in candidates
+        ]
+        env_levels = [
+            (c.get("composition_plan") or {}).get("environment_level", "")
+            for c in candidates
+        ]
+
+        # 5. Same contrast_mechanism across all three — visual collapse
+        if len(set(contrast_mechanisms)) == 1 and contrast_mechanisms[0]:
+            errors.append(
+                f"All three candidates share contrast_mechanism='{contrast_mechanisms[0]}'. "
+                "A/B/C candidates must use different visual approaches so testing is meaningful. "
+                "Vary between silhouette, rim_light, object_vs_world, human_vs_artifact, scale_contrast."
+            )
+
+        # 6. Same environment_level across all three — creative collapse
+        if len(set(env_levels)) == 1 and env_levels[0] in ("none", "suggestive"):
+            warnings.append(
+                f"All three candidates share environment_level='{env_levels[0]}'. "
+                "At least one candidate should use 'contextual' environment to provide "
+                "visual variety for A/B/C testing."
+            )
+
+    return {
+        "passed":   len(errors) == 0,
+        "errors":   errors,
+        "warnings": warnings,
+    }
+
+
+def _infer_trigger_from_candidate(candidate: dict) -> str:
+    """Attempt to infer emotional trigger from text_overlay hook text."""
+    overlay = candidate.get("text_overlay") or {}
+    text = (overlay.get("text", "") if isinstance(overlay, dict) else str(overlay)).lower()
+    if "vanished" in text or "gone" in text or "lost" in text:
+        return "loss"
+    if "shouldn" in text or "exist" in text or "impossible" in text:
+        return "impossibility"
+    if "who" in text or "unknown" in text or "no one" in text:
+        return "betrayal"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------

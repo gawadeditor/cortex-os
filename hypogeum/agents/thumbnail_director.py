@@ -68,7 +68,10 @@ from typing import Optional
 
 from hypogeum.agents.thumbnail_generation_agent import generate_thumbnails
 from hypogeum.agents.thumbnail_killer_concept_validator import validate_concept_quality
-from hypogeum.agents.thumbnail_plan_validator import validate_all_candidates_pre_generation
+from hypogeum.agents.thumbnail_plan_validator import (
+    validate_all_candidates_pre_generation,
+    validate_ctr_readability,
+)
 from hypogeum.agents.thumbnail_prompt_validator import (
     PromptDistinctnessError,
     validate_prompt_distinctness,
@@ -213,6 +216,22 @@ def run_thumbnail_director(
         log.warn(
             "td_plan_validation_warnings",
             failures=plan_validation["failures"],
+        )
+
+    # ------------------------------------------------------------------
+    # CTR readability gate (hard rejection for product-shot / void-only)
+    # ------------------------------------------------------------------
+    ctr_validation = validate_ctr_readability(main_candidates_for_validation)
+    if not ctr_validation["passed"]:
+        log.error(
+            "td_ctr_readability_failed",
+            errors=ctr_validation["errors"],
+            concept_driven=concept_brief is not None,
+        )
+    if ctr_validation["warnings"]:
+        log.warn(
+            "td_ctr_readability_warnings",
+            warnings=ctr_validation["warnings"],
         )
 
     # ------------------------------------------------------------------

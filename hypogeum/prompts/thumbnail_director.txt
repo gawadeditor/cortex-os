@@ -286,90 +286,111 @@ MAPPING (fixed — do not reorder):
   concepts[2] → rank 3
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHAT YOU ARE CREATING: A VISUAL ARGUMENT, NOT A SCENE
+THE PRIMARY OBJECTIVE: CTR AT 320PX
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-A visual argument is a composition that in 0.3 seconds at thumbnail scale creates one unresolved question in the viewer's mind. It does not illustrate what happens in the video. It does not show the historical objects. It produces a psychological state in the viewer: "I need to know what that is, and why it exists."
+Every thumbnail will be viewed at approximately 320px wide on a phone screen. That is roughly 50mm. The first job is to STOP THE SCROLL. The second job is to create an unresolved question. In that order.
 
-You are not a documentary set designer. You are a graphic provocateur.
+At 320px:
+- Text must be the largest, most readable element in the frame
+- The primary subject must be identifiable as a specific category of thing
+- Pure void or abstract atmosphere will read as a dark rectangle — it will not stop the scroll
+- A product shot (isolated object on black backdrop) reads as an ad, not a mystery
+
+You are creating a high-CTR mystery thumbnail. Not gallery art. Not a brand presentation. Not a concept render. A thumbnail that makes a person click.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-THE THREE-LEVEL RULE
+THREE-LEVEL ARCHITECTURE (required in every prompt)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Every image_prompt must operate on three levels simultaneously:
-  Level 1 — VISUAL: what is literally in the image (minimal, singular)
-  Level 2 — EMOTIONAL: what psychological state does the composition produce
-  Level 3 — CONCEPTUAL: what question does the viewer leave with
+Every image_prompt must operate on three levels:
+  Level 1 — READABLE: what does the eye land on first in 0.3s at 320px
+  Level 2 — EMOTIONAL: what feeling does the subject + context produce
+  Level 3 — COGNITIVE GAP: what question is created that only clicking resolves
 
-A prompt that only describes Level 1 will produce a documentary illustration. All three must be present.
+A prompt that nails Level 1 but ignores Level 3 produces a pretty image, not a click. A prompt that nails Level 3 but fails Level 1 produces a click-bait that doesn't stop the scroll. All three are required.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HOW TO WRITE A CONCEPT_DRIVEN_MODE PROMPT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Build each image_prompt from the concept fields in this order:
+Build each image_prompt from the concept fields and composition_plan in this order:
 
-STEP 1 — EMOTIONAL TRIGGER FIRST, OBJECT SECOND
-The emotional_trigger determines the dominant feeling. Start the prompt with the emotional atmosphere, not with the object. The object exists WITHIN the atmosphere, not the other way around.
+STEP 1 — ESTABLISH THE VISUAL_THESIS FIRST
+Read the visual_thesis for this concept. It specifies what is visually dominant and why. Follow it. The visual_thesis is your creative authority.
 
-  impossibility: The image should make the viewer feel that physical and historical law has been violated. The composition implies precision that cannot exist, context that is completely absent. Darkness, isolation, impossible clarity.
+STEP 2 — SUBJECT SIZE AND PLACEMENT (use composition_plan.focal_scale)
+  hero / large: Subject fills right 40–65% of frame. It is readable at 320px. The viewer can identify it as a specific category of thing.
+  medium:       Subject fills right 25–40% of frame. Still readable. Has environmental context around it.
+  small:        Subject is 8–15% of frame. Used only when the CONTRAST between subject and vast environment is the message. The environment must be cinematic.
+  trace:        Only a remnant or partial element remains. Used for "loss" concept.
+  absent:       No visible subject. ONLY for "loss" trigger when total absence is the concept. Must have at least one trace element (not pure void).
 
-  loss:          The image should make the viewer feel that something vast and irreplaceable is now completely gone, and only one tiny remainder exists to prove it ever did. Solitude, the vast dark, one small warm thing.
+  FORBIDDEN scale: medium-sized isolated object on a pure black background. This reads as a product shot.
 
-  betrayal:      The image should make the viewer feel that something was deliberately hidden or removed. Absence where presence is expected. The space where something was. Shadows that suggest concealment.
+STEP 3 — ENVIRONMENT LEVEL (use composition_plan.environment_level)
+  contextual:  The subject exists in a real environment — ancient workshop, sea floor, stone chamber, cliff face, archive room. The environment proves the subject's impossibility by contrast.
+  suggestive:  Hints of environment only — atmospheric haze, distant stone texture, faint horizon line. Enough to prevent product-shot isolation.
+  none:        ONLY for "loss" trigger with absent/trace focal scale. Pure void is not permitted for any other trigger.
 
-  awe:           The composition dwarfs human comprehension. The viewer feels confronted by scale they cannot process.
+  NEVER: isolated object on pure black backdrop for any trigger except loss.
+  NEVER: ambient circular spotlight or halo around subject (product photography).
 
-  dread:         Something is present that should not be. The composition implies an unseen threat. Stillness before something.
+STEP 4 — CONTRAST MECHANISM (use composition_plan.contrast_mechanism)
+  object_vs_world:    Subject in environment creates temporal impossibility. The world around the object proves the object shouldn't be in it.
+  human_vs_artifact:  A human figure (silhouette, hands, anonymous body) and an artifact both appear. The human mystery is primary.
+  rim_light:          Subject is separated from background by a strong rim light. Background has some depth/texture.
+  scale_contrast:     Tiny human or detail in vast environment. Scale contrast is the argument.
+  silhouette:         Subject reads by outline only — no internal detail visible.
 
-  discovery:     First light on something hidden. The boundary between darkness and revelation.
+STEP 5 — EMOTIONAL ATMOSPHERE
+  impossibility: precision that violates what is historically possible; something that is real but shouldn't be; the subject exists in a world that makes it impossible
+  loss:          trace of something vast now gone; warmth that is fading; the shape of absence
+  betrayal:      concealment; unknown hands; a figure whose face is never seen; the maker who left no name
+  awe:           scale that dwarfs the viewer; ancient presence confronting a small human
+  dread:         stillness before threat; presence that should not be there
+  discovery:     first light on what was hidden; boundary between dark and revelation
 
-  scale:         A tiny thing against an enormous ancient presence. The contrast is the message.
-
-STEP 2 — ONE VISUAL METAPHOR ONLY
-Each prompt must be built around exactly one visual metaphor from the concept's visual_thesis. Do not add supporting objects, contextual ruins, reference tablets, or secondary props. The metaphor is singular.
-
-STEP 3 — DARKNESS IS THE MEDIUM
-Near-black (void_black #000000 to deep_stone #1A1A1A) occupies 75–90% of the frame. Warm amber or gold light touches at most one element. Everything else is void. This is not an empty image — the void is the argument.
-
-STEP 4 — HOOK TEXT VERBATIM
-Use suggested_hook_text as text_overlay.text exactly as written. Do not change capitalisation, punctuation, or words.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ABSOLUTELY FORBIDDEN IN CONCEPT_DRIVEN_MODE PROMPTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-NEVER start any prompt with these or similar words:
-  Corroded / Bronze / Ancient / A bronze / An ancient / Fragment / Gear / Dial /
-  Tablet / Column / Torch / Ruin / Ruins / Stone / Koine / Mechanism / Artefact /
-  Artifact / Inscription / Parchment / Scroll
-
-NEVER include object inventories: "gear, tablet, column, torch" (comma lists of props)
-NEVER stage a scene: "resting on a stone plinth", "inside a dark chamber", "beside a Babylonian tablet"
-NEVER reference primary_subject_identity as a prompt prefix or mandatory element
-NEVER describe documentary context: "ancient Greek", "2nd century BC", "Roman shipwreck"
-NEVER produce three prompts that all foreground the same physical object — even with different backgrounds
+STEP 6 — HOOK TEXT VERBATIM
+Use suggested_hook_text as text_overlay.text exactly as written.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PERMITTED IN CONCEPT_DRIVEN_MODE PROMPTS
+HARD RULES — CONCEPT_DRIVEN_MODE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Darkness, void, negative space as active compositional elements — these are not absence, they are the argument
-A single object described by its CONCEPTUAL quality ("a device of impossible precision") not its historical features
-Emotional atmosphere language: "oppressive silence", "the weight of lost knowledge", "impossible clarity in the dark"
-A single warm amber or gold light source with no visible origin
-Scale implied through framing, not through listing multiple objects
+FORBIDDEN IN ALL PROMPTS:
+- Circular ambient halo / spotlight glow around a subject (product photography)
+- Isolated object on pure black with no environmental context (except loss trigger)
+- Three candidates that all foreground the same visual subject or same scene type
+- Object inventory prompts: "gear, tablet, column, torch" comma lists
+- Documentary context labels: "ancient Greek", "2nd century BC", "Roman shipwreck" as the opening
+- Start with object nouns: "Corroded / Bronze / Fragment / Gear / Mechanism / Artifact / Inscription"
+- Pure abstract void with no readable element (except loss trigger with trace element)
+
+FORBIDDEN VISUAL OUTCOMES (describe your prompt to avoid these):
+- The subject looks like a product on a studio backdrop
+- The thumbnail reads as a black rectangle at 320px
+- All three A/B/C candidates produce the same visual hypothesis
+- The environment_level is "none" for impossibility or betrayal concepts
+
+PERMITTED:
+- A device of complex visible gears and precision, described conceptually ("a machine of impossible knowledge") — starting with its emotional meaning, not its material
+- Human hands, silhouettes, anonymous figures — permitted and encouraged for betrayal/human mystery
+- Environmental context: ancient workshop tools in background, sea-floor sediment, stone chamber walls — allowed when composition_plan.environment_level is contextual
+- Atmospheric depth that implies environment without documenting it
+- Two light sources when composition_plan.contrast_mechanism calls for rim_light or object_vs_world
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COMPOSITION RULES FOR CONCEPT_DRIVEN_MODE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-- DO NOT apply the rule "primary subject occupies at least one-third of frame" — the frame exists to produce a psychological state, not to display an object
-- Near-black must dominate (75–90% of pixels near-black or deep shadow)
-- At most ONE clearly visible object or figure per prompt (the concept may be better served by zero visible objects — void can be the composition)
-- Top 12% of frame: must remain near-black or very deep shadow for wordmark legibility
-- At most TWO distinct light sources; prefer one
+- Near-black dominates shadow zones: 50–65% of total pixels. The remainder is subject, environment, or atmospheric depth.
+- Top 12% of frame: near-black or very deep shadow for wordmark legibility
+- Left 35–40% of frame: reserved for hook text (lower half of left zone)
+- Subject zone: right 40–60% of frame, centre-right placement
+- Primary subject + environmental context must occupy 35–50% of total frame area
+- At most two distinct light sources. One warm key (amber/torch/firelight), one cool secondary (diffuse stone grey, atmospheric sky, moonlight) for temperature contrast
+- Do NOT use uniform flat ambient lighting
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COMPOSITION PLAN AND TYPOGRAPHY PLAN — REQUIRED IN CONCEPT_DRIVEN_MODE

@@ -917,6 +917,20 @@ _OVERLAY_FONT_CANDIDATES: list[str] = [
     "/System/Library/Fonts/Supplemental/Tahoma Bold.ttf",               # last resort
 ]
 
+# Bold font candidates for emphasis word in _apply_typography_plan.
+# The emphasis word must have genuine Bold weight to dominate at 320px viewing size.
+# Preference: Helvetica Neue Bold (very common macOS) → Arial Bold → Gill Sans Bold.
+_OVERLAY_BOLD_FONT_CANDIDATES: list[str] = [
+    "/Library/Fonts/Raleway-ExtraBold.ttf",
+    "/Library/Fonts/Raleway-Bold.ttf",
+    "/System/Library/Fonts/Helvetica Neue.ttc",                          # includes Bold variant
+    "/System/Library/Fonts/Supplemental/Gill Sans Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Futura.ttc",
+    "/System/Library/Fonts/Supplemental/Tahoma Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+]
+
 # Fonts tried in order for the channel wordmark (Cinzel-like serif, all-caps).
 # Copperplate is the closest macOS system match to Cinzel SemiBold (small caps, engraved look).
 # Didot and Baskerville are elegant fallbacks; Times New Roman Bold is the last resort.
@@ -1223,11 +1237,12 @@ def _apply_typography_plan(local_path: Path, typography_plan: dict) -> None:
     No-ops silently if PIL is unavailable, local_path does not exist, or both
     headline and emphasis are empty.
     """
-    headline       = str(typography_plan.get("headline", "")).strip().upper()
-    emphasis       = str(typography_plan.get("emphasis", "")).strip().upper()
-    alignment      = typography_plan.get("alignment", "left")
-    zone           = typography_plan.get("zone", "lower_left")
-    emphasis_scale = float(typography_plan.get("emphasis_scale", 2.5))
+    headline        = str(typography_plan.get("headline", "")).strip().upper()
+    emphasis        = str(typography_plan.get("emphasis", "")).strip().upper()
+    alignment       = typography_plan.get("alignment", "left")
+    zone            = typography_plan.get("zone", "lower_left")
+    emphasis_scale  = float(typography_plan.get("emphasis_scale", 1.7))
+    use_stroke      = bool(typography_plan.get("emphasis_stroke", True))
 
     if not headline and not emphasis:
         return
@@ -1240,37 +1255,39 @@ def _apply_typography_plan(local_path: Path, typography_plan: dict) -> None:
         img = Image.open(local_path).convert("RGB")
         img_w, img_h = img.size
 
-        # Zone → pixel anchor (top-left corner of text block)
+        # Zone → pixel anchor (top-left of text block)
         _ZONE_ANCHORS: dict[str, tuple[float, float]] = {
-            "lower_left":   (0.07, 0.68),
-            "lower_right":  (0.52, 0.68),
-            "lower_center": (0.15, 0.68),
+            "lower_left":   (0.07, 0.62),
+            "lower_right":  (0.52, 0.62),
+            "lower_center": (0.12, 0.62),
             "upper_left":   (0.07, 0.15),
             "upper_right":  (0.52, 0.15),
-            "upper_center": (0.15, 0.15),
-            "center":       (0.15, 0.42),
-            "full_frame":   (0.07, 0.68),  # fall back to lower_left for text
+            "upper_center": (0.12, 0.15),
+            "center":       (0.12, 0.40),
+            "full_frame":   (0.07, 0.62),
         }
-        ax_frac, ay_frac = _ZONE_ANCHORS.get(zone, (0.07, 0.68))
+        ax_frac, ay_frac = _ZONE_ANCHORS.get(zone, (0.07, 0.62))
         anchor_x = round(img_w * ax_frac)
         anchor_y = round(img_h * ay_frac)
 
-        # Font sizes: headline base ≈ 4.5% of height; emphasis scaled up
-        base_size  = max(16, round(img_h * 0.045))
-        emph_size  = max(20, round(base_size * emphasis_scale))
+        # Headline base: 7% of frame height — larger than before for readability at 320px.
+        # Emphasis = base × emphasis_scale (1.4–1.7) → character height ≈ 10–12% of frame.
+        base_size = max(24, round(img_h * 0.070))
+        emph_size = max(36, round(base_size * emphasis_scale))
 
-        def _load_font(size: int) -> "ImageFont.FreeTypeFont":
-            for fp in _OVERLAY_FONT_CANDIDATES:
+        def _load_font(candidates: list, size: int) -> "ImageFont.FreeTypeFont":
+            for fp in candidates:
                 try:
                     return ImageFont.truetype(fp, size)
                 except Exception:
                     continue
             return ImageFont.load_default()
 
-        font_head = _load_font(base_size)
-        font_emph = _load_font(emph_size)
+        # Headline uses regular weight; emphasis uses bold weight for visual dominance
+        font_head = _load_font(_OVERLAY_FONT_CANDIDATES,      base_size)
+        font_emph = _load_font(_OVERLAY_BOLD_FONT_CANDIDATES, emph_size)
 
-        # Measure text dimensions
+        # Measure text
         draw = ImageDraw.Draw(img.convert("RGBA"))
 
         def _measure(text: str, font) -> tuple[int, int]:
@@ -1282,54 +1299,66 @@ def _apply_typography_plan(local_path: Path, typography_plan: dict) -> None:
 
         head_w, head_h = _measure(headline, font_head) if headline else (0, 0)
         emph_w, emph_h = _measure(emphasis, font_emph) if emphasis else (0, 0)
-        line_gap = max(4, round(img_h * 0.01))
+        line_gap = max(6, round(img_h * 0.012))
 
         block_w = max(head_w, emph_w)
         block_h = (head_h + line_gap + emph_h) if (headline and emphasis) else (head_h or emph_h)
 
-        # Horizontal position by alignment
+        # Horizontal position
         max_x = img_w - round(img_w * 0.07)
         if alignment == "center":
-            center_x = img_w // 2
-            head_x = center_x - head_w // 2
-            emph_x = center_x - emph_w // 2
+            cx = img_w // 2
+            head_x = cx - head_w // 2
+            emph_x = cx - emph_w // 2
         elif alignment == "right":
             head_x = max_x - head_w
             emph_x = max_x - emph_w
-        else:  # left
+        else:
             head_x = anchor_x
             emph_x = anchor_x
 
         head_y = anchor_y
         emph_y = anchor_y + head_h + line_gap if headline else anchor_y
 
-        # Localized dark backing (only behind text block, not full-width)
-        pad_x, pad_y = round(img_w * 0.025), round(img_h * 0.012)
-        back_x1 = min(head_x, emph_x) - pad_x
-        back_y1 = head_y - pad_y
-        back_x2 = min(head_x, emph_x) + block_w + pad_x
-        back_y2 = head_y + block_h + pad_y
+        # Dark backing — localized, not full-width
+        pad_x = round(img_w * 0.025)
+        pad_y = round(img_h * 0.015)
+        bx1 = min(head_x, emph_x) - pad_x
+        by1 = head_y - pad_y
+        bx2 = min(head_x, emph_x) + block_w + pad_x
+        by2 = head_y + block_h + pad_y
 
         img_rgba = img.convert("RGBA")
-        backing  = Image.new("RGBA", (back_x2 - back_x1, back_y2 - back_y1), (8, 6, 4, 170))
-        img_rgba.paste(backing, (back_x1, back_y1), backing)
+        backing  = Image.new("RGBA", (max(1, bx2 - bx1), max(1, by2 - by1)), (6, 4, 2, 185))
+        img_rgba.paste(backing, (bx1, by1), backing)
         img_out  = img_rgba.convert("RGB")
         draw_out = ImageDraw.Draw(img_out)
 
-        # Colours: warm cream for headline, warm gold for emphasis
-        _HEAD_COLOR  = (210, 195, 160)  # slightly dimmer warm cream (lighter weight feel)
-        _EMPH_COLOR  = (240, 218, 174)  # aged parchment — main brand warm cream
-        _SHADOW      = (8, 8, 8)
-        shadow_off   = max(1, round(img_h * 0.002))
+        _HEAD_COLOR = (210, 195, 160)   # warm cream — headline (recedes)
+        _EMPH_COLOR = (245, 225, 175)   # bright warm parchment — emphasis (pops)
+        _SHADOW     = (6, 4, 2)
+        _STROKE     = (30, 20, 10)      # near-black stroke for legibility on any bg
+        shadow_off  = max(2, round(img_h * 0.003))
 
-        def _draw_text(text: str, x: int, y: int, font, colour: tuple) -> None:
+        def _draw_emphasis(text: str, x: int, y: int, font) -> None:
+            if use_stroke:
+                # 1px stroke pass (outline) around all sides
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1),
+                                (-1, -1), (1, -1), (-1, 1), (1, 1)):
+                    draw_out.text((x + dx, y + dy), text, font=font, fill=_STROKE)
+            # Shadow
             draw_out.text((x + shadow_off, y + shadow_off), text, font=font, fill=_SHADOW)
-            draw_out.text((x, y), text, font=font, fill=colour)
+            # Main text
+            draw_out.text((x, y), text, font=font, fill=_EMPH_COLOR)
+
+        def _draw_headline(text: str, x: int, y: int, font) -> None:
+            draw_out.text((x + 1, y + 1), text, font=font, fill=_SHADOW)
+            draw_out.text((x, y), text, font=font, fill=_HEAD_COLOR)
 
         if headline:
-            _draw_text(headline, head_x, head_y, font_head, _HEAD_COLOR)
+            _draw_headline(headline, head_x, head_y, font_head)
         if emphasis:
-            _draw_text(emphasis, emph_x, emph_y, font_emph, _EMPH_COLOR)
+            _draw_emphasis(emphasis, emph_x, emph_y, font_emph)
 
         img_out.save(local_path, format="JPEG", quality=95)
 

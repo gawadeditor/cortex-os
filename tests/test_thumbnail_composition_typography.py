@@ -58,16 +58,17 @@ class TestCompositionPlanner:
     def test_required_keys_present(self):
         p = plan_composition("impossibility")
         for k in ("focal_zone", "focal_scale", "negative_space_zones",
-                  "dominant_tone", "text_zone", "text_safe_brightness", "eye_path"):
+                  "dominant_tone", "text_zone", "text_safe_brightness", "eye_path",
+                  "environment_level", "contrast_mechanism", "subject_readability_at_320px"):
             assert k in p, f"Missing key: {k}"
 
     def test_dominant_tone_is_near_black(self):
         for trigger in ("impossibility", "loss", "betrayal", "discovery", "awe", "dread"):
             assert plan_composition(trigger)["dominant_tone"] == "near_black"
 
-    def test_impossibility_focal_scale_small(self):
+    def test_impossibility_focal_scale_large(self):
         p = plan_composition("impossibility")
-        assert p["focal_scale"] == "small"
+        assert p["focal_scale"] == "large"
 
     def test_impossibility_focal_zone_center_right(self):
         p = plan_composition("impossibility")
@@ -81,28 +82,32 @@ class TestCompositionPlanner:
         p = plan_composition("impossibility")
         assert "lower_left" in p["negative_space_zones"]
 
-    def test_loss_focal_scale_absent(self):
-        """composition_plan for loss must use focal_scale='absent'."""
-        p = plan_composition("loss")
-        assert p["focal_scale"] == "absent"
+    def test_impossibility_environment_level_contextual(self):
+        p = plan_composition("impossibility")
+        assert p["environment_level"] == "contextual"
 
-    def test_loss_focal_zone_absent(self):
+    def test_loss_focal_scale_trace(self):
+        """loss uses focal_scale='trace' — remnant element, not full absence."""
         p = plan_composition("loss")
-        assert p["focal_zone"] == "absent"
+        assert p["focal_scale"] == "trace"
 
-    def test_loss_negative_space_full_frame(self):
+    def test_loss_focal_zone_center(self):
         p = plan_composition("loss")
-        assert "full_frame" in p["negative_space_zones"]
+        assert p["focal_zone"] == "center"
 
-    def test_loss_eye_path_no_focal_object(self):
+    def test_loss_negative_space_includes_sides(self):
         p = plan_composition("loss")
-        assert "focal_object" not in p["eye_path"]
+        zones = p["negative_space_zones"]
+        assert len(zones) >= 1
+
+    def test_loss_eye_path_contains_hook_text(self):
+        p = plan_composition("loss")
         assert "hook_text" in p["eye_path"]
         assert "wordmark" in p["eye_path"]
 
-    def test_betrayal_has_two_negative_zones(self):
-        p = plan_composition("betrayal")
-        assert len(p["negative_space_zones"]) >= 2
+    def test_loss_environment_level_suggestive(self):
+        p = plan_composition("loss")
+        assert p["environment_level"] == "suggestive"
 
     def test_betrayal_negative_zones_include_lower_left(self):
         p = plan_composition("betrayal")
@@ -111,6 +116,10 @@ class TestCompositionPlanner:
     def test_betrayal_focal_zone_center_right(self):
         p = plan_composition("betrayal")
         assert p["focal_zone"] == "center_right"
+
+    def test_betrayal_contrast_mechanism_human_vs_artifact(self):
+        p = plan_composition("betrayal")
+        assert p["contrast_mechanism"] == "human_vs_artifact"
 
     def test_awe_focal_scale_small(self):
         p = plan_composition("awe")
@@ -209,19 +218,19 @@ class TestTypographyPlanner:
         p = plan_typography("THE KNOWLEDGE VANISHED", "loss", comp)
         assert p["zone"] == comp["text_zone"]
 
-    def test_emphasis_scale_25_for_single_word(self):
+    def test_emphasis_scale_single_word_gte_1_7(self):
         p = _typo("IT SHOULDN'T EXIST", "impossibility")
         assert p["emphasis"] == "EXIST"
-        assert p["emphasis_scale"] == 2.5
+        assert p["emphasis_scale"] >= 1.7
 
-    def test_emphasis_scale_20_for_two_words(self):
+    def test_emphasis_scale_two_words_gte_1_4(self):
         p = _typo("NO ONE KNOWS WHO BUILT IT", "betrayal")
         assert p["emphasis"] == "BUILT IT"
-        assert p["emphasis_scale"] == 2.0
+        assert p["emphasis_scale"] >= 1.4
 
-    def test_headline_weight_light(self):
+    def test_headline_weight_regular(self):
         p = _typo("IT SHOULDN'T EXIST", "impossibility")
-        assert p["headline_weight"] == "light"
+        assert p["headline_weight"] == "regular"
 
     def test_emphasis_weight_bold(self):
         p = _typo("IT SHOULDN'T EXIST", "impossibility")

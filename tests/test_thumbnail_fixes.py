@@ -330,14 +330,15 @@ class TestConceptDrivenModeRules:
         assert "one-third" in SYSTEM_PROMPT
         assert "DO NOT apply the rule" in SYSTEM_PROMPT or "not apply" in SYSTEM_PROMPT.lower()
 
-    def test_section_11c_visual_argument_language(self):
-        """SECTION 11C must use 'visual argument' language, not 'cinematic scene' language."""
-        assert "visual argument" in SYSTEM_PROMPT.lower()
+    def test_section_11c_ctr_at_320px_rule(self):
+        """SECTION 11C must include a 320px CTR readability rule."""
+        assert "320px" in SYSTEM_PROMPT
 
     def test_section_11c_forbidden_words_list(self):
-        """SECTION 11C must list specific forbidden opening words."""
-        for word in ["Corroded", "Bronze", "Fragment", "Gear", "Tablet", "Column", "Torch"]:
-            assert word in SYSTEM_PROMPT, f"Expected '{word}' in FORBIDDEN list in SECTION 11C"
+        """SECTION 11C must list specific forbidden opening words (case-insensitive)."""
+        prompt_lower = SYSTEM_PROMPT.lower()
+        for word in ["corroded", "bronze", "fragment", "gear", "tablet", "column", "torch"]:
+            assert word in prompt_lower, f"Expected '{word}' in FORBIDDEN list in SECTION 11C"
 
     def test_wordmark_is_not_hero_in_prompt(self):
         """Prompt must say wordmark is small branding, not the hero."""

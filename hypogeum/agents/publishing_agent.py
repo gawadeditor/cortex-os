@@ -303,6 +303,25 @@ def run_publishing_agent(
 
     yt_client.reset_quota_counter()
 
+    # SecretProfile-first token resolution: DB credential takes priority over env.
+    # Mirrors sync_youtube_analytics() so publishing and analytics always target
+    # the same channel.
+    import copy as _copy
+    config = _copy.copy(config)
+    try:
+        from hypogeum.credential_manager import list_secret_profiles as _lsp
+        _db_for_creds = assets_root / "hypogeum.db"
+        _yt_profiles = _lsp(provider="youtube", db_path=_db_for_creds)
+        _stored = [
+            p for p in _yt_profiles
+            if p.label == "youtube-oauth-refresh" and p.status == "active"
+        ]
+        if _stored:
+            config.YOUTUBE_REFRESH_TOKEN = _stored[0].credential_data
+            log.info("publishing_youtube_token_from_secret_profile", episode_id=episode_id)
+    except Exception:
+        pass  # fall back to env token
+
     if (
         config.YOUTUBE_CLIENT_ID
         and config.YOUTUBE_CLIENT_SECRET

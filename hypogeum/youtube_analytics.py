@@ -63,10 +63,29 @@ def _now_iso() -> str:
 
 
 def _clean_video_id(raw_id: str) -> str:
-    """Strip YouTube timestamp suffixes like &t=400s from stored video IDs."""
+    """Normalize any YouTube video reference to a bare 11-char video ID.
+
+    Handles: bare IDs, IDs with timestamp suffixes, full watch URLs, youtu.be
+    short URLs, and any combination with ?t= or &t= parameters.
+    """
+    from urllib.parse import urlparse, parse_qs
     if not raw_id:
         return raw_id
-    return re.split(r"[&?#]", raw_id.strip())[0]
+    s = raw_id.strip()
+    parsed = urlparse(s)
+    if parsed.scheme in ("http", "https"):
+        host = parsed.netloc.lower()
+        if "youtu.be" in host:
+            # https://youtu.be/<video_id>?t=400
+            return parsed.path.lstrip("/").split("/")[0]
+        # https://www.youtube.com/watch?v=<video_id>&t=400s
+        qs = parse_qs(parsed.query)
+        v = qs.get("v", [])
+        if v:
+            return v[0]
+        return parsed.path.lstrip("/").split("/")[0]
+    # Bare ID or ID with suffix: WVbs9rMuQvA&t=400s
+    return re.split(r"[&?#]", s)[0]
 
 
 def fetch_video_analytics(

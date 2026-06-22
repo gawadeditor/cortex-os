@@ -1524,7 +1524,9 @@ def platform_connect_save_form(platform: str):
 # ===========================================================================
 
 _YT_OAUTH_SCOPES = " ".join([
-    "https://www.googleapis.com/auth/yt-analytics.readonly",
+    "https://www.googleapis.com/auth/youtube",                # upload, thumbnails, end screens
+    "https://www.googleapis.com/auth/youtube.force-ssl",      # captions.insert (required explicitly)
+    "https://www.googleapis.com/auth/yt-analytics.readonly",  # Analytics API
 ])
 
 _YT_AUTH_URL   = "https://accounts.google.com/o/oauth2/v2/auth"

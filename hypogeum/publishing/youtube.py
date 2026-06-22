@@ -44,7 +44,7 @@ _OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 _YT_UPLOAD_BASE = "https://www.googleapis.com/upload/youtube/v3/videos"
 _YT_CAPTIONS_UPLOAD = "https://www.googleapis.com/upload/youtube/v3/captions"
-_YT_THUMBNAILS = f"{_YT_API_BASE}/thumbnails/set"
+_YT_THUMBNAILS = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 _YT_VIDEO_CLIPS = f"{_YT_API_BASE}/videos/insertCard"
 _YT_SEARCH = f"{_YT_API_BASE}/search"
 
@@ -398,7 +398,7 @@ def upload_thumbnail(
             **_auth_headers(access_token),
             "Content-Type": "image/jpeg",
         }
-        params = {"videoId": video_id}
+        params = {"videoId": video_id, "uploadType": "media"}
 
         try:
             with open(thumb_path, "rb") as fh:

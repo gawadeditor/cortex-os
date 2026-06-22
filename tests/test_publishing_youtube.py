@@ -340,6 +340,38 @@ class TestUploadThumbnail:
 
         assert result is False
 
+    def test_uses_upload_url_and_uploadtype_media(self, tmp_path):
+        # Regression: thumbnail must use /upload/youtube/v3/thumbnails/set
+        # with uploadType=media, not the API base URL without uploadType.
+        # The API base URL returns 400 "mediaBodyRequired".
+        yt.reset_quota_counter()
+        config = _make_config()
+        thumb_path = _fake_thumbnail(tmp_path)
+
+        mock_resp = _make_response(200, json_data={"kind": "youtube#thumbnailSetResponse"})
+        captured = {}
+
+        def capture_post(url, **kwargs):
+            captured["url"] = url
+            captured["params"] = kwargs.get("params", {})
+            return mock_resp
+
+        with patch("requests.post", side_effect=capture_post):
+            yt.upload_thumbnail(
+                config=config,
+                access_token="ya29.token",
+                video_id="vid_123",
+                thumb_path=thumb_path,
+            )
+
+        assert captured["url"] == "https://www.googleapis.com/upload/youtube/v3/thumbnails/set", (
+            f"Wrong thumbnail URL: {captured['url']!r}"
+        )
+        assert captured["params"].get("uploadType") == "media", (
+            f"Missing uploadType=media in params: {captured['params']}"
+        )
+        assert captured["params"].get("videoId") == "vid_123"
+
 
 # ---------------------------------------------------------------------------
 # TestUploadCaptions

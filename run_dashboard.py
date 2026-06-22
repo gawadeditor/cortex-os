@@ -1806,6 +1806,96 @@ def api_schedule_status(schedule_id):
     return jsonify(result), http_status
 
 
+@app.route("/api/schedules", methods=["GET"])
+def api_schedules_list():
+    """
+    List all schedules.
+
+    Returns [{schedule_id, scope, channel_id, cadence, status,
+               next_run_at, last_run_at, label, max_runs_per_day,
+               created_at, updated_at}, ...]
+    """
+    from hypogeum.db import get_connection, initialize_schema
+    db = _db_path()
+    initialize_schema(db)
+    try:
+        conn = get_connection(db)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM schedules ORDER BY created_at DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/schedules", methods=["POST"])
+def api_schedules_create():
+    """
+    Create a new schedule.
+
+    Body (JSON):
+        scope           "factory" | "channel"   (default: "factory")
+        channel_id      str | null               (required when scope="channel")
+        cadence         "daily" | "weekly" | "manual"  (default: "daily")
+        next_run_at     ISO datetime string | null      (null = no auto-fire)
+        max_runs_per_day int                     (default: 1)
+        label           str                      (optional)
+
+    Returns:
+        {ok: true, schedule_id: str}
+    """
+    from hypogeum.scheduler import create_schedule as _create_schedule
+    from datetime import datetime, timezone
+
+    body = request.get_json(silent=True) or {}
+    scope            = body.get("scope", "factory")
+    channel_id       = body.get("channel_id") or None
+    cadence          = body.get("cadence", "daily")
+    next_run_at_raw  = body.get("next_run_at")
+    max_runs_per_day = int(body.get("max_runs_per_day", 1))
+    label            = body.get("label") or None
+
+    if scope not in ("factory", "channel"):
+        return jsonify({"ok": False, "error": "scope must be 'factory' or 'channel'",
+                        "code": "invalid"}), 400
+    if cadence not in ("daily", "weekly", "manual"):
+        return jsonify({"ok": False, "error": "cadence must be 'daily', 'weekly', or 'manual'",
+                        "code": "invalid"}), 400
+    if scope == "channel" and not channel_id:
+        return jsonify({"ok": False, "error": "channel_id is required when scope='channel'",
+                        "code": "invalid"}), 400
+
+    next_run_at = None
+    if next_run_at_raw:
+        try:
+            next_run_at = datetime.fromisoformat(next_run_at_raw.replace("Z", "+00:00"))
+            if next_run_at.tzinfo is None:
+                next_run_at = next_run_at.replace(tzinfo=timezone.utc)
+        except (ValueError, AttributeError):
+            return jsonify({"ok": False,
+                            "error": f"next_run_at must be an ISO datetime string, got: {next_run_at_raw!r}",
+                            "code": "invalid"}), 400
+
+    try:
+        schedule_id = _create_schedule(
+            db_path=_db_path(),
+            scope=scope,
+            channel_id=channel_id,
+            cadence=cadence,
+            next_run_at=next_run_at,
+            max_runs_per_day=max_runs_per_day,
+            label=label,
+        )
+        return jsonify({"ok": True, "schedule_id": schedule_id}), 201
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "code": "invalid"}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "code": "server_error"}), 500
+
+
 # ===========================================================================
 # Phase B — Action routes (POST-only)
 # ===========================================================================

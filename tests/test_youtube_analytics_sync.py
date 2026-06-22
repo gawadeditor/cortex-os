@@ -462,8 +462,11 @@ class TestImportPageYouTubeState:
             inst.YOUTUBE_CLIENT_SECRET = "csec"
             resp = client.get("/analytics/import")
         html = resp.data.decode()
-        assert "Sync YouTube Analytics" in html, (
-            "Sync button must appear on /analytics/import when YouTube is connected."
+        assert "Quick Sync" in html, (
+            "Quick Sync button must appear on /analytics/import when YouTube is connected."
+        )
+        assert "Full Sync" in html, (
+            "Full Sync button must appear on /analytics/import when YouTube is connected."
         )
         assert "syncYouTube" in html, (
             "syncYouTube JS function must be present when YouTube is connected."
@@ -497,4 +500,227 @@ class TestImportPageYouTubeState:
         )
         assert 'action="/analytics/import"' in html, (
             "Manual import form must still be present when YouTube is connected."
+        )
+
+
+# ===========================================================================
+# TestSyncWindowDays — default window and UI button payloads
+# ===========================================================================
+
+class TestSyncWindowDays:
+    """
+    Tests for the window_days parameter on POST /api/analytics/sync/youtube.
+
+    Default (no body or missing key) must be 900 for full historical sync.
+    UI Quick Sync sends 28. UI Full Sync sends 900.
+    """
+
+    def test_default_window_is_900_when_no_body(self, client):
+        """Route defaults to 900 when no JSON body is provided."""
+        fake_result = {
+            "ok": True, "synced_count": 0, "skipped_count": 0,
+            "errors": [], "synced_at": "2026-06-22T00:00:00+00:00",
+            "episodes": [],
+        }
+        with patch("hypogeum.config.Config") as MockCfg, \
+             patch("hypogeum.youtube_analytics.sync_youtube_analytics",
+                   return_value=fake_result) as mock_sync:
+            inst = MockCfg.return_value
+            inst.YOUTUBE_REFRESH_TOKEN = "tok"
+            inst.YOUTUBE_CLIENT_ID = "cid"
+            inst.YOUTUBE_CLIENT_SECRET = "csec"
+            # POST with no body at all
+            client.post("/api/analytics/sync/youtube")
+
+        mock_sync.assert_called_once()
+        assert mock_sync.call_args[1]["window_days"] == 900, (
+            "Default window_days must be 900 for full historical sync. "
+            f"Got: {mock_sync.call_args[1]['window_days']}"
+        )
+
+    def test_default_window_is_900_when_key_absent_from_json(self, client):
+        """Route defaults to 900 when JSON body omits window_days key."""
+        fake_result = {
+            "ok": True, "synced_count": 0, "skipped_count": 0,
+            "errors": [], "synced_at": "2026-06-22T00:00:00+00:00",
+            "episodes": [],
+        }
+        with patch("hypogeum.config.Config") as MockCfg, \
+             patch("hypogeum.youtube_analytics.sync_youtube_analytics",
+                   return_value=fake_result) as mock_sync:
+            inst = MockCfg.return_value
+            inst.YOUTUBE_REFRESH_TOKEN = "tok"
+            inst.YOUTUBE_CLIENT_ID = "cid"
+            inst.YOUTUBE_CLIENT_SECRET = "csec"
+            client.post(
+                "/api/analytics/sync/youtube",
+                json={},
+                content_type="application/json",
+            )
+
+        assert mock_sync.call_args[1]["window_days"] == 900
+
+    def test_quick_sync_sends_28(self, client):
+        """UI Quick Sync: window_days=28 is forwarded to sync function."""
+        fake_result = {
+            "ok": True, "synced_count": 0, "skipped_count": 0,
+            "errors": [], "synced_at": "2026-06-22T00:00:00+00:00",
+            "episodes": [],
+        }
+        with patch("hypogeum.config.Config") as MockCfg, \
+             patch("hypogeum.youtube_analytics.sync_youtube_analytics",
+                   return_value=fake_result) as mock_sync:
+            inst = MockCfg.return_value
+            inst.YOUTUBE_REFRESH_TOKEN = "tok"
+            inst.YOUTUBE_CLIENT_ID = "cid"
+            inst.YOUTUBE_CLIENT_SECRET = "csec"
+            client.post(
+                "/api/analytics/sync/youtube",
+                json={"window_days": 28},
+                content_type="application/json",
+            )
+
+        assert mock_sync.call_args[1]["window_days"] == 28, (
+            "Quick Sync must pass window_days=28 to sync_youtube_analytics."
+        )
+
+    def test_full_sync_sends_900(self, client):
+        """UI Full Sync: window_days=900 is forwarded to sync function."""
+        fake_result = {
+            "ok": True, "synced_count": 0, "skipped_count": 0,
+            "errors": [], "synced_at": "2026-06-22T00:00:00+00:00",
+            "episodes": [],
+        }
+        with patch("hypogeum.config.Config") as MockCfg, \
+             patch("hypogeum.youtube_analytics.sync_youtube_analytics",
+                   return_value=fake_result) as mock_sync:
+            inst = MockCfg.return_value
+            inst.YOUTUBE_REFRESH_TOKEN = "tok"
+            inst.YOUTUBE_CLIENT_ID = "cid"
+            inst.YOUTUBE_CLIENT_SECRET = "csec"
+            client.post(
+                "/api/analytics/sync/youtube",
+                json={"window_days": 900},
+                content_type="application/json",
+            )
+
+        assert mock_sync.call_args[1]["window_days"] == 900, (
+            "Full Sync must pass window_days=900 to sync_youtube_analytics."
+        )
+
+    def test_quick_and_full_buttons_present_in_ui(self, client):
+        """Both Quick Sync and Full Sync buttons must appear when YouTube is connected."""
+        with patch("hypogeum.config.Config") as MockCfg, \
+             patch("hypogeum.youtube_analytics.get_last_youtube_sync", return_value=None):
+            inst = MockCfg.return_value
+            inst.YOUTUBE_REFRESH_TOKEN = "tok"
+            inst.YOUTUBE_CLIENT_ID = "cid"
+            inst.YOUTUBE_CLIENT_SECRET = "csec"
+            resp = client.get("/analytics/import")
+        html = resp.data.decode()
+        assert "Quick Sync" in html, "Quick Sync button must appear when connected."
+        assert "Full Sync" in html, "Full Sync button must appear when connected."
+        assert "28" in html, "Quick Sync must reference 28 days."
+        assert "900" in html, "Full Sync must reference 900 days."
+
+
+# ===========================================================================
+# TestSecretProfileOverridesEnvToken — oauth refresh preference
+# ===========================================================================
+
+class TestSecretProfileOverridesEnvToken:
+    """
+    When sync_youtube_analytics() finds a SecretProfile with
+    label='youtube-oauth-refresh', it must use that token instead of
+    config.YOUTUBE_REFRESH_TOKEN (which may be the expired env token).
+    """
+
+    def _insert_publishing_outcome(self, db, episode_id, video_id):
+        from hypogeum.db import get_connection
+        conn = get_connection(db)
+        from datetime import datetime, timezone
+        conn.execute(
+            """INSERT OR REPLACE INTO publishing_outcomes
+               (outcome_id, episode_id, platform, publishing_status,
+                platform_video_id, recorded_at, metadata_version)
+               VALUES (?,?,?,?,?,?,?)""",
+            (f"o-{episode_id}", episode_id, "youtube", "success",
+             video_id, datetime.now(timezone.utc).isoformat(), "v1"),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_stored_refresh_token_overrides_env_token(self, db):
+        """
+        sync_youtube_analytics() must use the SecretProfile token with
+        label='youtube-oauth-refresh' when present, NOT config.YOUTUBE_REFRESH_TOKEN.
+        This covers the case where the env token is expired but the DB holds a
+        fresh token obtained via the OAuth callback.
+        """
+        from hypogeum.youtube_analytics import sync_youtube_analytics
+        from hypogeum.credential_manager import create_secret_profile
+        from hypogeum.db import initialize_schema
+
+        initialize_schema(db)
+        self._insert_publishing_outcome(db, "ep_tok_test", "vid_tok")
+
+        # Store a fresh token in SecretProfile
+        fresh_token = "fresh-refresh-token-from-oauth-callback"
+        create_secret_profile(
+            provider="youtube",
+            label="youtube-oauth-refresh",
+            credential_type="oauth2_token",
+            credential_data=fresh_token,
+            db_path=db,
+        )
+
+        # Config has an expired token
+        cfg = _make_config_with_youtube(YOUTUBE_REFRESH_TOKEN="expired-token-do-not-use")
+
+        tokens_used = []
+
+        def _mock_refresh(config):
+            tokens_used.append(config.YOUTUBE_REFRESH_TOKEN)
+            return "fresh-access-token"
+
+        api_data = _fake_analytics_response(video_id="vid_tok", views=42)
+
+        with patch("hypogeum.youtube_analytics.refresh_youtube_token",
+                   side_effect=_mock_refresh), \
+             patch("requests.get",
+                   return_value=_mock_requests_get(api_data)):
+            result = sync_youtube_analytics(cfg, db_path=db, window_days=365)
+
+        assert result["ok"] is True
+        assert len(tokens_used) == 1, "refresh_youtube_token must be called exactly once"
+        assert tokens_used[0] == fresh_token, (
+            "sync_youtube_analytics must use the SecretProfile token "
+            f"('{fresh_token}'), not the env token ('expired-token-do-not-use'). "
+            f"Got: '{tokens_used[0]}'"
+        )
+
+    def test_falls_back_to_env_token_when_no_secret_profile(self, db):
+        """
+        When no 'youtube-oauth-refresh' SecretProfile exists, config.YOUTUBE_REFRESH_TOKEN
+        (from env) must be used as-is.
+        """
+        from hypogeum.youtube_analytics import sync_youtube_analytics
+
+        env_token = "env-refresh-token"
+        cfg = _make_config_with_youtube(YOUTUBE_REFRESH_TOKEN=env_token)
+
+        tokens_used = []
+
+        def _mock_refresh(config):
+            tokens_used.append(config.YOUTUBE_REFRESH_TOKEN)
+            return "access-token"
+
+        with patch("hypogeum.youtube_analytics.refresh_youtube_token",
+                   side_effect=_mock_refresh):
+            sync_youtube_analytics(cfg, db_path=db, window_days=365)
+
+        assert len(tokens_used) == 1
+        assert tokens_used[0] == env_token, (
+            "Without a SecretProfile, the env config token must be used. "
+            f"Got: '{tokens_used[0]}'"
         )

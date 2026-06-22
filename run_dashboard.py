@@ -3611,10 +3611,10 @@ def api_analytics_sync_youtube():
                      "YOUTUBE_CLIENT_ID, and YOUTUBE_CLIENT_SECRET are required.",
         }), 400
 
-    window_days = 28
+    window_days = 900  # default: full historical sync (~2.5 years)
     if request.is_json and request.json:
         try:
-            window_days = int(request.json.get("window_days", 28))
+            window_days = int(request.json.get("window_days", 900))
         except (TypeError, ValueError):
             pass
     result = sync_youtube_analytics(cfg, db_path=_db_path(), window_days=window_days)

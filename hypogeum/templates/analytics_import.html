@@ -85,9 +85,15 @@
     <br><span style="font-size:12px; color:#d29922;">Never synced — click below to fetch your first real analytics.</span>
     {% endif %}
   </div>
-  <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-    <button id="btn-yt-sync" class="btn btn-save" onclick="syncYouTube(event)" style="min-width:180px;">
-      Sync YouTube Analytics
+  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+    <button id="btn-yt-quick" class="btn btn-save" onclick="syncYouTube(event,28)"
+            title="Last 28 days — fast, for routine updates">
+      Quick Sync (28 days)
+    </button>
+    <button id="btn-yt-full" class="btn" onclick="syncYouTube(event,900)"
+            title="Full history (~2.5 years) — use on first sync or after a gap"
+            style="border-color:#3fb950; color:#3fb950;">
+      Full Sync (900 days)
     </button>
     <span id="yt-sync-status" style="font-size:13px; color:var(--muted);"></span>
   </div>
@@ -106,24 +112,27 @@
 {% endif %}
 
 <script>
-function syncYouTube(event) {
+function syncYouTube(event, windowDays) {
   event.preventDefault();
-  var btn = document.getElementById('btn-yt-sync');
-  var status = document.getElementById('yt-sync-status');
-  var result = document.getElementById('yt-sync-result');
-  btn.disabled = true;
-  btn.textContent = 'Syncing…';
-  status.textContent = '';
+  var quickBtn = document.getElementById('btn-yt-quick');
+  var fullBtn  = document.getElementById('btn-yt-full');
+  var status   = document.getElementById('yt-sync-status');
+  var result   = document.getElementById('yt-sync-result');
+  var label    = windowDays === 28 ? 'Quick Sync (28 days)' : 'Full Sync (900 days)';
+  if (quickBtn) quickBtn.disabled = true;
+  if (fullBtn)  fullBtn.disabled  = true;
+  status.textContent = 'Syncing…';
+  status.style.color = 'var(--muted)';
   result.style.display = 'none';
   fetch('/api/analytics/sync/youtube', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({window_days: 28}),
+    body: JSON.stringify({window_days: windowDays}),
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
-    btn.disabled = false;
-    btn.textContent = 'Sync YouTube Analytics';
+    if (quickBtn) quickBtn.disabled = false;
+    if (fullBtn)  fullBtn.disabled  = false;
     if (d.ok) {
       status.textContent = '✓ Synced ' + d.synced_count + ' video' + (d.synced_count !== 1 ? 's' : '');
       status.style.color = '#3fb950';
@@ -141,8 +150,8 @@ function syncYouTube(event) {
     }
   })
   .catch(function(e) {
-    btn.disabled = false;
-    btn.textContent = 'Sync YouTube Analytics';
+    if (quickBtn) quickBtn.disabled = false;
+    if (fullBtn)  fullBtn.disabled  = false;
     status.textContent = '✗ Network error: ' + e.message;
     status.style.color = 'var(--red)';
   });

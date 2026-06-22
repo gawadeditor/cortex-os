@@ -349,6 +349,54 @@ def run_publishing_agent(
         log.warn("publishing_youtube_credentials_missing", episode_id=episode_id)
         youtube_available = False
 
+    # TikTok: SecretProfile-first token resolution.
+    # credential_data may be a raw access token string or a JSON blob
+    # with keys "access_token" and optionally "open_id".
+    try:
+        from hypogeum.credential_manager import list_secret_profiles as _lsp_tt
+        import json as _json_tt
+        _tt_profiles = _lsp_tt(provider="tiktok", db_path=_db_for_creds)
+        _tt_active = [p for p in _tt_profiles if p.status == "active"]
+        if _tt_active:
+            _tt_cred = _tt_active[0].credential_data
+            try:
+                _tt_blob = _json_tt.loads(_tt_cred)
+                if _tt_blob.get("access_token"):
+                    config.TIKTOK_ACCESS_TOKEN = _tt_blob["access_token"]
+                if _tt_blob.get("open_id"):
+                    config.TIKTOK_OPEN_ID = _tt_blob["open_id"]
+            except (ValueError, TypeError):
+                config.TIKTOK_ACCESS_TOKEN = _tt_cred
+            log.info("publishing_tiktok_token_from_secret_profile", episode_id=episode_id)
+    except Exception:
+        pass  # fall back to env token
+
+    # Meta (Facebook / Instagram): SecretProfile-first token resolution.
+    # Prefers provider='facebook'; falls back to provider='instagram'.
+    # Overrides META_ACCESS_TOKEN only — APP_ID, APP_SECRET, PAGE_ID, and
+    # INSTAGRAM_ACCOUNT_ID must still be present in env / config.
+    # credential_data may be a raw token string or a JSON blob with "access_token".
+    try:
+        from hypogeum.credential_manager import list_secret_profiles as _lsp_meta
+        import json as _json_meta
+        _meta_cred: Optional[str] = None
+        for _meta_provider in ("facebook", "instagram"):
+            _meta_profiles = _lsp_meta(provider=_meta_provider, db_path=_db_for_creds)
+            _meta_active = [p for p in _meta_profiles if p.status == "active"]
+            if _meta_active:
+                _meta_cred = _meta_active[0].credential_data
+                break
+        if _meta_cred is not None:
+            try:
+                _meta_blob = _json_meta.loads(_meta_cred)
+                _meta_token_from_db = _meta_blob.get("access_token") or _meta_cred
+            except (ValueError, TypeError):
+                _meta_token_from_db = _meta_cred
+            config.META_ACCESS_TOKEN = _meta_token_from_db
+            log.info("publishing_meta_token_from_secret_profile", episode_id=episode_id)
+    except Exception:
+        pass  # fall back to env token
+
     # ------------------------------------------------------------------
     # PRE-FLIGHT 4: Meta token refresh
     # ------------------------------------------------------------------

@@ -132,12 +132,13 @@ def write_thumbnail_prompts(
 
 def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
     """
-    Attach deterministic composition_plan and typography_plan to each
-    main_episode ranked_candidate when in concept_driven_mode.
+    Attach deterministic composition_plan, typography_plan, layer_prompts, and
+    composite_mode=True to every main_episode ranked_candidate.
 
-    When composition_plan.typography_integration == "embedded", also appends
-    an integrated typography block to the image_prompt so the image model
-    renders the hook text as part of the image — not as a post-composite overlay.
+    composite_mode is always True for premium episodes regardless of
+    typography_integration. The compositor renders typography via PIL
+    (_render_typography_pil), not via MUAPI, so the typography_integration
+    field on composition_plan no longer controls routing.
 
     Mapping: concepts[0] → rank 1, concepts[1] → rank 2, concepts[2] → rank 3.
     Mutates generation_plan in place.
@@ -156,18 +157,12 @@ def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
         hook_text = concept.get("suggested_hook_text", "")
         comp_plan = plan_composition(trigger)
         typo_plan = plan_typography(hook_text, trigger, comp_plan)
-        candidate["composition_plan"]     = comp_plan
-        candidate["typography_plan"]      = typo_plan
+        candidate["composition_plan"]      = comp_plan
+        candidate["typography_plan"]       = typo_plan
         candidate["typography_integration"] = comp_plan.get("typography_integration", "composited")
-
-        if comp_plan.get("typography_integration") == "embedded":
-            candidate["image_prompt"] = _embed_typography_in_prompt(
-                base_prompt=candidate.get("image_prompt", ""),
-                typography_plan=typo_plan,
-            )
-            # Build multi-layer prompts for the compositor pipeline
-            candidate["layer_prompts"] = build_layer_prompts(concept, comp_plan)
-            candidate["composite_mode"] = True
+        # Always use the multi-layer compositor. Typography is PIL-rendered.
+        candidate["layer_prompts"]  = build_layer_prompts(concept, comp_plan)
+        candidate["composite_mode"] = True
 
 
 def _embed_typography_in_prompt(base_prompt: str, typography_plan: dict) -> str:

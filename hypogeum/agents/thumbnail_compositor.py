@@ -5,8 +5,10 @@ Thumbnail mode registry
 -----------------------
 THUMBNAIL_MODE_PREMIUM  = "multi_layer_composite"
     Main path for all premium main-episode thumbnails.
-    Generates 4 independent layers via MUAPI, composites with PIL screen-blend.
-    Required layers: base_scene, hero_subject, fx, typography.
+    Generates 3 visual layers via MUAPI, renders typography + wordmark via PIL.
+    Required layers: base_scene, hero_subject, fx  (MUAPI)
+                     typography                     (PIL — deterministic)
+                     wordmark                       (PIL — mandatory final step)
     Use generate_and_composite() with candidate["composite_mode"] = True.
 
 THUMBNAIL_MODE_FAST     = "single_pass_integrated"
@@ -19,11 +21,11 @@ THUMBNAIL_MODE_LEGACY   = "pil_composited_text"
     Only reached when typography_plan is present but composite_mode is False.
 
 Layered compositing workflow (PREMIUM only):
-  Layer 1 — base_scene:    Environment plate only (no subject, no text)
-  Layer 2 — hero_subject:  Isolated subject on dark background
-  Layer 3 — fx:            Atmospheric effects on black (screen blended)
-  Layer 4 — typography:    Distressed gold text on black (screen blended)
-  → PIL composite → color grade → vignette
+  Layer 1 — base_scene:    Environment plate only (no subject, no text) — MUAPI
+  Layer 2 — hero_subject:  Isolated subject on dark background          — MUAPI
+  Layer 3 — fx:            Atmospheric effects on black (screen blended) — MUAPI
+  Layer 4 — typography:    Hook text on black — PIL-rendered, deterministic
+  → PIL composite → color grade → vignette → wordmark overlay
 
 Public API:
     build_layer_prompts(concept, composition_plan) -> dict
@@ -62,20 +64,22 @@ LAYERS_SUBDIR = "layers"
 
 def build_layer_prompts(concept: dict, composition_plan: dict) -> dict:
     """
-    Build four focused layer prompts from a concept dict.
+    Build three MUAPI layer prompts from a concept dict.
 
     Each prompt is optimised for its single job:
       base_scene   — environment only, no subject, no text
       hero_subject — subject only on dark background (screen blend ready)
       fx           — atmospheric particles/light on black (screen blend)
-      typography   — large distressed gold text on black (screen blend)
+
+    Typography is NOT included — it is rendered deterministically via PIL
+    by _render_typography_pil(), never via MUAPI.
 
     Args:
         concept:          One concept dict from thumbnail_concept_brief.concepts[].
         composition_plan: composition_plan from plan_composition().
 
     Returns:
-        dict with keys: base_scene, hero_subject, fx, typography
+        dict with keys: base_scene, hero_subject, fx
     """
     hook_text   = concept.get("suggested_hook_text", "").strip()
     visual_thesis = concept.get("visual_thesis", "")
@@ -155,36 +159,179 @@ def build_layer_prompts(concept: dict, composition_plan: dict) -> dict:
         "No subjects, no text, only atmosphere and particles."
     )
 
-    # Typography layer — text on black for screen compositing
-    if headline:
-        typo_layout = (
-            f'Top line: "{headline}" in smaller, lighter-weight letters.\n'
-            f'Bottom line: "{emphasis}" in enormous dominant letters, '
-            f'at least 3× taller than the top line, filling most of the frame height.'
-        )
-    else:
-        typo_layout = (
-            f'Single line: "{emphasis}" in enormous dominant letters filling most of the frame.'
-        )
-
-    typography_prompt = (
-        f"Pure solid black background. "
-        f"Large distressed stone-and-gold typography centered in frame.\n"
-        f"{typo_layout}\n"
-        f"Letter material: ancient cracked stone surface with warm parchment-gold highlights. "
-        f"Dark grime visible inside letter cracks. Subtle bevel depth and shadow. "
-        f"Weathered, aged, textured. The text catches warm amber light. "
-        f"Realistic shadows beneath letters. Strong contrast. "
-        f"NO other visual elements. NO background texture. Pure black except the letters. "
-        f"Text must be fully legible and correctly spelled."
-    )
-
     return {
         "base_scene":   env_prompt,
         "hero_subject": subject_prompt,
         "fx":           fx_prompt,
-        "typography":   typography_prompt,
     }
+
+
+# ---------------------------------------------------------------------------
+# PIL typography rendering — deterministic, no MUAPI
+# ---------------------------------------------------------------------------
+
+_WORDMARK_LINE1 = "THE"
+_WORDMARK_LINE2 = "HYPOGEUM"
+_WORDMARK_LINE3 = "— CHRONICLES —"
+_GOLD_COLOR     = (196, 154, 66)   # brand antique_gold #C49A42
+_CREAM_COLOR    = (245, 243, 238)  # brand parchment_cream #F5F3EE
+
+_FONT_SEARCH_PATHS = [
+    # macOS system fonts
+    "/System/Library/Fonts/Supplemental/Palatino.ttc",
+    "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    # Linux / CI
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+]
+
+
+def _load_pil_font(size: int):
+    """Return a PIL font at the requested size, falling back gracefully."""
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+    for path in _FONT_SEARCH_PATHS:
+        try:
+            return ImageFont.truetype(path, size)
+        except (OSError, IOError):
+            continue
+    # Pillow ≥ 9.2 supports size argument on load_default()
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _render_typography_pil(
+    output_dir: Path,
+    deliverable_id: str,
+    typography_plan: dict,
+    log,
+) -> Optional[Path]:
+    """
+    Render hook text as a PIL typography layer (black background, cream text).
+
+    Replaces the former MUAPI typography layer call. Text is always deterministic:
+    headline above emphasis, left-aligned in the lower-left zone, matching the
+    brand palette. Saves to thumbnails/layers/{deliverable_id}_typography.jpg.
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        log.warn("compositor_pil_unavailable", deliverable_id=deliverable_id)
+        return None
+
+    W, H = 1280, 720
+    img  = Image.new("RGB", (W, H), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    headline = (typography_plan.get("headline") or "").upper().strip()
+    emphasis = (typography_plan.get("emphasis") or "").upper().strip()
+
+    # Zone: lower-left, occupying x 2–42%, y 30–88%
+    zone_x = int(W * 0.04)
+    zone_w = int(W * 0.38)
+    zone_y_start = int(H * 0.30)
+    zone_y_end   = int(H * 0.88)
+
+    # Font sizes: emphasis ~3× headline
+    emphasis_size  = 88
+    headline_size  = 36
+
+    font_hl  = _load_pil_font(headline_size)
+    font_em  = _load_pil_font(emphasis_size)
+
+    y = zone_y_start
+
+    if headline and font_hl:
+        draw.text((zone_x, y), headline, font=font_hl, fill=_CREAM_COLOR)
+        bbox = draw.textbbox((zone_x, y), headline, font=font_hl)
+        y += (bbox[3] - bbox[1]) + 8
+
+    if emphasis and font_em:
+        # Word-wrap emphasis if too wide for zone
+        words = emphasis.split()
+        line  = ""
+        for word in words:
+            test = (line + " " + word).strip()
+            bb   = draw.textbbox((zone_x, y), test, font=font_em)
+            if bb[2] - bb[0] <= zone_w or not line:
+                line = test
+            else:
+                draw.text((zone_x, y), line, font=font_em, fill=_GOLD_COLOR)
+                bb2 = draw.textbbox((zone_x, y), line, font=font_em)
+                y  += (bb2[3] - bb2[1]) + 4
+                line = word
+        if line:
+            draw.text((zone_x, y), line, font=font_em, fill=_GOLD_COLOR)
+
+    path = _layer_path(output_dir, deliverable_id, "typography")
+    img.save(str(path), format="JPEG", quality=95)
+    log.info("compositor_typography_pil_rendered", deliverable_id=deliverable_id,
+             path=str(path))
+    return path
+
+
+def _apply_wordmark(composite_path: Path, log) -> None:
+    """
+    Overlay the brand wordmark at top-center of the finished composite.
+
+    Three-line layout (matching brand visual identity):
+      THE
+      HYPOGEUM
+      — CHRONICLES —
+    Drawn in brand antique_gold (#C49A42) in the reserved top-12% zone.
+    Modifies the file at composite_path in-place.
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        log.warn("compositor_wordmark_pil_unavailable")
+        return
+
+    img  = Image.open(composite_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    W, H = img.size
+
+    # Top zone: 0–12% height, centered horizontally
+    zone_h = int(H * 0.12)
+    line_spacing = 4
+
+    font_sm  = _load_pil_font(13)
+    font_med = _load_pil_font(18)
+    font_sm2 = _load_pil_font(11)
+
+    lines = [
+        (_WORDMARK_LINE1, font_sm),
+        (_WORDMARK_LINE2, font_med),
+        (_WORDMARK_LINE3, font_sm2),
+    ]
+
+    # Measure total block height to vertically center in zone
+    total_h = 0
+    for text, font in lines:
+        if font:
+            bb = draw.textbbox((0, 0), text, font=font)
+            total_h += (bb[3] - bb[1]) + line_spacing
+    total_h = max(total_h, 1)
+
+    y = max(4, (zone_h - total_h) // 2)
+
+    for text, font in lines:
+        if not font:
+            continue
+        bb   = draw.textbbox((0, 0), text, font=font)
+        tw   = bb[2] - bb[0]
+        x    = (W - tw) // 2
+        draw.text((x, y), text, font=font, fill=_GOLD_COLOR)
+        y   += (bb[3] - bb[1]) + line_spacing
+
+    img.save(str(composite_path), format="JPEG", quality=95)
+    log.info("compositor_wordmark_applied", path=str(composite_path))
 
 
 # ---------------------------------------------------------------------------
@@ -462,11 +609,11 @@ def generate_and_composite(
     """
     Run the full multi-layer generation + compositing pipeline for one candidate.
 
-    Reads candidate["layer_prompts"] (set by thumbnail_prompt_writer._attach_concept_plans).
-    Generates each layer via MUAPI.
-    Composites with PIL.
-    Saves result to output_dir/thumbnails/{deliverable_id}.jpg.
+    Visual layers (base_scene, hero_subject, fx) are generated via MUAPI.
+    Typography layer is rendered deterministically by PIL (_render_typography_pil).
+    Wordmark is applied as the mandatory final step by _apply_wordmark.
 
+    Saves result to output_dir/thumbnails/{deliverable_id}.jpg.
     Returns True on success, False if base_scene generation failed.
     """
     layer_prompts = candidate.get("layer_prompts")
@@ -474,22 +621,30 @@ def generate_and_composite(
         log.warn("compositor_no_layer_prompts", deliverable_id=deliverable_id)
         return False
 
+    typography_plan = candidate.get("typography_plan") or {}
+
     log.info("compositor_started", deliverable_id=deliverable_id,
              layers=list(layer_prompts.keys()))
 
-    # Generate each layer
-    base_path  = _generate_layer("base_scene",   layer_prompts["base_scene"],   deliverable_id, config, output_dir, log)
-    subj_path  = _generate_layer("hero_subject",  layer_prompts["hero_subject"], deliverable_id, config, output_dir, log)
-    fx_path    = _generate_layer("fx",            layer_prompts.get("fx", ""),   deliverable_id, config, output_dir, log)
-    typo_path  = _generate_layer("typography",    layer_prompts["typography"],   deliverable_id, config, output_dir, log)
+    # MUAPI visual layers (base_scene, hero_subject, fx)
+    base_path = _generate_layer("base_scene",  layer_prompts["base_scene"],   deliverable_id, config, output_dir, log)
+    subj_path = _generate_layer("hero_subject", layer_prompts["hero_subject"], deliverable_id, config, output_dir, log)
+    fx_path   = _generate_layer("fx",           layer_prompts.get("fx", ""),   deliverable_id, config, output_dir, log)
 
     if base_path is None:
         log.error("compositor_base_failed", deliverable_id=deliverable_id)
         return False
 
-    # Composite
+    # PIL typography layer — deterministic, no MUAPI
+    typo_path = _render_typography_pil(output_dir, deliverable_id, typography_plan, log)
+
+    # Composite all layers
     out_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
     _composite_layers(base_path, subj_path, fx_path, typo_path, out_path)
+
+    # Wordmark overlay — mandatory brand identity step
+    if out_path.exists():
+        _apply_wordmark(out_path, log)
 
     log.info("compositor_finished", deliverable_id=deliverable_id,
              output=str(out_path),

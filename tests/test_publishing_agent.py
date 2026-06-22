@@ -382,6 +382,34 @@ class TestSuccessfulFullRun:
         assert result["package_integrity"]["production_ready"] is True
         assert result["summary"]["youtube_main_published"] is True
 
+    def test_full_run_summary_includes_youtube_main_video_id(self, tmp_path):
+        # Regression: summary.youtube_main_video_id must be populated so
+        # pipeline.py can write analytics_pending after a successful publish.
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_vid_id_001", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_vid_id_001", tmp_path)
+
+        assert result["summary"]["youtube_main_video_id"] == "yt_vid_main"
+
+    def test_full_run_writes_publishing_outcome_to_db(self, tmp_path):
+        # Regression: run_publishing_agent must call record_publishing_outcome
+        # after a successful YouTube main upload so analytics sync can discover it.
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_outcome_db_001", tmp_path)
+
+        with _patch_platforms(), \
+             patch("hypogeum.agents.publishing_agent.record_publishing_outcome") as mock_outcome:
+            _run(pkg, config, "ep_outcome_db_001", tmp_path)
+
+        mock_outcome.assert_called_once()
+        _, call_kwargs = mock_outcome.call_args
+        assert call_kwargs["episode_id"] == "ep_outcome_db_001"
+        assert call_kwargs["platform"] == "youtube"
+        assert call_kwargs["publishing_status"] == "success"
+        assert call_kwargs["platform_video_id"] == "yt_vid_main"
+
     def test_full_run_record_written_to_disk(self, tmp_path):
         config = _make_config()
         pkg = _make_final_render_package("ep_disk_001", tmp_path)

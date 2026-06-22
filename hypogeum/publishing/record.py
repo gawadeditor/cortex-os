@@ -227,6 +227,7 @@ class PublishingRecord:
         total_failed = 0
         total_skipped = 0
         youtube_main_published = False
+        youtube_main_video_id: Optional[str] = None
 
         for r in results:
             status = r.get("status", "")
@@ -242,11 +243,13 @@ class PublishingRecord:
                 total_published += 1
                 if platform == "youtube" and deliverable_type == "main_episode":
                     youtube_main_published = True
+                    youtube_main_video_id = r.get("platform_video_id")
             elif status == "failed":
                 total_failed += 1
 
         self._record["summary"] = {
             "youtube_main_published": youtube_main_published,
+            "youtube_main_video_id": youtube_main_video_id,
             "total_deliverables_attempted": total_attempted,
             "total_published": total_published,
             "total_failed": total_failed,

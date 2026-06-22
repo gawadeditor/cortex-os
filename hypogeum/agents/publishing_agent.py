@@ -48,6 +48,7 @@ from hypogeum.publishing.record import PublishingRecord, make_result_entry
 from hypogeum.publishing.retry import HardFailureError, PollTimeoutError, SoftFailureError
 from hypogeum.publishing.staging import StagingError, get_staging_provider
 from hypogeum.agents.covered_topics_writer import record_published_topic
+from hypogeum.decision_inputs.store import record_publishing_outcome
 from hypogeum.schemas import SchemaError, validate
 
 
@@ -504,13 +505,14 @@ def run_publishing_agent(
                         episode_id=episode_id,
                     )
 
+                _published_at = datetime.now(timezone.utc).isoformat()
                 entry = make_result_entry(
                     platform="youtube",
                     deliverable_type="main_episode",
                     status="published",
                     platform_video_id=yt_main_id,
                     published_url=f"https://www.youtube.com/watch?v={yt_main_id}",
-                    published_at=datetime.now(timezone.utc).isoformat(),
+                    published_at=_published_at,
                     title=episode_title,
                     description_length_chars=len(yt_description),
                     thumbnail_applied=thumbnail_applied,
@@ -520,6 +522,29 @@ def run_publishing_agent(
                     end_screen_applied=end_screen_applied,
                 )
                 record.append_result(entry)
+
+                # Persist to publishing_outcomes so analytics sync can discover it.
+                try:
+                    record_publishing_outcome(
+                        episode_id=episode_id,
+                        platform="youtube",
+                        publishing_status="success",
+                        platform_video_id=yt_main_id,
+                        published_at=_published_at,
+                        db_path=assets_root / "hypogeum.db",
+                    )
+                    log.info(
+                        "publishing_outcome_recorded",
+                        episode_id=episode_id,
+                        platform="youtube",
+                        platform_video_id=yt_main_id,
+                    )
+                except Exception as _exc:
+                    log.warn(
+                        "publishing_outcome_record_failed",
+                        episode_id=episode_id,
+                        error=str(_exc),
+                    )
 
             except HardFailureError as exc:
                 log.error(

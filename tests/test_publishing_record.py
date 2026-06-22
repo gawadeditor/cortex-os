@@ -156,6 +156,34 @@ class TestPublishingRecordAppendResult:
         summary = record.to_dict()["summary"]
         assert summary["youtube_main_published"] is True
 
+    def test_append_sets_youtube_main_video_id(self, tmp_path):
+        # Regression: summary must include youtube_main_video_id so pipeline.py
+        # can write analytics_pending after a successful YouTube publish.
+        record = PublishingRecord("ep_005b", output_dir=tmp_path)
+        record.initialize()
+        record.append_result(_published_result("youtube", "main_episode"))
+
+        summary = record.to_dict()["summary"]
+        assert summary.get("youtube_main_video_id") == "vid_123"
+
+    def test_youtube_main_video_id_none_when_not_published(self, tmp_path):
+        record = PublishingRecord("ep_005c", output_dir=tmp_path)
+        record.initialize()
+        record.append_result(_failed_result("youtube", "main_episode"))
+
+        summary = record.to_dict()["summary"]
+        assert summary.get("youtube_main_video_id") is None
+
+    def test_youtube_main_video_id_not_set_by_short(self, tmp_path):
+        # A published short must not overwrite the main video ID slot.
+        record = PublishingRecord("ep_005d", output_dir=tmp_path)
+        record.initialize()
+        record.append_result(_published_result("youtube", "short", "sh_001"))
+
+        summary = record.to_dict()["summary"]
+        assert summary.get("youtube_main_video_id") is None
+        assert summary["youtube_main_published"] is False
+
     def test_append_multiple_results(self, tmp_path):
         record = PublishingRecord("ep_006", output_dir=tmp_path)
         record.initialize()

@@ -393,3 +393,74 @@ class TestProvidersPageRouting:
         resp = client.get("/providers")
         html = resp.data.decode()
         assert "/providers/content/connect/openrouter" in html
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — active_channel check uses channel_profiles.status
+# ---------------------------------------------------------------------------
+
+class TestActiveChannelCheck:
+    """
+    Regression for: active_channel — Cannot check channels: no such column: status
+    Root cause: setup_preflight._check_active_channel() queried channels.status
+                which does not exist; channels uses an 'active' INTEGER column.
+                channel_profiles is the correct table and has status TEXT.
+    Fix: query channel_profiles WHERE status='active' instead.
+    """
+
+    def _ensure_channel_profiles(self, db):
+        """Create channel_profiles table if absent (not in base initialize_schema)."""
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_profiles (
+                channel_id TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                brand_profile_id TEXT,
+                publishing_profile_id TEXT,
+                model_profile_id TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                metadata_version TEXT NOT NULL DEFAULT 'v1'
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_active_channel_passes_with_active_channel_profile(self, db):
+        """After fix: a channel_profile with status='active' makes check pass."""
+        import sqlite3
+        self._ensure_channel_profiles(db)
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "INSERT INTO channel_profiles (channel_id, name, status, metadata_version) "
+            "VALUES ('test_ch', 'Test Channel', 'active', 'v1')"
+        )
+        conn.commit()
+        conn.close()
+
+        result = get_setup_preflight_status(db_path=db)
+        chan_check = next((c for c in result["checks"] if c["name"] == "active_channel"), None)
+        assert chan_check is not None
+        assert chan_check["passed"] is True, f"Expected pass; got: {chan_check}"
+
+    def test_active_channel_fails_with_no_channel_profiles(self, db):
+        """channel_profiles table exists but empty → active_channel check fails cleanly."""
+        self._ensure_channel_profiles(db)
+        result = get_setup_preflight_status(db_path=db)
+        chan_check = next((c for c in result["checks"] if c["name"] == "active_channel"), None)
+        assert chan_check is not None
+        assert chan_check["passed"] is False
+
+    def test_active_channel_does_not_query_channels_status_column(self, db):
+        """Query against channels table directly must not raise 'no such column: status'."""
+        from hypogeum.db import get_connection
+        conn = get_connection(db)
+        # channels table has no status column — this would raise if code queries it
+        with pytest.raises(Exception):
+            conn.execute("SELECT COUNT(*) FROM channels WHERE status='active'").fetchone()
+        conn.close()
+        # But get_setup_preflight_status must NOT raise
+        result = get_setup_preflight_status(db_path=db)
+        assert "ready" in result

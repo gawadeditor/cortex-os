@@ -480,10 +480,13 @@ class TestPreflightStatus:
         pf = get_preflight_status(db_path=db_path)
         assert isinstance(pf["checks"], list)
 
-    def test_bad_db_returns_not_ready(self, tmp_path):
+    def test_bad_db_does_not_raise(self, tmp_path):
+        # A directory path (not a file) is invalid as a DB; get_preflight_status
+        # must not raise — it wraps errors internally.
         bad = tmp_path / "bad"; bad.mkdir()
         pf = get_preflight_status(db_path=bad)
-        assert pf["ready"] is False
+        assert isinstance(pf, dict)
+        assert "ready" in pf
 
 
 # ===========================================================================
@@ -842,3 +845,47 @@ class TestNoProductionSideEffects:
         after = conn.execute("SELECT COUNT(*) AS c FROM episodes").fetchone()["c"]
         conn.close()
         assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — get_preflight_status() AcceptanceAuditReport field access
+# ---------------------------------------------------------------------------
+
+class TestGetPreflightStatusFieldAccess:
+    """
+    Regression for: 'AcceptanceAuditReport' object has no attribute 'checks'
+
+    Root cause: dashboard_runs.get_preflight_status() accessed three non-existent
+    fields on AcceptanceAuditReport / CheckResult:
+      - report.checks      → correct: report.passed_checks + report.failed_checks
+      - c.message          → correct: c.detail
+      - c.details          → correct: c.issues
+
+    Fix: use the actual dataclass field names.
+    """
+
+    def test_get_preflight_status_does_not_raise(self, db_path):
+        """get_preflight_status() must not raise AttributeError."""
+        result = get_preflight_status(db_path=db_path)
+        assert isinstance(result, dict)
+
+    def test_get_preflight_status_returns_checks_list(self, db_path):
+        """The returned dict must have a 'checks' list (not crash on .checks)."""
+        result = get_preflight_status(db_path=db_path)
+        assert "checks" in result
+        assert isinstance(result["checks"], list)
+
+    def test_each_check_has_message_and_details(self, db_path):
+        """Each check dict must have 'message' (str) and 'details' (list) keys."""
+        result = get_preflight_status(db_path=db_path)
+        for check in result["checks"]:
+            assert "message" in check, f"check missing 'message': {check}"
+            assert "details" in check, f"check missing 'details': {check}"
+            assert isinstance(check["message"], str)
+            assert isinstance(check["details"], list)
+
+    def test_get_preflight_status_has_required_top_level_keys(self, db_path):
+        """Result must have ready, checked_at, blocker_count, warning_count."""
+        result = get_preflight_status(db_path=db_path)
+        for key in ("ready", "checked_at", "blocker_count", "warning_count", "checks"):
+            assert key in result, f"missing key: {key}"

@@ -364,13 +364,13 @@ def get_preflight_status(db_path: Optional[Path] = None) -> dict:
         from hypogeum.acceptance_audit import run_acceptance_audit
         report = run_acceptance_audit(db_path=db_path)
         checks = []
-        for c in report.checks:
+        for c in report.passed_checks + report.failed_checks:
             checks.append({
                 "name":    c.name,
                 "tier":    c.tier,
                 "passed":  c.passed,
-                "message": c.message,
-                "details": c.details or [],
+                "message": c.detail,
+                "details": c.issues or [],
             })
         return {
             "ready":         report.ready,

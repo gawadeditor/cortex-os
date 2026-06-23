@@ -202,7 +202,7 @@ def _check_active_channel(db_path: Optional[Path]) -> tuple[SetupCheck, int]:
         conn = get_connection(db)
         try:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM channels WHERE status='active'"
+                "SELECT COUNT(*) AS n FROM channel_profiles WHERE status='active'"
             ).fetchone()
             count = row["n"] if row else 0
         finally:

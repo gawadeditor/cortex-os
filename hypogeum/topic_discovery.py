@@ -17,6 +17,14 @@ Public API:
     get_latest_cycle_id(channel_id, db_path=None) -> str | None
     approve_candidate(candidate_id, db_path=None) -> dict
     reject_candidate(candidate_id, reason=None, db_path=None) -> dict
+
+Signal scoring (M5.1):
+    _build_signal_context() reads both platform_analytics and analytics_insights
+    to compute per-channel KPI baselines and keyword sets that _score_seed()
+    uses to boost or penalise topic candidates relative to channel performance.
+    When no real analytics exist the function returns has_real_analytics=False
+    and _score_seed() falls back to static heuristic scores — identical to
+    pre-M5.1 behaviour.
 """
 
 from __future__ import annotations
@@ -93,15 +101,150 @@ _FALLBACK_SEEDS: list[dict] = [
     },
 ]
 
-# Scoring weights for composite score
+# Scoring weights for composite score (retained for reference)
 _W_CTR        = 0.35
 _W_RETENTION  = 0.35
 _W_WATCH_TIME = 0.20
 _W_NOVELTY    = 0.10
 
+# Signal scoring deltas applied on top of the heuristic base score.
+# Keep as named constants so they can be tuned without hunting inline literals.
+_SIGNAL_BOOST_TOP_PERFORMER = 0.12   # topic words overlap a top-performer insight
+_SIGNAL_BOOST_HIGH_RETENTION = 0.08  # topic words overlap a high-retention insight
+_SIGNAL_PENALTY_LOW_RETENTION = 0.10 # topic words overlap a low-retention / hook-failure insight
+_SIGNAL_NOVELTY_PENALTY = 0.70       # multiplier for recently queued topics (unchanged)
 
-def _score_seed(seed: dict, existing_topics: set[str]) -> float:
-    """Assign a heuristic composite score 0.0–1.0 to a seed topic."""
+# Stopwords excluded from keyword tokenisation to avoid spurious overlap.
+_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "in", "on", "at", "to", "and", "or", "but",
+    "that", "this", "with", "for", "by", "from", "as", "is", "was", "are",
+    "were", "be", "been", "being", "have", "has", "had", "do", "does",
+    "did", "will", "would", "could", "should", "may", "might", "what",
+    "how", "why", "when", "where", "which", "who", "we", "they", "their",
+    "our", "its", "it", "he", "she", "you", "your", "my",
+})
+
+
+def _tokenise(text: str) -> set[str]:
+    """Return lowercase word set, excluding stopwords and short tokens."""
+    import re
+    words = re.findall(r"[a-z']+", text.lower())
+    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
+
+
+def _build_signal_context(channel_id: str, conn) -> dict:
+    """
+    Build a per-channel signal context from platform_analytics and analytics_insights.
+
+    Reads both tables so that scoring reflects real performance data when available.
+    When no real analytics exist (source='mock' or no rows), returns a context with
+    has_real_analytics=False — _score_seed() must treat this as a no-op and produce
+    the same scores as the pre-M5.1 heuristic.
+
+    Returns:
+        {
+          "has_real_analytics": bool,
+          "top_performer_keywords": set[str],   # boost candidates
+          "high_retention_keywords": set[str],  # secondary boost
+          "penalty_keywords": set[str],          # penalise candidates
+          "avg_ctr": float | None,
+          "avg_view_pct": float | None,
+          "avg_watch_time_s": float | None,
+        }
+    """
+    empty: dict = {
+        "has_real_analytics":    False,
+        "top_performer_keywords": set(),
+        "high_retention_keywords": set(),
+        "penalty_keywords":       set(),
+        "avg_ctr":                None,
+        "avg_view_pct":           None,
+        "avg_watch_time_s":       None,
+    }
+
+    try:
+        # ── 1. Channel KPI baselines from platform_analytics (real data only) ──
+        # Episodes are linked to channels via the channel_episodes join table
+        # (managed by channel_manager._ensure_tables).  If that table does not
+        # exist yet (bare DB), the except block returns the empty context.
+        kpi_row = conn.execute(
+            """SELECT AVG(ctr), AVG(avg_view_pct), AVG(avg_watch_time_s)
+               FROM platform_analytics
+               WHERE source != 'mock'
+                 AND episode_id IN (
+                     SELECT episode_id FROM channel_episodes WHERE channel_id = ?
+                 )""",
+            (channel_id,),
+        ).fetchone()
+
+        avg_ctr          = kpi_row[0] if kpi_row else None
+        avg_view_pct     = kpi_row[1] if kpi_row else None
+        avg_watch_time_s = kpi_row[2] if kpi_row else None
+
+        has_real_kpis = any(v is not None for v in (avg_ctr, avg_view_pct, avg_watch_time_s))
+
+        # ── 2. Keyword sets from analytics_insights ──────────────────────────
+        insight_rows = conn.execute(
+            """SELECT ai.insight_type, ai.detail
+               FROM analytics_insights ai
+               WHERE ai.episode_id IN (
+                   SELECT episode_id FROM channel_episodes WHERE channel_id = ?
+               )
+               ORDER BY ai.created_at DESC LIMIT 40""",
+            (channel_id,),
+        ).fetchall()
+
+        top_performer_keywords: set[str] = set()
+        high_retention_keywords: set[str] = set()
+        penalty_keywords: set[str] = set()
+
+        for insight_type, detail in insight_rows:
+            if not detail:
+                continue
+            words = _tokenise(detail)
+            if insight_type in ("top_performer", "trend", "audience_segment"):
+                top_performer_keywords |= words
+            elif insight_type in ("high_retention",):
+                high_retention_keywords |= words
+            elif insight_type in ("hook_failure", "low_retention", "weak_thumbnail"):
+                penalty_keywords |= words
+
+        has_insight_data = bool(top_performer_keywords or high_retention_keywords or penalty_keywords)
+
+        if not has_real_kpis and not has_insight_data:
+            return empty
+
+        return {
+            "has_real_analytics":     True,
+            "top_performer_keywords": top_performer_keywords,
+            "high_retention_keywords": high_retention_keywords,
+            "penalty_keywords":        penalty_keywords,
+            "avg_ctr":                avg_ctr,
+            "avg_view_pct":           avg_view_pct,
+            "avg_watch_time_s":       avg_watch_time_s,
+        }
+
+    except Exception:
+        # Never crash discovery due to analytics errors — degrade gracefully.
+        return empty
+
+
+def _score_seed(seed: dict, existing_topics: set[str], signal_ctx: dict | None = None) -> float:
+    """
+    Assign a composite score 0.0–1.0 to a seed topic.
+
+    When signal_ctx is None or has_real_analytics=False, scoring is identical
+    to pre-M5.1 behaviour (hardcoded heuristic base scores + novelty penalty).
+
+    When signal_ctx contains real analytics:
+    - Topics whose words overlap top-performer insight keywords receive a boost.
+    - Topics whose words overlap high-retention insight keywords receive a
+      smaller secondary boost.
+    - Topics whose words overlap low-retention / hook-failure keywords are
+      penalised.
+    - The existing novelty penalty is applied last, after signal adjustments.
+    - Score is clamped to [0.0, 1.0].
+    """
     base_scores = {
         "The hidden history of ancient underground cities": 0.82,
         "Lost civilisations: what archaeology refuses to explain": 0.78,
@@ -112,11 +255,23 @@ def _score_seed(seed: dict, existing_topics: set[str]) -> float:
         "Secret societies and the empires they shaped": 0.64,
     }
     score = base_scores.get(seed["topic"], 0.60)
-    # Novelty penalty: reduce if this exact topic was recently queued/produced
+
+    # Signal adjustments — only when real analytics data is available.
+    if signal_ctx and signal_ctx.get("has_real_analytics"):
+        topic_words = _tokenise(seed["topic"])
+        if topic_words & signal_ctx["top_performer_keywords"]:
+            score += _SIGNAL_BOOST_TOP_PERFORMER
+        if topic_words & signal_ctx["high_retention_keywords"]:
+            score += _SIGNAL_BOOST_HIGH_RETENTION
+        if topic_words & signal_ctx["penalty_keywords"]:
+            score -= _SIGNAL_PENALTY_LOW_RETENTION
+
+    # Novelty penalty: reduce if this topic was recently queued/produced.
     norm = seed["topic"].lower().strip()
     if any(norm in t.lower() for t in existing_topics):
-        score *= 0.70
-    return round(score, 4)
+        score *= _SIGNAL_NOVELTY_PENALTY
+
+    return round(max(0.0, min(1.0, score)), 4)
 
 
 def _get_existing_topics(channel_id: str, conn) -> set[str]:
@@ -131,7 +286,11 @@ def _get_existing_topics(channel_id: str, conn) -> set[str]:
 
 
 def _get_signal_hints(channel_id: str, conn) -> list[str]:
-    """Extract topic hints from recent analytics insights for this channel."""
+    """Extract topic hints from recent analytics insights for this channel.
+
+    Superseded by _build_signal_context() in M5.1 but retained for any
+    external callers that may depend on the function signature.
+    """
     rows = conn.execute(
         """SELECT ai.detail FROM analytics_insights ai
            JOIN episodes e ON ai.episode_id = e.episode_id
@@ -163,12 +322,12 @@ def run_discovery_cycle(
 
     try:
         existing_topics = _get_existing_topics(channel_id, conn)
-        _signal_hints = _get_signal_hints(channel_id, conn)  # reserved for future scoring
+        signal_ctx = _build_signal_context(channel_id, conn)
 
-        # Score all seeds
+        # Score all seeds using real analytics when available
         scored: list[dict] = []
         for seed in _FALLBACK_SEEDS:
-            score = _score_seed(seed, existing_topics)
+            score = _score_seed(seed, existing_topics, signal_ctx)
             scored.append({
                 "candidate_id": str(uuid.uuid4()),
                 "channel_id": channel_id,

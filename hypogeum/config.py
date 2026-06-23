@@ -567,6 +567,15 @@ class Config:
             "NOTIFY_SEVERITY_THRESHOLD", default="WARNING"
         )
 
+        # --- Autonomous Discovery (M5.1) ---
+        # Master switch — defaults off so existing deployments are unaffected.
+        self.AUTO_DISCOVERY_ENABLED = _get_bool("AUTO_DISCOVERY_ENABLED", default=False)
+        # Run discovery when queued topic depth per channel falls below this value.
+        self.AUTO_DISCOVERY_THRESHOLD = _get_int("AUTO_DISCOVERY_THRESHOLD", default=2)
+        # If True, the top-scored candidate is auto-approved and enqueued without
+        # operator review. Defaults False — requires explicit opt-in for full autonomy.
+        self.AUTO_DISCOVERY_AUTO_APPROVE = _get_bool("AUTO_DISCOVERY_AUTO_APPROVE", default=False)
+
     # ------------------------------------------------------------------
     # Derived properties
     # ------------------------------------------------------------------

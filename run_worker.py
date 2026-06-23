@@ -78,6 +78,144 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _check_and_refill_queue(
+    db_path: Path,
+    threshold: int,
+    auto_approve: bool,
+) -> dict:
+    """
+    Inspect topic queue depth across all active channels.
+
+    For each active channel: if the number of queued topics is below
+    `threshold`, run a discovery cycle to generate fresh candidates.
+    If `auto_approve` is True, the top-scored candidate is automatically
+    approved and enqueued, closing the loop without operator input.
+
+    Duplicate-topic errors from enqueue_topic() are handled gracefully —
+    treated as a successful enqueue of an already-queued topic.
+
+    Returns:
+        {
+          "channels_checked": int,
+          "channels_refilled": int,
+          "cycles_run": list[str],     # cycle_ids
+          "topics_enqueued": list[str] # topic texts (only when auto_approve)
+        }
+    """
+    from hypogeum.channel_manager import list_channels
+    from hypogeum.topic_discovery import run_discovery_cycle, approve_candidate
+    from hypogeum.db import get_connection
+
+    result: dict = {
+        "channels_checked": 0,
+        "channels_refilled": 0,
+        "cycles_run": [],
+        "topics_enqueued": [],
+    }
+
+    try:
+        channels = list_channels(db_path=db_path)
+    except Exception as exc:
+        log.error("discovery_channel_list_error error=%s", exc)
+        return result
+
+    for ch in channels:
+        channel_id = ch.channel_id
+        result["channels_checked"] += 1
+
+        # ── Queue depth check ─────────────────────────────────────────────
+        try:
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM episode_topics "
+                    "WHERE channel_id = ? AND status = 'queued'",
+                    (channel_id,),
+                ).fetchone()
+                depth = row[0] if row else 0
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.error("discovery_queue_depth_error channel=%s error=%s", channel_id, exc)
+            continue
+
+        if depth >= threshold:
+            log.debug(
+                "discovery_queue_sufficient channel=%s depth=%d threshold=%d",
+                channel_id, depth, threshold,
+            )
+            continue
+
+        # ── Queue is below threshold — run discovery cycle ────────────────
+        log.info(
+            "discovery_triggered channel=%s depth=%d threshold=%d",
+            channel_id, depth, threshold,
+        )
+        try:
+            cycle = run_discovery_cycle(channel_id, db_path=db_path)
+        except Exception as exc:
+            log.error("discovery_cycle_error channel=%s error=%s", channel_id, exc)
+            continue
+
+        if not cycle.get("ok"):
+            log.error("discovery_cycle_failed channel=%s", channel_id)
+            continue
+
+        cycle_id = cycle["cycle_id"]
+        result["cycles_run"].append(cycle_id)
+        result["channels_refilled"] += 1
+        log.info(
+            "discovery_cycle_complete channel=%s cycle_id=%s candidates=%d selected=%s",
+            channel_id, cycle_id,
+            cycle.get("candidate_count", 0),
+            cycle.get("selected_candidate_id"),
+        )
+
+        # ── Auto-approve: enqueue top candidate without operator input ────
+        if not auto_approve:
+            log.info(
+                "discovery_pending_approval channel=%s cycle_id=%s "
+                "(set AUTO_DISCOVERY_AUTO_APPROVE=true to enqueue automatically)",
+                channel_id, cycle_id,
+            )
+            continue
+
+        selected_id = cycle.get("selected_candidate_id")
+        if not selected_id:
+            log.warning("discovery_no_selected_candidate channel=%s cycle_id=%s", channel_id, cycle_id)
+            continue
+
+        try:
+            approve_result = approve_candidate(selected_id, db_path=db_path)
+        except Exception as exc:
+            log.error("discovery_approve_error channel=%s candidate=%s error=%s",
+                      channel_id, selected_id, exc)
+            continue
+
+        if approve_result.get("ok"):
+            topic_text = approve_result.get("topic_text", "")
+            result["topics_enqueued"].append(topic_text)
+            log.info(
+                "discovery_auto_enqueued channel=%s topic=%r topic_id=%s",
+                channel_id, topic_text, approve_result.get("topic_id"),
+            )
+        else:
+            code = approve_result.get("code", "")
+            if code == "duplicate":
+                # Topic already in queue — not an error for autonomous operation.
+                log.info(
+                    "discovery_duplicate_skipped channel=%s candidate=%s",
+                    channel_id, selected_id,
+                )
+            else:
+                log.error(
+                    "discovery_approve_failed channel=%s candidate=%s error=%s",
+                    channel_id, selected_id, approve_result.get("error"),
+                )
+
+    return result
+
+
 def run_iteration(
     worker_id: str,
     db_path: Path,
@@ -94,6 +232,26 @@ def run_iteration(
     from hypogeum.queue import consume_scheduled_runs, poll
 
     now = _now_utc()
+
+    # Step 0: autonomous queue refill — runs before tick() so newly enqueued
+    # topics are visible to the scheduler in the same iteration.
+    discovery_result: dict = {}
+    if getattr(config, "AUTO_DISCOVERY_ENABLED", False):
+        try:
+            discovery_result = _check_and_refill_queue(
+                db_path=db_path,
+                threshold=getattr(config, "AUTO_DISCOVERY_THRESHOLD", 2),
+                auto_approve=getattr(config, "AUTO_DISCOVERY_AUTO_APPROVE", False),
+            )
+            if discovery_result.get("channels_refilled"):
+                log.info(
+                    "discovery_summary refilled=%d cycles=%s enqueued=%s",
+                    discovery_result["channels_refilled"],
+                    discovery_result["cycles_run"],
+                    discovery_result["topics_enqueued"],
+                )
+        except Exception as exc:
+            log.error("discovery_error error=%s", exc, exc_info=True)
 
     # Step 1: tick — fire any due schedules
     sr_ids = tick(db_path=db_path, now=now)
@@ -138,6 +296,7 @@ def run_iteration(
         "poll_status":            proc.status if proc else "empty",
         "poll_stop_reason":       poll_result.stop_reason,
         "dry_run":                dry_run,
+        "discovery":              discovery_result,
     }
 
 

@@ -625,6 +625,7 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
     verif_map = verif_map or {}
 
     # Pull account/channel IDs and OAuth client ID from config once (best-effort)
+    import os as _os
     try:
         from hypogeum.config import Config as _Cfg
         _cfg = _Cfg()
@@ -633,10 +634,30 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
         _fb_page_id      = _cfg.META_FACEBOOK_PAGE_ID or ""
         _ig_account_id   = _cfg.META_INSTAGRAM_ACCOUNT_ID or ""
         _meta_app_id     = _cfg.META_APP_ID or ""
-        _tk_client_key   = getattr(_cfg, "TIKTOK_CLIENT_KEY", "") or ""
     except Exception:
-        _yt_client_id = _yt_channel_id = _fb_page_id = _ig_account_id = ""
-        _meta_app_id = _tk_client_key = ""
+        _yt_client_id = _yt_channel_id = _fb_page_id = _ig_account_id = _meta_app_id = ""
+    # TikTok credentials: read directly from .env so we see actual file values,
+    # not stale os.environ entries (Config._load_dotenv skips already-set keys).
+    def _env_file_val(key: str) -> str:
+        try:
+            from hypogeum.db import _PROJECT_ROOT as _pr
+            env_path = _pr / ".env"
+            if env_path.exists():
+                for _line in env_path.read_text().splitlines():
+                    _line = _line.strip()
+                    if _line.startswith("#") or "=" not in _line:
+                        continue
+                    _k, _, _v = _line.partition("=")
+                    if _k.strip() == key:
+                        return _v.strip().split(" #")[0].strip().strip('"\'')
+        except Exception:
+            pass
+        return _os.environ.get(key, "").strip()
+
+    _tk_client_key    = _env_file_val("TIKTOK_CLIENT_KEY")
+    _tk_client_secret = _env_file_val("TIKTOK_CLIENT_SECRET")
+    _tk_access_token  = _env_file_val("TIKTOK_ACCESS_TOKEN")
+    _tk_open_id       = _env_file_val("TIKTOK_OPEN_ID")
 
     result = []
     for p in provider_list:
@@ -673,13 +694,21 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
                 ("META_INSTAGRAM_ACCOUNT_ID", not _ig_account_id),
             ) if bad]
         elif p["id"] == "tiktok":
-            entry["account_id"]   = ""
-            entry["missing_reqs"] = [name for name, bad in (
+            entry["account_id"]    = _tk_open_id  # open_id is the TikTok account identifier
+            entry["missing_reqs"]  = [name for name, bad in (
                 ("TIKTOK_CLIENT_KEY",    not _tk_client_key),
-                ("TIKTOK_CLIENT_SECRET", False),
-                ("TIKTOK_ACCESS_TOKEN",  True),   # always missing until OAuth complete
-                ("TIKTOK_OPEN_ID",       True),
+                ("TIKTOK_CLIENT_SECRET", not _tk_client_secret),
+                ("TIKTOK_ACCESS_TOKEN",  not _tk_access_token),
+                ("TIKTOK_OPEN_ID",       not _tk_open_id),
             ) if bad]
+            # Compute TikTok source accurately — verifier only checks ACCESS_TOKEN
+            # so its source fallback "env" is misleading when only client creds exist.
+            if _tk_access_token:
+                entry["_tiktok_source_override"] = "env"
+            elif _tk_client_key or _tk_client_secret:
+                entry["_tiktok_source_override"] = "partial"
+            else:
+                entry["_tiktok_source_override"] = ""
 
         # Verification status (replaces simple connected bool)
         v = verif_map.get(lookup_id)
@@ -715,6 +744,10 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
         entry["verif_source"]           = (v or {}).get("source", "")
         entry["verif_has_secret_profile"] = bool((v or {}).get("has_secret_profile"))
         entry["verif_has_env_var"]      = bool((v or {}).get("has_env_var"))
+        # Apply TikTok source override — verifier only knows ACCESS_TOKEN; we know more
+        _src_override = entry.pop("_tiktok_source_override", None)
+        if _src_override is not None:
+            entry["verif_source"] = _src_override
         # Legacy: True only when verified (not just saved)
         entry["connected"] = vstatus == "verified"
         # Distinguish real network probes from format/string checks.

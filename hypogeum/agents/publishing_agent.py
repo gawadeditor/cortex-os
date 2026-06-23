@@ -9,14 +9,15 @@ Execution sequence:
   2.  Pre-flight: validate all asset files exist on disk
   3.  Pre-flight: refresh YouTube OAuth token — PDR + skip YouTube on failure
   4.  Pre-flight: refresh Meta token — log error + skip Meta on failure
-  5.  YouTube main episode upload → captions → thumbnail → end screen
-  6.  YouTube Shorts (3) upload → thumbnail each
-  7.  Facebook Video upload (main) → thumbnail
-  8.  Instagram Reels (3) → stage → container → poll → publish → cleanup
-  9.  TikTok gate check → TikTok Shorts (3) upload (conditional)
-  10. Seal publishing record: set overall_status, production_ready
-  11. Issue PDR if YouTube main failed, or failed_count > 3 (excluding TikTok skipped)
-  12. Update covered-topics.md after successful YouTube main upload
+  5.  Pre-flight: refresh TikTok token — log error + skip TikTok on failure
+  6.  YouTube main episode upload → captions → thumbnail → end screen
+  7.  YouTube Shorts (3) upload → thumbnail each
+  8.  Facebook Video upload (main) → thumbnail
+  9.  Instagram Reels (3) → stage → container → poll → publish → cleanup
+  10. TikTok gate check → TikTok Shorts (3) upload (conditional)
+  11. Seal publishing record: set overall_status, production_ready
+  12. Issue PDR if YouTube main failed, or failed_count > 3 (excluding TikTok skipped)
+  13. Update covered-topics.md after successful YouTube main upload
       (delegated to covered_topics_writer tentacle)
 
 Public API:
@@ -425,6 +426,42 @@ def run_publishing_agent(
         log.warn("publishing_meta_credentials_missing", episode_id=episode_id)
         meta_available = False
 
+    # ------------------------------------------------------------------
+    # PRE-FLIGHT 5: TikTok token refresh
+    # ------------------------------------------------------------------
+    # refresh_tiktok_token() reads from secret_profiles and writes the new
+    # token back to DB. If no SecretProfile exists we fall back to the env
+    # token (non-blocking). If a refresh was attempted and the API rejected
+    # it, we block TikTok for this run.
+    _tiktok_refresh_error: Optional[str] = None
+
+    if config.TIKTOK_ACCESS_TOKEN:
+        try:
+            _new_tt_token = tt_client.refresh_tiktok_token(db_path=_db_for_creds)
+            config.TIKTOK_ACCESS_TOKEN = _new_tt_token
+            # TIKTOK_OPEN_ID is preserved — refresh_tiktok_token() only
+            # updates access_token and refresh_token in the credential blob.
+            log.info("publishing_tiktok_auth_ok", episode_id=episode_id)
+        except RuntimeError as exc:
+            err_str = str(exc)
+            if "No active TikTok credential in secret_profiles" in err_str:
+                # No SecretProfile to refresh from — proceed with env token.
+                log.warn(
+                    "publishing_tiktok_no_secret_profile_using_env_token",
+                    episode_id=episode_id,
+                )
+            else:
+                # Refresh was attempted but the TikTok API rejected it.
+                # Block TikTok for this run.
+                _tiktok_refresh_error = err_str
+                log.error(
+                    "publishing_tiktok_auth_failed",
+                    episode_id=episode_id,
+                    error=err_str,
+                )
+    else:
+        log.warn("publishing_tiktok_credentials_missing", episode_id=episode_id)
+
     # Track failures (excludes TikTok skipped)
     failed_count = 0
     youtube_main_published = False
@@ -432,7 +469,7 @@ def run_publishing_agent(
     youtube_quota_exceeded = False
 
     # ------------------------------------------------------------------
-    # STEP 5: YouTube main episode upload
+    # STEP 6: YouTube main episode upload
     # ------------------------------------------------------------------
     main_video_id = ep_render.get("video_asset_id", "")
     main_caption_id = ep_render.get("caption_asset_id", "")
@@ -661,7 +698,7 @@ def run_publishing_agent(
             failed_count += 1
 
     # ------------------------------------------------------------------
-    # STEP 6: YouTube Shorts (3)
+    # STEP 7: YouTube Shorts (3)
     # ------------------------------------------------------------------
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
@@ -802,7 +839,7 @@ def run_publishing_agent(
             failed_count += 1
 
     # ------------------------------------------------------------------
-    # STEP 7: Facebook Video upload
+    # STEP 8: Facebook Video upload
     # ------------------------------------------------------------------
     fb_video_id_result: Optional[str] = None
 
@@ -876,7 +913,7 @@ def run_publishing_agent(
             failed_count += 1
 
     # ------------------------------------------------------------------
-    # STEP 8: Instagram Reels (3 shorts)
+    # STEP 9: Instagram Reels (3 shorts)
     # ------------------------------------------------------------------
     staging_provider = get_staging_provider(
         meta_staging_base_url=config.META_STAGING_BASE_URL,
@@ -1067,12 +1104,20 @@ def run_publishing_agent(
         record.append_result(entry)
 
     # ------------------------------------------------------------------
-    # STEP 9: TikTok (conditional)
+    # STEP 10: TikTok (conditional)
     # ------------------------------------------------------------------
-    tiktok_available = tt_client.check_tiktok_availability(
-        config=config,
-        episode_id=episode_id,
-    )
+    if _tiktok_refresh_error:
+        tiktok_available = False
+        log.warn(
+            "publishing_tiktok_skipped_token_refresh_failed",
+            episode_id=episode_id,
+            error=_tiktok_refresh_error,
+        )
+    else:
+        tiktok_available = tt_client.check_tiktok_availability(
+            config=config,
+            episode_id=episode_id,
+        )
 
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
@@ -1163,12 +1208,12 @@ def run_publishing_agent(
             failed_count += 1
 
     # ------------------------------------------------------------------
-    # STEP 10: Seal publishing record
+    # STEP 11: Seal publishing record
     # ------------------------------------------------------------------
     publishing_record = record.seal()
 
     # ------------------------------------------------------------------
-    # STEP 11: PDR check — YouTube main failed OR threshold exceeded
+    # STEP 12: PDR check — YouTube main failed OR threshold exceeded
     # ------------------------------------------------------------------
     youtube_main_result = next(
         (r for r in publishing_record.get("platform_results", [])

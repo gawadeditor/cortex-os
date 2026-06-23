@@ -156,6 +156,11 @@ def _patched_agent(
         captured["tt_config"] = config
         return tt_available
 
+    def _fake_tt_refresh(db_path=None):
+        # Simulate "no SecretProfile exists" — non-blocking; lets the token
+        # already set by DB resolution flow through unchanged to publish.
+        raise RuntimeError("No active TikTok credential in secret_profiles")
+
     with patch(f"{_CRED_MGR}", side_effect=_fake_lsp), \
          patch(f"{_YT}.refresh_youtube_token",   side_effect=HardFailureError("no yt", 401)), \
          patch(f"{_YT}.reset_quota_counter"), \
@@ -164,6 +169,7 @@ def _patched_agent(
          patch(f"{_META_MOD}.create_instagram_container", return_value="ig_c"), \
          patch(f"{_META_MOD}.poll_instagram_container",    return_value="FINISHED"), \
          patch(f"{_META_MOD}.publish_instagram_container", return_value="ig_m"), \
+         patch(f"{_TT_MOD}.refresh_tiktok_token",         side_effect=_fake_tt_refresh), \
          patch(f"{_TT_MOD}.check_tiktok_availability",   side_effect=_fake_tt_check), \
          patch(f"{_TT_MOD}.init_tiktok_upload",          return_value=("pub_id", "https://upload.tt/")), \
          patch(f"{_TT_MOD}.upload_tiktok_chunks"), \

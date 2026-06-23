@@ -200,6 +200,8 @@ def _patch_platforms(
          patch(f"{_META}.create_instagram_container", return_value=ig_container), \
          patch(f"{_META}.poll_instagram_container", return_value=ig_status), \
          patch(f"{_META}.publish_instagram_container", return_value=ig_media), \
+         patch(f"{_TT}.refresh_tiktok_token",
+               side_effect=RuntimeError("No active TikTok credential in secret_profiles")), \
          patch(f"{_TT}.check_tiktok_availability", return_value=tiktok_avail), \
          patch(f"{_TT}.init_tiktok_upload", return_value=("tt_pub_id", "https://upload.tiktok/abc")), \
          patch(f"{_TT}.upload_tiktok_chunks"), \

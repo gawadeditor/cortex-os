@@ -1250,3 +1250,49 @@ CREATE TABLE IF NOT EXISTS provider_comparison_runs (
     results_json TEXT,
     completed_at TEXT
 );
+
+-- ===========================================================================
+-- topic_candidates — Autonomous Discovery (Dashboard Refactor)
+-- One row per candidate topic produced by a discovery cycle.
+-- cycle_id groups all candidates from the same run.
+-- selected=1 marks the system-ranked winner within a cycle.
+-- status transitions: pending → approved (operator) | rejected (operator/auto)
+--                     approved → consumed (after enqueue_topic completes)
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS topic_candidates (
+    candidate_id         TEXT NOT NULL PRIMARY KEY,
+    channel_id           TEXT NOT NULL,
+    cycle_id             TEXT NOT NULL,
+    topic                TEXT NOT NULL,
+    source               TEXT NOT NULL DEFAULT 'heuristic',
+    score                REAL NOT NULL DEFAULT 0.0,
+    ctr_rationale        TEXT,
+    retention_rationale  TEXT,
+    watch_time_rationale TEXT,
+    risk                 TEXT,
+    selected             INTEGER NOT NULL DEFAULT 0,
+    status               TEXT NOT NULL DEFAULT 'pending'
+                             CHECK(status IN ('pending','approved','rejected','consumed')),
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_topiccand_channel ON topic_candidates(channel_id, status);
+CREATE INDEX IF NOT EXISTS idx_topiccand_cycle   ON topic_candidates(cycle_id);
+
+-- ===========================================================================
+-- platform_sync_log — Per-platform auto-sync audit trail
+-- One row per sync attempt. triggered_by: 'auto' | 'manual'.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS platform_sync_log (
+    sync_id          TEXT NOT NULL PRIMARY KEY,
+    platform         TEXT NOT NULL,
+    channel_id       TEXT,
+    status           TEXT NOT NULL
+                         CHECK(status IN ('ok','error','not_connected','skipped')),
+    records_imported INTEGER NOT NULL DEFAULT 0,
+    errors_json      TEXT,
+    window_days      INTEGER NOT NULL DEFAULT 90,
+    triggered_by     TEXT NOT NULL DEFAULT 'auto',
+    synced_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_platformsync_platform ON platform_sync_log(platform, synced_at);

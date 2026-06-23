@@ -460,13 +460,13 @@ class TestImportPageYouTubeState:
             inst.YOUTUBE_REFRESH_TOKEN = "tok"
             inst.YOUTUBE_CLIENT_ID = "cid"
             inst.YOUTUBE_CLIENT_SECRET = "csec"
-            resp = client.get("/analytics/import")
+            resp = client.get("/analytics/advanced/import")
         html = resp.data.decode()
         assert "Quick Sync" in html, (
-            "Quick Sync button must appear on /analytics/import when YouTube is connected."
+            "Quick Sync button must appear on /analytics/advanced/import when YouTube is connected."
         )
         assert "Full Sync" in html, (
-            "Full Sync button must appear on /analytics/import when YouTube is connected."
+            "Full Sync button must appear on /analytics/advanced/import when YouTube is connected."
         )
         assert "syncYouTube" in html, (
             "syncYouTube JS function must be present when YouTube is connected."
@@ -479,7 +479,7 @@ class TestImportPageYouTubeState:
             inst.YOUTUBE_REFRESH_TOKEN = None
             inst.YOUTUBE_CLIENT_ID = "cid"
             inst.YOUTUBE_CLIENT_SECRET = "csec"
-            resp = client.get("/analytics/import")
+            resp = client.get("/analytics/advanced/import")
         html = resp.data.decode()
         assert "/platforms/connect/youtube" in html, (
             "Connect link must appear when YouTube is not connected."
@@ -493,12 +493,12 @@ class TestImportPageYouTubeState:
             inst.YOUTUBE_REFRESH_TOKEN = "tok"
             inst.YOUTUBE_CLIENT_ID = "cid"
             inst.YOUTUBE_CLIENT_SECRET = "csec"
-            resp = client.get("/analytics/import")
+            resp = client.get("/analytics/advanced/import")
         html = resp.data.decode()
         assert "Manual Import" in html, (
             "Manual Import section must remain visible even when YouTube is connected."
         )
-        assert 'action="/analytics/import"' in html, (
+        assert 'action="/analytics/advanced/import"' in html, (
             "Manual import form must still be present when YouTube is connected."
         )
 
@@ -616,7 +616,7 @@ class TestSyncWindowDays:
             inst.YOUTUBE_REFRESH_TOKEN = "tok"
             inst.YOUTUBE_CLIENT_ID = "cid"
             inst.YOUTUBE_CLIENT_SECRET = "csec"
-            resp = client.get("/analytics/import")
+            resp = client.get("/analytics/advanced/import")
         html = resp.data.decode()
         assert "Quick Sync" in html, "Quick Sync button must appear when connected."
         assert "Full Sync" in html, "Full Sync button must appear when connected."

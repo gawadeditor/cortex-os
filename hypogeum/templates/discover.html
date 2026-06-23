@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Discover — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .candidate-row { display: flex; gap: 12px; align-items: flex-start;
+                     padding: 12px 14px; border-bottom: 1px solid var(--border); }
+    .candidate-row:last-child { border-bottom: none; }
+    .candidate-rank { width: 28px; flex-shrink: 0; text-align: center;
+                      font-size: 18px; font-weight: 700; color: var(--muted);
+                      padding-top: 2px; }
+    .candidate-rank.selected-rank { color: var(--blue); }
+    .candidate-body { flex: 1; min-width: 0; }
+    .candidate-topic { font-size: 14px; font-weight: 600; color: var(--text);
+                       margin-bottom: 6px; line-height: 1.4; }
+    .candidate-topic.selected-topic { color: var(--blue); }
+    .candidate-meta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 12px; }
+    .candidate-score { font-weight: 700; font-family: monospace; color: var(--green); }
+    .candidate-source { color: var(--muted); }
+    .candidate-rationale { font-size: 12px; color: var(--muted); line-height: 1.6;
+                           display: grid; grid-template-columns: 60px 1fr; gap: 3px 8px; }
+    .rationale-lbl { color: var(--muted); font-weight: 600; text-transform: uppercase;
+                     font-size: 10px; letter-spacing: .04em; padding-top: 2px; }
+    .risk-pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
+                 background: #3a2e0d; color: var(--yellow); border: 1px solid #9e6a03; }
+    .candidate-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+    .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
+    .empty-icon { font-size: 32px; margin-bottom: 8px; }
+    .cycle-meta { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Topic Discovery</h1>
+  <span class="page-meta">
+    {% if candidates %}{{ candidates | length }} candidate{% if candidates | length != 1 %}s{% endif %}{% endif %}
+  </span>
+  <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+    {% if channels and channels | length > 1 %}
+    <form method="GET" action="/discover" style="display:inline;">
+      <select name="channel_id" onchange="this.form.submit()"
+              style="padding:4px 8px; background:var(--surface); border:1px solid var(--border);
+                     border-radius:var(--radius); color:var(--text); font-size:12px;">
+        {% for ch in channels %}
+          <option value="{{ ch.channel_id }}"
+            {% if ch.channel_id == channel_id %}selected{% endif %}>
+            {{ ch.channel_id }}
+          </option>
+        {% endfor %}
+      </select>
+    </form>
+    {% endif %}
+    <button id="btn-run" class="btn btn-save" onclick="runDiscovery(event)">
+      Run Discovery Cycle
+    </button>
+  </div>
+</div>
+
+{% if flash == 'ok' %}
+  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Discovery cycle complete — candidates ranked below.</div>
+{% elif flash == 'approved' %}
+  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Candidate approved and added to topic queue.</div>
+{% elif flash == 'rejected' %}
+  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Candidate rejected.</div>
+{% elif flash == 'duplicate' %}
+  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Topic is already queued — no duplicate created.</div>
+{% elif flash %}
+  <div class="flash flash-err" style="margin-bottom:var(--gap);">{{ flash }}</div>
+{% endif %}
+
+{% if cycle_id %}
+<div class="cycle-meta" style="margin-bottom:var(--gap);">
+  Cycle: <code style="font-size:11px;">{{ cycle_id }}</code>
+  {% if candidates %}&nbsp;·&nbsp;Channel: <code style="font-size:11px;">{{ channel_id }}</code>{% endif %}
+</div>
+{% endif %}
+
+<div class="card" style="padding:0;">
+  {% if candidates %}
+    {% for c in candidates %}
+    <div class="candidate-row">
+      <div class="candidate-rank {% if c.selected %}selected-rank{% endif %}">
+        {% if c.selected %}★{% else %}{{ loop.index }}{% endif %}
+      </div>
+      <div class="candidate-body">
+        <div class="candidate-topic {% if c.selected %}selected-topic{% endif %}">
+          {{ c.topic }}
+        </div>
+        <div class="candidate-meta">
+          <span class="candidate-score">{{ "%.2f"|format(c.score) }}</span>
+          <span class="candidate-source">{{ c.source }}</span>
+          <span class="badge badge-{{ c.status }}">{{ c.status }}</span>
+          {% if c.selected %}<span class="badge badge-active">top pick</span>{% endif %}
+        </div>
+        <div class="candidate-rationale">
+          <span class="rationale-lbl">CTR</span>
+          <span>{{ c.ctr_rationale or '—' }}</span>
+          <span class="rationale-lbl">Retention</span>
+          <span>{{ c.retention_rationale or '—' }}</span>
+          <span class="rationale-lbl">Watch</span>
+          <span>{{ c.watch_time_rationale or '—' }}</span>
+          {% if c.risk %}
+          <span class="rationale-lbl">Risk</span>
+          <span><span class="risk-pill">{{ c.risk }}</span></span>
+          {% endif %}
+        </div>
+      </div>
+      {% if c.status == 'pending' %}
+      <div class="candidate-actions">
+        {% if c.selected %}
+        <form method="POST" action="/api/discover/approve/{{ c.candidate_id }}">
+          <button type="submit" class="btn btn-approve">Approve</button>
+        </form>
+        {% endif %}
+        <form method="POST" action="/api/discover/reject/{{ c.candidate_id }}">
+          <button type="submit" class="btn btn-reject">Reject</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">🔍</div>
+    <div style="font-weight:600; color:var(--text); margin-bottom:6px;">No candidates yet</div>
+    <div>Click <strong>Run Discovery Cycle</strong> to generate scored topic candidates.</div>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+function runDiscovery(event) {
+  event.preventDefault();
+  var btn = document.getElementById('btn-run');
+  if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+  fetch('/api/discover/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel_id: '{{ channel_id }}'}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      window.location.href = '/discover?channel_id={{ channel_id }}&flash=ok&cycle_id=' + d.cycle_id;
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = 'Run Discovery Cycle'; }
+      alert('Discovery failed: ' + (d.error || 'unknown error'));
+    }
+  })
+  .catch(function(e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Run Discovery Cycle'; }
+    alert('Network error: ' + e.message);
+  });
+}
+</script>
+</body>
+</html>

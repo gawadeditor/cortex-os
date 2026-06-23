@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Analytics Sync — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .platform-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+                     gap: var(--gap); margin-bottom: var(--gap); }
+    .platform-card { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); padding: 14px 16px; }
+    .platform-card-ok   { border-color: #2ea043; }
+    .platform-card-err  { border-color: #da3633; }
+    .platform-card-skip { opacity: .7; }
+    .platform-name { font-size: 14px; font-weight: 700; text-transform: capitalize;
+                     margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+    .platform-stat { display: flex; justify-content: space-between; align-items: baseline;
+                     font-size: 12px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+    .platform-stat:last-child { border-bottom: none; }
+    .stat-lbl { color: var(--muted); }
+    .stat-val { font-family: monospace; font-weight: 600; }
+    .sync-log-row { display: grid;
+                    grid-template-columns: 90px 90px 60px 1fr auto;
+                    gap: 8px; align-items: baseline;
+                    padding: 6px 0; border-bottom: 1px solid var(--border);
+                    font-size: 12px; }
+    .sync-log-row:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+{# ── Secondary nav ── #}
+<div class="sub-nav">
+  <a href="/analytics"                      class="sub-nav-link">Portfolio</a>
+  <a href="/analytics/platform/youtube"     class="sub-nav-link">YouTube</a>
+  <a href="/analytics/platform/tiktok"      class="sub-nav-link">TikTok</a>
+  <a href="/analytics/platform/instagram"   class="sub-nav-link">Instagram</a>
+  <a href="/analytics/platform/facebook"    class="sub-nav-link">Facebook</a>
+  <a href="/analytics/sync"                 class="sub-nav-link active">Sync</a>
+  <a href="/analytics/advanced/import"      class="sub-nav-link">Manual Import</a>
+</div>
+
+<div class="breadcrumb">
+  <a href="/analytics">Analytics</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>Sync</span>
+</div>
+
+<div class="page-header">
+  <h1>Analytics Sync</h1>
+  <span class="page-meta">Platform connection status &amp; sync history</span>
+  <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+    <button id="btn-sync-quick" class="btn btn-save" onclick="runSync(event, 28)">
+      Quick Sync (28d)
+    </button>
+    <button id="btn-sync-full" class="btn" onclick="runSync(event, 900)"
+            style="border-color:#3fb950; color:#3fb950;">
+      Full Sync (900d)
+    </button>
+    <span id="sync-status" style="font-size:12px; color:var(--muted);"></span>
+  </div>
+</div>
+
+{% if flash == 'ok' %}
+  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Sync complete.</div>
+{% elif flash %}
+  <div class="flash flash-err" style="margin-bottom:var(--gap);">{{ flash }}</div>
+{% endif %}
+
+{# ── Per-platform cards ── #}
+<div class="platform-grid">
+
+  {# YouTube #}
+  {% set yt_last = last_sync_by_platform.get('youtube') %}
+  <div class="platform-card {% if youtube_connected %}platform-card-ok{% endif %}">
+    <div class="platform-name">
+      <span class="perf-dot {% if youtube_connected %}perf-dot-ok{% else %}perf-dot-warn{% endif %}"></span>
+      YouTube
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">Connection</span>
+      <span class="stat-val">{% if youtube_connected %}Connected{% else %}Not connected{% endif %}</span>
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">Last synced</span>
+      <span class="stat-val" style="font-family:sans-serif;">
+        {% if youtube_last_synced %}{{ youtube_last_synced[:19] | replace("T", " ") }}{% else %}Never{% endif %}
+      </span>
+    </div>
+    {% if yt_last %}
+    <div class="platform-stat">
+      <span class="stat-lbl">Records</span>
+      <span class="stat-val">{{ yt_last.records_imported }}</span>
+    </div>
+    {% endif %}
+    {% if not youtube_connected %}
+    <div style="margin-top:8px;">
+      <a href="/platforms/connect/youtube" class="btn" style="font-size:11px;">Connect →</a>
+    </div>
+    {% endif %}
+  </div>
+
+  {# TikTok — manual only #}
+  {% set tk_last = last_sync_by_platform.get('tiktok') %}
+  <div class="platform-card platform-card-skip">
+    <div class="platform-name">
+      <span class="perf-dot perf-dot-muted"></span>
+      TikTok
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">API sync</span>
+      <span class="stat-val" style="color:var(--muted);">Not available</span>
+    </div>
+    {% if tk_last %}
+    <div class="platform-stat">
+      <span class="stat-lbl">Last import</span>
+      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">{{ tk_last.synced_at[:10] }}</span>
+    </div>
+    {% endif %}
+    <div style="margin-top:8px;">
+      <a href="/analytics/advanced/import?platform=tiktok" class="btn" style="font-size:11px;">Manual import →</a>
+    </div>
+  </div>
+
+  {# Instagram — manual only #}
+  {% set ig_last = last_sync_by_platform.get('instagram') %}
+  <div class="platform-card platform-card-skip">
+    <div class="platform-name">
+      <span class="perf-dot perf-dot-muted"></span>
+      Instagram
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">API sync</span>
+      <span class="stat-val" style="color:var(--muted);">Not available</span>
+    </div>
+    {% if ig_last %}
+    <div class="platform-stat">
+      <span class="stat-lbl">Last import</span>
+      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">{{ ig_last.synced_at[:10] }}</span>
+    </div>
+    {% endif %}
+    <div style="margin-top:8px;">
+      <a href="/analytics/advanced/import?platform=instagram" class="btn" style="font-size:11px;">Manual import →</a>
+    </div>
+  </div>
+
+  {# Facebook — manual only #}
+  {% set fb_last = last_sync_by_platform.get('facebook') %}
+  <div class="platform-card platform-card-skip">
+    <div class="platform-name">
+      <span class="perf-dot perf-dot-muted"></span>
+      Facebook
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">API sync</span>
+      <span class="stat-val" style="color:var(--muted);">Not available</span>
+    </div>
+    {% if fb_last %}
+    <div class="platform-stat">
+      <span class="stat-lbl">Last import</span>
+      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">{{ fb_last.synced_at[:10] }}</span>
+    </div>
+    {% endif %}
+    <div style="margin-top:8px;">
+      <a href="/analytics/advanced/import?platform=facebook" class="btn" style="font-size:11px;">Manual import →</a>
+    </div>
+  </div>
+
+</div>
+
+{# ── Sync log ── #}
+<div class="card" style="padding:12px 16px;">
+  <div class="card-title">Sync Log</div>
+  {% if sync_log %}
+  <div id="sync-result" style="display:none; margin-bottom:10px;"></div>
+  {% for row in sync_log %}
+  <div class="sync-log-row">
+    <span style="color:var(--muted);">{{ row.synced_at[:19] | replace("T", " ") if row.synced_at else '—' }}</span>
+    <span style="text-transform:capitalize; font-weight:600;">{{ row.platform }}</span>
+    <span class="badge badge-{{ row.status }}">{{ row.status }}</span>
+    <span style="color:var(--muted);">
+      {% if row.records_imported %}{{ row.records_imported }} records{% endif %}
+      {% if row.triggered_by %}· {{ row.triggered_by }}{% endif %}
+    </span>
+    <span style="color:var(--muted); font-size:11px;">{{ row.window_days }}d window</span>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div style="color:var(--muted); font-size:13px;">No sync history yet — run a sync above.</div>
+  {% endif %}
+</div>
+
+<script>
+function runSync(event, windowDays) {
+  event.preventDefault();
+  var qBtn = document.getElementById('btn-sync-quick');
+  var fBtn = document.getElementById('btn-sync-full');
+  var st   = document.getElementById('sync-status');
+  if (qBtn) qBtn.disabled = true;
+  if (fBtn) fBtn.disabled = true;
+  if (st)   st.textContent = 'Syncing…';
+  fetch('/api/analytics/sync', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({window_days: windowDays}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (qBtn) qBtn.disabled = false;
+    if (fBtn) fBtn.disabled = false;
+    if (d.ok || d.results) {
+      var total = d.total_records || 0;
+      if (st) { st.textContent = '✓ ' + total + ' record' + (total !== 1 ? 's' : '') + ' synced'; st.style.color = 'var(--green)'; }
+      setTimeout(function() { window.location.reload(); }, 1200);
+    } else {
+      if (st) { st.textContent = '✗ ' + (d.error || 'sync failed'); st.style.color = 'var(--red)'; }
+    }
+  })
+  .catch(function(e) {
+    if (qBtn) qBtn.disabled = false;
+    if (fBtn) fBtn.disabled = false;
+    if (st) { st.textContent = '✗ Network error'; st.style.color = 'var(--red)'; }
+  });
+}
+</script>
+</body>
+</html>

@@ -468,7 +468,8 @@ class TestF13NavRefactor:
         if not nav_links:
             nav_links = _re.findall(r'href="([^"]+)"[^>]*class="nav-link', html)
         operator_paths = {"/dashboard", "/create", "/episodes", "/channels",
-                          "/providers", "/analytics", "/settings"}
+                          "/providers", "/providers/video-test", "/platforms", "/discover",
+                          "/analytics", "/settings"}
         for href in nav_links:
             assert href in operator_paths, (
                 f"Non-operator nav item found: {href!r}. "
@@ -540,7 +541,7 @@ class TestF13NavRefactor:
     def test_analytics_import_default_is_not_mock(self, client, db):
         import run_dashboard as server
         server.app.config["DB_PATH"] = str(db)
-        resp = client.get("/analytics/import")
+        resp = client.get("/analytics/advanced/import")
         html = resp.data.decode()
         # The hidden input "method-input" should NOT default to "mock"
         assert 'id="method-input" value="mock"' not in html
@@ -549,7 +550,7 @@ class TestF13NavRefactor:
     def test_analytics_import_json_is_first_active_tab(self, client, db):
         import run_dashboard as server
         server.app.config["DB_PATH"] = str(db)
-        resp = client.get("/analytics/import")
+        resp = client.get("/analytics/advanced/import")
         html = resp.data.decode()
         # JSON tab must come before mock tab in the HTML
         json_pos = html.find("setMethod('json'")

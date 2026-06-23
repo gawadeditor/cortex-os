@@ -4831,6 +4831,11 @@ def analytics_episode_page(episode_id):
 
 
 @app.route("/analytics/import", methods=["GET"])
+def analytics_import_redirect():
+    return redirect(url_for("analytics_import_page"), 301)
+
+
+@app.route("/analytics/advanced/import", methods=["GET"])
 def analytics_import_page():
     from hypogeum.dashboard_api import get_channel_summaries
     from hypogeum.dashboard_runs import list_episodes
@@ -4894,6 +4899,7 @@ def api_analytics_sync_youtube():
     return jsonify(result), status
 
 
+@app.route("/analytics/advanced/import", methods=["POST"])
 @app.route("/analytics/import", methods=["POST"])
 def analytics_import_submit():
     episode_id = request.form.get("episode_id", "").strip()
@@ -4929,6 +4935,173 @@ def analytics_import_submit():
 
     code = result.get("code", "error")
     return redirect(url_for("analytics_import_page") + f"?import_result={code}")
+
+
+# ===========================================================================
+# Analytics Sync — /analytics/sync
+# ===========================================================================
+
+@app.route("/analytics/sync", methods=["GET"])
+def analytics_sync_page():
+    from hypogeum.youtube_analytics import get_last_youtube_sync
+    from hypogeum.platform_sync import get_sync_log, get_last_sync_by_platform
+
+    youtube_connected = False
+    try:
+        from hypogeum.config import Config as _Cfg
+        _cfg = _Cfg()
+        youtube_connected = bool(
+            _cfg.YOUTUBE_REFRESH_TOKEN
+            and _cfg.YOUTUBE_CLIENT_ID
+            and _cfg.YOUTUBE_CLIENT_SECRET
+        )
+    except Exception:
+        pass
+
+    try:
+        youtube_last_synced = get_last_youtube_sync(db_path=_db_path())
+    except Exception:
+        youtube_last_synced = None
+
+    try:
+        sync_log = get_sync_log(limit=30, db_path=_db_path())
+    except Exception:
+        sync_log = []
+
+    try:
+        last_sync_by_platform = get_last_sync_by_platform(db_path=_db_path())
+    except Exception:
+        last_sync_by_platform = {}
+
+    flash = request.args.get("flash")
+    return render_template(
+        "analytics_sync.html",
+        youtube_connected=youtube_connected,
+        youtube_last_synced=youtube_last_synced,
+        sync_log=sync_log,
+        last_sync_by_platform=last_sync_by_platform,
+        flash=flash,
+    )
+
+
+@app.route("/api/analytics/sync", methods=["POST"])
+def api_analytics_sync():
+    """
+    Multi-platform analytics sync. Currently executes YouTube (API).
+    Other platforms return status='skipped' — manual import only.
+    Returns {ok, results, total_records, synced_at}.
+    """
+    from hypogeum.platform_sync import run_platform_sync
+    body = request.get_json(silent=True) or {}
+    try:
+        window_days = int(body.get("window_days", 90))
+    except (TypeError, ValueError):
+        window_days = 90
+    platforms = body.get("platforms") or None
+    try:
+        result = run_platform_sync(
+            db_path=_db_path(),
+            window_days=window_days,
+            triggered_by="manual",
+            platforms=platforms,
+        )
+        status = 200 if result.get("ok") else 207
+        return jsonify(result), status
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+# ===========================================================================
+# Topic Discovery — /discover
+# ===========================================================================
+
+def _default_channel_id(db_path=None) -> str:
+    """Return the first available channel_id, or 'hypogeum' as fallback."""
+    try:
+        from hypogeum.dashboard_api import get_channel_summaries
+        channels = get_channel_summaries(db_path=db_path)
+        if channels:
+            return channels[0].channel_id
+    except Exception:
+        pass
+    return "hypogeum"
+
+
+@app.route("/discover", methods=["GET"])
+def discover_page():
+    from hypogeum.topic_discovery import get_candidates, get_latest_cycle_id
+    db = _db_path()
+
+    try:
+        from hypogeum.dashboard_api import get_channel_summaries
+        channels = get_channel_summaries(db_path=db)
+    except Exception:
+        channels = []
+
+    channel_id = request.args.get("channel_id") or _default_channel_id(db)
+    cycle_id   = request.args.get("cycle_id")
+    flash      = request.args.get("flash")
+
+    if not cycle_id:
+        try:
+            cycle_id = get_latest_cycle_id(channel_id, db_path=db)
+        except Exception:
+            cycle_id = None
+
+    candidates = []
+    if cycle_id:
+        try:
+            candidates = get_candidates(channel_id, cycle_id=cycle_id, db_path=db)
+        except Exception:
+            candidates = []
+
+    return render_template(
+        "discover.html",
+        channel_id=channel_id,
+        channels=channels,
+        cycle_id=cycle_id,
+        candidates=candidates,
+        flash=flash,
+    )
+
+
+@app.route("/api/discover/run", methods=["POST"])
+def api_discover_run():
+    """Run a new discovery cycle and return scored candidates."""
+    from hypogeum.topic_discovery import run_discovery_cycle
+    db = _db_path()
+    body = request.get_json(silent=True) or {}
+    channel_id = body.get("channel_id") or _default_channel_id(db)
+    try:
+        result = run_discovery_cycle(channel_id, db_path=db)
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/discover/approve/<candidate_id>", methods=["POST"])
+def api_discover_approve(candidate_id: str):
+    """Approve the selected candidate — enqueues it as an episode_topic."""
+    from hypogeum.topic_discovery import approve_candidate
+    result = approve_candidate(candidate_id, db_path=_db_path())
+    if request.accept_mimetypes.best == "application/json":
+        return jsonify(result)
+    flash = "approved" if result.get("ok") else result.get("error", "error")
+    channel_id = request.args.get("channel_id") or _default_channel_id(_db_path())
+    return redirect(url_for("discover_page") + f"?channel_id={channel_id}&flash={flash}")
+
+
+@app.route("/api/discover/reject/<candidate_id>", methods=["POST"])
+def api_discover_reject(candidate_id: str):
+    """Reject a topic candidate."""
+    from hypogeum.topic_discovery import reject_candidate
+    reason = (request.get_json(silent=True) or {}).get("reason") or request.form.get("reason")
+    result = reject_candidate(candidate_id, reason=reason, db_path=_db_path())
+    if request.accept_mimetypes.best == "application/json":
+        return jsonify(result)
+    flash = "rejected" if result.get("ok") else result.get("error", "error")
+    channel_id = request.args.get("channel_id") or _default_channel_id(_db_path())
+    return redirect(url_for("discover_page") + f"?channel_id={channel_id}&flash={flash}")
 
 
 @app.route("/learning")

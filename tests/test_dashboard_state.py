@@ -584,7 +584,7 @@ class TestAnalyticsNoApiState:
         assert "not connected" in body.lower() or "not implemented" in body.lower() or "Manual" in body
 
     def test_analytics_import_page_says_manual(self, client):
-        resp = client.get("/analytics/import")
+        resp = client.get("/analytics/advanced/import")
         assert resp.status_code == 200
         body = resp.data.decode()
         # Should be clear this is manual import only

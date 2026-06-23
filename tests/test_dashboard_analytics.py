@@ -222,14 +222,18 @@ class TestFlaskAnalyticsHtmlRoutes:
         assert r.status_code == 404
 
     def test_analytics_import_page_200(self, flask_client):
+        # /analytics/import now redirects (301) to /analytics/advanced/import
         r = flask_client.get("/analytics/import")
-        assert r.status_code == 200
-        text = r.get_data(as_text=True)
+        assert r.status_code == 301
+        # Follow the redirect
+        r2 = flask_client.get("/analytics/advanced/import")
+        assert r2.status_code == 200
+        text = r2.get_data(as_text=True)
         assert "Import" in text
         assert "mock" in text.lower() or "Generate" in text
 
     def test_analytics_import_shows_platform_select(self, flask_client):
-        r = flask_client.get("/analytics/import")
+        r = flask_client.get("/analytics/advanced/import")
         text = r.get_data(as_text=True)
         assert "youtube" in text.lower()
 
@@ -484,7 +488,7 @@ class TestNoCredentialsRequired:
             assert r.status_code == 200, f"Platform {p} failed"
 
     def test_import_page_no_credentials(self, flask_client_bare):
-        r = flask_client_bare.get("/analytics/import")
+        r = flask_client_bare.get("/analytics/advanced/import")
         assert r.status_code == 200
 
     def test_learning_page_no_credentials(self, flask_client_bare):

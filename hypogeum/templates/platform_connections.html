@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Platform Connections — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .plat-grid       { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px,1fr));
+                       gap: var(--gap); margin-top: var(--gap); }
+
+    .plat-card       { background: var(--surface); border: 1px solid var(--border);
+                       border-radius: var(--radius); padding: 20px; }
+    .plat-card-ok    { border-color: #2ea043; }
+    .plat-card-fail  { border-color: var(--red); }
+    .plat-card-warn  { border-color: var(--yellow); }
+
+    .plat-header     { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .plat-icon       { width: 32px; height: 32px; border-radius: 6px; display: flex;
+                       align-items: center; justify-content: center; font-size: 11px;
+                       font-weight: 800; flex-shrink: 0; }
+    .plat-icon-yt    { background: #ff0000; color: #fff; }
+    .plat-icon-fb    { background: #1877f2; color: #fff; }
+    .plat-icon-ig    { background: linear-gradient(135deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888); color:#fff; }
+    .plat-icon-tk    { background: #010101; color: #fff; border: 1px solid #333; }
+
+    .plat-name       { font-size: 16px; font-weight: 700; }
+    .plat-status-row { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+
+    /* Status badges */
+    .badge-verified  { font-size: 11px; padding: 2px 8px; border-radius: 99px;
+                       background: #0f2016; border: 1px solid #2ea043; color: #3fb950; }
+    .badge-saved     { font-size: 11px; padding: 2px 8px; border-radius: 99px;
+                       background: #1a1200; border: 1px solid #8b6914; color: #d29922; }
+    .badge-partial   { font-size: 11px; padding: 2px 8px; border-radius: 99px;
+                       background: #1a0a00; border: 1px solid var(--yellow); color: var(--yellow); }
+    .badge-failed    { font-size: 11px; padding: 2px 8px; border-radius: 99px;
+                       background: #1a0000; border: 1px solid var(--red); color: var(--red); }
+    .badge-missing   { font-size: 11px; padding: 2px 8px; border-radius: 99px;
+                       background: #111; border: 1px solid var(--border); color: var(--muted); }
+
+    /* Credentials table */
+    .cred-table      { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
+    .cred-table th   { text-align: left; color: var(--muted); font-weight: 600;
+                       text-transform: uppercase; font-size: 10px; letter-spacing:.05em;
+                       padding: 0 0 6px 0; border-bottom: 1px solid var(--border); }
+    .cred-table td   { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.04);
+                       vertical-align: middle; }
+    .cred-table tr:last-child td { border-bottom: none; }
+
+    .cred-key        { font-family: monospace; color: var(--text); min-width: 180px; }
+    .cred-label      { color: var(--muted); font-size: 11px; display: block; }
+
+    .src-badge       { display: inline-block; font-size: 10px; padding: 1px 5px;
+                       border-radius: 3px; font-family: monospace; }
+    .src-env         { background: #001a3d; color: #4c9de8; border: 1px solid #1e4a7c; }
+    .src-sp          { background: #0f2016; color: #3fb950; border: 1px solid #2ea043; }
+    .src-missing     { background: #1a0000; color: var(--muted); border: 1px solid #333; }
+
+    .cred-val        { font-family: monospace; font-size: 11px; color: var(--muted);
+                       word-break: break-all; }
+    .cred-age        { font-size: 10px; color: var(--muted); white-space: nowrap; }
+    .cred-expiry     { font-size: 10px; color: var(--yellow); white-space: nowrap; }
+    .cred-expiry-warn{ color: var(--red); }
+
+    /* Account ID row */
+    .account-row     { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px 0;
+                       padding: 8px 10px; background: rgba(255,255,255,.03);
+                       border-radius: var(--radius); border: 1px solid var(--border); }
+    .account-label   { font-size: 10px; color: var(--muted); font-weight: 600;
+                       text-transform: uppercase; letter-spacing:.05em; width: 80px; flex-shrink:0; }
+    .account-val     { font-family: monospace; font-size: 12px; color: var(--text); }
+    .account-missing { font-size: 12px; color: var(--muted); }
+
+    /* Verification block */
+    .verif-block     { font-size: 11px; color: var(--muted); margin: 6px 0; }
+    .verif-block .ts { font-family: monospace; }
+    .verif-warn      { font-size: 11px; color: var(--yellow); margin-top: 2px; }
+    .verif-error     { font-size: 11px; color: var(--red); margin-top: 4px; }
+
+    /* Note */
+    .plat-note       { font-size: 11px; color: var(--muted); line-height: 1.5;
+                       margin: 8px 0; padding: 8px; background: rgba(255,255,255,.02);
+                       border-radius: 4px; border-left: 2px solid var(--border); }
+
+    /* Missing pills */
+    .missing-block   { margin-top: 8px; }
+    .missing-label   { font-size: 10px; font-weight: 700; color: var(--yellow);
+                       text-transform: uppercase; letter-spacing:.05em; margin-bottom: 4px; }
+    .missing-pill    { display: inline-block; font-family: monospace; font-size: 10px;
+                       padding: 1px 6px; margin: 2px 3px 2px 0;
+                       background: #1a1200; border: 1px solid var(--yellow);
+                       border-radius: 3px; color: var(--yellow); }
+
+    /* Actions */
+    .plat-actions    { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .btn-authorize   { font-size: 12px; padding: 5px 12px; border-radius: var(--radius);
+                       border: 1px solid var(--green); color: var(--green);
+                       background: rgba(46,160,67,.08); cursor: pointer;
+                       text-decoration: none; display: inline-block; }
+    .btn-authorize:hover { background: rgba(46,160,67,.16); }
+    .btn-verify      { font-size: 12px; padding: 5px 12px; border-radius: var(--radius);
+                       border: 1px solid var(--border); color: var(--muted);
+                       background: transparent; cursor: pointer; }
+    .btn-verify:hover { border-color: var(--blue); color: var(--text); }
+    .btn-disabled    { opacity: .4; pointer-events: none; }
+    .verify-result   { font-size: 11px; margin-top: 6px; min-height: 14px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="breadcrumb">
+  <a href="/dashboard">Dashboard</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>Platform Connections</span>
+</div>
+
+<div class="page-header">
+  <h1>Platform Connections</h1>
+  <span class="page-meta">Per-credential connection state for all publishing platforms</span>
+</div>
+
+<div class="plat-grid">
+{% for p in platforms %}
+{% set vstatus = p.vstatus %}
+
+<div class="plat-card
+  {% if vstatus == 'verified' %}plat-card-ok
+  {% elif vstatus == 'failed' %}plat-card-fail
+  {% elif vstatus in ('saved','partial') %}plat-card-warn
+  {% endif %}">
+
+  {# ── Header ──────────────────────────────────────── #}
+  <div class="plat-header">
+    <div class="plat-icon
+      {% if p.id == 'youtube' %}plat-icon-yt
+      {% elif p.id == 'facebook' %}plat-icon-fb
+      {% elif p.id == 'instagram' %}plat-icon-ig
+      {% else %}plat-icon-tk{% endif %}">
+      {{ p.icon }}
+    </div>
+    <span class="plat-name">{{ p.label }}</span>
+    <div class="plat-status-row">
+      {% if vstatus == 'verified' %}
+        <span class="badge-verified">✓ Verified</span>
+      {% elif vstatus == 'failed' %}
+        <span class="badge-failed">✗ Failed</span>
+      {% elif vstatus == 'saved' %}
+        <span class="badge-saved">● Token saved</span>
+      {% elif vstatus == 'partial' %}
+        <span class="badge-partial">◑ Partial</span>
+      {% else %}
+        <span class="badge-missing">Not configured</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Account ID ──────────────────────────────────── #}
+  <div class="account-row">
+    <span class="account-label">{{ p.account_label }}</span>
+    {% if p.account_id %}
+      <span class="account-val">{{ p.account_id }}</span>
+    {% else %}
+      <span class="account-missing">— not configured —</span>
+    {% endif %}
+  </div>
+
+  {# ── Credentials table ───────────────────────────── #}
+  <table class="cred-table">
+    <thead>
+      <tr>
+        <th>Credential</th>
+        <th>Source</th>
+        <th>Value</th>
+        <th>Age</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in p.credentials %}
+    <tr>
+      <td class="cred-key">
+        {{ c.key }}
+        {% if c.sp_label %}<span class="cred-label">{{ c.sp_label }}</span>{% endif %}
+      </td>
+      <td>
+        {% if c.source == 'secret_profile' %}
+          <span class="src-badge src-sp">secret_profile</span>
+        {% elif c.source == 'env' %}
+          <span class="src-badge src-env">env</span>
+        {% else %}
+          <span class="src-badge src-missing">missing</span>
+        {% endif %}
+      </td>
+      <td class="cred-val">
+        {% if c.is_id and c.masked %}
+          {{ c.masked }}
+        {% elif c.masked %}
+          {{ c.masked }}
+        {% else %}
+          <span style="color:var(--muted);">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if c.get('expiry_warning') %}
+          <span class="cred-expiry{% if 'soon' in c.expiry_warning %} cred-expiry-warn{% endif %}">
+            {{ c.expiry_warning }}
+          </span>
+        {% elif c.age_days is not none %}
+          <span class="cred-age">{{ c.age_days }}d ago</span>
+        {% else %}
+          <span class="cred-age" style="color:transparent;">—</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {# ── Last verified ───────────────────────────────── #}
+  <div class="verif-block">
+    {% if p.verified_at %}
+      Last verified: <span class="ts">{{ p.verified_at }} UTC</span>
+      {% if p.latency_ms is not none %}
+        {% if p.latency_ms == 0 %}
+          <span style="color:var(--yellow);">(format check only — no live probe)</span>
+        {% else %}
+          ({{ p.latency_ms }}ms)
+        {% endif %}
+      {% endif %}
+    {% else %}
+      Last verified: <span style="color:var(--muted);">never</span>
+    {% endif %}
+  </div>
+
+  {% if p.error %}
+  <div class="verif-error">✗ {{ p.error }}</div>
+  {% endif %}
+
+  {# ── Missing requirements ────────────────────────── #}
+  {% if p.missing %}
+  <div class="missing-block">
+    <div class="missing-label">Missing</div>
+    {% for req in p.missing %}
+    <span class="missing-pill">{{ req }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# ── Note ────────────────────────────────────────── #}
+  {% if p.note %}
+  <div class="plat-note">{{ p.note }}</div>
+  {% endif %}
+
+  {# ── Actions ─────────────────────────────────────── #}
+  <div class="plat-actions">
+    {% if p.authorize_url %}
+    <a href="{{ p.authorize_url }}" class="btn-authorize">{{ p.authorize_label }}</a>
+    {% endif %}
+    <button class="btn-verify {% if not p.credentials or p.id == 'tiktok' and vstatus == 'missing' %}btn-disabled{% endif %}"
+            onclick="verifyPlatform(this, '{{ p.id }}')">
+      Verify
+    </button>
+    <span class="verify-result" id="vr-{{ p.id }}"></span>
+  </div>
+
+</div>
+{% endfor %}
+</div>
+
+<script>
+function verifyPlatform(btn, provider) {
+  var el = document.getElementById('vr-' + provider);
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+  el.textContent = '';
+  fetch('/api/providers/verify/' + provider, {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.disabled = false;
+      btn.textContent = 'Verify';
+      if (d.ok || d.status === 'verified') {
+        el.style.color = 'var(--green)';
+        el.textContent = '✓ Verified' + (d.latency_ms ? ' (' + d.latency_ms + 'ms)' : '');
+      } else {
+        el.style.color = 'var(--red)';
+        el.textContent = '✗ ' + (d.error || d.status || 'failed');
+      }
+    })
+    .catch(function(e){
+      btn.disabled = false;
+      btn.textContent = 'Verify';
+      el.style.color = 'var(--red)';
+      el.textContent = '✗ network error';
+    });
+}
+</script>
+
+</body>
+</html>

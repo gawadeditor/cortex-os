@@ -1437,6 +1437,301 @@ def api_platform_connections():
 
 
 # ===========================================================================
+# Platform Connections — /platforms dedicated page
+# ===========================================================================
+
+def _read_env_file() -> dict:
+    """Parse .env into a dict of {key: value}. Does not touch os.environ."""
+    try:
+        from hypogeum.db import _PROJECT_ROOT
+        env_path = _PROJECT_ROOT / ".env"
+        result = {}
+        if not env_path.exists():
+            return result
+        for raw in env_path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().split(" #")[0].strip().strip("\"'")
+            result[k] = v
+        return result
+    except Exception:
+        return {}
+
+
+def _mask(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "●" * len(value)
+    return value[:6] + "…" + value[-3:]
+
+
+def _get_platform_detail() -> list:
+    """
+    Build per-platform, per-credential connection detail for /platforms page.
+    Returns list of platform dicts — never raises.
+    """
+    import os as _os
+    from datetime import datetime, timezone
+
+    env = _read_env_file()
+    db  = _db_path()
+
+    # Secret profiles keyed by provider
+    try:
+        all_sp = list_secret_profiles(db_path=db)
+    except Exception:
+        all_sp = []
+    sp_by_provider = {}
+    for p in all_sp:
+        sp_by_provider.setdefault(p.provider, []).append(p)
+
+    # Verification map
+    try:
+        from hypogeum.provider_verifier import get_all_provider_statuses
+        verif = get_all_provider_statuses(db_path=db)
+    except Exception:
+        verif = {}
+
+    def _age_days(iso: str) -> int | None:
+        try:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return (datetime.now(timezone.utc) - dt).days
+        except Exception:
+            return None
+
+    def _cred(key: str, label: str, env_dict: dict,
+              sp_list: list, sp_label_filter: str | None = None,
+              is_id: bool = False) -> dict:
+        """Build one credential row."""
+        env_val = env_dict.get(key, "")
+        # Find matching secret profile
+        sp = None
+        for profile in sp_list:
+            if sp_label_filter and profile.label != sp_label_filter:
+                continue
+            sp = profile
+            break
+
+        if sp and sp.status == "active":
+            source   = "secret_profile"
+            present  = True
+            masked   = _mask(sp.credential_data or "")
+            age      = _age_days(sp.created_at or "")
+            sp_label = sp.label
+        elif env_val:
+            source   = "env"
+            present  = True
+            masked   = key if is_id else _mask(env_val)  # IDs shown plain
+            age      = None
+            sp_label = None
+        else:
+            source   = "missing"
+            present  = False
+            masked   = ""
+            age      = None
+            sp_label = None
+
+        return {
+            "key":       key,
+            "label":     label,
+            "source":    source,
+            "present":   present,
+            "masked":    masked,
+            "sp_label":  sp_label,
+            "age_days":  age,
+            "is_id":     is_id,
+        }
+
+    now_utc = datetime.now(timezone.utc)
+
+    platforms = []
+
+    # ── YouTube ──────────────────────────────────────────────────────────────
+    yt_sp = sp_by_provider.get("youtube", [])
+    yt_refresh = next((p for p in yt_sp if p.label == "youtube-oauth-refresh"), None)
+    yt_v = verif.get("youtube", {})
+    yt_creds = [
+        _cred("YOUTUBE_CLIENT_ID",     "OAuth Client ID",     env, [], is_id=False),
+        _cred("YOUTUBE_CLIENT_SECRET", "OAuth Client Secret", env, []),
+        _cred("YOUTUBE_REFRESH_TOKEN", "Refresh Token",       env,
+              [yt_refresh] if yt_refresh else []),
+        _cred("YOUTUBE_CHANNEL_ID",    "Channel ID",          env, [], is_id=True),
+    ]
+    yt_missing = [c["key"] for c in yt_creds if not c["present"]]
+    platforms.append({
+        "id":              "youtube",
+        "label":           "YouTube",
+        "icon":            "YT",
+        "vstatus":         yt_v.get("status", "missing"),
+        "verified_at":     (yt_v.get("checked_at") or "")[:16].replace("T", " "),
+        "latency_ms":      yt_v.get("latency_ms"),
+        "real_probe":      False,
+        "error":           yt_v.get("error"),
+        "credentials":     yt_creds,
+        "missing":         yt_missing,
+        "account_id":      env.get("YOUTUBE_CHANNEL_ID", ""),
+        "account_label":   "Channel ID",
+        "authorize_url":   "/platforms/youtube/authorize",
+        "authorize_label": "Re-authorize with Google",
+        "note":            "Refresh token does not expire unless revoked.",
+    })
+
+    # ── Facebook ─────────────────────────────────────────────────────────────
+    fb_sp  = sp_by_provider.get("facebook", [])
+    fb_tok = next((p for p in fb_sp if p.status == "active"), None)
+    fb_v   = verif.get("facebook", {})
+    fb_token_age = _age_days(fb_tok.created_at) if fb_tok else None
+    fb_token_expiry_warning = None
+    if fb_token_age is not None:
+        remaining = 60 - fb_token_age
+        if remaining <= 7:
+            fb_token_expiry_warning = f"Expires in ~{remaining}d — re-authorize soon"
+        elif remaining <= 14:
+            fb_token_expiry_warning = f"Expires in ~{remaining}d"
+    fb_creds = [
+        _cred("META_APP_ID",          "App ID",              env, [], is_id=True),
+        _cred("META_APP_SECRET",      "App Secret",          env, []),
+        _cred("META_FACEBOOK_PAGE_ID","Facebook Page ID",    env, [], is_id=True),
+        {**_cred("META_ACCESS_TOKEN", "Long-lived Token",    env,
+                 fb_sp if fb_sp else []),
+         "expiry_warning": fb_token_expiry_warning,
+         "age_days": fb_token_age},
+    ]
+    fb_missing = [c["key"] for c in fb_creds if not c["present"]]
+    platforms.append({
+        "id":              "facebook",
+        "label":           "Facebook",
+        "icon":            "FB",
+        "vstatus":         fb_v.get("status", "missing"),
+        "verified_at":     (fb_v.get("checked_at") or "")[:16].replace("T", " "),
+        "latency_ms":      fb_v.get("latency_ms"),
+        "real_probe":      True,
+        "error":           fb_v.get("error"),
+        "credentials":     fb_creds,
+        "missing":         fb_missing,
+        "account_id":      env.get("META_FACEBOOK_PAGE_ID", ""),
+        "account_label":   "Page ID",
+        "authorize_url":   "/platforms/meta/authorize",
+        "authorize_label": "Re-authorize with Meta",
+        "note":            "Long-lived token valid ~60 days from issue date.",
+    })
+
+    # ── Instagram ────────────────────────────────────────────────────────────
+    ig_sp  = sp_by_provider.get("instagram", [])
+    ig_tok = next((p for p in ig_sp if p.status == "active"), None)
+    ig_v   = verif.get("instagram", {})
+    ig_token_age = _age_days(ig_tok.created_at) if ig_tok else None
+    ig_token_expiry_warning = None
+    if ig_token_age is not None:
+        remaining = 60 - ig_token_age
+        if remaining <= 7:
+            ig_token_expiry_warning = f"Expires in ~{remaining}d — re-authorize soon"
+        elif remaining <= 14:
+            ig_token_expiry_warning = f"Expires in ~{remaining}d"
+    ig_creds = [
+        _cred("META_APP_ID",               "App ID",              env, [], is_id=True),
+        _cred("META_APP_SECRET",           "App Secret",          env, []),
+        _cred("META_INSTAGRAM_ACCOUNT_ID", "Instagram Account ID",env, [], is_id=True),
+        {**_cred("META_ACCESS_TOKEN", "Long-lived Token",    env,
+                 ig_sp if ig_sp else []),
+         "expiry_warning": ig_token_expiry_warning,
+         "age_days": ig_token_age},
+    ]
+    ig_missing = [c["key"] for c in ig_creds if not c["present"]]
+    platforms.append({
+        "id":              "instagram",
+        "label":           "Instagram",
+        "icon":            "IG",
+        "vstatus":         ig_v.get("status", "missing"),
+        "verified_at":     (ig_v.get("checked_at") or "")[:16].replace("T", " "),
+        "latency_ms":      ig_v.get("latency_ms"),
+        "real_probe":      True,
+        "error":           ig_v.get("error"),
+        "credentials":     ig_creds,
+        "missing":         ig_missing,
+        "account_id":      env.get("META_INSTAGRAM_ACCOUNT_ID", ""),
+        "account_label":   "Account ID",
+        "authorize_url":   "/platforms/meta/authorize",
+        "authorize_label": "Re-authorize with Meta",
+        "note":            "Long-lived token valid ~60 days from issue date.",
+    })
+
+    # ── TikTok ───────────────────────────────────────────────────────────────
+    tk_sp  = sp_by_provider.get("tiktok", [])
+    tk_v   = verif.get("tiktok", {})
+    tk_creds = [
+        _cred("TIKTOK_CLIENT_KEY",    "Client Key",    env, []),
+        _cred("TIKTOK_CLIENT_SECRET", "Client Secret", env, []),
+        _cred("TIKTOK_ACCESS_TOKEN",  "Access Token",  env, tk_sp),
+        _cred("TIKTOK_OPEN_ID",       "Open ID",       env, [], is_id=True),
+    ]
+    tk_missing = [c["key"] for c in tk_creds if not c["present"]]
+    # TikTok is only connected when ACCESS_TOKEN + OPEN_ID are both verified
+    tk_has_token = any(c["present"] for c in tk_creds if c["key"] == "TIKTOK_ACCESS_TOKEN")
+    tk_has_oid   = any(c["present"] for c in tk_creds if c["key"] == "TIKTOK_OPEN_ID")
+    if tk_v.get("status") == "verified" and tk_has_token and tk_has_oid:
+        tk_vstatus = "verified"
+    elif tk_has_token or tk_has_oid:
+        tk_vstatus = "saved"
+    elif tk_creds[0]["present"] or tk_creds[1]["present"]:
+        tk_vstatus = "partial"   # has client creds only
+    else:
+        tk_vstatus = "missing"
+    platforms.append({
+        "id":              "tiktok",
+        "label":           "TikTok",
+        "icon":            "TK",
+        "vstatus":         tk_vstatus,
+        "verified_at":     (tk_v.get("checked_at") or "")[:16].replace("T", " "),
+        "latency_ms":      tk_v.get("latency_ms"),
+        "real_probe":      True,
+        "error":           tk_v.get("error"),
+        "credentials":     tk_creds,
+        "missing":         tk_missing,
+        "account_id":      env.get("TIKTOK_OPEN_ID", ""),
+        "account_label":   "Open ID",
+        "authorize_url":   None,   # TikTok OAuth not yet implemented in dashboard
+        "authorize_label": None,
+        "note":            "OAuth not yet wired. Add CLIENT_KEY + CLIENT_SECRET to .env, "
+                           "then complete OAuth via TikTok Developer Portal.",
+    })
+
+    return platforms
+
+
+@app.route("/platforms")
+def platform_connections_page():
+    try:
+        platforms = _get_platform_detail()
+    except Exception as exc:
+        platforms = []
+    return render_template("platform_connections.html", platforms=platforms)
+
+
+@app.route("/api/platforms/detail")
+def api_platform_connections_detail():
+    """Per-credential platform detail — no credential values returned."""
+    try:
+        raw = _get_platform_detail()
+        # Strip masked values before returning as JSON
+        safe = []
+        for p in raw:
+            pc = dict(p)
+            pc["credentials"] = [
+                {k: v for k, v in c.items() if k != "masked"}
+                for c in p["credentials"]
+            ]
+            safe.append(pc)
+        return jsonify(safe)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+# ===========================================================================
 # F9 — Channel Profile (Control Center)
 # ===========================================================================
 

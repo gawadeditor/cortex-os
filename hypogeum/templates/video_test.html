@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Video Provider Test — {{ episode_id }} — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* ── Summary tiles ────────────────────────────── */
+    .summ-grid     { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr));
+                     gap: 10px; margin: var(--gap) 0; }
+    .summ-tile     { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); padding: 12px; }
+    .summ-tile.warn{ border-color: var(--yellow); }
+    .summ-tile.fail{ border-color: var(--red); }
+    .summ-tile.pass{ border-color: var(--green); }
+    .summ-val      { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .summ-label    { font-size: 10px; text-transform: uppercase; letter-spacing:.06em;
+                     color: var(--muted); margin-top: 2px; }
+
+    /* ── Filter bar ───────────────────────────────── */
+    .filter-bar    { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;
+                     align-items: center; }
+    .filter-btn    { font-size: 11px; padding: 4px 10px; border-radius: 99px; cursor: pointer;
+                     border: 1px solid var(--border); background: transparent; color: var(--muted); }
+    .filter-btn.active { border-color: var(--blue); color: var(--blue);
+                         background: rgba(88,166,255,.1); }
+    .filter-label  { font-size: 11px; color: var(--muted); }
+
+    /* ── Clip grid ────────────────────────────────── */
+    .clip-grid     { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px,1fr));
+                     gap: var(--gap); }
+    .clip-card     { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); overflow: hidden; }
+    .clip-card.pass{ border-color: #2ea043; }
+    .clip-card.warn{ border-color: var(--yellow); }
+    .clip-card.fail{ border-color: var(--red); }
+    .clip-card.missing-card { opacity: .6; }
+
+    /* Video player area */
+    .clip-player   { background: #000; aspect-ratio: 16/9; position: relative;
+                     display: flex; align-items: center; justify-content: center; }
+    .clip-player video { width: 100%; height: 100%; object-fit: contain; }
+    .clip-player .no-clip { color: var(--muted); font-size: 12px; }
+
+    /* Clip meta */
+    .clip-body     { padding: 12px; }
+    .clip-header   { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .clip-scene    { font-size: 14px; font-weight: 700; font-family: monospace; }
+
+    .verdict-badge { font-size: 10px; padding: 2px 7px; border-radius: 99px; }
+    .vb-pass       { background: #0f2016; color: #3fb950; border: 1px solid #2ea043; }
+    .vb-warn       { background: #1a1200; color: var(--yellow); border: 1px solid var(--yellow); }
+    .vb-fail       { background: #1a0000; color: var(--red); border: 1px solid var(--red); }
+
+    .tier-badge    { font-size: 10px; padding: 2px 6px; border-radius: 3px;
+                     font-family: monospace; }
+    .tier-1        { background: #1a0a3d; color: #a78bfa; border: 1px solid #4c1d95; }
+    .tier-2        { background: #001a3d; color: #60a5fa; border: 1px solid #1e4a7c; }
+    .tier-3        { background: #0f2016; color: #6ee7b7; border: 1px solid #064e3b; }
+
+    .risk-badge    { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+    .risk-high     { background: #1a0000; color: var(--red); border: 1px solid var(--red); }
+    .risk-medium   { background: #1a1200; color: var(--yellow); border: 1px solid #8b6914; }
+    .risk-low      { background: #0f2016; color: var(--green); border: 1px solid #2ea043; }
+    .risk-na       { background: #111; color: var(--muted); border: 1px solid var(--border); }
+
+    /* Metric rows */
+    .metric-rows   { font-size: 11px; }
+    .mr            { display: flex; gap: 6px; padding: 3px 0;
+                     border-bottom: 1px solid rgba(255,255,255,.04); }
+    .mr:last-child { border-bottom: none; }
+    .mr-key        { color: var(--muted); width: 100px; flex-shrink: 0; }
+    .mr-val        { color: var(--text); font-variant-numeric: tabular-nums; }
+    .mr-val.red    { color: var(--red); }
+    .mr-val.yellow { color: var(--yellow); }
+
+    /* Prompt */
+    .prompt-box    { margin-top: 8px; font-size: 11px; color: var(--muted);
+                     line-height: 1.5; background: rgba(255,255,255,.02);
+                     border: 1px solid var(--border); border-radius: 4px;
+                     padding: 6px 8px; max-height: 80px; overflow-y: auto; }
+    .prompt-toggle { font-size: 10px; color: var(--blue); cursor: pointer;
+                     margin-top: 4px; user-select: none; }
+
+    /* Fail reasons */
+    .fail-reasons  { margin-top: 6px; }
+    .fail-pill     { display: inline-block; font-size: 10px; padding: 1px 6px;
+                     background: #1a0000; border: 1px solid var(--red);
+                     border-radius: 3px; color: var(--red); margin: 2px 3px 2px 0; }
+
+    /* ── Side-by-side compare ─────────────────────── */
+    .compare-section { margin-top: calc(var(--gap) * 1.5); }
+    .compare-grid    { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap);
+                       margin-top: var(--gap); }
+    .compare-slot    { background: var(--surface); border: 1px solid var(--border);
+                       border-radius: var(--radius); padding: 14px; }
+    .compare-slot h4 { font-size: 12px; font-weight: 700; color: var(--muted);
+                       text-transform: uppercase; letter-spacing:.05em; margin: 0 0 10px 0; }
+    .compare-slot video { width: 100%; border-radius: 4px; background: #000; }
+    .compare-meta  { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
+
+    /* ── Motion score bar ─────────────────────────── */
+    .motion-bar-bg { width: 60px; height: 4px; background: rgba(255,255,255,.1);
+                     border-radius: 2px; display: inline-block; vertical-align: middle; }
+    .motion-bar    { height: 100%; border-radius: 2px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="breadcrumb">
+  <a href="/dashboard">Dashboard</a>
+  <span class="breadcrumb-sep">›</span>
+  <a href="/providers">Providers</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>Video Test</span>
+</div>
+
+<div class="page-header" style="display:flex; align-items:baseline; gap:16px;">
+  <h1>Video Provider Test</h1>
+  <span class="page-meta">{{ episode_id }} — {{ data.clips_present }}/{{ data.scene_count }} clips — read-only</span>
+  <a href="?episode={{ episode_id }}&refresh=1" class="btn" style="margin-left:auto; font-size:11px;">↻ Refresh</a>
+</div>
+
+{# ── Summary tiles ──────────────────────────────────────────────────────── #}
+<div class="summ-grid">
+  <div class="summ-tile {% if data.clips_present == data.scene_count %}pass{% else %}warn{% endif %}">
+    <div class="summ-val">{{ data.clips_present }}/{{ data.scene_count }}</div>
+    <div class="summ-label">Clips present</div>
+  </div>
+  <div class="summ-tile {% if data.clips_missing == 0 %}pass{% else %}fail{% endif %}">
+    <div class="summ-val">{{ data.clips_missing }}</div>
+    <div class="summ-label">Missing clips</div>
+  </div>
+  <div class="summ-tile {% if data.high_risk_count == 0 %}pass{% else %}fail{% endif %}">
+    <div class="summ-val">{{ data.high_risk_count }}</div>
+    <div class="summ-label">High loop risk</div>
+  </div>
+  <div class="summ-tile {% if data.med_risk_count == 0 %}pass{% else %}warn{% endif %}">
+    <div class="summ-val">{{ data.med_risk_count }}</div>
+    <div class="summ-label">Medium loop risk</div>
+  </div>
+  <div class="summ-tile {% if data.frozen_clip_count == 0 %}pass{% else %}warn{% endif %}">
+    <div class="summ-val">{{ data.frozen_clip_count }}</div>
+    <div class="summ-label">Clips with freeze</div>
+  </div>
+  <div class="summ-tile">
+    <div class="summ-val">${{ data.total_cost_usd }}</div>
+    <div class="summ-label">Cost (present)</div>
+  </div>
+  <div class="summ-tile">
+    <div class="summ-val">${{ data.planned_cost_usd }}</div>
+    <div class="summ-label">Planned (all 35)</div>
+  </div>
+  <div class="summ-tile">
+    <div class="summ-val">
+      {% for tier, cnt in data.tier_breakdown.items() %}
+        {% if cnt %}T{{ tier }}:{{ cnt }}{% if not loop.last %} {% endif %}{% endif %}
+      {% endfor %}
+    </div>
+    <div class="summ-label">Tier breakdown</div>
+  </div>
+</div>
+
+{# ── Filter bar ─────────────────────────────────────────────────────────── #}
+<div class="filter-bar">
+  <span class="filter-label">Show:</span>
+  <button class="filter-btn active" onclick="filterClips('all', this)">All ({{ data.clips_present + data.clips_missing }})</button>
+  <button class="filter-btn" onclick="filterClips('present', this)">Present ({{ data.clips_present }})</button>
+  <button class="filter-btn" onclick="filterClips('missing', this)">Missing ({{ data.clips_missing }})</button>
+  <button class="filter-btn" onclick="filterClips('high', this)">High risk ({{ data.high_risk_count }})</button>
+  <button class="filter-btn" onclick="filterClips('medium', this)">Medium risk ({{ data.med_risk_count }})</button>
+  <button class="filter-btn" onclick="filterClips('low', this)">Low risk ({{ data.low_risk_count }})</button>
+</div>
+
+{# ── Clip grid ──────────────────────────────────────────────────────────── #}
+<div class="clip-grid" id="clip-grid">
+{% for clip in data.clips %}
+<div class="clip-card {{ clip.clip_verdict }}{% if not clip.exists %} missing-card{% endif %}"
+     data-exists="{{ 'yes' if clip.exists else 'no' }}"
+     data-risk="{{ clip.loop_risk }}"
+     id="card-{{ clip.scene_id }}">
+
+  {# Video player #}
+  <div class="clip-player">
+    {% if clip.exists %}
+    <video controls preload="none"
+           src="/api/providers/video-test/clip/{{ episode_id }}/{{ clip.scene_id }}">
+    </video>
+    {% else %}
+    <div class="no-clip">No clip generated</div>
+    {% endif %}
+  </div>
+
+  <div class="clip-body">
+    <div class="clip-header">
+      <span class="clip-scene">{{ clip.scene_id }}</span>
+      <span class="verdict-badge vb-{{ clip.clip_verdict }}">
+        {{ clip.clip_verdict | upper }}
+      </span>
+      <span class="tier-badge tier-{{ clip.tier }}">T{{ clip.tier }}</span>
+      <span class="risk-badge risk-{{ clip.loop_risk }}">
+        {{ clip.loop_risk }} risk
+      </span>
+    </div>
+
+    <div class="metric-rows">
+      <div class="mr">
+        <span class="mr-key">Provider</span>
+        <span class="mr-val">{{ clip.provider }}{% if clip.catalog_model %} / {{ clip.catalog_model }}{% endif %}</span>
+      </div>
+      <div class="mr">
+        <span class="mr-key">Model</span>
+        <span class="mr-val" style="font-family:monospace; font-size:10px;">{{ clip.model }}</span>
+      </div>
+      <div class="mr">
+        <span class="mr-key">Duration</span>
+        <span class="mr-val">
+          {% if clip.duration %}{{ clip.duration }}s / {{ clip.expected_dur }}s expected{% else %}—{% endif %}
+        </span>
+      </div>
+      <div class="mr">
+        <span class="mr-key">Narration</span>
+        <span class="mr-val">{{ clip.nar_dur }}s → loops {{ clip.loops or "—" }}×</span>
+      </div>
+      <div class="mr">
+        <span class="mr-key">Motion score</span>
+        <span class="mr-val">
+          {% if clip.motion_score is not none %}
+          {{ clip.motion_score }}/100
+          <span class="motion-bar-bg">
+            <span class="motion-bar" style="width:{{ clip.motion_score * 0.6 | int }}px;
+              background: {% if clip.motion_score >= 80 %}var(--green){% elif clip.motion_score >= 50 %}var(--yellow){% else %}var(--red){% endif %};"></span>
+          </span>
+          {% else %}—{% endif %}
+        </span>
+      </div>
+      <div class="mr">
+        <span class="mr-key">Freeze</span>
+        <span class="mr-val {% if clip.freeze_s and clip.freeze_s > 0.5 %}red{% endif %}">
+          {{ clip.freeze_s if clip.freeze_s is not none else "—" }}s
+        </span>
+      </div>
+      <div class="mr">
+        <span class="mr-key">Cost</span>
+        <span class="mr-val">{% if clip.exists %}${{ clip.cost_usd }}{% else %}$0 (not generated){% endif %}</span>
+      </div>
+      <div class="mr">
+        <span class="mr-key">Subject</span>
+        <span class="mr-val" style="font-size:10px; color:var(--muted);">{{ clip.subject[:60] }}</span>
+      </div>
+    </div>
+
+    {# Prompt (collapsed by default) #}
+    <div class="prompt-toggle" onclick="togglePrompt(this)">▸ Show prompt</div>
+    <div class="prompt-box" style="display:none;">{{ clip.prompt }}</div>
+
+    {# Fail reasons #}
+    {% if clip.fail_reasons %}
+    <div class="fail-reasons">
+      {% for reason in clip.fail_reasons %}
+      <span class="fail-pill">{{ reason }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+</div>
+
+{# ── Side-by-side compare ─────────────────────────────────────────────── #}
+<div class="compare-section">
+  <div class="section-label">Side-by-side Compare</div>
+  <div style="display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; align-items:center;">
+    <label style="font-size:12px; color:var(--muted);">Left:</label>
+    <select id="cmp-left" onchange="updateCompare()" style="font-size:12px; background:var(--surface); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px;">
+      <option value="">— choose scene —</option>
+      {% for clip in data.clips if clip.exists %}
+      <option value="{{ clip.scene_id }}">{{ clip.scene_id }} (T{{ clip.tier }} {{ clip.model[:20] }} · {{ clip.loops }}× loops)</option>
+      {% endfor %}
+    </select>
+    <label style="font-size:12px; color:var(--muted);">Right:</label>
+    <select id="cmp-right" onchange="updateCompare()" style="font-size:12px; background:var(--surface); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px;">
+      <option value="">— choose scene —</option>
+      {% for clip in data.clips if clip.exists %}
+      <option value="{{ clip.scene_id }}">{{ clip.scene_id }} (T{{ clip.tier }} {{ clip.model[:20] }} · {{ clip.loops }}× loops)</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="compare-grid">
+    <div class="compare-slot" id="cmp-slot-left">
+      <h4>Left — <span id="cmp-label-left">not selected</span></h4>
+      <video id="cmp-video-left" controls style="display:none;"></video>
+      <div class="compare-meta" id="cmp-meta-left"></div>
+    </div>
+    <div class="compare-slot" id="cmp-slot-right">
+      <h4>Right — <span id="cmp-label-right">not selected</span></h4>
+      <video id="cmp-video-right" controls style="display:none;"></video>
+      <div class="compare-meta" id="cmp-meta-right"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Clip lookup for compare widget
+var CLIPS = {
+{% for clip in data.clips if clip.exists %}
+  "{{ clip.scene_id }}": {
+    model: "{{ clip.model }}",
+    tier: "{{ clip.tier }}",
+    loops: "{{ clip.loops }}",
+    nar_dur: "{{ clip.nar_dur }}s narration",
+    motion: "{{ clip.motion_score }}/100 motion",
+    cost: "${{ clip.cost_usd }}",
+    prompt: {{ clip.prompt | tojson }}
+  }{% if not loop.last %},{% endif %}
+{% endfor %}
+};
+
+function filterClips(filter, btn) {
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('#clip-grid .clip-card').forEach(card => {
+    var exists = card.dataset.exists === 'yes';
+    var risk   = card.dataset.risk;
+    var show = false;
+    if (filter === 'all')     show = true;
+    if (filter === 'present') show = exists;
+    if (filter === 'missing') show = !exists;
+    if (filter === 'high')    show = risk === 'high';
+    if (filter === 'medium')  show = risk === 'medium';
+    if (filter === 'low')     show = risk === 'low';
+    card.style.display = show ? '' : 'none';
+  });
+}
+
+function togglePrompt(el) {
+  var box = el.nextElementSibling;
+  if (box.style.display === 'none') {
+    box.style.display = 'block';
+    el.textContent = '▾ Hide prompt';
+  } else {
+    box.style.display = 'none';
+    el.textContent = '▸ Show prompt';
+  }
+}
+
+function updateCompare() {
+  ['left','right'].forEach(function(side) {
+    var sel = document.getElementById('cmp-' + side).value;
+    var vid = document.getElementById('cmp-video-' + side);
+    var lbl = document.getElementById('cmp-label-' + side);
+    var meta = document.getElementById('cmp-meta-' + side);
+    if (!sel) {
+      vid.style.display = 'none';
+      lbl.textContent = 'not selected';
+      meta.textContent = '';
+      return;
+    }
+    var ep = '{{ episode_id }}';
+    vid.src = '/api/providers/video-test/clip/' + ep + '/' + sel;
+    vid.style.display = 'block';
+    lbl.textContent = sel;
+    var c = CLIPS[sel] || {};
+    meta.innerHTML = [c.model, 'Tier ' + c.tier, c.loops + '× loops',
+                      c.nar_dur, c.motion, c.cost].filter(Boolean).join(' · ');
+  });
+}
+</script>
+</body>
+</html>

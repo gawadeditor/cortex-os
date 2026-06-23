@@ -1183,6 +1183,236 @@ def api_providers_compare_video_results():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+
+# ---------------------------------------------------------------------------
+# Video Provider Test — read-only inspection of generated clips
+# ---------------------------------------------------------------------------
+
+# In-memory cache: {episode_id: {"clips": [...], "computed_at": iso}}
+_VIDEO_TEST_CACHE: dict = {}
+
+
+def _compute_video_test(episode_id: str) -> dict | None:
+    """
+    Build per-clip analysis for the Video Provider Test page.
+    Reads: visual_package, narration_package, clip_catalog.jsonl, clip files.
+    Runs: ffprobe (duration), ffmpeg freezedetect (freeze seconds).
+    Returns None if episode dir doesn't exist.
+    Never raises.
+    """
+    import subprocess as _sp, re as _re, json as _json, math as _math
+    from datetime import datetime, timezone
+
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+    if not ep_dir.exists():
+        return None
+
+    def _load(name):
+        p = ep_dir / f"{name}_{episode_id}.json"
+        try:
+            return _json.loads(p.read_text()) if p.exists() else {}
+        except Exception:
+            return {}
+
+    def _ffprobe_dur(path) -> float | None:
+        try:
+            r = _sp.run(["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                        capture_output=True, text=True, timeout=15)
+            return round(float(r.stdout.strip()), 3) if r.stdout.strip() else None
+        except Exception:
+            return None
+
+    def _freeze_seconds(path, dur: float) -> tuple[float, float]:
+        """Return (freeze_s, motion_score 0-100). Uses ffmpeg freezedetect."""
+        try:
+            r = _sp.run(
+                ["ffmpeg", "-i", str(path),
+                 "-vf", "freezedetect=n=0.001:d=0.1",
+                 "-f", "null", "-"],
+                capture_output=True, text=True, timeout=30)
+            stderr = r.stderr
+            starts = [float(m) for m in _re.findall(r"freeze_start:\s*([\d.]+)", stderr)]
+            ends   = [float(m) for m in _re.findall(r"freeze_end:\s*([\d.]+)", stderr)]
+            total  = sum(e - s for s, e in zip(starts, ends))
+            if len(starts) > len(ends) and dur:
+                total += dur - starts[-1]
+            total = round(max(0.0, total), 2)
+            motion = round(max(0.0, (1.0 - total / dur) * 100)) if dur else 0
+            return total, motion
+        except Exception:
+            return 0.0, 100
+
+    # Tier → model → cost mapping (from finance records)
+    _TIER_MODEL = {
+        "1": "veo3-text-to-video",
+        "2": "veo3-fast-text-to-video",
+        "3": "runway-image-to-video",
+    }
+    _TIER_COST = {"1": 2.50, "2": 0.60, "3": 0.25}
+
+    # Load packages
+    vp    = _load("visual_package")
+    np_d  = _load("narration_package")
+    vp_scenes = vp.get("scenes", [])
+    segs  = {s["beat_reference"]: s["duration_seconds"]
+             for s in np_d.get("narration_segments", [])}
+
+    # Load clip catalog
+    cat_path = _ASSETS_ROOT_PATH / "catalogs" / "clip_catalog.jsonl"
+    clip_cat: dict[str, dict] = {}
+    if cat_path.exists():
+        for line in cat_path.read_text().splitlines():
+            try:
+                e = _json.loads(line)
+                if e.get("source_episode_id") == episode_id:
+                    clip_cat[e["scene_id"]] = e
+            except Exception:
+                pass
+
+    clips_dir = ep_dir / "video"
+    clips_out = []
+    total_cost = 0.0
+
+    for i, scene in enumerate(vp_scenes):
+        sid   = scene["scene_id"]
+        beat  = f"b_{i+1:03d}"
+        ps    = scene["production_spec"]["provider_routing"]
+        vs    = scene["visual_spec"]
+        tier  = str(ps.get("primary_tier", "2"))
+        model = _TIER_MODEL.get(tier, "unknown")
+        cost  = _TIER_COST.get(tier, 0.0)
+        provider   = ps.get("primary_provider", "muapi")
+        prompt     = ps.get("primary_prompt", "")
+        fb_prompt  = ps.get("fallback_prompt", "")
+        nar_dur    = segs.get(beat, 0.0)
+        cat_entry  = clip_cat.get(sid, {})
+
+        clip_file = clips_dir / f"sc_{sid}.mp4"
+        exists    = clip_file.exists()
+
+        dur = freeze_s = motion_score = None
+        if exists:
+            dur       = _ffprobe_dur(clip_file)
+            freeze_s, motion_score = _freeze_seconds(clip_file, dur or 0)
+            total_cost += cost
+
+        # Loop risk
+        loops = round(nar_dur / dur, 2) if (dur and dur > 0) else None
+        if loops is None:
+            loop_risk = "n/a"
+        elif loops >= 4:
+            loop_risk = "high"
+        elif loops >= 2:
+            loop_risk = "medium"
+        else:
+            loop_risk = "low"
+
+        # Per-clip pass/fail
+        fails = []
+        if not exists:
+            fails.append("clip missing")
+        elif freeze_s and freeze_s > 0.5:
+            fails.append(f"freeze {freeze_s}s")
+        if loop_risk == "high":
+            fails.append(f"loop {loops}×")
+        clip_verdict = "pass" if (exists and not fails) else ("fail" if not exists else "warn")
+
+        clips_out.append({
+            "scene_id":     sid,
+            "scene_index":  i,
+            "tier":         tier,
+            "model":        model,
+            "provider":     provider,
+            "catalog_model": cat_entry.get("model") or "",
+            "prompt":       prompt,
+            "fallback_prompt": fb_prompt,
+            "subject":      vs.get("subject", ""),
+            "motion_type":  vs.get("motion_type", ""),
+            "duration":     dur,
+            "expected_dur": scene["production_spec"].get("duration_seconds", 8),
+            "nar_dur":      round(nar_dur, 2),
+            "freeze_s":     freeze_s,
+            "motion_score": motion_score,
+            "loops":        loops,
+            "loop_risk":    loop_risk,
+            "cost_usd":     cost,
+            "file":         clip_file.name if exists else None,
+            "exists":       exists,
+            "clip_verdict": clip_verdict,
+            "fail_reasons": fails,
+            "indexed_at":   cat_entry.get("indexed_at", ""),
+        })
+
+    present     = [c for c in clips_out if c["exists"]]
+    missing     = [c for c in clips_out if not c["exists"]]
+    high_risk   = [c for c in present if c["loop_risk"] == "high"]
+    med_risk    = [c for c in present if c["loop_risk"] == "medium"]
+    low_risk    = [c for c in present if c["loop_risk"] == "low"]
+    frozen      = [c for c in present if c["freeze_s"] and c["freeze_s"] > 0.5]
+    total_freeze = round(sum(c["freeze_s"] or 0 for c in present), 1)
+
+    return {
+        "episode_id":        episode_id,
+        "scene_count":       len(vp_scenes),
+        "clips_present":     len(present),
+        "clips_missing":     len(missing),
+        "total_cost_usd":    round(total_cost, 2),
+        "planned_cost_usd":  round(sum(c["cost_usd"] for c in clips_out), 2),
+        "total_freeze_s":    total_freeze,
+        "high_risk_count":   len(high_risk),
+        "med_risk_count":    len(med_risk),
+        "low_risk_count":    len(low_risk),
+        "frozen_clip_count": len(frozen),
+        "tier_breakdown":    {
+            t: sum(1 for c in present if c["tier"] == t)
+            for t in ["1", "2", "3"]
+        },
+        "clips":             clips_out,
+        "computed_at":       datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.route("/providers/video-test")
+def video_test_page():
+    episode_id = request.args.get("episode", "ep_003")
+    cached = _VIDEO_TEST_CACHE.get(episode_id)
+    if not cached:
+        cached = _compute_video_test(episode_id)
+        if cached:
+            _VIDEO_TEST_CACHE[episode_id] = cached
+    if not cached:
+        return render_template("not_found.html", kind="Episode", id=episode_id), 404
+    return render_template("video_test.html", data=cached, episode_id=episode_id)
+
+
+@app.route("/api/providers/video-test/clip/<episode_id>/<scene_id>")
+def api_video_test_clip(episode_id: str, scene_id: str):
+    """Serve a single generated clip for the in-browser player. Read-only."""
+    from flask import send_file
+    clip = _ASSETS_ROOT_PATH / "episodes" / episode_id / "video" / f"sc_{scene_id}.mp4"
+    if not clip.exists():
+        return jsonify({"error": "clip not found"}), 404
+    return send_file(str(clip), mimetype="video/mp4", conditional=True)
+
+
+@app.route("/api/providers/video-test")
+def api_video_test():
+    """Per-clip video analysis. No write actions, no provider calls."""
+    episode_id = request.args.get("episode", "ep_003")
+    refresh    = request.args.get("refresh", "0") == "1"
+    if refresh:
+        _VIDEO_TEST_CACHE.pop(episode_id, None)
+    cached = _VIDEO_TEST_CACHE.get(episode_id)
+    if not cached:
+        cached = _compute_video_test(episode_id)
+        if cached:
+            _VIDEO_TEST_CACHE[episode_id] = cached
+    if not cached:
+        return jsonify({"error": "episode not found"}), 404
+    return jsonify(cached)
+
+
 @app.route("/api/providers/compare/results")
 def api_providers_compare_results():
     """Return the most recent completed comparison run from DB."""

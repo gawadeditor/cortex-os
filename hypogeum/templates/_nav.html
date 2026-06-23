@@ -7,6 +7,7 @@
     <a href="/channels"   class="nav-link {% if request.path.startswith('/channels') or (request.path.startswith('/channel/') and not request.path.startswith('/channel-profile')) %}active{% endif %}">Channels</a>
     <a href="/providers"  class="nav-link {% if request.path == '/providers' %}active{% endif %}">Providers</a>
     <a href="/platforms" class="nav-link {% if request.path == '/platforms' %}active{% endif %}">Platforms</a>
+    <a href="/providers/video-test" class="nav-link {% if request.path == '/providers/video-test' %}active{% endif %}">Video Test</a>
     <a href="/analytics"  class="nav-link {% if request.path.startswith('/analytics') %}active{% endif %}">Analytics</a>
     <a href="/settings"   class="nav-link {% if request.path == '/settings' or request.path.startswith('/channel-profile') %}active{% endif %}">Settings</a>
     <details class="nav-ops-details">

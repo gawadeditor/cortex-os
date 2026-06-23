@@ -2714,6 +2714,279 @@ def run_detail_page(run_id):
     return render_template("run_detail.html", d=detail, fmt_duration=fmt_duration)
 
 
+@app.route("/episode/<episode_id>/qa")
+def episode_qa_page(episode_id: str):
+    """Read-only QA inspection page for a single episode."""
+    qa = _compute_episode_qa(episode_id)
+    if qa is None:
+        return render_template("not_found.html", kind="Episode", id=episode_id), 404
+    return render_template("episode_qa.html", qa=qa, episode_id=episode_id)
+
+
+@app.route("/api/episode/<episode_id>/qa")
+def api_episode_qa(episode_id: str):
+    qa = _compute_episode_qa(episode_id)
+    if qa is None:
+        return jsonify({"error": "episode not found"}), 404
+    return jsonify(qa)
+
+
+def _compute_episode_qa(episode_id: str) -> dict | None:
+    """
+    Compute QA metrics for an episode from disk artifacts only.
+    Returns None if the episode directory does not exist.
+    Never raises.
+    """
+    import subprocess as _sp
+    import re as _re
+    import math as _math
+    from collections import defaultdict as _dd
+
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+    if not ep_dir.exists():
+        return None
+
+    def _jp(name):
+        p = ep_dir / f"{name}_{episode_id}.json"
+        if not p.exists():
+            return {}
+        try:
+            import json as _j
+            return _j.loads(p.read_text())
+        except Exception:
+            return {}
+
+    def _ffprobe_dur(path) -> float | None:
+        try:
+            r = _sp.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                capture_output=True, text=True, timeout=15)
+            return float(r.stdout.strip()) if r.stdout.strip() else None
+        except Exception:
+            return None
+
+    def _ffprobe_audio_dur(path) -> float | None:
+        try:
+            r = _sp.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "a:0",
+                 "-show_entries", "stream=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                capture_output=True, text=True, timeout=15)
+            return float(r.stdout.strip()) if r.stdout.strip() else None
+        except Exception:
+            return None
+
+    # ── Video file (prefer v3, fall back to v1) ───────────────────────────
+    v3 = ep_dir / f"main_{episode_id}_v3.mp4"
+    v1 = ep_dir / f"main_{episode_id}.mp4"
+    video_file = v3 if v3.exists() else (v1 if v1.exists() else None)
+    video_version = "v3" if v3.exists() else ("v1" if v1.exists() else None)
+    video_duration = _ffprobe_dur(video_file) if video_file else None
+    audio_duration = _ffprobe_audio_dur(video_file) if video_file else None
+    av_delta = round(abs(video_duration - audio_duration), 3) if (
+        video_duration is not None and audio_duration is not None) else None
+    video_size_mb = round(video_file.stat().st_size / 1024 / 1024, 1) if video_file else None
+
+    # ── Scene list from visual_package ───────────────────────────────────
+    vp = _jp("visual_package")
+    scenes_def = vp.get("scenes", [])
+    scene_ids = [s["scene_id"] for s in scenes_def]
+    scene_count_expected = len(scene_ids)
+
+    # ── Narration beats → per-scene durations ─────────────────────────────
+    np_d = _jp("narration_package")
+    segs = np_d.get("narration_segments", [])
+    total_narration = round(sum(s["duration_seconds"] for s in segs), 3)
+    # Beat b_001 → scene s01, b_002 → s02 etc.
+    beat_dur = {}
+    for i, s in enumerate(segs):
+        sid = f"s{i+1:02d}"
+        beat_dur[sid] = s["duration_seconds"]
+
+    # ── Present scene clips ────────────────────────────────────────────────
+    clips_dir = ep_dir / "video"
+    clip_files: dict[str, float] = {}
+    if clips_dir.exists():
+        for c in sorted(clips_dir.glob("sc_*.mp4")):
+            dur = _ffprobe_dur(c)
+            sid = c.stem.replace("sc_", "")
+            if dur is not None:
+                clip_files[sid] = dur
+
+    clip_count_present  = len(clip_files)
+    missing_scene_ids   = [sid for sid in scene_ids if sid not in clip_files]
+
+    # ── Render manifest ────────────────────────────────────────────────────
+    mani = _jp("render_output_manifest")
+    manifest_missing  = mani.get("missing_clips", [])
+    max_hold_manifest = mani.get("max_scene_hold_seconds", 0)
+    render_status     = mani.get("render_status", "unknown")
+    clip_avail_rate   = mani.get("clip_availability_rate", 0)
+
+    # ── Per-scene hold/loop (beats covered by video file) ─────────────────
+    # Figure out how many beats fit in the video's audio duration
+    if video_duration and segs:
+        running = 0.0
+        covered_beat_count = 0
+        for s in segs:
+            running += s["duration_seconds"]
+            if running <= video_duration + 0.1:
+                covered_beat_count += 1
+    else:
+        covered_beat_count = len(segs)
+
+    scene_rows = []
+    total_hold_s = 0.0
+    total_unique_clip_s = 0.0
+    for i, sid in enumerate(scene_ids[:covered_beat_count]):
+        nar  = beat_dur.get(sid, 0)
+        if sid in clip_files:
+            clip = clip_files[sid]
+            loops = round(nar / clip, 2) if clip > 0 else 0
+            hold  = round(max(0, nar - clip), 2)
+            total_hold_s += hold
+            total_unique_clip_s += clip
+        else:
+            clip  = 0
+            loops = 0
+            hold  = round(nar, 2)
+            total_hold_s += nar
+        scene_rows.append({
+            "scene_id":     sid,
+            "nar_sec":      round(nar, 2),
+            "clip_sec":     round(clip, 2),
+            "loops":        loops,
+            "hold_sec":     hold,
+            "has_clip":     sid in clip_files,
+            "in_video":     True,
+        })
+    # Scenes not covered by video
+    for sid in scene_ids[covered_beat_count:]:
+        nar = beat_dur.get(sid, 0)
+        scene_rows.append({
+            "scene_id": sid, "nar_sec": round(nar, 2), "clip_sec": 0,
+            "loops": 0, "hold_sec": 0, "has_clip": sid in clip_files,
+            "in_video": False,
+        })
+
+    freeze_seconds  = round(total_hold_s, 1)
+    freeze_pct      = round(freeze_seconds / video_duration * 100, 1) if video_duration else 0
+
+    # ── Repeated clip detection (exact file-size duplicate) ────────────────
+    by_size: dict = {}
+    if clips_dir.exists():
+        for c in clips_dir.glob("sc_*.mp4"):
+            sz = c.stat().st_size
+            by_size.setdefault(sz, []).append(c.stem.replace("sc_", ""))
+    repeated_groups = {sz: sids for sz, sids in by_size.items() if len(sids) > 1}
+    repeated_seconds = round(sum(
+        clip_files.get(sids[0], 0) * (len(sids) - 1)
+        for sids in repeated_groups.values()
+    ), 1)
+
+    # ── Caption coverage ──────────────────────────────────────────────────
+    srt_v3 = ep_dir / "captions" / "main_v3.srt"
+    srt_v1 = ep_dir / "captions" / "main.srt"
+    srt_file = srt_v3 if srt_v3.exists() else (srt_v1 if srt_v1.exists() else None)
+    cap_blocks = 0
+    cap_span_end = 0.0
+    total_captioned = 0.0
+    if srt_file:
+        srt_txt = srt_file.read_text()
+        blocks = [b.strip() for b in _re.split(r"\n\n+", srt_txt) if b.strip()]
+        cap_blocks = len(blocks)
+        for b in blocks:
+            for line in b.splitlines():
+                m = _re.match(
+                    r"(\d+:\d+:\d+[,\.]\d+)\s*-->\s*(\d+:\d+:\d+[,\.]\d+)", line)
+                if m:
+                    def _ts(t):
+                        t = t.replace(",", ".")
+                        h, mn, s = t.split(":")
+                        return int(h) * 3600 + int(mn) * 60 + float(s)
+                    s0, e0 = _ts(m.group(1)), _ts(m.group(2))
+                    total_captioned += e0 - s0
+                    cap_span_end = max(cap_span_end, e0)
+    cap_coverage_pct = round(total_captioned / video_duration * 100, 1) if video_duration else 0
+    cap_gap_seconds  = round(max(0, video_duration - cap_span_end), 1) if video_duration else 0
+
+    # ── Verdict ───────────────────────────────────────────────────────────
+    checks = []
+    def _check(name, ok, warn, detail):
+        if ok:
+            status = "pass"
+        elif warn:
+            status = "warn"
+        else:
+            status = "fail"
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    _check("Video file exists",
+           ok=video_file is not None, warn=False,
+           detail=f"{video_file.name} ({video_size_mb}MB)" if video_file else "No video file found")
+    _check("All scenes present",
+           ok=len(missing_scene_ids) == 0,
+           warn=0 < len(missing_scene_ids) <= 3,
+           detail=f"{clip_count_present}/{scene_count_expected} clips present, "
+                  f"missing: {missing_scene_ids or 'none'}")
+    _check("Freeze/loop < 30%",
+           ok=freeze_pct < 10, warn=freeze_pct < 30,
+           detail=f"{freeze_seconds}s held/looped ({freeze_pct}% of video)")
+    _check("No repeated clips",
+           ok=len(repeated_groups) == 0, warn=False,
+           detail=f"{len(repeated_groups)} exact duplicate group(s)" if repeated_groups else "No exact duplicates")
+    _check("Caption coverage > 95%",
+           ok=cap_coverage_pct >= 95, warn=cap_coverage_pct >= 85,
+           detail=f"{cap_coverage_pct}% ({cap_blocks} blocks, gap after {cap_span_end:.0f}s)")
+    _check("A/V sync delta < 1s",
+           ok=av_delta is not None and av_delta < 1.0, warn=False,
+           detail=f"delta={av_delta}s" if av_delta is not None else "could not measure")
+    _check("Render status complete",
+           ok=render_status == "complete", warn=render_status == "partial",
+           detail=f"render_status={render_status}, availability={clip_avail_rate*100:.0f}%")
+
+    fails = sum(1 for c in checks if c["status"] == "fail")
+    warns = sum(1 for c in checks if c["status"] == "warn")
+    verdict = "PASS" if fails == 0 and warns == 0 else ("WARN" if fails == 0 else "FAIL")
+
+    return {
+        "episode_id":           episode_id,
+        "video_file":           video_file.name if video_file else None,
+        "video_version":        video_version,
+        "video_size_mb":        video_size_mb,
+        "total_duration_s":     round(video_duration, 1) if video_duration else None,
+        "total_duration_min":   round(video_duration / 60, 1) if video_duration else None,
+        "total_narration_s":    total_narration,
+        "narration_beats_total": len(segs),
+        "beats_covered_in_video": covered_beat_count,
+        "clip_count_present":   clip_count_present,
+        "scene_count_expected": scene_count_expected,
+        "missing_scene_ids":    missing_scene_ids,
+        "missing_count":        len(missing_scene_ids),
+        "repeated_groups":      list(repeated_groups.values()),
+        "repeated_seconds":     repeated_seconds,
+        "total_hold_seconds":   freeze_seconds,
+        "freeze_pct":           freeze_pct,
+        "total_unique_clip_s":  round(total_unique_clip_s, 1),
+        "max_hold_s":           max_hold_manifest,
+        "caption_file":         srt_file.name if srt_file else None,
+        "caption_blocks":       cap_blocks,
+        "total_captioned_s":    round(total_captioned, 1),
+        "caption_coverage_pct": cap_coverage_pct,
+        "caption_gap_s":        cap_gap_seconds,
+        "audio_duration_s":     round(audio_duration, 3) if audio_duration else None,
+        "av_delta_s":           av_delta,
+        "render_status":        render_status,
+        "clip_avail_rate_pct":  round(clip_avail_rate * 100, 1),
+        "scene_rows":           scene_rows,
+        "checks":               checks,
+        "verdict":              verdict,
+        "fail_count":           fails,
+        "warn_count":           warns,
+    }
+
+
 @app.route("/episode/<episode_id>")
 def episode_detail_page(episode_id):
     d = get_episode_detail(episode_id, db_path=_db_path())

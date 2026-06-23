@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>QA — {{ episode_id }} — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* ── Layout ─────────────────────────────────────── */
+    .qa-grid          { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap);
+                        margin-top: var(--gap); }
+    .qa-card          { background: var(--surface); border: 1px solid var(--border);
+                        border-radius: var(--radius); padding: 16px; }
+    .qa-card-full     { grid-column: 1 / -1; }
+    .qa-card h3       { font-size: 11px; font-weight: 700; text-transform: uppercase;
+                        letter-spacing: .05em; color: var(--muted); margin: 0 0 12px 0; }
+
+    /* ── Verdict banner ─────────────────────────────── */
+    .verdict-banner   { border-radius: var(--radius); padding: 14px 18px;
+                        display: flex; align-items: center; gap: 16px; margin-bottom: var(--gap); }
+    .verdict-pass     { background: #0f2016; border: 1px solid #2ea043; }
+    .verdict-warn     { background: #1a1200; border: 1px solid var(--yellow); }
+    .verdict-fail     { background: #1a0000; border: 1px solid var(--red); }
+    .verdict-label    { font-size: 22px; font-weight: 800; }
+    .verdict-pass .verdict-label { color: #3fb950; }
+    .verdict-warn .verdict-label { color: var(--yellow); }
+    .verdict-fail .verdict-label { color: var(--red); }
+    .verdict-sub      { font-size: 13px; color: var(--muted); }
+
+    /* ── Check list ─────────────────────────────────── */
+    .check-list       { list-style: none; margin: 0; padding: 0; }
+    .check-item       { display: flex; gap: 10px; align-items: flex-start;
+                        padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+    .check-item:last-child { border-bottom: none; }
+    .check-icon       { font-size: 13px; width: 16px; flex-shrink: 0; margin-top: 1px; }
+    .check-pass       { color: var(--green); }
+    .check-warn       { color: var(--yellow); }
+    .check-fail       { color: var(--red); }
+    .check-name       { font-size: 12px; font-weight: 600; }
+    .check-detail     { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+    /* ── Metric tiles ───────────────────────────────── */
+    .metric-grid      { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .metric-tile      { background: rgba(255,255,255,.03); border: 1px solid var(--border);
+                        border-radius: var(--radius); padding: 12px; }
+    .metric-tile.warn { border-color: var(--yellow); background: rgba(210,153,34,.05); }
+    .metric-tile.fail { border-color: var(--red); background: rgba(248,81,73,.05); }
+    .metric-tile.pass { border-color: var(--green); background: rgba(46,160,67,.05); }
+    .metric-val       { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .metric-label     { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+                        color: var(--muted); margin-top: 2px; }
+    .metric-sub       { font-size: 10px; color: var(--muted); margin-top: 1px; }
+
+    /* ── Scene table ────────────────────────────────── */
+    .scene-table      { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .scene-table th   { text-align: left; color: var(--muted); font-weight: 600;
+                        font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+                        padding: 0 8px 6px 0; border-bottom: 1px solid var(--border); }
+    .scene-table td   { padding: 5px 8px 5px 0; border-bottom: 1px solid rgba(255,255,255,.03);
+                        vertical-align: middle; font-variant-numeric: tabular-nums; }
+    .scene-table tr:last-child td { border-bottom: none; }
+    .scene-table tr.missing td    { opacity: .55; }
+    .scene-table tr.not-in-video  { opacity: .35; }
+    .loop-bar         { display: inline-block; height: 6px; background: var(--blue);
+                        border-radius: 2px; vertical-align: middle; }
+    .loop-bar.high    { background: var(--red); }
+    .loop-bar.med     { background: var(--yellow); }
+    .badge-missing-sc { font-size: 9px; padding: 1px 5px; border-radius: 3px;
+                        background: #1a0000; color: var(--red); border: 1px solid var(--red); }
+    .badge-not-in-vid { font-size: 9px; padding: 1px 5px; border-radius: 3px;
+                        background: #111; color: var(--muted); border: 1px solid var(--border); }
+    .badge-ok         { font-size: 9px; padding: 1px 5px; border-radius: 3px;
+                        background: #0f2016; color: var(--green); border: 1px solid var(--green); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="breadcrumb">
+  <a href="/dashboard">Dashboard</a>
+  <span class="breadcrumb-sep">›</span>
+  <a href="/episode/{{ episode_id }}">{{ episode_id }}</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>QA</span>
+</div>
+
+<div class="page-header">
+  <h1>{{ episode_id }} — QA Inspection</h1>
+  <span class="page-meta">Read-only. No changes, no upload, no generation.</span>
+</div>
+
+{# ── Verdict banner ─────────────────────────────────────────────────────── #}
+<div class="verdict-banner verdict-{{ qa.verdict | lower }}">
+  <span class="verdict-label">{{ qa.verdict }}</span>
+  <div>
+    <div class="verdict-sub">
+      {% if qa.fail_count > 0 %}{{ qa.fail_count }} check(s) failing{% endif %}
+      {% if qa.warn_count > 0 %}{% if qa.fail_count > 0 %}, {% endif %}{{ qa.warn_count }} warning(s){% endif %}
+      {% if qa.fail_count == 0 and qa.warn_count == 0 %}All checks passed{% endif %}
+    </div>
+    <div class="verdict-sub" style="margin-top:3px;">
+      Source: {{ qa.video_file or "no video" }}{% if qa.video_size_mb %} ({{ qa.video_size_mb }}MB){% endif %}
+      &ensp;|&ensp;
+      {{ qa.total_duration_min }}min &ensp;|&ensp;
+      {{ qa.clip_count_present }}/{{ qa.scene_count_expected }} clips
+    </div>
+  </div>
+</div>
+
+{# ── Check list + Metric tiles ──────────────────────────────────────────── #}
+<div class="qa-grid">
+
+  <div class="qa-card">
+    <h3>Checks</h3>
+    <ul class="check-list">
+    {% for c in qa.checks %}
+    <li class="check-item">
+      <span class="check-icon
+        {% if c.status == 'pass' %}check-pass{% elif c.status == 'warn' %}check-warn{% else %}check-fail{% endif %}">
+        {% if c.status == 'pass' %}✓{% elif c.status == 'warn' %}⚠{% else %}✗{% endif %}
+      </span>
+      <div>
+        <div class="check-name">{{ c.name }}</div>
+        <div class="check-detail">{{ c.detail }}</div>
+      </div>
+    </li>
+    {% endfor %}
+    </ul>
+  </div>
+
+  <div class="qa-card">
+    <h3>Metrics</h3>
+    <div class="metric-grid">
+
+      <div class="metric-tile {% if qa.total_duration_s %}pass{% else %}fail{% endif %}">
+        <div class="metric-val">{{ qa.total_duration_min or "—" }}min</div>
+        <div class="metric-label">Duration ({{ qa.video_version or "—" }})</div>
+        <div class="metric-sub">{{ qa.total_duration_s }}s  ·  narration {{ (qa.total_narration_s / 60) | round(1) }}min</div>
+      </div>
+
+      <div class="metric-tile {% if qa.missing_count == 0 %}pass{% elif qa.missing_count <= 3 %}warn{% else %}fail{% endif %}">
+        <div class="metric-val">{{ qa.missing_count }}</div>
+        <div class="metric-label">Missing clips</div>
+        <div class="metric-sub">{{ qa.clip_count_present }}/{{ qa.scene_count_expected }} present</div>
+      </div>
+
+      <div class="metric-tile {% if qa.freeze_pct < 10 %}pass{% elif qa.freeze_pct < 30 %}warn{% else %}fail{% endif %}">
+        <div class="metric-val">{{ qa.freeze_pct }}%</div>
+        <div class="metric-label">Held/looped</div>
+        <div class="metric-sub">{{ qa.total_hold_seconds }}s  ·  max {{ qa.max_hold_s }}s</div>
+      </div>
+
+      <div class="metric-tile {% if qa.caption_coverage_pct >= 95 %}pass{% elif qa.caption_coverage_pct >= 85 %}warn{% else %}fail{% endif %}">
+        <div class="metric-val">{{ qa.caption_coverage_pct }}%</div>
+        <div class="metric-label">Caption coverage</div>
+        <div class="metric-sub">{{ qa.caption_blocks }} blocks  ·  gap {{ qa.caption_gap_s }}s</div>
+      </div>
+
+      <div class="metric-tile {% if qa.av_delta_s is not none and qa.av_delta_s < 1.0 %}pass{% else %}fail{% endif %}">
+        <div class="metric-val">{{ qa.av_delta_s if qa.av_delta_s is not none else "—" }}s</div>
+        <div class="metric-label">A/V sync delta</div>
+        <div class="metric-sub">
+          audio {{ qa.audio_duration_s }}s  ·  video {{ qa.total_duration_s }}s
+        </div>
+      </div>
+
+      <div class="metric-tile {% if qa.repeated_seconds == 0 %}pass{% else %}fail{% endif %}">
+        <div class="metric-val">{{ qa.repeated_seconds }}s</div>
+        <div class="metric-label">Repeated clip secs</div>
+        <div class="metric-sub">{{ qa.repeated_groups | length }} exact duplicate group(s)</div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+{# ── Scene-level table ──────────────────────────────────────────────────── #}
+<div class="qa-card qa-card-full" style="margin-top: var(--gap);">
+  <h3>
+    Scene breakdown — {{ qa.beats_covered_in_video }} beats in video
+    ({{ qa.scene_count_expected - qa.beats_covered_in_video }} outside video)
+  </h3>
+  <div style="overflow-x:auto;">
+  <table class="scene-table">
+    <thead>
+      <tr>
+        <th>Scene</th>
+        <th>Status</th>
+        <th>Narration</th>
+        <th>Clip</th>
+        <th>Loops</th>
+        <th>Hold</th>
+        <th style="min-width:120px;">Loop bar</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in qa.scene_rows %}
+    <tr class="
+      {%- if not row.has_clip and row.in_video %} missing
+      {%- elif not row.in_video %} not-in-video
+      {%- endif %}">
+      <td style="font-family:monospace; font-weight:600;">{{ row.scene_id }}</td>
+      <td>
+        {% if not row.in_video %}
+          <span class="badge-not-in-vid">outside video</span>
+        {% elif not row.has_clip %}
+          <span class="badge-missing-sc">no clip</span>
+        {% else %}
+          <span class="badge-ok">clip</span>
+        {% endif %}
+      </td>
+      <td>{{ row.nar_sec }}s</td>
+      <td>{{ row.clip_sec }}s</td>
+      <td style="font-variant-numeric:tabular-nums;">
+        {% if row.has_clip %}{{ row.loops }}×{% else %}—{% endif %}
+      </td>
+      <td style="
+        {%- if row.hold_sec > 30 %} color:var(--red);
+        {%- elif row.hold_sec > 15 %} color:var(--yellow);
+        {%- endif %}">
+        {{ row.hold_sec }}s
+      </td>
+      <td>
+        {% if row.has_clip and row.loops > 0 %}
+          {% set bar_w = [row.loops * 15, 120] | min | int %}
+          {% set bar_cls = "high" if row.loops >= 4 else ("med" if row.loops >= 2 else "") %}
+          <span class="loop-bar {{ bar_cls }}" style="width:{{ bar_w }}px;"></span>
+          <span style="font-size:10px; color:var(--muted); margin-left:4px;">{{ row.loops }}×</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{# ── Missing scenes list ────────────────────────────────────────────────── #}
+{% if qa.missing_scene_ids %}
+<div class="qa-card qa-card-full" style="margin-top: var(--gap);">
+  <h3>Missing scenes ({{ qa.missing_count }} total — not generated)</h3>
+  {% for sid in qa.missing_scene_ids %}
+  <span style="display:inline-block; font-family:monospace; font-size:11px;
+               padding:2px 8px; margin:3px 4px 3px 0;
+               background:#1a0000; border:1px solid var(--red);
+               border-radius:3px; color:var(--red);">{{ sid }}</span>
+  {% endfor %}
+</div>
+{% endif %}
+
+</body>
+</html>

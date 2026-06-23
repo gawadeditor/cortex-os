@@ -623,6 +623,21 @@ _PLATFORM_PROVIDERS = [
 
 def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
     verif_map = verif_map or {}
+
+    # Pull account/channel IDs and OAuth client ID from config once (best-effort)
+    try:
+        from hypogeum.config import Config as _Cfg
+        _cfg = _Cfg()
+        _yt_client_id    = _cfg.YOUTUBE_CLIENT_ID or ""
+        _yt_channel_id   = _cfg.YOUTUBE_CHANNEL_ID or ""
+        _fb_page_id      = _cfg.META_FACEBOOK_PAGE_ID or ""
+        _ig_account_id   = _cfg.META_INSTAGRAM_ACCOUNT_ID or ""
+        _meta_app_id     = _cfg.META_APP_ID or ""
+        _tk_client_key   = getattr(_cfg, "TIKTOK_CLIENT_KEY", "") or ""
+    except Exception:
+        _yt_client_id = _yt_channel_id = _fb_page_id = _ig_account_id = ""
+        _meta_app_id = _tk_client_key = ""
+
     result = []
     for p in provider_list:
         entry = dict(p)
@@ -634,9 +649,37 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
         cred = creds_map.get(lookup_id)
         entry["credential_label"] = getattr(cred, "label", None) if cred else None
         entry["cost_usd"] = cost_map.get(p["id"], 0.0)
+
+        # Per-platform supplemental fields (account IDs, OAuth client ID)
         if p["id"] == "youtube":
-            entry["oauth_client_id"] = None
+            entry["oauth_client_id"]    = _yt_client_id
             entry["oauth_redirect_uri"] = "http://localhost:8080/oauth2callback"
+            entry["account_id"]         = _yt_channel_id
+            entry["missing_reqs"]       = []  # filled after vstatus is resolved below
+        elif p["id"] == "facebook":
+            entry["account_id"]   = _fb_page_id
+            entry["meta_app_id"]  = _meta_app_id
+            entry["missing_reqs"] = [name for name, bad in (
+                ("META_APP_ID",           not _meta_app_id),
+                ("META_APP_SECRET",       False),
+                ("META_FACEBOOK_PAGE_ID", not _fb_page_id),
+            ) if bad]
+        elif p["id"] == "instagram":
+            entry["account_id"]   = _ig_account_id
+            entry["meta_app_id"]  = _meta_app_id
+            entry["missing_reqs"] = [name for name, bad in (
+                ("META_APP_ID",               not _meta_app_id),
+                ("META_APP_SECRET",           False),
+                ("META_INSTAGRAM_ACCOUNT_ID", not _ig_account_id),
+            ) if bad]
+        elif p["id"] == "tiktok":
+            entry["account_id"]   = ""
+            entry["missing_reqs"] = [name for name, bad in (
+                ("TIKTOK_CLIENT_KEY",    not _tk_client_key),
+                ("TIKTOK_CLIENT_SECRET", False),
+                ("TIKTOK_ACCESS_TOKEN",  True),   # always missing until OAuth complete
+                ("TIKTOK_OPEN_ID",       True),
+            ) if bad]
 
         # Verification status (replaces simple connected bool)
         v = verif_map.get(lookup_id)
@@ -657,10 +700,21 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
             else:
                 vstatus = "missing"
 
+        # Fix missing_reqs for youtube now that vstatus is known
+        if p["id"] == "youtube":
+            entry["missing_reqs"] = [r for r, bad in (
+                ("YOUTUBE_CLIENT_ID",     not _yt_client_id),
+                ("YOUTUBE_CLIENT_SECRET", False),
+                ("YOUTUBE_REFRESH_TOKEN", vstatus == "missing"),
+            ) if bad]
+
         entry["vstatus"] = vstatus  # verified|failed|not_verifiable|saved|missing|muapi_configured
-        entry["verif_error"]      = (v or {}).get("error_message") or (v or {}).get("error")
-        entry["verif_checked_at"] = (v or {}).get("checked_at")
-        entry["verif_latency_ms"] = (v or {}).get("latency_ms")
+        entry["verif_error"]            = (v or {}).get("error_message") or (v or {}).get("error")
+        entry["verif_checked_at"]       = (v or {}).get("checked_at")
+        entry["verif_latency_ms"]       = (v or {}).get("latency_ms")
+        entry["verif_source"]           = (v or {}).get("source", "")
+        entry["verif_has_secret_profile"] = bool((v or {}).get("has_secret_profile"))
+        entry["verif_has_env_var"]      = bool((v or {}).get("has_env_var"))
         # Legacy: True only when verified (not just saved)
         entry["connected"] = vstatus == "verified"
         # Distinguish real network probes from format/string checks.

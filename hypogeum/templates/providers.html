@@ -358,6 +358,7 @@
     <div class="cap-row"><span class="cap-pill cap-pill-pub">Publishing</span></div>
 
     <table class="status-table">
+      {# — Credential status — #}
       <tr>
         <td class="status-label-cell">Credential</td>
         <td>
@@ -374,50 +375,80 @@
           {% endif %}
         </td>
       </tr>
+      {# — Credential source — #}
+      <tr>
+        <td class="status-label-cell">Source</td>
+        <td style="font-size:11px; color:var(--muted); font-family:monospace;">
+          {{ p.verif_source if p.verif_source else "—" }}
+        </td>
+      </tr>
+      {# — Account / Page / Channel ID — #}
+      <tr>
+        <td class="status-label-cell">
+          {% if p.id == 'youtube' %}Channel ID
+          {% elif p.id == 'facebook' %}Page ID
+          {% elif p.id == 'instagram' %}Account ID
+          {% elif p.id == 'tiktok' %}Open ID
+          {% endif %}
+        </td>
+        <td style="font-size:11px; font-family:monospace; color:{% if p.account_id %}var(--text){% else %}var(--muted){% endif %};">
+          {{ p.account_id if p.account_id else "— not configured —" }}
+        </td>
+      </tr>
+      {# — Last verified — #}
+      <tr>
+        <td class="status-label-cell">Last verified</td>
+        <td style="font-size:11px; color:var(--muted);">
+          {% if p.verif_checked_at %}
+            {{ p.verif_checked_at[:16] | replace("T", " ") }} UTC
+            {% if p.verif_latency_ms is not none and p.verif_latency_ms > 0 %}
+              <span style="color:var(--muted);">({{ p.verif_latency_ms }}ms)</span>
+            {% elif p.verif_latency_ms == 0 %}
+              <span style="color:var(--muted);">(format check only)</span>
+            {% endif %}
+          {% else %}
+            never
+          {% endif %}
+        </td>
+      </tr>
     </table>
 
-    {% if vstatus == 'verified' and not p.real_probe %}
-    <div class="status-note">Token format checked only — not verified via API</div>
+    {# — Platform note — #}
+    {% if p.auth == 'oauth2_meta' %}
+    <div style="font-size:10px; color:var(--muted); margin-top:4px;">Meta Graph API</div>
     {% endif %}
 
-    {% if p.id == "youtube" %}
-    <div class="oauth-fields" style="margin-top:8px;">
-      <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:8px;">Required env vars</div>
-      <div class="oauth-field-row">
-        <span class="oauth-label">YOUTUBE_CLIENT_ID</span>
-        <span class="oauth-value">{{ p.oauth_client_id or "— not configured —" }}</span>
-      </div>
-      <div class="oauth-field-row">
-        <span class="oauth-label">YOUTUBE_CLIENT_SECRET</span>
-        <span class="oauth-value">— set in environment —</span>
-      </div>
-      <div class="oauth-field-row">
-        <span class="oauth-label">YOUTUBE_REFRESH_TOKEN</span>
-        <span class="oauth-value">{{ "✓ stored" if vstatus != 'missing' else "— not configured —" }}</span>
-      </div>
-    </div>
-    {% elif p.auth == 'oauth2_meta' %}
-    <div class="status-note" style="margin-top:6px;">
-      Meta Graph API. Required: {{ p.requires | join(', ') if p.requires else 'META_ACCESS_TOKEN' }}.
-    </div>
-    {% elif p.id == 'tiktok' %}
-    <div class="status-note" style="margin-top:6px;">
-      TikTok for Developers. Required: TIKTOK_ACCESS_TOKEN, TIKTOK_CLIENT_KEY.
-    </div>
-    {% endif %}
-
+    {# — Error detail — #}
     {% if p.verif_error %}
-    <div class="verif-error">✗ {{ p.verif_error }}</div>
+    <div class="verif-error" style="margin-top:6px;">✗ {{ p.verif_error }}</div>
     {% endif %}
 
-    <div class="pc-actions">
-      <a href="/platforms/connect/{{ p.id }}" class="btn-provider">
-        {% if vstatus == 'verified' %}Re-authorize{% elif vstatus == 'saved' %}Reconnect{% else %}OAuth Setup{% endif %}
+    {# — Missing requirements — #}
+    {% if p.missing_reqs %}
+    <div style="margin-top:8px; font-size:11px;">
+      <span style="color:var(--yellow); font-weight:600;">Missing:</span>
+      {% for req in p.missing_reqs %}
+      <span style="display:inline-block; margin:2px 4px 2px 0; padding:1px 5px;
+                   background:#1a1200; border:1px solid var(--yellow); border-radius:3px;
+                   color:var(--yellow); font-family:monospace;">{{ req }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="pc-actions" style="margin-top:10px;">
+      {# YouTube: OAuth flow button #}
+      {% if p.id == 'youtube' %}
+      <a href="/platforms/youtube/authorize" class="btn-provider" style="border-color:var(--green); color:var(--green);">
+        {% if vstatus == 'verified' %}Re-authorize{% else %}Authorize with Google →{% endif %}
       </a>
-      {# Secret Profile credential flow for Meta + TikTok providers (Phase 1J) #}
-      {% if p.id in publishing_sp_providers %}
-      <a href="/providers/content/connect/{{ p.id }}" class="btn-provider"
-         title="Save credential via Secret Profile">Save Credential</a>
+      {# Meta: OAuth flow button for Facebook + Instagram #}
+      {% elif p.id in ('facebook', 'instagram') %}
+      <a href="/platforms/meta/authorize" class="btn-provider" style="border-color:#1877f2; color:#1877f2;">
+        {% if vstatus == 'verified' %}Re-authorize Meta{% else %}Authorize with Meta →{% endif %}
+      </a>
+      {# TikTok: paste form only (OAuth route not yet implemented) #}
+      {% elif p.id == 'tiktok' %}
+      <a href="/platforms/connect/tiktok" class="btn-provider">Paste Token</a>
       {% endif %}
       <button class="btn-test" onclick="testProvider(this, '{{ p.id }}')"
               title="Verify credential via live API probe">Test</button>

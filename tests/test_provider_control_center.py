@@ -138,7 +138,7 @@ class TestYouTubeOAuth:
 
     def test_youtube_shows_oauth_setup_required(self, client):
         html = _html(client)
-        assert "OAuth setup required" in html or "OAuth 2.0" in html
+        assert "platforms/youtube/authorize" in html or "Re-authorize" in html or "Authorize with Google" in html
 
     def test_youtube_shows_client_id_field(self, client):
         html = _html(client)

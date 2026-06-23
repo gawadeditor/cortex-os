@@ -1707,6 +1707,301 @@ def youtube_oauth_callback():
     return redirect(url_for("providers_page") + "?youtube_authorized=1")
 
 
+# ---------------------------------------------------------------------------
+# Meta (Facebook + Instagram) OAuth 2.0 flow
+# ---------------------------------------------------------------------------
+# Scopes:
+#   pages_manage_posts       — publish video posts to a Facebook Page
+#   pages_read_engagement    — required alongside pages_manage_posts
+#   pages_show_list          — list Pages the user administers
+#   instagram_content_publish — create Instagram Reels / feed posts
+#   instagram_basic          — read basic Instagram account info
+#
+# Flow:
+#   1. /platforms/meta/authorize          → redirect to Facebook dialog
+#   2. Facebook → /platforms/meta/oauth_callback?code=...
+#   3. callback: exchange code → short-lived user token
+#   4. callback: exchange short-lived → long-lived token (60-day)
+#   5. callback: store in secret_profiles for provider='facebook'
+#                and provider='instagram' (same token, both platforms need it)
+#   6. callback: verify token against Graph API /me
+#   7. redirect to /providers?meta_authorized=1
+# ---------------------------------------------------------------------------
+
+_META_GRAPH_VERSION = "v19.0"
+_META_AUTH_URL      = f"https://www.facebook.com/{_META_GRAPH_VERSION}/dialog/oauth"
+_META_TOKEN_URL_CB  = f"https://graph.facebook.com/{_META_GRAPH_VERSION}/oauth/access_token"
+_META_EXCHANGE_URL  = f"https://graph.facebook.com/{_META_GRAPH_VERSION}/oauth/access_token"
+_META_SCOPES        = (
+    "pages_read_engagement,"
+    "instagram_content_publish,"
+    "instagram_basic"
+)
+
+
+def _meta_redirect_uri() -> str:
+    base = request.host_url.rstrip("/")
+    return f"{base}/platforms/meta/oauth_callback"
+
+
+@app.route("/platforms/meta/authorize")
+def meta_oauth_authorize():
+    """
+    Start the Meta (Facebook + Instagram) OAuth 2.0 authorization code flow.
+
+    Redirects to the Facebook dialog. Uses a single flow to obtain
+    permissions for both Facebook Page publishing and Instagram content
+    publishing.
+
+    Prerequisite: META_APP_ID and META_APP_SECRET must be set in .env.
+    The redirect URI http(s)://{host}/platforms/meta/oauth_callback must be
+    registered as a Valid OAuth Redirect URI in the Meta app's Facebook Login
+    settings at developers.facebook.com.
+    """
+    import urllib.parse
+    from hypogeum.config import Config as _Cfg
+    try:
+        cfg = _Cfg()
+    except Exception as exc:
+        return f"Config error: {exc}", 500
+
+    if not (cfg.META_APP_ID and cfg.META_APP_SECRET):
+        return ("META_APP_ID and META_APP_SECRET must be set "
+                "before starting the Meta OAuth flow."), 400
+
+    params = {
+        "client_id":     cfg.META_APP_ID,
+        "redirect_uri":  _meta_redirect_uri(),
+        "response_type": "code",
+        "scope":         _META_SCOPES,
+    }
+    auth_url = _META_AUTH_URL + "?" + urllib.parse.urlencode(params)
+    return redirect(auth_url)
+
+
+@app.route("/platforms/meta/oauth_callback")
+def meta_oauth_callback():
+    """
+    Handle the Meta OAuth 2.0 callback.
+
+    Steps:
+      1. Exchange authorization code for a short-lived user access token.
+      2. Exchange short-lived token for a long-lived token (60-day expiry).
+      3. Upsert a SecretProfile for provider='facebook' and provider='instagram'
+         (both use the same long-lived token).
+      4. Verify token via GET /me and confirm Page / IG account access.
+
+    Success → /providers?meta_authorized=1
+    Error   → meta_oauth_result.html with diagnostics
+    """
+    import requests as _req
+    from hypogeum.config import Config as _Cfg
+
+    error = request.args.get("error")
+    if error:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False,
+            error=error,
+            error_description=request.args.get("error_description", ""),
+            redirect_uri=_meta_redirect_uri(),
+            scope=_META_SCOPES,
+        ), 400
+
+    code = request.args.get("code")
+    if not code:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False, error="no_code",
+            error_description="No authorization code in callback parameters.",
+            redirect_uri=_meta_redirect_uri(),
+            scope=_META_SCOPES,
+        ), 400
+
+    try:
+        cfg = _Cfg()
+    except Exception as exc:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False, error="config_error",
+            error_description=str(exc),
+            redirect_uri=_meta_redirect_uri(),
+            scope=_META_SCOPES,
+        ), 500
+
+    redirect_uri = _meta_redirect_uri()
+
+    # Step 1: Exchange authorization code → short-lived user access token
+    try:
+        tok_resp = _req.get(_META_TOKEN_URL_CB, params={
+            "client_id":     cfg.META_APP_ID,
+            "client_secret": cfg.META_APP_SECRET,
+            "redirect_uri":  redirect_uri,
+            "code":          code,
+        }, timeout=15)
+        token_data = tok_resp.json()
+    except Exception as exc:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False, error="network_error",
+            error_description=str(exc),
+            redirect_uri=redirect_uri,
+            scope=_META_SCOPES,
+        ), 502
+
+    if not tok_resp.ok or "access_token" not in token_data:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False,
+            error=token_data.get("error", {}).get("type", "token_exchange_failed"),
+            error_description=str(token_data.get("error", token_data)),
+            redirect_uri=redirect_uri,
+            scope=_META_SCOPES,
+        ), 400
+
+    short_token = token_data["access_token"]
+
+    # Step 2: Exchange short-lived token → long-lived token (60-day)
+    try:
+        ll_resp = _req.get(_META_EXCHANGE_URL, params={
+            "grant_type":      "fb_exchange_token",
+            "client_id":       cfg.META_APP_ID,
+            "client_secret":   cfg.META_APP_SECRET,
+            "fb_exchange_token": short_token,
+        }, timeout=15)
+        ll_data = ll_resp.json()
+    except Exception as exc:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False, error="longlived_exchange_error",
+            error_description=str(exc),
+            redirect_uri=redirect_uri,
+            scope=_META_SCOPES,
+        ), 502
+
+    if not ll_resp.ok or "access_token" not in ll_data:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False,
+            error=ll_data.get("error", {}).get("type", "longlived_exchange_failed"),
+            error_description=str(ll_data.get("error", ll_data)),
+            redirect_uri=redirect_uri,
+            scope=_META_SCOPES,
+        ), 400
+
+    long_user_token = ll_data["access_token"]
+    token_expires_in = ll_data.get("expires_in", "unknown")
+
+    # Step 2.5: Attempt to get a Page access token for Facebook publishing.
+    # A Page token has implicit pages_manage_posts rights for that page without
+    # requiring the user token to carry that scope. Falls back to user token.
+    long_fb_token = long_user_token
+    page_token_source = "user_token"
+    page_id_for_token = getattr(_Cfg(), "META_FACEBOOK_PAGE_ID", "") or ""
+    if page_id_for_token:
+        try:
+            pt_resp = _req.get(
+                f"https://graph.facebook.com/{_META_GRAPH_VERSION}/{page_id_for_token}",
+                params={"fields": "access_token", "access_token": long_user_token},
+                timeout=15,
+            )
+            if pt_resp.ok:
+                pt_data = pt_resp.json()
+                short_page_token = pt_data.get("access_token", "")
+                if short_page_token:
+                    # Exchange page token for long-lived page token
+                    lp_resp = _req.get(_META_EXCHANGE_URL, params={
+                        "grant_type":        "fb_exchange_token",
+                        "client_id":         cfg.META_APP_ID,
+                        "client_secret":     cfg.META_APP_SECRET,
+                        "fb_exchange_token": short_page_token,
+                    }, timeout=15)
+                    if lp_resp.ok:
+                        lp_data = lp_resp.json()
+                        long_fb_token = lp_data.get("access_token", long_user_token)
+                        page_token_source = "page_token"
+        except Exception:
+            pass  # fall back to user token for Facebook
+
+    long_token = long_user_token  # Instagram uses user token
+    # Step 3: Persist in secret_profiles.
+    # Facebook gets the long-lived Page token (or user token fallback).
+    # Instagram gets the long-lived user token.
+    db = _db_path()
+    _META_LABEL = "meta-oauth-token"
+    _tokens_by_provider = {"facebook": long_fb_token, "instagram": long_token}
+    try:
+        for _provider, _cred in _tokens_by_provider.items():
+            existing = list_secret_profiles(provider=_provider, db_path=db)
+            active   = [p for p in existing if p.label == _META_LABEL and p.status == "active"]
+            if active:
+                update_secret_profile(
+                    active[0].secret_profile_id,
+                    credential_data=_cred,
+                    label=_META_LABEL,
+                    db_path=db,
+                )
+            else:
+                create_secret_profile(
+                    provider=_provider,
+                    label=_META_LABEL,
+                    credential_type="oauth2_token",
+                    credential_data=_cred,
+                    db_path=db,
+                )
+    except Exception as exc:
+        return render_template(
+            "meta_oauth_result.html",
+            ok=False, error="db_error",
+            error_description=str(exc),
+            redirect_uri=redirect_uri,
+            scope=_META_SCOPES,
+        ), 500
+
+    # Step 4: Verify token — GET /me
+    me_info = {}
+    page_info = {}
+    ig_info = {}
+    try:
+        me_resp = _req.get(
+            f"https://graph.facebook.com/{_META_GRAPH_VERSION}/me",
+            params={"fields": "id,name", "access_token": long_token},
+            timeout=10,
+        )
+        me_info = me_resp.json() if me_resp.ok else {"error": me_resp.text[:200]}
+
+        # Verify Facebook Page ID access
+        page_id = getattr(cfg, "META_FACEBOOK_PAGE_ID", None) or ""
+        if page_id:
+            pg_resp = _req.get(
+                f"https://graph.facebook.com/{_META_GRAPH_VERSION}/{page_id}",
+                params={"fields": "id,name", "access_token": long_token},
+                timeout=10,
+            )
+            page_info = pg_resp.json() if pg_resp.ok else {"error": pg_resp.text[:200]}
+
+        # Verify Instagram Business Account ID access
+        ig_id = getattr(cfg, "META_INSTAGRAM_ACCOUNT_ID", None) or ""
+        if ig_id:
+            ig_resp = _req.get(
+                f"https://graph.facebook.com/{_META_GRAPH_VERSION}/{ig_id}",
+                params={"fields": "id,username", "access_token": long_token},
+                timeout=10,
+            )
+            ig_info = ig_resp.json() if ig_resp.ok else {"error": ig_resp.text[:200]}
+    except Exception:
+        pass  # verification failures do not block storage
+
+    return redirect(
+        url_for("providers_page")
+        + f"?meta_authorized=1"
+        + f"&me={me_info.get('name', '')}"
+        + f"&page={page_info.get('name', '')}"
+        + f"&ig={ig_info.get('username', '')}"
+        + f"&expires_in={token_expires_in}"
+    )
+
+
 # ===========================================================================
 # Phase B — Read / detail routes (GET, read-only)
 # ===========================================================================

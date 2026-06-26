@@ -79,6 +79,10 @@ import requests
 
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
+import hypogeum.finance as _finance
+from hypogeum.prompt_loader import load_music_categories
+
+_MUSIC_CATEGORIES_FILE = Path(__file__).resolve().parent / "prompts" / "music_categories.json"
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +98,12 @@ _DEFAULT_SIMILARITY_BOOST  = 0.75
 
 # Default narration model (frozen M3.1 decision — benchmark against eleven_v3 pre-production)
 _DEFAULT_MODEL_ID = "eleven_multilingual_v2"
+
+# Cost estimates (USD) — used for cost recording only; not billing.
+# eleven_multilingual_v2 at creator tier: ~$0.30 per 1,000 characters.
+_TTS_USD_PER_CHAR   = 3e-4
+# music_v1: approximate per-second cost for generated music.
+_MUSIC_USD_PER_SEC  = 0.02
 
 # Default output format
 _DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"
@@ -162,38 +172,8 @@ _MUSIC_CATEGORY_SLUGS: dict[str, str] = {
 }
 
 # Category base prompts (from §5.C)
-_MUSIC_CATEGORY_PROMPTS: dict[str, str] = {
-    "Mystery": (
-        "Slow atmospheric dark underscore. Sparse instrumentation — solo piano or low "
-        "sustained strings only. 60–80 BPM. No percussion. Minimal harmonic movement. "
-        "Convey unresolved tension without urgency."
-    ),
-    "Discovery": (
-        "Building orchestral piece with a hopeful, expansive character. Moderate tempo "
-        "90–110 BPM. Layered strings entering mid-track, light brass accent. Arc from "
-        "sparse to full without climax. Background underscore level."
-    ),
-    "Investigation": (
-        "Tense, rhythmic chamber piece. Sparse piano or plucked strings with subtle "
-        "rhythmic pattern. 80–100 BPM. Convey quiet urgency and methodical pacing. "
-        "No resolution. Underscore only — not foreground."
-    ),
-    "Ancient Civilizations": (
-        "Cinematic ambient with period-appropriate ethnic instrumentation. Oud, duduk, "
-        "lyre, or equivalent ancient strings. Drone or modal harmonic language. 60–80 BPM. "
-        "No contemporary production textures. Evocative of an ancient world."
-    ),
-    "Tension": (
-        "Urgent dissonant string-led underscore. Rising harmonic tension with no release. "
-        "90–120 BPM. Rhythmic bow pressure and cluster harmonics acceptable. Build "
-        "throughout. No resolution at track end."
-    ),
-    "Resolution": (
-        "Warm, decelerating orchestral or sparse piano piece. Full strings or solo piano. "
-        "Sense of emotional landing — not triumphant, not tragic. 70–90 BPM and slowing. "
-        "Natural fade acceptable."
-    ),
-}
+# Music category prompts loaded from hypogeum/prompts/music_categories.json
+_MUSIC_CATEGORY_PROMPTS: dict[str, str] = load_music_categories(_MUSIC_CATEGORIES_FILE)
 
 # Tone arc extension truncation limit (§15 security consideration)
 _TONE_ARC_MAX_CHARS = 100
@@ -768,6 +748,7 @@ def generate_narration_segment(
     duration_seconds = word_timings[-1].end_seconds if word_timings else 0.0
     asset_id = f"episodes/{episode_id}/narration/{beat_id}"
 
+    char_count = len(text)
     log.info(
         "elevenlabs_tts_completed",
         beat_id=beat_id,
@@ -775,7 +756,15 @@ def generate_narration_segment(
         duration_seconds=round(duration_seconds, 3),
         word_count=len(word_timings),
         alignment_source=alignment_source,
-        character_cost=len(text),
+        character_cost=char_count,
+    )
+    _finance.record_cost(
+        provider="elevenlabs",
+        model=config.ELEVENLABS_MODEL_ID or _DEFAULT_MODEL_ID,
+        call_type="narration",
+        cost_usd=round(char_count * _TTS_USD_PER_CHAR, 6),
+        tokens_or_credits=float(char_count),
+        asset_id=asset_id,
     )
 
     return NarrationSegmentResult(
@@ -784,7 +773,7 @@ def generate_narration_segment(
         local_path=local_path,
         duration_seconds=duration_seconds,
         request_id=request_id,
-        character_cost=len(text),
+        character_cost=char_count,
         word_timings=word_timings,
         alignment_source=alignment_source,
     )
@@ -1392,6 +1381,15 @@ def generate_music_track(
         "last_used_date": None,
     }
     _append_to_music_library(library_path=library_path, entry=new_entry, log=log)
+
+    _finance.record_cost(
+        provider="elevenlabs",
+        model=model_id,
+        call_type="music",
+        cost_usd=round(required_duration_seconds * _MUSIC_USD_PER_SEC, 6),
+        tokens_or_credits=required_duration_seconds,
+        asset_id=asset_id,
+    )
 
     return MusicTrackResult(
         track_id=track_id,

@@ -204,6 +204,12 @@ def generate_scene_video(
         asset = asset_index[scene_id]
         asset["generation_status"] = gen_status
         asset["asset_id"] = manifest_entry.get("asset_id", asset.get("asset_id", ""))
+        # Write provenance fields back so asset_archive_agent can capture them.
+        asset["provider"]     = manifest_entry.get("provider", "muapi")
+        asset["model"]        = manifest_entry.get("model_used", "")
+        asset["prompt_used"]  = manifest_entry.get("prompt_used")
+        asset["tier_used"]    = manifest_entry.get("tier_used")
+        asset["fallback_used"] = manifest_entry.get("fallback_used", False)
     else:
         asset_manifest_assets.append({
             "scene_id":          scene_id,
@@ -212,6 +218,9 @@ def generate_scene_video(
             "generation_status": gen_status,
             "provider":          manifest_entry.get("provider", ""),
             "model":             manifest_entry.get("model_used", ""),
+            "prompt_used":       manifest_entry.get("prompt_used"),
+            "tier_used":         manifest_entry.get("tier_used"),
+            "fallback_used":     manifest_entry.get("fallback_used", False),
             "source_type":       scene.get("source_type", "main_episode"),
             "used_in_scenes":    [scene_id],
         })

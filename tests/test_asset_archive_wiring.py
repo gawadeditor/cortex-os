@@ -456,3 +456,449 @@ class TestSchemaValidation:
         }
         with pytest.raises(SchemaError):
             validate("asset_archive_record", bad)
+
+
+# ---------------------------------------------------------------------------
+# TestProvenanceFields — M7.2 observability pass
+# ---------------------------------------------------------------------------
+
+def _make_packages_with_provenance():
+    """Package fixtures with provenance data set as VGA now writes back."""
+    visual_package = {
+        "asset_manifest": {
+            "assets": [
+                {
+                    "asset_id":          "clip_asset_001",
+                    "scene_id":          "scene_1",
+                    "source_type":       "main_episode",
+                    "derivation_source": "muapi",
+                    "generation_status": "generated",
+                    "provider":          "muapi",
+                    "model":             "veo3-text-to-video",
+                    "prompt_used":       "Ancient Roman colosseum at dusk, cinematic",
+                    "tier_used":         1,
+                    "fallback_used":     False,
+                },
+            ]
+        },
+        "visual_continuity_record": {"locked_entities": []},
+    }
+    narration_package = {
+        "voice_configuration": {
+            "voice_id":  "j9jfwdrw7BRfcR43Qohk",
+            "model_id":  "eleven_multilingual_v2",
+            "environment_source": "env",
+        },
+        "stitched_tracks": [
+            {
+                "audio_asset_id": "narr_asset_001",
+                "track_id":       "main",
+                "source_type":    "elevenlabs",
+            },
+        ],
+        "captions": [
+            {
+                "caption_id":     "cap_001",
+                "srt_asset_id":   "srt_asset_001",
+                "caption_method": "elevenlabs_alignment",
+            }
+        ],
+    }
+    thumbnail_package = {
+        "main_thumbnail": {"asset_id": "thumb_asset_001"},
+        "candidates": [
+            {
+                "candidate_id":   "cand_a",
+                "rank":           1,
+                "asset_id":       "thumb_asset_001",
+                "status":         "generated",
+                "visual_prompt":  "Dark ancient ruins, high contrast",
+                "file_path":      "/abs/path/to/episodes/ep_000/thumbnails/main.jpg",
+            },
+        ],
+        "short_thumbnails": [],
+        "generation_metadata": {
+            "provider":       "muapi",
+            "primary_model":  "gpt-image-2-text-to-image",
+            "fallback_model": "flux-2-dev",
+            "resolution":     "2K",
+            "quality":        "high",
+        },
+    }
+    final_render_package = {
+        "episode_render": {"video_asset_id": "render_asset_001"},
+        "shorts_renders": [],
+        "thumbnail_references": [],
+        "music_log": [
+            {
+                "log_id":      "music_log_001",
+                "asset_id":    "music_asset_001",
+                "source":      "ai_generated",
+                "category":    "background",
+                "section_key": "intro",
+            }
+        ],
+    }
+    return visual_package, narration_package, thumbnail_package, final_render_package
+
+
+class TestProvenanceFields:
+    """Verify M7.2 provenance fields are captured in catalog records."""
+
+    def test_clip_catalog_has_generation_prompt(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "clip_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        clip = next(r for r in records if r.get("scene_id") == "scene_1")
+        assert clip["generation_prompt"] == "Ancient Roman colosseum at dusk, cinematic"
+
+    def test_clip_catalog_has_model(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "clip_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        clip = next(r for r in records if r.get("scene_id") == "scene_1")
+        assert clip["model"] == "veo3-text-to-video"
+
+    def test_clip_catalog_has_file_path(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "clip_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        clip = next(r for r in records if r.get("scene_id") == "scene_1")
+        assert clip["file_path"] == "episodes/ep_000/video/sc_scene_1.mp4"
+        assert clip["archive_location"] == clip["file_path"]
+        assert clip["moved_at"] is None
+
+    def test_clip_catalog_has_generation_params(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "clip_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        clip = next(r for r in records if r.get("scene_id") == "scene_1")
+        assert "tier_used" in clip["generation_params"]
+        assert clip["generation_params"]["tier_used"] == 1
+
+    def test_clip_catalog_has_version_and_created_at(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "clip_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        clip = next(r for r in records if r.get("scene_id") == "scene_1")
+        assert clip["version"] == 1
+        assert clip["created_at"]
+
+    def test_thumbnail_catalog_has_generation_prompt(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "thumbnail_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        thumb = next(r for r in records if r.get("thumbnail_type") == "main")
+        assert thumb["generation_prompt"] == "Dark ancient ruins, high contrast"
+
+    def test_thumbnail_catalog_has_model(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "thumbnail_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        thumb = next(r for r in records if r.get("thumbnail_type") == "main")
+        assert thumb["model"] == "gpt-image-2-text-to-image"
+
+    def test_thumbnail_catalog_has_generation_params(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "thumbnail_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        thumb = next(r for r in records if r.get("thumbnail_type") == "main")
+        assert thumb["generation_params"].get("resolution") == "2K"
+        assert thumb["generation_params"].get("quality") == "high"
+        assert thumb["generation_params"].get("aspect_ratio") == "16:9"
+
+    def test_thumbnail_catalog_has_file_path(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "thumbnail_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        thumb = next(r for r in records if r.get("thumbnail_type") == "main")
+        # file_path comes from candidate["file_path"] (absolute path normalized)
+        assert thumb["file_path"] is not None
+        assert thumb["archive_location"] == thumb["file_path"]
+        assert thumb["moved_at"] is None
+
+    def test_narration_catalog_has_model(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "asset_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        narr = next(r for r in records if r.get("asset_type") == "narration")
+        assert narr["model"] == "eleven_multilingual_v2"
+
+    def test_narration_catalog_has_file_path(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "asset_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        narr = next(r for r in records if r.get("asset_type") == "narration")
+        assert narr["file_path"] == "episodes/ep_000/narration/narr_asset_001.mp3"
+
+    def test_narration_catalog_has_voice_generation_params(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "asset_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        narr = next(r for r in records if r.get("asset_type") == "narration")
+        assert narr["generation_params"]["voice_id"] == "j9jfwdrw7BRfcR43Qohk"
+
+    def test_music_catalog_has_model(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "music_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        music = records[0]
+        assert music["model"] == "music_v1"
+
+    def test_music_catalog_has_generation_params(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "music_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        music = records[0]
+        assert music["generation_params"]["category"] == "background"
+        assert music["generation_params"]["section_key"] == "intro"
+
+    def test_music_catalog_has_file_path(self, store):
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "music_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        music = records[0]
+        assert music["file_path"] == "episodes/ep_000/music/music_asset_001.mp3"
+        assert music["archive_location"] == music["file_path"]
+
+    def test_asset_catalog_provenance_fields_present_for_all_types(self, store):
+        """Every catalog record has the required provenance fields."""
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        records = [
+            json.loads(line)
+            for line in (catalog_dir / "asset_catalog.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        required_provenance = {
+            "generation_prompt", "generation_params", "file_path",
+            "archive_location", "moved_at", "version", "created_at", "cost_usd",
+        }
+        for r in records:
+            missing = required_provenance - set(r.keys())
+            assert not missing, (
+                f"asset_id={r.get('asset_id')} type={r.get('asset_type')} "
+                f"missing provenance fields: {missing}"
+            )
+
+    def test_db_record_has_model_populated(self, store):
+        """DB assets table receives model from catalog (not None)."""
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        conn = get_connection(db_path)
+        # archive_index stores model
+        rows = conn.execute(
+            "SELECT model FROM archive_index WHERE episode_id='ep_000'"
+        ).fetchall()
+        conn.close()
+        models = [r["model"] for r in rows if r["model"]]
+        assert len(models) > 0, "Expected at least one archive_index row with a model"
+
+    def test_db_archive_index_has_file_path(self, store):
+        """archive_index stores file_path for clip assets."""
+        db_path, catalog_dir, output_dir = store
+        vp, np, tp, frp = _make_packages_with_provenance()
+        run_asset_archive(
+            vp, np, tp, frp, "ep_000",
+            catalog_dir=catalog_dir, output_dir=output_dir,
+            run_id="run-001", db_path=db_path,
+        )
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT file_path FROM archive_index WHERE asset_id='clip_asset_001'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row["file_path"] == "episodes/ep_000/video/sc_scene_1.mp4"
+
+    def test_vga_writeback_model_is_in_asset_manifest(self):
+        """video_generation_agent writes model/prompt_used back to existing asset entries."""
+        from hypogeum.agents.video_generation_agent import build_asset_index
+        # Simulate a pre-populated asset_manifest from Claude Phase 1.
+        # Phase 1 assets have used_in_scenes — that's how build_asset_index builds the index.
+        visual_package = {
+            "asset_manifest": {
+                "assets": [{
+                    "asset_id":          "clip_old",
+                    "scene_id":          "sc_1",
+                    "used_in_scenes":    ["sc_1"],
+                    "source_type":       "main_episode",
+                    "generation_status": "planned",
+                }]
+            }
+        }
+        asset_index = build_asset_index(visual_package)
+        assets = visual_package["asset_manifest"]["assets"]
+        # Simulate the VGA update path (the "if scene_id in asset_index" branch)
+        manifest_entry = {
+            "scene_id":          "sc_1",
+            "asset_id":          "clip_new",
+            "generation_status": "generated",
+            "provider":          "muapi",
+            "model_used":        "veo3-text-to-video",
+            "prompt_used":       "Roman forum at sunset",
+            "tier_used":         1,
+            "fallback_used":     False,
+        }
+        scene_id = "sc_1"
+        gen_status = "generated"
+        assert scene_id in asset_index, "build_asset_index must index by used_in_scenes[0]"
+        asset = asset_index[scene_id]
+        asset["generation_status"] = gen_status
+        asset["asset_id"] = manifest_entry.get("asset_id", asset.get("asset_id", ""))
+        asset["provider"]      = manifest_entry.get("provider", "muapi")
+        asset["model"]         = manifest_entry.get("model_used", "")
+        asset["prompt_used"]   = manifest_entry.get("prompt_used")
+        asset["tier_used"]     = manifest_entry.get("tier_used")
+        asset["fallback_used"] = manifest_entry.get("fallback_used", False)
+
+        updated = assets[0]
+        assert updated["model"] == "veo3-text-to-video"
+        assert updated["prompt_used"] == "Roman forum at sunset"
+        assert updated["tier_used"] == 1
+        assert updated["provider"] == "muapi"

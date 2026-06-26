@@ -370,6 +370,9 @@ def register_asset_success(
     source_stage: Optional[str] = None,
     reuse_eligible: bool = True,
     db_path: Optional[Path] = None,
+    generation_prompt: Optional[str] = None,
+    generation_params: Optional[dict] = None,
+    scene_id: Optional[str] = None,
 ) -> None:
     """
     Record a successful asset generation.
@@ -479,6 +482,13 @@ def register_asset_success(
                     quality_verdict="unvalidated",
                     archived_at=attempted_at,
                     metadata_version="v2",
+                    generation_prompt=generation_prompt,
+                    generation_params=generation_params,
+                    cost_usd=cost_usd,
+                    scene_id=scene_id,
+                    archive_location=resolved_file_path,
+                    version=1,
+                    asset_created_at=attempted_at,
                 )
 
             conn.commit()
@@ -574,6 +584,12 @@ def register_existing_asset(
     prompt_hash: Optional[str] = None,
     reuse_eligible: bool = True,
     db_path: Optional[Path] = None,
+    generation_prompt: Optional[str] = None,
+    generation_params: Optional[dict] = None,
+    cost_usd: Optional[float] = None,
+    scene_id: Optional[str] = None,
+    archive_location: Optional[str] = None,
+    asset_created_at: Optional[str] = None,
 ) -> None:
     """
     Register an asset discovered at archive time rather than during generation.
@@ -664,6 +680,13 @@ def register_existing_asset(
                     quality_verdict="unvalidated",
                     archived_at=now,
                     metadata_version="v2",
+                    generation_prompt=generation_prompt,
+                    generation_params=generation_params,
+                    cost_usd=cost_usd,
+                    scene_id=scene_id,
+                    archive_location=archive_location if archive_location is not None else resolved_file_path,
+                    version=1,
+                    asset_created_at=asset_created_at or now,
                 )
 
             conn.commit()

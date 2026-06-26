@@ -21,10 +21,11 @@ Public API:
     write_episode_rollup(run_id, episode_id,
                          db_path=None, finance_dir=None) -> dict
 
-Coverage for Phase 2C:
+Coverage:
     OpenRouter (LLM calls) — wired via agent.py
-    MUAPI (video/image generation) — deferred to Phase 3 wiring
-    ElevenLabs (narration/music) — deferred to Phase 3 wiring
+    MUAPI (video/image generation) — wired via muapi.py
+    ElevenLabs (narration/music) — wired via elevenlabs.py
+    Perplexity (web search) — wired via perplexity.py
 
 Finance controller writes are non-blocking. Any write failure is
 silently swallowed — cost recording must never halt the pipeline.
@@ -128,6 +129,7 @@ def record_cost(
     call_type: str,
     cost_usd: float,
     tokens_or_credits: Optional[float] = None,
+    asset_id: Optional[str] = None,
     run_id: Optional[str] = None,
     episode_id: Optional[str] = None,
     db_path: Optional[Path] = None,
@@ -139,14 +141,18 @@ def record_cost(
     explicitly. If neither source provides them, the call is silently skipped.
 
     Args:
-        provider:           Provider slug ("openrouter", "muapi", "elevenlabs").
+        provider:           Provider slug ("openrouter", "muapi", "elevenlabs",
+                            "perplexity").
         model:              Model slug (e.g. "anthropic/claude-opus-4.6"). None for
                             providers that do not report a model.
         call_type:          Semantic call category ("research_synthesis",
-                            "scene_generation", "narration", "thumbnail_planning",
-                            "td_planning", "bga_pass1", "bga_pass2").
+                            "scene_generation", "narration", "music",
+                            "thumbnail_planning", "td_planning", "web_search").
         cost_usd:           Actual or estimated cost for this call in USD.
-        tokens_or_credits:  Token count (LLM) or credit count (MUAPI).
+        tokens_or_credits:  Token count (LLM/Perplexity) or credit count (MUAPI)
+                            or character count (ElevenLabs TTS).
+        asset_id:           Asset that incurred this cost (nullable). Links cost
+                            row to a specific generated asset for provenance.
         run_id:             Override run_id. Falls back to active run context.
         episode_id:         Override episode_id. Falls back to active run context.
         db_path:            Override SQLite path.
@@ -171,6 +177,7 @@ def record_cost(
                 called_at=_now_iso(),
                 model=model,
                 tokens_or_credits=tokens_or_credits,
+                asset_id=asset_id,
             )
             conn.commit()
         finally:

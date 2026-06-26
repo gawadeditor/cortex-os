@@ -37,6 +37,18 @@ Verdicts:
 Non-blocking — verdict is logged and stored in PipelineResult but does not
 raise exceptions. Downstream consumers use the query API, not the record.
 
+Provenance fields captured per asset (as of M7.2 observability pass):
+  generation_prompt  — actual prompt submitted to the provider (clips, thumbnails)
+  model              — model slug used (e.g. veo3-text-to-video, gpt-image-1)
+  provider           — provider name (muapi, elevenlabs, openai, …)
+  generation_params  — dict with aspect_ratio, duration_seconds, tier_used, etc.
+  file_path          — path to the asset file (relative to .hypogeum-assets/)
+  archive_location   — current file location (= file_path; updated on move)
+  moved_at           — ISO timestamp when the asset was relocated (None if not moved)
+  version            — generation attempt index (1 = first generation)
+  created_at         — ISO timestamp of generation (= indexed_at at archive time)
+  cost_usd           — per-asset generation cost (None until per-asset tracking added)
+
 Query API (module-level functions, read-only):
   query_by_asset_id(asset_id, catalog_dir)           → dict | None
   query_by_entity_id(entity_id, catalog_dir)         → list[dict]
@@ -164,6 +176,23 @@ def _add_check(
 # Indexing helpers
 # ---------------------------------------------------------------------------
 
+def _clip_file_path(episode_id: str, scene_id: str, short_id: Optional[str]) -> Optional[str]:
+    """
+    Derive the conventional relative file path for a generated scene video clip.
+
+    Mirrors the convention in muapi._scene_file_path():
+      Main episode: episodes/{episode_id}/video/sc_{scene_id}.mp4
+      Short:        episodes/{episode_id}/video/sh_{short_id}/sc_{scene_id}.mp4
+
+    Returns None when scene_id is empty (final-render composite entries).
+    """
+    if not scene_id:
+        return None
+    if short_id:
+        return f"episodes/{episode_id}/video/sh_{short_id}/sc_{scene_id}.mp4"
+    return f"episodes/{episode_id}/video/sc_{scene_id}.mp4"
+
+
 def _index_clips(
     visual_package: dict,
     final_render_package: dict,
@@ -176,6 +205,10 @@ def _index_clips(
     Index video clips from visual_package.asset_manifest.assets,
     final_render_package.episode_render, and shorts_renders.
 
+    Captures provenance fields (generation_prompt, model, generation_params,
+    file_path, archive_location, version) from the asset_manifest entries
+    written by video_generation_agent.
+
     Writes to clip_catalog.jsonl and asset_catalog.jsonl.
     Skips asset_ids already present (idempotent).
     Returns count of newly indexed clips.
@@ -187,69 +220,108 @@ def _index_clips(
     existing_assets = _existing_ids(asset_catalog, "asset_id")
     indexed = 0
 
-    def _add(asset_id: str, clip_type: str, scene_id: str, derivation_source: str) -> None:
+    def _add(
+        asset_id: str,
+        clip_type: str,
+        scene_id: str,
+        derivation_source: str,
+        provider: str = "muapi",
+        model: Optional[str] = None,
+        generation_prompt: Optional[str] = None,
+        generation_params: Optional[dict] = None,
+        short_id: Optional[str] = None,
+    ) -> None:
         nonlocal indexed
         if not asset_id or asset_id in existing_clips:
             return
+        file_path = _clip_file_path(episode_id, scene_id, short_id)
         _append_line(clip_catalog, {
-            "clip_id": f"clip_{uuid.uuid4().hex[:12]}",
-            "asset_id": asset_id,
-            "run_id": run_id,
+            "clip_id":           f"clip_{uuid.uuid4().hex[:12]}",
+            "asset_id":          asset_id,
+            "run_id":            run_id,
             "source_episode_id": episode_id,
-            "clip_type": clip_type,
-            "scene_id": scene_id,
+            "clip_type":         clip_type,
+            "scene_id":          scene_id,
             "derivation_source": derivation_source,
-            "provider": "muapi",
-            "model": None,
-            "file_path": None,
-            "indexed_at": now,
-            "reusable": True,
-            "metadata_version": METADATA_VERSION,
+            "provider":          provider,
+            "model":             model,
+            "generation_prompt": generation_prompt,
+            "generation_params": generation_params or {},
+            "file_path":         file_path,
+            "archive_location":  file_path,
+            "moved_at":          None,
+            "version":           1,
+            "created_at":        now,
+            "indexed_at":        now,
+            "cost_usd":          None,
+            "reusable":          True,
+            "metadata_version":  METADATA_VERSION,
         })
         existing_clips.add(asset_id)
         if asset_id not in existing_assets:
             _append_line(asset_catalog, {
-                "asset_id": asset_id,
-                "run_id": run_id,
-                "asset_type": "clip",
+                "asset_id":          asset_id,
+                "run_id":            run_id,
+                "asset_type":        "clip",
                 "source_episode_id": episode_id,
-                "provider": "muapi",
-                "model": None,
-                "file_path": None,
-                "reusable": True,
-                "indexed_at": now,
-                "metadata": {"clip_type": clip_type, "scene_id": scene_id},
-                "metadata_version": METADATA_VERSION,
+                "provider":          provider,
+                "model":             model,
+                "generation_prompt": generation_prompt,
+                "generation_params": generation_params or {},
+                "file_path":         file_path,
+                "archive_location":  file_path,
+                "moved_at":          None,
+                "version":           1,
+                "created_at":        now,
+                "cost_usd":          None,
+                "reusable":          True,
+                "indexed_at":        now,
+                "metadata":          {"clip_type": clip_type, "scene_id": scene_id},
+                "metadata_version":  METADATA_VERSION,
             })
             existing_assets.add(asset_id)
         indexed += 1
 
-    # From visual_package.asset_manifest.assets
+    # From visual_package.asset_manifest.assets — includes provenance from VGA writebacks
     for asset in visual_package.get("asset_manifest", {}).get("assets", []):
+        scene_id = asset.get("scene_id", "")
+        short_id = asset.get("short_id") or None
+        tier = asset.get("tier_used")
+        gen_params: dict = {}
+        if tier is not None:
+            gen_params["tier_used"] = tier
+        if asset.get("fallback_used"):
+            gen_params["fallback_used"] = True
         _add(
             asset_id=asset.get("asset_id", ""),
             clip_type=asset.get("source_type", "main_episode"),
-            scene_id=asset.get("scene_id", ""),
+            scene_id=scene_id,
             derivation_source=asset.get("derivation_source", ""),
+            provider=asset.get("provider", "muapi"),
+            model=asset.get("model") or asset.get("model_used") or None,
+            generation_prompt=asset.get("prompt_used"),
+            generation_params=gen_params or None,
+            short_id=short_id,
         )
 
-    # Main episode render
+    # Main episode render (final composite — no per-scene prompt)
     episode_render = final_render_package.get("episode_render", {})
     _add(
         asset_id=episode_render.get("video_asset_id", ""),
-        clip_type="main_episode",
+        clip_type="main_episode_render",
         scene_id="",
         derivation_source="final_render",
     )
 
-    # Shorts renders
+    # Shorts renders (final composites — no per-scene prompt)
     for short_render in final_render_package.get("shorts_renders", []):
         short_id = short_render.get("short_id", "")
         _add(
             asset_id=short_render.get("video_asset_id", ""),
-            clip_type="short",
+            clip_type="short_render",
             scene_id="",
             derivation_source=f"short_render:{short_id}",
+            short_id=short_id,
         )
 
     return indexed
@@ -266,6 +338,7 @@ def _index_thumbnails(
     """
     Index thumbnails from thumbnail_package.main_thumbnail and short_thumbnails.
     Uses thumbnail_references from final_render_package for format metadata.
+    Extracts generation_prompt and file_path from thumbnail_package.candidates[].
 
     Writes to thumbnail_catalog.jsonl and asset_catalog.jsonl.
     Skips asset_ids already present (idempotent).
@@ -285,56 +358,118 @@ def _index_thumbnails(
         if tid:
             format_lookup[tid] = ref.get("format", "")
 
-    def _add(asset_id: str, thumb_type: str, short_id: Optional[str] = None) -> None:
+    # Build provenance lookup from candidates: asset_id → {prompt, file_path, model}
+    candidate_lookup: dict[str, dict] = {}
+    for c in thumbnail_package.get("candidates", []):
+        aid = c.get("asset_id")
+        if aid:
+            candidate_lookup[aid] = c
+
+    gen_meta = thumbnail_package.get("generation_metadata", {})
+    thumb_provider = gen_meta.get("provider", "muapi")
+    thumb_model     = gen_meta.get("primary_model")
+    thumb_resolution = gen_meta.get("resolution")
+    thumb_quality    = gen_meta.get("quality")
+
+    def _add(
+        asset_id: str,
+        thumb_type: str,
+        short_id: Optional[str] = None,
+        deliverable_id: str = "",
+    ) -> None:
         nonlocal indexed
         if not asset_id or asset_id in existing_thumbs:
             return
+
+        cand = candidate_lookup.get(asset_id, {})
+        generation_prompt = cand.get("visual_prompt")
+        # file_path from candidate dict (set by thumbnail_generation_agent)
+        cand_file_path: Optional[str] = cand.get("file_path")
+        if cand_file_path:
+            # Normalize to relative path from project root
+            cand_file_path = str(cand_file_path)
+
+        # Derive conventional path when candidate doesn't carry it
+        if not cand_file_path:
+            if deliverable_id:
+                cand_file_path = f"episodes/{episode_id}/thumbnails/{deliverable_id}.jpg"
+            elif thumb_type == "main":
+                cand_file_path = f"episodes/{episode_id}/thumbnails/main.jpg"
+
+        fmt = format_lookup.get(asset_id, "")
+        gen_params: dict = {}
+        if thumb_resolution:
+            gen_params["resolution"] = thumb_resolution
+        if thumb_quality:
+            gen_params["quality"] = thumb_quality
+        gen_params["aspect_ratio"] = "16:9" if thumb_type == "main" else "9:16"
+
         _append_line(thumb_catalog, {
-            "thumbnail_id": f"thumb_{uuid.uuid4().hex[:12]}",
-            "asset_id": asset_id,
-            "run_id": run_id,
+            "thumbnail_id":      f"thumb_{uuid.uuid4().hex[:12]}",
+            "asset_id":          asset_id,
+            "run_id":            run_id,
             "source_episode_id": episode_id,
-            "thumbnail_type": thumb_type,
-            "short_id": short_id,
-            "format": format_lookup.get(asset_id, ""),
-            "provider": "muapi",
-            "model": None,
-            "file_path": None,
-            "indexed_at": now,
-            "reusable": True,
-            "metadata_version": METADATA_VERSION,
+            "thumbnail_type":    thumb_type,
+            "short_id":          short_id,
+            "format":            fmt,
+            "provider":          thumb_provider,
+            "model":             thumb_model,
+            "generation_prompt": generation_prompt,
+            "generation_params": gen_params,
+            "file_path":         cand_file_path,
+            "archive_location":  cand_file_path,
+            "moved_at":          None,
+            "version":           1,
+            "created_at":        now,
+            "indexed_at":        now,
+            "cost_usd":          None,
+            "reusable":          True,
+            "metadata_version":  METADATA_VERSION,
         })
         existing_thumbs.add(asset_id)
         if asset_id not in existing_assets:
             _append_line(asset_catalog, {
-                "asset_id": asset_id,
-                "run_id": run_id,
-                "asset_type": "thumbnail",
+                "asset_id":          asset_id,
+                "run_id":            run_id,
+                "asset_type":        "thumbnail",
                 "source_episode_id": episode_id,
-                "provider": "muapi",
-                "model": None,
-                "file_path": None,
-                "reusable": True,
-                "indexed_at": now,
+                "provider":          thumb_provider,
+                "model":             thumb_model,
+                "generation_prompt": generation_prompt,
+                "generation_params": gen_params,
+                "file_path":         cand_file_path,
+                "archive_location":  cand_file_path,
+                "moved_at":          None,
+                "version":           1,
+                "created_at":        now,
+                "cost_usd":          None,
+                "reusable":          True,
+                "indexed_at":        now,
                 "metadata": {
                     "thumbnail_type": thumb_type,
-                    "format": format_lookup.get(asset_id, ""),
+                    "format":         fmt,
                 },
-                "metadata_version": METADATA_VERSION,
+                "metadata_version":  METADATA_VERSION,
             })
             existing_assets.add(asset_id)
         indexed += 1
 
     # Main thumbnail
     main_thumb = thumbnail_package.get("main_thumbnail", {})
-    _add(asset_id=main_thumb.get("asset_id", ""), thumb_type="main")
+    _add(
+        asset_id=main_thumb.get("asset_id", ""),
+        thumb_type="main",
+        deliverable_id="main",
+    )
 
     # Short thumbnails
     for short_thumb in thumbnail_package.get("short_thumbnails", []):
+        sid = short_thumb.get("short_id") or None
         _add(
             asset_id=short_thumb.get("asset_id", ""),
             thumb_type="short",
-            short_id=short_thumb.get("short_id") or None,
+            short_id=sid,
+            deliverable_id=f"short_{sid}" if sid else "",
         )
 
     return indexed
@@ -366,42 +501,67 @@ def _index_music(
         if not log_id or log_id in existing_music:
             continue
 
-        source = entry.get("source", "")
+        source   = entry.get("source", "")
+        category = entry.get("category", "")
         asset_id = entry.get("asset_id", "") or log_id
         reusable = source == "channel_library"
         provider = "elevenlabs" if source != "channel_library" else "channel_library"
+        model    = entry.get("model") or ("music_v1" if source == "ai_generated" else None)
+        # Music files stored by music_agent under episodes/{ep}/music/
+        file_path: Optional[str] = entry.get("file_path")
+        if not file_path and asset_id:
+            file_path = f"episodes/{episode_id}/music/{asset_id}.mp3"
+
+        gen_params: dict = {"category": category, "source": source}
+        section_key = entry.get("section_key", "")
+        if section_key:
+            gen_params["section_key"] = section_key
 
         _append_line(music_catalog, {
-            "music_id": f"music_{uuid.uuid4().hex[:12]}",
-            "log_id": log_id,
-            "asset_id": asset_id,
-            "run_id": run_id,
+            "music_id":          f"music_{uuid.uuid4().hex[:12]}",
+            "log_id":            log_id,
+            "asset_id":          asset_id,
+            "run_id":            run_id,
             "source_episode_id": episode_id,
-            "source": source,
-            "category": entry.get("category", ""),
-            "section_key": entry.get("section_key", ""),
-            "provider": provider,
-            "model": None,
-            "file_path": None,
-            "indexed_at": now,
-            "reusable": reusable,
-            "metadata_version": METADATA_VERSION,
+            "source":            source,
+            "category":          category,
+            "section_key":       section_key,
+            "provider":          provider,
+            "model":             model,
+            "generation_prompt": None,
+            "generation_params": gen_params,
+            "file_path":         file_path,
+            "archive_location":  file_path,
+            "moved_at":          None,
+            "version":           1,
+            "created_at":        now,
+            "indexed_at":        now,
+            "cost_usd":          None,
+            "reusable":          reusable,
+            "metadata_version":  METADATA_VERSION,
         })
         existing_music.add(log_id)
 
         if asset_id not in existing_assets:
             _append_line(asset_catalog, {
-                "asset_id": asset_id,
-                "run_id": run_id,
-                "asset_type": "music",
+                "asset_id":          asset_id,
+                "run_id":            run_id,
+                "asset_type":        "music",
                 "source_episode_id": episode_id,
-                "provider": provider,
-                "model": None,
-                "file_path": None,
-                "reusable": reusable,
-                "indexed_at": now,
-                "metadata": {"source": source, "category": entry.get("category", "")},
-                "metadata_version": METADATA_VERSION,
+                "provider":          provider,
+                "model":             model,
+                "generation_prompt": None,
+                "generation_params": gen_params,
+                "file_path":         file_path,
+                "archive_location":  file_path,
+                "moved_at":          None,
+                "version":           1,
+                "created_at":        now,
+                "cost_usd":          None,
+                "reusable":          reusable,
+                "indexed_at":        now,
+                "metadata":          {"source": source, "category": category},
+                "metadata_version":  METADATA_VERSION,
             })
             existing_assets.add(asset_id)
 
@@ -497,25 +657,42 @@ def _index_narration(
     existing_assets = _existing_ids(asset_catalog, "asset_id")
     indexed = 0
 
+    voice_cfg = narration_package.get("voice_configuration", {})
+    voice_model = voice_cfg.get("model_id")
+
     for track in narration_package.get("stitched_tracks", []):
         audio_id = track.get("audio_asset_id", "")
         if not audio_id or audio_id in existing_assets:
             continue
+        track_id = track.get("track_id", "")
+        file_path: Optional[str] = track.get("file_path")
+        if not file_path and audio_id:
+            file_path = f"episodes/{episode_id}/narration/{audio_id}.mp3"
         _append_line(asset_catalog, {
-            "asset_id": audio_id,
-            "run_id": run_id,
-            "asset_type": "narration",
+            "asset_id":          audio_id,
+            "run_id":            run_id,
+            "asset_type":        "narration",
             "source_episode_id": episode_id,
-            "provider": "elevenlabs",
-            "model": None,
-            "file_path": None,
-            "reusable": False,
-            "indexed_at": now,
+            "provider":          "elevenlabs",
+            "model":             voice_model,
+            "generation_prompt": None,
+            "generation_params": {
+                "voice_id":   voice_cfg.get("voice_id"),
+                "track_type": track.get("source_type", ""),
+            },
+            "file_path":         file_path,
+            "archive_location":  file_path,
+            "moved_at":          None,
+            "version":           1,
+            "created_at":        now,
+            "cost_usd":          None,
+            "reusable":          False,
+            "indexed_at":        now,
             "metadata": {
-                "track_id": track.get("track_id", ""),
+                "track_id":    track_id,
                 "source_type": track.get("source_type", ""),
             },
-            "metadata_version": METADATA_VERSION,
+            "metadata_version":  METADATA_VERSION,
         })
         existing_assets.add(audio_id)
         indexed += 1
@@ -524,21 +701,34 @@ def _index_narration(
         srt_id = cap.get("srt_asset_id", "")
         if not srt_id or srt_id in existing_assets:
             continue
+        caption_id = cap.get("caption_id", "")
+        file_path_srt: Optional[str] = cap.get("file_path")
+        if not file_path_srt and srt_id:
+            file_path_srt = f"episodes/{episode_id}/captions/{srt_id}.srt"
         _append_line(asset_catalog, {
-            "asset_id": srt_id,
-            "run_id": run_id,
-            "asset_type": "caption",
+            "asset_id":          srt_id,
+            "run_id":            run_id,
+            "asset_type":        "caption",
             "source_episode_id": episode_id,
-            "provider": "elevenlabs",
-            "model": None,
-            "file_path": None,
-            "reusable": False,
-            "indexed_at": now,
-            "metadata": {
-                "caption_id": cap.get("caption_id", ""),
+            "provider":          "elevenlabs",
+            "model":             None,
+            "generation_prompt": None,
+            "generation_params": {
                 "caption_method": cap.get("caption_method", ""),
             },
-            "metadata_version": METADATA_VERSION,
+            "file_path":         file_path_srt,
+            "archive_location":  file_path_srt,
+            "moved_at":          None,
+            "version":           1,
+            "created_at":        now,
+            "cost_usd":          None,
+            "reusable":          False,
+            "indexed_at":        now,
+            "metadata": {
+                "caption_id":     caption_id,
+                "caption_method": cap.get("caption_method", ""),
+            },
+            "metadata_version":  METADATA_VERSION,
         })
         existing_assets.add(srt_id)
         indexed += 1
@@ -751,7 +941,7 @@ def run_asset_archive(
     validate("asset_archive_record", record)
 
     # ----------------------------------------------------------------
-    # DB write — non-blocking; write newly indexed assets to assets table
+    # DB write — non-blocking; write newly indexed assets to assets + archive_index
     # ----------------------------------------------------------------
     if _run_id:
         try:
@@ -776,6 +966,13 @@ def run_asset_archive(
                         model=r.get("model"),
                         reuse_eligible=bool(r.get("reusable", True)),
                         db_path=db_path,
+                        generation_prompt=r.get("generation_prompt"),
+                        generation_params=r.get("generation_params") or None,
+                        cost_usd=r.get("cost_usd"),
+                        scene_id=(r.get("metadata") or {}).get("scene_id")
+                                  or r.get("scene_id"),
+                        archive_location=r.get("archive_location"),
+                        asset_created_at=r.get("created_at"),
                     )
         except Exception:
             pass  # Asset archive DB writes must never halt the pipeline

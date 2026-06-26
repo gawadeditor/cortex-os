@@ -89,6 +89,7 @@ from PIL import Image
 
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
+import hypogeum.finance as _finance
 
 
 # ---------------------------------------------------------------------------
@@ -883,12 +884,20 @@ def generate_reference_image(
 
     asset_id = f"episodes/{episode_id}/video/ref_{entity_id}"
 
+    ref_model = config.MUAPI_IMAGE_MODEL
     log.info(
         "muapi_reference_image_generated",
         entity_id=entity_id,
         asset_id=asset_id,
         hosted_url=_mask_url(hosted_url),
         ref_aspect_ratio=ref_aspect_ratio,
+    )
+    _finance.record_cost(
+        provider="muapi",
+        model=ref_model,
+        call_type="reference_image_generation",
+        cost_usd=MODEL_CREDIT_COSTS.get(ref_model, 0.015),
+        asset_id=asset_id,
     )
 
     return ReferenceImageResult(asset_id=asset_id, hosted_url=hosted_url)
@@ -1773,8 +1782,16 @@ def _generate_thumbnail_one_provider(
             _apply_wordmark_overlay(local_path)
         log.info("thumbnail_generated", deliverable_id=deliverable_id,
                  model=model, provider="openai", used_fallback=is_fallback)
+        thumb_asset_id = f"episodes/{episode_id}/thumbnails/{deliverable_id}"
+        _finance.record_cost(
+            provider="openai",
+            model=model,
+            call_type="thumbnail_generation",
+            cost_usd=MODEL_CREDIT_COSTS.get(model, 0.04),
+            asset_id=thumb_asset_id,
+        )
         return ThumbnailResult(
-            asset_id=f"episodes/{episode_id}/thumbnails/{deliverable_id}",
+            asset_id=thumb_asset_id,
             local_path=local_path,
             model_used=model,
             provider_used="openai",
@@ -1795,8 +1812,16 @@ def _generate_thumbnail_one_provider(
             _apply_wordmark_overlay(local_path)
         log.info("thumbnail_generated", deliverable_id=deliverable_id,
                  model=model, provider="openrouter", used_fallback=is_fallback)
+        thumb_asset_id = f"episodes/{episode_id}/thumbnails/{deliverable_id}"
+        _finance.record_cost(
+            provider="openrouter",
+            model=model,
+            call_type="thumbnail_generation",
+            cost_usd=MODEL_CREDIT_COSTS.get(model, 0.04),
+            asset_id=thumb_asset_id,
+        )
         return ThumbnailResult(
-            asset_id=f"episodes/{episode_id}/thumbnails/{deliverable_id}",
+            asset_id=thumb_asset_id,
             local_path=local_path,
             model_used=model,
             provider_used="openrouter",
@@ -1827,8 +1852,16 @@ def _generate_thumbnail_one_provider(
         typography_integration=typography_integration,
         log=log,
     )
+    thumb_asset_id = f"episodes/{episode_id}/thumbnails/{deliverable_id}"
+    _finance.record_cost(
+        provider="muapi",
+        model=image_model,
+        call_type="thumbnail_generation",
+        cost_usd=MODEL_CREDIT_COSTS.get(image_model, 0.09),
+        asset_id=thumb_asset_id,
+    )
     return ThumbnailResult(
-        asset_id=f"episodes/{episode_id}/thumbnails/{deliverable_id}",
+        asset_id=thumb_asset_id,
         local_path=output_dir / "thumbnails" / f"{deliverable_id}.jpg",
         model_used=image_model,
         provider_used="muapi",
@@ -1947,9 +1980,20 @@ def _attempt_generation(
     if budget_guard is not None and credits_used:
         budget_guard.record_actual_spend(float(credits_used))
 
+    computed_asset_id = _compute_asset_id(episode_id, scene_id, short_id)
+    cost_usd = MODEL_CREDIT_COSTS.get(model, _DEFAULT_UNKNOWN_MODEL_COST)
+    _finance.record_cost(
+        provider="muapi",
+        model=model,
+        call_type="scene_generation",
+        cost_usd=cost_usd,
+        tokens_or_credits=float(credits_used) if credits_used else None,
+        asset_id=computed_asset_id,
+    )
+
     return {
         "scene_id": scene_id,
-        "asset_id": _compute_asset_id(episode_id, scene_id, short_id),
+        "asset_id": computed_asset_id,
         "generation_status": "generated",
         "provider": "muapi",
         "tier_used": tier,

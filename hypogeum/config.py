@@ -576,6 +576,32 @@ class Config:
         # operator review. Defaults False — requires explicit opt-in for full autonomy.
         self.AUTO_DISCOVERY_AUTO_APPROVE = _get_bool("AUTO_DISCOVERY_AUTO_APPROVE", default=False)
 
+        # --- Discovery Director (v2) ---
+        # Controls which engine run_discovery_cycle() dispatches to.
+        # 'v1' = legacy heuristic (default — no behaviour change for existing deployments).
+        # 'v2' = Discovery Director (LLM-driven ideation + initial_scorer).
+        self.DISCOVERY_ENGINE = _get_optional("DISCOVERY_ENGINE", default="v1")
+        # Absolute score floor: candidates with initial_composite >= this are verify-eligible.
+        self.DISCOVERY_VERIFY_THRESHOLD = _get_float("DISCOVERY_VERIFY_THRESHOLD", default=0.65)
+        # Delta from cycle best: candidates within this range of best_score also qualify.
+        self.DISCOVERY_VERIFY_DELTA = _get_float("DISCOVERY_VERIFY_DELTA", default=0.10)
+
+        # --- Discovery Scoring Weights (v2 initial_scorer.py) ---
+        # All scorer constants live here so tuning never requires a source-code edit.
+        # initial_scorer.py reads these via os.getenv() at call time.
+        # Defaults match the structural scorer in initial_scorer.py exactly.
+        self.DISCOVERY_BASE_SCORE = _get_float("DISCOVERY_BASE_SCORE", default=0.50) or 0.50
+        self.DISCOVERY_HOOK_LONG_WEIGHT = _get_float("DISCOVERY_HOOK_LONG_WEIGHT", default=0.10) or 0.10
+        self.DISCOVERY_HOOK_SHORT_WEIGHT = _get_float("DISCOVERY_HOOK_SHORT_WEIGHT", default=0.05) or 0.05
+        self.DISCOVERY_HOOK_PRESENT_WEIGHT = _get_float("DISCOVERY_HOOK_PRESENT_WEIGHT", default=0.02) or 0.02
+        self.DISCOVERY_DIFF_LONG_WEIGHT = _get_float("DISCOVERY_DIFF_LONG_WEIGHT", default=0.10) or 0.10
+        self.DISCOVERY_DIFF_SHORT_WEIGHT = _get_float("DISCOVERY_DIFF_SHORT_WEIGHT", default=0.05) or 0.05
+        self.DISCOVERY_NOVELTY_PENALTY = _get_float("DISCOVERY_NOVELTY_PENALTY", default=0.20) or 0.20
+        self.DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER = _get_float("DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER", default=0.12) or 0.12
+        self.DISCOVERY_SIGNAL_BOOST_HIGH_RETENTION = _get_float("DISCOVERY_SIGNAL_BOOST_HIGH_RETENTION", default=0.10) or 0.10
+        self.DISCOVERY_SIGNAL_PENALTY_KEYWORD = _get_float("DISCOVERY_SIGNAL_PENALTY_KEYWORD", default=0.25) or 0.25
+        self.DISCOVERY_ANALYTICS_DELTA_CAP = _get_float("DISCOVERY_ANALYTICS_DELTA_CAP", default=0.20) or 0.20
+
     # ------------------------------------------------------------------
     # Derived properties
     # ------------------------------------------------------------------

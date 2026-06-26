@@ -1035,3 +1035,165 @@ class TestWorkerIntegration:
 
         # Worker continues normally despite discovery error
         assert result["poll_status"] == "empty"
+
+
+# ---------------------------------------------------------------------------
+# Discovery scoring config — all 11 weights live in Config, not in source
+# ---------------------------------------------------------------------------
+
+_SCORING_VARS = [
+    "OPENROUTER_API_KEY",
+    "DISCOVERY_BASE_SCORE",
+    "DISCOVERY_HOOK_LONG_WEIGHT",
+    "DISCOVERY_HOOK_SHORT_WEIGHT",
+    "DISCOVERY_HOOK_PRESENT_WEIGHT",
+    "DISCOVERY_DIFF_LONG_WEIGHT",
+    "DISCOVERY_DIFF_SHORT_WEIGHT",
+    "DISCOVERY_NOVELTY_PENALTY",
+    "DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER",
+    "DISCOVERY_SIGNAL_BOOST_HIGH_RETENTION",
+    "DISCOVERY_SIGNAL_PENALTY_KEYWORD",
+    "DISCOVERY_ANALYTICS_DELTA_CAP",
+]
+
+
+def _make_isolated_config(overrides: dict | None = None):
+    """Instantiate Config in a clean env, applying any overrides."""
+    import os
+    from hypogeum.config import Config
+    saved = {k: os.environ.get(k) for k in _SCORING_VARS}
+    for k in _SCORING_VARS:
+        os.environ.pop(k, None)
+    os.environ["OPENROUTER_API_KEY"] = "test-key"
+    if overrides:
+        os.environ.update(overrides)
+    try:
+        cfg = Config()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return cfg
+
+
+class TestDiscoveryScoringConfig:
+    """Verify that all 11 v2 scoring weights are in Config with correct defaults."""
+
+    _ALL_KEYS = [
+        "DISCOVERY_BASE_SCORE",
+        "DISCOVERY_HOOK_LONG_WEIGHT",
+        "DISCOVERY_HOOK_SHORT_WEIGHT",
+        "DISCOVERY_HOOK_PRESENT_WEIGHT",
+        "DISCOVERY_DIFF_LONG_WEIGHT",
+        "DISCOVERY_DIFF_SHORT_WEIGHT",
+        "DISCOVERY_NOVELTY_PENALTY",
+        "DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER",
+        "DISCOVERY_SIGNAL_BOOST_HIGH_RETENTION",
+        "DISCOVERY_SIGNAL_PENALTY_KEYWORD",
+        "DISCOVERY_ANALYTICS_DELTA_CAP",
+    ]
+
+    def test_config_has_all_11_scoring_keys(self):
+        cfg = _make_isolated_config()
+        for key in self._ALL_KEYS:
+            assert hasattr(cfg, key), f"Config missing attribute {key}"
+
+    def test_config_default_base_score(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_BASE_SCORE == pytest.approx(0.50)
+
+    def test_config_default_hook_long_weight(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_HOOK_LONG_WEIGHT == pytest.approx(0.10)
+
+    def test_config_default_hook_short_weight(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_HOOK_SHORT_WEIGHT == pytest.approx(0.05)
+
+    def test_config_default_hook_present_weight(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_HOOK_PRESENT_WEIGHT == pytest.approx(0.02)
+
+    def test_config_default_diff_long_weight(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_DIFF_LONG_WEIGHT == pytest.approx(0.10)
+
+    def test_config_default_diff_short_weight(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_DIFF_SHORT_WEIGHT == pytest.approx(0.05)
+
+    def test_config_default_novelty_penalty(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_NOVELTY_PENALTY == pytest.approx(0.20)
+
+    def test_config_default_signal_boost_top_performer(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER == pytest.approx(0.12)
+
+    def test_config_default_signal_boost_high_retention(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_SIGNAL_BOOST_HIGH_RETENTION == pytest.approx(0.10)
+
+    def test_config_default_signal_penalty_keyword(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_SIGNAL_PENALTY_KEYWORD == pytest.approx(0.25)
+
+    def test_config_default_analytics_delta_cap(self):
+        cfg = _make_isolated_config()
+        assert cfg.DISCOVERY_ANALYTICS_DELTA_CAP == pytest.approx(0.20)
+
+    def test_env_var_overrides_initial_scorer_boost(self):
+        """DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER env var changes initial_scorer output."""
+        import os
+        from hypogeum.initial_scorer import compute_score, _analytics_delta
+        candidate = {
+            "topic_text": "Lost City of Helike",
+            "canonical_subject": "lost_city_of_helike",
+            "angle": "The mystery angle",
+            "mystery_hook": "Why did an entire Greek city vanish beneath the waves?",
+            "differentiation_claim": "First video to use 2001 sonar data",
+        }
+        ctx = {
+            "has_real_analytics": True,
+            "top_performer_keywords": {"helike", "lost"},
+            "high_retention_keywords": set(),
+            "penalty_keywords": set(),
+        }
+        old = os.environ.get("DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER")
+        try:
+            os.environ["DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER"] = "0.19"
+            delta_high = _analytics_delta(candidate, ctx)
+            os.environ["DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER"] = "0.01"
+            delta_low = _analytics_delta(candidate, ctx)
+        finally:
+            if old is None:
+                os.environ.pop("DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER", None)
+            else:
+                os.environ["DISCOVERY_SIGNAL_BOOST_TOP_PERFORMER"] = old
+        assert delta_high > delta_low
+
+    def test_env_var_overrides_initial_scorer_novelty(self):
+        """DISCOVERY_NOVELTY_PENALTY env var changes compute_score output."""
+        import os
+        from hypogeum.initial_scorer import compute_score
+        candidate = {
+            "topic_text": "Lost City of Helike",
+            "canonical_subject": "lost_city_of_helike",
+            "mystery_hook": "Short",
+            "differentiation_claim": "",
+        }
+        existing = {"lost_city_of_helike"}
+        old = os.environ.get("DISCOVERY_NOVELTY_PENALTY")
+        try:
+            os.environ["DISCOVERY_NOVELTY_PENALTY"] = "0.05"
+            score_light = compute_score(candidate, existing_topics=existing)
+            os.environ["DISCOVERY_NOVELTY_PENALTY"] = "0.40"
+            score_heavy = compute_score(candidate, existing_topics=existing)
+        finally:
+            if old is None:
+                os.environ.pop("DISCOVERY_NOVELTY_PENALTY", None)
+            else:
+                os.environ["DISCOVERY_NOVELTY_PENALTY"] = old
+        assert score_light > score_heavy

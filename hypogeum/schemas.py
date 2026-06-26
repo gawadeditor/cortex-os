@@ -4,7 +4,7 @@ hypogeum/schemas.py — Schema validators for all pipeline output packages
 Every agent calls validate(schema_name, package) before sealing its output.
 Validation is fail-fast: the first structural problem raises SchemaError immediately.
 
-Validated schemas (25 total):
+Validated schemas (26 total):
   1.  validation_scorecard          — Executive Producer topic validation result
   2.  topic_brief                   — Executive Producer topic brief
   3.  package_deficiency_report     — PDR issued by any agent
@@ -30,6 +30,7 @@ Validated schemas (25 total):
   23. finance_record                  — Finance Agent (R50) budget gate + cost ledger; AUTHORIZED/WARNING/BLOCKED/RECORDED
   24. bga_compliance_report           — Brand Guardian Agent (v1A) Pass 1/2 audit report; APPROVED/APPROVED_WITH_FLAGS/REJECTED
   25. signal_record                   — Phase 5B normalized analytics signal; ingested from analytics_snapshot
+  26. opportunity_batch               — Discovery Director v2 Topic Ideator parsed output; no numeric fields permitted
 
 Design principles:
   - Stdlib only; no external JSON Schema library
@@ -52,7 +53,10 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Tuple, Type, Union
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -966,6 +970,93 @@ def _validate_audio_qa_verdict(p: dict) -> None:
         _req_str(ck, s, "detail", path=path)
 
 
+_OPPORTUNITY_STRING_FIELDS = frozenset({
+    "topic_text", "angle", "mystery_hook",
+    "differentiation_claim", "visual_signal", "evidence_signal",
+})
+
+# Known scoring field names that the LLM should never produce.
+# Logged distinctly so prompt-drift diagnostics can distinguish scoring
+# leakage from genuinely unexpected unknown fields.
+_NUMERIC_SCORING_FIELDS = frozenset({
+    "initial_composite", "final_composite", "score", "rank",
+    "priority_score", "source_score", "composite", "rating",
+})
+
+
+def parse_opportunity_batch(raw_batch: dict) -> dict:
+    """
+    Sanitize a raw LLM batch before schema validation.
+
+    For each opportunity dict:
+    - Retains only the six approved string fields.
+    - Strips numeric scoring fields (initial_composite, score, rank, …) and
+      logs "numeric scoring field stripped" — these indicate prompt drift where
+      the model returned scores it was told not to produce.
+    - Strips any other unknown field and logs "unknown field stripped".
+
+    Separating the two warning classes makes prompt-drift diagnostics easier:
+    scoring leakage is a different failure mode from hallucinated metadata.
+
+    The LLM is never the source of initial_composite; stripping here keeps
+    initial_scorer.py as the sole owner while tolerating prompt drift without
+    hard failures.
+
+    Returns a new batch dict (does not mutate the input).
+    """
+    cleaned_opps = []
+    raw_opps = raw_batch.get("opportunities", [])
+    for i, opp in enumerate(raw_opps):
+        if not isinstance(opp, dict):
+            cleaned_opps.append(opp)  # validator will reject non-dicts
+            continue
+        kept: dict = {}
+        for key, val in opp.items():
+            if key in _OPPORTUNITY_STRING_FIELDS:
+                kept[key] = val
+            elif key in _NUMERIC_SCORING_FIELDS:
+                _log.warning(
+                    "opportunity_batch.parse numeric scoring field stripped "
+                    "opportunities[%d].%s=%r — scoring is owned by initial_scorer.py; "
+                    "check Topic Ideator prompt",
+                    i, key, val,
+                )
+            else:
+                _log.warning(
+                    "opportunity_batch.parse unknown field stripped "
+                    "opportunities[%d].%s=%r — LLM output must contain only "
+                    "the six approved string fields",
+                    i, key, val,
+                )
+        cleaned_opps.append(kept)
+    return {**raw_batch, "opportunities": cleaned_opps}
+
+
+def _validate_opportunity_batch(p: dict) -> None:
+    """
+    Validates a pre-parsed opportunity batch (after parse_opportunity_batch()).
+
+    Contract:
+    - batch_id, channel_id, engine: required strings.
+    - opportunities: non-empty list; each item is a dict with the six
+      approved string fields present.
+
+    Extra fields are not checked here — they should have been stripped by
+    parse_opportunity_batch() before validation is called.
+    """
+    s = "opportunity_batch"
+    _req_str(p, s, "batch_id")
+    _req_str(p, s, "channel_id")
+    _req_str(p, s, "engine")
+    opps = _req_list(p, s, "opportunities", min_length=1)
+    for i, opp in enumerate(opps):
+        path = f"opportunities[{i}]"
+        if not isinstance(opp, dict):
+            raise SchemaError(s, path, "each opportunity must be a dict")
+        for field in _OPPORTUNITY_STRING_FIELDS:
+            _req_str(opp, s, field, path=path)
+
+
 # ---------------------------------------------------------------------------
 # Registry — populated after all validators are defined
 # ---------------------------------------------------------------------------
@@ -998,6 +1089,7 @@ _VALIDATORS = {
     "bga_compliance_report":     _validate_bga_compliance_report,
     "asset_archive_record":      _validate_asset_archive_record,
     "signal_record":             _validate_signal_record,
+    "opportunity_batch":         _validate_opportunity_batch,
 }
 
 # Expose schema names for discovery and testing

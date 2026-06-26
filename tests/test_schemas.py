@@ -765,10 +765,10 @@ def _set(d: dict, key: str, value) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestSchemaRegistry:
-    def test_schema_names_has_27_entries(self):
-        assert len(SCHEMA_NAMES) == 27
+    def test_schema_names_has_28_entries(self):
+        assert len(SCHEMA_NAMES) == 28
 
-    def test_all_27_names_present(self):
+    def test_all_28_names_present(self):
         expected = {
             "validation_scorecard", "topic_brief", "package_deficiency_report",
             "research_package", "narrative_package", "script_package",
@@ -780,7 +780,7 @@ class TestSchemaRegistry:
             "music_track_package", "audio_qa_verdict", "caption_package",
             "qa_approval_report", "compliance_report", "archive_record",
             "finance_record", "bga_compliance_report", "asset_archive_record",
-            "signal_record",
+            "signal_record", "opportunity_batch",
         }
         assert set(SCHEMA_NAMES) == expected
 

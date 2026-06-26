@@ -30,6 +30,8 @@ Signal scoring (M5.1):
 from __future__ import annotations
 
 import json
+import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -101,18 +103,13 @@ _FALLBACK_SEEDS: list[dict] = [
     },
 ]
 
-# Scoring weights for composite score (retained for reference)
-_W_CTR        = 0.35
-_W_RETENTION  = 0.35
-_W_WATCH_TIME = 0.20
-_W_NOVELTY    = 0.10
-
-# Signal scoring deltas applied on top of the heuristic base score.
-# Keep as named constants so they can be tuned without hunting inline literals.
-_SIGNAL_BOOST_TOP_PERFORMER = 0.12   # topic words overlap a top-performer insight
-_SIGNAL_BOOST_HIGH_RETENTION = 0.08  # topic words overlap a high-retention insight
-_SIGNAL_PENALTY_LOW_RETENTION = 0.10 # topic words overlap a low-retention / hook-failure insight
-_SIGNAL_NOVELTY_PENALTY = 0.70       # multiplier for recently queued topics (unchanged)
+# Signal scoring deltas for _score_seed() — v1 heuristic path only.
+# These constants belong to the v1 legacy scorer. Do not tune here;
+# use initial_scorer.py (v2) for the configurable structural scorer.
+_SIGNAL_BOOST_TOP_PERFORMER  = 0.12
+_SIGNAL_BOOST_HIGH_RETENTION = 0.08
+_SIGNAL_PENALTY_LOW_RETENTION = 0.10
+_SIGNAL_NOVELTY_PENALTY      = 0.70
 
 # Stopwords excluded from keyword tokenisation to avoid spurious overlap.
 _STOPWORDS = frozenset({
@@ -302,12 +299,149 @@ def _get_signal_hints(channel_id: str, conn) -> list[str]:
     return [r[0] for r in rows if r[0]]
 
 
+_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+")
+_PUNCT_RE   = re.compile(r"[^a-z0-9\s]")
+_WS_RE      = re.compile(r"\s+")
+
+
+def normalize_topic_text(topic_text: str) -> str:
+    """
+    Full normalization pipeline applied before canonical slug generation.
+
+    Sequence (order is significant):
+      1. trim leading/trailing whitespace
+      2. lowercase
+      3. strip leading English article (the / a / an)
+      4. remove punctuation (anything that is not a-z, 0-9, or whitespace)
+      5. collapse consecutive whitespace to a single space
+      6. trim again
+
+    After this function, all five variants from the design doc converge:
+        "Lost City of Helike"     → "lost city of helike"
+        "The Lost City of Helike" → "lost city of helike"
+        "Lost City Of Helike"     → "lost city of helike"
+        "Lost City of Helike?"    → "lost city of helike"
+        "Lost City of Helike!"    → "lost city of helike"
+
+    Returns a normalized, lowercase, punctuation-free string with single
+    spaces. NOT yet slugified (no underscores).
+    """
+    text = topic_text.strip().lower()
+    text = _ARTICLE_RE.sub("", text)
+    text = _PUNCT_RE.sub("", text)
+    text = _WS_RE.sub(" ", text)
+    return text.strip()
+
+
+def _make_canonical_subject(topic_text: str) -> str:
+    """
+    Deterministic canonical subject key derived from topic_text only.
+
+    Angle is intentionally excluded: multiple angles on the same underlying
+    subject must resolve to one shared canonical identity. Used for:
+    source-verification caching, opportunity deduplication, novelty scoring,
+    discovery memory, and topic-graph node identity.
+
+    Delegates normalization to normalize_topic_text(), then converts spaces
+    to underscores and truncates at 200 characters.
+
+    Stable contract: same topic_text (after normalization) always produces
+    the same output, regardless of angle or any other candidate field.
+    """
+    slug = _WS_RE.sub("_", normalize_topic_text(topic_text))
+    return slug[:200]
+
+
+def _build_v2_config():
+    """
+    Build a minimal config SimpleNamespace from os.environ for the v2 director.
+
+    By the time _run_discovery_cycle_v2_stub() is called from the worker,
+    the worker has already instantiated Config (which calls _load_dotenv and
+    populates os.environ).  Reading env vars here picks up .env values without
+    requiring a second Config instantiation (which would need OPENROUTER_API_KEY).
+    """
+    from types import SimpleNamespace
+
+    def _bool(key: str, default: bool = False) -> bool:
+        raw = os.getenv(key, "true" if default else "false").strip().lower()
+        return raw in ("true", "1", "yes")
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(os.getenv(key, str(default)) or str(default))
+        except (TypeError, ValueError):
+            return default
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(os.getenv(key, str(default)) or str(default))
+        except (TypeError, ValueError):
+            return default
+
+    return SimpleNamespace(
+        AUTO_DISCOVERY_AUTO_APPROVE = _bool("AUTO_DISCOVERY_AUTO_APPROVE"),
+        DISCOVERY_VERIFY_THRESHOLD  = _float("DISCOVERY_VERIFY_THRESHOLD", 0.65),
+        DISCOVERY_VERIFY_DELTA      = _float("DISCOVERY_VERIFY_DELTA", 0.10),
+        # OpenRouter — required by openrouter._build_headers()
+        OPENROUTER_API_KEY         = os.getenv("OPENROUTER_API_KEY", ""),
+        OPENROUTER_SONNET_MODEL_ID = os.getenv(
+            "OPENROUTER_SONNET_MODEL_ID", "anthropic/claude-sonnet-4.6"
+        ),
+        OPENROUTER_APP_NAME        = os.getenv("OPENROUTER_APP_NAME", "hypogeum-brain"),
+        OPENROUTER_APP_URL         = os.getenv("OPENROUTER_APP_URL"),
+        # Perplexity
+        PERPLEXITY_API_KEY    = os.getenv("PERPLEXITY_API_KEY"),
+        PERPLEXITY_MODEL      = os.getenv("PERPLEXITY_MODEL", "sonar-pro"),
+        PERPLEXITY_MAX_TOKENS = _int("PERPLEXITY_MAX_TOKENS", 2048),
+    )
+
+
+def _run_discovery_cycle_v2_stub(
+    channel_id: str,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """Dispatch to Discovery Director v2 when DISCOVERY_ENGINE=v2."""
+    from hypogeum.agents.discovery_director import run as _director_run
+    cfg = _build_v2_config()
+    result = _director_run(channel_id, config=cfg, db_path=db_path)
+    # Patch in v1-compatible keys so existing consumers don't break on a
+    # partial dict (run_worker reads selected_candidate_id and candidates).
+    result.setdefault("selected_candidate_id", None)
+    result.setdefault("candidates", result.get("opportunities", []))
+    return result
+
+
 def run_discovery_cycle(
     channel_id: str,
     db_path: Optional[Path] = None,
 ) -> dict:
     """
-    Run one discovery cycle for channel_id.
+    Stable public entrypoint for topic discovery.
+
+    Dispatches to the v1 heuristic implementation or the v2 Discovery
+    Director based on the DISCOVERY_ENGINE environment variable.
+
+    DISCOVERY_ENGINE=v1 (default) — legacy heuristic; no behaviour change.
+    DISCOVERY_ENGINE=v2           — Discovery Director (LLM-driven, not yet
+                                    implemented; returns ok=False stub).
+
+    Returns the same dict shape from both engines:
+        {ok, cycle_id, channel_id, candidate_count, selected_candidate_id, candidates}
+    (v2 stub returns a minimal error dict until implemented.)
+    """
+    engine = os.getenv("DISCOVERY_ENGINE", "v1").strip().lower()
+    if engine == "v2":
+        return _run_discovery_cycle_v2_stub(channel_id, db_path)
+    return _run_discovery_cycle_v1(channel_id, db_path)
+
+
+def _run_discovery_cycle_v1(
+    channel_id: str,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """
+    Legacy heuristic discovery cycle (v1).
 
     Reads existing topics + analytics signals, scores heuristic seeds,
     inserts candidates into topic_candidates, marks the top scorer as

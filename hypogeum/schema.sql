@@ -1296,3 +1296,130 @@ CREATE TABLE IF NOT EXISTS platform_sync_log (
     synced_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_platformsync_platform ON platform_sync_log(platform, synced_at);
+
+-- ===========================================================================
+-- opportunities — Opportunity registry (Discovery Director v2)
+-- opportunity_id is the primary key. canonical_subject is an indexed field —
+-- the same subject may generate multiple opportunities over time with
+-- different rankings, verification outcomes, and feedback history.
+-- Opportunity lifecycle and subject identity are separate concepts.
+-- v1 heuristic cycles do not write here.
+--
+-- Lifecycle:
+--   active → selected → enqueued → consumed
+--         ↘ rejected | blacklisted | exhausted
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS opportunities (
+    opportunity_id          TEXT NOT NULL PRIMARY KEY,
+    canonical_subject       TEXT NOT NULL,
+    -- Content (from Topic Ideator, six approved string fields)
+    topic_text              TEXT NOT NULL,
+    angle                   TEXT,
+    mystery_hook            TEXT,
+    differentiation_claim   TEXT,
+    visual_signal           TEXT,
+    evidence_signal         TEXT,
+    -- Provenance
+    generation_source       TEXT,           -- 'llm_ideation' | 'fallback_seed'
+    first_seen_at           TEXT NOT NULL,
+    last_seen_at            TEXT NOT NULL,
+    -- Verification
+    verification_status     TEXT NOT NULL DEFAULT 'unverified'
+                                CHECK(verification_status IN
+                                      ('unverified','verified','failed','skipped')),
+    source_count            INTEGER NOT NULL DEFAULT 0,
+    source_score            REAL,
+    verify_count            INTEGER NOT NULL DEFAULT 0,
+    -- Scoring (all populated by initial_scorer.py and source verification)
+    initial_composite       REAL,
+    final_composite         REAL,
+    priority_score          REAL,
+    priority_tier           TEXT
+                                CHECK(priority_tier IN ('tier1','tier2','tier3',NULL)),
+    -- Lifecycle
+    status                  TEXT NOT NULL DEFAULT 'active'
+                                CHECK(status IN
+                                      ('active','selected','enqueued','consumed',
+                                       'rejected','blacklisted','exhausted')),
+    rejection_reason        TEXT,
+    topic_id                TEXT,   -- episode_topics.topic_id once enqueued
+    routed_to               TEXT,   -- channel_id this opportunity was routed to
+    selected_at             TEXT,
+    enqueued_at             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_opp_subject  ON opportunities(canonical_subject, status);
+CREATE INDEX IF NOT EXISTS idx_opp_status   ON opportunities(status, last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_opp_priority ON opportunities(priority_tier, priority_score);
+
+-- ===========================================================================
+-- opportunity_events — Audit log for opportunity lifecycle transitions
+-- Events belong to an opportunity, not to the subject namespace.
+-- event_type lifecycle: discovered → angle_added | verified | verification_failed
+--                                  → rejected | consumed
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS opportunity_events (
+    event_id          TEXT NOT NULL PRIMARY KEY,
+    opportunity_id    TEXT NOT NULL,
+    event_type        TEXT NOT NULL
+                          CHECK(event_type IN ('discovered','angle_added','verified',
+                                               'verification_failed','rejected','consumed')),
+    cycle_id          TEXT,
+    channel_id        TEXT,
+    detail_json       TEXT,
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_opev_opportunity ON opportunity_events(opportunity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_opev_cycle       ON opportunity_events(cycle_id);
+
+-- ===========================================================================
+-- discovery_cycles — One row per v2 Discovery Director cycle.
+-- Primary observability surface for the Discovery Director.
+-- v1 heuristic cycles do not write here; they appear in topic_candidates only.
+-- engine_used: 'v2' | 'v1_fallback'
+-- status sealed to 'complete' | 'failed' | 'fallback' on exit.
+-- Funnel: raw_candidates_count → viable_after_feasibility → verify_eligible_count
+--         → verified_count (source confirmed) vs rejected_source_count
+--         → final selection vs rejected_score_count
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS discovery_cycles (
+    cycle_id                 TEXT NOT NULL PRIMARY KEY,
+    channel_id               TEXT NOT NULL,
+    engine_used              TEXT NOT NULL DEFAULT 'v2',
+    -- Funnel metrics (populated as the cycle progresses)
+    raw_candidates_count     INTEGER NOT NULL DEFAULT 0,  -- total returned by Topic Ideator
+    viable_after_feasibility INTEGER NOT NULL DEFAULT 0,  -- after basic feasibility filter
+    verify_eligible_count    INTEGER NOT NULL DEFAULT 0,  -- above DISCOVERY_VERIFY_THRESHOLD
+    verified_count           INTEGER NOT NULL DEFAULT 0,  -- source verification returned true
+    rejected_source_count    INTEGER NOT NULL DEFAULT 0,  -- failed source verification
+    rejected_score_count     INTEGER NOT NULL DEFAULT 0,  -- score below threshold post-verify
+    -- Outcome
+    selected_opportunity_id    TEXT,   -- opportunities.opportunity_id
+    selected_canonical_subject TEXT,   -- canonical_subject of the selected opportunity
+    topic_id_enqueued          TEXT,   -- episode_topics.topic_id if auto-approved
+    -- Routing metadata
+    model_used               TEXT,                        -- LLM model slug used for ideation
+    prompt_version           TEXT,                        -- ideation prompt version tag
+    -- Status
+    status                   TEXT NOT NULL DEFAULT 'running'
+                                 CHECK(status IN ('running','complete','failed','fallback')),
+    created_at               TEXT NOT NULL,
+    completed_at             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_disccycle_channel ON discovery_cycles(channel_id, created_at);
+
+-- ===========================================================================
+-- source_verifications — Per-canonical_subject verification results (v2 only)
+-- Multiple rows per subject are permitted (re-verification across cycles).
+-- confidence: 'high' | 'medium' | 'low' | NULL (unverified)
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS source_verifications (
+    verification_id   TEXT NOT NULL PRIMARY KEY,
+    canonical_subject TEXT NOT NULL,
+    cycle_id          TEXT,
+    verified          INTEGER NOT NULL DEFAULT 0,
+    source_url        TEXT,
+    confidence        TEXT,
+    penalty_applied   INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_srcverif_subject ON source_verifications(canonical_subject, created_at);

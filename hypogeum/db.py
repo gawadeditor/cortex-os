@@ -103,6 +103,20 @@ _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 # each ALTER TABLE — safe to call on every startup (idempotent).
 # ---------------------------------------------------------------------------
 
+_V3_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    # archive_index: full provenance fields (Phase 1 — archive provenance pass)
+    "archive_index": [
+        ("generation_prompt", "TEXT"),
+        ("generation_params", "TEXT"),
+        ("cost_usd",          "REAL"),
+        ("scene_id",          "TEXT"),
+        ("archive_location",  "TEXT"),
+        ("moved_at",          "TEXT"),
+        ("version",           "INTEGER DEFAULT 1"),
+        ("asset_created_at",  "TEXT"),
+    ],
+}
+
 _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "runs": [
         ("duration_ms",          "INTEGER"),
@@ -157,6 +171,9 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "factories": [
         ("factory_policies", "TEXT"),   # P3-05: JSON policy blob
     ],
+    "opportunities": [
+        ("generation_source", "TEXT"),      # observability: 'llm_ideation' | 'fallback_seed'
+    ],
     "publishing_outcomes": [
         ("url", "TEXT"),
     ],
@@ -202,15 +219,12 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
 # Schema initialization
 # ---------------------------------------------------------------------------
 
-def _apply_v2_column_migrations(conn: sqlite3.Connection) -> None:
-    """
-    Apply v2 column additions to v1 tables. Idempotent via PRAGMA table_info.
-
-    Each entry in _V2_COLUMN_MIGRATIONS is checked: if the column already
-    exists the ALTER TABLE is skipped, so this function is safe to call on
-    every startup including on a fresh database.
-    """
-    for table, columns in _V2_COLUMN_MIGRATIONS.items():
+def _apply_column_migrations(
+    conn: sqlite3.Connection,
+    migration_map: dict,
+) -> None:
+    """Apply column additions from a migration map. Idempotent via PRAGMA table_info."""
+    for table, columns in migration_map.items():
         existing = {
             row[1]
             for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -221,6 +235,16 @@ def _apply_v2_column_migrations(conn: sqlite3.Connection) -> None:
                     f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
                 )
     conn.commit()
+
+
+def _apply_v2_column_migrations(conn: sqlite3.Connection) -> None:
+    """Apply v2 column additions. Idempotent."""
+    _apply_column_migrations(conn, _V2_COLUMN_MIGRATIONS)
+
+
+def _apply_v3_column_migrations(conn: sqlite3.Connection) -> None:
+    """Apply v3 column additions (archive provenance pass). Idempotent."""
+    _apply_column_migrations(conn, _V3_COLUMN_MIGRATIONS)
 
 
 def initialize_schema(db_path: Optional[Path] = None) -> None:
@@ -243,6 +267,7 @@ def initialize_schema(db_path: Optional[Path] = None) -> None:
         conn.executescript(schema_sql)
         conn.commit()
         _apply_v2_column_migrations(conn)
+        _apply_v3_column_migrations(conn)
     finally:
         conn.close()
 
@@ -440,6 +465,7 @@ def insert_cost(
     called_at: str,
     model: Optional[str] = None,
     tokens_or_credits: Optional[float] = None,
+    asset_id: Optional[str] = None,
     metadata_version: str = "v1",
 ) -> None:
     """
@@ -457,19 +483,20 @@ def insert_cost(
         called_at:          ISO 8601 UTC timestamp string.
         model:              Model slug used (e.g. "anthropic/claude-opus-4.6").
         tokens_or_credits:  Token count (LLM calls) or credit count (MUAPI).
+        asset_id:           Asset that incurred this cost (nullable).
         metadata_version:   Schema version tag.
     """
     conn.execute(
         """
         INSERT INTO costs
             (cost_id, run_id, episode_id, provider, model, call_type,
-             tokens_or_credits, cost_usd, called_at, metadata_version)
+             tokens_or_credits, cost_usd, called_at, asset_id, metadata_version)
         VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             cost_id, run_id, episode_id, provider, model, call_type,
-            tokens_or_credits, cost_usd, called_at, metadata_version,
+            tokens_or_credits, cost_usd, called_at, asset_id, metadata_version,
         ),
     )
 
@@ -1115,6 +1142,15 @@ def insert_archive_index_entry(
     gate_name: Optional[str] = None,
     performance_signal: Optional[float] = None,
     metadata_version: str = "v2",
+    # V3 provenance fields
+    generation_prompt: Optional[str] = None,
+    generation_params: Optional[dict] = None,
+    cost_usd: Optional[float] = None,
+    scene_id: Optional[str] = None,
+    archive_location: Optional[str] = None,
+    moved_at: Optional[str] = None,
+    version: int = 1,
+    asset_created_at: Optional[str] = None,
 ) -> None:
     """Insert an archive index entry for an archived asset."""
     conn.execute(
@@ -1125,9 +1161,12 @@ def insert_archive_index_entry(
              content_hash, source_stage, reuse_eligible,
              semantic_tags_json, visual_style_json,
              quality_verdict, gate_name, performance_signal,
-             archived_at, metadata_version)
+             archived_at, metadata_version,
+             generation_prompt, generation_params, cost_usd,
+             scene_id, archive_location, moved_at, version, asset_created_at)
         VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             archive_id, asset_id, episode_id, run_id, asset_type,
@@ -1137,6 +1176,14 @@ def insert_archive_index_entry(
             json.dumps(visual_style_json) if visual_style_json is not None else None,
             quality_verdict, gate_name, performance_signal,
             archived_at, metadata_version,
+            generation_prompt,
+            json.dumps(generation_params) if generation_params is not None else None,
+            cost_usd,
+            scene_id,
+            archive_location if archive_location is not None else file_path,
+            moved_at,
+            version,
+            asset_created_at if asset_created_at is not None else archived_at,
         ),
     )
 

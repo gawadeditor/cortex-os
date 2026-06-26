@@ -35,12 +35,19 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import requests
 
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
+import hypogeum.finance as _finance
+from hypogeum.prompt_loader import load_prompt
+
+# Cost estimate for Perplexity sonar-pro (USD per token, combined input+output).
+# sonar-pro pricing: $1/1M input tokens + $5/1M output tokens ≈ $3/1M blended.
+_PERPLEXITY_USD_PER_TOKEN = 3e-6
 
 
 # ---------------------------------------------------------------------------
@@ -76,14 +83,9 @@ _CONTENT_FILTER_SUFFIX = (
     " Focus on documented historical facts and established academic sources only."
 )
 
-# System prompt embedded in every Perplexity query (per spec §5)
-_RESEARCH_SYSTEM_PROMPT = (
-    "You are a research assistant specialized in historical fact-finding. "
-    "Prioritize academic sources, primary documents, and expert analysis over general-interest content. "
-    "Include specific dates, names, and documented facts where available. "
-    "Flag when claims are disputed or contested across sources. "
-    "Do not speculate beyond what sources state."
-)
+# System prompt loaded from hypogeum/prompts/perplexity_research.txt
+_PROMPT_FILE = Path(__file__).resolve().parent / "prompts" / "perplexity_research.txt"
+_RESEARCH_SYSTEM_PROMPT = load_prompt(_PROMPT_FILE)
 
 # Max tokens doubled on length-truncation retry; capped to avoid runaway cost
 _LENGTH_RETRY_MAX_TOKENS_CAP = 4096
@@ -583,14 +585,22 @@ def _single_request(
             finish_reason=finish_reason,
         )
 
+    total_tokens = usage.get("total_tokens", 0)
     log.info(
         "perplexity_response_received",
         phase_id=phase_id,
         query_index=query_index,
-        total_tokens_used=usage.get("total_tokens", 0),
+        total_tokens_used=total_tokens,
         citation_count=len(citations),
         finish_reason=finish_reason,
         response_time_ms=elapsed_ms,
+    )
+    _finance.record_cost(
+        provider="perplexity",
+        model=config.PERPLEXITY_MODEL,
+        call_type="web_search",
+        cost_usd=round(total_tokens * _PERPLEXITY_USD_PER_TOKEN, 6),
+        tokens_or_credits=float(total_tokens),
     )
 
     return PerplexityResult(

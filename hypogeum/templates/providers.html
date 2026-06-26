@@ -500,8 +500,8 @@
   <div class="section-label">Provider Comparison</div>
 
   <div class="cmp-run-bar">
-    <button class="btn-compare" id="btn-img-compare" onclick="runImageComparison()">
-      Run Image Comparison
+    <button class="btn-compare" id="btn-img-compare" onclick="runComparison()">
+      Run Comparison
     </button>
     <button class="btn-compare" id="btn-vid-compare" onclick="runVideoCheck()"
             style="margin-left:0;">
@@ -509,9 +509,9 @@
     </button>
     <span class="cmp-status" id="cmp-status">
       {% if last_comparison %}
-        Image last run: {{ last_comparison.completed_at[:19] | replace('T',' ') }} UTC
+        Last run: {{ last_comparison.completed_at[:19] | replace('T',' ') }} UTC
       {% else %}
-        No image comparison run yet.
+        No comparison run yet
       {% endif %}
     </span>
   </div>
@@ -610,7 +610,7 @@ function testProvider(btn, provider) {
     });
 }
 
-function runImageComparison() {
+function runComparison() {
   var btn = document.getElementById('btn-img-compare');
   var status = document.getElementById('cmp-status');
   var grid = document.getElementById('cmp-grid');
@@ -627,7 +627,7 @@ function runImageComparison() {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       btn.disabled = false;
-      btn.textContent = 'Run Image Comparison';
+      btn.textContent = 'Run Comparison';
       if (!data.ok) {
         status.textContent = '✗ Error: ' + (data.error || 'unknown');
         grid.innerHTML = '';
@@ -639,7 +639,7 @@ function runImageComparison() {
     })
     .catch(function(err) {
       btn.disabled = false;
-      btn.textContent = 'Run Image Comparison';
+      btn.textContent = 'Run Comparison';
       status.textContent = '✗ Network error: ' + err.message;
     });
 }

@@ -6,6 +6,7 @@ Public API:
     init_tiktok_upload(config, video_path, title) -> tuple[str, str]
     upload_tiktok_chunks(config, upload_url, video_path) -> None
     poll_tiktok_publish(config, publish_id) -> str
+    refresh_tiktok_token(db_path=None) -> str   # call before any run; token expires in 24h
 
 TikTok is conditional — all operations are gated by check_tiktok_availability().
 If the gate fails, all TikTok deliverables are marked as skipped (not failed).
@@ -13,6 +14,9 @@ If the gate fails, all TikTok deliverables are marked as skipped (not failed).
 
 from __future__ import annotations
 
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +37,7 @@ from hypogeum.publishing.retry import (
 # ---------------------------------------------------------------------------
 
 _TIKTOK_API_BASE = "https://open.tiktokapis.com/v2"
+_TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 _TIKTOK_INIT_URL = f"{_TIKTOK_API_BASE}/post/video/init/"
 _TIKTOK_STATUS_URL = f"{_TIKTOK_API_BASE}/post/publish/status/fetch/"
 _TIKTOK_CREATOR_INFO_URL = f"{_TIKTOK_API_BASE}/post/publish/creator_info/query/"
@@ -398,3 +403,75 @@ def poll_tiktok_publish(
         post_id=post_id,
     )
     return post_id
+
+
+def refresh_tiktok_token(db_path: Optional[Path] = None) -> str:
+    """
+    Refresh the TikTok access_token using the stored refresh_token.
+
+    Reads credential_data from secret_profiles, calls the TikTok token endpoint,
+    then writes the new access_token and expires_at back to the DB.
+
+    Args:
+        db_path: Override DB path (defaults to .hypogeum-assets/hypogeum.db).
+
+    Returns:
+        The new access_token string.
+
+    Raises:
+        RuntimeError — if no TikTok credential found or refresh fails.
+    """
+    from hypogeum.db import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT credential_data FROM secret_profiles WHERE provider='tiktok' AND status='active'"
+        ).fetchone()
+        if not row:
+            raise RuntimeError("No active TikTok credential in secret_profiles")
+
+        cred = json.loads(row[0])
+        refresh_token = cred.get("refresh_token")
+        client_key = cred.get("client_key")
+        client_secret = cred.get("client_secret")
+        if not all([refresh_token, client_key, client_secret]):
+            raise RuntimeError("TikTok credential missing refresh_token, client_key, or client_secret")
+
+        resp = requests.post(
+            _TIKTOK_TOKEN_URL,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "client_key": client_key,
+                "client_secret": client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+            timeout=30,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"TikTok token refresh failed: HTTP {resp.status_code} — {resp.text[:200]}")
+
+        body = resp.json()
+        new_access_token = body.get("access_token")
+        new_refresh_token = body.get("refresh_token", refresh_token)
+        expires_in = int(body.get("expires_in", 86400))
+        if not new_access_token:
+            raise RuntimeError(f"TikTok token refresh: no access_token in response: {body}")
+
+        cred["access_token"] = new_access_token
+        cred["refresh_token"] = new_refresh_token
+        now = datetime.now(timezone.utc)
+        expires_at = (now + timedelta(seconds=expires_in)).isoformat()
+        cred["expires_at"] = expires_at
+
+        conn.execute(
+            """UPDATE secret_profiles
+               SET credential_data = ?, expires_at = ?, updated_at = ?
+               WHERE provider = 'tiktok' AND status = 'active'""",
+            (json.dumps(cred), expires_at, now.isoformat()),
+        )
+        conn.commit()
+        return new_access_token
+    finally:
+        conn.close()

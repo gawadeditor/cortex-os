@@ -90,7 +90,7 @@ Status values: `✅ registered` | `✅ Phase 3A` | `✅ Phase 3B` | `✅ Phase 3
 
 | Agent | Python Module | Tentacle Directory | Status |
 |---|---|---|---|
-| Discovery Director | `agents/discovery_director.py` | `discovery-director/` | ✅ Phase 3A |
+| Discovery Director | `agents/discovery_director.py` | `discovery-director/` | ✅ Phase 3A (tentacle); implemented Phase 3C |
 | Topic Ideator | `discovery/topic_ideator.py` | `topic-ideator/` | ✅ Phase 3B |
 | Source Verifier | `discovery/source_verifier.py` | `source-verifier/` | ✅ Phase 3B |
 | Queue Gateway | `discovery/queue_gateway.py` | `queue-gateway/` | ✅ Phase 3B |
@@ -136,25 +136,23 @@ Phase 3C completion (2026-06-26):
 
 ---
 
-## 9. Remaining Gaps (for Phase 3C and beyond)
+## 9. Remaining Gaps (post-Phase-3C)
 
 **All active production Python modules now have tentacles.**
 
-Remaining work deferred to Phase 3C:
-
-| Item | Description |
-|---|---|
-| ~~Skills attachment~~ | ~~`skills_attached:` fields on all CONTEXT.md files~~ — **RESOLVED Phase 3C 2026-06-26** |
-| ~~Source verifier inline query template~~ | ~~Not yet in prompt registry~~ — **RESOLVED Phase 2A follow-up 2026-06-26**: `source_verifier_query.txt` created; `_VERIFY_QUERY_TEMPLATE` now loaded via `load_prompt()`; registered in `/api/prompts` |
-| Reference image QA wiring | `reference_image_qa` implemented but not called from VPD Phase 2 |
-| `publishing/connectors.py` stubs | `PlatformConnector.publish()` raises `NotImplementedError`; dead code documented in audit manifest |
-| ~~AIVA integration spec~~ | ~~`provider-integrations/aiva-integration.md` is an archived spec~~ — **RESOLVED 2026-06-01**: file marked VOIDED; ElevenLabs Music is sole AI provider; see `elevenlabs-music-integration.md §13` |
+| Item | Description | Blocks episode run? |
+|---|---|---|
+| ~~Skills attachment~~ | ~~`skills_attached:` fields on all CONTEXT.md files~~ — **RESOLVED Phase 3C 2026-06-26** | — |
+| ~~Source verifier inline query template~~ | ~~Not yet in prompt registry~~ — **RESOLVED Phase 2A follow-up 2026-06-26**: `source_verifier_query.txt` created; `_VERIFY_QUERY_TEMPLATE` now loaded via `load_prompt()`; registered in `/api/prompts` | — |
+| ~~AIVA integration spec~~ | ~~`provider-integrations/aiva-integration.md` is an archived spec~~ — **RESOLVED 2026-06-01**: file marked VOIDED; ElevenLabs Music is sole AI provider; see `elevenlabs-music-integration.md §13` | — |
+| Reference image QA wiring | `reference_image_qa` implemented but not called from VPD Phase 2. Module is outside the current production call graph. | **No** — module is not in the production call path |
+| `publishing/connectors.py` stubs | `PlatformConnector.publish()` raises `NotImplementedError`. Publishing agent calls the platform-specific clients (`youtube.py`, `meta.py`, `tiktok.py`) directly; `connectors.py` is not in the production call path. | **No** — dead code not invoked at runtime |
 
 ---
 
 ## 10. Duplicate / Overlap Notes
 
-No duplicates introduced by Phase 3B. Verified:
+No duplicates introduced by Phase 3B or Phase 3C. Verified:
 
 - `archive-agent/` → `agents/archive_agent.py` (publication archive R49)
 - `asset-archive-agent/` → `agents/asset_archive_agent.py` (JSONL asset catalog)
@@ -202,7 +200,7 @@ No duplicates introduced by Phase 3B. Verified:
 | `agents/script_engine.py` | `script-engine/` | **Yes** | OpenRouter (Sonnet) |
 | `agents/thumbnail_composition_planner.py` | `thumbnail-composition-planner/` | No | None |
 | `agents/thumbnail_compositor.py` | `thumbnail-compositor/` | No | MUAPI, PIL |
-| `agents/thumbnail_director.py` | `thumbnail-director/` | **Yes** | OpenRouter (GPT + Claude vision) |
+| `agents/thumbnail_director.py` | `thumbnail-director/` | **Yes** | OpenRouter (GPT planning via `TD_PLANNING_MODEL`); vision gate delegated to TIG (separate agent) |
 | `agents/thumbnail_generation_agent.py` | `thumbnail-generation-agent/` | No | MUAPI |
 | `agents/thumbnail_handoff_brief_builder.py` | `thumbnail-handoff-brief-builder/` | No | None |
 | `agents/thumbnail_identity_guardian.py` | `thumbnail-identity-guardian/` | **Yes** | OpenRouter (vision) |
@@ -239,7 +237,12 @@ Only local skills (`.claude/skills/`) are attached. GitHub skills deferred — s
 | `/brand-extract` | `brand-guardian` | `.claude/skills/brand-extract.md` |
 | `/budget-run` | `finance-agent`, `assembly-agent`, `visual-package-director` | `.claude/skills/budget-run.md` |
 | `/cost-forensic` | `finance-agent` | `.claude/skills/cost-forensic.md` |
-| `/ep0-run` | pipeline-level only (not per-agent) — invoke before any 9-stage run | `.claude/skills/ep0-run.md` |
+
+**Pipeline-level skill (not attached to any single tentacle):**
+
+| Skill | Scope | Local file |
+|---|---|---|
+| `/ep0-run` | Invoke before any 9-stage episode run. Operates at pipeline entry — no single agent owns it. | `.claude/skills/ep0-run.md` |
 
 **Agents intentionally without skills (deterministic / non-LLM):**
 
@@ -284,22 +287,20 @@ Only local skills (`.claude/skills/`) are attached. GitHub skills deferred — s
 
 ---
 
-## 13. GitHub Skills Deferred (Phase 3C — not yet installed)
+## 13. Operator UX Skills — Installed Locally, Not Agent-Attached
 
-The following skills exist in `.claude/skills/` but are UI/analytics skills
-not applicable to any agent tentacle:
+The following skills are installed locally in `.claude/skills/` and are
+available to the operator. They are not attached to any agent tentacle because
+they address dashboard and UX concerns, not production pipeline agents.
 
-| Skill file | Reason deferred from agent attachment |
+| Skill file | Purpose |
 |---|---|
-| `analytics_experience_design.md` | Operator UX skill — no agent domain |
-| `dashboard_ux.md` | Operator UX skill — no agent domain |
-| `data_visualization.md` | Operator UX skill — no agent domain |
-| `frontend_polish.md` | Operator UX skill — no agent domain |
-| `information_architecture.md` | Operator UX skill — no agent domain |
-| `ui_ux_audit.md` | Operator UX skill — no agent domain |
-
-GitHub skills (not yet installed locally): deferred to Phase 4 or later.
-No GitHub skills have been installed as part of Phase 3C.
+| `analytics_experience_design.md` | Operator UX — dashboard analytics design |
+| `dashboard_ux.md` | Operator UX — dashboard layout and interaction |
+| `data_visualization.md` | Operator UX — chart and data display |
+| `frontend_polish.md` | Operator UX — frontend quality and polish |
+| `information_architecture.md` | Operator UX — navigation and IA |
+| `ui_ux_audit.md` | Operator UX — audit of operator-facing UI |
 
 ---
 
@@ -312,13 +313,14 @@ operator surface, no system prompt, and no direct invocation by the harness.
 
 | Module | Added | Role | Caller(s) |
 |---|---|---|---|
-| `hypogeum/initial_scorer.py` | Phase 3C / Discovery v2 | Deterministic structural scorer: computes `initial_composite` for Topic Ideator output. Pure Python — no LLM, no DB, no network. | `discovery/topic_ideator.py` |
+| `hypogeum/initial_scorer.py` | Phase 3C / Discovery v2 | Deterministic structural scorer: computes `initial_composite` for opportunity records. Pure Python — no LLM, no DB, no network. Sole owner of `opportunities.initial_composite` (schema contract in `schema.sql`). | `discovery/topic_ideator.py` (current sole runtime caller) |
 | `hypogeum/command_state.py` | Phase F0 | Read-only operational snapshot aggregator for the Command Center dashboard widget. Derives factory health, provider status, run state, and attention queue from real DB rows — no external calls. | `run_dashboard.py` (dashboard route) |
 
-**Classification rule:** A module requires a tentacle when it is an agent (has a
-system prompt, makes LLM/API calls on behalf of the pipeline, or owns a pipeline
-stage). Modules that are pure computation, pure DB reads, or pure library
-functions do not require tentacles regardless of file size.
+**Classification rule:** Every `hypogeum/agents/*.py` and `hypogeum/discovery/*.py`
+module has a tentacle, regardless of whether it uses an LLM. Modules in
+`hypogeum/` root, `hypogeum/skills/`, `hypogeum/publishing/`, or other
+subdirectories do not have tentacles unless they are explicitly registered
+as agents.
 
 ---
 
@@ -339,31 +341,51 @@ at `GET /api/prompts` and `GET /api/prompts/<name>`.
 # PURPOSE: <one-line description>
 ```
 
-### Registered prompt files (12 total)
+### Registered prompt files (11 total)
 
-| Prompt file | Owner agent | Tentacle |
+| Prompt file | Loaded by | Tentacle |
 |---|---|---|
-| `brand_guardian_agent.txt` | brand_guardian_agent | `brand-guardian/` |
-| `executive_producer.txt` | executive_producer | `executive-producer/` |
-| `narrative_architect.txt` | narrative_architect | `narrative-architect/` |
-| `perplexity_research.txt` | research_director | `research-director/` |
-| `research_director.txt` | research_director | `research-director/` |
-| `script_engine.txt` | script_engine | `script-engine/` |
-| `source_verifier_query.txt` | source_verifier | `source-verifier/` |
-| `thumbnail_director.txt` | thumbnail_director | `thumbnail-director/` |
-| `thumbnail_identity_guardian.txt` | thumbnail_identity_guardian | `thumbnail-identity-guardian/` |
-| `thumbnail_strategy.txt` | thumbnail_strategy skill | `visual-package-director/` |
-| `topic_ideator.txt` | topic_ideator | `topic-ideator/` |
-| `visual_package_director.txt` | visual_package_director | `visual-package-director/` |
+| `brand_guardian_agent.txt` | `agents/brand_guardian_agent.py` | `brand-guardian/` |
+| `executive_producer.txt` | `agents/executive_producer.py` | `executive-producer/` |
+| `narrative_architect.txt` | `agents/narrative_architect.py` | `narrative-architect/` |
+| `perplexity_research.txt` | `hypogeum/perplexity.py` (infrastructure) | — (no tentacle) |
+| `research_director.txt` | `agents/research_director.py` | `research-director/` |
+| `script_engine.txt` | `agents/script_engine.py` | `script-engine/` |
+| `source_verifier_query.txt` | `discovery/source_verifier.py` | `source-verifier/` |
+| `thumbnail_director.txt` | `agents/thumbnail_prompt_writer.py` (AGENT_NAME="thumbnail_director") | `thumbnail-prompt-writer/` |
+| `thumbnail_identity_guardian.txt` | `agents/thumbnail_identity_guardian.py` | `thumbnail-identity-guardian/` |
+| `topic_ideator.txt` | `discovery/topic_ideator.py` | `topic-ideator/` |
+| `visual_package_director.txt` | `agents/visual_package_director.py` | `visual-package-director/` |
 
-**Note:** `music_categories.json` in `hypogeum/prompts/` is a data file (not a
-`.txt` prompt), loaded by `elevenlabs.py` via `prompt_loader.load_music_categories()`.
-It is not registered in the prompt registry and does not carry version headers.
+**Notes:**
+- `thumbnail_director.txt` is loaded by `thumbnail_prompt_writer.py`, not by `thumbnail_director.py`. The name reflects the prompt's origin (extracted from TD's planning phase); `_AGENT_NAME = "thumbnail_director"` is preserved for registry identity.
+- `perplexity_research.txt` is loaded by `hypogeum/perplexity.py` (an infrastructure client, not an agent). It has no tentacle.
+- `thumbnail_strategy.txt` is loaded by `hypogeum/skills/thumbnail_strategy.py` (an operator-invoked skill, outside the `agents/` + `discovery/` scope of this MANIFEST). See §U note below.
+- `music_categories.json` in `hypogeum/prompts/` is a data file (not a `.txt` prompt), loaded by `elevenlabs.py` via `prompt_loader.load_music_categories()`. It is not registered in the prompt registry and does not carry version headers.
 
-### Agents that load prompts via `load_prompt()`
+**§U — Prompt files outside agent scope (not in table above):**
 
-All 9 pipeline agents + `brand_guardian_agent` + `thumbnail_identity_guardian` +
-`thumbnail_prompt_writer` + `visual_package_director` + `skills/thumbnail_strategy.py`
-now call `prompt_loader.load_prompt(path)` instead of `Path.read_text()`. This
-strips the version header before returning text to the agent, keeping prompts
-clean at runtime while preserving metadata for the registry.
+| Prompt file | Loaded by | Why excluded |
+|---|---|---|
+| `thumbnail_strategy.txt` | `hypogeum/skills/thumbnail_strategy.py` | Operator-invoked skill; outside `agents/` + `discovery/` scope |
+
+### Modules that call `load_prompt()`
+
+The following modules call `prompt_loader.load_prompt(path)` to strip version
+headers before use. Pipeline stages 6–9 (Thumbnail Director, Audio, Assembly,
+Publishing) are non-LLM or delegate prompt loading to sub-agents and do not
+call `load_prompt()` directly.
+
+**Python agent files (`hypogeum/agents/`):**
+`executive_producer.py`, `narrative_architect.py`, `research_director.py`,
+`script_engine.py`, `visual_package_director.py`, `brand_guardian_agent.py`,
+`thumbnail_identity_guardian.py`, `thumbnail_prompt_writer.py`
+
+**Infrastructure (`hypogeum/`):**
+`perplexity.py`
+
+**Discovery sub-agents (`hypogeum/discovery/`):**
+`topic_ideator.py`, `source_verifier.py`
+
+**Skills (`hypogeum/skills/`):**
+`thumbnail_strategy.py`

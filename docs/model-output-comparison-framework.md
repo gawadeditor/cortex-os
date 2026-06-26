@@ -37,9 +37,9 @@ ModelComparisonRun:
   initiated_at      TEXT  — ISO timestamp when operator clicked "Approve and Run"
   completed_at      TEXT  — ISO timestamp of last result received
   operator_note     TEXT  — optional free-text note captured in approval modal
-  results           TEXT  — JSON array of ModelComparisonResult inline (v1);
-                            results are stored as a single JSON blob in this column,
-                            matching the provider_comparison_runs pattern.
+  results_json      TEXT  — JSON array of ModelComparisonResult inline (v1);
+                            stored as a single JSON blob, matching the column name
+                            used by the existing provider_comparison_runs table.
                             Separate result rows are deferred to v2.
 ```
 
@@ -161,22 +161,22 @@ This is the primary read path. The comparison framework surfaces this data befor
 
 **Null provenance caveat:** The M7.2 provenance columns (`generation_prompt`, `generation_params`, `cost_usd`, `archive_location`, `version`, `asset_created_at`) are V3 migration columns, not in the base `schema.sql` definition. They are NULL for any episode generated before M7.2 was committed. `ep_val_01` (the only partially-generated real episode as of this writing) was run before M7.2 — its `archive_index` rows will have `generation_prompt IS NULL` and will be excluded by the `WHERE generation_prompt IS NOT NULL` filter. The archive panel will show zero rows for `ep_val_01`. The first post-M7.2 episode will populate these columns and make the archive source useful.
 
-### Cross-referencing with cost_tracking
+### Cross-referencing with costs
 
 ```sql
 SELECT
-    ct.provider,
-    ct.model,
-    ct.cost_usd,
-    ct.tokens_or_credits,
-    ct.call_type,
-    ct.called_at,
-    ct.asset_id
-FROM cost_tracking ct
-WHERE ct.asset_id = ?
+    c.provider,
+    c.model,
+    c.cost_usd,
+    c.tokens_or_credits,
+    c.call_type,
+    c.called_at,
+    c.asset_id
+FROM costs c
+WHERE c.asset_id = ?
 ```
 
-The `asset_id` FK links `cost_tracking` rows to `archive_index` rows, allowing exact cost attribution per output asset.
+The `asset_id` column links `costs` rows to `archive_index` rows, allowing exact cost attribution per output asset. Note: the table is named `costs`, not `cost_tracking`.
 
 ---
 
@@ -233,7 +233,7 @@ Generation runs cost real money. The flow has three stages:
 
 Before the run is triggered, the page displays:
 1. The selected provider/model matrix
-2. An estimated cost range, derived from `MODEL_CREDIT_COSTS` in `muapi.py` and existing `cost_tracking` averages — the same sources used by the existing comparison engine
+2. An estimated cost range, derived from `MODEL_CREDIT_COSTS` in `muapi.py` and existing `costs` table averages — the same sources used by the existing comparison engine
 3. The estimated duration
 
 The "Run Comparison" button is always enabled. The cost estimate is informational — the modal is the only approval gate. There is no "acknowledge to unlock" mechanism.
@@ -276,7 +276,7 @@ TestArchiveQuery
   test_archive_query_returns_provenance_fields
   test_archive_query_filters_by_episode_id
   test_archive_query_excludes_rows_without_prompt
-  test_cross_reference_with_cost_tracking
+  test_cross_reference_with_costs
 
 TestComparisonApprovalFlow
   test_run_not_created_without_approval

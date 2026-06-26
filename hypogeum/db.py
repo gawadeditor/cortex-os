@@ -2146,3 +2146,73 @@ def list_provider_comparison_runs(conn: sqlite3.Connection, limit: int = 10) -> 
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Model comparison helpers (Step D — model_comparison_runs)
+# ---------------------------------------------------------------------------
+
+def insert_model_comparison_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    run_type: str,
+    prompt_text: str,
+    provider_matrix: str,
+    initiated_at: str,
+    prompt_name: Optional[str] = None,
+    input_context: Optional[str] = None,
+    operator_note: Optional[str] = None,
+) -> None:
+    """Insert a new model comparison run with status='running'."""
+    conn.execute(
+        """
+        INSERT INTO model_comparison_runs
+            (run_id, run_type, prompt_name, prompt_text, input_context,
+             provider_matrix, status, initiated_at, operator_note)
+        VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)
+        """,
+        (run_id, run_type, prompt_name, prompt_text, input_context,
+         provider_matrix, initiated_at, operator_note),
+    )
+
+
+def complete_model_comparison_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    results: list,
+    completed_at: str,
+    status: str = "completed",
+) -> None:
+    """Mark a model comparison run finished and store per-model results as JSON."""
+    conn.execute(
+        """
+        UPDATE model_comparison_runs
+        SET status=?, results_json=?, completed_at=?
+        WHERE run_id=?
+        """,
+        (status, json.dumps(results), completed_at, run_id),
+    )
+
+
+def get_latest_model_comparison(
+    conn: sqlite3.Connection,
+    run_type: str = "llm",
+) -> Optional[dict]:
+    """Return the most recent completed model comparison run of the given type, or None."""
+    row = conn.execute(
+        """
+        SELECT * FROM model_comparison_runs
+        WHERE status = 'completed' AND run_type = ?
+        ORDER BY completed_at DESC
+        LIMIT 1
+        """,
+        (run_type,),
+    ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    if d.get("results_json"):
+        d["results"] = json.loads(d["results_json"])
+    else:
+        d["results"] = []
+    return d

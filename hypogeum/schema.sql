@@ -1423,3 +1423,30 @@ CREATE TABLE IF NOT EXISTS source_verifications (
     created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_srcverif_subject ON source_verifications(canonical_subject, created_at);
+
+-- ===========================================================================
+-- model_comparison_runs — Model Output Comparison (Step D)
+-- One row per operator-initiated comparison session. Results stored as a
+-- JSON blob in results_json, matching the provider_comparison_runs pattern.
+-- Separate result rows are deferred to v2.
+--
+-- run_type: 'llm' | 'image' | 'video'
+-- status:   'running' | 'completed' | 'cancelled' | 'error'
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS model_comparison_runs (
+    run_id           TEXT NOT NULL PRIMARY KEY,
+    run_type         TEXT NOT NULL
+                         CHECK(run_type IN ('llm','image','video')),
+    prompt_name      TEXT,
+    prompt_text      TEXT NOT NULL,
+    input_context    TEXT,
+    provider_matrix  TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'running'
+                         CHECK(status IN ('running','completed','cancelled','error')),
+    initiated_at     TEXT NOT NULL,
+    completed_at     TEXT,
+    operator_note    TEXT,
+    results_json     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mcrun_status   ON model_comparison_runs(status, initiated_at);
+CREATE INDEX IF NOT EXISTS idx_mcrun_type     ON model_comparison_runs(run_type, initiated_at);

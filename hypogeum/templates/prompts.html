@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prompt Registry — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .prompt-body pre {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 14px;
+      font-size: 12px; line-height: 1.6; white-space: pre-wrap;
+      word-break: break-word; color: var(--text); margin-top: 8px;
+      max-height: 400px; overflow-y: auto;
+    }
+    .prompt-row { display: flex; gap: 10px; align-items: baseline;
+                  flex-wrap: wrap; font-size: 13px; }
+    .prompt-name { font-family: monospace; font-size: 13px; font-weight: 600;
+                   color: var(--text); min-width: 240px; }
+    .prompt-meta { display: flex; gap: 10px; flex-wrap: wrap;
+                   align-items: center; font-size: 12px; color: var(--muted); }
+    .prompt-version { font-family: monospace; font-size: 11px; padding: 1px 6px;
+                      border-radius: 10px; background: #1a2a3a;
+                      color: var(--blue); border: 1px solid #1f6feb; }
+    .prompt-model { font-family: monospace; font-size: 11px; color: var(--muted); }
+    .prompt-purpose { font-size: 12px; color: var(--text); flex: 1; min-width: 0; }
+    .prompt-chars { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .prompt-owner { font-size: 11px; color: var(--muted); font-family: monospace; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Prompt Registry</h1>
+  <span class="page-meta">
+    {% if prompts %}{{ prompts | length }} prompt{% if prompts | length != 1 %}s{% endif %}{% endif %}
+  </span>
+</div>
+
+{% if not prompts %}
+  <div class="empty">No registered prompts found.</div>
+{% else %}
+
+<div class="card" style="padding: 0;">
+  {% for p in prompts %}
+  <details>
+    <summary>
+      <div class="prompt-row">
+        <span class="prompt-name">{{ p.name }}</span>
+        <div class="prompt-meta">
+          {% if p.prompt_version %}
+            <span class="prompt-version">{{ p.prompt_version }}</span>
+          {% endif %}
+          {% if p.owner_agent %}
+            <span class="prompt-owner">{{ p.owner_agent }}</span>
+          {% endif %}
+          {% if p.model_target %}
+            <span class="prompt-model">{{ p.model_target }}</span>
+          {% endif %}
+          {% if p.purpose %}
+            <span class="prompt-purpose">{{ p.purpose }}</span>
+          {% endif %}
+          {% if p.char_count %}
+            <span class="prompt-chars">{{ p.char_count }} chars</span>
+          {% endif %}
+        </div>
+      </div>
+    </summary>
+    <div class="collapse-body prompt-body">
+      <div style="display:flex; gap:20px; flex-wrap:wrap; font-size:12px;
+                  color:var(--muted); padding: 10px 0 8px;">
+        <span><strong style="color:var(--text);">File:</strong> {{ p.file_path }}</span>
+        <span><strong style="color:var(--text);">Version:</strong> {{ p.prompt_version or '—' }}</span>
+        <span><strong style="color:var(--text);">Owner:</strong> {{ p.owner_agent or '—' }}</span>
+        <span><strong style="color:var(--text);">Model:</strong> {{ p.model_target or '—' }}</span>
+        <span><strong style="color:var(--text);">Purpose:</strong> {{ p.purpose or '—' }}</span>
+        <span><strong style="color:var(--text);">Chars:</strong> {{ p.char_count }}</span>
+      </div>
+      {% if p.body %}
+        <pre>{{ p.body }}</pre>
+      {% else %}
+        <div class="empty" style="padding:12px;">Body unavailable.</div>
+      {% endif %}
+    </div>
+  </details>
+  {% endfor %}
+</div>
+
+{% endif %}
+</body>
+</html>

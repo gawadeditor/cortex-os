@@ -5450,6 +5450,20 @@ def api_prompts_detail(name: str):
     return jsonify({"prompt": record.to_dict(include_body=True)})
 
 
+@app.route("/prompts", methods=["GET"])
+def prompts_page():
+    """
+    Prompt Registry dashboard page.
+
+    Loads all registered prompt files with full body text (local file reads
+    only — no network, no DB).  The body is rendered server-side so the
+    operator can read and compare prompts without any JS fetch.
+    """
+    records = [get_prompt(r.name) for r in list_prompts()]
+    records = [r for r in records if r is not None]
+    return render_template("prompts.html", prompts=records)
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------

@@ -237,6 +237,7 @@ Only local skills (`.claude/skills/`) are attached. GitHub skills deferred — s
 | `/brand-extract` | `brand-guardian` | `.claude/skills/brand-extract.md` |
 | `/budget-run` | `finance-agent`, `assembly-agent`, `visual-package-director` | `.claude/skills/budget-run.md` |
 | `/cost-forensic` | `finance-agent` | `.claude/skills/cost-forensic.md` |
+| `/publishing-preflight` | `publishing-agent` | `.claude/skills/publishing-preflight.md` |
 
 **Pipeline-level skill (not attached to any single tentacle):**
 
@@ -262,7 +263,7 @@ Only local skills (`.claude/skills/`) are attached. GitHub skills deferred — s
 | `music-agent` | ElevenLabs caller; no operator pre-run gate |
 | `narrative-architect` | LLM agent; `/diagnostics` is applicable but provider pre-flight is covered by pipeline-level `/ep0-run` (Gate 1) before this stage is reached — per-agent attachment is redundant at this time |
 | `provider-router` | Deterministic routing; no operator surface |
-| `publishing-agent` | Platform publishing; no applicable local skill |
+| `publishing-agent` | `/publishing-preflight` attached (2026-06-26) |
 | `qa-agent` | Deterministic gate; no operator surface |
 | `queue-gateway` | Deterministic queue ops; no operator surface |
 | `reference-image-qa` | UNWIRED + deterministic PIL; no operator surface |

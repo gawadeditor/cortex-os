@@ -623,7 +623,7 @@ def run_pipeline(
         log.info("pipeline_stage_completed", agent="visual_package_director")
 
         # -----------------------------------------------------------------------
-        # 7. Thumbnail Director
+        # 7b. Thumbnail Director
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="thumbnail_director")
         _current_stage_id, _current_stage_t0 = _record_stage_start(

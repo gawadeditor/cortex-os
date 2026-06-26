@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "PROMPT_VERSION": "v1",
+    "OWNER_AGENT": "music_agent",
+    "MODEL_TARGET": "elevenlabs/music_v1",
+    "PURPOSE": "Category-specific background music generation prompts for ElevenLabs music_v1"
+  },
+  "categories": {
+    "Mystery": "Slow atmospheric dark underscore. Sparse instrumentation — solo piano or low sustained strings only. 60–80 BPM. No percussion. Minimal harmonic movement. Convey unresolved tension without urgency.",
+    "Discovery": "Building orchestral piece with a hopeful, expansive character. Moderate tempo 90–110 BPM. Layered strings entering mid-track, light brass accent. Arc from sparse to full without climax. Background underscore level.",
+    "Investigation": "Tense, rhythmic chamber piece. Sparse piano or plucked strings with subtle rhythmic pattern. 80–100 BPM. Convey quiet urgency and methodical pacing. No resolution. Underscore only — not foreground.",
+    "Ancient Civilizations": "Cinematic ambient with period-appropriate ethnic instrumentation. Oud, duduk, lyre, or equivalent ancient strings. Drone or modal harmonic language. 60–80 BPM. No contemporary production textures. Evocative of an ancient world.",
+    "Tension": "Urgent dissonant string-led underscore. Rising harmonic tension with no release. 90–120 BPM. Rhythmic bow pressure and cluster harmonics acceptable. Build throughout. No resolution at track end.",
+    "Resolution": "Warm, decelerating orchestral or sparse piano piece. Full strings or solo piano. Sense of emotional landing — not triumphant, not tragic. 70–90 BPM and slowing. Natural fade acceptable."
+  }
+}

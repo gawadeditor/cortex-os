@@ -751,7 +751,8 @@ class TestSystemPrompt:
         assert len(SYSTEM_PROMPT) > 0
 
     def test_system_prompt_matches_file(self):
-        assert SYSTEM_PROMPT == _PROMPT_FILE.read_text(encoding="utf-8")
+        from hypogeum.prompt_loader import load_prompt
+        assert SYSTEM_PROMPT == load_prompt(_PROMPT_FILE)
 
     def test_prompt_mentions_cta_strategy(self):
         assert "CTA" in SYSTEM_PROMPT or "cta" in SYSTEM_PROMPT.lower()

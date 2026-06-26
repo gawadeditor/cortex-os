@@ -51,6 +51,7 @@ from typing import Optional
 from hypogeum.agent import run_agent
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
+from hypogeum.prompt_loader import load_prompt
 from hypogeum.perplexity import (
     PerplexityHardFailure,
     PerplexitySoftFailureExhausted,
@@ -112,7 +113,7 @@ _RESEARCH_PHASES = [
 # ---------------------------------------------------------------------------
 
 def _load_system_prompt() -> str:
-    return _PROMPT_FILE.read_text(encoding="utf-8")
+    return load_prompt(_PROMPT_FILE)
 
 
 SYSTEM_PROMPT: str = _load_system_prompt()

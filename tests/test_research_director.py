@@ -1250,7 +1250,8 @@ class TestSystemPrompt:
         assert isinstance(SYSTEM_PROMPT, str) and len(SYSTEM_PROMPT.strip()) > 0
 
     def test_system_prompt_matches_file_contents(self):
-        assert SYSTEM_PROMPT == _PROMPT_FILE.read_text(encoding="utf-8")
+        from hypogeum.prompt_loader import load_prompt
+        assert SYSTEM_PROMPT == load_prompt(_PROMPT_FILE)
 
     def test_prompt_contains_narrative_signal_taxonomy(self):
         assert "shock_fact" in SYSTEM_PROMPT

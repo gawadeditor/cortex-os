@@ -571,8 +571,8 @@ class TestSystemPrompt:
         assert len(SYSTEM_PROMPT.strip()) > 0
 
     def test_system_prompt_matches_file_contents(self):
-        file_content = _PROMPT_FILE.read_text(encoding="utf-8")
-        assert SYSTEM_PROMPT == file_content
+        from hypogeum.prompt_loader import load_prompt
+        assert SYSTEM_PROMPT == load_prompt(_PROMPT_FILE)
 
     def test_system_prompt_passed_to_first_call(self):
         cfg = make_config()

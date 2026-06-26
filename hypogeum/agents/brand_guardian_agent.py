@@ -58,6 +58,7 @@ from typing import Optional
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 from hypogeum.openrouter import call_claude
+from hypogeum.prompt_loader import load_prompt
 from hypogeum.schemas import SchemaError, validate
 
 
@@ -85,7 +86,7 @@ _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
 # ---------------------------------------------------------------------------
 
 def _load_system_prompt() -> str:
-    return _PROMPT_FILE.read_text(encoding="utf-8")
+    return load_prompt(_PROMPT_FILE)
 
 
 SYSTEM_PROMPT: str = _load_system_prompt()

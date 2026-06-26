@@ -100,6 +100,7 @@ _PLATFORM_DISPLAY = {
     "instagram": "Instagram", "facebook": "Facebook",
 }
 _VALID_PLATFORMS_CONNECT = frozenset(_PLATFORM_CRED_TYPE)
+from hypogeum.prompt_registry import list_prompts, get_prompt
 from hypogeum.dashboard_control import (
     # reads
     get_channel_detail,
@@ -5410,6 +5411,43 @@ def decision_inputs_page():
             "error":      str(exc),
         }
     return render_template("decision_inputs.html", state=state)
+
+
+# ---------------------------------------------------------------------------
+# Prompt Registry API (Phase 2B)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/prompts", methods=["GET"])
+def api_prompts_list():
+    """
+    List all versioned prompt files with metadata (no body text).
+
+    Returns:
+        200  {"prompts": [...]}  — list of prompt metadata records
+    """
+    try:
+        records = list_prompts()
+        return jsonify({"prompts": [r.to_dict(include_body=False) for r in records]})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/prompts/<name>", methods=["GET"])
+def api_prompts_detail(name: str):
+    """
+    Return full metadata and body text for one prompt file.
+
+    Args:
+        name: Prompt name (filename stem, no extension).
+
+    Returns:
+        200  {"prompt": {...}}  — full record including body
+        404  {"error": "..."}  — prompt not found
+    """
+    record = get_prompt(name)
+    if record is None:
+        return jsonify({"error": f"Prompt {name!r} not found"}), 404
+    return jsonify({"prompt": record.to_dict(include_body=True)})
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ from typing import Optional
 
 from hypogeum.agent import run_agent
 from hypogeum.config import Config
+from hypogeum.prompt_loader import load_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -46,8 +47,8 @@ _PROMPT_FILE  = _PROMPTS_DIR / "executive_producer.txt"
 # ---------------------------------------------------------------------------
 
 def _load_system_prompt() -> str:
-    """Read the EP system prompt from disk. Must exist before import."""
-    return _PROMPT_FILE.read_text(encoding="utf-8")
+    """Load the EP system prompt, stripping version headers before returning."""
+    return load_prompt(_PROMPT_FILE)
 
 
 SYSTEM_PROMPT: str = _load_system_prompt()

@@ -42,6 +42,7 @@ from hypogeum.agents.thumbnail_composition_planner import plan_composition
 from hypogeum.agents.thumbnail_compositor import build_layer_prompts
 from hypogeum.agents.thumbnail_typography_planner import plan_typography
 from hypogeum.config import Config
+from hypogeum.prompt_loader import load_prompt
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -54,7 +55,7 @@ _PROMPT_FILE = _PROMPTS_DIR / "thumbnail_director.txt"
 
 
 def _load_system_prompt() -> str:
-    return _PROMPT_FILE.read_text(encoding="utf-8")
+    return load_prompt(_PROMPT_FILE)
 
 
 SYSTEM_PROMPT: str = _load_system_prompt()

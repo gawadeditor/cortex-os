@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from hypogeum.identifiers import METADATA_VERSION
+from hypogeum.prompt_loader import load_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -94,9 +95,9 @@ _WARNING_RULES = {
     "TIG-W04": "Image subject competes with wordmark",
 }
 
-# System prompt loaded from disk — consistent with all other agent prompts.
+# System prompt loaded from disk — headers stripped by prompt_loader.
 # Source: hypogeum/prompts/thumbnail_identity_guardian.txt
-_SYSTEM_PROMPT: str = _PROMPT_FILE.read_text(encoding="utf-8")
+_SYSTEM_PROMPT: str = load_prompt(_PROMPT_FILE)
 
 
 # ---------------------------------------------------------------------------

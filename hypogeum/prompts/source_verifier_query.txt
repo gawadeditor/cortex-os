@@ -1,0 +1,5 @@
+# PROMPT_VERSION: v1
+# OWNER_AGENT: source_verifier
+# MODEL_TARGET: sonar-pro
+# PURPOSE: Perplexity source verification query template
+What primary academic sources, peer-reviewed research, and authoritative references document the historical or scientific basis for: {topic_text}? List specific papers, books, or institutional sources only.

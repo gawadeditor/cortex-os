@@ -231,7 +231,7 @@ Only local skills (`.claude/skills/`) are attached. GitHub skills deferred — s
 | Skill | Attached Tentacles | Local file |
 |---|---|---|
 | `/collect` | `asset-archive-agent` | `.claude/skills/collect.md` |
-| `/visual-review` | `thumbnail-qa`, `timeline-qa`, `final-render-reviewer` | `.claude/skills/visual-review.md` |
+| `/visual-review` | `visual-package-director`, `thumbnail-qa`, `timeline-qa`, `final-render-reviewer` | `.claude/skills/visual-review.md` |
 | `/diagnostics` | `executive-producer`, `research-director`, `visual-package-director`, `thumbnail-director`, `topic-ideator`, `source-verifier` | `.claude/skills/diagnostics.md` |
 | `/bga-preflight` | `brand-guardian` | `.claude/skills/bga-preflight.md` |
 | `/brand-extract` | `brand-guardian` | `.claude/skills/brand-extract.md` |
@@ -260,14 +260,14 @@ Only local skills (`.claude/skills/`) are attached. GitHub skills deferred — s
 | `image-generation-agent` | MUAPI caller; cost governed via VPD + `/budget-run` |
 | `media-specs-qa` | Deterministic PIL checks; no operator surface |
 | `music-agent` | ElevenLabs caller; no operator pre-run gate |
-| `narrative-architect` | LLM agent, but no applicable local skill (no narration skill exists yet) |
+| `narrative-architect` | LLM agent; `/diagnostics` is applicable but provider pre-flight is covered by pipeline-level `/ep0-run` (Gate 1) before this stage is reached — per-agent attachment is redundant at this time |
 | `provider-router` | Deterministic routing; no operator surface |
 | `publishing-agent` | Platform publishing; no applicable local skill |
 | `qa-agent` | Deterministic gate; no operator surface |
 | `queue-gateway` | Deterministic queue ops; no operator surface |
 | `reference-image-qa` | UNWIRED + deterministic PIL; no operator surface |
 | `scene-planner` | Deterministic; no operator surface |
-| `script-engine` | LLM agent, but no applicable local skill (no script review skill exists yet) |
+| `script-engine` | LLM agent; `/diagnostics` is applicable but provider pre-flight is covered by pipeline-level `/ep0-run` (Gate 1) before this stage is reached — per-agent attachment is redundant at this time |
 | `thumbnail-compositor` | Deterministic PIL+MUAPI; no operator surface |
 | `thumbnail-composition-planner` | Deterministic; no operator surface |
 | `thumbnail-generation-agent` | MUAPI caller; cost governed via TD + `/budget-run` on VPD |

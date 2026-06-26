@@ -9,6 +9,12 @@ status: implemented
 
 Sends the Thumbnail Handoff Brief to the configured GPT model and returns the validated thumbnail_generation_plan.
 
+## Prompt Files
+
+- `hypogeum/prompts/thumbnail_director.txt`
+
+Note: `thumbnail_prompt_writer.py` loads `thumbnail_director.txt` because the thumbnail planning prompt governs the prompt-writer sub-agent as part of Thumbnail Director Phase 1.
+
 ## Model
 
 **Runtime model: `openai/gpt-5.5-pro`** (config key: `TD_PLANNING_MODEL`, default: `openai/gpt-5.5-pro`).

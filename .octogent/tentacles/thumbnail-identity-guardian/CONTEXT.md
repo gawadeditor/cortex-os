@@ -16,6 +16,12 @@ Unlike the Brand Guardian Agent (BGA), which operates on text descriptions befor
 image generation, the TIG operates on the generated bitmap using Claude's vision
 capability.
 
+## Prompt Files
+
+- `hypogeum/prompts/thumbnail_identity_guardian.txt`
+
+Loaded by: `hypogeum/agents/thumbnail_identity_guardian.py`
+
 ## Purpose
 
 Catch visual identity violations that only become detectable in the rendered image:

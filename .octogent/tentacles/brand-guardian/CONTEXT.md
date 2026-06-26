@@ -4,6 +4,7 @@ domain: brand_compliance
 implementation_file: hypogeum/agents/brand_guardian_agent.py
 status: implemented
 version: v1A
+skills_attached: [bga-preflight, brand-extract]
 ---
 
 # Brand Guardian Agent v1A

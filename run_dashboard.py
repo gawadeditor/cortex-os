@@ -101,6 +101,13 @@ _PLATFORM_DISPLAY = {
 }
 _VALID_PLATFORMS_CONNECT = frozenset(_PLATFORM_CRED_TYPE)
 from hypogeum.prompt_registry import list_prompts, get_prompt
+from hypogeum.model_comparison import (
+    run_model_comparison,
+    query_archive_for_comparison,
+    get_model_comparison_result,
+    DEFAULT_LLM_MATRIX,
+    BENCHMARK_USER_MESSAGE,
+)
 from hypogeum.dashboard_control import (
     # reads
     get_channel_detail,
@@ -5462,6 +5469,114 @@ def prompts_page():
     records = [get_prompt(r.name) for r in list_prompts()]
     records = [r for r in records if r is not None]
     return render_template("prompts.html", prompts=records)
+
+
+# ---------------------------------------------------------------------------
+# Model Output Comparison (Step D)
+# ---------------------------------------------------------------------------
+
+@app.route("/compare", methods=["GET"])
+def compare_page():
+    """
+    Model Output Comparison dashboard page.
+
+    Loads prompt registry and last run from DB. If ?episode_id= is provided,
+    also queries archive_index for zero-cost provenance rows.
+    """
+    from datetime import datetime, timezone as _tz
+    db = _db_path()
+
+    prompts = [r for r in [get_prompt(r.name) for r in list_prompts()] if r is not None]
+    last_run = get_model_comparison_result(db_path=db, run_type="llm")
+
+    episode_id  = request.args.get("episode_id", "").strip()
+    archive_rows: list = []
+    if episode_id:
+        try:
+            from hypogeum.db import get_connection as _gc
+            c = _gc(db)
+            archive_rows = query_archive_for_comparison(episode_id, c)
+            c.close()
+        except Exception:
+            archive_rows = []
+
+    return render_template(
+        "compare.html",
+        prompts=prompts,
+        llm_matrix=DEFAULT_LLM_MATRIX,
+        last_run=last_run,
+        episode_id=episode_id,
+        archive_rows=archive_rows,
+        benchmark_user_message=BENCHMARK_USER_MESSAGE,
+    )
+
+
+@app.route("/api/compare/run", methods=["POST"])
+def api_compare_run():
+    """
+    Trigger a live model comparison run.
+
+    Body (JSON):
+        prompt_name     str   — registered prompt stem (e.g. "executive_producer")
+        provider_matrix list  — [{provider, model}, ...]; defaults to DEFAULT_LLM_MATRIX
+        operator_note   str   — optional note stored with the run
+        user_message    str   — optional user message; defaults to BENCHMARK_USER_MESSAGE
+
+    Returns:
+        200  {"ok": true, "run_id": ..., "status": ..., "results": [...]}
+        400  {"ok": false, "error": "..."}  — missing or unknown prompt
+        500  {"ok": false, "error": "..."}  — unexpected failure
+    """
+    from datetime import datetime, timezone as _tz
+    body           = request.get_json(silent=True) or {}
+    prompt_name    = body.get("prompt_name", "").strip()
+    provider_matrix = body.get("provider_matrix") or DEFAULT_LLM_MATRIX
+    operator_note  = body.get("operator_note") or None
+    user_message   = body.get("user_message") or BENCHMARK_USER_MESSAGE
+
+    if not prompt_name:
+        return jsonify({"ok": False, "error": "prompt_name is required"}), 400
+
+    record = get_prompt(prompt_name)
+    if record is None or not record.body:
+        return jsonify({"ok": False, "error": f"Prompt {prompt_name!r} not found"}), 400
+
+    initiated_at = datetime.now(_tz.utc).isoformat()
+    try:
+        result = run_model_comparison(
+            prompt_text=record.body,
+            initiated_at=initiated_at,
+            db_path=_db_path(),
+            run_type="llm",
+            prompt_name=prompt_name,
+            user_message=user_message,
+            provider_matrix=provider_matrix,
+            operator_note=operator_note,
+        )
+        return jsonify({"ok": True, **result})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/compare/results", methods=["GET"])
+def api_compare_results():
+    """
+    Return the most recent completed model comparison run.
+
+    Query params:
+        run_type  str  — "llm" (default) | "image" | "video"
+
+    Returns:
+        200  {"ok": true,  "run": {...}}  — run found
+        200  {"ok": true,  "run": null}   — no completed run yet
+        500  {"ok": false, "error": "..."}
+    """
+    run_type = request.args.get("run_type", "llm")
+    try:
+        run = get_model_comparison_result(db_path=_db_path(), run_type=run_type)
+        return jsonify({"ok": True, "run": run})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 # ---------------------------------------------------------------------------

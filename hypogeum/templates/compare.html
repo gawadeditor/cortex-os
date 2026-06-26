@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Model Comparison — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .cmp-panel { background: var(--surface); border: 1px solid var(--border);
+                 border-radius: var(--radius); padding: 16px; margin-bottom: var(--gap); }
+    .cmp-section-label { font-size: 11px; font-weight: 700; text-transform: uppercase;
+                         letter-spacing: .05em; color: var(--muted); margin-bottom: 10px; }
+    .matrix-grid { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 12px; }
+    .matrix-item { display: flex; align-items: center; gap: 6px; font-size: 12px;
+                   background: var(--bg); border: 1px solid var(--border);
+                   border-radius: var(--radius); padding: 4px 10px; }
+    .matrix-item input[type=checkbox] { accent-color: var(--blue); }
+    .cost-estimate { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+    .cost-est-val { color: var(--yellow); font-weight: 700; }
+    .result-row { display: flex; gap: 12px; align-items: center; font-size: 13px;
+                  padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    .result-row:last-child { border-bottom: none; }
+    .result-model { font-family: monospace; font-size: 12px; min-width: 220px; color: var(--text); }
+    .result-stat { min-width: 70px; font-family: monospace; font-size: 12px; color: var(--muted); }
+    .result-output pre { background: var(--bg); border: 1px solid var(--border);
+                         border-radius: var(--radius); padding: 10px 12px;
+                         font-size: 12px; line-height: 1.6; white-space: pre-wrap;
+                         word-break: break-word; margin-top: 6px; max-height: 360px;
+                         overflow-y: auto; }
+    .modal-backdrop { display: none; position: fixed; inset: 0;
+                      background: rgba(0,0,0,.6); z-index: 200;
+                      align-items: center; justify-content: center; }
+    .modal-backdrop.open { display: flex; }
+    .modal-box { background: var(--surface); border: 1px solid var(--border);
+                 border-radius: var(--radius); padding: 20px 24px;
+                 min-width: 340px; max-width: 480px; }
+    .modal-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+    .modal-body  { font-size: 13px; color: var(--muted); line-height: 1.7;
+                   margin-bottom: 16px; }
+    .modal-row   { display: flex; gap: 8px; justify-content: flex-end; }
+    .tab-row { display: flex; gap: 4px; margin-bottom: var(--gap); }
+    .tab-btn { padding: 4px 14px; border-radius: var(--radius); font-size: 13px;
+               border: 1px solid var(--border); background: transparent;
+               color: var(--muted); cursor: pointer; }
+    .tab-btn.active { background: var(--surface); color: var(--text);
+                      border-color: var(--blue); font-weight: 600; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .archive-row { display: grid; grid-template-columns: 1fr 1fr 80px 80px 90px;
+                   gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border);
+                   font-size: 12px; align-items: center; }
+    .archive-row:last-child { border-bottom: none; }
+    .archive-hdr { font-size: 11px; font-weight: 700; text-transform: uppercase;
+                   letter-spacing: .04em; color: var(--muted); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Model Output Comparison</h1>
+  <span class="page-meta">Compare LLM prompt outputs across provider/model pairs</span>
+</div>
+
+<!-- ── Source tabs ── -->
+<div class="tab-row">
+  <button class="tab-btn {% if not episode_id %}active{% endif %}"
+          onclick="switchTab('registry', this)">Prompt Registry</button>
+  <button class="tab-btn {% if episode_id %}active{% endif %}"
+          onclick="switchTab('archive', this)">Archive</button>
+</div>
+
+<!-- ── Registry panel ── -->
+<div id="tab-registry" class="tab-panel {% if not episode_id %}active{% endif %}">
+  <div class="cmp-panel">
+    <div class="cmp-section-label">Prompt</div>
+    <div class="field">
+      <label>Select registered prompt</label>
+      <select id="sel-prompt" style="width:100%; max-width:400px;">
+        <option value="">— choose a prompt —</option>
+        {% for p in prompts %}
+          <option value="{{ p.name }}"
+                  data-purpose="{{ p.purpose or '' }}"
+                  data-model="{{ p.model_target or '' }}">
+            {{ p.name }}
+            {% if p.model_target %} — {{ p.model_target }}{% endif %}
+          </option>
+        {% endfor %}
+      </select>
+      <div class="hint" id="prompt-hint" style="margin-top:4px;"></div>
+    </div>
+
+    <div class="cmp-section-label">Model Matrix</div>
+    <div class="matrix-grid" id="matrix-grid">
+      {% for pair in llm_matrix %}
+        <label class="matrix-item">
+          <input type="checkbox" class="matrix-cb"
+                 value="{{ pair.model }}"
+                 data-provider="{{ pair.provider }}"
+                 checked>
+          <span>{{ pair.model | replace('anthropic/', '') | replace('openai/', '') }}</span>
+        </label>
+      {% endfor %}
+    </div>
+
+    <div class="cost-estimate">
+      Estimated cost: <span class="cost-est-val" id="cost-est">~$0.05</span>
+      per selected model · <span id="model-count">{{ llm_matrix | length }}</span> selected
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-save" id="btn-run" onclick="openModal()">
+        Run Comparison →
+      </button>
+      <span id="run-status" style="font-size:12px; color:var(--muted); margin-left:8px;"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Archive panel ── -->
+<div id="tab-archive" class="tab-panel {% if episode_id %}active{% endif %}">
+  <div class="cmp-panel">
+    <div class="cmp-section-label">Episode Archive</div>
+    <form method="GET" action="/compare" style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
+      <div class="field" style="margin:0; flex:1; max-width:320px;">
+        <label>Episode ID</label>
+        <input type="text" name="episode_id" value="{{ episode_id }}"
+               placeholder="e.g. ep_000" style="width:100%;">
+      </div>
+      <button type="submit" class="btn">Load Archive</button>
+    </form>
+
+    {% if episode_id and not archive_rows %}
+      <div class="empty" style="padding:16px 0;">
+        No provenance data for <code>{{ episode_id }}</code> — this episode may have
+        been generated before M7.2. Run a new episode to populate comparison data.
+      </div>
+    {% elif archive_rows %}
+      <div class="archive-row archive-hdr">
+        <span>Scene</span><span>Model</span>
+        <span>Cost</span><span>Provider</span><span>Created</span>
+      </div>
+      {% for row in archive_rows %}
+        <div class="archive-row">
+          <span><code style="font-size:11px;">{{ row.scene_id or '—' }}</code></span>
+          <span style="font-family:monospace; font-size:11px;">
+            {{ (row.model or '—') | replace('anthropic/', '') | replace('openai/', '') }}
+          </span>
+          <span>${{ '%.3f'|format(row.cost_usd) if row.cost_usd else '—' }}</span>
+          <span>{{ row.provider or '—' }}</span>
+          <span style="font-size:11px; color:var(--muted);">
+            {{ (row.asset_created_at or '')[:10] }}
+          </span>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty" style="padding:12px 0;">Enter an episode ID to browse provenance data.</div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ── Results ── -->
+<div id="results-section">
+  {% if last_run %}
+    <div class="cmp-section-label" style="margin-bottom:8px;">
+      Last run —
+      {{ last_run.prompt_name or 'unnamed' }} ·
+      {{ (last_run.completed_at or '')[:19] | replace('T',' ') }} UTC ·
+      <span class="badge badge-{{ last_run.status }}">{{ last_run.status }}</span>
+    </div>
+    <div class="card" style="padding:0;">
+      {% for r in last_run.results %}
+        <details>
+          <summary>
+            <div class="result-row">
+              <span class="result-model">{{ r.provider }}/{{ r.model | replace('anthropic/', '') | replace('openai/', '') }}</span>
+              <span class="result-stat">{{ (r.latency_ms / 1000) | round(1) }}s</span>
+              <span class="result-stat">${{ '%.3f'|format(r.cost_usd) if r.cost_usd else '—' }}</span>
+              <span class="result-stat">{{ r.output_tokens or '—' }} tok</span>
+              <span class="{% if r.status == 'success' %}ok{% elif r.status == 'error' %}err{% else %}muted{% endif %}">
+                {{ r.status }}
+              </span>
+            </div>
+          </summary>
+          <div class="collapse-body result-output">
+            {% if r.output_text %}
+              <pre>{{ r.output_text }}</pre>
+            {% elif r.error %}
+              <div style="font-size:12px; color:var(--red); padding:8px 0;">{{ r.error }}</div>
+            {% else %}
+              <div class="empty" style="padding:8px 0;">No output.</div>
+            {% endif %}
+          </div>
+        </details>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div id="no-run-msg" class="empty" style="padding:20px 0;">
+      No comparison run yet — select a prompt and click Run Comparison.
+    </div>
+  {% endif %}
+</div>
+
+<!-- ── Confirmation modal ── -->
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal-box">
+    <div class="modal-title">Run Model Output Comparison?</div>
+    <div class="modal-body" id="modal-body">Loading…</div>
+    <div class="modal-row">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-save" onclick="confirmRun()">Approve and Run →</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var _runPayload = null;
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
+  document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+}
+
+function updateCostEstimate() {
+  var checked = document.querySelectorAll('.matrix-cb:checked').length;
+  document.getElementById('model-count').textContent = checked;
+  document.getElementById('cost-est').textContent = '~$' + (checked * 0.05).toFixed(2);
+}
+
+document.querySelectorAll('.matrix-cb').forEach(function(cb) {
+  cb.addEventListener('change', updateCostEstimate);
+});
+
+document.getElementById('sel-prompt').addEventListener('change', function() {
+  var opt = this.options[this.selectedIndex];
+  var hint = document.getElementById('prompt-hint');
+  hint.textContent = opt.dataset.purpose || '';
+});
+
+function openModal() {
+  var promptName = document.getElementById('sel-prompt').value;
+  if (!promptName) {
+    document.getElementById('run-status').textContent = 'Select a prompt first.';
+    return;
+  }
+  var checked = Array.from(document.querySelectorAll('.matrix-cb:checked'));
+  if (checked.length === 0) {
+    document.getElementById('run-status').textContent = 'Select at least one model.';
+    return;
+  }
+  var matrix = checked.map(function(cb) {
+    return { provider: cb.dataset.provider, model: cb.value };
+  });
+  _runPayload = { prompt_name: promptName, provider_matrix: matrix };
+  var est = document.getElementById('cost-est').textContent;
+  document.getElementById('modal-body').innerHTML =
+    '<strong>Prompt:</strong> ' + promptName + '<br>' +
+    '<strong>Models:</strong> ' + checked.map(function(c) {
+      return c.value.replace(/^(anthropic|openai)\//, '');
+    }).join(', ') + '<br>' +
+    '<strong>Estimated:</strong> ' + est + '<br>' +
+    '<strong>Duration:</strong> 10–120 seconds per model';
+  document.getElementById('modal-backdrop').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.remove('open');
+  _runPayload = null;
+}
+
+function confirmRun() {
+  closeModal();
+  if (!_runPayload) return;
+  var btn = document.getElementById('btn-run');
+  var status = document.getElementById('run-status');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  status.textContent = 'Sending prompt to each model — this takes 10–120s…';
+
+  fetch('/api/compare/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(_runPayload)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    btn.disabled = false;
+    btn.textContent = 'Run Comparison →';
+    if (!data.ok) {
+      status.textContent = '✗ ' + (data.error || 'unknown error');
+      return;
+    }
+    status.textContent = '✓ Done — reloading results…';
+    window.location.reload();
+  })
+  .catch(function(err) {
+    btn.disabled = false;
+    btn.textContent = 'Run Comparison →';
+    status.textContent = '✗ Network error: ' + err.message;
+  });
+}
+
+updateCostEstimate();
+</script>
+</body>
+</html>

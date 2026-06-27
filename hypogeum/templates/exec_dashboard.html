@@ -252,8 +252,10 @@
         <span class="ok">Ready</span>
       {% elif fhlabel == 'Blocked' %}
         <span class="err">Blocked</span>
+      {% elif fhlabel == 'Degraded' %}
+        <span class="warn">Degraded</span>
       {% else %}
-        <span class="warn">Needs Setup</span>
+        <span class="warn">{{ fhlabel }}</span>
       {% endif %}
     </div>
     <div class="kpi-strip" style="margin-bottom:0">

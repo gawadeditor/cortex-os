@@ -84,7 +84,7 @@ from hypogeum.agents.thumbnail_handoff_brief_builder import build_thumbnail_hand
 from hypogeum.agents.video_generation_agent import generate_all_scene_videos
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
-from hypogeum.prompt_loader import load_prompt
+from hypogeum.prompt_loader import compose_system_prompt
 from hypogeum.muapi import (
     MUAPIAuthFailure,
     MUAPIBudgetExhausted,
@@ -105,13 +105,16 @@ _AGENT_NAME      = "visual_package_director"
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _PROMPT_FILE = _PROMPTS_DIR / "visual_package_director.txt"
 
+_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "visual_package_director"
+_CINEMATIC_SKILL_FILE = _SKILLS_DIR / "cinematic_prompt_architecture.md"
+
 
 # ---------------------------------------------------------------------------
 # System prompt — loaded once at import time
 # ---------------------------------------------------------------------------
 
 def _load_system_prompt() -> str:
-    return load_prompt(_PROMPT_FILE)
+    return compose_system_prompt(_PROMPT_FILE, _CINEMATIC_SKILL_FILE)
 
 
 SYSTEM_PROMPT: str = _load_system_prompt()

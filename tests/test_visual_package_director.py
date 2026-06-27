@@ -1571,3 +1571,172 @@ class TestVPDPromptConstraints:
         assert "warm earth" in prompt_lower or "earth tone" in prompt_lower, (
             "VPD prompt must require warm earth tones as the dominant palette"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestVPDCinematicSkillInjection
+# ---------------------------------------------------------------------------
+
+class TestVPDCinematicSkillInjection:
+    """Verify that the cinematic prompt architecture skill is injected into VPD's
+    system prompt at import time, that other agents are unaffected, and that the
+    skill loader degrades safely when the skill file is absent."""
+
+    def test_vpd_system_prompt_includes_cinematic_skill(self):
+        """VPD SYSTEM_PROMPT must contain the cinematic skill header."""
+        from hypogeum.agents.visual_package_director import SYSTEM_PROMPT
+        assert "CINEMATIC PROMPT ARCHITECTURE" in SYSTEM_PROMPT, (
+            "VPD SYSTEM_PROMPT must include the cinematic_prompt_architecture.md skill content"
+        )
+
+    def test_vpd_system_prompt_includes_base_prompt(self):
+        """VPD SYSTEM_PROMPT must still contain the base prompt content."""
+        from hypogeum.agents.visual_package_director import SYSTEM_PROMPT
+        assert "VISUAL PACKAGE DIRECTOR" in SYSTEM_PROMPT
+        assert "DOCUMENTARY VISUAL GRAMMAR" in SYSTEM_PROMPT
+
+    def test_vpd_system_prompt_skill_appended_after_base(self):
+        """Skill content must appear after the base prompt in SYSTEM_PROMPT."""
+        from hypogeum.agents.visual_package_director import SYSTEM_PROMPT
+        base_pos = SYSTEM_PROMPT.find("VISUAL PACKAGE DIRECTOR")
+        skill_pos = SYSTEM_PROMPT.find("CINEMATIC PROMPT ARCHITECTURE")
+        assert base_pos < skill_pos, (
+            "Skill content must be appended after the base prompt, not before it"
+        )
+
+    def test_other_agents_not_affected(self):
+        """Agents other than VPD must not receive the cinematic skill in their prompts."""
+        from hypogeum.agents.script_engine import SYSTEM_PROMPT as SE
+        assert "CINEMATIC PROMPT ARCHITECTURE" not in SE
+
+        from hypogeum.agents.executive_producer import SYSTEM_PROMPT as EP
+        assert "CINEMATIC PROMPT ARCHITECTURE" not in EP
+
+        from hypogeum.agents.narrative_architect import SYSTEM_PROMPT as NA
+        assert "CINEMATIC PROMPT ARCHITECTURE" not in NA
+
+    def test_load_skill_returns_empty_for_missing_file(self, tmp_path):
+        """load_skill() returns empty string when the skill file does not exist."""
+        from hypogeum.prompt_loader import load_skill
+        result = load_skill(tmp_path / "nonexistent_skill.md")
+        assert result == ""
+
+    def test_load_skill_returns_content_when_file_exists(self, tmp_path):
+        """load_skill() returns the full file content when the file exists."""
+        from hypogeum.prompt_loader import load_skill
+        skill_file = tmp_path / "test_skill.md"
+        skill_file.write_text("# TEST SKILL\nContent here.\n")
+        result = load_skill(skill_file)
+        assert result == "# TEST SKILL\nContent here.\n"
+
+    def test_vpd_base_prompt_present_when_skill_missing(self, tmp_path, monkeypatch):
+        """_load_system_prompt() falls back to base prompt only when skill file is absent."""
+        import hypogeum.agents.visual_package_director as vpd
+        monkeypatch.setattr(vpd, "_CINEMATIC_SKILL_FILE", tmp_path / "missing.md")
+        result = vpd._load_system_prompt()
+        assert "VISUAL PACKAGE DIRECTOR" in result
+        assert "CINEMATIC PROMPT ARCHITECTURE" not in result
+
+    def test_no_provider_call_during_skill_injection(self, tmp_path):
+        """load_skill() is pure file I/O — no network calls in its implementation."""
+        from hypogeum.prompt_loader import load_skill
+        import inspect
+        src = inspect.getsource(load_skill)
+        assert "requests" not in src
+        assert "urllib" not in src
+        assert "httpx" not in src
+        assert "call_claude" not in src
+
+
+# ---------------------------------------------------------------------------
+# TestComposeSystemPrompt
+# ---------------------------------------------------------------------------
+
+class TestComposeSystemPrompt:
+    """Tests for the generic compose_system_prompt() helper in prompt_loader.
+
+    This function is the canonical way for all agents to attach skills to their
+    base prompt. VPD is the first consumer; future agents follow the same pattern.
+    """
+
+    def test_base_only_no_skills(self, tmp_path):
+        """compose_system_prompt with no skill paths returns the base prompt."""
+        from hypogeum.prompt_loader import compose_system_prompt
+        base = tmp_path / "base.txt"
+        base.write_text("# PROMPT_VERSION: v1\n# OWNER_AGENT: test\n# MODEL_TARGET: x\n# PURPOSE: t\nBASE CONTENT")
+        result = compose_system_prompt(base)
+        assert result == "BASE CONTENT"
+
+    def test_single_skill_appended(self, tmp_path):
+        """compose_system_prompt appends a single skill after the base."""
+        from hypogeum.prompt_loader import compose_system_prompt
+        base = tmp_path / "base.txt"
+        base.write_text("# PROMPT_VERSION: v1\n# OWNER_AGENT: test\n# MODEL_TARGET: x\n# PURPOSE: t\nBASE")
+        skill = tmp_path / "skill.md"
+        skill.write_text("# SKILL\nSkill content.")
+        result = compose_system_prompt(base, skill)
+        assert result == "BASE\n\n---\n\n# SKILL\nSkill content."
+
+    def test_multiple_skills_appended_in_order(self, tmp_path):
+        """compose_system_prompt concatenates multiple skills in the order given."""
+        from hypogeum.prompt_loader import compose_system_prompt
+        base = tmp_path / "base.txt"
+        base.write_text("# PROMPT_VERSION: v1\n# OWNER_AGENT: t\n# MODEL_TARGET: x\n# PURPOSE: t\nBASE")
+        s1 = tmp_path / "s1.md"
+        s1.write_text("SKILL_ONE")
+        s2 = tmp_path / "s2.md"
+        s2.write_text("SKILL_TWO")
+        result = compose_system_prompt(base, s1, s2)
+        assert result == "BASE\n\n---\n\nSKILL_ONE\n\n---\n\nSKILL_TWO"
+
+    def test_missing_skill_silently_skipped(self, tmp_path):
+        """A skill path that does not exist is silently skipped."""
+        from hypogeum.prompt_loader import compose_system_prompt
+        base = tmp_path / "base.txt"
+        base.write_text("# PROMPT_VERSION: v1\n# OWNER_AGENT: t\n# MODEL_TARGET: x\n# PURPOSE: t\nBASE")
+        missing = tmp_path / "missing.md"
+        result = compose_system_prompt(base, missing)
+        assert result == "BASE"
+        assert "---" not in result
+
+    def test_present_and_missing_skills_mixed(self, tmp_path):
+        """Present skills are included; missing ones are silently skipped."""
+        from hypogeum.prompt_loader import compose_system_prompt
+        base = tmp_path / "base.txt"
+        base.write_text("# PROMPT_VERSION: v1\n# OWNER_AGENT: t\n# MODEL_TARGET: x\n# PURPOSE: t\nBASE")
+        present = tmp_path / "present.md"
+        present.write_text("PRESENT")
+        missing = tmp_path / "missing.md"
+        result = compose_system_prompt(base, missing, present, missing)
+        assert result == "BASE\n\n---\n\nPRESENT"
+
+    def test_missing_base_raises(self, tmp_path):
+        """compose_system_prompt raises FileNotFoundError if the base file is absent."""
+        from hypogeum.prompt_loader import compose_system_prompt
+        with pytest.raises(FileNotFoundError):
+            compose_system_prompt(tmp_path / "nonexistent.txt")
+
+    def test_vpd_uses_compose_system_prompt(self):
+        """VPD _load_system_prompt must delegate to compose_system_prompt."""
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+        src = inspect.getsource(vpd._load_system_prompt)
+        assert "compose_system_prompt" in src
+
+    def test_vpd_does_not_manually_concatenate(self):
+        """VPD must not contain manual base+skill concatenation after refactor."""
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+        src = inspect.getsource(vpd._load_system_prompt)
+        assert "load_prompt" not in src
+        assert "load_skill" not in src
+        assert '+ "\\n\\n---\\n\\n"' not in src
+
+    def test_compose_system_prompt_is_pure_io(self):
+        """compose_system_prompt() must not make network calls."""
+        from hypogeum.prompt_loader import compose_system_prompt
+        import inspect
+        src = inspect.getsource(compose_system_prompt)
+        assert "requests" not in src
+        assert "urllib" not in src
+        assert "call_claude" not in src

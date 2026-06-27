@@ -58,6 +58,42 @@ class AgentError(RuntimeError):
     """Base class for agent-runner errors."""
 
 
+class ProductionAssetProtectionError(AgentError):
+    """
+    Raised when _write_package() would overwrite a path that has been registered
+    as a protected production asset via protect_production_path().
+
+    The production pipeline never calls protect_production_path() — protection is
+    opt-in and is only activated by validation/experiment scripts that must not
+    overwrite live production files.
+    """
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            f"Write blocked: {path} is a protected production asset. "
+            "Route validation output to .hypogeum-assets/experiments/ instead."
+        )
+
+
+# Paths registered here are write-protected. Empty by default so the
+# production pipeline is never affected. Validation scripts populate this set
+# before calling run_agent() to prevent accidental overwrites of live assets.
+_PROTECTED_PRODUCTION_PATHS: set[str] = set()
+
+
+def protect_production_path(path: Path) -> None:
+    """
+    Register a path as a protected production asset.
+
+    Any subsequent call to _write_package() that resolves to this path will
+    raise ProductionAssetProtectionError instead of writing.
+
+    Args:
+        path: Absolute path to protect. Resolved to its canonical form.
+    """
+    _PROTECTED_PRODUCTION_PATHS.add(str(path.resolve()))
+
+
 class ResponseParseError(AgentError):
     """
     Claude's response could not be parsed as a JSON dict.
@@ -283,6 +319,8 @@ def _write_package(package: dict, path: Path, output_schema: str, log) -> None:
     Serialize package to pretty-printed JSON and write to path.
     Creates parent directories if they do not exist.
     """
+    if str(path.resolve()) in _PROTECTED_PRODUCTION_PATHS:
+        raise ProductionAssetProtectionError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(package, ensure_ascii=False, indent=2)
     path.write_text(content, encoding="utf-8")

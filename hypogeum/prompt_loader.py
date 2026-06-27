@@ -17,9 +17,11 @@ never sees them.  This preserves exact pre-Phase-2A prompt behaviour while
 making version/ownership machine-readable.
 
 Public API:
-    load_prompt(path)          -> str   (body text, headers stripped)
-    read_metadata(path)        -> dict  (parsed header key/value pairs)
-    load_music_categories(path) -> dict (categories from music_categories.json)
+    load_prompt(path)                    -> str   (body text, headers stripped)
+    load_skill(path)                     -> str   (skill markdown, empty if absent)
+    compose_system_prompt(base, *skills) -> str   (base + skills, missing skills skipped)
+    read_metadata(path)                  -> dict  (parsed header key/value pairs)
+    load_music_categories(path)          -> dict  (categories from music_categories.json)
 
 Raises:
     FileNotFoundError — prompt file does not exist (raised as-is; callers rely
@@ -92,6 +94,55 @@ def read_metadata(path: Path) -> dict:
     for key in REQUIRED_HEADER_KEYS:
         meta.setdefault(key, None)
     return meta
+
+
+def load_skill(path: Path) -> str:
+    """
+    Read a skill markdown file and return its full content.
+
+    Unlike load_prompt(), does not strip headers — skill files are plain markdown.
+    Returns an empty string if the file does not exist (safe degradation).
+
+    Args:
+        path: Absolute path to the skill .md file.
+
+    Returns:
+        Skill file content, or empty string if the file is absent.
+    """
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def compose_system_prompt(base_prompt_path: Path, *skill_paths: Path) -> str:
+    """
+    Compose a system prompt from a base prompt file and zero or more skill files.
+
+    Loads the base prompt via load_prompt(), then appends each skill via
+    load_skill() in the order given, separated by ``\\n\\n---\\n\\n``.
+    Skills whose files are absent are silently skipped — the base prompt is
+    always returned even when every skill path is missing.
+
+    This is the generic entry point for all agents that attach skills.
+    No agent should concatenate base + skill manually.
+
+    Args:
+        base_prompt_path: Absolute path to the versioned base prompt (.txt).
+        *skill_paths:     Zero or more absolute paths to skill (.md) files.
+
+    Returns:
+        Composed system prompt string ready to pass to run_agent().
+
+    Raises:
+        FileNotFoundError: base_prompt_path does not exist.
+        ValueError:        base_prompt_path is empty after stripping headers.
+    """
+    parts = [load_prompt(base_prompt_path)]
+    for skill_path in skill_paths:
+        skill = load_skill(skill_path)
+        if skill:
+            parts.append(skill)
+    return "\n\n---\n\n".join(parts)
 
 
 def load_music_categories(path: Path) -> dict:

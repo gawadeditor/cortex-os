@@ -107,9 +107,11 @@ Rules:
 - Include period-specific visual details: clothing styles, architectural features, material textures.
 - Include lighting quality: "torchlight casting warm amber glow", "overcast diffuse light", "harsh noon sun".
 - Include camera language: "close-up", "wide establishing shot", "slow pan", "static overhead".
-- Primary_prompt: 30–60 words. Specific, cinematic, accurate.
-- Fallback_prompt: 20–40 words. Simpler scene that can be rendered reliably. Same period accuracy.
+- Primary_prompt: 30–60 words minimum. Specific, cinematic, accurate.
+- Fallback_prompt: 20–40 words minimum. Simpler scene that can be rendered reliably. Same period accuracy.
 - Never reference non-visual concepts in prompts ("mysterious", "important", "significant"). Describe only what can be seen.
+
+When generating primary_prompt and fallback_prompt for any scene, follow the Cinematic Prompt Architecture skill (appended at the end of this system prompt). The skill defines the required layered structure: premise → shot declaration → lighting plan → material detail → spatial composition → camera and motion → time segmentation → technical tags → negative constraints. Apply all layers. The skill supersedes the generic word-count guidance above for prompt fields.
 
 DOCUMENTARY VISUAL GRAMMAR — PERMANENT HARD CONSTRAINT
 

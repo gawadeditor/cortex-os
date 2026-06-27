@@ -1280,6 +1280,26 @@ CREATE INDEX IF NOT EXISTS idx_topiccand_channel ON topic_candidates(channel_id,
 CREATE INDEX IF NOT EXISTS idx_topiccand_cycle   ON topic_candidates(cycle_id);
 
 -- ===========================================================================
+-- discovery_state — Persistent run state for the /discover dashboard page
+-- One row per channel_id. Engine-agnostic: both v1 (topic_candidates) and
+-- v2 (opportunities) engines write here after each cycle.
+-- candidates_json: JSON array of normalized candidate dicts for the template.
+-- status lifecycle: idle → running → completed | failed
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS discovery_state (
+    channel_id       TEXT PRIMARY KEY,
+    status           TEXT NOT NULL DEFAULT 'idle'
+                         CHECK(status IN ('idle','running','completed','failed')),
+    last_cycle_id    TEXT,
+    candidate_count  INTEGER NOT NULL DEFAULT 0,
+    candidates_json  TEXT,
+    started_at       TEXT,
+    completed_at     TEXT,
+    error            TEXT,
+    updated_at       TEXT NOT NULL
+);
+
+-- ===========================================================================
 -- platform_sync_log — Per-platform auto-sync audit trail
 -- One row per sync attempt. triggered_by: 'auto' | 'manual'.
 -- ===========================================================================

@@ -6,64 +6,133 @@
   <title>Discover — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
+    /* ── Candidate card ── */
     .candidate-row { display: flex; gap: 12px; align-items: flex-start;
-                     padding: 12px 14px; border-bottom: 1px solid var(--border); }
+                     padding: 14px 16px; border-bottom: 1px solid var(--border);
+                     transition: background .1s; }
     .candidate-row:last-child { border-bottom: none; }
-    .candidate-rank { width: 28px; flex-shrink: 0; text-align: center;
-                      font-size: 18px; font-weight: 700; color: var(--muted);
-                      padding-top: 2px; }
-    .candidate-rank.selected-rank { color: var(--blue); }
+    .candidate-row.is-selected { background: rgba(88,166,255,.05); }
+
+    .candidate-rank { width: 24px; flex-shrink: 0; text-align: center;
+                      font-size: 16px; font-weight: 700; color: var(--muted);
+                      padding-top: 3px; }
+    .candidate-rank.rank-selected { color: var(--blue); }
+
     .candidate-body { flex: 1; min-width: 0; }
+
     .candidate-topic { font-size: 14px; font-weight: 600; color: var(--text);
                        margin-bottom: 6px; line-height: 1.4; }
-    .candidate-topic.selected-topic { color: var(--blue); }
-    .candidate-meta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 12px; }
-    .candidate-score { font-weight: 700; font-family: monospace; color: var(--green); }
-    .candidate-source { color: var(--muted); }
-    .candidate-rationale { font-size: 12px; color: var(--muted); line-height: 1.6;
-                           display: grid; grid-template-columns: 60px 1fr; gap: 3px 8px; }
-    .rationale-lbl { color: var(--muted); font-weight: 600; text-transform: uppercase;
-                     font-size: 10px; letter-spacing: .04em; padding-top: 2px; }
-    .risk-pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
-                 background: #3a2e0d; color: var(--yellow); border: 1px solid #9e6a03; }
-    .candidate-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+    .candidate-topic.topic-selected { color: var(--blue); }
+
+    /* Score bar row */
+    .score-row { display: flex; align-items: center; gap: 8px;
+                 margin-bottom: 8px; flex-wrap: wrap; }
+    .score-num { font-size: 13px; font-weight: 700; font-family: monospace;
+                 color: var(--green); min-width: 36px; }
+    .score-bar-wrap { flex: 1; min-width: 80px; max-width: 180px;
+                      height: 6px; background: var(--border);
+                      border-radius: 3px; overflow: hidden; }
+    .score-bar-fill { height: 100%; background: var(--green); border-radius: 3px; }
+    .score-bar-fill.score-mid { background: var(--yellow); }
+    .score-bar-fill.score-low { background: var(--muted); }
+    .source-tag { font-size: 11px; color: var(--muted);
+                  background: var(--surface); border: 1px solid var(--border);
+                  border-radius: 10px; padding: 1px 7px; }
+
+    /* Rationale grid */
+    .rationale-grid { font-size: 12px; color: var(--muted); line-height: 1.6;
+                      display: grid; grid-template-columns: 70px 1fr;
+                      gap: 3px 8px; margin-top: 4px; }
+    .rationale-lbl { font-weight: 600; text-transform: uppercase; font-size: 10px;
+                     letter-spacing: .04em; color: var(--muted); padding-top: 2px; }
+    .risk-pill { display: inline-block; padding: 1px 7px; border-radius: 10px;
+                 font-size: 11px; background: #3a2e0d; color: var(--yellow);
+                 border: 1px solid #9e6a03; }
+
+    /* Queued badge */
+    .badge-queued { display: inline-flex; align-items: center; gap: 4px;
+                    font-size: 11px; color: var(--green);
+                    background: rgba(63,185,80,.12); border: 1px solid rgba(63,185,80,.3);
+                    border-radius: 10px; padding: 1px 8px; font-weight: 600; }
+
+    .candidate-actions { display: flex; flex-direction: column; gap: 4px;
+                         flex-shrink: 0; min-width: 72px; }
+
+    /* Queue panel */
+    .queue-panel { margin-top: var(--gap); }
+    .queue-row { display: flex; align-items: flex-start; gap: 10px;
+                 padding: 10px 14px; border-bottom: 1px solid var(--border);
+                 font-size: 13px; }
+    .queue-row:last-child { border-bottom: none; }
+    .queue-topic { flex: 1; min-width: 0; }
+    .queue-topic-text { font-weight: 500; line-height: 1.4; margin-bottom: 3px; }
+    .queue-meta { font-size: 11px; color: var(--muted); display: flex;
+                  gap: 10px; flex-wrap: wrap; }
+    .queue-source-disc { color: var(--blue); }
+    .queue-source-manual { color: var(--muted); }
+
+    /* State banners */
+    .running-banner { display: flex; align-items: center; gap: 10px;
+                      padding: 12px 16px; background: var(--surface);
+                      border: 1px solid var(--border); border-radius: var(--radius);
+                      font-size: 13px; color: var(--muted); margin-bottom: var(--gap); }
+    .failed-banner { padding: 12px 16px; background: rgba(248,81,73,.08);
+                     border: 1px solid rgba(248,81,73,.3); border-radius: var(--radius);
+                     font-size: 13px; color: var(--red, #f85149); margin-bottom: var(--gap); }
+
+    /* Status bar inline */
+    #discover-status { font-size: 12px; padding: 3px 10px; border-radius: var(--radius);
+                       display: none; align-items: center; gap: 6px; }
+    #discover-status.running { display: flex; color: var(--muted); }
+    #discover-status.error   { display: flex; color: var(--red, #f85149);
+                                background: rgba(248,81,73,.1); padding: 4px 10px; }
+
     .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
-    .empty-icon { font-size: 32px; margin-bottom: 8px; }
-    .cycle-meta { font-size: 12px; color: var(--muted); }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { width: 14px; height: 14px; border: 2px solid currentColor;
+               border-top-color: transparent; border-radius: 50%;
+               display: inline-block; animation: spin .7s linear infinite; flex-shrink: 0; }
+
+    .section-title { font-size: 12px; font-weight: 600; text-transform: uppercase;
+                     letter-spacing: .05em; color: var(--muted);
+                     padding: 10px 16px 6px; border-bottom: 1px solid var(--border); }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
+{# ── Page header ── #}
 <div class="page-header">
   <h1>Topic Discovery</h1>
   <span class="page-meta">
-    {% if candidates %}{{ candidates | length }} candidate{% if candidates | length != 1 %}s{% endif %}{% endif %}
+    {% if candidates %}{{ candidates|length }} candidate{% if candidates|length != 1 %}s{% endif %}{% endif %}
+    {% if queued_topics %}&nbsp;·&nbsp;{{ queued_topics|length }} queued{% endif %}
   </span>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
-    {% if channels and channels | length > 1 %}
+    {% if channels and channels|length > 1 %}
     <form method="GET" action="/discover" style="display:inline;">
       <select name="channel_id" onchange="this.form.submit()"
               style="padding:4px 8px; background:var(--surface); border:1px solid var(--border);
                      border-radius:var(--radius); color:var(--text); font-size:12px;">
         {% for ch in channels %}
           <option value="{{ ch.channel_id }}"
-            {% if ch.channel_id == channel_id %}selected{% endif %}>
-            {{ ch.channel_id }}
-          </option>
+            {% if ch.channel_id == channel_id %}selected{% endif %}>{{ ch.channel_id }}</option>
         {% endfor %}
       </select>
     </form>
     {% endif %}
-    <button id="btn-run" class="btn btn-save" onclick="runDiscovery(event)">
-      Run Discovery Cycle
+    <div id="discover-status" role="status" aria-live="polite"></div>
+    <button id="btn-run" type="button" class="btn btn-save"
+            onclick="runDiscovery()"
+            {% if discovery_status == 'running' %}disabled{% endif %}>
+      {% if discovery_status == 'running' %}Running…{% else %}Run Discovery Cycle{% endif %}
     </button>
   </div>
 </div>
 
-{% if flash == 'ok' %}
-  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Discovery cycle complete — candidates ranked below.</div>
-{% elif flash == 'approved' %}
+{# ── Flash messages ── #}
+{% if flash == 'approved' %}
   <div class="flash flash-ok" style="margin-bottom:var(--gap);">Candidate approved and added to topic queue.</div>
 {% elif flash == 'rejected' %}
   <div class="flash flash-ok" style="margin-bottom:var(--gap);">Candidate rejected.</div>
@@ -73,90 +142,272 @@
   <div class="flash flash-err" style="margin-bottom:var(--gap);">{{ flash }}</div>
 {% endif %}
 
-{% if cycle_id %}
-<div class="cycle-meta" style="margin-bottom:var(--gap);">
-  Cycle: <code style="font-size:11px;">{{ cycle_id }}</code>
-  {% if candidates %}&nbsp;·&nbsp;Channel: <code style="font-size:11px;">{{ channel_id }}</code>{% endif %}
+{# ── Running banner ── #}
+{% if discovery_status == 'running' %}
+<div class="running-banner">
+  <span class="spinner"></span>
+  <span>Discovery cycle is running — this page will refresh automatically when complete.</span>
 </div>
 {% endif %}
 
+{# ── Failed banner ── #}
+{% if discovery_status == 'failed' and discovery_error %}
+<div class="failed-banner">
+  &#9888; Last cycle failed: {{ discovery_error }}
+</div>
+{% endif %}
+
+{# ── Cycle metadata ── #}
+{% if cycle_id and discovery_status in ('completed', 'idle') and candidates %}
+<div style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  Last cycle:
+  {% if discovery_completed_at %}{{ discovery_completed_at[:19].replace('T',' ') }} UTC &nbsp;·&nbsp;{% endif %}
+  <code style="font-size:11px;">{{ cycle_id[:8] }}…</code>
+  &nbsp;·&nbsp; Channel: <code style="font-size:11px;">{{ channel_id }}</code>
+</div>
+{% endif %}
+
+{# ── Candidates ── #}
+{% set queued_set = queued_candidate_ids %}
 <div class="card" style="padding:0;">
   {% if candidates %}
-    {% for c in candidates %}
-    <div class="candidate-row">
-      <div class="candidate-rank {% if c.selected %}selected-rank{% endif %}">
-        {% if c.selected %}★{% else %}{{ loop.index }}{% endif %}
+  <div class="section-title">Scored Candidates</div>
+  {% for c in candidates %}
+  {% set already_queued = c.candidate_id in queued_set %}
+  <div class="candidate-row {% if c.selected %}is-selected{% endif %}">
+    <div class="candidate-rank {% if c.selected %}rank-selected{% endif %}">
+      {% if c.selected %}&#9733;{% else %}{{ loop.index }}{% endif %}
+    </div>
+    <div class="candidate-body">
+      <div class="candidate-topic {% if c.selected %}topic-selected{% endif %}">
+        {{ c.topic }}
       </div>
-      <div class="candidate-body">
-        <div class="candidate-topic {% if c.selected %}selected-topic{% endif %}">
-          {{ c.topic }}
+
+      {# ── Score bar ── #}
+      {% set pct = (c.score * 100) | int %}
+      <div class="score-row">
+        <span class="score-num">{{ "%.2f"|format(c.score) }}</span>
+        <div class="score-bar-wrap" title="Score {{ pct }}%">
+          <div class="score-bar-fill {% if c.score < 0.5 %}score-low{% elif c.score < 0.7 %}score-mid{% endif %}"
+               style="width:{{ pct }}%;"></div>
         </div>
-        <div class="candidate-meta">
-          <span class="candidate-score">{{ "%.2f"|format(c.score) }}</span>
-          <span class="candidate-source">{{ c.source }}</span>
-          <span class="badge badge-{{ c.status }}">{{ c.status }}</span>
-          {% if c.selected %}<span class="badge badge-active">top pick</span>{% endif %}
-        </div>
-        <div class="candidate-rationale">
-          <span class="rationale-lbl">CTR</span>
-          <span>{{ c.ctr_rationale or '—' }}</span>
-          <span class="rationale-lbl">Retention</span>
-          <span>{{ c.retention_rationale or '—' }}</span>
-          <span class="rationale-lbl">Watch</span>
-          <span>{{ c.watch_time_rationale or '—' }}</span>
-          {% if c.risk %}
-          <span class="rationale-lbl">Risk</span>
-          <span><span class="risk-pill">{{ c.risk }}</span></span>
-          {% endif %}
-        </div>
-      </div>
-      {% if c.status == 'pending' %}
-      <div class="candidate-actions">
-        {% if c.selected %}
-        <form method="POST" action="/api/discover/approve/{{ c.candidate_id }}">
-          <button type="submit" class="btn btn-approve">Approve</button>
-        </form>
+        <span class="source-tag">{{ c.source }}</span>
+        {% if c.selected %}<span class="badge badge-active">top pick</span>{% endif %}
+        {% if already_queued %}<span class="badge-queued">&#10003; queued</span>{% endif %}
+        {% if c.status == 'approved' and not already_queued %}
+          <span class="badge badge-active">approved</span>
+        {% elif c.status == 'rejected' %}
+          <span class="badge" style="color:var(--muted);">rejected</span>
         {% endif %}
-        <form method="POST" action="/api/discover/reject/{{ c.candidate_id }}">
-          <button type="submit" class="btn btn-reject">Reject</button>
-        </form>
+      </div>
+
+      {# ── Rationale ── #}
+      {% if c.ctr_rationale or c.retention_rationale or c.watch_time_rationale or c.risk %}
+      <div class="rationale-grid">
+        {% if c.ctr_rationale %}
+        <span class="rationale-lbl">Click</span><span>{{ c.ctr_rationale }}</span>
+        {% endif %}
+        {% if c.retention_rationale %}
+        <span class="rationale-lbl">Retention</span><span>{{ c.retention_rationale }}</span>
+        {% endif %}
+        {% if c.watch_time_rationale %}
+        <span class="rationale-lbl">Watch time</span><span>{{ c.watch_time_rationale }}</span>
+        {% endif %}
+        {% if c.risk %}
+        <span class="rationale-lbl">Risk</span>
+        <span><span class="risk-pill">{{ c.risk }}</span></span>
+        {% endif %}
       </div>
       {% endif %}
     </div>
-    {% endfor %}
+
+    {# ── Actions ── #}
+    <div class="candidate-actions">
+      {% if c.status == 'pending' and not already_queued %}
+        <form method="POST" action="/api/discover/approve/{{ c.candidate_id }}?channel_id={{ channel_id }}">
+          <button type="submit" class="btn btn-approve"
+                  style="font-size:12px; padding:4px 10px; width:100%;"
+                  title="Add to production queue">Queue</button>
+        </form>
+        <form method="POST" action="/api/discover/reject/{{ c.candidate_id }}?channel_id={{ channel_id }}">
+          <button type="submit" class="btn btn-reject"
+                  style="font-size:12px; padding:4px 10px; width:100%;">Skip</button>
+        </form>
+      {% elif already_queued %}
+        <span style="font-size:11px; color:var(--green); text-align:center; padding-top:4px;">In queue</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+
+  {% elif discovery_status == 'running' %}
+  <div class="empty-state">
+    <div style="font-size:28px; animation:spin 1s linear infinite; display:inline-block;">&#8635;</div>
+    <div style="font-weight:600; color:var(--text); margin-top:8px; margin-bottom:6px;">Cycle in progress</div>
+    <div>Candidates will appear here when the cycle completes.</div>
+  </div>
   {% else %}
   <div class="empty-state">
-    <div class="empty-icon">🔍</div>
-    <div style="font-weight:600; color:var(--text); margin-bottom:6px;">No candidates yet</div>
-    <div>Click <strong>Run Discovery Cycle</strong> to generate scored topic candidates.</div>
+    <div style="font-size:32px;">&#128269;</div>
+    <div style="font-weight:600; color:var(--text); margin-top:8px; margin-bottom:6px;">No candidates yet</div>
+    <div>Click <strong>Run Discovery Cycle</strong> to score topic candidates.</div>
   </div>
   {% endif %}
 </div>
 
+{# ── Queue panel ── #}
+{% if queued_topics %}
+<div class="card queue-panel" style="padding:0; margin-top:var(--gap);">
+  <div class="section-title">
+    Production Queue
+    <span style="font-weight:400; font-size:11px; margin-left:6px;">— {{ queued_topics|length }} topic{% if queued_topics|length != 1 %}s{% endif %} waiting</span>
+    <a href="/create" style="font-size:11px; font-weight:400; margin-left:auto; float:right; color:var(--blue);">Run next &#8594;</a>
+  </div>
+  {% for t in queued_topics %}
+  <div class="queue-row">
+    <div class="queue-topic">
+      <div class="queue-topic-text">{{ t.topic_text }}</div>
+      <div class="queue-meta">
+        {% if t.source == 'discovered' %}
+          <span class="queue-source-disc">&#128270; discovered</span>
+          {% if t.discovery_score is not none and t.discovery_score %}<span>score {{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
+        {% else %}
+          <span class="queue-source-manual">&#9998; manual</span>
+        {% endif %}
+        {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
+        <span>priority {{ t.priority }}</span>
+      </div>
+    </div>
+    <div style="display:flex; gap:4px; flex-shrink:0; align-items:center;">
+      <form method="POST" action="/create/launch" style="display:inline;">
+        <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
+        <input type="hidden" name="topic" value="{{ t.topic_text }}">
+        <input type="hidden" name="video_type" value="long_video">
+        <input type="hidden" name="quality_mode" value="balanced">
+        <input type="hidden" name="platforms" value="youtube">
+        <button type="submit" class="btn btn-approve"
+                style="font-size:11px; padding:3px 10px;">&#9654; Start</button>
+      </form>
+      <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
+        <button type="submit" class="btn" onclick="return confirm('Remove this topic from queue?')"
+                style="font-size:11px; padding:3px 8px; color:var(--muted);">&#10005;</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ── Manual override ── #}
+<div style="margin-top:var(--gap);">
+  <details>
+    <summary style="cursor:pointer; font-size:12px; color:var(--muted); padding:8px 0;
+                    list-style:none; display:flex; align-items:center; gap:6px;">
+      <span style="font-size:10px;">&#9654;</span>
+      Override: queue a custom topic manually
+    </summary>
+    <div style="padding: 12px 0;">
+      <form id="manual-topic-form">
+        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+          <div style="flex:1; min-width:200px;">
+            <label style="display:block; font-size:12px; color:var(--muted); margin-bottom:4px;">Topic</label>
+            <input type="text" id="manual-topic-input" maxlength="500"
+                   placeholder="e.g. The Roman catacombs no one talks about"
+                   style="width:100%; padding:7px 10px; font-size:13px; font-family:inherit;
+                          background:var(--bg); border:1px solid var(--border);
+                          border-radius:var(--radius); color:var(--text);">
+          </div>
+          <button type="button" onclick="submitManualTopic()"
+                  class="btn btn-save" style="padding:7px 16px; font-size:13px;">
+            Add to Queue
+          </button>
+        </div>
+        <div id="manual-topic-status" style="font-size:12px; margin-top:6px; color:var(--muted);"></div>
+      </form>
+    </div>
+  </details>
+</div>
+
 <script>
-function runDiscovery(event) {
-  event.preventDefault();
+var _channelId = '{{ channel_id }}';
+
+function _setStatus(cls, html) {
+  var el = document.getElementById('discover-status');
+  if (!el) return;
+  el.className = cls;
+  el.innerHTML = html;
+}
+
+function runDiscovery() {
   var btn = document.getElementById('btn-run');
+  if (btn && btn.disabled) return;
   if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+  _setStatus('running', '<span class="spinner"></span> Starting…');
+
   fetch('/api/discover/run', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({channel_id: '{{ channel_id }}'}),
+    body: JSON.stringify({channel_id: _channelId}),
   })
-  .then(function(r) { return r.json(); })
+  .then(function(r) {
+    if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'HTTP ' + r.status); });
+    return r.json();
+  })
   .then(function(d) {
     if (d.ok) {
-      window.location.href = '/discover?channel_id={{ channel_id }}&flash=ok&cycle_id=' + d.cycle_id;
+      _setStatus('running', '<span class="spinner"></span> Cycle running…');
+      window.location.href = '/discover?channel_id=' + encodeURIComponent(_channelId);
     } else {
       if (btn) { btn.disabled = false; btn.textContent = 'Run Discovery Cycle'; }
-      alert('Discovery failed: ' + (d.error || 'unknown error'));
+      _setStatus('error', '&#9888; ' + (d.error || 'Discovery failed'));
     }
   })
   .catch(function(e) {
     if (btn) { btn.disabled = false; btn.textContent = 'Run Discovery Cycle'; }
-    alert('Network error: ' + e.message);
+    _setStatus('error', '&#9888; ' + (e.message || 'Network error'));
   });
 }
+
+function submitManualTopic() {
+  var input = document.getElementById('manual-topic-input');
+  var status = document.getElementById('manual-topic-status');
+  var text = (input ? input.value : '').trim();
+  if (!text) { if (status) status.textContent = 'Enter a topic first.'; return; }
+
+  fetch('/api/topics', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel_id: _channelId, topic_text: text, source: 'manual'}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      if (status) { status.style.color = 'var(--green)'; status.textContent = '✓ Added to queue.'; }
+      if (input) input.value = '';
+      setTimeout(function() { window.location.reload(); }, 800);
+    } else {
+      if (status) { status.style.color = 'var(--red,#f85149)'; status.textContent = d.error || 'Failed.'; }
+    }
+  })
+  .catch(function(e) {
+    if (status) { status.style.color = 'var(--red,#f85149)'; status.textContent = e.message; }
+  });
+}
+
+{% if discovery_status == 'running' %}
+(function poll() {
+  setTimeout(function() {
+    fetch('/api/discover/state?channel_id=' + encodeURIComponent(_channelId))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.status === 'completed' || d.status === 'failed') {
+        window.location.reload();
+      } else { poll(); }
+    })
+    .catch(function() { poll(); });
+  }, 3000);
+})();
+{% endif %}
 </script>
 </body>
 </html>

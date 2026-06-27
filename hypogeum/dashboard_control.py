@@ -338,6 +338,9 @@ def enqueue_topic(
     topic_text:  str,
     priority:    int             = 0,
     db_path:     Optional[Path] = None,
+    source:      str             = "manual",
+    discovery_score: Optional[float] = None,
+    candidate_id:    Optional[str]   = None,
 ) -> dict:
     """Enqueue a topic for a channel. Returns Result dict."""
     try:
@@ -351,6 +354,9 @@ def enqueue_topic(
             priority=priority,
             validate_channel=True,
             db_path=db_path,
+            source=source,
+            discovery_score=discovery_score,
+            candidate_id=candidate_id,
         )
         return _ok(topic_id=topic_id, channel_id=channel_id, topic_text=topic_text)
     except _CNF as exc:

@@ -412,6 +412,150 @@ def _run_discovery_cycle_v2_stub(
     return result
 
 
+# ---------------------------------------------------------------------------
+# discovery_state helpers — engine-agnostic persistent run state
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_candidate_v2(opp: dict) -> dict:
+    """Convert a v2 opportunity dict to the template-compatible candidate shape."""
+    status_map = {
+        "active":      "pending",
+        "selected":    "pending",
+        "enqueued":    "approved",
+        "consumed":    "consumed",
+        "rejected":    "rejected",
+        "blacklisted": "rejected",
+        "exhausted":   "rejected",
+    }
+    opp_status = opp.get("status", "active")
+    return {
+        "candidate_id":         opp.get("opportunity_id", str(uuid.uuid4())),
+        "topic":                opp.get("topic_text") or opp.get("canonical_subject", ""),
+        "score":                round(float(
+            opp.get("final_composite")
+            or opp.get("priority_score")
+            or opp.get("initial_composite")
+            or 0.0
+        ), 4),
+        "source":               opp.get("generation_source", "llm"),
+        "status":               status_map.get(opp_status, "pending"),
+        "selected":             1 if opp_status in ("selected", "enqueued") else 0,
+        "ctr_rationale":        opp.get("mystery_hook", ""),
+        "retention_rationale":  opp.get("differentiation_claim", ""),
+        "watch_time_rationale": opp.get("visual_signal", ""),
+        "risk":                 None,
+        "cycle_id":             opp.get("cycle_id"),
+    }
+
+
+def upsert_discovery_state(
+    channel_id: str,
+    status: str,
+    *,
+    last_cycle_id: Optional[str] = None,
+    candidates: Optional[list] = None,
+    error: Optional[str] = None,
+    started_at: Optional[str] = None,
+    completed_at: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Write or update the discovery_state row for a channel.
+
+    Fields not explicitly provided are preserved via COALESCE on conflict.
+    candidate_count and candidates_json are only updated when candidates is given.
+    """
+    now = _now_iso()
+    has_candidates = candidates is not None
+    count = len(candidates) if has_candidates else 0
+    cjson = json.dumps(candidates) if has_candidates else None
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO discovery_state
+               (channel_id, status, last_cycle_id, candidate_count, candidates_json,
+                started_at, completed_at, error, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(channel_id) DO UPDATE SET
+                 status          = excluded.status,
+                 last_cycle_id   = COALESCE(excluded.last_cycle_id,   last_cycle_id),
+                 candidate_count = CASE WHEN excluded.candidates_json IS NOT NULL
+                                   THEN excluded.candidate_count
+                                   ELSE candidate_count END,
+                 candidates_json = CASE WHEN excluded.candidates_json IS NOT NULL
+                                   THEN excluded.candidates_json
+                                   ELSE candidates_json END,
+                 started_at      = COALESCE(excluded.started_at,      started_at),
+                 completed_at    = excluded.completed_at,
+                 error           = excluded.error,
+                 updated_at      = excluded.updated_at""",
+            (channel_id, status, last_cycle_id, count, cjson,
+             started_at, completed_at, error, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_discovery_state(
+    channel_id: str,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """
+    Return the current discovery_state row for a channel.
+
+    Returns a dict with keys:
+        status, last_cycle_id, candidate_count, candidates,
+        started_at, completed_at, error, updated_at
+
+    Returns an idle default dict if no row exists yet.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """SELECT status, last_cycle_id, candidate_count, candidates_json,
+                      started_at, completed_at, error, updated_at
+               FROM discovery_state WHERE channel_id = ?""",
+            (channel_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return {
+            "status":          "idle",
+            "last_cycle_id":   None,
+            "candidate_count": 0,
+            "candidates":      [],
+            "started_at":      None,
+            "completed_at":    None,
+            "error":           None,
+            "updated_at":      None,
+        }
+
+    candidates = []
+    if row[3]:
+        try:
+            candidates = json.loads(row[3])
+        except (json.JSONDecodeError, TypeError):
+            candidates = []
+
+    return {
+        "status":          row[0],
+        "last_cycle_id":   row[1],
+        "candidate_count": row[2] or 0,
+        "candidates":      candidates,
+        "started_at":      row[4],
+        "completed_at":    row[5],
+        "error":           row[6],
+        "updated_at":      row[7],
+    }
+
+
 def run_discovery_cycle(
     channel_id: str,
     db_path: Optional[Path] = None,
@@ -422,18 +566,60 @@ def run_discovery_cycle(
     Dispatches to the v1 heuristic implementation or the v2 Discovery
     Director based on the DISCOVERY_ENGINE environment variable.
 
-    DISCOVERY_ENGINE=v1 (default) — legacy heuristic; no behaviour change.
-    DISCOVERY_ENGINE=v2           — Discovery Director (LLM-driven, not yet
-                                    implemented; returns ok=False stub).
+    In both cases, updates discovery_state:
+      - Sets status='running' at the start.
+      - Sets status='completed' with normalized candidates_json on success.
+      - Sets status='failed' with error on failure.
 
-    Returns the same dict shape from both engines:
-        {ok, cycle_id, channel_id, candidate_count, selected_candidate_id, candidates}
-    (v2 stub returns a minimal error dict until implemented.)
+    DISCOVERY_ENGINE=v1 (default) — heuristic seeds, no LLM calls.
+    DISCOVERY_ENGINE=v2           — Discovery Director (LLM + Perplexity).
+
+    Returns:
+        {ok, cycle_id, channel_id, candidate_count, candidates, ...}
     """
     engine = os.getenv("DISCOVERY_ENGINE", "v1").strip().lower()
-    if engine == "v2":
-        return _run_discovery_cycle_v2_stub(channel_id, db_path)
-    return _run_discovery_cycle_v1(channel_id, db_path)
+    started = _now_iso()
+    upsert_discovery_state(channel_id, "running", started_at=started, db_path=db_path)
+    try:
+        if engine == "v2":
+            result = _run_discovery_cycle_v2_stub(channel_id, db_path)
+        else:
+            result = _run_discovery_cycle_v1(channel_id, db_path)
+
+        if result.get("ok"):
+            raw_candidates = result.get("candidates", [])
+            # Normalize v2 opportunity dicts to the template-compatible shape
+            if engine == "v2":
+                normalized = [_normalize_candidate_v2(c) for c in raw_candidates]
+            else:
+                normalized = raw_candidates  # v1 candidates already in correct shape
+            upsert_discovery_state(
+                channel_id, "completed",
+                last_cycle_id=result.get("cycle_id"),
+                candidates=normalized,
+                started_at=started,
+                completed_at=_now_iso(),
+                db_path=db_path,
+            )
+            result["candidates"] = normalized
+        else:
+            upsert_discovery_state(
+                channel_id, "failed",
+                error=result.get("error", "Discovery failed"),
+                started_at=started,
+                completed_at=_now_iso(),
+                db_path=db_path,
+            )
+        return result
+    except Exception as exc:
+        upsert_discovery_state(
+            channel_id, "failed",
+            error=str(exc),
+            started_at=started,
+            completed_at=_now_iso(),
+            db_path=db_path,
+        )
+        raise
 
 
 def _run_discovery_cycle_v1(
@@ -584,12 +770,12 @@ def approve_candidate(
     conn = get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT channel_id, topic, selected, status FROM topic_candidates WHERE candidate_id = ?",
+            "SELECT channel_id, topic, selected, status, score FROM topic_candidates WHERE candidate_id = ?",
             (candidate_id,),
         ).fetchone()
         if not row:
             return {"ok": False, "error": "candidate not found", "code": "not_found"}
-        channel_id, topic_text, selected, status = row
+        channel_id, topic_text, selected, status, score = row
         if not selected:
             return {"ok": False, "error": "only the selected candidate may be approved", "code": "not_selected"}
         if status != "pending":
@@ -602,7 +788,7 @@ def approve_candidate(
         )
         conn.commit()
 
-        # Enqueue via topics module
+        # Enqueue via topics module, preserving discovery provenance
         from hypogeum.topics import enqueue_topic, DuplicateTopicError
         try:
             topic_id = enqueue_topic(
@@ -610,6 +796,9 @@ def approve_candidate(
                 priority=10,
                 validate_channel=True,
                 db_path=db_path,
+                source="discovered",
+                discovery_score=float(score) if score is not None else None,
+                candidate_id=candidate_id,
             )
         except DuplicateTopicError:
             # Already queued — treat as success
@@ -625,6 +814,7 @@ def approve_candidate(
             "topic_id": topic_id,
             "topic_text": topic_text,
             "channel_id": channel_id,
+            "discovery_score": float(score) if score is not None else None,
         }
     finally:
         conn.close()

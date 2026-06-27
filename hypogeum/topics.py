@@ -185,6 +185,9 @@ def enqueue_topic(
     priority: int = 0,
     validate_channel: bool = False,
     db_path: Optional[Path] = None,
+    source: str = "manual",
+    discovery_score: Optional[float] = None,
+    candidate_id: Optional[str] = None,
 ) -> str:
     """
     Add a topic to the episode backlog for a channel.
@@ -234,6 +237,9 @@ def enqueue_topic(
             channel_id=channel_id,
             topic_text=clean_text,
             priority=priority,
+            source=source,
+            discovery_score=discovery_score,
+            candidate_id=candidate_id,
             created_at=now,
             updated_at=now,
         )

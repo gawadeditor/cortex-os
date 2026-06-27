@@ -180,6 +180,13 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "provider_comparison_runs": [
         ("comparison_type", "TEXT NOT NULL DEFAULT 'image'"),  # Phase 1J: 'image'|'video'
     ],
+    "episode_topics": [
+        # Provenance — where did this topic come from?
+        # source: 'discovered' (via discovery cycle) | 'manual' (operator) | 'imported' (CSV)
+        ("source",          "TEXT NOT NULL DEFAULT 'manual'"),
+        ("discovery_score", "REAL"),    # score from the discovery cycle; NULL for manual
+        ("candidate_id",    "TEXT"),    # topic_candidates.candidate_id; NULL for manual
+    ],
 }
 
 
@@ -1737,17 +1744,23 @@ def insert_episode_topic(
     created_at: str,
     updated_at: str,
     priority: int = 0,
+    source: str = "manual",
+    discovery_score: Optional[float] = None,
+    candidate_id: Optional[str] = None,
 ) -> None:
     """Insert a new topic into the episode backlog with status='queued'."""
     conn.execute(
         """
         INSERT INTO episode_topics
             (topic_id, channel_id, topic_text, status, priority,
+             source, discovery_score, candidate_id,
              created_at, updated_at)
         VALUES
-            (?, ?, ?, 'queued', ?, ?, ?)
+            (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
         """,
-        (topic_id, channel_id, topic_text, priority, created_at, updated_at),
+        (topic_id, channel_id, topic_text, priority,
+         source, discovery_score, candidate_id,
+         created_at, updated_at),
     )
 
 

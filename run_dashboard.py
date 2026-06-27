@@ -329,9 +329,23 @@ def create_page():
     except Exception:
         setup_preflight = {"ready": False, "blockers": [], "blocker_count": 0}
     error = request.args.get("error")
-    # Surface topic queue so the operator can start from a queued topic
+    # Surface topic queue with full provenance so the operator sees why each topic is here
     try:
-        queued_topics = list_episode_topics(status="queued", db_path=db, limit=10)
+        from hypogeum.db import initialize_schema as _init_schema, get_connection as _get_conn
+        _init_schema(db)
+        _conn = _get_conn(db)
+        try:
+            _rows = _conn.execute(
+                """SELECT topic_id, channel_id, topic_text, status, priority,
+                          source, discovery_score, candidate_id, created_at, updated_at
+                   FROM episode_topics
+                   WHERE status = 'queued'
+                   ORDER BY priority ASC, created_at ASC
+                   LIMIT 10""",
+            ).fetchall()
+            queued_topics = [dict(r) for r in _rows]
+        finally:
+            _conn.close()
     except Exception:
         queued_topics = []
     return render_template(
@@ -2900,13 +2914,42 @@ def api_topic_enqueue():
     channel_id = body.get("channel_id", "")
     topic_text = body.get("topic_text", "")
     priority   = int(body.get("priority", 0))
-    result = enqueue_topic(channel_id, topic_text, priority=priority, db_path=_db_path())
+    source     = body.get("source", "manual")
+    result = enqueue_topic(
+        channel_id, topic_text,
+        priority=priority,
+        db_path=_db_path(),
+        source=source,
+    )
     http_status = 200 if result["ok"] else (
         404 if result.get("code") == "not_found" else
         409 if result.get("code") == "duplicate" else
         400
     )
     return jsonify(result), http_status
+
+
+@app.route("/api/topics/<topic_id>/remove", methods=["POST"])
+def api_topic_remove(topic_id: str):
+    """Remove a queued topic (set status=cancelled)."""
+    from hypogeum.db import get_connection as _gc
+    db = _db_path()
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        conn = _gc(db)
+        try:
+            conn.execute(
+                "UPDATE episode_topics SET status='cancelled', updated_at=? WHERE topic_id=? AND status='queued'",
+                (now, topic_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        channel_id = request.form.get("channel_id") or request.args.get("channel_id", "")
+        return redirect(url_for("discover_page") + (f"?channel_id={channel_id}" if channel_id else ""))
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/api/approvals", methods=["GET"])
@@ -5037,8 +5080,10 @@ def _default_channel_id(db_path=None) -> str:
 
 @app.route("/discover", methods=["GET"])
 def discover_page():
-    from hypogeum.topic_discovery import get_candidates, get_latest_cycle_id
+    from hypogeum.topic_discovery import get_discovery_state
+    from hypogeum.db import initialize_schema, get_connection
     db = _db_path()
+    initialize_schema(db)  # ensure discovery_state and provenance columns exist
 
     try:
         from hypogeum.dashboard_api import get_channel_summaries
@@ -5047,44 +5092,101 @@ def discover_page():
         channels = []
 
     channel_id = request.args.get("channel_id") or _default_channel_id(db)
-    cycle_id   = request.args.get("cycle_id")
     flash      = request.args.get("flash")
 
-    if not cycle_id:
-        try:
-            cycle_id = get_latest_cycle_id(channel_id, db_path=db)
-        except Exception:
-            cycle_id = None
+    state = get_discovery_state(channel_id, db_path=db)
 
-    candidates = []
-    if cycle_id:
+    # Build a set of candidate_ids that are already queued, and the full queue
+    queued_candidate_ids: set[str] = set()
+    queued_topics: list[dict] = []
+    try:
+        conn = get_connection(db)
         try:
-            candidates = get_candidates(channel_id, cycle_id=cycle_id, db_path=db)
-        except Exception:
-            candidates = []
+            rows = conn.execute(
+                """SELECT topic_id, topic_text, status, priority, source,
+                          discovery_score, candidate_id, created_at, updated_at
+                   FROM episode_topics
+                   WHERE channel_id = ? AND status = 'queued'
+                   ORDER BY priority ASC, created_at ASC""",
+                (channel_id,),
+            ).fetchall()
+            for r in rows:
+                queued_topics.append(dict(r))
+                if r["candidate_id"]:
+                    queued_candidate_ids.add(r["candidate_id"])
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
     return render_template(
         "discover.html",
         channel_id=channel_id,
         channels=channels,
-        cycle_id=cycle_id,
-        candidates=candidates,
+        candidates=state.get("candidates", []),
+        cycle_id=state.get("last_cycle_id"),
+        discovery_status=state.get("status", "idle"),
+        discovery_error=state.get("error"),
+        discovery_started_at=state.get("started_at"),
+        discovery_completed_at=state.get("completed_at"),
+        queued_candidate_ids=list(queued_candidate_ids),
+        queued_topics=queued_topics,
         flash=flash,
     )
 
 
 @app.route("/api/discover/run", methods=["POST"])
 def api_discover_run():
-    """Run a new discovery cycle and return scored candidates."""
-    from hypogeum.topic_discovery import run_discovery_cycle
+    """
+    Start a discovery cycle in a background thread.
+
+    Returns immediately with {"ok": true, "status": "running"} so the
+    browser does not need to stay open for the cycle to complete.
+    State is written to discovery_state and readable from /discover on reload.
+    """
+    import threading
+    from hypogeum.topic_discovery import get_discovery_state, upsert_discovery_state
+    from hypogeum.db import initialize_schema
     db = _db_path()
+    initialize_schema(db)
+
     body = request.get_json(silent=True) or {}
     channel_id = body.get("channel_id") or _default_channel_id(db)
-    try:
-        result = run_discovery_cycle(channel_id, db_path=db)
-        return jsonify(result)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    # Refuse to start a second cycle while one is running
+    state = get_discovery_state(channel_id, db_path=db)
+    if state.get("status") == "running":
+        return jsonify({"ok": True, "status": "running",
+                        "message": "A discovery cycle is already in progress"})
+
+    def _run_in_background():
+        from hypogeum.topic_discovery import run_discovery_cycle
+        try:
+            run_discovery_cycle(channel_id, db_path=db)
+        except Exception:
+            pass  # run_discovery_cycle already writes failed state on exception
+
+    t = threading.Thread(target=_run_in_background, daemon=True)
+    t.start()
+
+    return jsonify({"ok": True, "status": "running"})
+
+
+@app.route("/api/discover/state", methods=["GET"])
+def api_discover_state():
+    """Return the current discovery_state for a channel (for polling)."""
+    from hypogeum.topic_discovery import get_discovery_state
+    db = _db_path()
+    channel_id = request.args.get("channel_id") or _default_channel_id(db)
+    state = get_discovery_state(channel_id, db_path=db)
+    return jsonify({
+        "status":          state.get("status", "idle"),
+        "last_cycle_id":   state.get("last_cycle_id"),
+        "candidate_count": state.get("candidate_count", 0),
+        "started_at":      state.get("started_at"),
+        "completed_at":    state.get("completed_at"),
+        "error":           state.get("error"),
+    })
 
 
 @app.route("/api/discover/approve/<candidate_id>", methods=["POST"])

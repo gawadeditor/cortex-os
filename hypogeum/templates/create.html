@@ -5,48 +5,62 @@
   <title>Create — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
-    .create-form { max-width: 640px; }
-    .create-form .field { margin-bottom: 20px; }
-    .create-form label { display: block; font-size: 13px; font-weight: 600;
-                         color: var(--text); margin-bottom: 6px; }
-    .create-form .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .create-form input[type="text"],
-    .create-form select,
-    .create-form textarea {
-      width: 100%; padding: 8px 10px; font-size: 13px; font-family: inherit;
-      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
-      color: var(--text);
+    /* Queue cards */
+    .queue-item { display:flex; align-items:flex-start; gap:12px;
+                  padding:12px 16px; border-bottom:1px solid var(--border); }
+    .queue-item:last-child { border-bottom:none; }
+    .queue-rank { width:20px; flex-shrink:0; font-size:13px; font-weight:700;
+                  color:var(--muted); padding-top:2px; text-align:center; }
+    .queue-body { flex:1; min-width:0; }
+    .queue-text  { font-size:14px; font-weight:500; line-height:1.4; margin-bottom:4px; }
+    .queue-provenance { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); }
+    .prov-discovered { color:var(--blue); }
+    .score-chip { font-family:monospace; font-size:11px; color:var(--green);
+                  background:rgba(63,185,80,.1); border:1px solid rgba(63,185,80,.25);
+                  border-radius:8px; padding:0 6px; }
+    .queue-actions { display:flex; gap:6px; flex-shrink:0; align-items:center; }
+
+    /* Empty queue nudge */
+    .queue-empty { padding:24px 16px; text-align:center; color:var(--muted); font-size:13px; }
+
+    /* Override form */
+    .override-wrap { padding:16px; }
+    .override-wrap label { display:block; font-size:12px; font-weight:600;
+                           color:var(--muted); margin-bottom:5px; }
+    .override-wrap input[type="text"],
+    .override-wrap select,
+    .override-wrap textarea {
+      width:100%; padding:7px 10px; font-size:13px; font-family:inherit;
+      background:var(--bg); border:1px solid var(--border);
+      border-radius:var(--radius); color:var(--text);
     }
-    .create-form input:focus,
-    .create-form select:focus { outline: none; border-color: var(--blue); }
-    .radio-group { display: flex; gap: 10px; flex-wrap: wrap; }
-    .radio-opt   { display: flex; align-items: center; gap: 7px;
-                   padding: 8px 14px; background: var(--surface);
-                   border: 1px solid var(--border); border-radius: var(--radius);
-                   cursor: pointer; font-size: 13px; }
-    .radio-opt input[type="radio"] { accent-color: var(--blue); cursor: pointer; }
-    .radio-opt:has(input:checked) { border-color: var(--blue); color: var(--blue); }
-    .platform-checks { display: flex; gap: 10px; flex-wrap: wrap; }
-    .check-opt { display: flex; align-items: center; gap: 7px;
-                 padding: 7px 12px; background: var(--surface);
-                 border: 1px solid var(--border); border-radius: var(--radius);
-                 cursor: pointer; font-size: 13px; }
-    .check-opt input[type="checkbox"] { accent-color: var(--blue); cursor: pointer; }
-    .blocker-list { margin-top: 10px; }
-    .blocker-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0;
-                    border-bottom: 1px solid var(--border); font-size: 13px; }
-    .blocker-item:last-child { border-bottom: none; }
-    .blocker-dot { width: 8px; height: 8px; border-radius: 50%;
-                   background: var(--yellow); margin-top: 5px; flex-shrink: 0; }
-    .blocker-dot-err { background: var(--red); }
-    .btn-launch { padding: 10px 28px; font-size: 14px; font-weight: 600;
-                  background: var(--green); color: #0d1117; border: none;
-                  border-radius: var(--radius); cursor: pointer; font-family: inherit; }
-    .btn-launch:hover { background: #4caf63; }
-    .btn-launch:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
-    .ready-status { font-size: 13px; margin-top: 6px; }
-    .ready-ok  { color: var(--green); }
-    .ready-no  { color: var(--yellow); }
+    .override-wrap input:focus,
+    .override-wrap select:focus { outline:none; border-color:var(--blue); }
+    .radio-group { display:flex; gap:8px; flex-wrap:wrap; }
+    .radio-opt { display:flex; align-items:center; gap:6px;
+                 padding:6px 12px; background:var(--surface);
+                 border:1px solid var(--border); border-radius:var(--radius);
+                 cursor:pointer; font-size:13px; }
+    .radio-opt input[type="radio"] { accent-color:var(--blue); cursor:pointer; }
+    .radio-opt:has(input:checked) { border-color:var(--blue); color:var(--blue); }
+    .platform-checks { display:flex; gap:8px; flex-wrap:wrap; }
+    .check-opt { display:flex; align-items:center; gap:6px;
+                 padding:5px 10px; background:var(--surface);
+                 border:1px solid var(--border); border-radius:var(--radius);
+                 cursor:pointer; font-size:13px; }
+    .check-opt input[type="checkbox"] { accent-color:var(--blue); cursor:pointer; }
+
+    /* Blocker list */
+    .blocker-item { display:flex; align-items:flex-start; gap:8px;
+                    padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; }
+    .blocker-item:last-child { border-bottom:none; }
+    .blocker-dot { width:8px; height:8px; border-radius:50%; background:var(--red);
+                   margin-top:5px; flex-shrink:0; }
+
+    details > summary { list-style:none; }
+    details > summary::-webkit-details-marker { display:none; }
+    details[open] > summary .arrow { transform:rotate(90deg); }
+    .arrow { display:inline-block; transition:transform .15s; font-size:10px; }
   </style>
 </head>
 <body>
@@ -54,65 +68,27 @@
 
 <div class="page-header">
   <h1>Create Video</h1>
-  <span class="page-meta">Launch a new production run</span>
+  <span class="page-meta">Start a production run from the queue</span>
 </div>
 
 {% if error %}
-<div class="card" style="border-color: var(--red); margin-bottom: var(--gap);">
-  <div class="card-title" style="color: var(--red);">Launch Error</div>
-  <div style="font-size: 13px; margin-top: 4px;">{{ error }}</div>
+<div class="card" style="border-color:var(--red); margin-bottom:var(--gap);">
+  <div class="card-title" style="color:var(--red);">Launch Error</div>
+  <div style="font-size:13px; margin-top:4px;">{{ error }}</div>
 </div>
 {% endif %}
 
-{# ── Requirements check ── #}
-{% set missing_reqs = [] %}
-{% if not channels %}{% set _ = missing_reqs.append("No channels configured — set up a channel first") %}{% endif %}
-
-{% if missing_reqs %}
-<div class="card" style="border-color: var(--yellow); margin-bottom: var(--gap);">
-  <div class="card-title" style="color: var(--yellow);">Missing Requirements</div>
-  <div class="blocker-list">
-    {% for req in missing_reqs %}
-    <div class="blocker-item">
-      <div class="blocker-dot blocker-dot-err"></div>
-      <div>{{ req }}</div>
-    </div>
-    {% endfor %}
-  </div>
-  <div style="margin-top: 12px; font-size: 13px; color: var(--muted);">
-    <a href="/settings">Configure settings →</a>
-  </div>
-</div>
-{% endif %}
-
-{% if preflight %}
-{% set legacy_blockers = preflight.blockers if preflight.blockers else [] %}
-{% if legacy_blockers %}
-<div class="card" style="border-color: var(--red); margin-bottom: var(--gap);">
-  <div class="card-title" style="color: var(--red);">Acceptance Audit Blocked</div>
-  <div class="blocker-list">
-    {% for b in legacy_blockers %}
-    <div class="blocker-item">
-      <div class="blocker-dot blocker-dot-err"></div>
-      <div>{{ b.message if b.message else b }}</div>
-    </div>
-    {% endfor %}
-  </div>
-</div>
-{% endif %}
-{% endif %}
-
-{# ── Setup / Production Readiness Preflight ── #}
+{# ── Blockers ── #}
 {% set setup_blockers = setup_preflight.blockers if setup_preflight and setup_preflight.blockers else [] %}
 {% if setup_blockers %}
-<div class="card" style="border-color: var(--red); margin-bottom: var(--gap);">
-  <div class="card-title" style="color: var(--red);">
+<div class="card" style="border-color:var(--red); margin-bottom:var(--gap);">
+  <div class="card-title" style="color:var(--red);">
     Factory Not Ready — {{ setup_blockers|length }} Blocker{% if setup_blockers|length != 1 %}s{% endif %}
   </div>
-  <div class="blocker-list">
+  <div>
     {% for b in setup_blockers %}
     <div class="blocker-item">
-      <div class="blocker-dot blocker-dot-err"></div>
+      <div class="blocker-dot"></div>
       <div>
         <strong>{{ b.name }}</strong> — {{ b.message }}
         {% if b.action %}<div style="font-size:11px; color:var(--muted); margin-top:3px; font-family:monospace;">→ {{ b.action }}</div>{% endif %}
@@ -120,154 +96,185 @@
     </div>
     {% endfor %}
   </div>
-  <div style="margin-top: 10px; font-size: 12px; color: var(--muted);">
-    <a href="/setup">View full setup checklist →</a>
+  <div style="margin-top:10px; font-size:12px; color:var(--muted);">
+    <a href="/setup">View setup checklist →</a>
   </div>
 </div>
 {% endif %}
 
-{# ── Queued Topics — surface first ── #}
-{% if queued_topics %}
-<div class="card" style="margin-bottom:var(--gap);">
-  <div class="card-title">Queued Topics
-    <span style="font-weight:400; font-size:11px; color:var(--muted);">— approve one to start production</span>
+{% set launch_blocked = setup_blockers %}
+
+{# ── Primary: Production Queue ── #}
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <div style="display:flex; align-items:center; padding:10px 16px;
+              border-bottom:1px solid var(--border);">
+    <span style="font-size:13px; font-weight:600;">Production Queue</span>
+    <span style="font-size:12px; color:var(--muted); margin-left:8px;">
+      {{ queued_topics|length }} topic{% if queued_topics|length != 1 %}s{% endif %} waiting
+    </span>
+    <a href="/discover" style="margin-left:auto; font-size:12px; color:var(--blue);">
+      Run discovery &#8594;
+    </a>
   </div>
+
+  {% if queued_topics %}
   {% for t in queued_topics %}
-  <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;">
-    <div style="flex:1; min-width:0;">
-      <div style="font-weight:500; line-height:1.4;">{{ t.topic_text }}</div>
-      <div style="font-size:11px; color:var(--muted); margin-top:2px;">
-        Channel: {{ t.channel_id }} · Priority: {{ t.priority }}
-        {% if t.created_at %} · {{ t.created_at[:10] }}{% endif %}
+  <div class="queue-item">
+    <div class="queue-rank">{{ loop.index }}</div>
+    <div class="queue-body">
+      <div class="queue-text">{{ t.topic_text }}</div>
+      <div class="queue-provenance">
+        {% if t.source == 'discovered' %}
+          <span class="prov-discovered">&#128270; discovered</span>
+          {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
+        {% else %}
+          <span>&#9998; manual</span>
+        {% endif %}
+        {% if t.created_at %}<span>added {{ t.created_at[:10] }}</span>{% endif %}
+        <span>priority {{ t.priority }}</span>
+        <span>{{ t.channel_id }}</span>
       </div>
     </div>
-    {% if not (missing_reqs or setup_blockers) %}
-    <form method="POST" action="/create/launch" style="flex-shrink:0;">
-      <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
-      <input type="hidden" name="topic" value="{{ t.topic_text }}">
-      <input type="hidden" name="video_type" value="long_video">
-      <input type="hidden" name="quality_mode" value="balanced">
-      <input type="hidden" name="platforms" value="youtube">
-      <button type="submit" class="btn btn-approve" style="font-size:12px; padding:4px 12px;">
-        ▶ Start
-      </button>
-    </form>
-    {% else %}
-    <span class="btn" style="opacity:.35; cursor:not-allowed; font-size:12px;" title="Resolve blockers first">▶ Start</span>
-    {% endif %}
+    <div class="queue-actions">
+      {% if not launch_blocked %}
+      <form method="POST" action="/create/launch" style="display:inline;">
+        <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
+        <input type="hidden" name="topic"      value="{{ t.topic_text }}">
+        <input type="hidden" name="video_type" value="long_video">
+        <input type="hidden" name="quality_mode" value="balanced">
+        <input type="hidden" name="platforms"  value="youtube">
+        <button type="submit" class="btn btn-approve"
+                style="font-size:12px; padding:5px 14px;">&#9654; Start</button>
+      </form>
+      {% else %}
+      <span class="btn" style="opacity:.35; cursor:not-allowed; font-size:12px;"
+            title="Resolve blockers first">&#9654; Start</span>
+      {% endif %}
+      <form method="POST" action="/api/topics/{{ t.topic_id }}/remove">
+        <button type="submit" class="btn"
+                onclick="return confirm('Remove this topic from queue?')"
+                style="font-size:12px; padding:5px 8px; color:var(--muted);"
+                title="Remove from queue">&#10005;</button>
+      </form>
+    </div>
   </div>
   {% endfor %}
-  <div style="margin-top:8px; font-size:12px;">
-    <a href="/episodes">Manage queue →</a>
+  {% else %}
+  <div class="queue-empty">
+    No topics in queue.
+    <a href="/discover" style="color:var(--blue);">Run a discovery cycle</a> to generate candidates,
+    or use the override below to queue a custom topic.
   </div>
+  {% endif %}
 </div>
-{% endif %}
 
-{# ── Launch form ── #}
-{% set launch_blocked = missing_reqs or setup_blockers %}
-<div class="card create-form">
-  <div class="card-title">Or enter a custom topic</div>
-  <form method="POST" action="/create/launch">
-    <div class="field">
-      <label>Channel</label>
-      {% if channels %}
-      <select name="channel_id" required {% if launch_blocked %}disabled{% endif %}>
-        <option value="">— select channel —</option>
-        {% for ch in channels %}
-        <option value="{{ ch.channel_id }}">{{ ch.name or ch.channel_id }}</option>
-        {% endfor %}
-      </select>
-      {% else %}
-      <select name="channel_id" disabled>
-        <option>No channels configured</option>
-      </select>
-      <div class="hint">
-        <a href="/settings">Set up a channel →</a>
+{# ── Secondary: Manual override (collapsible) ── #}
+<details style="margin-bottom:var(--gap);">
+  <summary style="cursor:pointer; padding:10px 16px; background:var(--surface);
+                  border:1px solid var(--border); border-radius:var(--radius);
+                  font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px;">
+    <span class="arrow">&#9654;</span>
+    Override: launch with a custom topic
+    <span style="font-size:11px; margin-left:4px;">(skips the queue)</span>
+  </summary>
+  <div class="card override-wrap" style="margin-top:4px; border-top:none; border-radius:0 0 var(--radius) var(--radius);">
+    <form method="POST" action="/create/launch">
+      <div style="margin-bottom:14px;">
+        <label>Channel</label>
+        {% if channels %}
+        <select name="channel_id" required {% if launch_blocked %}disabled{% endif %}>
+          <option value="">— select channel —</option>
+          {% for ch in channels %}
+          <option value="{{ ch.channel_id }}">{{ ch.name or ch.channel_id }}</option>
+          {% endfor %}
+        </select>
+        {% else %}
+        <select disabled><option>No channels configured</option></select>
+        <div style="font-size:12px; color:var(--muted); margin-top:4px;">
+          <a href="/settings">Set up a channel →</a>
+        </div>
+        {% endif %}
       </div>
-      {% endif %}
-    </div>
 
-    <div class="field">
-      <label>Topic</label>
-      <input type="text" name="topic" id="topic-input"
-             placeholder="e.g. The rise and fall of ancient Rome"
-             required maxlength="500" {% if launch_blocked %}disabled{% endif %}>
-      <div class="hint">Describe what this video should be about.</div>
-    </div>
-
-    <div class="field">
-      <label>Video type</label>
-      <div class="radio-group" id="video-type-group">
-        <label class="radio-opt">
-          <input type="radio" name="video_type" value="long_video" checked
-                 {% if launch_blocked %}disabled{% endif %}> Long video
-        </label>
-        <label class="radio-opt">
-          <input type="radio" name="video_type" value="short"
-                 {% if launch_blocked %}disabled{% endif %}> Short
-        </label>
-        <label class="radio-opt">
-          <input type="radio" name="video_type" value="reel"
-                 {% if launch_blocked %}disabled{% endif %}> Reel
-        </label>
+      <div style="margin-bottom:14px;">
+        <label>Topic</label>
+        <input type="text" name="topic" placeholder="e.g. The rise and fall of ancient Rome"
+               required maxlength="500" {% if launch_blocked %}disabled{% endif %}>
+        <div style="font-size:11px; color:var(--muted); margin-top:3px;">
+          Describe what this video should be about.
+        </div>
       </div>
-    </div>
 
-    <div class="field">
-      <label>Target platforms</label>
-      <div class="platform-checks">
-        <label class="check-opt">
-          <input type="checkbox" name="platforms" value="youtube" checked
-                 {% if launch_blocked %}disabled{% endif %}> YouTube
-        </label>
-        <label class="check-opt">
-          <input type="checkbox" name="platforms" value="tiktok"
-                 {% if launch_blocked %}disabled{% endif %}> TikTok
-        </label>
-        <label class="check-opt">
-          <input type="checkbox" name="platforms" value="instagram"
-                 {% if launch_blocked %}disabled{% endif %}> Instagram
-        </label>
-        <label class="check-opt">
-          <input type="checkbox" name="platforms" value="facebook"
-                 {% if launch_blocked %}disabled{% endif %}> Facebook
-        </label>
+      <div style="margin-bottom:14px;">
+        <label>Video type</label>
+        <div class="radio-group">
+          <label class="radio-opt">
+            <input type="radio" name="video_type" value="long_video" checked
+                   {% if launch_blocked %}disabled{% endif %}> Long video
+          </label>
+          <label class="radio-opt">
+            <input type="radio" name="video_type" value="short"
+                   {% if launch_blocked %}disabled{% endif %}> Short
+          </label>
+        </div>
       </div>
-    </div>
 
-    <div class="field">
-      <label>Quality mode</label>
-      <div class="radio-group" id="quality-mode-group">
-        <label class="radio-opt">
-          <input type="radio" name="quality_mode" value="economy"
-                 {% if launch_blocked %}disabled{% endif %}> Economy
-        </label>
-        <label class="radio-opt">
-          <input type="radio" name="quality_mode" value="balanced" checked
-                 {% if launch_blocked %}disabled{% endif %}> Balanced
-        </label>
-        <label class="radio-opt">
-          <input type="radio" name="quality_mode" value="premium"
-                 {% if launch_blocked %}disabled{% endif %}> Premium
-        </label>
+      <div style="margin-bottom:14px;">
+        <label>Target platforms</label>
+        <div class="platform-checks">
+          <label class="check-opt">
+            <input type="checkbox" name="platforms" value="youtube" checked
+                   {% if launch_blocked %}disabled{% endif %}> YouTube
+          </label>
+          <label class="check-opt">
+            <input type="checkbox" name="platforms" value="tiktok"
+                   {% if launch_blocked %}disabled{% endif %}> TikTok
+          </label>
+          <label class="check-opt">
+            <input type="checkbox" name="platforms" value="instagram"
+                   {% if launch_blocked %}disabled{% endif %}> Instagram
+          </label>
+        </div>
       </div>
-      <div class="hint">Economy: fastest, lowest cost. Premium: highest quality, highest cost.</div>
-    </div>
 
-    <div style="padding-top: 8px; border-top: 1px solid var(--border); margin-top: 8px;">
-      <button type="submit" class="btn-launch"
-              {% if launch_blocked %}disabled{% endif %}>
-        Start Production
-      </button>
-      {% if not launch_blocked %}
-      <div class="ready-status ready-ok" style="margin-top: 8px;">Factory ready</div>
-      {% else %}
-      <div class="ready-status ready-no" style="margin-top: 8px;">
-        Resolve blockers above before launching. <a href="/setup">Setup checklist →</a>
+      <div style="margin-bottom:16px;">
+        <label>Quality mode</label>
+        <div class="radio-group">
+          <label class="radio-opt">
+            <input type="radio" name="quality_mode" value="economy"
+                   {% if launch_blocked %}disabled{% endif %}> Economy
+          </label>
+          <label class="radio-opt">
+            <input type="radio" name="quality_mode" value="balanced" checked
+                   {% if launch_blocked %}disabled{% endif %}> Balanced
+          </label>
+          <label class="radio-opt">
+            <input type="radio" name="quality_mode" value="premium"
+                   {% if launch_blocked %}disabled{% endif %}> Premium
+          </label>
+        </div>
+        <div style="font-size:11px; color:var(--muted); margin-top:4px;">
+          Economy: fastest, lowest cost. Premium: highest quality, highest cost.
+        </div>
       </div>
-      {% endif %}
-    </div>
-  </form>
-</div>
+
+      <div style="padding-top:8px; border-top:1px solid var(--border);">
+        <button type="submit"
+                style="padding:9px 24px; font-size:14px; font-weight:600;
+                       background:var(--green); color:#0d1117; border:none;
+                       border-radius:var(--radius); cursor:pointer; font-family:inherit;"
+                {% if launch_blocked %}disabled style="opacity:.5; cursor:not-allowed;"{% endif %}>
+          Start Production
+        </button>
+        {% if launch_blocked %}
+        <div style="font-size:12px; color:var(--yellow); margin-top:8px;">
+          Resolve blockers above before launching. <a href="/setup">Setup checklist →</a>
+        </div>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+</details>
+
 </body>
 </html>

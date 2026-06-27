@@ -253,6 +253,7 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
         "factory_health":  {"status_label": "Needs Setup", "active_count": 0, "queued_count": 0},
         "needs_attention": [],
         "primary_cta":     {},
+        "failed_run_id":   None,
     }
 
     db = Path(db_path) if db_path else _DEFAULT_DB_PATH
@@ -274,19 +275,37 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
     except Exception:
         pass
 
-    # ── Live production state ─────────────────────────────────────────────────
+    # ── Live production state — episode_topics is the source of truth ────────
+    # run_queue serves the autonomous worker scheduler and is empty in
+    # dashboard-driven workflows. episode_topics is what /episodes and /create
+    # use, so the dashboard must read the same table.
+    _et_claimed_count = 0
     try:
-        from hypogeum.dashboard_live import get_active_runs, get_queue_snapshot
-        active = get_active_runs(db_path=db)
-        queue  = get_queue_snapshot(db_path=db)
+        from hypogeum.db import get_connection as _et_conn_fn
+        _et_conn = _et_conn_fn(db)
+        try:
+            _qr = _et_conn.execute(
+                "SELECT COUNT(*) AS n FROM episode_topics WHERE status = 'queued'"
+            ).fetchone()
+            _cr = _et_conn.execute(
+                "SELECT COUNT(*) AS n FROM episode_topics WHERE status = 'claimed'"
+            ).fetchone()
+            result["production"]["queue_size"] = (_qr["n"] if _qr else 0)
+            _et_claimed_count = (_cr["n"] if _cr else 0)
+        finally:
+            _et_conn.close()
+    except Exception:
+        pass
 
+    # Best-effort: stage/progress detail from the active pipeline run
+    try:
+        from hypogeum.dashboard_live import get_active_runs
+        active = get_active_runs(db_path=db)
         if active:
             latest = active[0]
             result["production"]["current_episode"] = latest.get("episode_id")
             result["production"]["current_stage"]   = latest.get("current_stage")
             result["production"]["progress_pct"]    = latest.get("progress_pct") or 0
-
-        result["production"]["queue_size"] = queue.get("queued_count", 0) or 0
     except Exception:
         pass
 
@@ -308,9 +327,9 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
         pass
 
     # ── Factory health, needs attention, primary CTA ──────────────────────────
-    active_count = 1 if result["production"].get("current_episode") else 0
+    # active_count = claimed episode_topics (matches /episodes "In Production" count)
     result["factory_health"] = _build_factory_health(
-        active_count, result["production"]["queue_size"], failed_run_count
+        _et_claimed_count, result["production"]["queue_size"], failed_run_count
     )
     result["needs_attention"] = _build_needs_attention(
         result["platform_state"],
@@ -324,6 +343,8 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
         result["needs_attention"],
         failed_run_id,
     )
+
+    result["failed_run_id"] = failed_run_id
 
     # ── Views trend (pre-normalised for chart rendering) ──────────────────────
     result["views_chart"] = _build_views_chart(result["recent_episodes"])

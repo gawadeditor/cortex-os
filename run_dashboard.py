@@ -1488,7 +1488,7 @@ def api_command_state():
         return jsonify({"error": str(exc)}), 503
 
 
-def _compute_next_action(state, report, recent_episodes: list) -> dict:
+def _compute_next_action(state, report, recent_episodes: list, failed_run_id: str = None) -> dict:
     """
     Derive the single most important next action the operator should take.
     Returns {label, url, urgency: "critical"|"warning"|"info", detail}.
@@ -1528,11 +1528,13 @@ def _compute_next_action(state, report, recent_episodes: list) -> dict:
             }
 
         # 4. Episodes stuck at partial (have artifacts but no render)
+        # Skip when a known failed run exists — primary_cta already surfaces it
+        # and a stale disk artifact must not supersede it.
         stuck = [
             ep for ep in recent_episodes
             if ep.get("_disk_only") and not ep.get("has_render")
         ]
-        if stuck:
+        if stuck and not failed_run_id:
             ep = stuck[0]
             return {
                 "label":   f"Resume production for {ep['episode_id']}",
@@ -1631,8 +1633,12 @@ def legacy_dashboard():
     except Exception:
         pass
 
-    # Next required action derived from factory state
-    next_action = _compute_next_action(state, report, db_episodes)
+    # Next required action — pass failed_run_id so stale disk episodes
+    # don't surface when a real DB run failure already needs attention.
+    next_action = _compute_next_action(
+        state, report, db_episodes,
+        failed_run_id=overview.get("failed_run_id") if overview else None,
+    )
 
     return render_template(
         "exec_dashboard.html",

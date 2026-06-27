@@ -114,6 +114,128 @@ class TestDashboardHome:
         fh = overview.get("factory_health", {})
         assert fh.get("status_label") == "Degraded"
 
+    def test_queued_count_reads_episode_topics_not_run_queue(self, tmp_path):
+        """factory_health.queued_count must come from episode_topics, not run_queue."""
+        from hypogeum.dashboard_executive import get_executive_overview
+        from hypogeum.db import get_connection, initialize_schema
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        conn = get_connection(db)
+        # Insert 2 queued topics — run_queue is intentionally left empty
+        conn.executemany(
+            "INSERT INTO episode_topics (topic_id, channel_id, topic_text, status, created_at, updated_at) VALUES (?,?,?,?,datetime('now'),datetime('now'))",
+            [("t1", "ch", "Topic A", "queued"), ("t2", "ch", "Topic B", "queued")],
+        )
+        conn.commit()
+        conn.close()
+
+        overview = get_executive_overview(db_path=db)
+        fh = overview.get("factory_health", {})
+        assert fh.get("queued_count") == 2, (
+            f"Expected 2 queued from episode_topics, got {fh.get('queued_count')}"
+        )
+
+    def test_active_count_reads_claimed_episode_topics(self, tmp_path):
+        """factory_health.active_count must equal claimed episode_topics rows."""
+        from hypogeum.dashboard_executive import get_executive_overview
+        from hypogeum.db import get_connection, initialize_schema
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        conn = get_connection(db)
+        conn.execute(
+            "INSERT INTO episode_topics (topic_id, channel_id, topic_text, status, created_at, updated_at) VALUES (?,?,?,?,datetime('now'),datetime('now'))",
+            ("t_claimed", "ch", "Ancient Rome", "claimed"),
+        )
+        conn.commit()
+        conn.close()
+
+        overview = get_executive_overview(db_path=db)
+        fh = overview.get("factory_health", {})
+        assert fh.get("active_count") == 1, (
+            f"Expected 1 active from claimed episode_topics, got {fh.get('active_count')}"
+        )
+
+    def test_dashboard_queue_matches_episodes_page(self, tmp_path):
+        """Queued count on /dashboard must match what /episodes shows."""
+        from hypogeum.dashboard_executive import get_executive_overview
+        from hypogeum.dashboard_runs import list_episode_topics
+        from hypogeum.db import get_connection, initialize_schema
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        conn = get_connection(db)
+        conn.executemany(
+            "INSERT INTO episode_topics (topic_id, channel_id, topic_text, status, created_at, updated_at) VALUES (?,?,?,?,datetime('now'),datetime('now'))",
+            [("q1", "ch", "Foo", "queued"), ("q2", "ch", "Bar", "queued"), ("c1", "ch", "Baz", "claimed")],
+        )
+        conn.commit()
+        conn.close()
+
+        overview = get_executive_overview(db_path=db)
+        episodes_queued  = len(list_episode_topics(status="queued",  db_path=db))
+        episodes_claimed = len(list_episode_topics(status="claimed", db_path=db))
+
+        fh = overview.get("factory_health", {})
+        assert fh["queued_count"] == episodes_queued,  (
+            f"Dashboard queued={fh['queued_count']} != /episodes queued={episodes_queued}"
+        )
+        assert fh["active_count"] == episodes_claimed, (
+            f"Dashboard active={fh['active_count']} != /episodes claimed={episodes_claimed}"
+        )
+
+
+class TestNextActionResumeCard:
+    """Stale disk-only partial episodes must not surface when a DB run has failed."""
+
+    def test_resume_card_suppressed_when_failed_run_id_known(self):
+        """Step 4 (stuck disk episode) must not fire when failed_run_id is set."""
+        from run_dashboard import _compute_next_action
+
+        recent_episodes = [
+            # Old disk-only partial — should be suppressed
+            {"episode_id": "b5734867-stale", "run_status": None, "title": None,
+             "_disk_only": True, "has_render": False},
+        ]
+        action = _compute_next_action(
+            None, None, recent_episodes, failed_run_id="d23037aa-a2ab-4981-ae58-75b77862b325"
+        )
+        assert action["url"] != "/episode/b5734867-stale", (
+            "Stale disk episode should not surface as next_action when failed_run_id is set"
+        )
+
+    def test_resume_card_suppressed_real_scenario(self):
+        """Reproduces the live bug: episode.run_id is NULL so run_status='None'
+        even though runs table has a failed row. Suppression must use failed_run_id."""
+        from run_dashboard import _compute_next_action
+
+        # DB episode where run_status=None because episodes.run_id is NULL (real case)
+        recent_episodes = [
+            {"episode_id": "ep_20260627140713_5e81f4", "run_status": None,
+             "_disk_only": False, "has_render": False},
+            {"episode_id": "b5734867-41dc-4913-8d33-85e68c5d5f46", "run_status": None,
+             "_disk_only": True, "has_render": False},
+        ]
+        # Without failed_run_id — stale card would surface
+        action_without = _compute_next_action(None, None, recent_episodes)
+        # With failed_run_id from the runs table — stale card suppressed
+        action_with = _compute_next_action(
+            None, None, recent_episodes, failed_run_id="d23037aa-a2ab-4981-ae58-75b77862b325"
+        )
+        assert action_without["url"] == "/episode/b5734867-41dc-4913-8d33-85e68c5d5f46", \
+            "Without failed_run_id, step 4 should fire for the stuck disk episode"
+        assert action_with["url"] != "/episode/b5734867-41dc-4913-8d33-85e68c5d5f46", \
+            "With failed_run_id, stale disk episode must be suppressed"
+
+    def test_resume_card_shown_when_no_failed_run(self):
+        """Step 4 fires normally when failed_run_id is None."""
+        from run_dashboard import _compute_next_action
+
+        recent_episodes = [
+            {"episode_id": "uuid-partial", "run_status": None, "title": None,
+             "_disk_only": True, "has_render": False},
+        ]
+        action = _compute_next_action(None, None, recent_episodes, failed_run_id=None)
+        assert action["url"] == "/episode/uuid-partial"
+
 
 # ---------------------------------------------------------------------------
 # TestEpisodeOverview

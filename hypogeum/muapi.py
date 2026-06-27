@@ -20,14 +20,14 @@ Corrections for the full discrepancy table.
 
 Tier → model mapping (no `tier` parameter exists in the API):
   Tier 1 → config.MUAPI_T1_MODEL  (default: veo3-text-to-video,    $2.50/gen, fixed 8s)
-  Tier 2 → config.MUAPI_T2_MODEL  (default: runway-text-to-video,  $0.15/gen, 5 or 8s)  # confirmed 2026-06-05
-  Tier 3 → config.MUAPI_T3_MODEL  (default: veo3-fast-text-to-video, cheapest, fixed)
+  Tier 2 → config.MUAPI_T2_MODEL  (default: veo3-fast-text-to-video, $0.60/gen, fixed 8s)  # benchmark PASS 2026-06-27; .env overrides default
+  Tier 3 → config.MUAPI_T3_MODEL  (default: veo3-fast-text-to-video, $0.60/gen, fixed 8s)  # cheap-mode alias, same model as T2
   I2V    → config.MUAPI_I2V_MODEL (default: veo3-image-to-video,   $2.50/gen, fixed 8s)
   Image  → config.MUAPI_IMAGE_MODEL (default: flux-dev-image,      ~$0.01/gen)
 
 Duration constraints:
   Veo3 models:   duration is fixed by the provider (8s) — no duration parameter sent
-  Runway models: duration must be 5 or 8 (integer enum) — requested value is rounded
+  Runway models: duration must be 5 or 8 (integer enum) — legacy path, not in production routing since 2026-06-27
 
 Path A reference image conditioning:
   generate_reference_image() creates a reference image, downloads it locally,

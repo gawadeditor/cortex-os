@@ -140,7 +140,7 @@ class TestOptionalVars:
 
     def test_muapi_timeout_default(self):
         cfg = make_config(MINIMUM_ENV)
-        assert cfg.MUAPI_TIMEOUT_SECONDS == 120
+        assert cfg.MUAPI_TIMEOUT_SECONDS == 180  # raised from 120 — Veo3 Premium took 128.5s in benchmark
 
     def test_music_duration_default(self):
         cfg = make_config(MINIMUM_ENV)

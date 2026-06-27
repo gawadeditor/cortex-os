@@ -242,9 +242,9 @@ class Config:
     # ------------------------------------------------------------------
     MUAPI_API_KEY: Optional[str]
     MUAPI_BASE_URL: str                       # default: https://api.muapi.ai/api/v1
-    MUAPI_T1_MODEL: str                       # default: veo3-text-to-video
-    MUAPI_T2_MODEL: str                       # default: runway-text-to-video
-    MUAPI_T3_MODEL: str                       # default: veo3-fast-text-to-video
+    MUAPI_T1_MODEL: str                       # default: veo3-text-to-video ($2.50/gen, premium)
+    MUAPI_T2_MODEL: str                       # default: veo3-fast-text-to-video ($0.60/gen, primary production tier)
+    MUAPI_T3_MODEL: str                       # default: veo3-fast-text-to-video ($0.60/gen, cheap-mode alias)
     MUAPI_I2V_MODEL: str                      # default: veo3-image-to-video
     MUAPI_IMAGE_MODEL: str                    # legacy alias — use THUMBNAIL_IMAGE_MODEL
     THUMBNAIL_IMAGE_PROVIDER: str             # default: openrouter (primary)
@@ -255,7 +255,7 @@ class Config:
     THUMBNAIL_FALLBACK2_PROVIDER: str        # default: muapi   (fallback #2 when fallback #1 fails)
     THUMBNAIL_FALLBACK_MODEL: str            # default: flux-2-dev (MUAPI-internal model fallback)
     MUAPI_DEFAULT_TIER: int                   # default: 2 (VPD routing fallback)
-    MUAPI_TIMEOUT_SECONDS: int                # default: 120
+    MUAPI_TIMEOUT_SECONDS: int                # default: 180 (Veo3 Premium took 128.5s in benchmark)
     MUAPI_POLL_INTERVAL_SECONDS: int          # default: 5
     MUAPI_MAX_POLL_ATTEMPTS: int              # default: 24
     MUAPI_WEBHOOK_URL: Optional[str]
@@ -267,7 +267,7 @@ class Config:
     MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE: int  # 0 = unlimited; default: 0
     EPISODE_ZERO_MAX_SCENES: int          # 0 = disabled; default: 0
     MUAPI_CHEAP_MODE: bool                # skip T1/T2, use T3 only; default: false
-    MUAPI_RUNWAY_ONLY_MODE: bool          # force T2 (runway) for all video scenes; default: false
+    MUAPI_RUNWAY_ONLY_MODE: bool          # force T2 for all video scenes (T2=veo3-fast since 2026-06-27); default: false
     MUAPI_DRY_RUN: bool                   # no real API calls; default: false
     MUAPI_ALLOW_PAID_FALLBACKS: bool      # allow automatic paid fallback; default: false
     ENABLE_DEDICATED_SHORT_GENERATION: bool  # allow VPD to plan/generate 9:16 Short scenes; default: false
@@ -411,7 +411,7 @@ class Config:
             "MUAPI_BASE_URL", default="https://api.muapi.ai/api/v1"
         )
         self.MUAPI_T1_MODEL = _get_optional("MUAPI_T1_MODEL", default="veo3-text-to-video")
-        self.MUAPI_T2_MODEL = _get_optional("MUAPI_T2_MODEL", default="runway-text-to-video")
+        self.MUAPI_T2_MODEL = _get_optional("MUAPI_T2_MODEL", default="veo3-fast-text-to-video")
         self.MUAPI_T3_MODEL = _get_optional("MUAPI_T3_MODEL", default="veo3-fast-text-to-video")
         self.MUAPI_I2V_MODEL = _get_optional("MUAPI_I2V_MODEL", default="veo3-image-to-video")
         self.MUAPI_IMAGE_MODEL = _get_optional("MUAPI_IMAGE_MODEL", default="flux-2-dev")  # legacy
@@ -425,7 +425,7 @@ class Config:
         self.THUMBNAIL_FALLBACK2_PROVIDER = _get_optional("THUMBNAIL_FALLBACK2_PROVIDER", default="muapi")
         self.THUMBNAIL_FALLBACK_MODEL = _get_optional("THUMBNAIL_FALLBACK_MODEL", default="flux-2-dev")
         self.MUAPI_DEFAULT_TIER = _get_int("MUAPI_DEFAULT_TIER", default=2)
-        self.MUAPI_TIMEOUT_SECONDS = _get_int("MUAPI_TIMEOUT_SECONDS", default=120)
+        self.MUAPI_TIMEOUT_SECONDS = _get_int("MUAPI_TIMEOUT_SECONDS", default=180)
         self.MUAPI_POLL_INTERVAL_SECONDS = _get_int("MUAPI_POLL_INTERVAL_SECONDS", default=5)
         self.MUAPI_MAX_POLL_ATTEMPTS = _get_int("MUAPI_MAX_POLL_ATTEMPTS", default=24)
         self.MUAPI_WEBHOOK_URL = _get_optional("MUAPI_WEBHOOK_URL")
@@ -450,6 +450,7 @@ class Config:
         if self.SMOKE_TEST_MODE:
             if self.EPISODE_ZERO_MAX_SCENES == 0:
                 self.EPISODE_ZERO_MAX_SCENES = 2
+            # Force T2 for all scenes in smoke test — T2=veo3-fast-text-to-video since 2026-06-27
             if not self.MUAPI_RUNWAY_ONLY_MODE and not self.MUAPI_CHEAP_MODE:
                 self.MUAPI_RUNWAY_ONLY_MODE = True
 

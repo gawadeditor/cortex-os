@@ -33,19 +33,19 @@ from hypogeum.config import Config
 
 PROVIDER_CAPABILITIES: dict = {
     "muapi_video": {
-        "supported_durations_seconds": [5, 8],
+        "supported_durations_seconds": [8],
         "duration_note": (
-            "Only 5 and 8 are valid. Veo3 generates fixed 8s clips. "
-            "Runway accepts 5 or 8 as an integer enum. No other durations exist."
+            "Only 8 is valid for production. Veo3 generates fixed 8s clips. "
+            "Do not request 5s durations — use 8 for all scenes."
         ),
         "aspect_ratios": {
             "main_episode": "16:9",
             "shorts": "9:16",
         },
         "quality_tiers": {
-            "1": "highest quality, highest cost — veo3-text-to-video ($2.50/gen)",
-            "2": "standard quality — runway-text-to-video ($0.09/gen)",
-            "3": "lowest cost — veo3-fast-text-to-video (cheapest)",
+            "1": "premium quality — veo3-text-to-video ($2.50/gen); reserve for hero/opening scenes",
+            "2": "standard — veo3-fast-text-to-video ($0.60/gen) [primary production tier; use for all scenes unless T1 is justified]",
+            "3": "cheap-mode alias — veo3-fast-text-to-video ($0.60/gen) [same model as T2; used when MUAPI_CHEAP_MODE=true]",
         },
         "i2v_note": (
             "When a final-locked entity has a reference image, Python code injects "

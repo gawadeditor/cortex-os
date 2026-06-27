@@ -96,11 +96,13 @@ Format: `Spatial composition: [background]. Composition: [subject position]. Neg
 
 Format: `Camera: [verb]. Subject: [subject behavior]. [Motion qualifier].`
 
-**Camera verbs**: static, slow pan, push in, pull back, slow tilt, overhead descent, handheld drift
+**Camera verbs**: controlled slow push in, slow drift, slow pan, pull back, slow tilt, overhead descent, handheld drift
+
+Do not use `static` as a camera verb. Use `controlled slow push in` for close-up and macro shots; use `slow drift` for wide and establishing shots. Controlled motion gives the frame cinematic life without displacing the subject.
 
 **Subject behavior**: what the primary subject physically does during the clip — not what it means, what it does. A fragment does not "convey age." It sits, catches light, holds position, recedes to shadow.
 
-**Motion qualifier**: the secondary motion that gives the frame life without camera movement — light temperature shift, water surface settling, dust particle drift, fabric drape weight, thermal heat shimmer. This is what makes a "static" shot feel alive.
+**Motion qualifier**: the secondary motion that gives the frame life — light temperature shift, water surface settling, dust particle drift, fabric drape weight, thermal heat shimmer. The camera moves; the subject does not.
 
 ---
 
@@ -132,6 +134,8 @@ Append inline at the end of the prompt in brackets:
 
 `[aspect ratio: 16:9]` or `[aspect ratio: 9:16]` — match the scene's aspect_ratio field
 
+`[lamp source off-frame]` — required whenever the lighting plan specifies a practical or period light source (oil lamp, torch, gaslight, single candle, brazier). Prevents the model from rendering the physical fixture in frame — the source should be implied by its light, never visible.
+
 ---
 
 ## Layer 9 — Negative Constraints
@@ -140,13 +144,15 @@ Append inline at the end of the prompt in brackets:
 
 Target what AI video models default to for this setting — museum lighting for artefacts, fluorescent for interiors, modern coastline infrastructure for seascape shots, synthetic materials for period figures.
 
+`[no vignette]` — always include. AI video models apply post-processing vignette by default; this flattens edge-frame depth and obscures material detail at the periphery.
+
 Examples:
-- `[without modern watercraft] [without contemporary diving equipment] [no wetsuit] [no modern coastline infrastructure] [no synthetic rope]`
-- `[without modern surfaces] [without institutional display context] [no ambient fill] [no background detail] [no lens flare] [no motion blur] [no museum case or display hardware] [no label or scale reference]`
+- `[without modern watercraft] [without contemporary diving equipment] [no wetsuit] [no modern coastline infrastructure] [no synthetic rope] [no vignette]`
+- `[without modern surfaces] [without institutional display context] [no ambient fill] [no background detail] [no lens flare] [no motion blur] [no museum case or display hardware] [no label or scale reference] [no vignette]`
 
 ---
 
-## Assembly Order — primary_prompt (Seedance / MUAPI)
+## Assembly Order — primary_prompt (Veo3 / MUAPI)
 
 Assemble all layers into a single continuous paragraph with no line breaks:
 
@@ -176,3 +182,6 @@ The fallback is not a lazy version of the primary. It is a simpler scene that ac
 - [ ] The 0–4s / 4–8s transition is a physical change, not an emotion
 - [ ] No word in the prompt is "mysterious", "important", "significant", "ancient" without a physical qualifier
 - [ ] The fallback would render if the primary fails — it is a distinct achievable scene, not a truncated version
+- [ ] Camera verb is not "static" — use controlled slow push in (close-up/macro) or slow drift (wide/establishing)
+- [ ] `[no vignette]` is present in Layer 9 constraints
+- [ ] `[lamp source off-frame]` is present in Layer 8 tags if any practical light source is named in the lighting plan

@@ -5,113 +5,190 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episodes — Factory OS</title>
   {% include '_base_style.html' %}
+  <style>
+    /* Queue rows */
+    .queue-item { display:flex; align-items:flex-start; gap:12px;
+                  padding:12px 16px; border-bottom:1px solid var(--border); }
+    .queue-item:last-child { border-bottom:none; }
+    .queue-rank { width:20px; flex-shrink:0; font-size:12px; font-weight:700;
+                  color:var(--muted); padding-top:3px; text-align:center; }
+    .queue-body { flex:1; min-width:0; }
+    .queue-text  { font-size:14px; font-weight:500; line-height:1.4; margin-bottom:4px; }
+    .queue-meta  { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted);
+                   align-items:center; }
+    .prov-disc   { color:var(--blue); font-weight:600; }
+    .score-chip  { font-family:monospace; font-size:11px; color:var(--green);
+                   background:rgba(63,185,80,.1); border:1px solid rgba(63,185,80,.25);
+                   border-radius:8px; padding:0 6px; }
+    .cand-chip   { font-family:monospace; font-size:10px; color:var(--muted);
+                   background:var(--surface); border:1px solid var(--border);
+                   border-radius:6px; padding:0 5px; }
+    .queue-actions { display:flex; gap:6px; flex-shrink:0; align-items:center; }
+
+    /* Claimed row */
+    .claimed-item { display:flex; align-items:flex-start; gap:12px;
+                    padding:10px 16px; border-bottom:1px solid var(--border);
+                    background:rgba(88,166,255,.03); }
+    .claimed-item:last-child { border-bottom:none; }
+
+    /* Section header inside card */
+    .card-section-hdr { font-size:11px; font-weight:600; text-transform:uppercase;
+                        letter-spacing:.05em; color:var(--muted);
+                        padding:8px 16px 6px; border-bottom:1px solid var(--border);
+                        display:flex; align-items:center; gap:8px; }
+
+    /* Empty queue */
+    .queue-empty { padding:20px 16px; font-size:13px; color:var(--muted); text-align:center; }
+
+    /* Override form */
+    .override-form label { display:block; font-size:12px; font-weight:600;
+                           color:var(--muted); margin-bottom:4px; }
+    .override-form input[type="text"],
+    .override-form input[type="number"],
+    .override-form select,
+    .override-form textarea {
+      width:100%; padding:7px 10px; font-size:13px; font-family:inherit;
+      background:var(--bg); border:1px solid var(--border);
+      border-radius:var(--radius); color:var(--text); }
+    .override-form input:focus,
+    .override-form select:focus,
+    .override-form textarea:focus { outline:none; border-color:var(--blue); }
+
+    details > summary { list-style:none; cursor:pointer; }
+    details > summary::-webkit-details-marker { display:none; }
+  </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
 <div class="page-header">
-  <h1>Episodes &amp; Topic Queue</h1>
+  <h1>Episodes</h1>
+  <span class="page-meta">
+    {{ queue_topics|length }} queued{% if claimed_topics %} · {{ claimed_topics|length }} in production{% endif %}
+  </span>
+  <a href="/discover" style="margin-left:auto; font-size:12px; color:var(--blue);">
+    &#128270; Run Discovery &#8594;
+  </a>
 </div>
 
-{# Flash feedback from enqueue redirect #}
+{# ── Flash ── #}
 {% set eq = request.args.get('enqueue') %}
 {% if eq == 'ok' %}
-  <div class="flash flash-ok">Topic enqueued successfully.</div>
+  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Topic enqueued.</div>
 {% elif eq == 'duplicate' %}
-  <div class="flash flash-err">Duplicate — that topic is already queued for this channel.</div>
-{% elif eq == 'not_found' %}
-  <div class="flash flash-err">Channel not found. Check the channel ID.</div>
+  <div class="flash flash-err" style="margin-bottom:var(--gap);">Duplicate — already queued for this channel.</div>
 {% elif eq and eq != 'ok' %}
-  <div class="flash flash-err">Enqueue failed ({{ eq }}).</div>
+  <div class="flash flash-err" style="margin-bottom:var(--gap);">Enqueue failed ({{ eq }}).</div>
 {% endif %}
 
-{# ── Enqueue new topic ── #}
-<div class="card">
-  <div class="card-title">Queue New Topic</div>
-  {% if preflight.ready %}
-    <div class="ok" style="font-size:12px; margin-bottom:10px;">✓ Preflight passed — factory is ready.</div>
-  {% else %}
-    <div class="warn" style="font-size:12px; margin-bottom:10px;">
-      ⚠ Preflight has {{ preflight.blocker_count }} blocker(s).
-      Topics can be queued, but the pipeline will not start until preflight clears.
-      <a href="/preflight">View preflight →</a>
-    </div>
-  {% endif %}
-  <form method="POST" action="/episodes/enqueue" style="display:flex; flex-direction:column; gap:10px; max-width:560px;">
-    <div class="field">
-      <label for="channel_id">Channel</label>
-      {% if channels %}
-        <select id="channel_id" name="channel_id" required style="width:100%;">
-          {% for ch in channels %}
-            <option value="{{ ch.channel_id }}">{{ ch.name }} ({{ ch.channel_id }})</option>
-          {% endfor %}
-        </select>
-      {% else %}
-        <input type="text" id="channel_id" name="channel_id" placeholder="channel_id" required style="width:100%;">
-        <div class="hint">No channels found — enter channel_id manually.</div>
-      {% endif %}
-    </div>
-    <div class="field">
-      <label for="topic_text">Topic</label>
-      <textarea id="topic_text" name="topic_text" rows="3" placeholder="e.g. The fall of the Library of Alexandria" required style="width:100%;"></textarea>
-    </div>
-    <div class="field">
-      <label for="priority">Priority</label>
-      <input type="number" id="priority" name="priority" value="0" min="0" max="100" style="width:120px;">
-      <div class="hint">Lower = higher priority. 0 = normal.</div>
-    </div>
-    <div>
-      <button type="submit" class="btn btn-save">+ Enqueue Topic</button>
-    </div>
-  </form>
-</div>
+{# ══════════════════════════════════════════════
+   1. PRODUCTION QUEUE — primary section
+   ══════════════════════════════════════════════ #}
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
 
-{# ── Topic queue ── #}
-<div class="card">
-  <div class="card-title">
-    Topic Queue
-    ({{ topics | selectattr('status', 'eq', 'queued') | list | length }} queued,
-     {{ topics | selectattr('status', 'eq', 'consumed') | list | length }} consumed)
+  {# In-production (claimed) #}
+  {% if claimed_topics %}
+  <div class="card-section-hdr">
+    <span style="width:8px; height:8px; border-radius:50%; background:var(--blue); flex-shrink:0;"></span>
+    In Production ({{ claimed_topics|length }})
   </div>
-  {% if topics %}
-  <table>
-    <thead>
-      <tr>
-        <th>Channel</th>
-        <th>Topic</th>
-        <th>Status</th>
-        <th>Priority</th>
-        <th>Created</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for t in topics %}
-      <tr>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ t.channel_id }}</td>
-        <td style="max-width:340px; word-break:break-word;">{{ t.topic_text }}</td>
-        <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
-        <td class="muted" style="text-align:right;">{{ t.priority }}</td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ t.created_at[:16] if t.created_at else '—' }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty">No topics in queue.</div>
+  {% for t in claimed_topics %}
+  <div class="claimed-item">
+    <div class="queue-rank">&#9654;</div>
+    <div class="queue-body">
+      <div class="queue-text">{{ t.topic_text }}</div>
+      <div class="queue-meta">
+        {% if t.source == 'discovered' %}
+          <span class="prov-disc">&#128270; discovered</span>
+          {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
+          {% if t.candidate_id %}<span class="cand-chip">cand {{ t.candidate_id[:8] }}</span>{% endif %}
+        {% else %}
+          <span>&#9998; manual</span>
+        {% endif %}
+        <span>{{ t.channel_id }}</span>
+        {% if t.claimed_at %}<span>started {{ t.claimed_at[:10] }}</span>{% endif %}
+      </div>
+    </div>
+    <div class="queue-actions">
+      <span class="badge badge-claimed">running</span>
+    </div>
+  </div>
+  {% endfor %}
   {% endif %}
+
+  {# Queued (waiting) #}
+  <div class="card-section-hdr">
+    <span>Queued — Next to Produce ({{ queue_topics|length }})</span>
+    {% if not queue_topics %}
+    <a href="/discover" style="margin-left:auto; font-size:11px; color:var(--blue);">
+      Run discovery to add topics &#8594;
+    </a>
+    {% endif %}
+  </div>
+
+  {% if queue_topics %}
+  {% for t in queue_topics %}
+  <div class="queue-item">
+    <div class="queue-rank">{{ loop.index }}</div>
+    <div class="queue-body">
+      <div class="queue-text">{{ t.topic_text }}</div>
+      <div class="queue-meta">
+        {% if t.source == 'discovered' %}
+          <span class="prov-disc">&#128270; discovered</span>
+          {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
+          {% if t.candidate_id %}<span class="cand-chip">cand {{ t.candidate_id[:8] }}</span>{% endif %}
+        {% else %}
+          <span>&#9998; manual</span>
+        {% endif %}
+        <span>{{ t.channel_id }}</span>
+        {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
+        <span>priority {{ t.priority }}</span>
+      </div>
+    </div>
+    <div class="queue-actions">
+      <form method="POST" action="/create/launch" style="display:inline;">
+        <input type="hidden" name="channel_id"   value="{{ t.channel_id }}">
+        <input type="hidden" name="topic"        value="{{ t.topic_text }}">
+        <input type="hidden" name="video_type"   value="long_video">
+        <input type="hidden" name="quality_mode" value="balanced">
+        <input type="hidden" name="platforms"    value="youtube">
+        <button type="submit" class="btn btn-approve"
+                style="font-size:12px; padding:4px 12px;">&#9654; Start</button>
+      </form>
+      <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
+        <button type="submit" class="btn"
+                onclick="return confirm('Remove this topic?')"
+                style="font-size:12px; padding:4px 8px; color:var(--muted);"
+                title="Remove from queue">&#10005;</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="queue-empty">
+    No topics queued.
+    <a href="/discover" style="color:var(--blue);">Run a discovery cycle</a>
+    to score and queue topic candidates, or add one manually below.
+  </div>
+  {% endif %}
+
 </div>
 
-{# ── Episode history ── #}
-<div class="card">
+{# ══════════════════════════════════════════════
+   2. EPISODE HISTORY
+   ══════════════════════════════════════════════ #}
+<div class="card" style="margin-bottom:var(--gap);">
   <div class="card-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-    <span>Episode History ({{ episodes | length }})</span>
+    <span>Episode History ({{ episodes|length }})</span>
     <span style="font-size:12px; font-weight:400; color:var(--muted);">
       {% if show_test %}
-        Showing all episodes including test runs.
-        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=0" style="color:var(--muted); text-decoration:underline;">Hide test episodes</a>
+        Showing all including test runs.
+        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=0"
+           style="color:var(--muted); text-decoration:underline;">Hide test episodes</a>
       {% elif test_count > 0 %}
         {{ test_count }} test episode{{ 's' if test_count != 1 else '' }} hidden.
-        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=1" style="color:var(--muted); text-decoration:underline;">Show test episodes</a>
+        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=1"
+           style="color:var(--muted); text-decoration:underline;">Show test episodes</a>
       {% endif %}
     </span>
   </div>
@@ -119,10 +196,10 @@
   <table>
     <thead>
       <tr>
-        <th>Episode ID</th>
+        <th>Episode</th>
         <th>Title / Topic</th>
         <th>Status</th>
-        <th>Run status</th>
+        <th>Run</th>
         <th>Cost</th>
         <th>Created</th>
       </tr>
@@ -130,9 +207,7 @@
     <tbody>
       {% for ep in episodes %}
       <tr>
-        <td>
-          <a href="/episode/{{ ep.episode_id }}">{{ ep.episode_id }}</a>
-        </td>
+        <td><a href="/episode/{{ ep.episode_id }}">{{ ep.episode_id }}</a></td>
         <td style="max-width:260px; word-break:break-word; font-size:13px;">
           <a href="/episode/{{ ep.episode_id }}" style="color:var(--text);">
             {{ ep.title or ep.topic or ep.episode_id }}
@@ -140,11 +215,8 @@
         </td>
         <td><span class="badge badge-{{ ep.status }}">{{ ep.status }}</span></td>
         <td>
-          {% if ep.run_status %}
-            <span class="badge badge-{{ ep.run_status }}">{{ ep.run_status }}</span>
-          {% else %}
-            <span class="muted">—</span>
-          {% endif %}
+          {% if ep.run_status %}<span class="badge badge-{{ ep.run_status }}">{{ ep.run_status }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
         </td>
         <td style="text-align:right; font-variant-numeric:tabular-nums;">
           {% if ep.total_cost_usd and ep.total_cost_usd > 0 %}
@@ -164,6 +236,57 @@
   <div class="empty">No episodes yet.</div>
   {% endif %}
 </div>
+
+{# ══════════════════════════════════════════════
+   3. MANUAL OVERRIDE — collapsed, secondary
+   ══════════════════════════════════════════════ #}
+<details style="margin-bottom:var(--gap);">
+  <summary style="padding:10px 16px; background:var(--surface);
+                  border:1px solid var(--border); border-radius:var(--radius);
+                  font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px;">
+    <span style="font-size:10px; display:inline-block; transition:transform .15s;">&#9654;</span>
+    Advanced: queue a topic manually
+    <span style="font-size:11px; margin-left:4px;">(bypasses discovery scoring)</span>
+  </summary>
+  <div class="card override-form" style="border-top:none; border-radius:0 0 var(--radius) var(--radius); padding:16px; margin-top:0;">
+    {% if not preflight.ready %}
+    <div class="warn" style="font-size:12px; margin-bottom:10px;">
+      &#9888; Preflight has {{ preflight.blocker_count }} blocker(s) —
+      topics can be queued but pipeline won't start until resolved.
+      <a href="/preflight">View preflight &#8594;</a>
+    </div>
+    {% endif %}
+    <form method="POST" action="/episodes/enqueue"
+          style="display:flex; flex-direction:column; gap:12px; max-width:540px;">
+      <div>
+        <label>Channel</label>
+        {% if channels %}
+          <select name="channel_id" required>
+            {% for ch in channels %}
+              <option value="{{ ch.channel_id }}">{{ ch.name }} ({{ ch.channel_id }})</option>
+            {% endfor %}
+          </select>
+        {% else %}
+          <input type="text" name="channel_id" placeholder="channel_id" required>
+        {% endif %}
+      </div>
+      <div>
+        <label>Topic</label>
+        <textarea name="topic_text" rows="2"
+                  placeholder="e.g. The fall of the Library of Alexandria"
+                  required></textarea>
+      </div>
+      <div>
+        <label>Priority <span style="font-weight:400; font-size:11px; color:var(--muted);">(0 = normal, lower = higher urgency)</span></label>
+        <input type="number" name="priority" value="0" min="0" max="100"
+               style="width:120px;">
+      </div>
+      <div>
+        <button type="submit" class="btn btn-save">+ Add to Queue</button>
+      </div>
+    </form>
+  </div>
+</details>
 
 </body>
 </html>

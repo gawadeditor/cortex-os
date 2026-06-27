@@ -501,12 +501,20 @@ def upsert_discovery_state(
         conn.close()
 
 
+_STALE_RUNNING_MINUTES = 15  # after this, a 'running' state is auto-reset to failed
+
+
 def get_discovery_state(
     channel_id: str,
     db_path: Optional[Path] = None,
 ) -> dict:
     """
     Return the current discovery_state row for a channel.
+
+    If status='running' but started_at is older than _STALE_RUNNING_MINUTES,
+    the row is automatically updated to status='failed' with a timeout error
+    so the page never stays stuck in Running state after a server restart or
+    thread death.
 
     Returns a dict with keys:
         status, last_cycle_id, candidate_count, candidates,
@@ -522,6 +530,33 @@ def get_discovery_state(
                FROM discovery_state WHERE channel_id = ?""",
             (channel_id,),
         ).fetchone()
+
+        if row and row[0] == "running" and row[4]:
+            try:
+                from datetime import timedelta
+                started = datetime.fromisoformat(row[4])
+                if (datetime.now(timezone.utc) - started).total_seconds() > _STALE_RUNNING_MINUTES * 60:
+                    now = _now_iso()
+                    conn.execute(
+                        """UPDATE discovery_state
+                           SET status='failed', error=?, completed_at=?, updated_at=?
+                           WHERE channel_id=?""",
+                        (
+                            f"Cycle timed out — no response in >{_STALE_RUNNING_MINUTES} minutes. "
+                            "Click 'Run Discovery Cycle' to retry.",
+                            now, now, channel_id,
+                        ),
+                    )
+                    conn.commit()
+                    # Re-fetch updated row
+                    row = conn.execute(
+                        """SELECT status, last_cycle_id, candidate_count, candidates_json,
+                                  started_at, completed_at, error, updated_at
+                           FROM discovery_state WHERE channel_id = ?""",
+                        (channel_id,),
+                    ).fetchone()
+            except Exception:
+                pass
     finally:
         conn.close()
 

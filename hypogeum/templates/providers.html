@@ -245,7 +245,9 @@
   </table>
 
   {# Operational note (e.g. "Auth rejected (check key + credits): 403 Client Error…") #}
-  {% if entry.operational_note and not is_ph %}
+  {% if is_del %}
+  <div class="status-note" style="color:var(--muted);">Configured through MUAPI — no direct API key needed.</div>
+  {% elif entry.operational_note and not is_ph %}
   <div class="status-note">{{ entry.operational_note[:160] }}</div>
   {% endif %}
 

@@ -41,6 +41,7 @@ def launch_episode_from_dashboard(
     quality_mode: str,
     platforms: list,
     db_path=None,
+    youtube_privacy: str = "private",
 ) -> dict:
     """
     Preflight all required resources, then spawn run_pipeline.py via Popen.
@@ -107,6 +108,7 @@ def launch_episode_from_dashboard(
         "--topic", topic,
         "--episode-id", episode_id,
         "--channel-id", channel_id,
+        "--youtube-privacy", youtube_privacy,
     ]
     proc = subprocess.Popen(
         cmd,

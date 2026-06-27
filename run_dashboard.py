@@ -329,23 +329,8 @@ def create_page():
     except Exception:
         setup_preflight = {"ready": False, "blockers": [], "blocker_count": 0}
     error = request.args.get("error")
-    # Surface topic queue with full provenance so the operator sees why each topic is here
     try:
-        from hypogeum.db import initialize_schema as _init_schema, get_connection as _get_conn
-        _init_schema(db)
-        _conn = _get_conn(db)
-        try:
-            _rows = _conn.execute(
-                """SELECT topic_id, channel_id, topic_text, status, priority,
-                          source, discovery_score, candidate_id, created_at, updated_at
-                   FROM episode_topics
-                   WHERE status = 'queued'
-                   ORDER BY priority ASC, created_at ASC
-                   LIMIT 10""",
-            ).fetchall()
-            queued_topics = [dict(r) for r in _rows]
-        finally:
-            _conn.close()
+        queued_topics = list_episode_topics(status="queued", db_path=db)[:10]
     except Exception:
         queued_topics = []
     return render_template(
@@ -4386,14 +4371,20 @@ def episodes_page():
     if not show_test:
         episodes = [ep for ep in episodes if not ep["_is_test"]]
 
-    topics     = list_episode_topics(
-        channel_id=channel_id or None, db_path=_db_path()
+    # Production queue: queued + claimed, ordered by priority then date
+    queue_topics  = list_episode_topics(
+        channel_id=channel_id or None, status="queued", db_path=_db_path()
+    )
+    claimed_topics = list_episode_topics(
+        channel_id=channel_id or None, status="claimed", db_path=_db_path()
     )
     from hypogeum.dashboard_api import get_channel_summaries
     channels   = get_channel_summaries(db_path=_db_path())
     preflight  = get_preflight_status(db_path=_db_path())
     return render_template("episodes.html",
-                           episodes=episodes, topics=topics,
+                           episodes=episodes,
+                           queue_topics=queue_topics,
+                           claimed_topics=claimed_topics,
                            channels=channels, preflight=preflight,
                            channel_filter=channel_id,
                            show_test=show_test,
@@ -5187,6 +5178,19 @@ def api_discover_state():
         "completed_at":    state.get("completed_at"),
         "error":           state.get("error"),
     })
+
+
+@app.route("/api/discover/reset", methods=["POST"])
+def api_discover_reset():
+    """Force-reset discovery_state to idle, unlocking the Run button after a stuck cycle."""
+    from hypogeum.topic_discovery import upsert_discovery_state
+    from hypogeum.db import initialize_schema
+    db = _db_path()
+    initialize_schema(db)
+    body = request.get_json(silent=True) or {}
+    channel_id = body.get("channel_id") or _default_channel_id(db)
+    upsert_discovery_state(channel_id, "idle", error=None, db_path=db)
+    return jsonify({"ok": True, "status": "idle"})
 
 
 @app.route("/api/discover/approve/<candidate_id>", methods=["POST"])

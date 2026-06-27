@@ -586,7 +586,7 @@ class TestFlaskRunRoutes:
         r = client.get("/episodes")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Topic Queue" in text
+        assert "Queued" in text or "Episode History" in text
 
     def test_episodes_page_shows_topics(self, flask_client):
         client, _ = flask_client

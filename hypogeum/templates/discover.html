@@ -146,14 +146,23 @@
 {% if discovery_status == 'running' %}
 <div class="running-banner">
   <span class="spinner"></span>
-  <span>Discovery cycle is running — this page will refresh automatically when complete.</span>
+  <span>Discovery cycle is running — this page refreshes automatically when complete.</span>
+  <button type="button" onclick="resetDiscovery()"
+          style="margin-left:auto; font-size:11px; padding:2px 8px; background:none;
+                 border:1px solid var(--border); border-radius:var(--radius);
+                 color:var(--muted); cursor:pointer;"
+          title="Force-reset if the cycle is stuck">Reset</button>
 </div>
 {% endif %}
 
 {# ── Failed banner ── #}
 {% if discovery_status == 'failed' and discovery_error %}
 <div class="failed-banner">
-  &#9888; Last cycle failed: {{ discovery_error }}
+  &#9888; {{ discovery_error }}
+  <button type="button" onclick="resetDiscovery()"
+          style="margin-left:12px; font-size:11px; padding:2px 8px; background:none;
+                 border:1px solid rgba(248,81,73,.4); border-radius:var(--radius);
+                 color:var(--red,#f85149); cursor:pointer;">Retry</button>
 </div>
 {% endif %}
 
@@ -366,6 +375,16 @@ function runDiscovery() {
     if (btn) { btn.disabled = false; btn.textContent = 'Run Discovery Cycle'; }
     _setStatus('error', '&#9888; ' + (e.message || 'Network error'));
   });
+}
+
+function resetDiscovery() {
+  fetch('/api/discover/reset', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel_id: _channelId}),
+  })
+  .then(function() { window.location.reload(); })
+  .catch(function() { window.location.reload(); });
 }
 
 function submitManualTopic() {

@@ -248,7 +248,8 @@ def list_episode_topics(
             params.append(limit)
             rows = conn.execute(f"""
                 SELECT topic_id, channel_id, topic_text, status,
-                       priority, created_at, claimed_at, consumed_at
+                       priority, created_at, claimed_at, consumed_at,
+                       source, discovery_score, candidate_id
                 FROM episode_topics
                 {where}
                 ORDER BY priority ASC, created_at ASC

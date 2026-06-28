@@ -1,33 +1,39 @@
 <nav class="site-nav">
   <a href="/dashboard" class="nav-brand">Factory OS</a>
   <div class="nav-links">
-    <a href="/dashboard"  class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Dashboard</a>
-    <a href="/create"     class="nav-link {% if request.path == '/create' %}active{% endif %}">Create</a>
-    <a href="/episodes"   class="nav-link {% if request.path.startswith('/episodes') or (request.path.startswith('/episode/') and not request.path.startswith('/episodes')) %}active{% endif %}">Episodes</a>
+    <a href="/dashboard"  class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Factory</a>
+    <a href="/create"     class="nav-link {% if request.path == '/create' %}active{% endif %}">Production Queue</a>
+    <a href="/discover"   class="nav-link {% if request.path.startswith('/discover') %}active{% endif %}">Discovery</a>
     <a href="/channels"   class="nav-link {% if request.path.startswith('/channels') or (request.path.startswith('/channel/') and not request.path.startswith('/channel-profile')) %}active{% endif %}">Channels</a>
-    <a href="/providers"  class="nav-link {% if request.path == '/providers' %}active{% endif %}">Providers</a>
-    <a href="/platforms" class="nav-link {% if request.path == '/platforms' %}active{% endif %}">Platforms</a>
-    <a href="/providers/video-test" class="nav-link {% if request.path == '/providers/video-test' %}active{% endif %}">Video Test</a>
-    <a href="/discover"   class="nav-link {% if request.path.startswith('/discover') %}active{% endif %}">Discover</a>
-    <a href="/analytics"  class="nav-link {% if request.path.startswith('/analytics') %}active{% endif %}">Analytics</a>
-    <a href="/settings"   class="nav-link {% if request.path == '/settings' or request.path.startswith('/channel-profile') %}active{% endif %}">Settings</a>
+    <a href="/providers"  class="nav-link {% if request.path == '/providers' %}active{% endif %}">AI Providers</a>
+    <a href="/platforms"  class="nav-link {% if request.path == '/platforms' %}active{% endif %}">Platform Connections</a>
     <details class="nav-ops-details">
       <summary class="nav-ops-toggle">Operations</summary>
       <div class="nav-ops-menu">
-        <a href="/command">Command</a>
+        <div class="nav-ops-group">Production</div>
         <a href="/live">Live</a>
-        <a href="/runs">Production History</a>
-        <a href="/queue">Schedule</a>
+        <a href="/queue">Run Queue</a>
+        <a href="/runs">History</a>
+        <a href="/failures">Failures</a>
+        <div class="nav-ops-group">Escalations</div>
         <a href="/approvals">Pending Approvals</a>
-        <a href="/signals">System Checks</a>
+        <a href="/preflight">System Checks</a>
+        <div class="nav-ops-group">Intelligence</div>
+        <a href="/episodes">Episodes</a>
+        <a href="/analytics">Analytics</a>
         <a href="/learning">Learning</a>
+        <div class="nav-ops-group">Governance</div>
         <a href="/decisions">Decisions</a>
         <a href="/decision-reviews">Reviews</a>
         <a href="/execution-plans">Plans</a>
         <a href="/decision-inputs">Inputs</a>
-        <a href="/preflight">System Checks</a>
-        <a href="/prompts">Prompt Registry</a>
+        <div class="nav-ops-group">Config</div>
+        <a href="/settings">Settings</a>
+        <div class="nav-ops-group">Debug</div>
+        <a href="/providers/video-test">Video Test</a>
         <a href="/compare">Model Comparison</a>
+        <a href="/prompts">Prompt Registry</a>
+        <a href="/command">Command</a>
       </div>
     </details>
   </div>
@@ -38,11 +44,15 @@
                      font-size: 13px; cursor: pointer; list-style: none; user-select: none; }
   .nav-ops-toggle::-webkit-details-marker { display: none; }
   .nav-ops-toggle:hover { background: var(--surface); color: var(--text); }
-  .nav-ops-menu    { position: absolute; top: 100%; right: 0; min-width: 180px; z-index: 100;
+  .nav-ops-menu    { position: absolute; top: 100%; right: 0; min-width: 190px; z-index: 100;
                      background: var(--surface); border: 1px solid var(--border);
                      border-radius: var(--radius); padding: 6px 0; margin-top: 4px;
                      box-shadow: 0 4px 16px rgba(0,0,0,.4); }
-  .nav-ops-menu a  { display: block; padding: 6px 14px; font-size: 13px; color: var(--muted);
+  .nav-ops-menu a  { display: block; padding: 5px 14px; font-size: 13px; color: var(--muted);
                      text-decoration: none; white-space: nowrap; }
   .nav-ops-menu a:hover { color: var(--text); background: rgba(255,255,255,.04); text-decoration: none; }
+  .nav-ops-group   { padding: 8px 14px 2px; font-size: 10px; font-weight: 700;
+                     text-transform: uppercase; letter-spacing: .07em; color: var(--border);
+                     border-top: 1px solid var(--border); margin-top: 2px; }
+  .nav-ops-group:first-child { border-top: none; margin-top: 0; padding-top: 4px; }
 </style>

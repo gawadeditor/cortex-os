@@ -514,4 +514,4 @@ class TestArchiveAgentSchema:
 
     def test_schema_count_updated(self):
         from hypogeum.schemas import SCHEMA_NAMES
-        assert len(SCHEMA_NAMES) == 29
+        assert len(SCHEMA_NAMES) == 31  # +2 for vpd_skeleton_meta, vpd_skeleton_scene_batch

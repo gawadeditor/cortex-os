@@ -3,10 +3,31 @@ hypogeum/agents/visual_package_director.py — Visual Package Director agent (M2
 
 Two-phase execution + Thumbnail Handoff Brief extraction:
 
-  Phase 1 — Claude planning:
-    run_agent() sends the Script Package to Claude Sonnet 4.6. Claude returns the
-    full Visual Package v1.3 JSON with generation_status = "planned" on all assets
-    and reference_image_asset_id = null on all locked_entities.
+  Phase 1 — Claude planning (Stage A split into A1 + A2 + A3):
+
+    Stage A1 — metadata (vpd_skeleton_meta schema):
+      Claude receives the compact script_package and produces all non-scene sections of
+      the Visual Package: package_metadata, episode_metadata, visual_continuity_record
+      (entities + palettes), provider_routing_manifest, visual_integrity_log,
+      thumbnail_handoff_brief, asset_manifest, package_integrity.
+      Max tokens: 4,096. Checkpoint: vpd_a1_meta_{episode_id}.json.
+
+    Stage A2 — scene skeleton batches (vpd_skeleton_scene_batch schema):
+      Claude receives a batch of narration beats plus the entity registry from A1 and
+      returns a {"scenes": [...]} dict. One call per batch of _SCENE_SKELETON_BATCH_SIZE
+      beats. Max tokens: 4,096 per batch.
+      Checkpoints: vpd_a2_scenes_batch_{i}_{episode_id}.json.
+
+    Stage A3 — Python merge:
+      The A1 metadata dict and all A2 scene lists are merged into the full Visual Package
+      skeleton. Scene counts in episode_metadata, package_integrity, and
+      provider_routing_manifest are patched from the actual scene list.
+      Writes: visual_package_skeleton_{episode_id}.json.
+
+  Stage B — cinematic prompts (batched):
+    Claude writes primary_prompt + fallback_prompt for each scene. Batched at
+    _SCENE_PROMPT_BATCH_SIZE scenes per call. Max tokens: 8,192 per batch.
+    Checkpoints: vpd_prompts_batch_{i}_{episode_id}.json.
 
   Phase 2 — MUAPI execution:
     For each entity with lock_state == "final":
@@ -46,27 +67,31 @@ Integration contracts (must not be violated):
   - MUAPI calls go through muapi.submit_scene() and muapi.generate_reference_image()
 
 Model: Claude Sonnet 4.6 (frozen — VPD governance decision)
-Max tokens: 12,288 (Visual Package is large — many scenes with full prompts)
-
-# TODO (future — M6+ design): Split VPD into two agents:
-#   visual_package_planner   — Phase 1: Claude planning only; returns planned Visual Package
-#   visual_package_executor  — Phase 2: MUAPI execution only; reads planned package, runs generation
-# This split enables retry/resume on execution failures without re-running the planning pass.
-# Do not refactor until planning + executor have separate test suites and contracts defined.
 
 Logging events emitted:
-  vpd_planning_started        — info  — before run_agent() call
-  vpd_planning_completed      — info  — after run_agent() returns
-  vpd_muapi_phase_started     — info  — before MUAPI execution loop
-  vpd_ref_image_started       — info  — before each generate_reference_image()
-  vpd_ref_image_completed     — info  — after each generate_reference_image()
-  vpd_ref_image_failed        — warn  — generate_reference_image() raised
-  vpd_scene_generation_start  — info  — before each submit_scene()
-  vpd_scene_generated         — info  — scene successfully generated
-  vpd_scene_failed            — warn  — scene generation_failed (pipeline continues)
-  vpd_muapi_phase_completed   — info  — after all scenes processed
-  vpd_package_finalized       — info  — final package written to disk
-  vpd_handoff_brief_written   — info  — thumbnail handoff brief written to disk
+  vpd_planning_started          — info  — before Stage A begins
+  vpd_stage_a1_started          — info  — before Stage A1 run_agent() call
+  vpd_stage_a1_resumed          — info  — Stage A1 checkpoint found, skipping call
+  vpd_stage_a1_completed        — info  — Stage A1 written to checkpoint
+  vpd_stage_a2_batch_started    — info  — before each Stage A2 run_agent() call
+  vpd_stage_a2_batch_resumed    — info  — Stage A2 batch checkpoint found, skipping call
+  vpd_stage_a2_batch_completed  — info  — Stage A2 batch merged into all_scenes
+  vpd_stage_a_completed         — info  — full skeleton written after A3 merge
+  vpd_stage_a_resumed           — info  — full skeleton checkpoint found, skipping A1/A2/A3
+  vpd_stage_b_batch_started     — info  — before each Stage B run_agent() call
+  vpd_stage_b_batch_resumed     — info  — Stage B batch checkpoint found, skipping call
+  vpd_stage_b_batch_completed   — info  — Stage B batch prompts merged into skeleton
+  vpd_planning_completed        — info  — all planning stages done
+  vpd_muapi_phase_started       — info  — before MUAPI execution loop
+  vpd_ref_image_started         — info  — before each generate_reference_image()
+  vpd_ref_image_completed       — info  — after each generate_reference_image()
+  vpd_ref_image_failed          — warn  — generate_reference_image() raised
+  vpd_scene_generation_start    — info  — before each submit_scene()
+  vpd_scene_generated           — info  — scene successfully generated
+  vpd_scene_failed              — warn  — scene generation_failed (pipeline continues)
+  vpd_muapi_phase_completed     — info  — after all scenes processed
+  vpd_package_finalized         — info  — final package written to disk
+  vpd_handoff_brief_written     — info  — thumbnail handoff brief written to disk
 """
 
 from __future__ import annotations
@@ -101,8 +126,13 @@ from hypogeum.schemas import SchemaError, validate
 _CLAUDE_SONNET   = "anthropic/claude-sonnet-4.6"
 _AGENT_NAME      = "visual_package_director"
 
-# Stage A: skeleton (no cinematic prompts) — budget 12,288 = ~37% of 32,768 ceiling
-_VPD_SKELETON_MAX_TOKENS    = 12_288
+# Stage A1: non-scene metadata — budget 4,096 (entities, palettes, thumbnail brief)
+_VPD_SKELETON_META_MAX_TOKENS        = 4_096
+# Stage A2: scene skeleton per batch — budget 4,096 (12 scenes × ~250 tok ≈ 3,000 tok output)
+_VPD_SKELETON_SCENE_BATCH_MAX_TOKENS = 4_096
+# Beats per Stage A2 batch
+_SCENE_SKELETON_BATCH_SIZE           = 12
+
 # Stage B: cinematic prompts per batch — budget 8,192 = ~25% of 32,768 ceiling
 _VPD_PROMPT_BATCH_MAX_TOKENS = 8_192
 # Scenes per Stage B batch (10 × ~580 tok/scene ≈ 5,800 tok output — safe)
@@ -112,8 +142,9 @@ _SCENE_PROMPT_BATCH_SIZE    = 10
 _VPD_MAX_TOKENS  = 32_768
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-_SKELETON_PROMPT_FILE     = _PROMPTS_DIR / "vpd_skeleton.txt"
-_SCENE_PROMPTS_PROMPT_FILE = _PROMPTS_DIR / "vpd_scene_prompts.txt"
+_SKELETON_META_PROMPT_FILE   = _PROMPTS_DIR / "vpd_skeleton_meta.txt"
+_SKELETON_SCENE_PROMPT_FILE  = _PROMPTS_DIR / "vpd_skeleton_scene_batch.txt"
+_SCENE_PROMPTS_PROMPT_FILE   = _PROMPTS_DIR / "vpd_scene_prompts.txt"
 # Legacy prompt file — still used by run_visual_package_director_from_plan if needed
 _PROMPT_FILE = _PROMPTS_DIR / "visual_package_director.txt"
 
@@ -128,16 +159,20 @@ _CINEMATIC_SKILL_FILE = _SKILLS_DIR / "cinematic_prompt_architecture.md"
 def _load_system_prompt() -> str:
     return compose_system_prompt(_PROMPT_FILE, _CINEMATIC_SKILL_FILE)
 
-def _load_skeleton_prompt() -> str:
-    return compose_system_prompt(_SKELETON_PROMPT_FILE)
+def _load_meta_prompt() -> str:
+    return compose_system_prompt(_SKELETON_META_PROMPT_FILE)
+
+def _load_scene_batch_prompt() -> str:
+    return compose_system_prompt(_SKELETON_SCENE_PROMPT_FILE)
 
 def _load_scene_prompts_prompt() -> str:
     return compose_system_prompt(_SCENE_PROMPTS_PROMPT_FILE, _CINEMATIC_SKILL_FILE)
 
 
-SYSTEM_PROMPT: str         = _load_system_prompt()
-SKELETON_PROMPT: str       = _load_skeleton_prompt()
-SCENE_PROMPTS_PROMPT: str  = _load_scene_prompts_prompt()
+SYSTEM_PROMPT: str        = _load_system_prompt()
+META_PROMPT: str          = _load_meta_prompt()
+SCENE_BATCH_PROMPT: str   = _load_scene_batch_prompt()
+SCENE_PROMPTS_PROMPT: str = _load_scene_prompts_prompt()
 
 
 # ---------------------------------------------------------------------------
@@ -228,31 +263,116 @@ def run_visual_package_director(
 
     # ------------------------------------------------------------------
     # Stage A — Skeleton planning (no cinematic prompts)
-    # Checkpoint: visual_package_skeleton_{episode_id}.json
+    # Split into A1 (metadata) + A2 (scene batches) + A3 (merge).
+    # Final checkpoint: visual_package_skeleton_{episode_id}.json
     # ------------------------------------------------------------------
     skeleton_path = _resolve_output_dir / f"visual_package_skeleton_{episode_id}.json"
     if skeleton_path.exists():
         log.info("vpd_stage_a_resumed", path=str(skeleton_path))
         visual_package = json.loads(skeleton_path.read_text(encoding="utf-8"))
     else:
-        log.info("vpd_stage_a_started", max_tokens=_VPD_SKELETON_MAX_TOKENS)
-        visual_package = run_agent(
-            agent_name=_AGENT_NAME,
-            model_slug=_CLAUDE_SONNET,
-            system_prompt=SKELETON_PROMPT,
-            input_package=input_package,
-            output_schema="visual_package",
-            episode_id=episode_id,
-            max_tokens=_VPD_SKELETON_MAX_TOKENS,
-            config=config,
-            output_dir=_resolve_output_dir,
-        )
+        # ── Stage A1: non-scene metadata ──────────────────────────────
+        # Checkpoint: vpd_a1_meta_{episode_id}.json
+        a1_path = _resolve_output_dir / f"vpd_a1_meta_{episode_id}.json"
+        if a1_path.exists():
+            log.info("vpd_stage_a1_resumed", path=str(a1_path))
+            meta_package = json.loads(a1_path.read_text(encoding="utf-8"))
+        else:
+            a1_input = {**input_package, "task": "plan_visual_package_meta"}
+            log.info("vpd_stage_a1_started", max_tokens=_VPD_SKELETON_META_MAX_TOKENS)
+            meta_package = run_agent(
+                agent_name=_AGENT_NAME,
+                model_slug=_CLAUDE_SONNET,
+                system_prompt=META_PROMPT,
+                input_package=a1_input,
+                output_schema="vpd_skeleton_meta",
+                episode_id=episode_id,
+                max_tokens=_VPD_SKELETON_META_MAX_TOKENS,
+                config=config,
+                output_dir=None,
+            )
+            a1_path.write_text(
+                json.dumps(meta_package, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            log.info(
+                "vpd_stage_a1_completed",
+                entities=len(
+                    meta_package.get("visual_continuity_record", {}).get("locked_entities", [])
+                ),
+                path=str(a1_path),
+            )
+
+        # ── Stage A2: scene skeleton batches ─────────────────────────
+        # One run_agent() call per batch of _SCENE_SKELETON_BATCH_SIZE beats.
+        # Checkpoint: vpd_a2_scenes_batch_{i}_{episode_id}.json
+        beats = _flatten_beats_for_a2(input_package)
+        scene_batches = [
+            beats[i : i + _SCENE_SKELETON_BATCH_SIZE]
+            for i in range(0, len(beats), _SCENE_SKELETON_BATCH_SIZE)
+        ]
+        all_scenes: list = []
+        start_index = 0
+        for batch_idx, batch_beats in enumerate(scene_batches):
+            a2_path = _resolve_output_dir / f"vpd_a2_scenes_batch_{batch_idx}_{episode_id}.json"
+            if a2_path.exists():
+                log.info("vpd_stage_a2_batch_resumed", batch=batch_idx, path=str(a2_path))
+                batch_result = json.loads(a2_path.read_text(encoding="utf-8"))
+            else:
+                a2_input: dict = {
+                    "task": "plan_scene_batch",
+                    "batch_index": batch_idx,
+                    "start_scene_index": start_index,
+                    "episode_metadata": meta_package.get("episode_metadata", {}),
+                    "locked_entities": (
+                        meta_package.get("visual_continuity_record", {}).get("locked_entities", [])
+                    ),
+                    "period_palettes": (
+                        meta_package.get("visual_continuity_record", {}).get("period_palettes", [])
+                    ),
+                    "provider_capabilities": input_package.get("provider_capabilities", {}),
+                    "beats": batch_beats,
+                }
+                if input_package.get("generation_constraints"):
+                    a2_input["generation_constraints"] = input_package["generation_constraints"]
+                log.info(
+                    "vpd_stage_a2_batch_started",
+                    batch=batch_idx,
+                    beats_in_batch=len(batch_beats),
+                    start_scene_index=start_index,
+                    max_tokens=_VPD_SKELETON_SCENE_BATCH_MAX_TOKENS,
+                )
+                batch_result = run_agent(
+                    agent_name=_AGENT_NAME,
+                    model_slug=_CLAUDE_SONNET,
+                    system_prompt=SCENE_BATCH_PROMPT,
+                    input_package=a2_input,
+                    output_schema="vpd_skeleton_scene_batch",
+                    episode_id=episode_id,
+                    max_tokens=_VPD_SKELETON_SCENE_BATCH_MAX_TOKENS,
+                    config=config,
+                    output_dir=None,
+                )
+                a2_path.write_text(
+                    json.dumps(batch_result, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            batch_scenes = batch_result.get("scenes", [])
+            all_scenes.extend(batch_scenes)
+            start_index += len(batch_scenes)
+            log.info(
+                "vpd_stage_a2_batch_completed",
+                batch=batch_idx,
+                scenes_in_batch=len(batch_scenes),
+                total_scenes_so_far=len(all_scenes),
+            )
+
+        # ── Stage A3: merge A1 + A2 batches into full skeleton ───────
+        visual_package = _merge_a1_a2(meta_package, all_scenes, episode_id)
         skeleton_path.write_text(
             json.dumps(visual_package, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         log.info(
             "vpd_stage_a_completed",
-            scenes=len(visual_package.get("scenes", [])),
+            scenes=len(all_scenes),
             path=str(skeleton_path),
         )
 
@@ -411,6 +531,114 @@ def run_visual_package_director(
     # M2.4 — Extract and write Thumbnail Handoff Brief
     # ------------------------------------------------------------------
     build_thumbnail_handoff_brief(visual_package, episode_id, _resolve_output_dir, log)
+
+    return visual_package
+
+
+# ---------------------------------------------------------------------------
+# Stage A2 helper — flatten beats for batching
+# ---------------------------------------------------------------------------
+
+def _flatten_beats_for_a2(input_package: dict) -> list:
+    """
+    Flatten all narration beats from the compacted script_package into a list for A2 batching.
+
+    Respects generation_constraints.shorts_count = 0 (skip shorts) and
+    max_main_scenes cap (truncate main episode beats).
+    """
+    sp = input_package.get("script_package", {})
+    constraints = input_package.get("generation_constraints", {})
+    suppress_shorts = constraints.get("shorts_count", -1) == 0
+    max_main = constraints.get("max_main_scenes", 0)
+
+    beats: list = []
+    for sec in sp.get("sections", []):
+        section_id       = sec.get("section_id", "")
+        visual_directions = sec.get("visual_directions", "")
+        for beat in sec.get("narration_beats", []):
+            beats.append({
+                "source_type":       "main_episode",
+                "section_id":        section_id,
+                "short_id":          None,
+                "visual_directions": visual_directions,
+                "beat_id":           beat.get("beat_id", ""),
+                "beat_type":         beat.get("beat_type", ""),
+                "text":              beat.get("text", ""),
+            })
+
+    if max_main > 0:
+        beats = beats[:max_main]
+
+    if not suppress_shorts:
+        for sh in sp.get("shorts_scripts", []):
+            short_id         = sh.get("short_id", "")
+            visual_directions = sh.get("visual_directions", "")
+            for beat in sh.get("narration_beats", []):
+                beats.append({
+                    "source_type":       "short",
+                    "section_id":        f"sh_{short_id}",
+                    "short_id":          short_id,
+                    "visual_directions": visual_directions,
+                    "beat_id":           beat.get("beat_id", ""),
+                    "beat_type":         beat.get("beat_type", ""),
+                    "text":              beat.get("text", ""),
+                })
+
+    return beats
+
+
+# ---------------------------------------------------------------------------
+# Stage A3 helper — merge A1 metadata + A2 scene batches
+# ---------------------------------------------------------------------------
+
+def _merge_a1_a2(meta_package: dict, all_scenes: list, episode_id: str) -> dict:
+    """
+    Merge Stage A1 metadata dict and Stage A2 scene lists into a full Visual Package skeleton.
+
+    Patches scene counts in episode_metadata, package_integrity, and
+    provider_routing_manifest based on the merged scene list.
+    """
+    visual_package = {k: v for k, v in meta_package.items() if k != "scenes"}
+    visual_package["scenes"] = all_scenes
+
+    main_scenes  = [s for s in all_scenes if s.get("source_type") == "main_episode"]
+    short_scenes = [s for s in all_scenes if s.get("source_type") == "short"]
+    total_duration = float(
+        sum(s.get("production_spec", {}).get("duration_seconds", 8) for s in all_scenes)
+    )
+
+    em = visual_package.setdefault("episode_metadata", {})
+    em["scene_count_main_episode"]      = len(main_scenes)
+    em["scene_count_shorts"]            = len(short_scenes)
+    em["total_planned_duration_seconds"] = total_duration
+
+    # Build shorts_coverage (preserving insertion order per short_id)
+    short_coverage: dict = {}
+    short_order: list    = []
+    for s in short_scenes:
+        sid = s.get("short_id") or "unknown"
+        if sid not in short_coverage:
+            short_coverage[sid] = 0
+            short_order.append(sid)
+        short_coverage[sid] += 1
+
+    thb = visual_package.get("thumbnail_handoff_brief", {})
+    pi  = visual_package.setdefault("package_integrity", {})
+    pi["scenes_total"]             = len(all_scenes)
+    pi["scenes_main_episode"]      = len(main_scenes)
+    pi["shorts_coverage"]          = [
+        {"short_id": sid, "scene_count": short_coverage[sid]} for sid in short_order
+    ]
+    pi["thumbnail_candidates_count"] = len(thb.get("candidates", []))
+
+    # Patch provider_routing_manifest with tier tallies from planned scenes
+    tier_counts: dict = {"1": 0, "2": 0, "3": 0}
+    for s in all_scenes:
+        tier = str(s.get("production_spec", {}).get("provider_routing", {}).get("primary_tier", 2))
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+    prm = visual_package.setdefault("provider_routing_manifest", {})
+    prm["scenes_by_provider"] = {"muapi": len(all_scenes)}
+    prm["scenes_by_tier"]     = tier_counts
 
     return visual_package
 

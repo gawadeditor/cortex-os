@@ -1074,6 +1074,48 @@ def _validate_vpd_scene_prompts_batch(p: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# VPD Stage A1 — metadata (non-scene sections) validator
+# ---------------------------------------------------------------------------
+
+def _validate_vpd_skeleton_meta(p: dict) -> None:
+    s = "vpd_skeleton_meta"
+    _req_dict(p, s, "package_metadata")
+    _req_dict(p, s, "episode_metadata")
+    _req_dict(p, s, "visual_continuity_record")
+    vcr = p["visual_continuity_record"]
+    _req_list(vcr, s, "locked_entities", path="visual_continuity_record")
+    for i, ent in enumerate(vcr.get("locked_entities", [])):
+        path = f"visual_continuity_record.locked_entities[{i}]"
+        if not isinstance(ent, dict):
+            raise SchemaError(s, path, "each locked entity must be a dict")
+        _req_str(ent, s, "entity_id", path=path)
+        _req_in(ent, s, "lock_state", ("provisional", "promoted", "final"), path=path)
+    _req_dict(p, s, "asset_manifest")
+    _req_dict(p, s, "provider_routing_manifest")
+    _req_dict(p, s, "visual_integrity_log")
+    thb = _req_dict(p, s, "thumbnail_handoff_brief")
+    _req_str(thb, s, "central_curiosity_gap_statement", path="thumbnail_handoff_brief")
+    _req_list(thb, s, "candidates", path="thumbnail_handoff_brief", min_length=2)
+    _req_dict(p, s, "package_integrity")
+
+
+# ---------------------------------------------------------------------------
+# VPD Stage A2 — scene skeleton batch validator
+# ---------------------------------------------------------------------------
+
+def _validate_vpd_skeleton_scene_batch(p: dict) -> None:
+    s = "vpd_skeleton_scene_batch"
+    scenes = _req_list(p, s, "scenes", min_length=1)
+    for i, scene in enumerate(scenes):
+        path = f"scenes[{i}]"
+        if not isinstance(scene, dict):
+            raise SchemaError(s, path, "each scene must be a dict")
+        _req_str(scene, s, "scene_id", path=path)
+        _req_in(scene, s, "source_type", ("main_episode", "short"), path=path)
+        _req_str(scene, s, "derivation_source", path=path)
+
+
+# ---------------------------------------------------------------------------
 # Registry — populated after all validators are defined
 # ---------------------------------------------------------------------------
 
@@ -1107,6 +1149,8 @@ _VALIDATORS = {
     "signal_record":             _validate_signal_record,
     "opportunity_batch":         _validate_opportunity_batch,
     "vpd_scene_prompts_batch":   _validate_vpd_scene_prompts_batch,
+    "vpd_skeleton_meta":         _validate_vpd_skeleton_meta,
+    "vpd_skeleton_scene_batch":  _validate_vpd_skeleton_scene_batch,
 }
 
 # Expose schema names for discovery and testing

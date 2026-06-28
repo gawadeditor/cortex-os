@@ -3432,6 +3432,19 @@ def _classify_run_recovery(detail: dict) -> dict:
         ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
         skeleton_path = ep_dir / f"visual_package_skeleton_{episode_id}.json"
         skeleton_ok   = skeleton_path.exists()
+
+        # Stage A1 meta checkpoint
+        a1_ok = (ep_dir / f"vpd_a1_meta_{episode_id}.json").exists() if ep_dir.exists() else False
+
+        # Stage A2 scene batch checkpoints
+        a2_files   = sorted(ep_dir.glob(f"vpd_a2_scenes_batch_*_{episode_id}.json")) if ep_dir.exists() else []
+        a2_indices = []
+        for af in a2_files:
+            m = _re.search(r"vpd_a2_scenes_batch_(\d+)_", af.name)
+            if m:
+                a2_indices.append(int(m.group(1)))
+
+        # Stage B cinematic prompt batch checkpoints
         batch_files   = sorted(ep_dir.glob(f"vpd_prompts_batch_*_{episode_id}.json")) if ep_dir.exists() else []
         batch_indices = []
         for bf in batch_files:
@@ -3439,8 +3452,10 @@ def _classify_run_recovery(detail: dict) -> dict:
             if m:
                 batch_indices.append(int(m.group(1)))
         vpd_checkpoints = {
-            "skeleton": skeleton_ok,
-            "batches":  sorted(batch_indices),
+            "skeleton":   skeleton_ok,
+            "a1_meta":    a1_ok,
+            "a2_batches": sorted(a2_indices),
+            "batches":    sorted(batch_indices),
         }
 
     # ── Classify failure ──────────────────────────────────────────────────
@@ -3459,14 +3474,21 @@ def _classify_run_recovery(detail: dict) -> dict:
         failure_class = "resumable"
         why = (
             "Visual Package Director output exceeded the model token limit. "
-            "P12-17 stage split is now active — re-running will resume from "
-            "the last completed checkpoint."
+            "Stage A is now split (A1 metadata + A2 scene batches + A3 merge) — "
+            "re-running will resume from the last completed checkpoint."
         )
         reuse = []
         if vpd_checkpoints.get("skeleton"):
-            reuse.append("Stage A skeleton (scene plan, VCR, thumbnail brief) — already on disk, will not be re-billed")
+            reuse.append("Stage A skeleton (full scene plan + entities + thumbnail brief) — already on disk, will not be re-billed")
+        else:
+            if vpd_checkpoints.get("a1_meta"):
+                reuse.append("Stage A1 meta (entities, palettes, thumbnail brief) — already on disk, will not be re-billed")
+            for i in vpd_checkpoints.get("a2_batches", []):
+                start = i * 12 + 1
+                end   = (i + 1) * 12
+                reuse.append(f"Stage A2 scene batch {i} (scenes {start}–{end}) — already on disk, will not be re-billed")
         for b in vpd_checkpoints.get("batches", []):
-            reuse.append(f"Prompt batch {b} (scenes {b*10+1}–{(b+1)*10}) — already on disk, will not be re-billed")
+            reuse.append(f"Stage B prompt batch {b} (scenes {b*10+1}–{(b+1)*10}) — already on disk, will not be re-billed")
         # reuse stays empty if no checkpoints found — template shows nothing to reuse
         safe_action    = "Re-run episode — earlier stages (EP, Research, Script) re-execute; VPD resumes from checkpoint"
         blocked_action = "Cannot resume mid-pipeline without re-executing earlier stages"

@@ -41,6 +41,11 @@ _EXPECTED_NAMES = {
     "source_verifier_query",
     "topic_ideator",
     "visual_package_director",
+    # VPD sub-stage prompt files (loaded directly by visual_package_director.py)
+    "vpd_skeleton",
+    "vpd_scene_prompts",
+    "vpd_skeleton_meta",
+    "vpd_skeleton_scene_batch",
 }
 
 _REQUIRED_META_KEYS = {"PROMPT_VERSION", "OWNER_AGENT", "MODEL_TARGET", "PURPOSE"}

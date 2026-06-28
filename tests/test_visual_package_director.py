@@ -351,11 +351,29 @@ def _make_prompts_batch(plan: dict) -> dict:
 
 
 def _stage_side_effect(plan: dict):
-    """Return a side_effect list for run_agent: Stage A → plan, Stage B batches → prompts."""
+    """
+    Return a side_effect list for run_agent matching the new A1+A2+B call sequence.
+
+    Stage A1: non-scene metadata → return plan without "scenes" key.
+    Stage A2: one scene batch call (test scripts always have ≤12 beats) → return scenes.
+    Stage B: one prompts call per _SCENE_PROMPT_BATCH_SIZE scenes → return prompts batch.
+    """
     import math
     from hypogeum.agents.visual_package_director import _SCENE_PROMPT_BATCH_SIZE
-    n_batches = max(1, math.ceil(len(plan.get("scenes", [])) / _SCENE_PROMPT_BATCH_SIZE))
-    return [plan] + [_make_prompts_batch(plan)] * n_batches
+
+    scenes = plan.get("scenes", [])
+
+    # A1: return metadata dict (no "scenes" key — same as what the real A1 call returns)
+    meta = {k: v for k, v in plan.items() if k != "scenes"}
+
+    # A2: one batch result wrapping all scenes (test scripts always fit in one batch)
+    a2_result = {"scenes": scenes}
+
+    # B: one result per batch of _SCENE_PROMPT_BATCH_SIZE scenes
+    n_b = max(1, math.ceil(len(scenes) / _SCENE_PROMPT_BATCH_SIZE))
+    b_results = [_make_prompts_batch(plan)] * n_b
+
+    return [meta, a2_result] + b_results
 
 
 def _make_script_package(episode_id: str = "ep_001") -> dict:
@@ -457,13 +475,19 @@ class TestVPDSuccess:
 
             run_visual_package_director(script_pkg, config, "ep_001", tmp_path)
 
-        # Stage A is the FIRST run_agent call — inspect call_args_list[0]
-        stage_a_kwargs = mock_ra.call_args_list[0][1]
-        compact = stage_a_kwargs["input_package"]["script_package"]
+        # Stage A1 is the FIRST run_agent call — inspect call_args_list[0]
+        a1_kwargs = mock_ra.call_args_list[0][1]
+        compact = a1_kwargs["input_package"]["script_package"]
         assert compact["episode_metadata"] == script_pkg.get("episode_metadata", {})
         assert len(compact["sections"]) == len(script_pkg.get("sections", []))
-        assert stage_a_kwargs["output_schema"] == "visual_package"
-        assert stage_a_kwargs["model_slug"] == "anthropic/claude-sonnet-4.6"
+        assert a1_kwargs["output_schema"] == "vpd_skeleton_meta"
+        assert a1_kwargs["model_slug"] == "anthropic/claude-sonnet-4.6"
+
+        # Stage A2 is the SECOND call — receives beats, not script_package
+        a2_kwargs = mock_ra.call_args_list[1][1]
+        assert a2_kwargs["output_schema"] == "vpd_skeleton_scene_batch"
+        assert "beats" in a2_kwargs["input_package"]
+        assert a2_kwargs["input_package"]["task"] == "plan_scene_batch"
 
 
 # ---------------------------------------------------------------------------

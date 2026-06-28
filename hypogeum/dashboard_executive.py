@@ -485,19 +485,28 @@ def _load_real_analytics_summary(conn, result: dict) -> None:
     Aggregate audience metrics for YouTube — REAL rows only (source != 'mock').
     Sets all fields to None when no real data is available, so the template
     displays '—' rather than fabricated numbers.
+
+    watch_time_s stores raw average seconds; the template converts to display
+    format (h/m/s) so short-form content doesn't collapse to 0.0h.
     """
     try:
         row = conn.execute(
             """
-            SELECT SUM(views)                 AS total_views,
-                   AVG(avg_watch_time_s)/3600 AS avg_watch_h
+            SELECT SUM(views)           AS total_views,
+                   AVG(avg_watch_time_s) AS avg_watch_s
             FROM platform_analytics
             WHERE platform = 'youtube'
               AND source   != 'mock'
             """
         ).fetchone()
         if row and row["total_views"]:
-            result["analytics"]["views"]       = int(row["total_views"])
-            result["analytics"]["watch_time_h"] = round(row["avg_watch_h"] or 0, 1)
+            result["analytics"]["views"] = int(row["total_views"])
+            avg_s = row["avg_watch_s"] or 0
+            # Store raw seconds; template decides h vs m vs s display
+            result["analytics"]["watch_time_s"] = round(avg_s, 1)
+            # Keep watch_time_h for backwards compat but only set when >= 1 min
+            result["analytics"]["watch_time_h"] = (
+                round(avg_s / 3600, 2) if avg_s >= 60 else None
+            )
     except Exception:
         pass

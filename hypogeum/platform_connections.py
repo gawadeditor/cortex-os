@@ -284,17 +284,23 @@ def _load_credentials(db_path: Optional[Path]) -> dict:
     """
     Return {platform: {"status": "active"|"expired"|"revoked"|"none"}} for all platforms.
     Platform provider names in secret_profiles match platform keys directly.
+
+    Tokens with a past expires_at are downgraded to 'expired' even if the DB
+    still shows status='active' (e.g. TikTok sandbox tokens not auto-updated).
     """
     result = {p: {"status": "none"} for p in PLATFORMS}
     db = _resolve(db_path)
     if not db.exists():
         return result
     try:
+        from datetime import datetime, timezone as _tz
+        _now = datetime.now(_tz.utc)
+
         conn = _open(db_path)
         try:
             rows = conn.execute(
                 """
-                SELECT provider, status
+                SELECT provider, status, expires_at
                 FROM secret_profiles
                 WHERE provider IN ('youtube','tiktok','instagram','facebook')
                 ORDER BY created_at DESC
@@ -306,7 +312,18 @@ def _load_credentials(db_path: Optional[Path]) -> dict:
         for r in rows:
             p = r["provider"]
             if p not in seen:
-                result[p] = {"status": r["status"]}
+                status = r["status"] or "none"
+                # Downgrade active→expired when expires_at is in the past
+                if status == "active" and r["expires_at"]:
+                    try:
+                        exp = datetime.fromisoformat(
+                            r["expires_at"].replace("Z", "+00:00")
+                        )
+                        if exp < _now:
+                            status = "expired"
+                    except Exception:
+                        pass
+                result[p] = {"status": status}
                 seen.add(p)
     except Exception:
         pass

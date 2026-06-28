@@ -24,9 +24,10 @@ from hypogeum.analytics_store import (
 from hypogeum.learning_engine import get_factory_learning_state, get_recommendations
 
 
-def _safe_avg(vals: list) -> float:
+def _safe_avg(vals: list):
+    """Return avg of non-None values, or None when no data available."""
     clean = [v for v in vals if v is not None]
-    return round(sum(clean) / len(clean), 4) if clean else 0.0
+    return round(sum(clean) / len(clean), 4) if clean else None
 
 
 def _safe_sum(vals: list) -> float:

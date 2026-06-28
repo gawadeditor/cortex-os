@@ -364,8 +364,13 @@
         <div class="plat-data">{{ p.real_count }} analytics record{{ '' if p.real_count == 1 else 's' }}</div>
       {% elif cstate == "connected_no_data" %}
         <div class="plat-connected">Connected</div>
-        <div class="plat-data">No analytics imported yet</div>
-        <a href="/analytics/import?platform={{ pkey }}" class="btn-connect">Import analytics</a>
+        {% if pkey in ('facebook', 'instagram') %}
+          <div class="plat-data">Auto-sync active — no published videos yet</div>
+          <a href="/intelligence/sync" class="btn-connect">Sync status →</a>
+        {% else %}
+          <div class="plat-data">No analytics imported yet</div>
+          <a href="/analytics/import?platform={{ pkey }}" class="btn-connect">Import analytics</a>
+        {% endif %}
       {% elif cstate == "published_no_cred" %}
         <div class="plat-expired">Credential expired</div>
         <a href="/platforms/connect/{{ pkey }}" class="btn-connect">Reconnect</a>
@@ -513,11 +518,15 @@
     </div>
     <div class="kpi-card">
       <div class="kpi-val">
-        {% if anl.watch_time_h %}{{ anl.watch_time_h }}h{% else %}<span class="dash-val">—</span>{% endif %}
+        {% if anl.watch_time_s %}
+          {% if anl.watch_time_s >= 3600 %}{{ "%.1f"|format(anl.watch_time_s / 3600) }}h
+          {% elif anl.watch_time_s >= 60 %}{{ (anl.watch_time_s / 60) | int }}m
+          {% else %}{{ anl.watch_time_s | int }}s{% endif %}
+        {% else %}<span class="dash-val">—</span>{% endif %}
       </div>
-      <div class="kpi-lbl">Watch Time</div>
-      <div class="kpi-source {{ 'kpi-source-real' if anl.watch_time_h else 'kpi-source-none' }}">
-        {{ "Real data" if anl.watch_time_h else "No real data" }}
+      <div class="kpi-lbl">Avg Watch Time</div>
+      <div class="kpi-source {{ 'kpi-source-real' if anl.watch_time_s else 'kpi-source-none' }}">
+        {{ "Real data" if anl.watch_time_s else "No real data" }}
       </div>
     </div>
     <div class="kpi-card">
@@ -532,8 +541,8 @@
   {% if not (ps.any_real_data if ps else false) %}
   <div style="font-size:12px; color:var(--muted); margin-top:10px; padding-top:10px;
               border-top:1px solid var(--border)">
-    No real analytics imported yet.
-    <a href="/analytics/import">Import analytics →</a>
+    No YouTube analytics synced yet. Sync runs automatically once OAuth is active.
+    <a href="/intelligence/sync">Check sync status →</a>
   </div>
   {% endif %}
 </div>

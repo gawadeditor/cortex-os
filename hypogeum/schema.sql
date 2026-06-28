@@ -1050,13 +1050,13 @@ CREATE INDEX IF NOT EXISTS idx_la_episode   ON learning_actions(source_episode);
 CREATE VIEW IF NOT EXISTS v_platform_kpis AS
 SELECT
     platform,
-    COUNT(DISTINCT episode_id)              AS episodes_tracked,
-    COUNT(*)                                AS total_snapshots,
-    ROUND(COALESCE(AVG(ctr), 0.0), 4)     AS avg_ctr,
-    ROUND(COALESCE(AVG(avg_view_pct), 0.0), 4) AS avg_view_pct,
+    COUNT(DISTINCT episode_id)                     AS episodes_tracked,
+    COUNT(*)                                       AS total_snapshots,
+    ROUND(AVG(ctr), 4)                            AS avg_ctr,
+    ROUND(COALESCE(AVG(avg_view_pct), 0.0), 4)   AS avg_view_pct,
     ROUND(COALESCE(AVG(avg_watch_time_s), 0.0), 1) AS avg_watch_time_s,
-    COALESCE(SUM(views), 0)               AS total_views,
-    COALESCE(SUM(total_watch_time_s), 0)  AS total_watch_time_s
+    COALESCE(SUM(views), 0)                       AS total_views,
+    COALESCE(SUM(total_watch_time_s), 0)          AS total_watch_time_s
 FROM platform_analytics
 GROUP BY platform;
 

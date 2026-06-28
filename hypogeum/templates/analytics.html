@@ -67,19 +67,30 @@
   {% for platform in valid_platforms %}
     {% set pb = overview.platform_breakdown.get(platform, {}) %}
     {% set ep_count = pb.get('episodes_tracked', 0) %}
-    {% set avg_ctr = pb.get('avg_ctr', 0) or 0 %}
+    {% set avg_ctr = pb.get('avg_ctr') %}
+    {% set _has_ctr = avg_ctr is not none and avg_ctr > 0 %}
+    {% set ret = pb.get('avg_view_pct', 0) or 0 %}
     {% if ep_count == 0 %}
       {% set _card_cls = 'health-card-empty' %}
       {% set _dot_cls  = 'perf-dot-muted' %}
-    {% elif avg_ctr > 0.05 %}
+    {% elif _has_ctr and avg_ctr > 0.05 %}
       {% set _card_cls = 'health-card-ok' %}
       {% set _dot_cls  = 'perf-dot-ok' %}
-    {% elif avg_ctr >= 0.02 %}
+    {% elif _has_ctr and avg_ctr >= 0.02 %}
+      {% set _card_cls = 'health-card-warn' %}
+      {% set _dot_cls  = 'perf-dot-warn' %}
+    {% elif _has_ctr %}
+      {% set _card_cls = 'health-card-err' %}
+      {% set _dot_cls  = 'perf-dot-err' %}
+    {% elif ret > 0.5 %}
+      {% set _card_cls = 'health-card-ok' %}
+      {% set _dot_cls  = 'perf-dot-ok' %}
+    {% elif ret >= 0.3 %}
       {% set _card_cls = 'health-card-warn' %}
       {% set _dot_cls  = 'perf-dot-warn' %}
     {% else %}
-      {% set _card_cls = 'health-card-err' %}
-      {% set _dot_cls  = 'perf-dot-err' %}
+      {% set _card_cls = 'health-card-warn' %}
+      {% set _dot_cls  = 'perf-dot-warn' %}
     {% endif %}
     <div class="health-card {{ _card_cls }}">
       <div class="health-name">
@@ -93,13 +104,16 @@
         </div>
         <div class="health-stat">
           <span class="muted">Avg CTR</span>
-          <span class="{% if avg_ctr < 0.02 %}err{% elif avg_ctr > 0.05 %}ok{% else %}warn{% endif %}">
-            {{ "%.1f%%"|format(avg_ctr * 100) }}
-          </span>
+          {% if _has_ctr %}
+            <span class="{% if avg_ctr < 0.02 %}err{% elif avg_ctr > 0.05 %}ok{% else %}warn{% endif %}">
+              {{ "%.1f%%"|format(avg_ctr * 100) }}
+            </span>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
         </div>
         <div class="health-stat">
           <span class="muted">Retention</span>
-          {% set ret = pb.get('avg_view_pct', 0) or 0 %}
           <span class="{% if ret < 0.3 %}err{% elif ret > 0.5 %}ok{% else %}warn{% endif %}">
             {{ "%.0f%%"|format(ret * 100) }}
           </span>

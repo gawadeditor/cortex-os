@@ -278,6 +278,115 @@ def _safe_state():
         return None, None, str(exc)
 
 
+def _build_attention_context() -> dict:
+    """
+    Aggregate all operator attention items from available state providers.
+    Never raises. All sub-calls are non-blocking.
+    Returns a dict suitable for both the attention template and /api/attention/summary.
+    """
+    state, report, state_err = _safe_state()
+
+    try:
+        learning = get_learning_state(db_path=_db_path())
+    except Exception:
+        learning = {"pending_actions_list": []}
+
+    try:
+        platforms = _get_platform_detail()
+    except Exception:
+        platforms = []
+
+    # 1. OIS signals — split by blocking flag
+    all_signals      = (state.active_signals or []) if state else []
+    blocking_signals = [s for s in all_signals if s.get("blocking")]
+    warning_signals  = [s for s in all_signals if not s.get("blocking")]
+
+    # 2. Pending approvals (dataclass objects — convert to dicts for template/JSON)
+    approvals_raw = (state.pending_approvals or []) if state else []
+    approvals     = [_to_dict(a) for a in approvals_raw]
+
+    # 3. Learning items pending human review
+    learning_pending = learning.get("pending_actions_list", [])
+
+    # 4. Platform connection issues
+    platform_issues = []
+    for p in platforms:
+        vstatus = p.get("vstatus", "missing")
+        if vstatus in ("missing", "partial"):
+            missing_keys = p.get("missing", [])
+            platform_issues.append({
+                "platform":   p["id"],
+                "label":      f"{p['label']} — not configured",
+                "detail":     f"Missing: {', '.join(missing_keys)}" if missing_keys else "Credentials incomplete",
+                "severity":   "warning",
+                "action_url": f"/platforms/connect/{p['id']}",
+                "action_label": f"Configure {p['label']}",
+            })
+        elif vstatus == "failed":
+            platform_issues.append({
+                "platform":   p["id"],
+                "label":      f"{p['label']} — verification failed",
+                "detail":     p.get("error") or "Last credential verification failed",
+                "severity":   "warning",
+                "action_url": "/platforms",
+                "action_label": "View platforms",
+            })
+        for cred in p.get("credentials", []):
+            if cred.get("expiry_warning"):
+                platform_issues.append({
+                    "platform":   p["id"],
+                    "label":      f"{p['label']} — {cred['label']} expiring",
+                    "detail":     cred["expiry_warning"],
+                    "severity":   "warning",
+                    "action_url": p.get("authorize_url") or "/platforms",
+                    "action_label": p.get("authorize_label") or "Re-authorize",
+                })
+
+    # 5. Factory readiness blocks from director report
+    readiness_blocks = []
+    if report and report.blocking_reasons:
+        for reason in report.blocking_reasons:
+            readiness_blocks.append({
+                "label":      "Factory readiness block",
+                "detail":     reason,
+                "action_url": "/preflight",
+                "action_label": "View checklist",
+            })
+
+    # 6. Run clearance
+    run_clearance_issue = None
+    if report and hasattr(report, "run_clearance"):
+        rc = report.run_clearance
+        if not rc.cleared and not report.blocking_reasons:
+            run_clearance_issue = {
+                "label":      "Run not cleared",
+                "detail":     getattr(rc, "reason", "") or "Factory cannot start new runs",
+                "action_url": "/preflight",
+                "action_label": "View checklist",
+            }
+
+    blocking_count       = len(blocking_signals) + len(readiness_blocks) + (1 if run_clearance_issue else 0)
+    action_required_count = len(approvals) + len(learning_pending)
+    warning_count        = len(warning_signals) + len(platform_issues)
+
+    return {
+        "total":                  blocking_count + action_required_count + warning_count,
+        "blocking_count":         blocking_count,
+        "action_required_count":  action_required_count,
+        "warning_count":          warning_count,
+        "blocking_signals":       blocking_signals,
+        "warning_signals":        warning_signals,
+        "approvals":              approvals,
+        "learning_pending":       learning_pending,
+        "platform_issues":        platform_issues,
+        "readiness_blocks":       readiness_blocks,
+        "run_clearance_issue":    run_clearance_issue,
+        "readiness_level":        (report.readiness_level if report else "UNKNOWN"),
+        "readiness_score":        (report.readiness_score if report else 0),
+        "state_err":              state_err,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -1640,6 +1749,17 @@ def legacy_dashboard():
         failed_run_id=overview.get("failed_run_id") if overview else None,
     )
 
+    try:
+        attn = _build_attention_context()
+        attention_summary = {
+            "total":          attn["total"],
+            "blocking":       attn["blocking_count"],
+            "action_required": attn["action_required_count"],
+            "warnings":       attn["warning_count"],
+        }
+    except Exception:
+        attention_summary = {"total": 0, "blocking": 0, "action_required": 0, "warnings": 0}
+
     return render_template(
         "exec_dashboard.html",
         state=state,
@@ -1649,7 +1769,33 @@ def legacy_dashboard():
         overview=overview,
         recent_episodes=db_episodes,
         next_action=next_action,
+        attention_summary=attention_summary,
     )
+
+
+@app.route("/attention")
+def attention_page():
+    ctx = _build_attention_context()
+    return render_template("attention.html", **ctx)
+
+
+@app.route("/api/attention/summary")
+def api_attention_summary():
+    ctx = _build_attention_context()
+    return jsonify({
+        "total":           ctx["total"],
+        "blocking":        ctx["blocking_count"],
+        "action_required": ctx["action_required_count"],
+        "warnings":        ctx["warning_count"],
+        "sections": {
+            "blocking_signals": len(ctx["blocking_signals"]),
+            "approvals":        len(ctx["approvals"]),
+            "learning_pending": len(ctx["learning_pending"]),
+            "platform_issues":  len(ctx["platform_issues"]),
+            "readiness_blocks": len(ctx["readiness_blocks"]),
+            "warning_signals":  len(ctx["warning_signals"]),
+        },
+    })
 
 
 @app.route("/api/state")

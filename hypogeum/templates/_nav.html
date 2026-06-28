@@ -1,7 +1,8 @@
 <nav class="site-nav">
   <a href="/dashboard" class="nav-brand">Factory OS</a>
   <div class="nav-links">
-    <a href="/dashboard"  class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Factory</a>
+    <a href="/dashboard"   class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Factory</a>
+    <a href="/attention"  class="nav-link {% if request.path == '/attention' %}active{% endif %}">Attention</a>
     <a href="/create"     class="nav-link {% if request.path == '/create' %}active{% endif %}">Production Queue</a>
     <a href="/discover"   class="nav-link {% if request.path.startswith('/discover') %}active{% endif %}">Discovery</a>
     <a href="/channels"   class="nav-link {% if request.path.startswith('/channels') or (request.path.startswith('/channel/') and not request.path.startswith('/channel-profile')) %}active{% endif %}">Channels</a>

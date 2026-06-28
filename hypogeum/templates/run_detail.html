@@ -121,15 +121,45 @@
     <div style="font-size:12px;"><span style="color:var(--muted); font-weight:600;">Blocked:</span> {{ recovery.blocked_action }}</div>
   </div>
 
-  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
     {% if recovery.can_rerun %}
     <button class="btn" style="background:rgba(46,160,67,.12); border-color:#2ea043; color:var(--green);"
-            onclick="rerunEpisode('{{ d.run.run_id }}', this)">
+            id="btn-rerun" onclick="rerunEpisode('{{ d.run.run_id }}', this)">
       ▶ Re-run Episode
     </button>
     {% endif %}
     <a href="/runs" class="btn">← All Runs</a>
-    <span id="rerun-result" style="font-size:12px; margin-top:6px;"></span>
+    <span id="rerun-result" style="font-size:12px;"></span>
+  </div>
+
+  {# ── Duplicate queue panel — hidden until JS reveals it ── #}
+  <div id="duplicate-panel" style="display:none; margin-top:14px; padding:12px 14px;
+       background:#1a1200; border:1px solid #8b6914; border-radius:var(--radius);">
+    <div style="font-size:11px; color:var(--yellow); text-transform:uppercase;
+                letter-spacing:.05em; margin-bottom:6px;">Existing Queued Entry Detected</div>
+    <div style="font-size:13px; margin-bottom:10px;">
+      A queued entry already covers this episode. The worker will execute it when the
+      scheduler next runs — no new entry is needed.
+    </div>
+    <div style="font-size:12px; margin-bottom:10px;">
+      Topic ID: <code id="dup-topic-id" style="font-family:monospace;"></code>
+      &nbsp;·&nbsp; Status: <span id="dup-status" style="color:var(--yellow); font-weight:600;"></span>
+      &nbsp;·&nbsp; Source: <span id="dup-source" class="muted"></span>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <a id="btn-use-existing" href="/create" class="btn"
+         style="background:rgba(46,160,67,.08); border-color:#2ea043; color:var(--green);">
+        ✓ Use Existing Queued Run →
+      </a>
+      <button class="btn" style="border-color:var(--red); color:var(--red);"
+              id="btn-cancel-entry" onclick="cancelQueueEntry(this)">
+        ✗ Cancel Existing Queue Entry
+      </button>
+      <span id="cancel-result" style="font-size:12px;"></span>
+    </div>
+    <div style="font-size:11px; color:var(--muted); margin-top:8px;">
+      Cancelling will remove the queued entry. You can then click <strong>Re-run Episode</strong> above to create a fresh entry.
+    </div>
   </div>
 
 </div>
@@ -265,12 +295,17 @@
 {% endif %}
 
 <script>
+var _dupTopicId = null;
+
 function rerunEpisode(runId, btn) {
-  var el = document.getElementById('rerun-result');
+  var el  = document.getElementById('rerun-result');
+  var dup = document.getElementById('duplicate-panel');
   btn.disabled = true;
   btn.textContent = 'Queuing…';
   el.textContent = '';
   el.style.color = '';
+  dup.style.display = 'none';
+
   fetch('/api/run/' + runId + '/rerun', {method: 'POST'})
     .then(function(r){ return r.json(); })
     .then(function(d){
@@ -279,6 +314,14 @@ function rerunEpisode(runId, btn) {
       if (d.ok) {
         el.style.color = 'var(--green)';
         el.textContent = '✓ Queued — ' + (d.note || 'episode re-enqueued');
+      } else if (d.code === 'duplicate') {
+        _dupTopicId = d.duplicate_topic_id;
+        document.getElementById('dup-topic-id').textContent  = d.duplicate_topic_id || '(unknown)';
+        document.getElementById('dup-status').textContent    = d.duplicate_status   || 'queued';
+        document.getElementById('dup-source').textContent    = d.duplicate_source   || '—';
+        dup.style.display = 'block';
+        el.style.color    = 'var(--yellow)';
+        el.textContent    = '⚠ Existing queued entry found — see below';
       } else {
         el.style.color = 'var(--red)';
         el.textContent = '✗ ' + (d.error || 'Failed to queue');
@@ -287,6 +330,37 @@ function rerunEpisode(runId, btn) {
     .catch(function(){
       btn.disabled = false;
       btn.textContent = '▶ Re-run Episode';
+      el.style.color = 'var(--red)';
+      el.textContent = '✗ network error';
+    });
+}
+
+function cancelQueueEntry(btn) {
+  if (!_dupTopicId) return;
+  var el = document.getElementById('cancel-result');
+  btn.disabled = true;
+  btn.textContent = 'Cancelling…';
+  el.textContent = '';
+  fetch('/api/topics/' + _dupTopicId + '/cancel', {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.disabled = false;
+      if (d.ok) {
+        el.style.color = 'var(--green)';
+        el.textContent = '✓ Entry cancelled — you can now click Re-run Episode above';
+        btn.textContent = '✗ Cancel Existing Queue Entry';
+        document.getElementById('dup-status').textContent = 'cancelled';
+        document.getElementById('dup-status').style.color = 'var(--muted)';
+        btn.disabled = true;
+      } else {
+        btn.textContent = '✗ Cancel Existing Queue Entry';
+        el.style.color = 'var(--red)';
+        el.textContent = '✗ ' + (d.error || 'Cancel failed');
+      }
+    })
+    .catch(function(){
+      btn.disabled = false;
+      btn.textContent = '✗ Cancel Existing Queue Entry';
       el.style.color = 'var(--red)';
       el.textContent = '✗ network error';
     });

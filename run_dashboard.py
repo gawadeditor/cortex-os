@@ -3374,16 +3374,47 @@ def run_detail_page(run_id):
     return render_template("run_detail.html", d=detail, recovery=recovery, fmt_duration=fmt_duration)
 
 
+def _find_active_duplicate_topic(channel_id: str, topic_text: str, db_path) -> dict | None:
+    """
+    Look up an existing queued/claimed topic matching topic_text for channel_id.
+    Returns {topic_id, status, source, priority, created_at} or None.
+    """
+    from hypogeum.db import get_connection as _gc
+    try:
+        conn = _gc(db_path)
+        try:
+            rows = conn.execute(
+                """SELECT topic_id, status, source, priority, created_at, topic_text
+                   FROM episode_topics
+                   WHERE channel_id = ? AND status IN ('queued', 'claimed')
+                   ORDER BY created_at ASC""",
+                (channel_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        norm = topic_text.lower().split()
+        for r in rows:
+            row_norm = r["topic_text"].lower().split()
+            if row_norm == norm:
+                return dict(r)
+        return None
+    except Exception:
+        return None
+
+
 @app.route("/api/run/<run_id>/rerun", methods=["POST"])
 def api_run_rerun(run_id: str):
     """
     Re-enqueue the episode from a failed run for a new pipeline execution.
 
-    Looks up the episode topic from the failed run, then enqueues it with
-    source='rerun' so the worker picks it up. VPD checkpoint files on disk
-    are preserved — the new run will resume from the last completed stage.
+    If a duplicate queued/claimed topic already exists, returns code='duplicate'
+    with the existing topic_id and status so the caller can show the operator
+    the "Use Existing" / "Cancel Entry" options without creating a second copy.
 
-    Returns {ok, topic_id, episode_id, note}.
+    Returns:
+        {ok, topic_id, episode_id, note}           — on success
+        {ok, code, duplicate_topic_id, duplicate_status, note}  — on duplicate
+        {ok, error}                                 — on other errors
     """
     detail = get_run_detail(run_id, db_path=_db_path())
     if detail is None:
@@ -3406,15 +3437,73 @@ def api_run_rerun(run_id: str):
         db_path=_db_path(),
         source="rerun",
     )
+
     if not result.get("ok"):
+        if result.get("code") == "duplicate":
+            # Find the existing entry so the UI can display it
+            existing = _find_active_duplicate_topic(channel_id, topic, _db_path())
+            return jsonify({
+                "ok":                 False,
+                "code":               "duplicate",
+                "duplicate_topic_id": existing["topic_id"] if existing else None,
+                "duplicate_status":   existing["status"]   if existing else "queued",
+                "duplicate_source":   existing["source"]   if existing else None,
+                "note":               (
+                    "A queued entry already covers this episode. "
+                    "The worker will execute it when the scheduler runs. "
+                    "You can cancel the existing entry and force a new re-run, "
+                    "or leave it as-is."
+                ),
+            }), 409
         return jsonify({"ok": False, "error": result.get("error", "enqueue failed")}), 500
 
     return jsonify({
-        "ok":        True,
-        "topic_id":  result.get("topic_id"),
+        "ok":         True,
+        "topic_id":   result.get("topic_id"),
         "episode_id": run.get("episode_id"),
-        "note":      "Episode re-queued. VPD checkpoints on disk will be reused by the new run.",
+        "note":       "Episode re-queued. VPD checkpoints on disk will be reused by the new run.",
     })
+
+
+@app.route("/api/topics/<topic_id>/cancel", methods=["POST"])
+def api_topic_cancel(topic_id: str):
+    """
+    Cancel a queued topic (set status=cancelled). JSON endpoint.
+
+    Only cancels topics with status='queued'. Claimed/running topics are
+    not cancelled here — those require pipeline-level intervention.
+
+    Returns {ok, topic_id, previous_status} or {ok, error, code}.
+    """
+    from hypogeum.db import get_connection as _gc
+    from datetime import datetime, timezone
+    db  = _db_path()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        conn = _gc(db)
+        try:
+            row = conn.execute(
+                "SELECT status FROM episode_topics WHERE topic_id=?", (topic_id,)
+            ).fetchone()
+            if row is None:
+                return jsonify({"ok": False, "error": "topic not found", "code": "not_found"}), 404
+            prev_status = row["status"]
+            if prev_status != "queued":
+                return jsonify({
+                    "ok":    False,
+                    "error": f"Cannot cancel topic with status='{prev_status}'. Only 'queued' topics may be cancelled here.",
+                    "code":  "not_queued",
+                }), 409
+            conn.execute(
+                "UPDATE episode_topics SET status='cancelled', updated_at=? WHERE topic_id=? AND status='queued'",
+                (now, topic_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return jsonify({"ok": True, "topic_id": topic_id, "previous_status": prev_status})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/episode/<episode_id>/qa")

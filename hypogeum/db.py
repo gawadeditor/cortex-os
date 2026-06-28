@@ -136,6 +136,7 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("short_count",       "INTEGER DEFAULT 0"),
         ("total_cost_usd",    "REAL"),
         ("run_count",         "INTEGER DEFAULT 1"),
+        ("topic_id",          "TEXT"),   # P12-22: FK → episode_topics.topic_id
     ],
     "assets": [
         ("stage_name",         "TEXT"),
@@ -189,6 +190,9 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         # Publish calendar linkage — when this episode should go live (P12-21)
         ("target_publish_at",      "TEXT"),  # ISO 8601 UTC — intended platform publish time
         ("production_deadline_at", "TEXT"),  # = target_publish_at - 24h — latest safe production start
+    ],
+    "publish_calendar": [
+        ("release_id", "TEXT"),   # P12-22: FK → releases.release_id
     ],
 }
 

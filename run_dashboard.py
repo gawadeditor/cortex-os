@@ -3226,6 +3226,120 @@ def api_topic_enqueue():
     return jsonify(result), http_status
 
 
+@app.route("/api/topics/<topic_id>/chain", methods=["GET"])
+def api_topic_chain(topic_id: str):
+    """
+    Return the full entity chain for a topic:
+      Topic → Episodes → Release → Publish Jobs
+
+    Used by /topics/<topic_id>/chain dashboard page.
+    """
+    from hypogeum.db import get_connection as _gc
+    db = _db_path()
+    try:
+        conn = _gc(db)
+        try:
+            topic = conn.execute(
+                """SELECT topic_id, channel_id, topic_text, status, priority, source,
+                          target_publish_at, production_deadline_at, created_at, updated_at
+                   FROM episode_topics WHERE topic_id=?""", (topic_id,)
+            ).fetchone()
+            if topic is None:
+                return jsonify({"error": "topic not found"}), 404
+
+            episodes = conn.execute(
+                """SELECT episode_id, title, topic, status, run_id, total_cost_usd,
+                          youtube_video_id, published_at, created_at
+                   FROM episodes WHERE topic_id=? ORDER BY created_at""",
+                (topic_id,)
+            ).fetchall()
+
+            releases = conn.execute(
+                """SELECT release_id, episode_id, topic_id, target_publish_at,
+                          status, notes, created_at, updated_at
+                   FROM releases WHERE topic_id=? ORDER BY target_publish_at""",
+                (topic_id,)
+            ).fetchall()
+
+            release_ids = [r["release_id"] for r in releases]
+            publish_jobs: list = []
+            if release_ids:
+                placeholders = ",".join("?" * len(release_ids))
+                publish_jobs = conn.execute(
+                    f"""SELECT calendar_id, release_id, episode_id, short_id, platform,
+                               target_publish_at, upload_status, publish_status,
+                               platform_video_id, platform_supports_scheduled_publish,
+                               publish_method, created_at, updated_at
+                        FROM publish_calendar
+                        WHERE release_id IN ({placeholders})
+                        ORDER BY platform, short_id""",
+                    release_ids
+                ).fetchall()
+            # Also check publish_calendar by episode_id (pre-release rows)
+            ep_ids = [e["episode_id"] for e in episodes]
+            if ep_ids:
+                placeholders = ",".join("?" * len(ep_ids))
+                extra_jobs = conn.execute(
+                    f"""SELECT calendar_id, release_id, episode_id, short_id, platform,
+                               target_publish_at, upload_status, publish_status,
+                               platform_video_id, platform_supports_scheduled_publish,
+                               publish_method, created_at, updated_at
+                        FROM publish_calendar
+                        WHERE episode_id IN ({placeholders})
+                          AND (release_id IS NULL OR release_id NOT IN ({placeholders}))
+                        ORDER BY platform, short_id""",
+                    ep_ids + ep_ids
+                ).fetchall()
+                publish_jobs = list(publish_jobs) + list(extra_jobs)
+
+        finally:
+            conn.close()
+
+        def _d(row):
+            return dict(row) if row else None
+
+        return jsonify({
+            "topic":        _d(topic),
+            "episodes":     [_d(e) for e in episodes],
+            "releases":     [_d(r) for r in releases],
+            "publish_jobs": [_d(j) for j in publish_jobs],
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/topics/<topic_id>/chain")
+def topic_chain_page(topic_id: str):
+    """Dashboard page: Topic → Episode → Release → Publish Jobs chain view."""
+    from hypogeum.db import get_connection as _gc
+    db = _db_path()
+    try:
+        conn = _gc(db)
+        try:
+            topic = conn.execute(
+                """SELECT topic_id, channel_id, topic_text, status, priority, source,
+                          target_publish_at, production_deadline_at, created_at
+                   FROM episode_topics WHERE topic_id=?""", (topic_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if topic is None:
+            return render_template("not_found.html", kind="Topic", id=topic_id), 404
+    except Exception:
+        return render_template("not_found.html", kind="Topic", id=topic_id), 404
+
+    chain = {}
+    try:
+        import requests as _req
+        r = _req.get(f"http://127.0.0.1:{request.environ.get('SERVER_PORT', 5001)}"
+                     f"/api/topics/{topic_id}/chain", timeout=5)
+        chain = r.json()
+    except Exception:
+        chain = {"topic": dict(topic), "episodes": [], "releases": [], "publish_jobs": []}
+
+    return render_template("topic_chain.html", chain=chain, topic_id=topic_id)
+
+
 @app.route("/api/topics/<topic_id>/remove", methods=["POST"])
 def api_topic_remove(topic_id: str):
     """Remove a queued topic (set status=cancelled)."""

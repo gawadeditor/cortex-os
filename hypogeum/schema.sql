@@ -1509,3 +1509,39 @@ CREATE INDEX IF NOT EXISTS idx_pub_cal_upload   ON publish_calendar(upload_statu
 CREATE INDEX IF NOT EXISTS idx_pub_cal_publish  ON publish_calendar(publish_status)
     WHERE publish_status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_mcrun_type     ON model_comparison_runs(run_type, initiated_at);
+
+-- ---------------------------------------------------------------------------
+-- releases  (P12-22)
+-- One row per planned publication event for an episode (or short series).
+-- Groups the per-platform publish_calendar rows under a single release intent.
+--
+-- Relationship chain:
+--   episode_topics.topic_id  (idea/backlog)
+--     → episodes.episode_id  (produced asset package; episodes.topic_id added via migration)
+--       → releases.release_id  (planned publication event)
+--         → publish_calendar.calendar_id  (per-platform upload/schedule/live job)
+--
+-- status lifecycle:
+--   planned    — release intent registered; assets not yet ready
+--   ready      — all episode assets confirmed; publish jobs may begin
+--   publishing — at least one platform job is in flight
+--   live       — all platform jobs complete/scheduled
+--   failed     — at least one platform job failed; may be partial
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS releases (
+    release_id          TEXT NOT NULL PRIMARY KEY,
+    episode_id          TEXT NOT NULL,
+    topic_id            TEXT,            -- FK → episode_topics.topic_id (may be NULL for historical)
+    target_publish_at   TEXT NOT NULL,   -- ISO 8601 UTC — intended publish time across platforms
+    status              TEXT NOT NULL DEFAULT 'planned'
+                            CHECK(status IN ('planned','ready','publishing','live','failed')),
+    notes               TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_releases_episode    ON releases(episode_id);
+CREATE INDEX IF NOT EXISTS idx_releases_topic      ON releases(topic_id);
+CREATE INDEX IF NOT EXISTS idx_releases_target     ON releases(target_publish_at);
+CREATE INDEX IF NOT EXISTS idx_releases_status     ON releases(status);

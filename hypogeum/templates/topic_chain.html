@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Topic Chain — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .chain-row   { display:flex; align-items:flex-start; gap:0; margin-bottom:var(--gap); }
+    .chain-node  { background:var(--surface); border:1px solid var(--border);
+                   border-radius:var(--radius); padding:14px 16px; flex:1; min-width:0; }
+    .chain-arrow { display:flex; align-items:center; padding:0 10px; color:var(--muted);
+                   font-size:20px; flex-shrink:0; margin-top:24px; }
+    .chain-label { font-size:10px; font-weight:700; text-transform:uppercase;
+                   letter-spacing:.08em; color:var(--muted); margin-bottom:6px; }
+    .chain-title { font-size:14px; font-weight:600; margin-bottom:8px;
+                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .chain-meta  { font-size:11px; color:var(--muted); display:flex; flex-direction:column; gap:3px; }
+    .chain-meta span strong { color:var(--text); }
+    .entity-list { display:flex; flex-direction:column; gap:8px; }
+    .entity-item { background:rgba(255,255,255,.03); border:1px solid var(--border);
+                   border-radius:4px; padding:10px 12px; font-size:12px; }
+    .entity-hdr  { display:flex; align-items:center; gap:8px; margin-bottom:4px;
+                   font-weight:600; }
+    .badge-small { font-size:10px; padding:1px 6px; border-radius:3px; }
+    .bs-planned  { background:#0d1a00; color:#3fb950; border:1px solid #2ea043; }
+    .bs-ready    { background:#001a2e; color:#58a6ff; border:1px solid #1f6feb; }
+    .bs-live     { background:#0d1a00; color:#3fb950; border:1px solid #2ea043; }
+    .bs-failed   { background:#2d0f0f; color:#ff7b72; border:1px solid #da3633; }
+    .bs-pending  { background:#111; color:var(--muted); border:1px solid var(--border); }
+    .bs-uploaded { background:#001a2e; color:#58a6ff; border:1px solid #1f6feb; }
+    .bs-queued   { background:#1a1200; color:#d29922; border:1px solid #8b6914; }
+    .platform-row { display:flex; align-items:center; gap:8px; padding:4px 0;
+                    border-bottom:1px solid rgba(255,255,255,.05); font-size:11px; }
+    .platform-row:last-child { border-bottom:none; }
+    .method-chip { font-size:9px; padding:1px 5px; border-radius:3px;
+                   background:#001a3d; color:#4c9de8; border:1px solid #1e4a7c; }
+    .none-msg    { font-size:12px; color:var(--muted); font-style:italic; padding:8px 0; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="breadcrumb">
+  <a href="/create">Production Queue</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>Topic Chain</span>
+</div>
+
+<div class="page-header">
+  <h1>Topic → Episode → Release → Publish Jobs</h1>
+  <span class="page-meta">Full entity chain for topic {{ topic_id[:12] }}…</span>
+</div>
+
+{% set t = chain.topic or {} %}
+{% set episodes = chain.episodes or [] %}
+{% set releases = chain.releases or [] %}
+{% set jobs = chain.publish_jobs or [] %}
+
+{# ── Row 1: Topic ── #}
+<div class="chain-row">
+  <div class="chain-node">
+    <div class="chain-label">Topic (backlog idea)</div>
+    <div class="chain-title">{{ t.topic_text or '—' }}</div>
+    <div class="chain-meta">
+      <span>ID: <strong>{{ t.topic_id or '—' }}</strong></span>
+      <span>Status: <strong>{{ t.status or '—' }}</strong></span>
+      <span>Channel: <strong>{{ t.channel_id or '—' }}</strong></span>
+      <span>Source: <strong>{{ t.source or '—' }}</strong></span>
+      {% if t.production_deadline_at %}
+      <span>Produce by: <strong style="color:var(--yellow);">{{ t.production_deadline_at[:16].replace('T',' ') }} UTC</strong></span>
+      {% endif %}
+      {% if t.target_publish_at %}
+      <span>Publish slot: <strong style="color:var(--green);">{{ t.target_publish_at[:16].replace('T',' ') }} UTC</strong></span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="chain-arrow">→</div>
+
+  {# ── Episodes ── #}
+  <div class="chain-node">
+    <div class="chain-label">Episode{{ 's' if episodes|length != 1 else '' }} (produced asset packages)</div>
+    {% if episodes %}
+    <div class="entity-list">
+      {% for ep in episodes %}
+      <div class="entity-item">
+        <div class="entity-hdr">
+          <code style="font-size:11px;">{{ ep.episode_id }}</code>
+          <span class="badge-small {% if ep.status == 'complete' %}bs-live{% elif ep.status == 'failed' %}bs-failed{% else %}bs-pending{% endif %}">
+            {{ ep.status }}
+          </span>
+        </div>
+        <div class="chain-meta">
+          {% if ep.total_cost_usd %}<span>Cost: ${{ "%.4f"|format(ep.total_cost_usd) }}</span>{% endif %}
+          {% if ep.youtube_video_id %}<span>YouTube: <strong>{{ ep.youtube_video_id }}</strong></span>{% endif %}
+          {% if ep.run_id %}<span>Run: <a href="/run/{{ ep.run_id }}" style="color:var(--blue);">{{ ep.run_id[:12] }}…</a></span>{% endif %}
+          <span>Created: {{ ep.created_at[:10] if ep.created_at else '—' }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="none-msg">No episodes produced yet — pipeline has not run.</div>
+    {% endif %}
+  </div>
+
+  <div class="chain-arrow">→</div>
+
+  {# ── Release ── #}
+  <div class="chain-node">
+    <div class="chain-label">Release (planned publication event)</div>
+    {% if releases %}
+    <div class="entity-list">
+      {% for rel in releases %}
+      <div class="entity-item">
+        <div class="entity-hdr">
+          <code style="font-size:11px;">{{ rel.release_id[:12] }}…</code>
+          <span class="badge-small bs-{{ rel.status }}">{{ rel.status }}</span>
+        </div>
+        <div class="chain-meta">
+          <span>Target publish: <strong style="color:var(--green);">{{ rel.target_publish_at[:16].replace('T',' ') }} UTC</strong></span>
+          {% if rel.notes %}<span>{{ rel.notes }}</span>{% endif %}
+          <span>Created: {{ rel.created_at[:10] if rel.created_at else '—' }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="none-msg">No release planned yet.</div>
+    {% endif %}
+  </div>
+
+  <div class="chain-arrow">→</div>
+
+  {# ── Publish Jobs ── #}
+  <div class="chain-node">
+    <div class="chain-label">Publish Jobs (per-platform upload + go-live)</div>
+    {% if jobs %}
+    <div class="entity-list">
+      {% for job in jobs %}
+      <div class="entity-item">
+        <div class="entity-hdr">
+          <strong style="text-transform:capitalize;">{{ job.platform }}</strong>
+          {% if job.short_id %}<span style="color:var(--muted); font-size:10px;">Short</span>{% else %}<span style="color:var(--muted); font-size:10px;">Main</span>{% endif %}
+          <span class="method-chip">{{ job.publish_method }}</span>
+        </div>
+        <div class="chain-meta">
+          <div class="platform-row">
+            <span>Upload:</span>
+            <span class="badge-small bs-{{ job.upload_status }}">{{ job.upload_status }}</span>
+            <span>Publish:</span>
+            <span class="badge-small bs-{{ job.publish_status }}">{{ job.publish_status }}</span>
+          </div>
+          {% if job.platform_video_id %}<span>Video ID: <strong>{{ job.platform_video_id }}</strong></span>{% endif %}
+          <span>Target: {{ job.target_publish_at[:16].replace('T',' ') if job.target_publish_at else '—' }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="none-msg">No publish jobs yet — will be created when assets are ready.</div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Legend ── #}
+<div class="card" style="padding:12px 16px; margin-top:0;">
+  <div style="font-size:11px; color:var(--muted);">
+    <strong style="color:var(--text);">Publish methods:</strong>
+    <span class="method-chip">api_scheduled</span> — platform API sets publishAt (YouTube, Meta) ·
+    <span class="method-chip" style="background:#1a1200; color:#d29922; border-color:#8b6914;">due_time_upload</span> — must upload at due time (TikTok)
+  </div>
+</div>
+
+<div style="margin-top:var(--gap);">
+  <a href="/create" class="btn">← Production Queue</a>
+  <a href="/api/topics/{{ topic_id }}/chain" class="btn" style="margin-left:8px;">JSON →</a>
+</div>
+
+</body>
+</html>

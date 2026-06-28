@@ -5952,6 +5952,249 @@ def api_compare_results():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+# ===========================================================================
+# Phase 6 — Infrastructure > Workers
+# ===========================================================================
+
+def _build_workers_context() -> dict:
+    """
+    Collect background worker state from existing DB tables only.
+    Never raises. Each worker section is independently guarded.
+    Returns {"ok": True, "workers": [...]} for both template and JSON.
+    """
+    from hypogeum.db import get_connection
+    from hypogeum.dashboard_api import get_schedules
+    from hypogeum.platform_sync import get_last_sync_by_platform
+
+    db = _db_path()
+
+    def _conn():
+        """Open a DB connection, falling back to default path if db is None."""
+        path = db or Path(".hypogeum-assets/hypogeum.db")
+        return get_connection(path)
+
+    def _ts(raw):
+        """Truncate ISO timestamp to seconds and humanise separator."""
+        if not raw:
+            return None
+        return str(raw)[:19].replace("T", " ")
+
+    _unknown = lambda name, source: {
+        "worker_name":  name,
+        "status":       "unknown",
+        "last_run_at":  None,
+        "next_run_at":  None,
+        "last_outcome": "No worker state records yet",
+        "source":       source,
+    }
+
+    workers = []
+
+    # ── 1. Discovery ────────────────────────────────────────────────────────
+    try:
+        conn = _conn()
+        try:
+            rows = conn.execute(
+                """SELECT channel_id, status, started_at, completed_at,
+                          error, candidate_count, updated_at
+                   FROM discovery_state
+                   ORDER BY updated_at DESC LIMIT 1"""
+            ).fetchall()
+        finally:
+            conn.close()
+        if rows:
+            r = dict(zip(
+                ["channel_id","status","started_at","completed_at",
+                 "error","candidate_count","updated_at"], rows[0]
+            ))
+            raw_s = r["status"] or "unknown"
+            # Normalise DB cycle statuses to operator-facing worker statuses
+            s = {"completed": "idle", "idle": "idle", "running": "running",
+                 "failed": "error"}.get(raw_s, "unknown")
+            if r["error"]:
+                outcome = f"Error: {r['error'][:120]}"
+            elif r["candidate_count"]:
+                outcome = f"{r['candidate_count']} candidates scored (last cycle: {raw_s})"
+            else:
+                outcome = f"Last cycle: {raw_s}"
+            workers.append({
+                "worker_name":  "Discovery",
+                "status":       s,
+                "last_run_at":  _ts(r["completed_at"] or r["started_at"] or r["updated_at"]),
+                "next_run_at":  None,
+                "last_outcome": outcome,
+                "source":       "discovery_state",
+            })
+        else:
+            workers.append(_unknown("Discovery", "discovery_state"))
+    except Exception:
+        workers.append(_unknown("Discovery", "discovery_state"))
+
+    # ── 2. Run Scheduler ────────────────────────────────────────────────────
+    try:
+        schedules = get_schedules(db)
+        prod = next(
+            (s for s in schedules
+             if s.get("scope") == "factory" or "production" in (s.get("label") or "").lower()),
+            schedules[0] if schedules else None,
+        )
+        if prod:
+            sched_status = prod.get("status") or "unknown"
+            worker_status = "idle" if sched_status == "active" else sched_status
+            cadence = prod.get("cadence") or "unknown"
+            workers.append({
+                "worker_name":  "Run Scheduler",
+                "status":       worker_status,
+                "last_run_at":  _ts(prod.get("last_run_at")),
+                "next_run_at":  _ts(prod.get("next_run_at")),
+                "last_outcome": f"Schedule {sched_status} — {cadence} cadence",
+                "source":       "schedules",
+            })
+        else:
+            workers.append(_unknown("Run Scheduler", "schedules"))
+    except Exception:
+        workers.append(_unknown("Run Scheduler", "schedules"))
+
+    # ── 3. Analytics Sync ───────────────────────────────────────────────────
+    try:
+        last_by_platform = get_last_sync_by_platform(db)
+        if last_by_platform:
+            most_recent = max(
+                last_by_platform.values(),
+                key=lambda x: x.get("synced_at") or "",
+            )
+            records = most_recent.get("records_imported") or 0
+            platform = most_recent.get("platform") or "?"
+            status = most_recent.get("status") or "unknown"
+            outcome = f"{records} records imported ({platform}) — {status}"
+            workers.append({
+                "worker_name":  "Analytics Sync",
+                "status":       "idle",
+                "last_run_at":  _ts(most_recent.get("synced_at")),
+                "next_run_at":  None,
+                "last_outcome": outcome,
+                "source":       "platform_sync_log",
+            })
+        else:
+            workers.append({
+                **_unknown("Analytics Sync", "platform_sync_log"),
+                "last_outcome": "No sync records yet",
+            })
+    except Exception:
+        workers.append(_unknown("Analytics Sync", "platform_sync_log"))
+
+    # ── 4. Learning Worker ──────────────────────────────────────────────────
+    try:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                """SELECT MAX(created_at),
+                          COUNT(*),
+                          SUM(CASE WHEN status='applied'   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN status='pending'   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN status='dismissed' THEN 1 ELSE 0 END)
+                   FROM learning_actions"""
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            total, applied, pending, dismissed = (row[1] or 0), (row[2] or 0), (row[3] or 0), (row[4] or 0)
+            outcome = (f"{total} action{'s' if total != 1 else ''} total — "
+                       f"{applied} applied, {pending} pending, {dismissed} dismissed")
+            workers.append({
+                "worker_name":  "Learning Worker",
+                "status":       "idle",
+                "last_run_at":  _ts(row[0]),
+                "next_run_at":  None,
+                "last_outcome": outcome,
+                "source":       "learning_actions",
+            })
+        else:
+            workers.append({
+                **_unknown("Learning Worker", "learning_actions"),
+                "last_outcome": "No learning actions recorded yet",
+            })
+    except Exception:
+        workers.append(_unknown("Learning Worker", "learning_actions"))
+
+    # ── 5. OIS Monitor ──────────────────────────────────────────────────────
+    try:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                """SELECT MAX(ingested_at),
+                          COUNT(*),
+                          SUM(CASE WHEN lifecycle_status='open'     THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN blocking=1                  THEN 1 ELSE 0 END)
+                   FROM signal_records"""
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            total, open_c, blocking = (row[1] or 0), (row[2] or 0), (row[3] or 0)
+            outcome = (f"{open_c} open signal{'s' if open_c != 1 else ''} "
+                       f"({blocking} blocking) — {total} total recorded")
+            workers.append({
+                "worker_name":  "OIS Monitor",
+                "status":       "idle",
+                "last_run_at":  _ts(row[0]),
+                "next_run_at":  None,
+                "last_outcome": outcome,
+                "source":       "signal_records",
+            })
+        else:
+            workers.append({
+                **_unknown("OIS Monitor", "signal_records"),
+                "last_outcome": "No signal records yet",
+            })
+    except Exception:
+        workers.append(_unknown("OIS Monitor", "signal_records"))
+
+    # ── 6. Publish Health ───────────────────────────────────────────────────
+    try:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                """SELECT MAX(published_at),
+                          COUNT(*),
+                          SUM(CASE WHEN publishing_status='success' THEN 1 ELSE 0 END)
+                   FROM publishing_outcomes"""
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            total, success = (row[1] or 0), (row[2] or 0)
+            outcome = f"{success} successful, {total} total publishing attempt{'s' if total != 1 else ''}"
+            workers.append({
+                "worker_name":  "Publish Health",
+                "status":       "idle",
+                "last_run_at":  _ts(row[0]),
+                "next_run_at":  None,
+                "last_outcome": outcome,
+                "source":       "publishing_outcomes",
+            })
+        else:
+            workers.append({
+                **_unknown("Publish Health", "publishing_outcomes"),
+                "last_outcome": "No publishing records yet",
+            })
+    except Exception:
+        workers.append(_unknown("Publish Health", "publishing_outcomes"))
+
+    return {"ok": True, "workers": workers}
+
+
+@app.route("/infrastructure/workers")
+def infrastructure_workers_page():
+    ctx = _build_workers_context()
+    return render_template("infrastructure_workers.html", **ctx)
+
+
+@app.route("/api/infrastructure/workers")
+def api_infrastructure_workers():
+    return jsonify(_build_workers_context())
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------

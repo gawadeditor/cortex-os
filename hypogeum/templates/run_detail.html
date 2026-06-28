@@ -63,6 +63,78 @@
   {% endif %}
 </div>
 
+{# ── Recovery Panel (failed runs only) ── #}
+{% if recovery and d.run.status == 'failed' %}
+<div class="card" style="border-color:
+  {% if recovery.failure_class == 'resumable' %}#2ea043
+  {% elif recovery.failure_class == 'retryable' %}#8b6914
+  {% elif recovery.failure_class == 'fatal' %}#da3633
+  {% else %}#8b6914{% endif %};">
+
+  <div class="card-title" style="display:flex; align-items:center; gap:8px;">
+    <span style="color:
+      {% if recovery.failure_class == 'resumable' %}var(--green)
+      {% elif recovery.failure_class == 'fatal' %}var(--red)
+      {% else %}var(--yellow){% endif %};">
+      {% if recovery.failure_class == 'resumable' %}⟳ Resumable
+      {% elif recovery.failure_class == 'retryable' %}↻ Retryable
+      {% elif recovery.failure_class == 'credential' %}🔑 Credential Required
+      {% elif recovery.failure_class == 'config' %}⚙ Config Fix Required
+      {% else %}✗ Fatal / Developer Only{% endif %}
+    </span>
+    <span style="font-size:11px; color:var(--muted); font-weight:400;">{{ recovery.failed_stage }}</span>
+  </div>
+
+  <div style="font-size:13px; margin-bottom:10px;">
+    <strong>Why it failed:</strong> {{ recovery.why }}
+  </div>
+
+  <div style="margin-bottom:10px;">
+    <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">What will be reused</div>
+    {% if recovery.reuse_summary %}
+      {% for line in recovery.reuse_summary %}
+      <div style="font-size:12px; color:var(--green); padding:2px 0;">✓ {{ line }}</div>
+      {% endfor %}
+    {% else %}
+      <div style="font-size:12px; color:var(--muted);">— No checkpoint files found. All stages will re-run from scratch.</div>
+    {% endif %}
+  </div>
+
+  {% if recovery.vpd_checkpoints %}
+  <div style="margin-bottom:10px;">
+    <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">VPD Checkpoint Status</div>
+    <div style="font-size:12px; color:{% if recovery.vpd_checkpoints.skeleton %}var(--green){% else %}var(--red){% endif %}; padding:2px 0;">
+      {% if recovery.vpd_checkpoints.skeleton %}✓{% else %}✗{% endif %} Stage A skeleton (scene plan, VCR, thumbnails)
+    </div>
+    {% if recovery.vpd_checkpoints.batches %}
+    {% for b in recovery.vpd_checkpoints.batches %}
+    <div style="font-size:12px; color:var(--green); padding:2px 0;">✓ Prompt batch {{ b }} (scenes {{ b*10+1 }}–{{ (b+1)*10 }})</div>
+    {% endfor %}
+    {% else %}
+    <div style="font-size:12px; color:var(--muted); padding:2px 0;">— No prompt batches completed</div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div style="display:flex; flex-direction:column; gap:4px; margin-bottom:12px;">
+    <div style="font-size:12px;"><span style="color:var(--green); font-weight:600;">Safe:</span> {{ recovery.safe_action }}</div>
+    <div style="font-size:12px;"><span style="color:var(--muted); font-weight:600;">Blocked:</span> {{ recovery.blocked_action }}</div>
+  </div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    {% if recovery.can_rerun %}
+    <button class="btn" style="background:rgba(46,160,67,.12); border-color:#2ea043; color:var(--green);"
+            onclick="rerunEpisode('{{ d.run.run_id }}', this)">
+      ▶ Re-run Episode
+    </button>
+    {% endif %}
+    <a href="/runs" class="btn">← All Runs</a>
+    <span id="rerun-result" style="font-size:12px; margin-top:6px;"></span>
+  </div>
+
+</div>
+{% endif %}
+
 {# ── Stage timeline ── #}
 <div class="card">
   <div class="card-title">Stage Timeline ({{ d.stage_count }} stages)</div>
@@ -192,5 +264,33 @@
 </div>
 {% endif %}
 
+<script>
+function rerunEpisode(runId, btn) {
+  var el = document.getElementById('rerun-result');
+  btn.disabled = true;
+  btn.textContent = 'Queuing…';
+  el.textContent = '';
+  el.style.color = '';
+  fetch('/api/run/' + runId + '/rerun', {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.disabled = false;
+      btn.textContent = '▶ Re-run Episode';
+      if (d.ok) {
+        el.style.color = 'var(--green)';
+        el.textContent = '✓ Queued — ' + (d.note || 'episode re-enqueued');
+      } else {
+        el.style.color = 'var(--red)';
+        el.textContent = '✗ ' + (d.error || 'Failed to queue');
+      }
+    })
+    .catch(function(){
+      btn.disabled = false;
+      btn.textContent = '▶ Re-run Episode';
+      el.style.color = 'var(--red)';
+      el.textContent = '✗ network error';
+    });
+}
+</script>
 </body>
 </html>

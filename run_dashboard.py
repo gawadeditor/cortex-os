@@ -3248,12 +3248,173 @@ def runs_page():
                            runs=runs, status_filter=status, fmt_duration=fmt_duration)
 
 
+def _classify_run_recovery(detail: dict) -> dict:
+    """
+    Classify a failed run and return operator-facing recovery context.
+
+    Returns a dict with:
+      failed_stage    — name of the stage that failed (or None)
+      failure_class   — "resumable" | "retryable" | "credential" | "config" | "fatal"
+      why             — human sentence: what went wrong
+      reuse_summary   — list of strings: what checkpoint files exist and will be reused
+      safe_action     — string: what operator action is safe
+      blocked_action  — string: what is NOT safe / not available
+      can_rerun       — bool: whether the rerun button is available
+      vpd_checkpoints — dict: {skeleton: bool, batches: [int]}  (only if VPD failed)
+    """
+    import re as _re
+
+    run      = detail.get("run", {})
+    episode  = detail.get("episode", {})
+    stages   = detail.get("stages", [])
+    episode_id = run.get("episode_id", "")
+
+    failed = next((s for s in stages if s.get("status") == "failed"), None)
+    if not failed and run.get("status") != "failed":
+        return {}  # run not failed — no recovery context needed
+
+    failed_stage = (failed or {}).get("stage_name") or run.get("error_message", "")[:40]
+    error_msg    = (failed or {}).get("error_message") or run.get("error_message") or ""
+
+    # ── VPD checkpoint detection ──────────────────────────────────────────
+    vpd_checkpoints: dict = {}
+    if "visual_package_director" in (failed_stage or ""):
+        ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+        skeleton_path = ep_dir / f"visual_package_skeleton_{episode_id}.json"
+        skeleton_ok   = skeleton_path.exists()
+        batch_files   = sorted(ep_dir.glob(f"vpd_prompts_batch_*_{episode_id}.json")) if ep_dir.exists() else []
+        batch_indices = []
+        for bf in batch_files:
+            m = _re.search(r"vpd_prompts_batch_(\d+)_", bf.name)
+            if m:
+                batch_indices.append(int(m.group(1)))
+        vpd_checkpoints = {
+            "skeleton": skeleton_ok,
+            "batches":  sorted(batch_indices),
+        }
+
+    # ── Classify failure ──────────────────────────────────────────────────
+    is_truncation = (
+        "truncat" in error_msg.lower()
+        or "max_tokens" in error_msg.lower()
+        or "completion_tokens" in error_msg.lower()
+    )
+    is_schema_error   = "SchemaError" in error_msg or "schema" in error_msg.lower()
+    is_credential     = any(k in error_msg for k in ("401", "403", "auth", "credential", "token"))
+    is_quota          = any(k in error_msg for k in ("402", "quota", "Quota", "budget", "Budget"))
+    is_muapi          = "MUAPI" in error_msg
+    is_vpd            = "visual_package_director" in (failed_stage or "")
+
+    if is_vpd and is_truncation:
+        failure_class = "resumable"
+        why = (
+            "Visual Package Director output exceeded the model token limit. "
+            "P12-17 stage split is now active — re-running will resume from "
+            "the last completed checkpoint."
+        )
+        reuse = []
+        if vpd_checkpoints.get("skeleton"):
+            reuse.append("Stage A skeleton (scene plan, VCR, thumbnail brief) — already on disk, will not be re-billed")
+        for b in vpd_checkpoints.get("batches", []):
+            reuse.append(f"Prompt batch {b} (scenes {b*10+1}–{(b+1)*10}) — already on disk, will not be re-billed")
+        # reuse stays empty if no checkpoints found — template shows nothing to reuse
+        safe_action    = "Re-run episode — earlier stages (EP, Research, Script) re-execute; VPD resumes from checkpoint"
+        blocked_action = "Cannot resume mid-pipeline without re-executing earlier stages"
+    elif is_vpd and not is_truncation:
+        failure_class  = "retryable"
+        why            = f"Visual Package Director raised an error: {error_msg[:120]}"
+        reuse          = []
+        safe_action    = "Re-run episode — will retry VPD from scratch (no existing checkpoints)"
+        blocked_action = "If BGA is enabled, review VPD output before re-running"
+    elif is_quota or (is_muapi and is_quota):
+        failure_class  = "config"
+        why            = "MUAPI budget or quota exhausted. Add credits or raise MUAPI_EPISODE_BUDGET_CREDITS."
+        reuse          = []
+        safe_action    = "Add MUAPI credits, then re-run"
+        blocked_action = "Re-running without adding credits will fail again"
+    elif is_credential:
+        failure_class  = "credential"
+        why            = f"Credential or authentication failure in {failed_stage}: {error_msg[:120]}"
+        reuse          = []
+        safe_action    = "Refresh credentials in Platform Connections, then re-run"
+        blocked_action = "Re-running without refreshing credentials will fail again"
+    elif is_schema_error:
+        failure_class  = "fatal"
+        why            = f"Schema validation failed in {failed_stage} — output structure did not match expected schema."
+        reuse          = []
+        safe_action    = "Review error in logs; this requires a developer fix"
+        blocked_action = "Re-running will fail again without a code fix"
+    else:
+        failure_class  = "retryable"
+        why            = f"{failed_stage} failed: {error_msg[:160]}"
+        reuse          = []
+        safe_action    = "Re-run episode — likely a transient API or network error"
+        blocked_action = "If the error recurs, investigate logs"
+
+    can_rerun = failure_class in ("resumable", "retryable") and bool(episode.get("topic") or episode.get("title"))
+
+    return {
+        "failed_stage":    failed_stage,
+        "failure_class":   failure_class,
+        "why":             why,
+        "reuse_summary":   reuse,
+        "safe_action":     safe_action,
+        "blocked_action":  blocked_action,
+        "can_rerun":       can_rerun,
+        "vpd_checkpoints": vpd_checkpoints,
+    }
+
+
 @app.route("/run/<run_id>")
 def run_detail_page(run_id):
     detail = get_run_detail(run_id, db_path=_db_path())
     if detail is None:
         return render_template("not_found.html", kind="Run", id=run_id), 404
-    return render_template("run_detail.html", d=detail, fmt_duration=fmt_duration)
+    recovery = _classify_run_recovery(detail) if detail["run"].get("status") == "failed" else {}
+    return render_template("run_detail.html", d=detail, recovery=recovery, fmt_duration=fmt_duration)
+
+
+@app.route("/api/run/<run_id>/rerun", methods=["POST"])
+def api_run_rerun(run_id: str):
+    """
+    Re-enqueue the episode from a failed run for a new pipeline execution.
+
+    Looks up the episode topic from the failed run, then enqueues it with
+    source='rerun' so the worker picks it up. VPD checkpoint files on disk
+    are preserved — the new run will resume from the last completed stage.
+
+    Returns {ok, topic_id, episode_id, note}.
+    """
+    detail = get_run_detail(run_id, db_path=_db_path())
+    if detail is None:
+        return jsonify({"ok": False, "error": "run not found"}), 404
+
+    run     = detail["run"]
+    episode = detail["episode"]
+
+    if run.get("status") != "failed":
+        return jsonify({"ok": False, "error": "run is not in failed state", "status": run.get("status")}), 409
+
+    topic = episode.get("topic") or episode.get("title", "")
+    if not topic:
+        return jsonify({"ok": False, "error": "episode has no topic text — cannot re-enqueue"}), 422
+
+    channel_id = episode.get("channel_id") or "hypogeum"
+    result = enqueue_topic(
+        channel_id, topic,
+        priority=10,
+        db_path=_db_path(),
+        source="rerun",
+    )
+    if not result.get("ok"):
+        return jsonify({"ok": False, "error": result.get("error", "enqueue failed")}), 500
+
+    return jsonify({
+        "ok":        True,
+        "topic_id":  result.get("topic_id"),
+        "episode_id": run.get("episode_id"),
+        "note":      "Episode re-queued. VPD checkpoints on disk will be reused by the new run.",
+    })
 
 
 @app.route("/episode/<episode_id>/qa")

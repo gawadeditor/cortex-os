@@ -342,7 +342,7 @@ def sync_meta_analytics(
 # ---------------------------------------------------------------------------
 
 _TIKTOK_VIDEO_LIST_URL = "https://open.tiktokapis.com/v2/video/list/"
-_TIKTOK_VIDEO_FIELDS   = "id,title,like_count,comment_count,share_count,view_count,play_count,duration"
+_TIKTOK_VIDEO_FIELDS   = "id,title,create_time,like_count,comment_count,share_count,view_count"
 
 
 def _fetch_tiktok_video_list(token: str) -> list[dict]:
@@ -353,10 +353,10 @@ def _fetch_tiktok_video_list(token: str) -> list[dict]:
     import urllib.request
     import urllib.error
 
-    payload = _json.dumps({"fields": _TIKTOK_VIDEO_FIELDS}).encode()
+    url = f"{_TIKTOK_VIDEO_LIST_URL}?fields={_TIKTOK_VIDEO_FIELDS}"
     req = urllib.request.Request(
-        _TIKTOK_VIDEO_LIST_URL,
-        data=payload,
+        url,
+        data=b"{}",
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type":  "application/json",

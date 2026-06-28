@@ -6665,6 +6665,7 @@ def _build_connections_context() -> dict:
             "sync_health":       sync_health,
             "publishing_health": pub_health,
             "has_credential":    bool(ps.get("has_credential")),
+            "has_published":     bool(ps.get("has_published")),
             "data_state":        ps.get("data_state", "none"),
             "real_count":        ps.get("real_count", 0),
             "authorize_url":     authorize_url,

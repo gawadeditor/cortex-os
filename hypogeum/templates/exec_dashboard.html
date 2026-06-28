@@ -365,7 +365,11 @@
       {% elif cstate == "connected_no_data" %}
         <div class="plat-connected">Connected</div>
         {% if pkey in ('facebook', 'instagram', 'tiktok') %}
-          <div class="plat-data">Auto-sync active — no published videos yet</div>
+          {% if p.has_published %}
+            <div class="plat-data">Published content found — analytics pending</div>
+          {% else %}
+            <div class="plat-data">Auto-sync active — no published content discovered yet</div>
+          {% endif %}
           <a href="/intelligence/sync" class="btn-connect">Sync status →</a>
         {% else %}
           <div class="plat-data">No analytics imported yet</div>

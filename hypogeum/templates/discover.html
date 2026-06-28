@@ -219,8 +219,9 @@
       {# ── Score bar ── #}
       {% set pct = (c.score * 100) | int %}
       <div class="score-row">
+        <span class="rationale-lbl" style="min-width:90px;">Discovery Score</span>
         <span class="score-num">{{ "%.2f"|format(c.score) }}</span>
-        <div class="score-bar-wrap" title="Score {{ pct }}%">
+        <div class="score-bar-wrap" title="Discovery Score {{ pct }}%">
           <div class="score-bar-fill {% if c.score < 0.5 %}score-low{% elif c.score < 0.7 %}score-mid{% endif %}"
                style="width:{{ pct }}%;"></div>
         </div>

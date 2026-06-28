@@ -6699,6 +6699,86 @@ def api_infrastructure_config():
     return jsonify(_build_config_context())
 
 
+# ===========================================================================
+# Phase 10 — Infrastructure Overview
+# ===========================================================================
+
+def _build_infrastructure_summary() -> dict:
+    """
+    Lightweight summary from all four infrastructure context builders.
+    Never raises. Returns {"ok": True, "summary": {...}}.
+    """
+    try:
+        wctx = _build_workers_context()
+        workers = {
+            "total":   len(wctx["workers"]),
+            "idle":    sum(1 for w in wctx["workers"] if w["status"] == "idle"),
+            "running": sum(1 for w in wctx["workers"] if w["status"] == "running"),
+            "error":   sum(1 for w in wctx["workers"] if w["status"] == "error"),
+            "unknown": sum(1 for w in wctx["workers"] if w["status"] in ("unknown", "paused")),
+        }
+    except Exception:
+        workers = {"total": 0, "idle": 0, "running": 0, "error": 0, "unknown": 0}
+
+    try:
+        pctx = _build_providers_context()
+        providers = {
+            "total":        len(pctx["providers"]),
+            "connected":    sum(1 for p in pctx["providers"] if p["status"] == "connected"),
+            "degraded":     sum(1 for p in pctx["providers"] if p["status"] == "degraded"),
+            "disconnected": sum(1 for p in pctx["providers"] if p["status"] == "disconnected"),
+        }
+    except Exception:
+        providers = {"total": 0, "connected": 0, "degraded": 0, "disconnected": 0}
+
+    try:
+        cctx = _build_connections_context()
+        connections = {
+            "total":        len(cctx["connections"]),
+            "connected":    sum(1 for c in cctx["connections"] if c["status"] == "connected"),
+            "degraded":     sum(1 for c in cctx["connections"] if c["status"] == "degraded"),
+            "expired":      sum(1 for c in cctx["connections"] if c["status"] == "expired"),
+            "disconnected": sum(1 for c in cctx["connections"] if c["status"] in ("disconnected", "unknown")),
+        }
+    except Exception:
+        connections = {"total": 0, "connected": 0, "degraded": 0, "expired": 0, "disconnected": 0}
+
+    try:
+        kctx = _build_config_context()
+        cfg = kctx.get("config", {})
+        config = {
+            "factory_status":  cfg.get("factory", {}).get("status", "unknown"),
+            "channel_count":   cfg.get("factory", {}).get("channel_count", 0),
+            "schedule_count":  len(cfg.get("schedules", [])),
+            "env_ready":       cfg.get("environment", {}).get("ready", False),
+            "blocker_count":   cfg.get("environment", {}).get("blocker_count", 0),
+        }
+    except Exception:
+        config = {"factory_status": "unknown", "channel_count": 0,
+                  "schedule_count": 0, "env_ready": False, "blocker_count": 0}
+
+    return {
+        "ok": True,
+        "summary": {
+            "workers":     workers,
+            "providers":   providers,
+            "connections": connections,
+            "config":      config,
+        },
+    }
+
+
+@app.route("/infrastructure")
+def infrastructure_overview_page():
+    ctx = _build_infrastructure_summary()
+    return render_template("infrastructure.html", **ctx)
+
+
+@app.route("/api/infrastructure/summary")
+def api_infrastructure_summary():
+    return jsonify(_build_infrastructure_summary())
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------

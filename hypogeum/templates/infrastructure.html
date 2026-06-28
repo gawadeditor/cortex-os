@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infrastructure — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .infra-grid { display: grid;
+                  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+                  gap: var(--gap); }
+
+    .infra-card { background: var(--surface); border: 1px solid var(--border);
+                  border-radius: var(--radius); padding: 18px 20px;
+                  text-decoration: none; display: block;
+                  transition: border-color .15s, box-shadow .15s; }
+    .infra-card:hover { border-color: var(--blue); box-shadow: 0 2px 12px rgba(0,0,0,.35);
+                        text-decoration: none; }
+
+    .ic-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .ic-icon   { font-size: 22px; }
+    .ic-title  { font-size: 15px; font-weight: 700; color: var(--text); }
+
+    .ic-desc   { font-size: 12px; color: var(--muted); margin-bottom: 12px;
+                 line-height: 1.6; }
+
+    .ic-stats  { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+    .ic-stat   { display: flex; flex-direction: column; }
+    .ic-stat-val { font-size: 18px; font-weight: 700; line-height: 1.1; }
+    .ic-stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase;
+                   letter-spacing: .05em; margin-top: 2px; }
+
+    .ic-arrow  { font-size: 12px; color: var(--muted); margin-top: 12px;
+                 display: flex; justify-content: flex-end; }
+    .infra-card:hover .ic-arrow { color: var(--blue); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% include '_infrastructure_subnav.html' %}
+
+<div class="page-header">
+  <h1>Infrastructure</h1>
+  <span class="page-meta">Operational visibility for workers, providers, connections, and configuration</span>
+  <span class="badge badge-unknown" style="margin-left:auto; font-size:11px;">Read-only monitoring</span>
+</div>
+
+{% if not ok %}
+<div class="card" style="border-color:var(--red); padding:12px 16px; margin-bottom:var(--gap);">
+  <span class="err">Infrastructure state unavailable. Check system logs.</span>
+</div>
+{% endif %}
+
+{% set w = summary.workers %}
+{% set p = summary.providers %}
+{% set c = summary.connections %}
+{% set k = summary.config %}
+
+<div class="infra-grid">
+
+  {# ── Workers ── #}
+  <a href="/infrastructure/workers" class="infra-card">
+    <div class="ic-header">
+      <span class="ic-icon">⚙️</span>
+      <span class="ic-title">Workers</span>
+      {% if w.error > 0 %}
+        <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ w.error }} error</span>
+      {% elif w.running > 0 %}
+        <span class="badge badge-active" style="font-size:10px; margin-left:auto;">{{ w.running }} running</span>
+      {% elif w.idle > 0 %}
+        <span class="badge badge-ready" style="font-size:10px; margin-left:auto;">healthy</span>
+      {% else %}
+        <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
+      {% endif %}
+    </div>
+    <p class="ic-desc">Background worker state, last run times, and outcome summaries.</p>
+    <div class="ic-stats">
+      <div class="ic-stat">
+        <span class="ic-stat-val">{{ w.total }}</span>
+        <span class="ic-stat-lbl">Workers</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if w.idle > 0 %}ok{% else %}muted{% endif %}">{{ w.idle }}</span>
+        <span class="ic-stat-lbl">Idle</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if w.running > 0 %}{% else %}muted{% endif %}">{{ w.running }}</span>
+        <span class="ic-stat-lbl">Running</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if w.error > 0 %}err{% else %}muted{% endif %}">{{ w.error }}</span>
+        <span class="ic-stat-lbl">Error</span>
+      </div>
+    </div>
+    <div class="ic-arrow">Workers →</div>
+  </a>
+
+  {# ── Providers ── #}
+  <a href="/infrastructure/providers" class="infra-card">
+    <div class="ic-header">
+      <span class="ic-icon">🤖</span>
+      <span class="ic-title">Providers</span>
+      {% if p.degraded > 0 %}
+        <span class="badge badge-degraded" style="font-size:10px; margin-left:auto;">{{ p.degraded }} degraded</span>
+      {% elif p.connected > 0 %}
+        <span class="badge badge-ready" style="font-size:10px; margin-left:auto;">{{ p.connected }} connected</span>
+      {% else %}
+        <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
+      {% endif %}
+    </div>
+    <p class="ic-desc">External AI and media service health — credential status and operational readiness.</p>
+    <div class="ic-stats">
+      <div class="ic-stat">
+        <span class="ic-stat-val">{{ p.total }}</span>
+        <span class="ic-stat-lbl">Total</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if p.connected > 0 %}ok{% else %}muted{% endif %}">{{ p.connected }}</span>
+        <span class="ic-stat-lbl">Connected</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if p.degraded > 0 %}warn{% else %}muted{% endif %}">{{ p.degraded }}</span>
+        <span class="ic-stat-lbl">Degraded</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val muted">{{ p.disconnected }}</span>
+        <span class="ic-stat-lbl">Disconnected</span>
+      </div>
+    </div>
+    <div class="ic-arrow">Providers →</div>
+  </a>
+
+  {# ── Connections ── #}
+  <a href="/infrastructure/connections" class="infra-card">
+    <div class="ic-header">
+      <span class="ic-icon">🔗</span>
+      <span class="ic-title">Connections</span>
+      {% if c.expired > 0 %}
+        <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ c.expired }} expired</span>
+      {% elif c.degraded > 0 %}
+        <span class="badge badge-degraded" style="font-size:10px; margin-left:auto;">{{ c.degraded }} degraded</span>
+      {% elif c.connected > 0 %}
+        <span class="badge badge-ready" style="font-size:10px; margin-left:auto;">{{ c.connected }} connected</span>
+      {% else %}
+        <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
+      {% endif %}
+    </div>
+    <p class="ic-desc">Platform OAuth health, token expiry, sync state, and publishing outcomes.</p>
+    <div class="ic-stats">
+      <div class="ic-stat">
+        <span class="ic-stat-val">{{ c.total }}</span>
+        <span class="ic-stat-lbl">Platforms</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if c.connected > 0 %}ok{% else %}muted{% endif %}">{{ c.connected }}</span>
+        <span class="ic-stat-lbl">Connected</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if c.expired > 0 %}err{% elif c.degraded > 0 %}warn{% else %}muted{% endif %}">
+          {{ c.expired + c.degraded }}
+        </span>
+        <span class="ic-stat-lbl">Issues</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val muted">{{ c.disconnected }}</span>
+        <span class="ic-stat-lbl">Disconnected</span>
+      </div>
+    </div>
+    <div class="ic-arrow">Connections →</div>
+  </a>
+
+  {# ── Config ── #}
+  <a href="/infrastructure/config" class="infra-card">
+    <div class="ic-header">
+      <span class="ic-icon">⚙</span>
+      <span class="ic-title">Config</span>
+      {% if k.blocker_count > 0 %}
+        <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ k.blocker_count }} blocker{% if k.blocker_count != 1 %}s{% endif %}</span>
+      {% elif k.env_ready %}
+        <span class="badge badge-ready" style="font-size:10px; margin-left:auto;">ready</span>
+      {% else %}
+        <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
+      {% endif %}
+    </div>
+    <p class="ic-desc">Factory configuration state — channels, schedules, model defaults, and environment health.</p>
+    <div class="ic-stats">
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if k.channel_count > 0 %}ok{% else %}muted{% endif %}">{{ k.channel_count }}</span>
+        <span class="ic-stat-lbl">Channels</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val">{{ k.schedule_count }}</span>
+        <span class="ic-stat-lbl">Schedules</span>
+      </div>
+      <div class="ic-stat">
+        <span class="ic-stat-val {% if k.blocker_count > 0 %}err{% elif k.env_ready %}ok{% else %}muted{% endif %}">
+          {% if k.env_ready %}✓{% else %}{{ k.blocker_count }}{% endif %}
+        </span>
+        <span class="ic-stat-lbl">Env health</span>
+      </div>
+    </div>
+    <div class="ic-arrow">Config →</div>
+  </a>
+
+</div>
+
+<div style="margin-top:calc(var(--gap)*2); font-size:11px; color:var(--muted);">
+  <a href="/api/infrastructure/summary" style="color:var(--muted);">/api/infrastructure/summary</a>
+  &ensp;·&ensp; All pages are read-only monitoring. No configuration changes are made here.
+</div>
+
+</body>
+</html>

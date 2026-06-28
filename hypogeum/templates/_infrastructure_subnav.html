@@ -1,0 +1,17 @@
+<div class="sub-nav" style="border-bottom: 2px solid var(--border); margin-bottom: 4px;">
+  <a href="/infrastructure"
+     class="sub-nav-link {% if request.path == '/infrastructure' %}active{% endif %}"
+     style="font-weight:600;">Overview</a>
+  <a href="/infrastructure/workers"
+     class="sub-nav-link {% if request.path == '/infrastructure/workers' %}active{% endif %}"
+     style="font-weight:600;">Workers</a>
+  <a href="/infrastructure/providers"
+     class="sub-nav-link {% if request.path == '/infrastructure/providers' %}active{% endif %}"
+     style="font-weight:600;">Providers</a>
+  <a href="/infrastructure/connections"
+     class="sub-nav-link {% if request.path == '/infrastructure/connections' %}active{% endif %}"
+     style="font-weight:600;">Connections</a>
+  <a href="/infrastructure/config"
+     class="sub-nav-link {% if request.path == '/infrastructure/config' %}active{% endif %}"
+     style="font-weight:600;">Config</a>
+</div>

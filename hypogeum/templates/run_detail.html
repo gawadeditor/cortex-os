@@ -201,6 +201,65 @@
   {% endif %}
 </div>
 
+{# ── Publish Calendar ── #}
+<div class="card">
+  <div class="card-title" style="display:flex; align-items:center; gap:8px;">
+    Publish Calendar
+    <span style="font-size:11px; color:var(--muted); font-weight:400;">
+      {% if d.publish_calendar %}
+        {{ d.publish_calendar | length }} platform entr{{ 'y' if d.publish_calendar | length == 1 else 'ies' }}
+      {% else %}
+        not yet populated — will be filled when pipeline reaches Publishing Agent
+      {% endif %}
+    </span>
+  </div>
+  {% if d.publish_calendar %}
+  <table>
+    <thead>
+      <tr>
+        <th>Platform</th>
+        <th>Type</th>
+        <th>Target Publish (UTC)</th>
+        <th>Publish Method</th>
+        <th>Upload</th>
+        <th>Publish</th>
+        <th>Video ID</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in d.publish_calendar %}
+      <tr>
+        <td style="font-weight:500; text-transform:capitalize;">{{ c.platform }}</td>
+        <td class="muted">{{ 'Short' if c.short_id else 'Main' }}</td>
+        <td style="font-family:monospace; font-size:12px;">{{ c.target_publish_at[:16].replace('T',' ') if c.target_publish_at else '—' }}</td>
+        <td class="muted" style="font-size:12px;">{{ c.publish_method }}</td>
+        <td>
+          <span class="{% if c.upload_status == 'uploaded' %}ok{% elif c.upload_status == 'failed' %}err{% else %}muted{% endif %}">
+            {{ c.upload_status }}
+          </span>
+        </td>
+        <td>
+          <span class="{% if c.publish_status == 'live' %}ok{% elif c.publish_status == 'scheduled' %}warn{% elif c.publish_status == 'failed' %}err{% else %}muted{% endif %}">
+            {{ c.publish_status }}
+          </span>
+        </td>
+        <td class="muted" style="font-size:11px; font-family:monospace;">{{ c.platform_video_id or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty" style="font-size:12px; padding:12px 0;">
+    No publish calendar entries yet.
+    {% if d.episode and d.episode.episode_id %}
+    <span class="muted">
+      Entries are created when the episode is enqueued with a target publish slot.
+    </span>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
 {# ── Gate verdicts ── #}
 {% if d.gates %}
 <div class="card">

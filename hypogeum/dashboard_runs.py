@@ -162,6 +162,23 @@ def get_run_detail(
                 ORDER BY created_at ASC
             """, [run_id]).fetchall()
 
+            # Publish calendar — keyed by episode_id (may be empty until Publishing Agent runs)
+            episode_id = run_row["episode_id"] if run_row else None
+            pub_cal_rows = []
+            if episode_id:
+                try:
+                    pub_cal_rows = conn.execute("""
+                        SELECT calendar_id, episode_id, short_id, platform,
+                               target_publish_at, upload_status, publish_status,
+                               platform_video_id, platform_supports_scheduled_publish,
+                               publish_method, created_at, updated_at
+                        FROM publish_calendar
+                        WHERE episode_id = ?
+                        ORDER BY platform, short_id
+                    """, [episode_id]).fetchall()
+                except Exception:
+                    pub_cal_rows = []
+
         finally:
             conn.close()
 
@@ -174,16 +191,17 @@ def get_run_detail(
                          if s.get("status") == "failed"]
 
         return {
-            "run":           _row_to_dict(run_row),
-            "episode":       _row_to_dict(ep_row) if ep_row else {},
-            "stages":        stages_list,
-            "gates":         [_row_to_dict(g) for g in gates],
-            "costs":         [_row_to_dict(c) for c in costs],
-            "transitions":   [_row_to_dict(t) for t in transitions],
-            "assets":        [_row_to_dict(a) for a in assets],
-            "total_cost_usd": round(total_cost, 6),
-            "stage_count":   len(stages_list),
-            "failed_stages": failed_stages,
+            "run":              _row_to_dict(run_row),
+            "episode":          _row_to_dict(ep_row) if ep_row else {},
+            "stages":           stages_list,
+            "gates":            [_row_to_dict(g) for g in gates],
+            "costs":            [_row_to_dict(c) for c in costs],
+            "transitions":      [_row_to_dict(t) for t in transitions],
+            "assets":           [_row_to_dict(a) for a in assets],
+            "publish_calendar": [_row_to_dict(c) for c in pub_cal_rows],
+            "total_cost_usd":   round(total_cost, 6),
+            "stage_count":      len(stages_list),
+            "failed_stages":    failed_stages,
         }
     except Exception:
         return None
@@ -249,7 +267,8 @@ def list_episode_topics(
             rows = conn.execute(f"""
                 SELECT topic_id, channel_id, topic_text, status,
                        priority, created_at, claimed_at, consumed_at,
-                       source, discovery_score, candidate_id
+                       source, discovery_score, candidate_id,
+                       target_publish_at, production_deadline_at
                 FROM episode_topics
                 {where}
                 ORDER BY priority ASC, created_at ASC

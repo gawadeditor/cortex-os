@@ -186,6 +186,9 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("source",          "TEXT NOT NULL DEFAULT 'manual'"),
         ("discovery_score", "REAL"),    # score from the discovery cycle; NULL for manual
         ("candidate_id",    "TEXT"),    # topic_candidates.candidate_id; NULL for manual
+        # Publish calendar linkage — when this episode should go live (P12-21)
+        ("target_publish_at",      "TEXT"),  # ISO 8601 UTC — intended platform publish time
+        ("production_deadline_at", "TEXT"),  # = target_publish_at - 24h — latest safe production start
     ],
 }
 

@@ -1469,4 +1469,43 @@ CREATE TABLE IF NOT EXISTS model_comparison_runs (
     results_json     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_mcrun_status   ON model_comparison_runs(status, initiated_at);
+
+-- ---------------------------------------------------------------------------
+-- publish_calendar  (P12-21)
+-- One row per episode (or short) per platform representing a planned publish
+-- event. Separates asset production timing from live-publishing timing.
+--
+-- upload_status:  'pending' → 'uploaded' | 'failed' | 'skipped'
+-- publish_status: 'pending' → 'scheduled' | 'live' | 'failed' | 'skipped'
+-- publish_method: 'api_scheduled' — platform API sets publishAt (YouTube, Meta)
+--                 'due_time_upload' — upload must happen at target_publish_at (TikTok)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS publish_calendar (
+    calendar_id         TEXT NOT NULL PRIMARY KEY,
+    episode_id          TEXT NOT NULL,
+    short_id            TEXT,           -- NULL for main episode, short_id for Shorts
+    platform            TEXT NOT NULL
+                            CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    target_publish_at   TEXT NOT NULL,  -- ISO 8601 UTC — when the video should go live
+    upload_status       TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(upload_status IN ('pending','uploaded','failed','skipped')),
+    publish_status      TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(publish_status IN ('pending','scheduled','live','failed','skipped')),
+    platform_video_id   TEXT,           -- set after successful upload
+    platform_supports_scheduled_publish INTEGER NOT NULL DEFAULT 0,
+    publish_method      TEXT NOT NULL DEFAULT 'due_time_upload'
+                            CHECK(publish_method IN ('api_scheduled','due_time_upload')),
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    UNIQUE(episode_id, short_id, platform)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pub_cal_episode  ON publish_calendar(episode_id);
+CREATE INDEX IF NOT EXISTS idx_pub_cal_platform ON publish_calendar(platform);
+CREATE INDEX IF NOT EXISTS idx_pub_cal_target   ON publish_calendar(target_publish_at);
+CREATE INDEX IF NOT EXISTS idx_pub_cal_upload   ON publish_calendar(upload_status)
+    WHERE upload_status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_pub_cal_publish  ON publish_calendar(publish_status)
+    WHERE publish_status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_mcrun_type     ON model_comparison_runs(run_type, initiated_at);

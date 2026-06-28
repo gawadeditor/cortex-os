@@ -141,6 +141,22 @@
         <span>priority {{ t.priority }}</span>
         <span>{{ t.channel_id }}</span>
       </div>
+      {% if t.target_publish_at or t.production_deadline_at %}
+      <div style="display:flex; gap:14px; margin-top:5px; font-size:11px; flex-wrap:wrap;">
+        {% if t.production_deadline_at %}
+        <span style="color:var(--yellow);">
+          &#9201; Produce by
+          <strong>{{ t.production_deadline_at[:16].replace('T',' ') }} UTC</strong>
+        </span>
+        {% endif %}
+        {% if t.target_publish_at %}
+        <span style="color:var(--green);">
+          &#128197; Publish slot
+          <strong>{{ t.target_publish_at[:16].replace('T',' ') }} UTC</strong>
+        </span>
+        {% endif %}
+      </div>
+      {% endif %}
     </div>
     <div class="queue-actions" style="align-items:flex-start;">
       <form method="POST" action="/api/topics/{{ t.topic_id }}/remove">

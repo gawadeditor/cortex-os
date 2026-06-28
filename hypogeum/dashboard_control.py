@@ -37,6 +37,7 @@ Result dict shape:
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +65,26 @@ def _dc_to_dict(obj) -> object:
     if isinstance(obj, dict):
         return {k: _dc_to_dict(v) for k, v in obj.items()}
     return obj
+
+
+def next_thursday_publish_slot(from_dt: datetime | None = None) -> datetime:
+    """
+    Return the next Thursday at 14:00 UTC at or after from_dt.
+
+    This is the YouTube long-form default publish slot. If today is Thursday
+    and the current time is before 14:00 UTC, returns today's slot. Otherwise
+    returns the next Thursday.
+    """
+    if from_dt is None:
+        from_dt = datetime.now(timezone.utc)
+    # weekday(): Monday=0 … Thursday=3 … Sunday=6
+    days_until_thursday = (3 - from_dt.weekday()) % 7
+    candidate = (from_dt + timedelta(days=days_until_thursday)).replace(
+        hour=14, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+    )
+    if candidate <= from_dt:
+        candidate += timedelta(weeks=1)
+    return candidate
 
 
 def _ok(data=None, **extra) -> dict:
@@ -342,13 +363,25 @@ def enqueue_topic(
     discovery_score: Optional[float] = None,
     candidate_id:    Optional[str]   = None,
 ) -> dict:
-    """Enqueue a topic for a channel. Returns Result dict."""
+    """
+    Enqueue a topic for a channel. Returns Result dict.
+
+    Also computes and writes the publish calendar fields:
+      target_publish_at      — next Thursday 14:00 UTC (YouTube long-form default slot)
+      production_deadline_at — target_publish_at - 24 hours (latest safe production start)
+    """
     try:
         from hypogeum.topics import (
             enqueue_topic as _enqueue,
             DuplicateTopicError,
             ChannelNotFoundError as _CNF,
         )
+        from hypogeum.db import get_connection
+
+        # Compute publish calendar dates before inserting
+        target_publish_at      = next_thursday_publish_slot()
+        production_deadline_at = target_publish_at - timedelta(hours=24)
+
         topic_id = _enqueue(
             channel_id, topic_text,
             priority=priority,
@@ -358,7 +391,35 @@ def enqueue_topic(
             discovery_score=discovery_score,
             candidate_id=candidate_id,
         )
-        return _ok(topic_id=topic_id, channel_id=channel_id, topic_text=topic_text)
+
+        # Write publish calendar fields onto the newly inserted row
+        try:
+            resolved_db = Path(db_path) if db_path else None
+            conn = get_connection(resolved_db)
+            try:
+                conn.execute(
+                    """UPDATE episode_topics
+                       SET target_publish_at = ?, production_deadline_at = ?
+                       WHERE topic_id = ?""",
+                    (
+                        target_publish_at.isoformat(),
+                        production_deadline_at.isoformat(),
+                        topic_id,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass  # non-fatal: calendar fields are advisory, not blocking
+
+        return _ok(
+            topic_id=topic_id,
+            channel_id=channel_id,
+            topic_text=topic_text,
+            target_publish_at=target_publish_at.isoformat(),
+            production_deadline_at=production_deadline_at.isoformat(),
+        )
     except _CNF as exc:
         return _err(str(exc), "not_found")
     except DuplicateTopicError as exc:

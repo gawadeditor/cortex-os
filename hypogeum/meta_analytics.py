@@ -335,3 +335,125 @@ def sync_meta_analytics(
         "skipped_count": skipped,
         "errors":       errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# TikTok Video API analytics sync
+# ---------------------------------------------------------------------------
+
+_TIKTOK_VIDEO_LIST_URL = "https://open.tiktokapis.com/v2/video/list/"
+_TIKTOK_VIDEO_FIELDS   = "id,title,like_count,comment_count,share_count,view_count,play_count,duration"
+
+
+def _fetch_tiktok_video_list(token: str) -> list[dict]:
+    """
+    Call POST /v2/video/list/ and return the list of video dicts.
+    Returns [] on any error (non-blocking).
+    """
+    import urllib.request
+    import urllib.error
+
+    payload = _json.dumps({"fields": _TIKTOK_VIDEO_FIELDS}).encode()
+    req = urllib.request.Request(
+        _TIKTOK_VIDEO_LIST_URL,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = _json.loads(resp.read())
+            return body.get("data", {}).get("videos", [])
+    except Exception:
+        return []
+
+
+def sync_tiktok_analytics(
+    cfg,
+    db_path=None,
+    window_days: int = 90,
+) -> dict:
+    """
+    Sync TikTok video stats using the Video List API (video.list scope).
+
+    Algorithm:
+      1. Load stored access_token from secret_profiles.
+      2. Find published TikTok videos in publishing_outcomes.
+      3. Fetch all user videos via POST /v2/video/list/.
+      4. Match published video IDs against the API response.
+      5. Store matched metrics in platform_analytics with source='api'.
+
+    Returns {ok, synced_count, skipped_count, errors, note}.
+    """
+    token = get_meta_token("tiktok", db_path=db_path)
+    if not token:
+        return {
+            "ok": False, "synced_count": 0, "skipped_count": 0,
+            "errors": ["No active TikTok credential found in secret_profiles"],
+        }
+
+    videos = _get_published_video_ids("tiktok", db_path)
+    if not videos:
+        return {
+            "ok": True, "synced_count": 0, "skipped_count": 0,
+            "errors": [],
+            "note": "No published TikTok videos found in publishing_outcomes — nothing to sync",
+        }
+
+    api_videos = _fetch_tiktok_video_list(token)
+    if not api_videos:
+        return {
+            "ok": True, "synced_count": 0, "skipped_count": len(videos),
+            "errors": ["TikTok API returned no videos (token may lack video.list scope or account has no uploads)"],
+        }
+
+    # Build lookup: tiktok_video_id → api metrics
+    api_by_id = {str(v.get("id", "")): v for v in api_videos}
+
+    from hypogeum.analytics_store import store_platform_metrics
+
+    synced = skipped = 0
+    errors: list[str] = []
+    snap_date = datetime.now(timezone.utc).date().isoformat()
+
+    for v in videos:
+        ep_id  = v["episode_id"]
+        vid_id = str(v["platform_video_id"])
+        raw    = api_by_id.get(vid_id)
+
+        if not raw:
+            skipped += 1
+            errors.append(f"TikTok video {vid_id} not found in API response")
+            continue
+
+        metrics = {
+            "views":            raw.get("view_count") or raw.get("play_count"),
+            "likes":            raw.get("like_count"),
+            "comments":         raw.get("comment_count"),
+            "shares":           raw.get("share_count"),
+            "platform_video_id": vid_id,
+        }
+        try:
+            store_platform_metrics(
+                episode_id=ep_id,
+                platform="tiktok",
+                metrics=metrics,
+                source="api",
+                snapshot_date=snap_date,
+                window_days=window_days,
+                db_path=db_path,
+            )
+            synced += 1
+        except Exception as exc:
+            skipped += 1
+            errors.append(f"Store failed for {vid_id}: {exc}")
+
+    return {
+        "ok":           True,
+        "synced_count": synced,
+        "skipped_count": skipped,
+        "errors":       errors,
+    }

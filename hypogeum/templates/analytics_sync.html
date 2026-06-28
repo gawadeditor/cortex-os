@@ -105,19 +105,21 @@
   {% set tk_last = last_sync_by_platform.get('tiktok') %}
   <div class="platform-card {% if tk_cred.has_token and not tk_cred.expired %}platform-card-ok{% elif tk_cred.expired %}platform-card-err{% else %}platform-card-skip{% endif %}">
     <div class="platform-name">
-      <span class="perf-dot {% if tk_cred.has_token and not tk_cred.expired %}perf-dot-warn{% elif tk_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
+      <span class="perf-dot {% if tk_cred.has_token and not tk_cred.expired %}perf-dot-ok{% elif tk_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
       TikTok
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Connection</span>
-      <span class="stat-val {% if tk_cred.expired %}err{% elif tk_cred.has_token %}warn{% endif %}">
+      <span class="stat-val {% if tk_cred.expired %}err{% elif tk_cred.has_token %}ok{% endif %}">
         {% if tk_cred.expired %}Credential expired{% elif tk_cred.has_token %}Connected{% else %}Not connected{% endif %}
       </span>
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val" style="color:var(--muted);">
-        {% if tk_cred.expired %}Re-connect required{% elif tk_cred.has_token %}Manual import only{% else %}Credential required{% endif %}
+      <span class="stat-val">
+        {% if tk_cred.has_token and not tk_cred.expired %}<span class="ok">Active (TikTok Video API)</span>
+        {% elif tk_cred.expired %}<span class="err">Re-connect required</span>
+        {% else %}<span style="color:var(--muted);">Credential required</span>{% endif %}
       </span>
     </div>
     <div class="platform-stat">

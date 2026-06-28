@@ -163,6 +163,48 @@ def _sync_meta(
                 "records_imported": 0, "error": str(exc)}
 
 
+def _sync_tiktok(
+    channel_id: Optional[str],
+    db_path: Optional[Path],
+    window_days: int,
+    triggered_by: str,
+    conn,
+) -> dict:
+    """Run TikTok Video API analytics sync, log result."""
+    import json as _json
+    try:
+        from hypogeum.config import Config
+        cfg = Config()
+    except Exception as exc:
+        _log_sync(conn, platform="tiktok", channel_id=channel_id,
+                  status="error", records_imported=0,
+                  errors_json=_json.dumps([str(exc)]),
+                  window_days=window_days, triggered_by=triggered_by)
+        return {"platform": "tiktok", "status": "error", "records_imported": 0, "error": str(exc)}
+
+    from hypogeum.meta_analytics import sync_tiktok_analytics
+    try:
+        result  = sync_tiktok_analytics(cfg, db_path=db_path, window_days=window_days)
+        records = result.get("synced_count", 0)
+        errors  = result.get("errors") or []
+        note    = result.get("note")
+        if note and not errors:
+            errors = [note]
+        status  = "ok" if result.get("ok") else "error"
+        _log_sync(conn, platform="tiktok", channel_id=channel_id,
+                  status=status, records_imported=records,
+                  errors_json=_json.dumps(errors) if errors else None,
+                  window_days=window_days, triggered_by=triggered_by)
+        return {"platform": "tiktok", "status": status,
+                "records_imported": records, "errors": errors}
+    except Exception as exc:
+        _log_sync(conn, platform="tiktok", channel_id=channel_id,
+                  status="error", records_imported=0,
+                  errors_json=_json.dumps([str(exc)]),
+                  window_days=window_days, triggered_by=triggered_by)
+        return {"platform": "tiktok", "status": "error", "records_imported": 0, "error": str(exc)}
+
+
 def run_platform_sync(
     channel_id: Optional[str] = None,
     db_path: Optional[Path] = None,
@@ -173,8 +215,8 @@ def run_platform_sync(
     """
     Run analytics sync across all supported platforms (or a subset).
 
-    Writes one platform_sync_log row per platform. YouTube and Meta
-    (Facebook/Instagram) sync via API. TikTok requires manual import.
+    Writes one platform_sync_log row per platform. YouTube, Meta
+    (Facebook/Instagram), and TikTok all sync via API.
 
     Returns:
         {ok, results: [{platform, status, records_imported, error?}], total_records}
@@ -190,8 +232,9 @@ def run_platform_sync(
                 r = _sync_youtube(channel_id, db_path, window_days, triggered_by, conn)
             elif platform in ("facebook", "instagram"):
                 r = _sync_meta(platform, channel_id, db_path, window_days, triggered_by, conn)
+            elif platform == "tiktok":
+                r = _sync_tiktok(channel_id, db_path, window_days, triggered_by, conn)
             else:
-                # TikTok: manual import only (no public analytics API available)
                 import json as _json
                 _log_sync(conn, platform=platform, channel_id=channel_id,
                           status="skipped", records_imported=0, errors_json=None,

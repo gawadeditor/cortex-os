@@ -2,7 +2,6 @@
   <a href="/dashboard" class="nav-brand">Factory OS</a>
   <div class="nav-links">
     <a href="/dashboard"   class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Factory</a>
-    <a href="/attention"  class="nav-link {% if request.path == '/attention' %}active{% endif %}">Attention</a>
     <a href="/create"     class="nav-link {% if request.path == '/create' %}active{% endif %}">Production Queue</a>
     <a href="/discover"   class="nav-link {% if request.path.startswith('/discover') %}active{% endif %}">Discovery</a>
     <a href="/channels"   class="nav-link {% if request.path.startswith('/channels') or (request.path.startswith('/channel/') and not request.path.startswith('/channel-profile')) %}active{% endif %}">Channels</a>
@@ -17,6 +16,7 @@
         <a href="/runs">History</a>
         <a href="/failures">Failures</a>
         <div class="nav-ops-group">Escalations</div>
+        <a href="/attention">Attention</a>
         <a href="/approvals">Pending Approvals</a>
         <a href="/preflight">System Checks</a>
         <div class="nav-ops-group">Intelligence</div>
@@ -30,7 +30,7 @@
         <a href="/execution-plans">Plans</a>
         <a href="/decision-inputs">Inputs</a>
         <div class="nav-ops-group">Config</div>
-        <a href="/settings">Settings</a>
+        <a href="/channel-profile">Channel Profile</a>
         <div class="nav-ops-group">Infrastructure</div>
         <a href="/infrastructure">Overview</a>
         <a href="/infrastructure/workers">Workers</a>

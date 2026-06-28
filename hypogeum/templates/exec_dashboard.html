@@ -364,7 +364,7 @@
         <div class="plat-data">{{ p.real_count }} analytics record{{ '' if p.real_count == 1 else 's' }}</div>
       {% elif cstate == "connected_no_data" %}
         <div class="plat-connected">Connected</div>
-        {% if pkey in ('facebook', 'instagram') %}
+        {% if pkey in ('facebook', 'instagram', 'tiktok') %}
           <div class="plat-data">Auto-sync active — no published videos yet</div>
           <a href="/intelligence/sync" class="btn-connect">Sync status →</a>
         {% else %}

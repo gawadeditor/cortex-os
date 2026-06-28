@@ -256,6 +256,12 @@
     {% if p.authorize_url %}
     <a href="{{ p.authorize_url }}" class="btn-authorize">{{ p.authorize_label }}</a>
     {% endif %}
+    {% if p.get('refresh_url') %}
+    <button class="btn-authorize" onclick="refreshToken(this, '{{ p.id }}', '{{ p.refresh_url }}')">
+      {{ p.refresh_label or 'Refresh Token' }}
+    </button>
+    <span class="verify-result" id="rr-{{ p.id }}"></span>
+    {% endif %}
     <button class="btn-verify {% if not p.credentials or p.id == 'tiktok' and vstatus == 'missing' %}btn-disabled{% endif %}"
             onclick="verifyPlatform(this, '{{ p.id }}')">
       Verify
@@ -268,6 +274,32 @@
 </div>
 
 <script>
+function refreshToken(btn, provider, url) {
+  var el = document.getElementById('rr-' + provider);
+  btn.disabled = true;
+  btn.textContent = 'Refreshing…';
+  el.textContent = '';
+  fetch(url, {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.disabled = false;
+      btn.textContent = 'Refresh Token';
+      if (d.ok) {
+        el.style.color = 'var(--green)';
+        el.textContent = '✓ ' + (d.message || 'Token refreshed');
+      } else {
+        el.style.color = 'var(--red)';
+        el.textContent = '✗ ' + (d.error || d.note || 'Refresh failed');
+      }
+    })
+    .catch(function(e){
+      btn.disabled = false;
+      btn.textContent = 'Refresh Token';
+      el.style.color = 'var(--red)';
+      el.textContent = '✗ network error';
+    });
+}
+
 function verifyPlatform(btn, provider) {
   var el = document.getElementById('vr-' + provider);
   btn.disabled = true;

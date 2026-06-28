@@ -2083,10 +2083,13 @@ def _get_platform_detail() -> list:
         "missing":         tk_missing,
         "account_id":      env.get("TIKTOK_OPEN_ID", ""),
         "account_label":   "Open ID",
-        "authorize_url":   None,   # TikTok OAuth not yet implemented in dashboard
+        "authorize_url":   None,
         "authorize_label": None,
-        "note":            "OAuth not yet wired. Add CLIENT_KEY + CLIENT_SECRET to .env, "
-                           "then complete OAuth via TikTok Developer Portal.",
+        "refresh_url":     "/api/platforms/tiktok/refresh",
+        "refresh_label":   "Refresh Token",
+        "note":            "HTTP 401 means the access token is expired or invalid — "
+                           "client credentials (CLIENT_KEY + CLIENT_SECRET) are present. "
+                           "Click Refresh Token to exchange the stored refresh_token for a new access token.",
     })
 
     return platforms

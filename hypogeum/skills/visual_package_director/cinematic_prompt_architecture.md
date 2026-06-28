@@ -39,7 +39,9 @@ Examples:
 
 Format: `[Temperature] light [entry verb] from [direction/position], [connector] [illuminated feature]; [falloff].`
 
-**Temperature**: bleached noon white, warm amber, copper-amber golden hour, cool grey-white diffuse, deep warm gaslight, single oil-lamp warmth
+**Temperature**: harsh noon glare, warm amber, copper-amber golden hour, overcast diffuse, deep warm gaslight, single oil-lamp warmth
+
+**BGA temperature constraint**: "bleached noon white" is forbidden — BGA rule E-C02 treats it as a white-dominant surface violation. For harsh outdoor noon scenes use "harsh noon glare" instead. For underwater scenes, torch/dive-lamp amber must be the dominant source; diffuse teal/blue ambient is subordinate and must be described as such (never as the primary or headline descriptor).
 
 **Entry verbs**: enters, descends, arrives, rakes across, falls across, radiates outward
 
@@ -53,7 +55,7 @@ Format: `[Temperature] light [entry verb] from [direction/position], [connector]
 The falloff sentence must name what recedes into darkness — not just that darkness exists.
 
 Examples:
-- "Bleached noon white light descends from overhead, illuminating the wave crests bleaching to white foam and the diver's canvas shirt at the shoulder; hard reflections fracturing across the surface; Aegean water deepens to intense ultramarine below the scatter layer; limestone cliff holds iron-oxide warmth in its deep fissures only."
+- "Harsh noon glare descends from overhead, illuminating the wave crests hard-edged at the shoulder; warm amber underlighting in the deep shadow below the surface line; Aegean water deepens to intense ultramarine below the scatter layer; limestone cliff holds iron-oxide warmth in its deep fissures only."
 - "Warm amber light enters from the upper left, raking across the corroded ridges and gear tooth faces, casting micro-shadow relief into the tooth valleys at a low oblique angle; opposing face recedes into deep surrounding shadow with no ambient fill; hard falloff to pure unlit black."
 
 ---

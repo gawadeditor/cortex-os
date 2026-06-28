@@ -161,11 +161,14 @@ PERMITTED ALTERNATIVES for artefact/discovery scenes:
 
 LIGHTING CONSTRAINT: All scenes must use one of these lighting registers:
 - Warm: torchlight, firelight, oil lamp, amber directional, golden hour, sunset
-- Harsh: harsh noon desert sun, direct overhead sun, bleached open sky
+- Harsh: harsh noon glare, harsh noon desert sun, direct overhead sun
 - Atmospheric: overcast diffuse natural (outdoors only), dawn-to-gold transition (must end
   in warm gold — the blue phase must be secondary and transitioning, NOT dominant)
 - Dramatic: single directional warm spotlight from one side, deep shadow on opposite side
 - Underground/interior: torch illumination, fire glow, single flame source, warm lantern light
+- Underwater: warm dive-lamp amber dominant; diffuse teal/grey ambient strictly subordinate,
+  never the headline descriptor. Do NOT use "blue-green dominant" or "diffuse blue-green"
+  as the primary lighting characteristic — these trigger BGA E-C04 (cool blue violation).
 
 PALETTE CONSTRAINT: The channel color bible requires warm earth tones as the DOMINANT palette.
 Any cool tone must be subordinate and transitional — NEVER dominant, primary, or the headline

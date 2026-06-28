@@ -130,8 +130,16 @@ _AGENT_NAME      = "visual_package_director"
 _VPD_SKELETON_META_MAX_TOKENS        = 4_096
 # Stage A2: scene skeleton per batch — budget 4,096 (12 scenes × ~250 tok ≈ 3,000 tok output)
 _VPD_SKELETON_SCENE_BATCH_MAX_TOKENS = 4_096
-# Beats per Stage A2 batch
+# Hard ceiling on beats per Stage A2 batch (never exceed regardless of estimate)
 _SCENE_SKELETON_BATCH_SIZE           = 12
+# Estimated output tokens per scene in an A2 call (8-word visual_spec × 9 fields + overhead)
+_A2_TOKENS_PER_SCENE_BASE            = 280
+# Tokens added per locked entity (entity_appearances + A2 input overhead per entity)
+_A2_TOKENS_PER_ENTITY                = 12
+# Safety factor applied to per-scene token estimate before budget comparison
+_A2_SAFETY_FACTOR                    = 1.2
+# Fraction of A2 max_tokens budget used for scene output (rest is JSON overhead, prompt)
+_A2_OUTPUT_BUDGET_RATIO              = 0.80
 
 # Stage B: cinematic prompts per batch — budget 8,192 = ~25% of 32,768 ceiling
 _VPD_PROMPT_BATCH_MAX_TOKENS = 8_192
@@ -303,13 +311,22 @@ def run_visual_package_director(
             )
 
         # ── Stage A2: scene skeleton batches ─────────────────────────
-        # One run_agent() call per batch of _SCENE_SKELETON_BATCH_SIZE beats.
+        # Batches are sized dynamically: max _SCENE_SKELETON_BATCH_SIZE, shrunk
+        # when estimated token load per scene is high (many entities, long context).
         # Checkpoint: vpd_a2_scenes_batch_{i}_{episode_id}.json
+        locked_entities = (
+            meta_package.get("visual_continuity_record", {}).get("locked_entities", [])
+        )
+        compact_entities = _compact_entities_for_a2(locked_entities)
         beats = _flatten_beats_for_a2(input_package)
-        scene_batches = [
-            beats[i : i + _SCENE_SKELETON_BATCH_SIZE]
-            for i in range(0, len(beats), _SCENE_SKELETON_BATCH_SIZE)
-        ]
+        scene_batches = _compute_a2_batches(beats, len(compact_entities))
+        log.info(
+            "vpd_stage_a2_plan",
+            total_beats=len(beats),
+            total_batches=len(scene_batches),
+            batch_sizes=[len(b) for b in scene_batches],
+            entities=len(compact_entities),
+        )
         all_scenes: list = []
         start_index = 0
         for batch_idx, batch_beats in enumerate(scene_batches):
@@ -323,9 +340,7 @@ def run_visual_package_director(
                     "batch_index": batch_idx,
                     "start_scene_index": start_index,
                     "episode_metadata": meta_package.get("episode_metadata", {}),
-                    "locked_entities": (
-                        meta_package.get("visual_continuity_record", {}).get("locked_entities", [])
-                    ),
+                    "locked_entities": compact_entities,
                     "period_palettes": (
                         meta_package.get("visual_continuity_record", {}).get("period_palettes", [])
                     ),
@@ -365,8 +380,24 @@ def run_visual_package_director(
                 total_scenes_so_far=len(all_scenes),
             )
 
-        # ── Stage A3: merge A1 + A2 batches into full skeleton ───────
+        # ── Stage A3: merge A1 + A2 batches → validate → write skeleton ──
         visual_package = _merge_a1_a2(meta_package, all_scenes, episode_id)
+        try:
+            validate("visual_package", visual_package)
+        except SchemaError as exc:
+            log.warn(
+                "vpd_stage_a3_validation_failed",
+                path=exc.path,
+                reason=exc.reason,
+                scenes=len(all_scenes),
+                note="A1/A2 checkpoint files preserved — fix and rerun",
+            )
+            raise SchemaError(
+                "visual_package",
+                exc.path,
+                f"Stage A3 merged package failed validation: {exc.reason}. "
+                f"A1/A2 checkpoints preserved for debugging.",
+            )
         skeleton_path.write_text(
             json.dumps(visual_package, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -585,6 +616,73 @@ def _flatten_beats_for_a2(input_package: dict) -> list:
                 })
 
     return beats
+
+
+# ---------------------------------------------------------------------------
+# Stage A2 helpers — entity compaction and budget-aware batching
+# ---------------------------------------------------------------------------
+
+def _compact_entities_for_a2(locked_entities: list) -> list:
+    """
+    Return a minimal entity list for A2 scene batch input.
+
+    Full locked_entities entries include long accuracy notes, distinctive_markers lists,
+    and accuracy_basis text that are not needed by A2's scene planning task.
+    This compact form reduces A2 input size by ~60% per entity while preserving
+    the entity_id, type, name, lock_state, and a short visual summary for
+    entity_appearances[] decisions.
+    """
+    result = []
+    for ent in locked_entities:
+        vs = ent.get("visual_spec", {})
+        # Take the first sentence of the description only
+        desc = vs.get("description", "")
+        first_sentence = (desc.split(".")[0] + ".") if desc else ""
+        result.append({
+            "entity_id":       ent.get("entity_id", ""),
+            "entity_type":     ent.get("entity_type", ""),
+            "name":            ent.get("name", ""),
+            "lock_state":      ent.get("lock_state", ""),
+            "visual_summary":  first_sentence,
+        })
+    return result
+
+
+def _estimate_a2_tokens_per_scene(n_entities: int) -> int:
+    """
+    Estimate output tokens required for one scene in an A2 call.
+
+    Formula: base tokens + per-entity overhead, scaled by safety factor.
+    n_entities: number of compact locked_entities passed to the A2 call.
+    """
+    raw = _A2_TOKENS_PER_SCENE_BASE + n_entities * _A2_TOKENS_PER_ENTITY
+    return int(raw * _A2_SAFETY_FACTOR)
+
+
+def _compute_a2_batches(beats: list, n_entities: int) -> list:
+    """
+    Split beats into budget-aware batches for Stage A2 calls.
+
+    Each batch contains at most _SCENE_SKELETON_BATCH_SIZE beats. The size is
+    further constrained by an estimated token budget: if the per-scene estimate
+    would cause the batch to consume more than _A2_OUTPUT_BUDGET_RATIO of
+    _VPD_SKELETON_SCENE_BATCH_MAX_TOKENS, the batch is capped earlier.
+
+    Never returns an empty batch (minimum 1 beat per batch).
+    Returns an empty list only when beats is empty.
+    """
+    if not beats:
+        return []
+
+    tokens_per_scene = _estimate_a2_tokens_per_scene(n_entities)
+    output_budget    = int(_VPD_SKELETON_SCENE_BATCH_MAX_TOKENS * _A2_OUTPUT_BUDGET_RATIO)
+    capacity         = max(1, output_budget // tokens_per_scene)
+    batch_size       = min(_SCENE_SKELETON_BATCH_SIZE, capacity)
+
+    batches = []
+    for i in range(0, len(beats), batch_size):
+        batches.append(beats[i : i + batch_size])
+    return batches
 
 
 # ---------------------------------------------------------------------------

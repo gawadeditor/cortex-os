@@ -3451,11 +3451,23 @@ def _classify_run_recovery(detail: dict) -> dict:
             m = _re.search(r"vpd_prompts_batch_(\d+)_", bf.name)
             if m:
                 batch_indices.append(int(m.group(1)))
+        # Estimate completed scene count from A2 batch files (rough: read each file)
+        a2_scene_count = 0
+        for af in a2_files:
+            try:
+                batch_data = _json.loads(af.read_text(encoding="utf-8"))
+                a2_scene_count += len(batch_data.get("scenes", []))
+            except Exception:
+                pass
+
         vpd_checkpoints = {
-            "skeleton":   skeleton_ok,
-            "a1_meta":    a1_ok,
-            "a2_batches": sorted(a2_indices),
-            "batches":    sorted(batch_indices),
+            "skeleton":         skeleton_ok,
+            "a1_meta":          a1_ok,
+            "a2_batches":       sorted(a2_indices),
+            "a2_batch_count":   len(a2_indices),
+            "a2_scene_count":   a2_scene_count,
+            "batches":          sorted(batch_indices),
+            "b_batch_count":    len(batch_indices),
         }
 
     # ── Classify failure ──────────────────────────────────────────────────
@@ -3474,23 +3486,45 @@ def _classify_run_recovery(detail: dict) -> dict:
         failure_class = "resumable"
         why = (
             "Visual Package Director output exceeded the model token limit. "
-            "Stage A is now split (A1 metadata + A2 scene batches + A3 merge) — "
-            "re-running will resume from the last completed checkpoint."
+            "Stage A is split (A1 metadata + A2 scene batches + A3 merge) with dynamic "
+            "batch sizing. Stage A now resumes from A1/A2 checkpoints. "
+            "Earlier completed stages are reused when the rerun path supports it."
         )
         reuse = []
         if vpd_checkpoints.get("skeleton"):
-            reuse.append("Stage A skeleton (full scene plan + entities + thumbnail brief) — already on disk, will not be re-billed")
+            reuse.append(
+                "Stage A skeleton (full scene plan + entities + thumbnail brief) — "
+                "already on disk, will not be re-billed"
+            )
         else:
             if vpd_checkpoints.get("a1_meta"):
-                reuse.append("Stage A1 meta (entities, palettes, thumbnail brief) — already on disk, will not be re-billed")
-            for i in vpd_checkpoints.get("a2_batches", []):
-                start = i * 12 + 1
-                end   = (i + 1) * 12
-                reuse.append(f"Stage A2 scene batch {i} (scenes {start}–{end}) — already on disk, will not be re-billed")
-        for b in vpd_checkpoints.get("batches", []):
-            reuse.append(f"Stage B prompt batch {b} (scenes {b*10+1}–{(b+1)*10}) — already on disk, will not be re-billed")
+                reuse.append(
+                    "Stage A1 meta (entities, palettes, thumbnail brief) — "
+                    "already on disk, will not be re-billed"
+                )
+            else:
+                reuse.append("Stage A1 meta — not yet completed, will run on rerun")
+            n_a2 = vpd_checkpoints.get("a2_batch_count", 0)
+            n_sc = vpd_checkpoints.get("a2_scene_count", 0)
+            if n_a2 > 0:
+                reuse.append(
+                    f"Stage A2 scene batches: {n_a2} batch(es) completed, "
+                    f"~{n_sc} scene(s) planned — already on disk, will not be re-billed"
+                )
+            else:
+                reuse.append("Stage A2 scene batches — not yet started, will run on rerun")
+        n_b = vpd_checkpoints.get("b_batch_count", 0)
+        if n_b > 0:
+            for b in vpd_checkpoints.get("batches", []):
+                reuse.append(
+                    f"Stage B prompt batch {b} (scenes {b*10+1}–{(b+1)*10}) — "
+                    "already on disk, will not be re-billed"
+                )
         # reuse stays empty if no checkpoints found — template shows nothing to reuse
-        safe_action    = "Re-run episode — earlier stages (EP, Research, Script) re-execute; VPD resumes from checkpoint"
+        safe_action    = (
+            "Re-run episode — earlier stages (EP, Research, Script) re-execute; "
+            "VPD resumes from the last completed A1/A2 checkpoint"
+        )
         blocked_action = "Cannot resume mid-pipeline without re-executing earlier stages"
     elif is_vpd and not is_truncation:
         failure_class  = "retryable"

@@ -478,6 +478,42 @@ def create_launch():
     return redirect(url_for("create_page") + f"?error={quote_plus(error_str)}")
 
 
+@app.route("/api/channels/<channel_id>/activate", methods=["POST"])
+def api_channel_activate(channel_id: str):
+    """
+    Run CALOG activation gates and, if all pass, transition channel to 'active'.
+
+    Uses hypogeum.calog.activate_channel() — all gates are enforced.
+    Does NOT bypass CALOG or write state directly.
+
+    Returns {ok, channel_id, state, gates: [{gate, passed, reason}], failure_reason}.
+    """
+    from hypogeum.calog import activate_channel
+    try:
+        result = activate_channel(channel_id, db_path=_db_path())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    gates = [
+        {"gate": g.gate, "passed": g.passed, "reason": g.reason}
+        for g in result.gate_results
+    ]
+    if result.success:
+        return jsonify({
+            "ok":         True,
+            "channel_id": channel_id,
+            "state":      result.new_state,
+            "gates":      gates,
+        })
+    return jsonify({
+        "ok":             False,
+        "channel_id":     channel_id,
+        "state":          result.new_state,
+        "gates":          gates,
+        "failure_reason": result.failure_reason,
+    }), 422
+
+
 @app.route("/channels")
 def channels_page():
     db = _db_path()

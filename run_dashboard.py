@@ -6313,6 +6313,187 @@ def api_infrastructure_providers():
     return jsonify(_build_providers_context())
 
 
+# ===========================================================================
+# Phase 8 — Infrastructure > Connections
+# ===========================================================================
+
+_PLATFORM_VSTATUS_LABEL = {
+    "verified": "Verified",
+    "saved":    "Saved — not yet verified",
+    "partial":  "Partial credentials",
+    "missing":  "Not configured",
+    "failed":   "Verification failed",
+}
+
+_CONN_TO_STATUS = {
+    "connected":          "connected",
+    "connected_no_data":  "connected",
+    "published_no_cred":  "expired",
+    "demo_only":          "disconnected",
+    "not_connected":      "disconnected",
+}
+
+
+def _build_connections_context() -> dict:
+    """
+    Aggregate platform connection health from existing state providers.
+    Never exposes credential values. Never raises.
+    Returns {"ok": True, "connections": [...]}.
+    """
+    from hypogeum.platform_connections import get_platform_connection_state, PLATFORMS
+    from hypogeum.platform_sync import get_last_sync_by_platform
+    from hypogeum.db import get_connection
+
+    db = _db_path()
+
+    # ── 1. High-level connection state (credential presence + analytics coverage) ──
+    try:
+        conn_state = get_platform_connection_state(db_path=db)
+        plat_map   = conn_state.get("platforms", {})
+    except Exception:
+        plat_map = {}
+
+    # ── 2. OAuth verification detail: vstatus, error, expiry warnings, authorize URLs ──
+    try:
+        detail_list = _get_platform_detail()
+        detail_by_id = {d["id"]: d for d in detail_list}
+    except Exception:
+        detail_by_id = {}
+
+    # ── 3. Last sync per platform ──
+    try:
+        last_sync = get_last_sync_by_platform(db_path=db)
+    except Exception:
+        last_sync = {}
+
+    # ── 4. Last publish per platform (max published_at from publishing_outcomes) ──
+    last_publish: dict = {}
+    try:
+        path = db or Path(".hypogeum-assets/hypogeum.db")
+        conn = get_connection(path)
+        try:
+            rows = conn.execute(
+                """SELECT platform,
+                          MAX(published_at) AS last_at,
+                          COUNT(*) AS total,
+                          SUM(CASE WHEN publishing_status='success' THEN 1 ELSE 0 END) AS successes
+                   FROM publishing_outcomes
+                   WHERE platform IN ('youtube','tiktok','instagram','facebook')
+                   GROUP BY platform"""
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            last_publish[r["platform"]] = {
+                "last_at":   r["last_at"],
+                "total":     r["total"],
+                "successes": r["successes"],
+            }
+    except Exception:
+        pass
+
+    connections = []
+
+    for p_id in PLATFORMS:
+        ps      = plat_map.get(p_id, {})
+        detail  = detail_by_id.get(p_id, {})
+        sync    = last_sync.get(p_id, {})
+        pub     = last_publish.get(p_id, {})
+
+        # ── Status ──
+        conn_key = ps.get("connection_state", "not_connected")
+        vstatus  = detail.get("vstatus", "missing")
+        status   = _CONN_TO_STATUS.get(conn_key, "unknown")
+        # Downgrade to degraded if verifier explicitly failed
+        if vstatus == "failed" and status == "connected":
+            status = "degraded"
+
+        # ── Token expiry (safe: only the warning string, never the token) ──
+        token_expiry = None
+        for cred in detail.get("credentials", []):
+            if cred.get("expiry_warning"):
+                token_expiry = cred["expiry_warning"]
+                # If expiry is imminent, mark as degraded
+                if "soon" in token_expiry and status == "connected":
+                    status = "degraded"
+                break
+
+        # ── OAuth status label ──
+        oauth_status = _PLATFORM_VSTATUS_LABEL.get(vstatus, vstatus or "Unknown")
+
+        # ── Last sync ──
+        last_sync_str = None
+        sync_health   = "No sync history"
+        if sync:
+            ts = sync.get("synced_at") or ""
+            last_sync_str = ts[:19].replace("T", " ") if ts else None
+            if sync.get("status") == "ok":
+                rec = sync.get("records_imported", 0) or 0
+                sync_health = f"Last sync successful — {rec} record{'s' if rec != 1 else ''} imported"
+            else:
+                sync_health = f"Last sync: {sync.get('status', 'unknown')}"
+
+        # ── Last publish ──
+        last_pub_str = None
+        pub_health   = "Not published"
+        if pub:
+            ts = pub.get("last_at") or ""
+            last_pub_str = ts[:19].replace("T", " ") if ts else None
+            suc  = pub.get("successes", 0) or 0
+            tot  = pub.get("total", 0) or 0
+            pub_health = f"{suc} of {tot} publishing attempt{'s' if tot != 1 else ''} successful"
+        elif conn_key == "published_no_cred":
+            pub_health = "Published (credential since expired)"
+
+        # ── Last error (verification only — never credential data) ──
+        last_error = (detail.get("error") or "")[:200] or None
+
+        # ── Authorize URL (only expose if already tracked) ──
+        authorize_url   = detail.get("authorize_url") or None
+        authorize_label = detail.get("authorize_label") or None
+
+        connections.append({
+            "platform":          detail.get("label") or p_id.title(),
+            "platform_id":       p_id,
+            "status":            status,
+            "oauth_status":      oauth_status,
+            "token_expiry":      token_expiry,
+            "last_sync":         last_sync_str,
+            "last_publish":      last_pub_str,
+            "last_error":        last_error,
+            "sync_health":       sync_health,
+            "publishing_health": pub_health,
+            "has_credential":    bool(ps.get("has_credential")),
+            "data_state":        ps.get("data_state", "none"),
+            "real_count":        ps.get("real_count", 0),
+            "authorize_url":     authorize_url,
+            "authorize_label":   authorize_label,
+            "source":            "platform_connections + provider_verifications + platform_sync_log",
+        })
+
+    return {"ok": True, "connections": connections}
+
+
+@app.route("/infrastructure/connections")
+def infrastructure_connections_page():
+    ctx = _build_connections_context()
+    return render_template("infrastructure_connections.html", **ctx)
+
+
+@app.route("/api/infrastructure/connections")
+def api_infrastructure_connections():
+    ctx = _build_connections_context()
+    # Strip authorize_url from JSON (internal routes only; not part of the API spec shape)
+    safe = {
+        "ok": ctx["ok"],
+        "connections": [
+            {k: v for k, v in c.items() if k not in ("authorize_url", "authorize_label")}
+            for c in ctx["connections"]
+        ],
+    }
+    return jsonify(safe)
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------

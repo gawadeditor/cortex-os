@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connections — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* ── Platform grid ── */
+    .conn-grid { display: grid;
+                 grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+                 gap: var(--gap); }
+
+    /* ── Platform card ── */
+    .conn-card              { background: var(--surface); border: 1px solid var(--border);
+                              border-radius: var(--radius); padding: 16px; }
+    .conn-card-connected    { border-color: #2ea043; }
+    .conn-card-degraded     { border-color: #9e6a03; }
+    .conn-card-expired      { border-color: #da3633; border-style: dashed; }
+    .conn-card-disconnected { border-color: var(--border); opacity: .85; }
+
+    /* Header */
+    .conn-header { display: flex; align-items: center; gap: 10px;
+                   margin-bottom: 12px; flex-wrap: wrap; }
+    .conn-icon   { width: 32px; height: 32px; border-radius: 6px; display: flex;
+                   align-items: center; justify-content: center; font-size: 12px;
+                   font-weight: 800; flex-shrink: 0; }
+    .icon-yt     { background: #ff0000; color: #fff; }
+    .icon-fb     { background: #1877f2; color: #fff; }
+    .icon-ig     { background: linear-gradient(135deg,#f09433,#dc2743,#bc1888); color:#fff; }
+    .icon-tk     { background: #010101; color: #fff; border: 1px solid #333; }
+    .conn-name   { font-size: 15px; font-weight: 700; flex: 1; }
+
+    /* Status dot */
+    .status-dot         { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .dot-connected      { background: var(--green); }
+    .dot-degraded       { background: var(--yellow); animation: blink 2s step-end infinite; }
+    .dot-expired        { background: var(--red); }
+    .dot-disconnected   { background: var(--border); }
+    .dot-unknown        { background: var(--muted); }
+    @keyframes blink { 50% { opacity: .3; } }
+
+    /* Status badge */
+    .badge-connected    { background:#0d1f12; color:var(--green); border:1px solid #2ea043; }
+    .badge-degraded     { background:#1e1a00; color:var(--yellow); border:1px solid #9e6a03; }
+    .badge-expired      { background:#1f0a09; color:var(--red);   border:1px solid #da3633; }
+    .badge-disconnected { background:var(--surface); color:var(--muted); border:1px solid var(--border); }
+    .badge-unknown      { background:var(--surface); color:var(--muted); border:1px solid var(--border); }
+
+    /* Stat rows */
+    .conn-stat { display: flex; justify-content: space-between; align-items: baseline;
+                 padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .conn-stat:last-child { border-bottom: none; }
+    .cs-lbl { color: var(--muted); flex-shrink: 0; }
+    .cs-val { text-align: right; max-width: 210px; word-break: break-word; }
+
+    /* Expiry warning pill */
+    .expiry-pill { display: inline-block; font-size: 11px; padding: 1px 7px;
+                   border-radius: 8px; background: #1e1a00;
+                   color: var(--yellow); border: 1px solid #9e6a03; margin-top: 2px; }
+
+    /* Authorize link */
+    .auth-link { display: inline-block; margin-top: 10px; font-size: 12px;
+                 padding: 4px 12px; border: 1px solid var(--border);
+                 border-radius: var(--radius); color: var(--muted); text-decoration: none; }
+    .auth-link:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
+
+    /* Summary strip */
+    .summary-strip { display: flex; gap: var(--gap); flex-wrap: wrap; margin-bottom: var(--gap); }
+    .summary-tile  { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: var(--radius); padding: 10px 16px;
+                     flex: 1; min-width: 100px; text-align: center; }
+    .summary-val   { font-size: 22px; font-weight: 700; line-height: 1.1; }
+    .summary-lbl   { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: .05em; margin-top: 4px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Platform Connections</h1>
+  <span class="page-meta">OAuth health, sync state, and publishing status per platform</span>
+  <span class="badge badge-unknown" style="margin-left:auto; font-size:11px;">Read-only monitoring</span>
+</div>
+
+<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  Connection state is read from existing database tables.
+  No credentials or tokens are exposed on this page.
+  <a href="/platforms" style="color:var(--muted);">Full platform detail →</a>
+</p>
+
+{% if not ok %}
+<div class="card" style="border-color:var(--red); margin-bottom:var(--gap); padding:12px 16px;">
+  <span class="err">Connection state unavailable. Check system logs.</span>
+</div>
+{% endif %}
+
+{# ── Summary strip ── #}
+{% set n_connected    = connections | selectattr('status','eq','connected')    | list | length %}
+{% set n_degraded     = connections | selectattr('status','eq','degraded')     | list | length %}
+{% set n_expired      = connections | selectattr('status','eq','expired')      | list | length %}
+{% set n_disconnected = connections | selectattr('status','in',['disconnected','unknown']) | list | length %}
+<div class="summary-strip">
+  <div class="summary-tile">
+    <div class="summary-val">{{ connections | length }}</div>
+    <div class="summary-lbl">Platforms</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val {% if n_connected > 0 %}ok{% else %}muted{% endif %}">{{ n_connected }}</div>
+    <div class="summary-lbl">Connected</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val {% if n_degraded > 0 %}warn{% else %}muted{% endif %}">{{ n_degraded }}</div>
+    <div class="summary-lbl">Degraded</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val {% if n_expired > 0 %}err{% else %}muted{% endif %}">{{ n_expired }}</div>
+    <div class="summary-lbl">Expired</div>
+  </div>
+  <div class="summary-tile">
+    <div class="summary-val muted">{{ n_disconnected }}</div>
+    <div class="summary-lbl">Disconnected</div>
+  </div>
+</div>
+
+{% if connections %}
+<div class="conn-grid">
+  {% for c in connections %}
+  {% set s = c.status %}
+  {% set pid = c.platform_id %}
+
+  <div class="conn-card conn-card-{{ s }}">
+
+    {# ── Card header ── #}
+    <div class="conn-header">
+      <div class="conn-icon {% if pid=='youtube' %}icon-yt{% elif pid=='facebook' %}icon-fb{% elif pid=='instagram' %}icon-ig{% elif pid=='tiktok' %}icon-tk{% endif %}">
+        {{ pid[:2].upper() }}
+      </div>
+      <span class="status-dot dot-{{ s }}"></span>
+      <span class="conn-name">{{ c.platform }}</span>
+      <span class="badge badge-{{ s }}" style="font-size:10px; padding:1px 7px;">
+        {{ s | upper }}
+      </span>
+    </div>
+
+    {# ── OAuth status ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">OAuth status</span>
+      <span class="cs-val {% if 'fail' in c.oauth_status | lower %}warn{% elif 'Not' in c.oauth_status %}muted{% endif %}">
+        {{ c.oauth_status }}
+      </span>
+    </div>
+
+    {# ── Credential configured ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">Credential</span>
+      <span class="cs-val {% if c.has_credential %}ok{% else %}muted{% endif %}">
+        {{ "Configured" if c.has_credential else "Not configured" }}
+      </span>
+    </div>
+
+    {# ── Token expiry ── #}
+    {% if c.token_expiry %}
+    <div class="conn-stat">
+      <span class="cs-lbl">Token expiry</span>
+      <span class="cs-val">
+        <span class="expiry-pill">{{ c.token_expiry }}</span>
+      </span>
+    </div>
+    {% endif %}
+
+    {# ── Last sync ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">Last sync</span>
+      <span class="cs-val {% if not c.last_sync %}muted{% endif %}">
+        {{ c.last_sync or "Never" }}
+      </span>
+    </div>
+
+    {# ── Sync health ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">Sync health</span>
+      <span class="cs-val" style="font-size:11px; {% if 'failed' in (c.sync_health|lower) %}color:var(--yellow){% endif %}">
+        {{ c.sync_health }}
+      </span>
+    </div>
+
+    {# ── Last publish ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">Last publish</span>
+      <span class="cs-val {% if not c.last_publish %}muted{% endif %}">
+        {{ c.last_publish or "Never" }}
+      </span>
+    </div>
+
+    {# ── Publishing health ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">Publishing health</span>
+      <span class="cs-val" style="font-size:11px;">{{ c.publishing_health }}</span>
+    </div>
+
+    {# ── Analytics data ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">Analytics data</span>
+      <span class="cs-val {% if c.data_state == 'none' %}muted{% elif c.data_state == 'real' %}ok{% else %}warn{% endif %}">
+        {% if c.data_state == 'real' %}
+          {{ c.real_count }} real record{% if c.real_count != 1 %}s{% endif %}
+        {% elif c.data_state == 'mock_only' %}
+          Demo data only (excluded from KPIs)
+        {% else %}
+          No analytics records
+        {% endif %}
+      </span>
+    </div>
+
+    {# ── Last error ── #}
+    {% if c.last_error %}
+    <div class="conn-stat">
+      <span class="cs-lbl">Last error</span>
+      <span class="cs-val warn" style="font-size:11px;">{{ c.last_error[:100] }}</span>
+    </div>
+    {% endif %}
+
+    {# ── Source ── #}
+    <div class="conn-stat">
+      <span class="cs-lbl">Source</span>
+      <span class="cs-val muted" style="font-size:10px; font-family:monospace;">{{ c.source }}</span>
+    </div>
+
+    {# ── Re-authorize link (only if already available) ── #}
+    {% if c.authorize_url and s in ('expired','degraded') %}
+    <div style="margin-top:10px;">
+      <a href="{{ c.authorize_url }}" class="auth-link">
+        {{ c.authorize_label or "Re-authorize" }} →
+      </a>
+    </div>
+    {% endif %}
+
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="card" style="text-align:center; padding:30px;">
+  <div style="color:var(--muted); font-size:14px;">No connection state available.</div>
+</div>
+{% endif %}
+
+<div style="margin-top:calc(var(--gap)*2); font-size:11px; color:var(--muted);">
+  <a href="/api/infrastructure/connections" style="color:var(--muted);">/api/infrastructure/connections</a>
+  &ensp;·&ensp; Read-only. No credentials or tokens are shown.
+  &ensp;·&ensp; <a href="/platforms" style="color:var(--muted);">Full platform detail →</a>
+  &ensp;·&ensp; <a href="/analytics/sync" style="color:var(--muted);">Sync status →</a>
+</div>
+
+</body>
+</html>

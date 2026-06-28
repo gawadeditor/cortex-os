@@ -319,7 +319,7 @@ def _probe_tiktok(credential: str) -> tuple[bool, Optional[str], int]:
     token = credential
     try:
         blob = _json.loads(credential)
-        token = blob.get("TIKTOK_ACCESS_TOKEN", credential)
+        token = blob.get("access_token") or blob.get("TIKTOK_ACCESS_TOKEN") or credential
     except Exception:
         pass
     t0 = time.monotonic()

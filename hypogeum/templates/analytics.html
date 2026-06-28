@@ -117,9 +117,17 @@
               OAuth required — <a href="/platforms/connect/youtube" style="color:var(--blue);">Connect YouTube</a>
             {% endif %}
           </div>
+        {% elif platform in ('facebook', 'instagram') %}
+          <div class="muted" style="font-size:12px; margin-top:4px;">
+            <span class="ok">Auto-sync active</span> — no published videos yet
+          </div>
+        {% elif platform == 'tiktok' %}
+          <div class="muted" style="font-size:12px; margin-top:4px;">
+            Manual import only — <a href="/analytics/import?platform=tiktok" style="color:var(--blue);">Import data</a>
+          </div>
         {% else %}
           <div class="muted" style="font-size:12px; margin-top:4px;">
-            Connector not implemented
+            No data yet
           </div>
         {% endif %}
       {% endif %}

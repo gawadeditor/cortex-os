@@ -155,11 +155,19 @@
 </div>
 {% else %}
 <div class="empty">
-  No {{ platform }} data yet.
+  No {{ platform | capitalize }} analytics data yet.
   {% if platform == 'youtube' %}
-  <a href="/analytics/sync" style="color:var(--blue);">Check sync status →</a>
-  {% else %}
-  <span class="muted" style="font-size:12px;">Connector not implemented.</span>
+  <a href="/intelligence/sync" style="color:var(--blue);">Check sync status →</a>
+  {% elif platform in ('facebook', 'instagram') %}
+  <span class="muted" style="font-size:12px;">
+    Data syncs automatically via Meta Graph API once videos are published to this platform.
+    <a href="/intelligence/sync" style="color:var(--blue);">View sync status →</a>
+  </span>
+  {% elif platform == 'tiktok' %}
+  <span class="muted" style="font-size:12px;">
+    TikTok analytics require manual import.
+    <a href="/analytics/import?platform=tiktok" style="color:var(--blue);">Import data →</a>
+  </span>
   {% endif %}
 </div>
 {% endif %}

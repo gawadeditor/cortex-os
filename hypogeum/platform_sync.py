@@ -110,6 +110,59 @@ def _sync_youtube(
                 "records_imported": 0, "error": str(exc)}
 
 
+def _sync_meta(
+    platform: str,
+    channel_id: Optional[str],
+    db_path: Optional[Path],
+    window_days: int,
+    triggered_by: str,
+    conn,
+) -> dict:
+    """Run Meta Graph API sync for facebook or instagram, log result."""
+    import json as _json
+    try:
+        from hypogeum.config import Config
+        cfg = Config()
+    except Exception as exc:
+        _log_sync(conn, platform=platform, channel_id=channel_id,
+                  status="error", records_imported=0,
+                  errors_json=_json.dumps([str(exc)]),
+                  window_days=window_days, triggered_by=triggered_by)
+        return {"platform": platform, "status": "error", "records_imported": 0, "error": str(exc)}
+
+    from hypogeum.meta_analytics import get_meta_token, sync_meta_analytics
+
+    token = get_meta_token(platform, db_path=db_path)
+    if not token:
+        _log_sync(conn, platform=platform, channel_id=channel_id,
+                  status="not_connected", records_imported=0, errors_json=None,
+                  window_days=window_days, triggered_by=triggered_by)
+        return {"platform": platform, "status": "not_connected", "records_imported": 0,
+                "error": f"{platform} credential not found"}
+
+    try:
+        result   = sync_meta_analytics(platform, cfg, db_path=db_path, window_days=window_days)
+        records  = result.get("synced_count", 0)
+        errors   = result.get("errors") or []
+        status   = "ok" if result.get("ok") else "error"
+        note     = result.get("note")
+        if note and not errors:
+            errors = [note]
+        _log_sync(conn, platform=platform, channel_id=channel_id,
+                  status=status, records_imported=records,
+                  errors_json=_json.dumps(errors) if errors else None,
+                  window_days=window_days, triggered_by=triggered_by)
+        return {"platform": platform, "status": status,
+                "records_imported": records, "errors": errors}
+    except Exception as exc:
+        _log_sync(conn, platform=platform, channel_id=channel_id,
+                  status="error", records_imported=0,
+                  errors_json=_json.dumps([str(exc)]),
+                  window_days=window_days, triggered_by=triggered_by)
+        return {"platform": platform, "status": "error",
+                "records_imported": 0, "error": str(exc)}
+
+
 def run_platform_sync(
     channel_id: Optional[str] = None,
     db_path: Optional[Path] = None,
@@ -120,8 +173,8 @@ def run_platform_sync(
     """
     Run analytics sync across all supported platforms (or a subset).
 
-    Writes one platform_sync_log row per platform. YouTube is synced via API;
-    other platforms return status='skipped' (manual import only).
+    Writes one platform_sync_log row per platform. YouTube and Meta
+    (Facebook/Instagram) sync via API. TikTok requires manual import.
 
     Returns:
         {ok, results: [{platform, status, records_imported, error?}], total_records}
@@ -135,8 +188,10 @@ def run_platform_sync(
         for platform in target:
             if platform == "youtube":
                 r = _sync_youtube(channel_id, db_path, window_days, triggered_by, conn)
+            elif platform in ("facebook", "instagram"):
+                r = _sync_meta(platform, channel_id, db_path, window_days, triggered_by, conn)
             else:
-                # Other platforms have no API sync path yet — log as skipped
+                # TikTok: manual import only (no public analytics API available)
                 import json as _json
                 _log_sync(conn, platform=platform, channel_id=channel_id,
                           status="skipped", records_imported=0, errors_json=None,

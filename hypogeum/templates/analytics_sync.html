@@ -100,64 +100,115 @@
     {% endif %}
   </div>
 
-  {# TikTok — connector not implemented #}
-  <div class="platform-card platform-card-skip">
+  {# TikTok — credential check, manual import only #}
+  {% set tk_cred = platform_creds.get('tiktok', {}) if platform_creds else {} %}
+  {% set tk_last = last_sync_by_platform.get('tiktok') %}
+  <div class="platform-card {% if tk_cred.has_token and not tk_cred.expired %}platform-card-ok{% elif tk_cred.expired %}platform-card-err{% else %}platform-card-skip{% endif %}">
     <div class="platform-name">
-      <span class="perf-dot perf-dot-muted"></span>
+      <span class="perf-dot {% if tk_cred.has_token and not tk_cred.expired %}perf-dot-warn{% elif tk_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
       TikTok
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Connection</span>
-      <span class="stat-val" style="color:var(--muted);">Not connected</span>
+      <span class="stat-val {% if tk_cred.expired %}err{% elif tk_cred.has_token %}warn{% endif %}">
+        {% if tk_cred.expired %}Credential expired{% elif tk_cred.has_token %}Connected{% else %}Not connected{% endif %}
+      </span>
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val" style="color:var(--muted);">Connector not implemented</span>
+      <span class="stat-val" style="color:var(--muted);">
+        {% if tk_cred.expired %}Re-connect required{% elif tk_cred.has_token %}Manual import only{% else %}Credential required{% endif %}
+      </span>
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="color:var(--muted);">—</span>
+      <span class="stat-val" style="color:var(--muted);">
+        {% if tk_last %}{{ tk_last.synced_at[:19].replace("T"," ") }}{% else %}—{% endif %}
+      </span>
     </div>
+    {% if not tk_cred.has_token or tk_cred.expired %}
+    <div style="margin-top:8px;">
+      <a href="/platforms/connect/tiktok" class="btn" style="font-size:11px;">
+        {% if tk_cred.expired %}Reconnect TikTok →{% else %}Connect TikTok →{% endif %}
+      </a>
+    </div>
+    {% endif %}
   </div>
 
-  {# Instagram — connector not implemented #}
-  <div class="platform-card platform-card-skip">
+  {# Instagram — Meta Graph API auto-sync #}
+  {% set ig_cred = platform_creds.get('instagram', {}) if platform_creds else {} %}
+  {% set ig_last = last_sync_by_platform.get('instagram') %}
+  <div class="platform-card {% if ig_cred.has_token and not ig_cred.expired %}platform-card-ok{% elif ig_cred.expired %}platform-card-err{% else %}platform-card-skip{% endif %}">
     <div class="platform-name">
-      <span class="perf-dot perf-dot-muted"></span>
+      <span class="perf-dot {% if ig_cred.has_token and not ig_cred.expired %}perf-dot-ok{% elif ig_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
       Instagram
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Connection</span>
-      <span class="stat-val" style="color:var(--muted);">Not connected</span>
+      <span class="stat-val {% if ig_cred.expired %}err{% elif ig_cred.has_token %}ok{% endif %}">
+        {% if ig_cred.expired %}Credential expired{% elif ig_cred.has_token %}Connected{% else %}Not connected{% endif %}
+      </span>
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val" style="color:var(--muted);">Connector not implemented</span>
+      <span class="stat-val">
+        {% if ig_cred.has_token and not ig_cred.expired %}<span class="ok">Active (Meta Graph API)</span>
+        {% elif ig_cred.expired %}<span class="err">Re-connect required</span>
+        {% else %}<span style="color:var(--muted);">Credential required</span>{% endif %}
+      </span>
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="color:var(--muted);">—</span>
+      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
+        {% if ig_last %}{{ ig_last.synced_at[:19].replace("T"," ") }} — {{ ig_last.records_imported or 0 }} records
+        {% else %}Never{% endif %}
+      </span>
     </div>
+    {% if not ig_cred.has_token or ig_cred.expired %}
+    <div style="margin-top:8px;">
+      <a href="/platforms/connect/instagram" class="btn" style="font-size:11px;">
+        {% if ig_cred.expired %}Reconnect Instagram →{% else %}Connect Instagram →{% endif %}
+      </a>
+    </div>
+    {% endif %}
   </div>
 
-  {# Facebook — connector not implemented #}
-  <div class="platform-card platform-card-skip">
+  {# Facebook — Meta Graph API auto-sync #}
+  {% set fb_cred = platform_creds.get('facebook', {}) if platform_creds else {} %}
+  {% set fb_last = last_sync_by_platform.get('facebook') %}
+  <div class="platform-card {% if fb_cred.has_token and not fb_cred.expired %}platform-card-ok{% elif fb_cred.expired %}platform-card-err{% else %}platform-card-skip{% endif %}">
     <div class="platform-name">
-      <span class="perf-dot perf-dot-muted"></span>
+      <span class="perf-dot {% if fb_cred.has_token and not fb_cred.expired %}perf-dot-ok{% elif fb_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
       Facebook
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Connection</span>
-      <span class="stat-val" style="color:var(--muted);">Not connected</span>
+      <span class="stat-val {% if fb_cred.expired %}err{% elif fb_cred.has_token %}ok{% endif %}">
+        {% if fb_cred.expired %}Credential expired{% elif fb_cred.has_token %}Connected{% else %}Not connected{% endif %}
+      </span>
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val" style="color:var(--muted);">Connector not implemented</span>
+      <span class="stat-val">
+        {% if fb_cred.has_token and not fb_cred.expired %}<span class="ok">Active (Meta Graph API)</span>
+        {% elif fb_cred.expired %}<span class="err">Re-connect required</span>
+        {% else %}<span style="color:var(--muted);">Credential required</span>{% endif %}
+      </span>
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="color:var(--muted);">—</span>
+      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
+        {% if fb_last %}{{ fb_last.synced_at[:19].replace("T"," ") }} — {{ fb_last.records_imported or 0 }} records
+        {% else %}Never{% endif %}
+      </span>
     </div>
+    {% if not fb_cred.has_token or fb_cred.expired %}
+    <div style="margin-top:8px;">
+      <a href="/platforms/connect/facebook" class="btn" style="font-size:11px;">
+        {% if fb_cred.expired %}Reconnect Facebook →{% else %}Connect Facebook →{% endif %}
+      </a>
+    </div>
+    {% endif %}
   </div>
 
 </div>

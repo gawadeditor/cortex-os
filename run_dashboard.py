@@ -5058,6 +5058,7 @@ def intelligence_learning_page():
 def intelligence_sync_page():
     from hypogeum.youtube_analytics import get_last_youtube_sync
     from hypogeum.platform_sync import get_sync_log, get_last_sync_by_platform
+    from hypogeum.meta_analytics import get_meta_token, get_meta_token_expiry
     youtube_connected = False
     try:
         from hypogeum.config import Config as _Cfg
@@ -5081,6 +5082,31 @@ def intelligence_sync_page():
         last_sync_by_platform = get_last_sync_by_platform(db_path=_db_path())
     except Exception:
         last_sync_by_platform = {}
+
+    # Build real credential state for non-YouTube platforms
+    def _cred_state(platform: str) -> dict:
+        token  = get_meta_token(platform, db_path=_db_path())
+        expiry = get_meta_token_expiry(platform, db_path=_db_path())
+        expired = False
+        if expiry:
+            try:
+                from datetime import datetime, timezone
+                exp_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                expired = exp_dt < datetime.now(timezone.utc)
+            except Exception:
+                pass
+        return {
+            "has_token":  bool(token),
+            "expired":    expired,
+            "expiry":     expiry,
+        }
+
+    platform_creds = {
+        "tiktok":    _cred_state("tiktok"),
+        "instagram": _cred_state("instagram"),
+        "facebook":  _cred_state("facebook"),
+    }
+
     flash = request.args.get("flash")
     return render_template(
         "analytics_sync.html",
@@ -5088,6 +5114,7 @@ def intelligence_sync_page():
         youtube_last_synced=youtube_last_synced,
         sync_log=sync_log,
         last_sync_by_platform=last_sync_by_platform,
+        platform_creds=platform_creds,
         flash=flash,
     )
 
@@ -5264,6 +5291,7 @@ def api_analytics_sync_status():
     """
     from hypogeum.platform_sync import get_last_sync_by_platform
     from hypogeum.youtube_analytics import get_last_youtube_sync
+    from hypogeum.meta_analytics import get_meta_token, get_meta_token_expiry
 
     youtube_connected = False
     try:
@@ -5287,6 +5315,65 @@ def api_analytics_sync_status():
     except Exception:
         yt_last_synced = None
 
+    # Read actual credential state for Meta platforms from secret_profiles
+    def _meta_platform_entry(platform: str) -> dict:
+        token   = get_meta_token(platform, db_path=_db_path())
+        expiry  = get_meta_token_expiry(platform, db_path=_db_path())
+        log     = last_by_platform.get(platform, {})
+        connected = bool(token)
+        # Check if token is expired
+        expired = False
+        if expiry:
+            try:
+                from datetime import datetime, timezone
+                exp_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                expired = exp_dt < datetime.now(timezone.utc)
+            except Exception:
+                pass
+        if expired:
+            auto_sync = "credential_expired"
+            connected = False
+        elif connected:
+            auto_sync = "active"
+        else:
+            auto_sync = "credential_required"
+        return {
+            "connected":    connected and not expired,
+            "auto_sync":    auto_sync,
+            "last_sync":    log.get("synced_at"),
+            "last_records": log.get("records_imported"),
+            "last_status":  log.get("status"),
+        }
+
+    # TikTok: has token but it's expired and no public analytics API exists
+    def _tiktok_entry() -> dict:
+        from hypogeum.meta_analytics import get_meta_token, get_meta_token_expiry
+        # Reuse same helper with 'tiktok' provider
+        token   = get_meta_token("tiktok", db_path=_db_path())
+        expiry  = get_meta_token_expiry("tiktok", db_path=_db_path())
+        log     = last_by_platform.get("tiktok", {})
+        expired = False
+        if expiry:
+            try:
+                from datetime import datetime, timezone
+                exp_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                expired = exp_dt < datetime.now(timezone.utc)
+            except Exception:
+                pass
+        if expired:
+            auto_sync = "credential_expired"
+        elif token:
+            auto_sync = "manual_import_only"
+        else:
+            auto_sync = "credential_required"
+        return {
+            "connected":    bool(token) and not expired,
+            "auto_sync":    auto_sync,
+            "last_sync":    log.get("synced_at"),
+            "last_records": log.get("records_imported"),
+            "last_status":  log.get("status"),
+        }
+
     yt_log = last_by_platform.get("youtube", {})
     platforms = {
         "youtube": {
@@ -5296,27 +5383,9 @@ def api_analytics_sync_status():
             "last_records": yt_log.get("records_imported") if yt_log else None,
             "last_status":  yt_log.get("status") if yt_log else None,
         },
-        "tiktok": {
-            "connected":    False,
-            "auto_sync":    "connector_not_implemented",
-            "last_sync":    None,
-            "last_records": None,
-            "last_status":  None,
-        },
-        "instagram": {
-            "connected":    False,
-            "auto_sync":    "connector_not_implemented",
-            "last_sync":    None,
-            "last_records": None,
-            "last_status":  None,
-        },
-        "facebook": {
-            "connected":    False,
-            "auto_sync":    "connector_not_implemented",
-            "last_sync":    None,
-            "last_records": None,
-            "last_status":  None,
-        },
+        "tiktok":    _tiktok_entry(),
+        "instagram": _meta_platform_entry("instagram"),
+        "facebook":  _meta_platform_entry("facebook"),
     }
     return jsonify({"ok": True, "platforms": platforms})
 

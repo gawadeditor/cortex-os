@@ -99,10 +99,22 @@ from hypogeum.schemas import SchemaError, validate
 # ---------------------------------------------------------------------------
 
 _CLAUDE_SONNET   = "anthropic/claude-sonnet-4.6"
-_VPD_MAX_TOKENS  = 32_768
 _AGENT_NAME      = "visual_package_director"
 
+# Stage A: skeleton (no cinematic prompts) — budget 12,288 = ~37% of 32,768 ceiling
+_VPD_SKELETON_MAX_TOKENS    = 12_288
+# Stage B: cinematic prompts per batch — budget 8,192 = ~25% of 32,768 ceiling
+_VPD_PROMPT_BATCH_MAX_TOKENS = 8_192
+# Scenes per Stage B batch (10 × ~580 tok/scene ≈ 5,800 tok output — safe)
+_SCENE_PROMPT_BATCH_SIZE    = 10
+
+# Legacy constant kept for run_visual_package_director_from_plan (no Stage A/B needed there)
+_VPD_MAX_TOKENS  = 32_768
+
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_SKELETON_PROMPT_FILE     = _PROMPTS_DIR / "vpd_skeleton.txt"
+_SCENE_PROMPTS_PROMPT_FILE = _PROMPTS_DIR / "vpd_scene_prompts.txt"
+# Legacy prompt file — still used by run_visual_package_director_from_plan if needed
 _PROMPT_FILE = _PROMPTS_DIR / "visual_package_director.txt"
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "visual_package_director"
@@ -110,14 +122,22 @@ _CINEMATIC_SKILL_FILE = _SKILLS_DIR / "cinematic_prompt_architecture.md"
 
 
 # ---------------------------------------------------------------------------
-# System prompt — loaded once at import time
+# System prompts — loaded once at import time
 # ---------------------------------------------------------------------------
 
 def _load_system_prompt() -> str:
     return compose_system_prompt(_PROMPT_FILE, _CINEMATIC_SKILL_FILE)
 
+def _load_skeleton_prompt() -> str:
+    return compose_system_prompt(_SKELETON_PROMPT_FILE)
 
-SYSTEM_PROMPT: str = _load_system_prompt()
+def _load_scene_prompts_prompt() -> str:
+    return compose_system_prompt(_SCENE_PROMPTS_PROMPT_FILE, _CINEMATIC_SKILL_FILE)
+
+
+SYSTEM_PROMPT: str         = _load_system_prompt()
+SKELETON_PROMPT: str       = _load_skeleton_prompt()
+SCENE_PROMPTS_PROMPT: str  = _load_scene_prompts_prompt()
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +209,14 @@ def run_visual_package_director(
         suppress_shorts=suppress_shorts,
     )
 
+    _resolve_output_dir = (
+        output_dir
+        if output_dir is not None
+        else Path(__file__).resolve().parent.parent.parent
+        / ".hypogeum-assets" / "episodes" / episode_id
+    )
+    _resolve_output_dir.mkdir(parents=True, exist_ok=True)
+
     input_package = build_scene_plan_input(script_package, config, episode_id)
 
     constraints = input_package.get("generation_constraints")
@@ -198,34 +226,118 @@ def run_visual_package_director(
         log_kwargs["reason"] = reason
         log.info("vpd_generation_constraints_injected", **log_kwargs)
 
-    visual_package = run_agent(
-        agent_name=_AGENT_NAME,
-        model_slug=_CLAUDE_SONNET,
-        system_prompt=SYSTEM_PROMPT,
-        input_package=input_package,
-        output_schema="visual_package",
-        episode_id=episode_id,
-        max_tokens=_VPD_MAX_TOKENS,
-        config=config,
-        output_dir=output_dir,
-    )
+    # ------------------------------------------------------------------
+    # Stage A — Skeleton planning (no cinematic prompts)
+    # Checkpoint: visual_package_skeleton_{episode_id}.json
+    # ------------------------------------------------------------------
+    skeleton_path = _resolve_output_dir / f"visual_package_skeleton_{episode_id}.json"
+    if skeleton_path.exists():
+        log.info("vpd_stage_a_resumed", path=str(skeleton_path))
+        visual_package = json.loads(skeleton_path.read_text(encoding="utf-8"))
+    else:
+        log.info("vpd_stage_a_started", max_tokens=_VPD_SKELETON_MAX_TOKENS)
+        visual_package = run_agent(
+            agent_name=_AGENT_NAME,
+            model_slug=_CLAUDE_SONNET,
+            system_prompt=SKELETON_PROMPT,
+            input_package=input_package,
+            output_schema="visual_package",
+            episode_id=episode_id,
+            max_tokens=_VPD_SKELETON_MAX_TOKENS,
+            config=config,
+            output_dir=_resolve_output_dir,
+        )
+        skeleton_path.write_text(
+            json.dumps(visual_package, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        log.info(
+            "vpd_stage_a_completed",
+            scenes=len(visual_package.get("scenes", [])),
+            path=str(skeleton_path),
+        )
 
+    # ------------------------------------------------------------------
+    # Stage B — Cinematic prompts (batched, SCENE_PROMPT_BATCH_SIZE per call)
+    # Checkpoint: vpd_prompts_batch_{i}_{episode_id}.json per batch
+    # ------------------------------------------------------------------
+    scenes = visual_package.get("scenes", [])
+    batches = [
+        scenes[i : i + _SCENE_PROMPT_BATCH_SIZE]
+        for i in range(0, len(scenes), _SCENE_PROMPT_BATCH_SIZE)
+    ]
+    for batch_idx, batch in enumerate(batches):
+        batch_path = _resolve_output_dir / f"vpd_prompts_batch_{batch_idx}_{episode_id}.json"
+        if batch_path.exists():
+            log.info("vpd_stage_b_batch_resumed", batch=batch_idx, path=str(batch_path))
+            prompts_result = json.loads(batch_path.read_text(encoding="utf-8"))
+        else:
+            batch_input = {
+                "task": "write_scene_prompts",
+                "episode_metadata": visual_package.get("episode_metadata", {}),
+                "scenes": [
+                    {
+                        "scene_id": s.get("scene_id"),
+                        "scene_index": s.get("scene_index"),
+                        "source_type": s.get("source_type"),
+                        "visual_spec": s.get("visual_spec", {}),
+                        "narrative_signals": s.get("narrative_signals", []),
+                        "entity_appearances": s.get("entity_appearances", []),
+                        "production_spec": {
+                            "aspect_ratio": s.get("production_spec", {}).get("aspect_ratio", "16:9"),
+                            "duration_seconds": s.get("production_spec", {}).get("duration_seconds", 8),
+                            "primary_tier": s.get("production_spec", {}).get(
+                                "provider_routing", {}
+                            ).get("primary_tier", 2),
+                        },
+                    }
+                    for s in batch
+                ],
+            }
+            log.info(
+                "vpd_stage_b_batch_started",
+                batch=batch_idx,
+                scenes_in_batch=len(batch),
+                max_tokens=_VPD_PROMPT_BATCH_MAX_TOKENS,
+            )
+            prompts_result = run_agent(
+                agent_name=_AGENT_NAME,
+                model_slug=_CLAUDE_SONNET,
+                system_prompt=SCENE_PROMPTS_PROMPT,
+                input_package=batch_input,
+                output_schema="vpd_scene_prompts_batch",
+                episode_id=episode_id,
+                max_tokens=_VPD_PROMPT_BATCH_MAX_TOKENS,
+                config=config,
+                output_dir=None,
+            )
+            batch_path.write_text(
+                json.dumps(prompts_result, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+
+        # Merge prompts into skeleton scenes
+        _merge_scene_prompts(visual_package, prompts_result)
+        log.info(
+            "vpd_stage_b_batch_completed",
+            batch=batch_idx,
+            prompts_merged=len(prompts_result.get("scene_prompts", [])),
+        )
+
+    # ------------------------------------------------------------------
+    # Stage C — Package assembly and final validation
+    # ------------------------------------------------------------------
     scenes_planned = len(visual_package.get("scenes", []))
     entities_count = len(
         visual_package.get("visual_continuity_record", {}).get("locked_entities", [])
     )
-
+    log.info(
+        "vpd_stage_c_assembled",
+        scenes_planned=scenes_planned,
+        entities_count=entities_count,
+    )
     log.info(
         "vpd_planning_completed",
         scenes_planned=scenes_planned,
         entities_count=entities_count,
-    )
-
-    _resolve_output_dir = (
-        output_dir
-        if output_dir is not None
-        else Path(__file__).resolve().parent.parent.parent
-        / ".hypogeum-assets" / "episodes" / episode_id
     )
 
     # ------------------------------------------------------------------
@@ -301,6 +413,32 @@ def run_visual_package_director(
     build_thumbnail_handoff_brief(visual_package, episode_id, _resolve_output_dir, log)
 
     return visual_package
+
+
+# ---------------------------------------------------------------------------
+# Stage B helper — merge cinematic prompts into skeleton
+# ---------------------------------------------------------------------------
+
+def _merge_scene_prompts(visual_package: dict, prompts_result: dict) -> None:
+    """
+    Merge primary_prompt and fallback_prompt from a vpd_scene_prompts_batch result
+    into the corresponding scenes in visual_package (matched by scene_id).
+
+    Mutates visual_package in-place. Unknown scene_ids in prompts_result are ignored.
+    """
+    prompt_by_id: dict = {
+        sp["scene_id"]: sp
+        for sp in prompts_result.get("scene_prompts", [])
+        if isinstance(sp, dict) and sp.get("scene_id")
+    }
+    for scene in visual_package.get("scenes", []):
+        sid = scene.get("scene_id")
+        if sid not in prompt_by_id:
+            continue
+        sp = prompt_by_id[sid]
+        routing = scene.setdefault("production_spec", {}).setdefault("provider_routing", {})
+        routing["primary_prompt"]  = sp.get("primary_prompt", "")
+        routing["fallback_prompt"] = sp.get("fallback_prompt", "")
 
 
 def run_visual_package_director_from_plan(

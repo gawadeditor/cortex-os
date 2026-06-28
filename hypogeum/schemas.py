@@ -4,7 +4,7 @@ hypogeum/schemas.py — Schema validators for all pipeline output packages
 Every agent calls validate(schema_name, package) before sealing its output.
 Validation is fail-fast: the first structural problem raises SchemaError immediately.
 
-Validated schemas (26 total):
+Validated schemas (27 total):
   1.  validation_scorecard          — Executive Producer topic validation result
   2.  topic_brief                   — Executive Producer topic brief
   3.  package_deficiency_report     — PDR issued by any agent
@@ -1058,6 +1058,22 @@ def _validate_opportunity_batch(p: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# VPD Stage B — scene prompts batch validator
+# ---------------------------------------------------------------------------
+
+def _validate_vpd_scene_prompts_batch(p: dict) -> None:
+    s = "vpd_scene_prompts_batch"
+    _req_list(p, s, "scene_prompts", min_length=1)
+    for i, sp in enumerate(p.get("scene_prompts", [])):
+        path = f"scene_prompts[{i}]"
+        if not isinstance(sp, dict):
+            raise SchemaError(s, path, "each scene_prompt must be a dict")
+        _req_str(sp, s, "scene_id", path=path)
+        _req_str(sp, s, "primary_prompt", path=path)
+        _req_str(sp, s, "fallback_prompt", path=path)
+
+
+# ---------------------------------------------------------------------------
 # Registry — populated after all validators are defined
 # ---------------------------------------------------------------------------
 
@@ -1090,6 +1106,7 @@ _VALIDATORS = {
     "asset_archive_record":      _validate_asset_archive_record,
     "signal_record":             _validate_signal_record,
     "opportunity_batch":         _validate_opportunity_batch,
+    "vpd_scene_prompts_batch":   _validate_vpd_scene_prompts_batch,
 }
 
 # Expose schema names for discovery and testing

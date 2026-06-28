@@ -332,6 +332,32 @@ def _make_visual_package(
     }
 
 
+def _make_prompts_batch(plan: dict) -> dict:
+    """Return a valid vpd_scene_prompts_batch for every scene in plan — used as Stage B mock."""
+    return {
+        "scene_prompts": [
+            {
+                "scene_id": s["scene_id"],
+                "primary_prompt": s.get("production_spec", {})
+                    .get("provider_routing", {})
+                    .get("primary_prompt", "Test primary prompt."),
+                "fallback_prompt": s.get("production_spec", {})
+                    .get("provider_routing", {})
+                    .get("fallback_prompt", "Test fallback prompt."),
+            }
+            for s in plan.get("scenes", [])
+        ]
+    }
+
+
+def _stage_side_effect(plan: dict):
+    """Return a side_effect list for run_agent: Stage A → plan, Stage B batches → prompts."""
+    import math
+    from hypogeum.agents.visual_package_director import _SCENE_PROMPT_BATCH_SIZE
+    n_batches = max(1, math.ceil(len(plan.get("scenes", [])) / _SCENE_PROMPT_BATCH_SIZE))
+    return [plan] + [_make_prompts_batch(plan)] * n_batches
+
+
 def _make_script_package(episode_id: str = "ep_001") -> dict:
     return {
         "episode_metadata": {"episode_id": episode_id, "topic": "Pharaoh Amenhotep's Secret"},
@@ -422,7 +448,8 @@ class TestVPDSuccess:
         script_pkg = _make_script_package()
         plan = _make_visual_package()
 
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan) as mock_ra, \
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=_stage_side_effect(plan)) as mock_ra, \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
@@ -430,13 +457,13 @@ class TestVPDSuccess:
 
             run_visual_package_director(script_pkg, config, "ep_001", tmp_path)
 
-        call_kwargs = mock_ra.call_args[1]
-        # script_package is compacted before being passed — not the original object
-        compact = call_kwargs["input_package"]["script_package"]
+        # Stage A is the FIRST run_agent call — inspect call_args_list[0]
+        stage_a_kwargs = mock_ra.call_args_list[0][1]
+        compact = stage_a_kwargs["input_package"]["script_package"]
         assert compact["episode_metadata"] == script_pkg.get("episode_metadata", {})
         assert len(compact["sections"]) == len(script_pkg.get("sections", []))
-        assert call_kwargs["output_schema"] == "visual_package"
-        assert call_kwargs["model_slug"] == "anthropic/claude-sonnet-4.6"
+        assert stage_a_kwargs["output_schema"] == "visual_package"
+        assert stage_a_kwargs["model_slug"] == "anthropic/claude-sonnet-4.6"
 
 
 # ---------------------------------------------------------------------------
@@ -1113,14 +1140,16 @@ class TestDedicatedShortsDisabled:
         cfg = _make_config_shorts(enabled=False)
         plan = _make_visual_package()
 
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan) as mock_ra, \
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=_stage_side_effect(plan)) as mock_ra, \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()):
             run_visual_package_director(_make_script_package_with_shorts(), cfg, "ep_001", tmp_path)
 
-        input_pkg = mock_ra.call_args[1]["input_package"]
+        # Stage A (first call) carries generation_constraints
+        input_pkg = mock_ra.call_args_list[0][1]["input_package"]
         constraints = input_pkg.get("generation_constraints", {})
         assert constraints.get("shorts_count") == 0
 
@@ -1129,14 +1158,16 @@ class TestDedicatedShortsDisabled:
         cfg = _make_config_shorts(enabled=False)
         plan = _make_visual_package()
 
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan) as mock_ra, \
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=_stage_side_effect(plan)) as mock_ra, \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()):
             run_visual_package_director(_make_script_package_with_shorts(), cfg, "ep_001", tmp_path)
 
-        input_pkg = mock_ra.call_args[1]["input_package"]
+        # Stage A (first call) carries the compacted script_package
+        input_pkg = mock_ra.call_args_list[0][1]["input_package"]
         compact_sp = input_pkg["script_package"]
         assert compact_sp["shorts_scripts"] == []
 
@@ -1216,14 +1247,15 @@ class TestDedicatedShortsDisabled:
         cfg = _make_config_shorts(enabled=True)
         plan = _make_visual_package()
 
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan) as mock_ra, \
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=_stage_side_effect(plan)) as mock_ra, \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()):
             run_visual_package_director(_make_script_package(), cfg, "ep_000", tmp_path)
 
-        input_pkg = mock_ra.call_args[1]["input_package"]
+        input_pkg = mock_ra.call_args_list[0][1]["input_package"]
         constraints = input_pkg.get("generation_constraints", {})
         assert constraints.get("shorts_count") == 0
 
@@ -1240,14 +1272,15 @@ class TestDedicatedShortsDisabled:
                 os.environ["EPISODE_ZERO_MAX_SCENES"] = prev
 
         plan = _make_visual_package()
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan) as mock_ra, \
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=_stage_side_effect(plan)) as mock_ra, \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()):
             run_visual_package_director(_make_script_package(), cfg, "ep_001", tmp_path)
 
-        input_pkg = mock_ra.call_args[1]["input_package"]
+        input_pkg = mock_ra.call_args_list[0][1]["input_package"]
         constraints = input_pkg.get("generation_constraints", {})
         assert constraints.get("shorts_count") == 0
 

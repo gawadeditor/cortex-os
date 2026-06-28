@@ -16,8 +16,7 @@
   <a href="/analytics/platform/tiktok"    class="sub-nav-link">TikTok</a>
   <a href="/analytics/platform/instagram" class="sub-nav-link">Instagram</a>
   <a href="/analytics/platform/facebook"  class="sub-nav-link">Facebook</a>
-  <a href="/analytics/sync"               class="sub-nav-link">Sync</a>
-  <a href="/analytics/advanced/import"   class="sub-nav-link">Manual Import</a>
+  <a href="/analytics/sync"               class="sub-nav-link">Sync Status</a>
 </div>
 
 <div class="page-header">
@@ -109,10 +108,19 @@
           <span>{{ "{:,}".format(pb.get('total_views', 0) | int) }}</span>
         </div>
       {% else %}
-        <div class="muted" style="font-size:12px; margin-top:4px;">No data yet</div>
-        <div style="margin-top:10px;">
-          <a href="/analytics/import?platform={{ platform }}" class="btn" style="font-size:11px;">Import →</a>
-        </div>
+        {% if platform == 'youtube' %}
+          <div class="muted" style="font-size:12px; margin-top:4px;">
+            {% if youtube_connected %}
+              <span class="ok">Auto-sync active</span> — no data yet
+            {% else %}
+              OAuth required — <a href="/platforms/connect/youtube" style="color:var(--blue);">Connect YouTube</a>
+            {% endif %}
+          </div>
+        {% else %}
+          <div class="muted" style="font-size:12px; margin-top:4px;">
+            Connector not implemented
+          </div>
+        {% endif %}
       {% endif %}
     </div>
   {% endfor %}
@@ -217,14 +225,18 @@
 {% else %}
 <div class="empty" style="padding:40px 20px; text-align:center;">
   <div style="font-size:14px; font-weight:600; color:var(--muted); margin-bottom:10px;">
-    Analytics API not connected
+    No analytics data yet
   </div>
   <div style="font-size:12px; color:var(--muted); margin-bottom:16px; max-width:440px; margin-left:auto; margin-right:auto; line-height:1.6;">
-    No real platform analytics imported yet. Platform API integrations (YouTube Data API,
-    TikTok Analytics) are not implemented in this version.
-    Import analytics manually from platform CSV exports.
+    {% if youtube_connected %}
+      YouTube is connected — analytics sync runs automatically in the background.
+      Data will appear here once videos have been published and synced.
+    {% else %}
+      Connect YouTube to enable automatic analytics sync. TikTok, Instagram, and
+      Facebook connectors are not yet implemented.
+    {% endif %}
   </div>
-  <a href="/analytics/import" class="btn">Manual Analytics Import →</a>
+  <a href="/analytics/sync" class="btn">View sync status →</a>
 </div>
 {% endif %}
 

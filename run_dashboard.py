@@ -4852,12 +4852,23 @@ def api_learning_action_dismiss(action_id):
 @app.route("/analytics")
 def analytics_page():
     overview   = get_analytics_overview(db_path=_db_path())
-    # Fetch channel list for seed-mock form
     from hypogeum.dashboard_api import get_channel_summaries
     channels   = get_channel_summaries(db_path=_db_path())
+    youtube_connected = False
+    try:
+        from hypogeum.config import Config as _Cfg
+        _cfg = _Cfg()
+        youtube_connected = bool(
+            _cfg.YOUTUBE_REFRESH_TOKEN
+            and _cfg.YOUTUBE_CLIENT_ID
+            and _cfg.YOUTUBE_CLIENT_SECRET
+        )
+    except Exception:
+        pass
     return render_template("analytics.html",
                            overview=overview, channels=channels,
-                           valid_platforms=sorted(_VALID_PLATFORMS))
+                           valid_platforms=sorted(_VALID_PLATFORMS),
+                           youtube_connected=youtube_connected)
 
 
 @app.route("/analytics/platform/<platform>")
@@ -5057,6 +5068,72 @@ def api_analytics_sync():
         return jsonify(result), status
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/analytics/sync/status", methods=["GET"])
+def api_analytics_sync_status():
+    """
+    Per-platform auto-sync status snapshot.
+    Returns connection state, last sync timestamp, last result, and whether
+    auto-sync is active for each platform. Non-blocking.
+    """
+    from hypogeum.platform_sync import get_last_sync_by_platform
+    from hypogeum.youtube_analytics import get_last_youtube_sync
+
+    youtube_connected = False
+    try:
+        from hypogeum.config import Config as _Cfg
+        _cfg = _Cfg()
+        youtube_connected = bool(
+            _cfg.YOUTUBE_REFRESH_TOKEN
+            and _cfg.YOUTUBE_CLIENT_ID
+            and _cfg.YOUTUBE_CLIENT_SECRET
+        )
+    except Exception:
+        pass
+
+    try:
+        last_by_platform = get_last_sync_by_platform(db_path=_db_path())
+    except Exception:
+        last_by_platform = {}
+
+    try:
+        yt_last_synced = get_last_youtube_sync(db_path=_db_path())
+    except Exception:
+        yt_last_synced = None
+
+    yt_log = last_by_platform.get("youtube", {})
+    platforms = {
+        "youtube": {
+            "connected":    youtube_connected,
+            "auto_sync":    "active" if youtube_connected else "oauth_required",
+            "last_sync":    yt_last_synced,
+            "last_records": yt_log.get("records_imported") if yt_log else None,
+            "last_status":  yt_log.get("status") if yt_log else None,
+        },
+        "tiktok": {
+            "connected":    False,
+            "auto_sync":    "connector_not_implemented",
+            "last_sync":    None,
+            "last_records": None,
+            "last_status":  None,
+        },
+        "instagram": {
+            "connected":    False,
+            "auto_sync":    "connector_not_implemented",
+            "last_sync":    None,
+            "last_records": None,
+            "last_status":  None,
+        },
+        "facebook": {
+            "connected":    False,
+            "auto_sync":    "connector_not_implemented",
+            "last_sync":    None,
+            "last_records": None,
+            "last_status":  None,
+        },
+    }
+    return jsonify({"ok": True, "platforms": platforms})
 
 
 # ===========================================================================

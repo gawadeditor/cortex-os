@@ -20,8 +20,7 @@
   <a href="/analytics/platform/{{ _p }}"
      class="sub-nav-link {% if _p == platform %}active{% endif %}">{{ _p | capitalize }}</a>
   {% endfor %}
-  <a href="/analytics/sync"             class="sub-nav-link">Sync</a>
-  <a href="/analytics/advanced/import" class="sub-nav-link">Manual Import</a>
+  <a href="/analytics/sync"             class="sub-nav-link">Sync Status</a>
 </div>
 
 {# ── Breadcrumb ── #}
@@ -35,7 +34,7 @@
   <h1>{{ platform | capitalize }}</h1>
   <span class="page-meta">{{ summary.kpis.get('episodes_tracked', 0) }} episode{% if summary.kpis.get('episodes_tracked', 0) != 1 %}s{% endif %} tracked</span>
   <div style="margin-left:auto;">
-    <a href="/analytics/import?platform={{ platform }}" class="btn">Import →</a>
+    <a href="/analytics/sync" class="btn" style="font-size:12px;">Sync status →</a>
   </div>
 </div>
 
@@ -154,7 +153,14 @@
   </table>
 </div>
 {% else %}
-<div class="empty">No {{ platform }} data yet. <a href="/analytics/import?platform={{ platform }}">Import →</a></div>
+<div class="empty">
+  No {{ platform }} data yet.
+  {% if platform == 'youtube' %}
+  <a href="/analytics/sync" style="color:var(--blue);">Check sync status →</a>
+  {% else %}
+  <span class="muted" style="font-size:12px;">Connector not implemented.</span>
+  {% endif %}
+</div>
 {% endif %}
 
 </body>

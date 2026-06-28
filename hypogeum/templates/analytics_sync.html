@@ -38,8 +38,7 @@
   <a href="/analytics/platform/tiktok"      class="sub-nav-link">TikTok</a>
   <a href="/analytics/platform/instagram"   class="sub-nav-link">Instagram</a>
   <a href="/analytics/platform/facebook"    class="sub-nav-link">Facebook</a>
-  <a href="/analytics/sync"                 class="sub-nav-link active">Sync</a>
-  <a href="/analytics/advanced/import"      class="sub-nav-link">Manual Import</a>
+  <a href="/analytics/sync"                 class="sub-nav-link active">Sync Status</a>
 </div>
 
 <div class="breadcrumb">
@@ -49,18 +48,8 @@
 </div>
 
 <div class="page-header">
-  <h1>Analytics Sync</h1>
-  <span class="page-meta">Platform connection status &amp; sync history</span>
-  <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
-    <button id="btn-sync-quick" class="btn btn-save" onclick="runSync(event, 28)">
-      Quick Sync (28d)
-    </button>
-    <button id="btn-sync-full" class="btn" onclick="runSync(event, 900)"
-            style="border-color:#3fb950; color:#3fb950;">
-      Full Sync (900d)
-    </button>
-    <span id="sync-status" style="font-size:12px; color:var(--muted);"></span>
-  </div>
+  <h1>Analytics Sync Status</h1>
+  <span class="page-meta">Auto-sync state per platform</span>
 </div>
 
 {% if flash == 'ok' %}
@@ -72,109 +61,110 @@
 {# ── Per-platform cards ── #}
 <div class="platform-grid">
 
-  {# YouTube #}
+  {# YouTube — auto-sync #}
   {% set yt_last = last_sync_by_platform.get('youtube') %}
-  <div class="platform-card {% if youtube_connected %}platform-card-ok{% endif %}">
+  <div class="platform-card {% if youtube_connected %}platform-card-ok{% else %}platform-card-err{% endif %}">
     <div class="platform-name">
       <span class="perf-dot {% if youtube_connected %}perf-dot-ok{% else %}perf-dot-warn{% endif %}"></span>
       YouTube
     </div>
     <div class="platform-stat">
       <span class="stat-lbl">Connection</span>
-      <span class="stat-val">{% if youtube_connected %}Connected{% else %}Not connected{% endif %}</span>
+      <span class="stat-val {% if youtube_connected %}ok{% else %}err{% endif %}">
+        {% if youtube_connected %}Connected{% else %}OAuth required{% endif %}
+      </span>
     </div>
     <div class="platform-stat">
-      <span class="stat-lbl">Last synced</span>
-      <span class="stat-val" style="font-family:sans-serif;">
+      <span class="stat-lbl">Auto-sync</span>
+      <span class="stat-val">
+        {% if youtube_connected %}<span class="ok">Active</span>{% else %}<span class="warn">Requires OAuth</span>{% endif %}
+      </span>
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">Last sync</span>
+      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
         {% if youtube_last_synced %}{{ youtube_last_synced[:19] | replace("T", " ") }}{% else %}Never{% endif %}
       </span>
     </div>
     {% if yt_last %}
     <div class="platform-stat">
-      <span class="stat-lbl">Records</span>
-      <span class="stat-val">{{ yt_last.records_imported }}</span>
+      <span class="stat-lbl">Last result</span>
+      <span class="stat-val">{{ yt_last.records_imported }} records</span>
     </div>
     {% endif %}
     {% if not youtube_connected %}
     <div style="margin-top:8px;">
-      <a href="/platforms/connect/youtube" class="btn" style="font-size:11px;">Connect →</a>
+      <a href="/platforms/connect/youtube" class="btn" style="font-size:11px;">Connect YouTube →</a>
     </div>
     {% endif %}
   </div>
 
-  {# TikTok — manual only #}
-  {% set tk_last = last_sync_by_platform.get('tiktok') %}
+  {# TikTok — connector not implemented #}
   <div class="platform-card platform-card-skip">
     <div class="platform-name">
       <span class="perf-dot perf-dot-muted"></span>
       TikTok
     </div>
     <div class="platform-stat">
-      <span class="stat-lbl">API sync</span>
-      <span class="stat-val" style="color:var(--muted);">Not available</span>
+      <span class="stat-lbl">Connection</span>
+      <span class="stat-val" style="color:var(--muted);">Not connected</span>
     </div>
-    {% if tk_last %}
     <div class="platform-stat">
-      <span class="stat-lbl">Last import</span>
-      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">{{ tk_last.synced_at[:10] }}</span>
+      <span class="stat-lbl">Auto-sync</span>
+      <span class="stat-val" style="color:var(--muted);">Connector not implemented</span>
     </div>
-    {% endif %}
-    <div style="margin-top:8px;">
-      <a href="/analytics/advanced/import?platform=tiktok" class="btn" style="font-size:11px;">Manual import →</a>
+    <div class="platform-stat">
+      <span class="stat-lbl">Last sync</span>
+      <span class="stat-val" style="color:var(--muted);">—</span>
     </div>
   </div>
 
-  {# Instagram — manual only #}
-  {% set ig_last = last_sync_by_platform.get('instagram') %}
+  {# Instagram — connector not implemented #}
   <div class="platform-card platform-card-skip">
     <div class="platform-name">
       <span class="perf-dot perf-dot-muted"></span>
       Instagram
     </div>
     <div class="platform-stat">
-      <span class="stat-lbl">API sync</span>
-      <span class="stat-val" style="color:var(--muted);">Not available</span>
+      <span class="stat-lbl">Connection</span>
+      <span class="stat-val" style="color:var(--muted);">Not connected</span>
     </div>
-    {% if ig_last %}
     <div class="platform-stat">
-      <span class="stat-lbl">Last import</span>
-      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">{{ ig_last.synced_at[:10] }}</span>
+      <span class="stat-lbl">Auto-sync</span>
+      <span class="stat-val" style="color:var(--muted);">Connector not implemented</span>
     </div>
-    {% endif %}
-    <div style="margin-top:8px;">
-      <a href="/analytics/advanced/import?platform=instagram" class="btn" style="font-size:11px;">Manual import →</a>
+    <div class="platform-stat">
+      <span class="stat-lbl">Last sync</span>
+      <span class="stat-val" style="color:var(--muted);">—</span>
     </div>
   </div>
 
-  {# Facebook — manual only #}
-  {% set fb_last = last_sync_by_platform.get('facebook') %}
+  {# Facebook — connector not implemented #}
   <div class="platform-card platform-card-skip">
     <div class="platform-name">
       <span class="perf-dot perf-dot-muted"></span>
       Facebook
     </div>
     <div class="platform-stat">
-      <span class="stat-lbl">API sync</span>
-      <span class="stat-val" style="color:var(--muted);">Not available</span>
+      <span class="stat-lbl">Connection</span>
+      <span class="stat-val" style="color:var(--muted);">Not connected</span>
     </div>
-    {% if fb_last %}
     <div class="platform-stat">
-      <span class="stat-lbl">Last import</span>
-      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">{{ fb_last.synced_at[:10] }}</span>
+      <span class="stat-lbl">Auto-sync</span>
+      <span class="stat-val" style="color:var(--muted);">Connector not implemented</span>
     </div>
-    {% endif %}
-    <div style="margin-top:8px;">
-      <a href="/analytics/advanced/import?platform=facebook" class="btn" style="font-size:11px;">Manual import →</a>
+    <div class="platform-stat">
+      <span class="stat-lbl">Last sync</span>
+      <span class="stat-val" style="color:var(--muted);">—</span>
     </div>
   </div>
 
 </div>
 
 {# ── Sync log ── #}
-<div class="card" style="padding:12px 16px;">
+<div class="card" style="padding:12px 16px; margin-bottom:var(--gap);">
   <div class="card-title">Sync Log</div>
   {% if sync_log %}
-  <div id="sync-result" style="display:none; margin-bottom:10px;"></div>
   {% for row in sync_log %}
   <div class="sync-log-row">
     <span style="color:var(--muted);">{{ row.synced_at[:19] | replace("T", " ") if row.synced_at else '—' }}</span>
@@ -188,9 +178,36 @@
   </div>
   {% endfor %}
   {% else %}
-  <div style="color:var(--muted); font-size:13px;">No sync history yet — run a sync above.</div>
+  <div style="color:var(--muted); font-size:13px;">No sync history yet. Sync runs automatically in the background when YouTube is connected.</div>
   {% endif %}
 </div>
+
+{# ── Advanced / Debug — manual sync triggers (collapsed) ── #}
+<details style="margin-bottom:var(--gap);">
+  <summary style="padding:10px 16px; background:var(--surface); border:1px solid var(--border);
+                  border-radius:var(--radius); font-size:13px; color:var(--muted);
+                  list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
+    <span>&#9654;</span>
+    Advanced: manual sync triggers
+    <span style="font-size:11px; margin-left:4px;">(debug / one-off use only)</span>
+  </summary>
+  <div class="card" style="border-top:none; border-radius:0 0 var(--radius) var(--radius);
+                            padding:16px; margin-top:0;">
+    <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+      These buttons trigger a one-off sync. Prefer the background worker for normal operation.
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button id="btn-sync-quick" class="btn btn-save" onclick="runSync(event, 28)">
+        Sync YouTube (28d)
+      </button>
+      <button id="btn-sync-full" class="btn" onclick="runSync(event, 900)"
+              style="border-color:#3fb950; color:#3fb950;">
+        Sync YouTube (900d)
+      </button>
+      <span id="sync-status" style="font-size:12px; color:var(--muted);"></span>
+    </div>
+  </div>
+</details>
 
 <script>
 function runSync(event, windowDays) {

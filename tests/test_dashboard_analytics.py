@@ -537,3 +537,148 @@ class TestNoProductionSideEffects:
         after = conn.execute("SELECT COUNT(*) AS c FROM analytics_insights").fetchone()["c"]
         conn.close()
         assert before == after
+
+
+# ===========================================================================
+# TestAnalyticsUX — background-first UX requirements (req F11)
+# ===========================================================================
+
+class TestAnalyticsUX:
+    """
+    Analytics UI must be background-first: no visible Quick/Full Sync buttons
+    in primary page areas; sync status per platform; manual sync collapsed.
+    """
+
+    def test_analytics_page_no_manual_import_cta(self, flask_client_bare):
+        """Main /analytics page must not show 'Manual Analytics Import' as primary CTA."""
+        r = flask_client_bare.get("/analytics")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "Manual Analytics Import" not in body, (
+            "Primary analytics page must not promote manual import as the main CTA"
+        )
+
+    def test_analytics_page_no_import_button_on_platform_cards(self, flask_client_bare):
+        """Platform health cards must not show 'Import →' buttons."""
+        r = flask_client_bare.get("/analytics")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "/analytics/import?platform=" not in body, (
+            "Platform cards must not link to manual import"
+        )
+
+    def test_analytics_page_empty_state_points_to_sync(self, flask_client_bare):
+        """Empty state must link to /analytics/sync, not to manual import."""
+        r = flask_client_bare.get("/analytics")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "/analytics/sync" in body, "Empty state must link to sync status page"
+
+    def test_analytics_page_no_manual_import_subnav(self, flask_client_bare):
+        """Sub-nav must not expose 'Manual Import' as a top-level link."""
+        r = flask_client_bare.get("/analytics")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "Manual Import" not in body, (
+            "Sub-nav must not show Manual Import as a visible top-level entry"
+        )
+
+    def test_sync_page_buttons_inside_details(self, flask_client_bare):
+        """Quick Sync / Full Sync buttons must be inside a <details> element."""
+        r = flask_client_bare.get("/analytics/sync")
+        assert r.status_code == 200
+        body = r.data.decode()
+        # Find the Advanced <details> block (contains "manual sync triggers")
+        details_start = body.find("manual sync triggers")
+        assert details_start >= 0, "Advanced <details> block not found"
+        # Walk back to the containing <details> tag
+        details_tag = body.rfind("<details", 0, details_start)
+        assert details_tag >= 0
+        details_end = body.find("</details>", details_tag)
+        details_block = body[details_tag:details_end]
+        assert "btn-sync-quick" in details_block, (
+            "Quick Sync button must be inside <details>, not in page header"
+        )
+        assert "btn-sync-full" in details_block, (
+            "Full Sync button must be inside <details>, not in page header"
+        )
+
+    def test_sync_page_no_sync_buttons_in_header(self, flask_client_bare):
+        """Sync buttons must not appear in page-header area."""
+        r = flask_client_bare.get("/analytics/sync")
+        assert r.status_code == 200
+        body = r.data.decode()
+        header_end = body.find("</div>", body.find("page-header"))
+        header_block = body[:header_end] if header_end > 0 else ""
+        assert "btn-sync-quick" not in header_block, (
+            "Quick Sync button must not appear in page-header"
+        )
+
+    def test_sync_page_shows_connector_not_implemented(self, flask_client_bare):
+        """TikTok, Instagram, Facebook must show 'Connector not implemented'."""
+        r = flask_client_bare.get("/analytics/sync")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "Connector not implemented" in body, (
+            "Non-YouTube platforms must show 'Connector not implemented'"
+        )
+
+    def test_sync_page_shows_youtube_autosync_status(self, flask_client_bare):
+        """YouTube card must show auto-sync state (Active or Requires OAuth)."""
+        r = flask_client_bare.get("/analytics/sync")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "Auto-sync" in body, "YouTube card must show Auto-sync state"
+        assert ("Active" in body or "Requires OAuth" in body or "oauth_required" in body), (
+            "YouTube auto-sync must show a readable state"
+        )
+
+    def test_platform_page_no_import_button_in_header(self, flask_client_bare):
+        """Platform page header must not have an Import button."""
+        r = flask_client_bare.get("/analytics/platform/youtube")
+        assert r.status_code == 200
+        body = r.data.decode()
+        header_area = body[body.find("page-header"):body.find("kpi-strip")]
+        assert "/analytics/import" not in header_area, (
+            "Platform page header must not link to manual import"
+        )
+
+    def test_platform_page_tiktok_empty_shows_not_implemented(self, flask_client_bare):
+        """TikTok platform empty state must say connector not implemented."""
+        r = flask_client_bare.get("/analytics/platform/tiktok")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "Connector not implemented" in body, (
+            "TikTok empty state must say 'Connector not implemented'"
+        )
+
+    def test_sync_status_api_returns_platform_map(self, flask_client_bare):
+        """/api/analytics/sync/status must return per-platform status."""
+        r = flask_client_bare.get("/api/analytics/sync/status")
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["ok"] is True
+        platforms = data["platforms"]
+        assert set(platforms.keys()) == {"youtube", "tiktok", "instagram", "facebook"}
+        # YouTube fields
+        yt = platforms["youtube"]
+        assert "connected" in yt
+        assert "auto_sync" in yt
+        assert "last_sync" in yt
+        # Non-YouTube connectors not implemented
+        for p in ("tiktok", "instagram", "facebook"):
+            assert platforms[p]["auto_sync"] == "connector_not_implemented"
+            assert platforms[p]["connected"] is False
+
+    def test_sync_status_api_youtube_not_connected_when_no_creds(self, flask_client_bare):
+        """Without OAuth creds, youtube.connected must be False."""
+        from unittest.mock import patch, MagicMock
+        mock_cfg = MagicMock()
+        mock_cfg.YOUTUBE_REFRESH_TOKEN = None
+        mock_cfg.YOUTUBE_CLIENT_ID = None
+        mock_cfg.YOUTUBE_CLIENT_SECRET = None
+        with patch("hypogeum.config.Config", return_value=mock_cfg):
+            r = flask_client_bare.get("/api/analytics/sync/status")
+        data = r.get_json()
+        assert data["platforms"]["youtube"]["connected"] is False
+        assert data["platforms"]["youtube"]["auto_sync"] == "oauth_required"

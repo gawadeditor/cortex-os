@@ -39,6 +39,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 _DEFAULT_DB    = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 _DEFAULT_INTERVAL = 60  # seconds between iterations
 
+# Analytics sync runs every this many iterations (default 60 = hourly at 60s interval).
+# Override with env var ANALYTICS_SYNC_EVERY_N_ITERATIONS.
+import os as _os
+_ANALYTICS_SYNC_EVERY_N = int(_os.environ.get("ANALYTICS_SYNC_EVERY_N_ITERATIONS", "60"))
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -76,6 +81,33 @@ signal.signal(signal.SIGTERM, _handle_signal)
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _sync_analytics_background(db_path: Path, config) -> None:
+    """
+    Background analytics sync — runs automatically, non-blocking, best-effort.
+
+    YouTube: syncs if OAuth credentials are configured (source='api').
+    TikTok / Instagram / Facebook: logged as skipped (connectors not implemented).
+    """
+    try:
+        yt_ok = bool(
+            getattr(config, "YOUTUBE_REFRESH_TOKEN", None)
+            and getattr(config, "YOUTUBE_CLIENT_ID", None)
+            and getattr(config, "YOUTUBE_CLIENT_SECRET", None)
+        )
+        if not yt_ok:
+            log.debug("analytics_sync_skip reason=youtube_not_connected")
+            return
+        from hypogeum.youtube_analytics import sync_youtube_analytics
+        result = sync_youtube_analytics(config, db_path=db_path, window_days=90)
+        log.info(
+            "analytics_sync_complete platform=youtube synced=%d skipped=%d",
+            result.get("synced_count", 0),
+            result.get("skipped_count", 0),
+        )
+    except Exception as exc:
+        log.error("analytics_sync_error error=%s", exc)
 
 
 def _check_and_refill_queue(
@@ -222,6 +254,7 @@ def run_iteration(
     dry_run: bool,
     channel_id: str | None,
     config,
+    iteration: int = 1,
 ) -> dict:
     """
     Execute one scheduler → consume → poll cycle.
@@ -290,6 +323,13 @@ def run_iteration(
     else:
         log.debug("poll queue_empty")
 
+    # Step 4: background analytics sync — every _ANALYTICS_SYNC_EVERY_N iterations
+    analytics_synced = False
+    if not dry_run and iteration % _ANALYTICS_SYNC_EVERY_N == 0:
+        log.info("analytics_sync_triggered iteration=%d", iteration)
+        _sync_analytics_background(db_path=db_path, config=config)
+        analytics_synced = True
+
     return {
         "scheduled_runs_created": len(sr_ids),
         "queue_items_created":    len(queue_ids),
@@ -297,6 +337,7 @@ def run_iteration(
         "poll_stop_reason":       poll_result.stop_reason,
         "dry_run":                dry_run,
         "discovery":              discovery_result,
+        "analytics_synced":       analytics_synced,
     }
 
 
@@ -347,6 +388,7 @@ def run_worker(
                 dry_run=dry_run,
                 channel_id=channel_id,
                 config=config,
+                iteration=iteration,
             )
             log.info(
                 "iteration=%d done sr_created=%d q_created=%d poll=%s",

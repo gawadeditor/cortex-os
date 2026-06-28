@@ -6494,6 +6494,211 @@ def api_infrastructure_connections():
     return jsonify(safe)
 
 
+# ===========================================================================
+# Phase 9 — Infrastructure > Config
+# ===========================================================================
+
+def _build_config_context() -> dict:
+    """
+    Read-only factory configuration state from existing DB tables and env.
+    Never exposes secrets, API keys, or OAuth tokens.
+    Returns {"ok": True, "config": {...}}.
+    """
+    from hypogeum.dashboard_api import get_channel_summaries, get_schedules
+    from hypogeum.setup_preflight import get_setup_preflight_status
+    from hypogeum.channel_profile import get_channel_profile
+    from hypogeum.db import get_connection
+
+    db = _db_path()
+
+    # ── Channel summaries ───────────────────────────────────────────────────
+    try:
+        channels = [_to_dict(c) for c in get_channel_summaries(db_path=db)]
+    except Exception:
+        channels = []
+
+    # ── Schedules ───────────────────────────────────────────────────────────
+    try:
+        schedules = get_schedules(db_path=db)
+    except Exception:
+        schedules = []
+
+    # ── Environment health + budget ─────────────────────────────────────────
+    try:
+        preflight = get_setup_preflight_status(db_path=db)
+    except Exception:
+        preflight = {}
+
+    # ── Channel profile settings (content_niche, tone_style, targets) ───────
+    try:
+        ch_profile = get_channel_profile(db_path=db)
+    except Exception:
+        ch_profile = {}
+
+    # ── Brand / model / publishing profiles (linked via channel_profiles) ───
+    brand_data = {}
+    model_data = {}
+    publishing_data = {}
+
+    try:
+        path = db or Path(".hypogeum-assets/hypogeum.db")
+        conn = get_connection(path)
+        try:
+            cp = conn.execute(
+                """SELECT channel_id, name, brand_profile_id,
+                          model_profile_id, publishing_profile_id
+                   FROM channel_profiles LIMIT 1"""
+            ).fetchone()
+
+            if cp:
+                # Brand profile — non-sensitive fields only
+                if cp["brand_profile_id"]:
+                    br = conn.execute(
+                        """SELECT name, tone, target_audience, visual_style, language,
+                                  content_pillars_json, voice_guidelines
+                           FROM brand_profiles WHERE brand_profile_id=?""",
+                        [cp["brand_profile_id"]],
+                    ).fetchone()
+                    if br:
+                        try:
+                            pillars = _json.loads(br["content_pillars_json"] or "[]")
+                        except Exception:
+                            pillars = []
+                        brand_data = {
+                            "name":             br["name"] or "—",
+                            "tone":             br["tone"] or "Not set",
+                            "target_audience":  br["target_audience"] or "Not set",
+                            "visual_style":     (br["visual_style"] or "Not set")[:200],
+                            "language":         br["language"] or "en",
+                            "content_pillars":  pillars,
+                            "voice_guidelines": (br["voice_guidelines"] or "Not set")[:200],
+                        }
+
+                # Model profile — show model slugs (public), never voice ID value
+                if cp["model_profile_id"]:
+                    mr = conn.execute(
+                        """SELECT name, episode_producer, research_director,
+                                  thumbnail_planner, image_provider, video_provider,
+                                  narration_voice_id
+                           FROM model_profiles WHERE model_profile_id=?""",
+                        [cp["model_profile_id"]],
+                    ).fetchone()
+                    if mr:
+                        model_data = {
+                            "name":                       mr["name"] or "—",
+                            "episode_producer":           mr["episode_producer"] or "—",
+                            "research_director":          mr["research_director"] or "—",
+                            "thumbnail_planner":          mr["thumbnail_planner"] or "—",
+                            "image_provider":             mr["image_provider"] or "—",
+                            "video_provider":             mr["video_provider"] or "—",
+                            "narration_voice_configured": bool(mr["narration_voice_id"]),
+                        }
+
+                # Publishing profile — non-sensitive fields only
+                if cp["publishing_profile_id"]:
+                    pr = conn.execute(
+                        """SELECT name, enabled_platforms_json, schedule_json,
+                                  default_tags_json, ai_disclosure_required,
+                                  auto_thumbnail, auto_captions
+                           FROM publishing_profiles WHERE publishing_profile_id=?""",
+                        [cp["publishing_profile_id"]],
+                    ).fetchone()
+                    if pr:
+                        try:
+                            platforms = _json.loads(pr["enabled_platforms_json"] or "[]")
+                        except Exception:
+                            platforms = []
+                        try:
+                            sched = _json.loads(pr["schedule_json"] or "{}")
+                        except Exception:
+                            sched = {}
+                        try:
+                            tags = _json.loads(pr["default_tags_json"] or "[]")
+                        except Exception:
+                            tags = []
+                        publishing_data = {
+                            "name":                   pr["name"] or "—",
+                            "enabled_platforms":      platforms,
+                            "schedule":               sched,
+                            "default_tags":           tags,
+                            "ai_disclosure_required": bool(pr["ai_disclosure_required"]),
+                            "auto_thumbnail":         bool(pr["auto_thumbnail"]),
+                            "auto_captions":          bool(pr["auto_captions"]),
+                        }
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # ── Factory section (derived; factories table is empty) ─────────────────
+    if channels:
+        primary = channels[0]
+        factory = {
+            "name":          primary.get("name") or ch_profile.get("channel_name") or "Factory",
+            "status":        primary.get("status", "unknown"),
+            "channel_count": len(channels),
+            "health":        f"{len(channels)} channel{'s' if len(channels) != 1 else ''} configured",
+            "content_niche": ch_profile.get("content_niche") or "Not set",
+            "tone_style":    ch_profile.get("tone_style") or "Not set",
+        }
+    else:
+        factory = {
+            "name":    ch_profile.get("channel_name") or "Factory",
+            "status":  "unknown",
+            "channel_count": 0,
+            "health":  "No channels configured yet",
+            "content_niche": ch_profile.get("content_niche") or "Not set",
+            "tone_style":    ch_profile.get("tone_style") or "Not set",
+        }
+
+    # ── Budget section ───────────────────────────────────────────────────────
+    ceiling = preflight.get("budget_ceiling_usd") or 0.0
+    budgets = {
+        "ceiling_usd":         ceiling,
+        "ceiling_configured":  ceiling > 0,
+        "estimated_cost_low":  preflight.get("estimated_cost_low", 18.0),
+        "estimated_cost_high": preflight.get("estimated_cost_high", 30.0),
+    }
+
+    # ── Environment health ───────────────────────────────────────────────────
+    env_vars = preflight.get("env_vars", {})
+    environment = {
+        "ready":            preflight.get("ready", False),
+        "blocker_count":    preflight.get("blocker_count", 0),
+        "warning_count":    preflight.get("warning_count", 0),
+        # Only show key names + present/missing — never the values
+        "env_vars":         {k: ("present" if v else "missing") for k, v in env_vars.items()},
+        "configured_count": sum(1 for v in env_vars.values() if v),
+        "total_required":   len(env_vars),
+        "ffmpeg":           "found" if preflight.get("ffmpeg_found") else "missing",
+    }
+
+    return {
+        "ok": True,
+        "config": {
+            "factory":     factory,
+            "channels":    channels,
+            "schedules":   schedules,
+            "publishing":  publishing_data,
+            "providers":   model_data,
+            "budgets":     budgets,
+            "brand":       brand_data,
+            "environment": environment,
+        },
+    }
+
+
+@app.route("/infrastructure/config")
+def infrastructure_config_page():
+    ctx = _build_config_context()
+    return render_template("infrastructure_config.html", **ctx)
+
+
+@app.route("/api/infrastructure/config")
+def api_infrastructure_config():
+    return jsonify(_build_config_context())
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------

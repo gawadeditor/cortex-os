@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Config — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    /* ── Section grid ── */
+    .cfg-grid { display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+                gap: var(--gap); }
+
+    /* ── Config card ── */
+    .cfg-card        { background: var(--surface); border: 1px solid var(--border);
+                       border-radius: var(--radius); padding: 14px 16px; }
+    .cfg-card-ok     { border-color: #2ea043; }
+    .cfg-card-warn   { border-color: #9e6a03; }
+    .cfg-card-err    { border-color: #da3633; }
+    .cfg-card-empty  { opacity: .75; border-style: dashed; }
+
+    /* Card header */
+    .cfg-header { display: flex; align-items: center; gap: 8px;
+                  margin-bottom: 10px; flex-wrap: wrap; }
+    .cfg-title  { font-size: 13px; font-weight: 700; }
+    .cfg-icon   { font-size: 16px; }
+
+    /* Stat rows */
+    .cfg-row { display: flex; justify-content: space-between; align-items: baseline;
+               padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .cfg-row:last-child { border-bottom: none; }
+    .cr-lbl  { color: var(--muted); flex-shrink: 0; padding-right: 8px; }
+    .cr-val  { text-align: right; max-width: 220px; word-break: break-word; }
+
+    /* Tag list */
+    .tag-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .cfg-tag { font-size: 10px; padding: 2px 6px; border-radius: 99px;
+               background: var(--bg); border: 1px solid var(--border); color: var(--muted); }
+
+    /* Env var status */
+    .ev-row  { display: flex; justify-content: space-between; align-items: center;
+               padding: 3px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .ev-row:last-child { border-bottom: none; }
+    .ev-key  { font-family: monospace; font-size: 11px; color: var(--muted); }
+    .ev-ok   { color: var(--green);  font-size: 11px; font-weight: 600; }
+    .ev-miss { color: var(--red);    font-size: 11px; font-weight: 600; }
+
+    /* Overall health banner */
+    .health-banner { padding: 10px 14px; border-radius: var(--radius);
+                     margin-bottom: var(--gap); font-size: 13px;
+                     display: flex; align-items: center; gap: 10px; }
+    .hb-ready { background: #0d1f12; border: 1px solid #2ea043; color: var(--green); }
+    .hb-block { background: #1f0a09; border: 1px solid #da3633; color: var(--red); }
+    .hb-warn  { background: #1e1a00; border: 1px solid #9e6a03; color: var(--yellow); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Infrastructure Config</h1>
+  <span class="page-meta">Factory configuration state — read-only</span>
+  <span class="badge badge-unknown" style="margin-left:auto; font-size:11px;">Read-only</span>
+</div>
+
+<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  Configuration values are read from the database. No secrets or API key values are shown.
+  To edit configuration, use the channel and profile management pages.
+</p>
+
+{% if not ok %}
+<div class="card" style="border-color:var(--red); padding:12px 16px; margin-bottom:var(--gap);">
+  <span class="err">Configuration state unavailable. Check system logs.</span>
+</div>
+{% endif %}
+
+{% set env = config.environment %}
+
+{# ── Environment health banner ── #}
+{% if env.blocker_count > 0 %}
+<div class="health-banner hb-block">
+  <span>✗</span>
+  <span><strong>{{ env.blocker_count }} environment blocker{% if env.blocker_count != 1 %}s{% endif %}</strong>
+    — {{ env.configured_count }}/{{ env.total_required }} required env vars configured.
+    <a href="/preflight" style="color:inherit; text-decoration:underline;">View checklist →</a>
+  </span>
+</div>
+{% elif env.warning_count > 0 %}
+<div class="health-banner hb-warn">
+  <span>⚠</span>
+  <span>{{ env.warning_count }} warning{% if env.warning_count != 1 %}s{% endif %}
+    — {{ env.configured_count }}/{{ env.total_required }} required env vars configured.</span>
+</div>
+{% elif env.ready %}
+<div class="health-banner hb-ready">
+  <span>✓</span>
+  <span>All required env vars configured. Factory ready for production.</span>
+</div>
+{% endif %}
+
+<div class="cfg-grid">
+
+{# ── Factory Profile ── #}
+{% set fac = config.factory %}
+<div class="cfg-card {% if fac.status == 'active' %}cfg-card-ok{% elif fac.channel_count == 0 %}cfg-card-empty{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">🏭</span>
+    <span class="cfg-title">Factory Profile</span>
+    <span class="badge badge-{{ fac.status if fac.status in ('active','paused','unknown') else 'unknown' }}"
+          style="font-size:10px; padding:1px 7px; margin-left:auto;">
+      {{ fac.status | upper }}
+    </span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Name</span>
+    <span class="cr-val">{{ fac.name }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Channels</span>
+    <span class="cr-val {% if fac.channel_count > 0 %}ok{% else %}muted{% endif %}">
+      {{ fac.channel_count }}
+    </span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Content niche</span>
+    <span class="cr-val">{{ fac.content_niche }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Tone style</span>
+    <span class="cr-val">{{ fac.tone_style }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Health</span>
+    <span class="cr-val muted" style="font-size:11px;">{{ fac.health }}</span>
+  </div>
+</div>
+
+{# ── Channels ── #}
+<div class="cfg-card {% if config.channels %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">📺</span>
+    <span class="cfg-title">Channels ({{ config.channels | length }})</span>
+  </div>
+  {% if config.channels %}
+  {% for ch in config.channels %}
+  <div class="cfg-row">
+    <span class="cr-lbl">{{ ch.name or ch.channel_id }}</span>
+    <span class="cr-val">
+      <span class="badge badge-{{ ch.status }}" style="font-size:10px;">{{ ch.status }}</span>
+      &nbsp;{{ (ch.profile_completeness * 100) | int }}% complete
+    </span>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="cfg-row">
+    <span class="cr-lbl muted">No channels configured</span>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Schedules ── #}
+<div class="cfg-card {% if config.schedules %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">📅</span>
+    <span class="cfg-title">Schedules ({{ config.schedules | length }})</span>
+  </div>
+  {% if config.schedules %}
+  {% for s in config.schedules %}
+  <div class="cfg-row">
+    <span class="cr-lbl">{{ s.label or s.scope or s.schedule_id[:8] }}</span>
+    <span class="cr-val">
+      <span class="badge badge-{{ 'active' if s.status == 'active' else 'unknown' }}"
+            style="font-size:10px;">{{ s.status }}</span>
+      &nbsp;{{ s.cadence }}
+    </span>
+  </div>
+  {% if s.next_run_at %}
+  <div class="cfg-row">
+    <span class="cr-lbl">Next run</span>
+    <span class="cr-val muted" style="font-size:11px;">{{ s.next_run_at[:16] | replace("T"," ") }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+  {% else %}
+  <div class="cfg-row">
+    <span class="cr-lbl muted">No schedules configured</span>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Publishing Defaults ── #}
+{% set pub = config.publishing %}
+<div class="cfg-card {% if pub %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">📤</span>
+    <span class="cfg-title">Publishing</span>
+  </div>
+  {% if pub %}
+  <div class="cfg-row">
+    <span class="cr-lbl">Profile</span>
+    <span class="cr-val">{{ pub.name }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Platforms</span>
+    <span class="cr-val">{{ pub.enabled_platforms | join(", ") or "None" }}</span>
+  </div>
+  {% if pub.schedule %}
+  <div class="cfg-row">
+    <span class="cr-lbl">Cadence</span>
+    <span class="cr-val">
+      {{ pub.schedule.get("cadence","—") }}
+      {% if pub.schedule.get("day_of_week") %} · {{ pub.schedule.day_of_week }}{% endif %}
+      {% if pub.schedule.get("time_of_day") %} {{ pub.schedule.time_of_day }} UTC{% endif %}
+    </span>
+  </div>
+  {% endif %}
+  <div class="cfg-row">
+    <span class="cr-lbl">AI disclosure</span>
+    <span class="cr-val {% if pub.ai_disclosure_required %}ok{% else %}warn{% endif %}">
+      {{ "Required" if pub.ai_disclosure_required else "Disabled" }}
+    </span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Auto thumbnail</span>
+    <span class="cr-val">{{ "Yes" if pub.auto_thumbnail else "No" }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Auto captions</span>
+    <span class="cr-val">{{ "Yes" if pub.auto_captions else "No" }}</span>
+  </div>
+  {% if pub.default_tags %}
+  <div class="tag-row">
+    {% for tag in pub.default_tags[:10] %}
+    <span class="cfg-tag">{{ tag }}</span>
+    {% endfor %}
+    {% if pub.default_tags | length > 10 %}
+    <span class="cfg-tag">+{{ pub.default_tags | length - 10 }} more</span>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="cfg-row"><span class="cr-lbl muted">No publishing profile configured</span></div>
+  {% endif %}
+</div>
+
+{# ── Provider / Model Defaults ── #}
+{% set mod = config.providers %}
+<div class="cfg-card {% if mod %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">🤖</span>
+    <span class="cfg-title">Model Defaults</span>
+  </div>
+  {% if mod %}
+  <div class="cfg-row">
+    <span class="cr-lbl">Profile</span>
+    <span class="cr-val">{{ mod.name }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Episode producer</span>
+    <span class="cr-val" style="font-size:11px; font-family:monospace;">{{ mod.episode_producer }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Research director</span>
+    <span class="cr-val" style="font-size:11px; font-family:monospace;">{{ mod.research_director }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Thumbnail planner</span>
+    <span class="cr-val" style="font-size:11px; font-family:monospace;">{{ mod.thumbnail_planner }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Image provider</span>
+    <span class="cr-val">{{ mod.image_provider }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Video provider</span>
+    <span class="cr-val">{{ mod.video_provider }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Narration voice</span>
+    <span class="cr-val {% if mod.narration_voice_configured %}ok{% else %}muted{% endif %}">
+      {{ "Configured" if mod.narration_voice_configured else "Not configured" }}
+    </span>
+  </div>
+  {% else %}
+  <div class="cfg-row"><span class="cr-lbl muted">No model profile configured</span></div>
+  {% endif %}
+</div>
+
+{# ── Budget / Cost Limits ── #}
+{% set bud = config.budgets %}
+<div class="cfg-card {% if bud.ceiling_configured %}cfg-card-ok{% else %}cfg-card-warn{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">💰</span>
+    <span class="cfg-title">Budget</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Ceiling per episode</span>
+    <span class="cr-val {% if bud.ceiling_configured %}ok{% else %}warn{% endif %}">
+      {% if bud.ceiling_configured %}${{ "%.2f"|format(bud.ceiling_usd) }}{% else %}Not set{% endif %}
+    </span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Estimated cost range</span>
+    <span class="cr-val muted">
+      ${{ "%.0f"|format(bud.estimated_cost_low) }} – ${{ "%.0f"|format(bud.estimated_cost_high) }}
+    </span>
+  </div>
+  {% if not bud.ceiling_configured %}
+  <div class="cfg-row">
+    <span class="cr-val warn" style="font-size:11px;">
+      Pipeline finance gate will block every run until ceiling is set.
+    </span>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Brand Settings ── #}
+{% set br = config.brand %}
+<div class="cfg-card {% if br %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">🎨</span>
+    <span class="cfg-title">Brand</span>
+  </div>
+  {% if br %}
+  <div class="cfg-row">
+    <span class="cr-lbl">Profile</span>
+    <span class="cr-val">{{ br.name }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Tone</span>
+    <span class="cr-val" style="font-size:11px;">{{ br.tone[:80] }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Audience</span>
+    <span class="cr-val" style="font-size:11px;">{{ br.target_audience[:80] }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Language</span>
+    <span class="cr-val">{{ br.language }}</span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Voice guidelines</span>
+    <span class="cr-val muted" style="font-size:11px;">{{ br.voice_guidelines[:80] }}{% if br.voice_guidelines | length > 80 %}…{% endif %}</span>
+  </div>
+  {% if br.content_pillars %}
+  <div class="tag-row">
+    {% for pillar in br.content_pillars[:6] %}
+    <span class="cfg-tag">{{ pillar }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="cfg-row"><span class="cr-lbl muted">No brand profile configured</span></div>
+  {% endif %}
+</div>
+
+{# ── Environment Health ── #}
+<div class="cfg-card {% if env.ready %}cfg-card-ok{% elif env.blocker_count > 0 %}cfg-card-err{% else %}cfg-card-warn{% endif %}">
+  <div class="cfg-header">
+    <span class="cfg-icon">🔧</span>
+    <span class="cfg-title">Environment</span>
+    <span class="badge badge-{{ 'ready' if env.ready else 'blocked' if env.blocker_count > 0 else 'degraded' }}"
+          style="font-size:10px; padding:1px 7px; margin-left:auto;">
+      {{ "READY" if env.ready else "NOT READY" }}
+    </span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">Required vars</span>
+    <span class="cr-val {% if env.configured_count == env.total_required %}ok{% else %}warn{% endif %}">
+      {{ env.configured_count }}/{{ env.total_required }} configured
+    </span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl">FFmpeg</span>
+    <span class="cr-val {% if env.ffmpeg == 'found' %}ok{% else %}warn{% endif %}">
+      {{ env.ffmpeg | title }}
+    </span>
+  </div>
+  {% for var_name, var_status in env.env_vars.items() %}
+  <div class="ev-row">
+    <span class="ev-key">{{ var_name }}</span>
+    <span class="{% if var_status == 'present' %}ev-ok{% else %}ev-miss{% endif %}">
+      {{ var_status }}
+    </span>
+  </div>
+  {% endfor %}
+</div>
+
+</div>{# end .cfg-grid #}
+
+<div style="margin-top:calc(var(--gap)*2); font-size:11px; color:var(--muted);">
+  <a href="/api/infrastructure/config" style="color:var(--muted);">/api/infrastructure/config</a>
+  &ensp;·&ensp; Read-only. No configuration values are changed here.
+  &ensp;·&ensp; <a href="/channel-profile" style="color:var(--muted);">Edit channel profile →</a>
+  &ensp;·&ensp; <a href="/preflight" style="color:var(--muted);">Environment checklist →</a>
+</div>
+
+</body>
+</html>

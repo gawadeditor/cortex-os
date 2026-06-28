@@ -1057,3 +1057,187 @@ class TestVPDFromPlanWiring:
                 run_visual_package_director_from_plan(vp, cfg, "ep_000", output_dir=tmp_path)
 
         mock_muapi.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestGateVerdictPersistence  (P12-03: BGA observability fix)
+# ---------------------------------------------------------------------------
+
+class TestGateVerdictPersistence:
+    """
+    Verify that _write_gate_verdict() persists verdict rows to gate_verdicts
+    for every BGA outcome, including rejections — which previously lost their
+    violation details as soon as BGARejectedError was raised.
+    """
+
+    def _setup_db(self, tmp_path, run_id: str, episode_id: str):
+        """
+        Initialise an isolated test DB, insert the required runs row so the
+        gate_verdicts FK constraint is satisfied, and return the DB path.
+        """
+        from hypogeum.db import initialize_schema, get_connection
+        from datetime import datetime, timezone
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        # gate_verdicts.run_id FK references runs.run_id
+        conn = get_connection(db)
+        conn.execute(
+            """INSERT OR IGNORE INTO runs (run_id, episode_id, started_at, status, metadata_version)
+               VALUES (?, ?, ?, 'running', 'v1')""",
+            (run_id, episode_id, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def _read_verdicts(self, db):
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM gate_verdicts ORDER BY evaluated_at").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def test_pass1_rejection_writes_gate_verdict(self, tmp_path):
+        """A blocking violation must produce a gate_verdicts row with REJECTED verdict."""
+        db = self._setup_db(tmp_path, "run-test-bga-001", "ep_p12_03")
+        cfg = _make_config()
+        vp  = _make_visual_package(n_scenes=3)
+
+        from hypogeum.finance import set_run_context, clear_run_context
+        set_run_context("run-test-bga-001", "ep_p12_03", db_path=db)
+        try:
+            with patch(
+                "hypogeum.agents.brand_guardian_agent.call_claude",
+                return_value=_call_result(_violations_json([_blocking_violation()])),
+            ):
+                with pytest.raises(BGARejectedError):
+                    run_bga_pass1(vp, "ep_p12_03", cfg, output_dir=tmp_path)
+        finally:
+            clear_run_context()
+
+        rows = self._read_verdicts(db)
+        assert len(rows) == 1
+        assert rows[0]["verdict"] == "REJECTED"
+        assert rows[0]["episode_id"] == "ep_p12_03"
+        assert rows[0]["run_id"] == "run-test-bga-001"
+        assert rows[0]["gate_name"] == "bga_pass1"
+
+    def test_pass1_rejection_persists_full_violation_payload(self, tmp_path):
+        """The full_report JSON in gate_verdicts must contain the violation list."""
+        db = self._setup_db(tmp_path, "run-test-bga-002", "ep_p12_03")
+        cfg = _make_config()
+        vp  = _make_visual_package(n_scenes=3)
+        violation = _blocking_violation(item_id="sc_001", rule_id="E-VG05")
+
+        from hypogeum.finance import set_run_context, clear_run_context
+        set_run_context("run-test-bga-002", "ep_p12_03", db_path=db)
+        try:
+            with patch(
+                "hypogeum.agents.brand_guardian_agent.call_claude",
+                return_value=_call_result(_violations_json([violation])),
+            ):
+                with pytest.raises(BGARejectedError):
+                    run_bga_pass1(vp, "ep_p12_03", cfg, output_dir=tmp_path)
+        finally:
+            clear_run_context()
+
+        rows = self._read_verdicts(db)
+        assert len(rows) == 1
+        full = json.loads(rows[0]["full_report"])
+        assert full["outcome"] == "REJECTED"
+        assert len(full["violations"]) == 1
+        assert full["violations"][0]["rule_id"] == "E-VG05"
+        assert full["violations"][0]["item_id"] == "sc_001"
+
+    def test_pass1_rejection_blocking_count_and_rule_ids(self, tmp_path):
+        """blocking_count column and rule_ids_flagged must be populated on rejection."""
+        db = self._setup_db(tmp_path, "run-test-bga-003", "ep_p12_03")
+        cfg = _make_config()
+        vp  = _make_visual_package(n_scenes=4)
+        violations = [
+            _blocking_violation("sc_001", "E-VG05"),
+            _blocking_violation("sc_002", "E-C02"),
+        ]
+
+        from hypogeum.finance import set_run_context, clear_run_context
+        set_run_context("run-test-bga-003", "ep_p12_03", db_path=db)
+        try:
+            with patch(
+                "hypogeum.agents.brand_guardian_agent.call_claude",
+                return_value=_call_result(_violations_json(violations)),
+            ):
+                with pytest.raises(BGARejectedError):
+                    run_bga_pass1(vp, "ep_p12_03", cfg, output_dir=tmp_path)
+        finally:
+            clear_run_context()
+
+        rows = self._read_verdicts(db)
+        assert rows[0]["blocking_count"] == 2
+        rule_ids = set((rows[0]["rule_ids_flagged"] or "").split(","))
+        assert "E-VG05" in rule_ids
+        assert "E-C02" in rule_ids
+
+    def test_approved_outcome_also_writes_verdict(self, tmp_path):
+        """APPROVED outcome must also be recorded so the audit trail is complete."""
+        db = self._setup_db(tmp_path, "run-test-bga-004", "ep_p12_03")
+        cfg = _make_config()
+        vp  = _make_visual_package(n_scenes=3)
+
+        from hypogeum.finance import set_run_context, clear_run_context
+        set_run_context("run-test-bga-004", "ep_p12_03", db_path=db)
+        try:
+            with patch(
+                "hypogeum.agents.brand_guardian_agent.call_claude",
+                return_value=_call_result(_no_violations_json()),
+            ):
+                run_bga_pass1(vp, "ep_p12_03", cfg, output_dir=tmp_path)
+        finally:
+            clear_run_context()
+
+        rows = self._read_verdicts(db)
+        assert len(rows) == 1
+        assert rows[0]["verdict"] == "APPROVED"
+        assert rows[0]["blocking_count"] == 0
+
+    def test_no_run_context_does_not_raise(self, tmp_path):
+        """If no active run context (standalone BGA call), write is silently skipped."""
+        from hypogeum.finance import clear_run_context
+        clear_run_context()   # ensure no context
+
+        cfg = _make_config()
+        vp  = _make_visual_package(n_scenes=3)
+
+        # Must not raise — the DB write is silently skipped
+        with patch(
+            "hypogeum.agents.brand_guardian_agent.call_claude",
+            return_value=_call_result(_violations_json([_blocking_violation()])),
+        ):
+            with pytest.raises(BGARejectedError):
+                run_bga_pass1(vp, "ep_p12_03", cfg, output_dir=tmp_path)
+        # Reaching here means no exception from the missing context
+
+    def test_pass2_rejection_writes_gate_verdict(self, tmp_path):
+        """Pass 2 rejection (rank-1 blocking) must also persist a gate_verdicts row."""
+        db = self._setup_db(tmp_path, "run-test-bga-005", "ep_p12_03")
+        cfg = _make_config()
+        plan = _make_generation_plan(n_main=3)
+
+        from hypogeum.finance import set_run_context, clear_run_context
+        set_run_context("run-test-bga-005", "ep_p12_03", db_path=db)
+        try:
+            with patch(
+                "hypogeum.agents.brand_guardian_agent.call_claude",
+                return_value=_call_result(_violations_json([_blocking_violation(item_id="main_01")])),
+            ):
+                with pytest.raises(BGARejectedError):
+                    run_bga_pass2(plan, "ep_p12_03", cfg, output_dir=tmp_path)
+        finally:
+            clear_run_context()
+
+        rows = self._read_verdicts(db)
+        assert len(rows) == 1
+        assert rows[0]["gate_name"] == "bga_pass2"
+        assert rows[0]["verdict"] == "REJECTED"
+        full = json.loads(rows[0]["full_report"])
+        assert full["violations"][0]["item_id"] == "main_01"

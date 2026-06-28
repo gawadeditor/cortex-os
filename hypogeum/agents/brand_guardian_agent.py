@@ -61,6 +61,11 @@ from hypogeum.openrouter import call_claude
 from hypogeum.prompt_loader import load_prompt
 from hypogeum.schemas import SchemaError, validate
 
+# Lazy import — avoids circular dependency at module load time
+def _get_run_context() -> dict:
+    from hypogeum.finance import get_run_context
+    return get_run_context()
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -305,6 +310,73 @@ def _write_report(
     )
 
 
+def _write_gate_verdict(
+    report: dict,
+    pass_number: int,
+    model_slug: str,
+) -> None:
+    """
+    Persist a BGA verdict row to gate_verdicts. Called for ALL outcomes —
+    APPROVED, APPROVED_WITH_FLAGS, and REJECTED — so the audit trail is complete.
+    Reads run_id and db_path from the active run context (set by pipeline).
+
+    Non-blocking: any exception is caught and logged. A failed DB write
+    must never interrupt the BGA flow or cause a run to fail.
+    """
+    ctx = _get_run_context()
+    run_id  = ctx.get("run_id")
+    db_path = ctx.get("db_path")
+
+    if not run_id:
+        return  # no active run context — standalone BGA call, skip write
+
+    try:
+        import uuid as _uuid
+        from hypogeum.db import get_connection, initialize_schema
+        from pathlib import Path as _Path
+
+        initialize_schema(db_path)
+        db = _Path(db_path) if db_path else None
+
+        summary    = report.get("summary", {})
+        violations = report.get("violations", [])
+        rule_ids   = ",".join(sorted({v["rule_id"] for v in violations if v.get("rule_id")}))
+
+        conn = get_connection(db)
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO gate_verdicts
+                   (verdict_id, run_id, episode_id, stage_exec_id,
+                    gate_name, verdict, evaluated_at,
+                    asset_id, rule_ids_flagged, flag_count,
+                    blocking_count, warning_count, model_slug,
+                    full_report, metadata_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    str(_uuid.uuid4()),
+                    str(run_id),
+                    str(report.get("episode_id") or ""),
+                    None,                          # stage_exec_id — not tracked at BGA level
+                    f"bga_pass{pass_number}",
+                    str(report.get("outcome") or ""),
+                    str(report.get("produced_at") or _now_iso()),
+                    None,                          # asset_id — not applicable for scene checks
+                    rule_ids or None,
+                    int(summary.get("flag_count", 0)),
+                    int(summary.get("blocking_count", 0)),
+                    0,                             # warning_count — BGA uses BLOCKING/FLAG only
+                    str(model_slug)[:200] if model_slug else None,
+                    json.dumps(report, ensure_ascii=False),
+                    "v1",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass   # observability write — never propagates
+
+
 def _call_bga(
     input_package: dict,
     config: Config,
@@ -413,6 +485,9 @@ def run_bga_pass1(
         log.warn("bga_schema_warn", pass_number=1, path=exc.path, reason=exc.reason)
 
     _write_report(report, episode_id, 1, _resolve_output_dir)
+
+    _pass1_model = getattr(config, "BGA_PASS1_MODEL", _BGA_MODEL)
+    _write_gate_verdict(report, 1, _pass1_model)
 
     log.info(
         "bga_pass1_completed",
@@ -531,6 +606,9 @@ def run_bga_pass2(
         log.warn("bga_schema_warn", pass_number=2, path=exc.path, reason=exc.reason)
 
     _write_report(report, episode_id, 2, _resolve_output_dir)
+
+    _pass2_model = getattr(config, "BGA_PASS2_MODEL", _BGA_MODEL)
+    _write_gate_verdict(report, 2, _pass2_model)
 
     log.info(
         "bga_pass2_completed",

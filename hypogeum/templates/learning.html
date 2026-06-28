@@ -43,16 +43,19 @@
     <a href="/analytics" class="btn">Analytics →</a>
   </div>
 </div>
+<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  The system applies high-confidence tunings automatically. Items below require your judgment.
+</p>
 
-{# ── Pending action queue (primary workflow) ── #}
+{# ── Items requiring human review (below confidence threshold) ── #}
 {% if state.pending_actions_list %}
 <div class="action-banner">
   <span style="font-size:20px; flex-shrink:0;">⚡</span>
   <div class="action-banner-body">
     <div class="action-banner-title">
-      {{ state.pending_actions_list | length }} action{% if state.pending_actions_list | length != 1 %}s{% endif %} need your review
+      {{ state.pending_actions_list | length }} item{% if state.pending_actions_list | length != 1 %}s{% endif %} require your review
     </div>
-    <div class="action-banner-sub">Apply or dismiss each to inform the next episode's production parameters.</div>
+    <div class="action-banner-sub">The system applies high-confidence tunings automatically. These items fell below the confidence threshold and require your judgment.</div>
   </div>
   <span class="action-banner-count">{{ state.pending_actions_list | length }}</span>
 </div>

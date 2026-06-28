@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta http-equiv="refresh" content="30">
-  <title>{% if state %}{{ (overview.channel_profile.channel_name if overview and overview.channel_profile and overview.channel_profile.channel_name else state.factory_name) or "Dashboard" }}{% else %}Dashboard{% endif %}</title>
+  <title>Factory — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
     /* ── F9 Executive Dashboard ───────────────────────────────── */
@@ -173,6 +173,10 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  Is the factory healthy?&ensp;·&ensp;What is running?&ensp;·&ensp;What needs attention?
+</p>
 
 {% if error %}
 <div class="error-banner">Dashboard unavailable — {{ error }}</div>
@@ -570,7 +574,7 @@
 ══════════════════════════════════════════════════════════════════ #}
 {% if exec_alerts %}
 <div class="card exec-section">
-  <div class="card-title">System Alerts</div>
+  <div class="card-title">Active Signals</div>
   {% for alert in exec_alerts %}
   <div class="alert-row"
        {% if alert.signal_type  %}data-signal-type="{{ alert.signal_type }}"{% endif %}

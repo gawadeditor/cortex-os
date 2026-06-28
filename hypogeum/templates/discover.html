@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Discover — Factory OS</title>
+  <title>Discovery — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
     /* ── Candidate card ── */
@@ -104,10 +104,11 @@
 
 {# ── Page header ── #}
 <div class="page-header">
-  <h1>Topic Discovery</h1>
+  <h1>Discovery Pipeline</h1>
   <span class="page-meta">
-    {% if candidates %}{{ candidates|length }} candidate{% if candidates|length != 1 %}s{% endif %}{% endif %}
-    {% if queued_topics %}&nbsp;·&nbsp;{{ queued_topics|length }} queued{% endif %}
+    Candidates scored by the autonomous discovery engine
+    {% if candidates %}&ensp;·&ensp;{{ candidates|length }} candidate{% if candidates|length != 1 %}s{% endif %}{% endif %}
+    {% if queued_topics %}&ensp;·&ensp;{{ queued_topics|length }} queued{% endif %}
   </span>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     {% if channels and channels|length > 1 %}
@@ -123,13 +124,17 @@
     </form>
     {% endif %}
     <div id="discover-status" role="status" aria-live="polite"></div>
-    <button id="btn-run" type="button" class="btn btn-save"
+    <button id="btn-run" type="button" class="btn"
+            style="font-size:12px;"
             onclick="runDiscovery()"
             {% if discovery_status == 'running' %}disabled{% endif %}>
       {% if discovery_status == 'running' %}Running…{% else %}Run Discovery Cycle{% endif %}
     </button>
   </div>
 </div>
+<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  Discovery runs automatically on schedule. The candidates below were scored by the last cycle.
+</p>
 
 {# ── Flash messages ── #}
 {% if flash == 'approved' %}

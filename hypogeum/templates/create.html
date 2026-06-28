@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Create — Factory OS</title>
+  <title>Production Queue — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
     /* Queue cards */
@@ -67,8 +67,8 @@
 {% include '_nav.html' %}
 
 <div class="page-header">
-  <h1>Create Video</h1>
-  <span class="page-meta">Start a production run from the queue</span>
+  <h1>Production Queue</h1>
+  <span class="page-meta">Topics queued for autonomous production</span>
 </div>
 
 {% if error %}
@@ -103,6 +103,12 @@
 {% endif %}
 
 {% set launch_blocked = setup_blockers %}
+
+{# ── Autonomous-operation note ── #}
+<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+  The worker picks the next topic automatically on schedule.
+  Use <strong>▶ Start</strong> only to force an immediate run outside the normal cycle.
+</p>
 
 {# ── Primary: Production Queue ── #}
 <div class="card" style="padding:0; margin-bottom:var(--gap);">
@@ -174,8 +180,8 @@
                   border:1px solid var(--border); border-radius:var(--radius);
                   font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px;">
     <span class="arrow">&#9654;</span>
-    Override: launch with a custom topic
-    <span style="font-size:11px; margin-left:4px;">(skips the queue)</span>
+    Emergency: launch with custom topic
+    <span style="font-size:11px; margin-left:4px;">(bypasses queue)</span>
   </summary>
   <div class="card override-wrap" style="margin-top:4px; border-top:none; border-radius:0 0 var(--radius) var(--radius);">
     <form method="POST" action="/create/launch">

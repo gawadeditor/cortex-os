@@ -4994,12 +4994,15 @@ def api_learning_action_dismiss(action_id):
 # ===========================================================================
 # Phase E — Analytics & Learning (HTML)
 # ===========================================================================
+# Intelligence namespace — primary handlers
+# Old /analytics/* and /learning routes redirect here.
+# ===========================================================================
 
-@app.route("/analytics")
-def analytics_page():
-    overview   = get_analytics_overview(db_path=_db_path())
+def _render_analytics_overview():
+    """Shared logic for /intelligence/performance."""
+    overview = get_analytics_overview(db_path=_db_path())
     from hypogeum.dashboard_api import get_channel_summaries
-    channels   = get_channel_summaries(db_path=_db_path())
+    channels = get_channel_summaries(db_path=_db_path())
     youtube_connected = False
     try:
         from hypogeum.config import Config as _Cfg
@@ -5017,8 +5020,18 @@ def analytics_page():
                            youtube_connected=youtube_connected)
 
 
-@app.route("/analytics/platform/<platform>")
-def analytics_platform_page(platform):
+@app.route("/intelligence")
+def intelligence_redirect():
+    return redirect("/intelligence/performance", 302)
+
+
+@app.route("/intelligence/performance")
+def intelligence_performance_page():
+    return _render_analytics_overview()
+
+
+@app.route("/intelligence/platform/<platform>")
+def intelligence_platform_page(platform):
     if platform not in _VALID_PLATFORMS:
         return render_template("not_found.html", kind="Platform", id=platform), 404
     summary = get_platform_summary(platform, db_path=_db_path())
@@ -5026,13 +5039,77 @@ def analytics_platform_page(platform):
                            summary=summary, platform=platform)
 
 
-@app.route("/analytics/episode/<episode_id>")
-def analytics_episode_page(episode_id):
+@app.route("/intelligence/performance/episode/<episode_id>")
+def intelligence_episode_page(episode_id):
     data = get_episode_performance(episode_id, db_path=_db_path())
     if data is None:
         return render_template("not_found.html",
                                kind="Episode analytics", id=episode_id), 404
     return render_template("analytics_episode.html", d=data)
+
+
+@app.route("/intelligence/learning")
+def intelligence_learning_page():
+    state = get_learning_state(db_path=_db_path())
+    return render_template("learning.html", state=state)
+
+
+@app.route("/intelligence/sync")
+def intelligence_sync_page():
+    from hypogeum.youtube_analytics import get_last_youtube_sync
+    from hypogeum.platform_sync import get_sync_log, get_last_sync_by_platform
+    youtube_connected = False
+    try:
+        from hypogeum.config import Config as _Cfg
+        _cfg = _Cfg()
+        youtube_connected = bool(
+            _cfg.YOUTUBE_REFRESH_TOKEN
+            and _cfg.YOUTUBE_CLIENT_ID
+            and _cfg.YOUTUBE_CLIENT_SECRET
+        )
+    except Exception:
+        pass
+    try:
+        youtube_last_synced = get_last_youtube_sync(db_path=_db_path())
+    except Exception:
+        youtube_last_synced = None
+    try:
+        sync_log = get_sync_log(limit=30, db_path=_db_path())
+    except Exception:
+        sync_log = []
+    try:
+        last_sync_by_platform = get_last_sync_by_platform(db_path=_db_path())
+    except Exception:
+        last_sync_by_platform = {}
+    flash = request.args.get("flash")
+    return render_template(
+        "analytics_sync.html",
+        youtube_connected=youtube_connected,
+        youtube_last_synced=youtube_last_synced,
+        sync_log=sync_log,
+        last_sync_by_platform=last_sync_by_platform,
+        flash=flash,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Old analytics/learning routes — 302 to Intelligence namespace
+# /analytics/import and /analytics/advanced/import are NOT redirected.
+# ---------------------------------------------------------------------------
+
+@app.route("/analytics")
+def analytics_page():
+    return redirect("/intelligence/performance", 302)
+
+
+@app.route("/analytics/platform/<platform>")
+def analytics_platform_page(platform):
+    return redirect(f"/intelligence/platform/{platform}", 302)
+
+
+@app.route("/analytics/episode/<episode_id>")
+def analytics_episode_page(episode_id):
+    return redirect(f"/intelligence/performance/episode/{episode_id}", 302)
 
 
 @app.route("/analytics/import", methods=["GET"])
@@ -5148,45 +5225,7 @@ def analytics_import_submit():
 
 @app.route("/analytics/sync", methods=["GET"])
 def analytics_sync_page():
-    from hypogeum.youtube_analytics import get_last_youtube_sync
-    from hypogeum.platform_sync import get_sync_log, get_last_sync_by_platform
-
-    youtube_connected = False
-    try:
-        from hypogeum.config import Config as _Cfg
-        _cfg = _Cfg()
-        youtube_connected = bool(
-            _cfg.YOUTUBE_REFRESH_TOKEN
-            and _cfg.YOUTUBE_CLIENT_ID
-            and _cfg.YOUTUBE_CLIENT_SECRET
-        )
-    except Exception:
-        pass
-
-    try:
-        youtube_last_synced = get_last_youtube_sync(db_path=_db_path())
-    except Exception:
-        youtube_last_synced = None
-
-    try:
-        sync_log = get_sync_log(limit=30, db_path=_db_path())
-    except Exception:
-        sync_log = []
-
-    try:
-        last_sync_by_platform = get_last_sync_by_platform(db_path=_db_path())
-    except Exception:
-        last_sync_by_platform = {}
-
-    flash = request.args.get("flash")
-    return render_template(
-        "analytics_sync.html",
-        youtube_connected=youtube_connected,
-        youtube_last_synced=youtube_last_synced,
-        sync_log=sync_log,
-        last_sync_by_platform=last_sync_by_platform,
-        flash=flash,
-    )
+    return redirect("/intelligence/sync", 302)
 
 
 @app.route("/api/analytics/sync", methods=["POST"])
@@ -5449,20 +5488,19 @@ def api_discover_reject(candidate_id: str):
 
 @app.route("/learning")
 def learning_page():
-    state = get_learning_state(db_path=_db_path())
-    return render_template("learning.html", state=state)
+    return redirect("/intelligence/learning", 302)
 
 
 @app.route("/learning/action/<action_id>/apply", methods=["POST"])
 def learning_action_apply(action_id):
     apply_action(action_id, db_path=_db_path())
-    return redirect(url_for("learning_page"))
+    return redirect(url_for("intelligence_learning_page"))
 
 
 @app.route("/learning/action/<action_id>/dismiss", methods=["POST"])
 def learning_action_dismiss(action_id):
     dismiss_action(action_id, db_path=_db_path())
-    return redirect(url_for("learning_page"))
+    return redirect(url_for("intelligence_learning_page"))
 
 
 # ===========================================================================

@@ -8,15 +8,16 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% include '_intelligence_subnav.html' %}
 
-{# ── Secondary nav ── #}
+{# ── Performance sub-nav ── #}
 <div class="sub-nav">
-  <a href="/analytics"                    class="sub-nav-link active">Portfolio</a>
-  <a href="/analytics/platform/youtube"   class="sub-nav-link">YouTube</a>
-  <a href="/analytics/platform/tiktok"    class="sub-nav-link">TikTok</a>
-  <a href="/analytics/platform/instagram" class="sub-nav-link">Instagram</a>
-  <a href="/analytics/platform/facebook"  class="sub-nav-link">Facebook</a>
-  <a href="/analytics/sync"               class="sub-nav-link">Sync Status</a>
+  <a href="/intelligence/performance"          class="sub-nav-link active">Portfolio</a>
+  <a href="/intelligence/platform/youtube"     class="sub-nav-link">YouTube</a>
+  <a href="/intelligence/platform/tiktok"      class="sub-nav-link">TikTok</a>
+  <a href="/intelligence/platform/instagram"   class="sub-nav-link">Instagram</a>
+  <a href="/intelligence/platform/facebook"    class="sub-nav-link">Facebook</a>
+  <a href="/intelligence/sync"                 class="sub-nav-link">Sync Health</a>
 </div>
 
 <div class="page-header">
@@ -25,14 +26,14 @@
     {{ overview.total_insights }} insight{% if overview.total_insights != 1 %}s{% endif %}
   </span>
   {% if overview.pending_action_count > 0 %}
-  <a href="/learning" style="margin-left:auto;">
+  <a href="/intelligence/learning" style="margin-left:auto;">
     <span class="action-banner-count" style="font-size:12px;">
       {{ overview.pending_action_count }} pending action{% if overview.pending_action_count != 1 %}s{% endif %} →
     </span>
   </a>
   {% else %}
   <div style="margin-left:auto;">
-    <a href="/learning" class="btn">Intelligence →</a>
+    <a href="/intelligence/learning" class="btn">Intelligence →</a>
   </div>
   {% endif %}
 </div>

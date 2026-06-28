@@ -26,6 +26,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% include '_intelligence_subnav.html' %}
 
 {% set _DIM_CLS = {
   'thumbnail': 'dim-thumbnail', 'title': 'dim-title', 'hook': 'dim-hook',
@@ -40,7 +41,7 @@
     {{ state.total_analytics_records }} records
   </span>
   <div style="margin-left:auto;">
-    <a href="/analytics" class="btn">Analytics →</a>
+    <a href="/intelligence/performance" class="btn">Analytics →</a>
   </div>
 </div>
 <p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">

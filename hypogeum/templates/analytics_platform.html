@@ -12,20 +12,21 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% include '_intelligence_subnav.html' %}
 
-{# ── Secondary nav ── #}
+{# ── Performance sub-nav ── #}
 <div class="sub-nav">
-  <a href="/analytics"                    class="sub-nav-link">Portfolio</a>
+  <a href="/intelligence/performance"          class="sub-nav-link">Portfolio</a>
   {% for _p in ['youtube','tiktok','instagram','facebook'] %}
-  <a href="/analytics/platform/{{ _p }}"
+  <a href="/intelligence/platform/{{ _p }}"
      class="sub-nav-link {% if _p == platform %}active{% endif %}">{{ _p | capitalize }}</a>
   {% endfor %}
-  <a href="/analytics/sync"             class="sub-nav-link">Sync Status</a>
+  <a href="/intelligence/sync"                 class="sub-nav-link">Sync Health</a>
 </div>
 
 {# ── Breadcrumb ── #}
 <div class="breadcrumb">
-  <a href="/analytics">Analytics</a>
+  <a href="/intelligence/performance">Intelligence</a>
   <span class="breadcrumb-sep">/</span>
   <span>{{ platform | capitalize }}</span>
 </div>
@@ -34,7 +35,7 @@
   <h1>{{ platform | capitalize }}</h1>
   <span class="page-meta">{{ summary.kpis.get('episodes_tracked', 0) }} episode{% if summary.kpis.get('episodes_tracked', 0) != 1 %}s{% endif %} tracked</span>
   <div style="margin-left:auto;">
-    <a href="/analytics/sync" class="btn" style="font-size:12px;">Sync status →</a>
+    <a href="/intelligence/sync" class="btn" style="font-size:12px;">Sync Health →</a>
   </div>
 </div>
 

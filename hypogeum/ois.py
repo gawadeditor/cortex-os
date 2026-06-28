@@ -193,29 +193,54 @@ def _find_open_duplicate(
     signal_type: str,
     channel_id: Optional[str],
     cooldown_minutes: int,
+    dedup_any_open: bool = False,
 ) -> Optional[str]:
-    """Return signal_id of an open duplicate within the cooldown window, or None."""
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
-    ).isoformat()
-    if channel_id is None:
-        sql = """
-            SELECT signal_id FROM signal_records
-            WHERE signal_type = ?
-              AND channel_id IS NULL
-              AND lifecycle_status = 'open'
-              AND ingested_at >= ?
-        """
-        params = (signal_type, cutoff)
+    """Return signal_id of an open duplicate within the cooldown window, or None.
+
+    When dedup_any_open is True the cooldown window is ignored and any open
+    signal of the same type + channel_id qualifies as a duplicate. Use this for
+    persistent conditions (e.g. credential_failure) where the signal should not
+    be re-emitted until the operator resolves the existing one.
+    """
+    if dedup_any_open:
+        if channel_id is None:
+            sql = """
+                SELECT signal_id FROM signal_records
+                WHERE signal_type = ?
+                  AND channel_id IS NULL
+                  AND lifecycle_status = 'open'
+            """
+            params = (signal_type,)
+        else:
+            sql = """
+                SELECT signal_id FROM signal_records
+                WHERE signal_type = ?
+                  AND channel_id = ?
+                  AND lifecycle_status = 'open'
+            """
+            params = (signal_type, channel_id)
     else:
-        sql = """
-            SELECT signal_id FROM signal_records
-            WHERE signal_type = ?
-              AND channel_id = ?
-              AND lifecycle_status = 'open'
-              AND ingested_at >= ?
-        """
-        params = (signal_type, channel_id, cutoff)
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
+        ).isoformat()
+        if channel_id is None:
+            sql = """
+                SELECT signal_id FROM signal_records
+                WHERE signal_type = ?
+                  AND channel_id IS NULL
+                  AND lifecycle_status = 'open'
+                  AND ingested_at >= ?
+            """
+            params = (signal_type, cutoff)
+        else:
+            sql = """
+                SELECT signal_id FROM signal_records
+                WHERE signal_type = ?
+                  AND channel_id = ?
+                  AND lifecycle_status = 'open'
+                  AND ingested_at >= ?
+            """
+            params = (signal_type, channel_id, cutoff)
     try:
         row = conn.execute(sql, params).fetchone()
         return row["signal_id"] if row else None
@@ -239,6 +264,7 @@ def emit_signal(
     run_id: Optional[str] = None,
     db_path: Optional[Path] = None,
     config=None,
+    dedup_any_open: bool = False,
 ) -> str:
     """
     Emit an operational signal and persist it to the DB.
@@ -248,6 +274,11 @@ def emit_signal(
     Deduplication: within the cooldown window for the given severity, an
     existing open signal of the same type + channel_id is returned instead
     of creating a duplicate.
+
+    When dedup_any_open is True, any existing open signal of the same type +
+    channel_id is treated as a duplicate regardless of age. Use for persistent
+    conditions (e.g. credential_failure) that should not flood the signal table
+    on repeated restarts.
 
     When config is provided and the severity meets NOTIFY_SEVERITY_THRESHOLD,
     routes the signal to configured notification channels (Telegram/email) via
@@ -271,7 +302,9 @@ def emit_signal(
         conn = get_connection(path)
         try:
             # Deduplication check — return existing signal without re-notifying
-            existing = _find_open_duplicate(conn, signal_type, channel_id, cooldown)
+            existing = _find_open_duplicate(
+                conn, signal_type, channel_id, cooldown, dedup_any_open
+            )
             if existing is not None:
                 return existing
 

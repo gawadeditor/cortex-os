@@ -177,3 +177,41 @@ def _isolate_pipeline_run_registry():
                             yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ois_emit_signal():
+    """
+    Prevent emit_signal() from writing to the production DB during tests.
+
+    finance_agent.py and startup.py call hypogeum.ois.emit_signal() without an
+    explicit db_path, causing budget_exhaustion, low_budget_warning, and
+    credential_failure signals to accumulate in the production DB across test runs.
+
+    The guard: if called without db_path AND get_connection has not been patched
+    (i.e. no test-level redirect to a tmp DB is in place), silently return a fake
+    signal ID without touching any database.
+
+    When a test patches hypogeum.ois.get_connection to redirect to a tmp db (e.g.
+    TestBudgetExhaustionSignal), the guard detects this and passes through to the
+    real emit_signal so the signal IS written to the tmp db as the test expects.
+
+    Calls with an explicit db_path always pass through unchanged (e.g. test_ois.py).
+
+    Both hypogeum.ois.emit_signal and hypogeum.signals.emit_signal are patched to
+    the same function object, preserving the identity invariant checked by
+    TestBackwardsCompat.test_ois_re_exports_from_signals.
+    """
+    import uuid as _uuid
+    from hypogeum import ois as _ois_mod
+    from unittest.mock import MagicMock as _MM
+    _real_emit = _ois_mod.emit_signal
+
+    def _guarded(*args, db_path=None, **kwargs):
+        if db_path is None and not isinstance(_ois_mod.get_connection, _MM):
+            return str(_uuid.uuid4())
+        return _real_emit(*args, db_path=db_path, **kwargs)
+
+    with _patch("hypogeum.ois.emit_signal", new=_guarded):
+        with _patch("hypogeum.signals.emit_signal", new=_guarded):
+            yield
+
+

@@ -312,6 +312,8 @@ def run_startup_checks(
         )
         # Emit OIS credential_failure signal for API connectivity failures.
         # Wrapped in broad except so OIS unavailability never blocks startup logging.
+        # dedup_any_open=True prevents a duplicate signal on every server restart
+        # while the condition persists — only one open signal at a time.
         if not openrouter_reachable and not fallback_configured:
             try:
                 import hypogeum.ois as _ois
@@ -325,6 +327,7 @@ def run_startup_checks(
                     metadata={"errors": errors},
                     episode_id=episode_id,
                     config=config,
+                    dedup_any_open=True,
                 )
             except Exception:
                 pass

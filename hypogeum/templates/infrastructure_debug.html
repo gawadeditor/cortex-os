@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Debug — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .debug-grid { display: grid;
+                  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+                  gap: var(--gap); }
+
+    .debug-card { background: var(--surface); border: 1px solid var(--border);
+                  border-radius: var(--radius); padding: 16px 18px; }
+    .debug-card-available { border-color: #2ea043; }
+    .debug-card-degraded  { border-color: #9e6a03; }
+    .debug-card-unknown   { border-style: dashed; }
+
+    .dc-header { display: flex; align-items: center; gap: 8px;
+                 margin-bottom: 8px; flex-wrap: wrap; }
+    .dc-name   { font-size: 14px; font-weight: 700; flex: 1; }
+    .dc-route  { font-family: monospace; font-size: 11px; color: var(--muted);
+                 background: var(--bg); border: 1px solid var(--border);
+                 border-radius: 3px; padding: 1px 5px; }
+
+    .dc-purpose { font-size: 12px; color: var(--muted); line-height: 1.6;
+                  margin-bottom: 10px; }
+
+    .dc-safety { font-size: 11px; color: var(--muted); padding: 5px 8px;
+                 background: var(--bg); border-radius: var(--radius);
+                 border: 1px solid var(--border); margin-bottom: 10px; }
+
+    .dc-footer { display: flex; align-items: center; justify-content: space-between;
+                 flex-wrap: wrap; gap: 6px; }
+
+    .dc-link { font-size: 12px; padding: 4px 12px; border: 1px solid var(--border);
+               border-radius: var(--radius); color: var(--muted); text-decoration: none; }
+    .dc-link:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
+    .dc-link-available { border-color: #2ea043; color: var(--green); }
+    .dc-link-available:hover { background: #0d1f12; color: var(--green); }
+
+    /* Summary banner */
+    .debug-banner { display: flex; gap: var(--gap); flex-wrap: wrap;
+                    margin-bottom: var(--gap); }
+    .db-tile  { background: var(--surface); border: 1px solid var(--border);
+                border-radius: var(--radius); padding: 10px 16px;
+                flex: 1; min-width: 120px; text-align: center; }
+    .db-val   { font-size: 22px; font-weight: 700; line-height: 1.1; }
+    .db-lbl   { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                letter-spacing: .05em; margin-top: 4px; }
+
+    /* Warning note */
+    .dev-note { background: #1e1a00; border: 1px solid #9e6a03;
+                border-radius: var(--radius); padding: 10px 14px;
+                font-size: 12px; color: var(--yellow); margin-bottom: var(--gap);
+                display: flex; gap: 8px; align-items: flex-start; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% include '_infrastructure_subnav.html' %}
+
+<div class="page-header">
+  <h1>Infrastructure Debug</h1>
+  <span class="page-meta">Diagnostic surfaces and developer-only tools</span>
+  <span class="badge badge-degraded" style="margin-left:auto; font-size:11px;">Developer tools</span>
+</div>
+
+<div class="dev-note">
+  <span>&#9888;</span>
+  <span>
+    These pages are diagnostic and developer-facing. They do not trigger production runs,
+    provider tests, or data modifications unless you explicitly submit forms on those pages.
+    This index page is read-only.
+  </span>
+</div>
+
+{% if not ok %}
+<div class="card" style="border-color:var(--red); padding:12px 16px; margin-bottom:var(--gap);">
+  <span class="err">Debug surface catalogue unavailable.</span>
+</div>
+{% endif %}
+
+{# ── Summary banner ── #}
+{% set n_available = debug_surfaces | selectattr('status','eq','available') | list | length %}
+{% set n_degraded  = debug_surfaces | selectattr('status','eq','degraded')  | list | length %}
+{% set n_unknown   = debug_surfaces | selectattr('status','eq','unknown')   | list | length %}
+<div class="debug-banner">
+  <div class="db-tile">
+    <div class="db-val">{{ debug_surfaces | length }}</div>
+    <div class="db-lbl">Total</div>
+  </div>
+  <div class="db-tile">
+    <div class="db-val {% if n_available > 0 %}ok{% else %}muted{% endif %}">{{ n_available }}</div>
+    <div class="db-lbl">Available</div>
+  </div>
+  <div class="db-tile">
+    <div class="db-val {% if n_degraded > 0 %}warn{% else %}muted{% endif %}">{{ n_degraded }}</div>
+    <div class="db-lbl">Degraded</div>
+  </div>
+  <div class="db-tile">
+    <div class="db-val muted">{{ n_unknown }}</div>
+    <div class="db-lbl">Unknown</div>
+  </div>
+</div>
+
+{# ── Debug surface cards ── #}
+{% if debug_surfaces %}
+<div class="debug-grid">
+  {% for s in debug_surfaces %}
+  {% set status_cls = 'debug-card-' + s.status %}
+  <div class="debug-card {{ status_cls }}">
+
+    <div class="dc-header">
+      <span class="dc-name">{{ s.name }}</span>
+      <span class="badge badge-{{ 'ready' if s.status == 'available' else 'degraded' if s.status == 'degraded' else 'unknown' }}"
+            style="font-size:10px; padding:1px 7px;">
+        {{ s.status | upper }}
+      </span>
+    </div>
+
+    <div style="margin-bottom:8px;">
+      <span class="dc-route">{{ s.route }}</span>
+    </div>
+
+    <p class="dc-purpose">{{ s.purpose }}</p>
+
+    <div class="dc-safety">
+      🔒 {{ s.safety }}
+    </div>
+
+    <div class="dc-footer">
+      {% if s.status == 'available' %}
+        <a href="{{ s.route }}" class="dc-link dc-link-available">Open {{ s.name }} →</a>
+      {% else %}
+        <a href="{{ s.route }}" class="dc-link">{{ s.route }} ({{ s.status }}) →</a>
+      {% endif %}
+    </div>
+
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="card" style="text-align:center; padding:30px;">
+  <div style="color:var(--muted); font-size:14px;">No debug surfaces indexed.</div>
+</div>
+{% endif %}
+
+<div style="margin-top:calc(var(--gap)*2); font-size:11px; color:var(--muted);">
+  <a href="/api/infrastructure/debug" style="color:var(--muted);">/api/infrastructure/debug</a>
+  &ensp;·&ensp; This page only links to existing tools. No tests are executed here.
+</div>
+
+</body>
+</html>

@@ -6779,6 +6779,100 @@ def api_infrastructure_summary():
     return jsonify(_build_infrastructure_summary())
 
 
+# ===========================================================================
+# Phase 11 — Infrastructure > Debug
+# ===========================================================================
+
+# Static catalogue of diagnostic surfaces. Status is derived at request time
+# by probing each route with the test client — no external calls, no DB writes.
+_DEBUG_SURFACES = [
+    {
+        "name":    "Preflight / System Checks",
+        "route":   "/preflight",
+        "purpose": "Production-readiness audit: env vars, budget ceiling, OIS signals, "
+                   "channel configuration, and FFmpeg availability.",
+        "safety":  "Read-only. No state changes.",
+    },
+    {
+        "name":    "Model Comparison",
+        "route":   "/compare",
+        "purpose": "Side-by-side comparison of image/video generation across providers "
+                   "using a fixed test prompt. Results cached in model_comparison_runs.",
+        "safety":  "View-only page. Actual comparison runs require explicit POST action.",
+    },
+    {
+        "name":    "Video Provider Test",
+        "route":   "/providers/video-test",
+        "purpose": "Inspect per-clip video generation results from previous provider "
+                   "test runs. Useful for validating prompt quality and provider output.",
+        "safety":  "Read-only. Displays cached results only.",
+    },
+    {
+        "name":    "Prompt Registry",
+        "route":   "/prompts",
+        "purpose": "Browse all versioned agent prompts used by the pipeline — "
+                   "Executive Producer, Research Director, Script Engine, etc.",
+        "safety":  "Read-only. No prompt editing on this page.",
+    },
+    {
+        "name":    "Command Console",
+        "route":   "/command",
+        "purpose": "Operator command-state overview: factory status, provider health, "
+                   "run state, and next required action. ",
+        "safety":  "Read-only status display. No commands are executed from this page.",
+    },
+    {
+        "name":    "OIS Signals",
+        "route":   "/signals",
+        "purpose": "Signal history from the Operational Intelligence System — "
+                   "open and resolved alerts with severity and blocking status.",
+        "safety":  "Read-only history view.",
+    },
+    {
+        "name":    "Setup Checklist",
+        "route":   "/setup",
+        "purpose": "Step-by-step first-run setup guide covering API keys, budget, "
+                   "channel configuration, and provider verification.",
+        "safety":  "Configuration guidance. Credential saves require explicit form submit.",
+    },
+]
+
+
+def _build_debug_context() -> dict:
+    """
+    Build the debug surfaces list with live availability status.
+    Checks each route by probing the Flask app internally — no external calls.
+    Never raises.
+    """
+    surfaces = []
+    for s in _DEBUG_SURFACES:
+        try:
+            with app.test_client() as tc:
+                r = tc.get(s["route"], follow_redirects=True)
+                status = "available" if r.status_code == 200 else "degraded"
+        except Exception:
+            status = "unknown"
+        surfaces.append({
+            "name":    s["name"],
+            "route":   s["route"],
+            "status":  status,
+            "purpose": s["purpose"],
+            "safety":  s["safety"],
+        })
+    return {"ok": True, "debug_surfaces": surfaces}
+
+
+@app.route("/infrastructure/debug")
+def infrastructure_debug_page():
+    ctx = _build_debug_context()
+    return render_template("infrastructure_debug.html", **ctx)
+
+
+@app.route("/api/infrastructure/debug")
+def api_infrastructure_debug():
+    return jsonify(_build_debug_context())
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------

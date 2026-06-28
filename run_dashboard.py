@@ -6195,6 +6195,124 @@ def api_infrastructure_workers():
     return jsonify(_build_workers_context())
 
 
+# ===========================================================================
+# Phase 7 — Infrastructure > Providers
+# ===========================================================================
+
+# Operational-readiness → human health string
+_OR_HEALTH = {
+    "ready":                          "Operational — smoke test passed",
+    "ready_via_muapi":                "Operational via MUAPI aggregator",
+    "not_tested":                     "Not tested yet",
+    "skipped_missing_key":            "Skipped — no credential configured",
+    "auth_failed":                    "Authentication failed",
+    "generation_failed":              "Generation test failed",
+    "billing_or_credits_failed":      "Billing or credits issue",
+    "needs_retest":                   "Stale result — re-test recommended",
+    "muapi_dependent":                "Dependent on MUAPI (not yet tested)",
+    "unavailable_muapi_not_ready":    "Unavailable — MUAPI not ready",
+    "not_configured":                 "Placeholder — not yet implemented",
+}
+
+# Map capability list → display category
+def _cap_to_category(caps: list) -> str:
+    for cap, label in [
+        ("publishing", "Publishing"),
+        ("video",      "Video"),
+        ("audio",      "Voice"),
+        ("llm",        "LLM"),
+        ("image",      "Image"),
+        ("analytics",  "Analytics"),
+    ]:
+        if cap in caps:
+            return label
+    return "Other"
+
+
+def _entry_status(entry) -> str:
+    """Map ProviderCatalogEntry fields to connected/degraded/disconnected/unknown."""
+    cred = entry.credential_status
+    op   = entry.operational_readiness
+    if op in ("ready", "ready_via_muapi"):
+        return "connected"
+    if cred == "verified":
+        return "connected"
+    if cred in ("saved",) and entry.is_configured:
+        return "connected"     # configured, not yet verified — treat as nominally connected
+    if op in ("auth_failed", "billing_or_credits_failed", "generation_failed"):
+        return "degraded"
+    if cred == "failed":
+        return "degraded"
+    if cred == "missing" or op == "skipped_missing_key":
+        return "disconnected"
+    if entry.is_configured:
+        return "connected"
+    return "unknown"
+
+
+def _build_providers_context() -> dict:
+    """
+    Collect provider health from get_provider_catalog() only.
+    Never exposes credential values. Never raises.
+    Returns {"ok": True, "providers": [...]}.
+    """
+    try:
+        from hypogeum.dashboard_api import get_provider_catalog
+        catalog = get_provider_catalog(db_path=_db_path())
+    except Exception:
+        return {"ok": False, "providers": [], "error": "Provider catalog unavailable"}
+
+    providers = []
+    for entry in catalog:
+        status   = _entry_status(entry)
+        category = _cap_to_category(entry.capabilities)
+        health   = (entry.operational_note
+                    or _OR_HEALTH.get(entry.operational_readiness,
+                                      entry.operational_readiness or "Unknown"))
+
+        # last_error: only set when there's a meaningful failure signal
+        last_error = None
+        if status in ("degraded", "disconnected") and entry.operational_note:
+            last_error = entry.operational_note[:200]
+
+        providers.append({
+            "provider_name":   entry.display_name,
+            "provider_id":     entry.provider,
+            "category":        category,
+            "capabilities":    entry.capabilities,
+            "access_mode":     entry.access_mode,
+            "status":          status,
+            "api_configured":  entry.is_configured,
+            "last_success":    None,      # no per-provider success timestamp in current schema
+            "last_error":      last_error,
+            "health":          health,
+            "source":          "provider_catalog",
+            # Usage stats (0 = never used; never fabricated)
+            "total_attempts":  entry.total_attempts,
+            "failure_count":   entry.failure_count,
+        })
+
+    # Sort: configured first, then by category, then by name
+    providers.sort(key=lambda p: (
+        0 if p["api_configured"] else 1,
+        p["category"],
+        p["provider_name"],
+    ))
+
+    return {"ok": True, "providers": providers}
+
+
+@app.route("/infrastructure/providers")
+def infrastructure_providers_page():
+    ctx = _build_providers_context()
+    return render_template("infrastructure_providers.html", **ctx)
+
+
+@app.route("/api/infrastructure/providers")
+def api_infrastructure_providers():
+    return jsonify(_build_providers_context())
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------

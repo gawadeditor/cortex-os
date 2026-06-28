@@ -62,6 +62,54 @@
     .badge-worker-error   { background: #1f0a09; color: var(--red);   border: 1px solid #da3633; }
     .badge-worker-unknown { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
     .badge-worker-paused  { background: #1e1a00; color: var(--yellow); border: 1px solid #9e6a03; }
+
+    /* ── Schedule control panel ── */
+    .sched-table      { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .sched-table th   { text-align: left; color: var(--muted); font-weight: 600;
+                        font-size: 10px; text-transform: uppercase; letter-spacing:.05em;
+                        padding: 0 8px 8px 0; border-bottom: 1px solid var(--border); }
+    .sched-table td   { padding: 10px 8px 10px 0; border-bottom: 1px solid var(--border);
+                        vertical-align: middle; }
+    .sched-table tr:last-child td { border-bottom: none; }
+    .sched-status-active { color: var(--green); font-weight: 600; }
+    .sched-status-paused { color: var(--yellow); font-weight: 600; }
+    .sched-status-disabled { color: var(--muted); }
+    .sched-next-stale { color: var(--yellow); font-size: 11px; }
+    .sched-next-ok    { color: var(--muted); font-size: 12px; }
+
+    .btn-resume { font-size: 11px; padding: 3px 10px; border-radius: var(--radius);
+                  border: 1px solid var(--green); color: var(--green);
+                  background: transparent; cursor: pointer; }
+    .btn-resume:hover { background: rgba(46,160,67,.12); }
+    .btn-pause  { font-size: 11px; padding: 3px 10px; border-radius: var(--radius);
+                  border: 1px solid var(--yellow); color: var(--yellow);
+                  background: transparent; cursor: pointer; }
+    .btn-pause:hover  { background: rgba(158,106,3,.12); }
+    .sched-action-result { font-size: 11px; margin-left: 6px; }
+
+    /* ── Production timeline table ── */
+    .timeline-table    { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .timeline-table th { text-align: left; color: var(--muted); font-size: 10px;
+                         text-transform: uppercase; letter-spacing:.05em;
+                         padding: 0 8px 6px 0; border-bottom: 1px solid var(--border); }
+    .timeline-table td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border); }
+    .timeline-table tr:last-child td { border-bottom: none; }
+    .tl-stage  { color: var(--text); }
+    .tl-dur    { font-family: monospace; color: var(--muted); text-align: right; white-space: nowrap; }
+    .tl-src    { font-size: 10px; color: var(--muted); }
+    .tl-total  { font-weight: 700; color: var(--text); }
+    .default-rule-tag { display: inline-block; font-size: 9px; font-weight: 700;
+                        letter-spacing: .06em; padding: 1px 5px; border-radius: 3px;
+                        background: #1a1200; border: 1px solid var(--yellow);
+                        color: var(--yellow); text-transform: uppercase; margin-bottom:6px; }
+    .pub-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap);
+                 font-size: 12px; }
+    @media (max-width: 560px) { .pub-grid { grid-template-columns: 1fr; } }
+    .pub-row   { display: flex; justify-content: space-between; padding: 5px 0;
+                 border-bottom: 1px solid var(--border); }
+    .pub-row:last-child { border-bottom: none; }
+    .pub-plat  { color: var(--muted); }
+    .pub-time  { font-family: monospace; color: var(--text); }
   </style>
 </head>
 <body>
@@ -71,13 +119,10 @@
 <div class="page-header">
   <h1>Infrastructure Workers</h1>
   <span class="page-meta">Background worker state and last outcomes</span>
-  <span class="badge badge-unknown" style="margin-left:auto; font-size:11px;">
-    Read-only monitoring
-  </span>
 </div>
 
 <p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
-  All values are read from existing database tables. No instrumentation is injected.
+  Worker status is read from existing database tables.
   Workers with no records show <em>unknown</em> status until they run.
 </p>
 
@@ -161,16 +206,269 @@
 {% else %}
 <div class="card" style="text-align:center; padding:30px;">
   <div style="color:var(--muted); font-size:14px;">No worker state available.</div>
-  <div style="color:var(--muted); font-size:12px; margin-top:8px;">
-    Workers will appear here once they have run at least once.
-  </div>
 </div>
 {% endif %}
 
+
+{# ══════════════════════════════════════════════════════
+   SCHEDULE CONTROLS
+══════════════════════════════════════════════════════ #}
+<div class="card" style="margin-top:var(--gap); padding:16px 20px;">
+  <div class="card-title" style="margin-bottom:12px;">
+    Production Schedules
+    <span style="font-size:11px; color:var(--muted); font-weight:400; margin-left:8px;">
+      — control when autonomous production runs fire
+    </span>
+  </div>
+
+  {% if schedules %}
+  <table class="sched-table">
+    <thead>
+      <tr>
+        <th>Schedule</th>
+        <th>Scope</th>
+        <th>Status</th>
+        <th>Cadence</th>
+        <th>Next Run (UTC)</th>
+        <th>Max/Day</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in schedules %}
+    <tr>
+      <td style="font-weight:600; font-size:12px;">
+        {{ s.label or s.schedule_id[:12] ~ '…' }}
+        <div style="font-size:10px; color:var(--muted); font-family:monospace;">{{ s.schedule_id[:16] }}…</div>
+      </td>
+      <td style="font-size:12px; color:var(--muted);">{{ s.scope }}</td>
+      <td>
+        {% if s.status == 'active' %}
+          <span class="sched-status-active">● Active</span>
+        {% elif s.status == 'paused' %}
+          <span class="sched-status-paused">⏸ Paused</span>
+        {% else %}
+          <span class="sched-status-disabled">○ {{ s.status }}</span>
+        {% endif %}
+      </td>
+      <td style="font-size:12px; color:var(--muted);">{{ s.cadence }}</td>
+      <td>
+        {% if s.next_run_at %}
+          {% set nr = s.next_run_at[:16].replace('T',' ') %}
+          {# Stale if date portion is before today — flag it #}
+          {% if s.next_run_at[:10] < '2026-06-28' %}
+            <span class="sched-next-stale" title="Stale — will be reset on Resume">⚠ {{ nr }} (stale)</span>
+          {% else %}
+            <span class="sched-next-ok">{{ nr }}</span>
+          {% endif %}
+        {% else %}
+          <span style="color:var(--muted); font-size:12px;">—</span>
+        {% endif %}
+      </td>
+      <td style="font-size:12px; color:var(--muted); text-align:center;">{{ s.max_runs_per_day or 1 }}</td>
+      <td style="white-space:nowrap;">
+        {% if s.status == 'paused' or s.status == 'disabled' %}
+          <button class="btn-resume"
+                  onclick="scheduleAction('{{ s.schedule_id }}','resume',this)">
+            ▶ Resume
+          </button>
+        {% else %}
+          <button class="btn-pause"
+                  onclick="scheduleAction('{{ s.schedule_id }}','pause',this)">
+            ⏸ Pause
+          </button>
+        {% endif %}
+        <span class="sched-action-result" id="sar-{{ s.schedule_id }}"></span>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p style="font-size:11px; color:var(--muted); margin-top:10px;">
+    Resume sets next run to the next 06:00 UTC slot — it does not fire immediately.
+    The autonomous worker picks up the schedule on its next tick.
+  </p>
+
+  {% else %}
+  <div style="color:var(--muted); font-size:13px; padding:12px 0;">
+    No schedules configured.
+    <a href="/api/schedules" style="color:var(--blue);">Create via API →</a>
+  </div>
+  {% endif %}
+</div>
+
+
+{# ══════════════════════════════════════════════════════
+   PRODUCTION TIMELINE
+══════════════════════════════════════════════════════ #}
+<div class="card" style="margin-top:var(--gap); padding:16px 20px;">
+  <div class="card-title" style="margin-bottom:4px;">Production Timeline</div>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:14px;">
+    Conservative stage-by-stage estimates. Real timings sourced from the Antikythera run (2026-06-27).
+    MUAPI generation estimates use veo3-fast benchmark data.
+  </p>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:var(--gap);">
+
+    {# ── Long video ── #}
+    <div>
+      <div style="font-size:12px; font-weight:700; margin-bottom:8px; color:var(--text);">
+        Long-form Episode (10–15 min)
+      </div>
+      <table class="timeline-table">
+        <thead>
+          <tr><th>Stage</th><th style="text-align:right;">Est. Time</th><th>Source</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="tl-stage">EP / Research / Script</td><td class="tl-dur">~18 min</td><td class="tl-src">measured</td></tr>
+          <tr><td class="tl-stage">VPD scene planning (Phase 1)</td><td class="tl-dur">~8 min</td><td class="tl-src">measured</td></tr>
+          <tr><td class="tl-stage">BGA pass 1 + 2</td><td class="tl-dur">~1 min</td><td class="tl-src">measured</td></tr>
+          <tr><td class="tl-stage">Video generation (30 scenes)</td><td class="tl-dur">150–220 min</td><td class="tl-src">benchmark</td></tr>
+          <tr><td class="tl-stage">Thumbnail generation</td><td class="tl-dur">~5 min</td><td class="tl-src">estimate</td></tr>
+          <tr><td class="tl-stage">Audio (ElevenLabs narration)</td><td class="tl-dur">~5 min</td><td class="tl-src">estimate</td></tr>
+          <tr><td class="tl-stage">Assembly (FFmpeg render)</td><td class="tl-dur">~15 min</td><td class="tl-src">estimate</td></tr>
+          <tr><td class="tl-stage">YouTube upload + publish</td><td class="tl-dur">~5 min</td><td class="tl-src">estimate</td></tr>
+          <tr>
+            <td class="tl-stage tl-total">TOTAL (conservative)</td>
+            <td class="tl-dur tl-total">~5 hours</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    {# ── Shorts ── #}
+    <div>
+      <div style="font-size:12px; font-weight:700; margin-bottom:8px; color:var(--text);">
+        Shorts / Reels (60–90 sec)
+      </div>
+      <table class="timeline-table">
+        <thead>
+          <tr><th>Stage</th><th style="text-align:right;">Est. Time</th><th>Source</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="tl-stage">Short scene planning</td><td class="tl-dur">~5 min</td><td class="tl-src">estimate</td></tr>
+          <tr><td class="tl-stage">Video generation (3–5 clips)</td><td class="tl-dur">15–30 min</td><td class="tl-src">benchmark</td></tr>
+          <tr><td class="tl-stage">Thumbnail (short format)</td><td class="tl-dur">~2 min</td><td class="tl-src">estimate</td></tr>
+          <tr><td class="tl-stage">Audio (short narration)</td><td class="tl-dur">~1 min</td><td class="tl-src">estimate</td></tr>
+          <tr><td class="tl-stage">Assembly + publish</td><td class="tl-dur">~5 min</td><td class="tl-src">estimate</td></tr>
+          <tr>
+            <td class="tl-stage tl-total">TOTAL (conservative)</td>
+            <td class="tl-dur tl-total">~45 min</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="font-size:11px; color:var(--muted); margin-top:8px;">
+        Shorts currently disabled (ENABLE_DEDICATED_SHORT_GENERATION=false).
+        Derived from main episode clips after assembly.
+      </p>
+    </div>
+  </div>
+</div>
+
+
+{# ══════════════════════════════════════════════════════
+   DEFAULT PUBLISH RULES
+══════════════════════════════════════════════════════ #}
+<div class="card" style="margin-top:var(--gap); padding:16px 20px;">
+  <div class="card-title" style="margin-bottom:4px;">Publish Timing</div>
+  <div class="default-rule-tag">Default Rules</div>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+    Applied until 10+ episodes provide enough analytics to derive audience-specific best times.
+    Based on industry benchmarks for English-speaking history/documentary audiences.
+  </p>
+  <div class="pub-grid">
+    <div>
+      <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase;
+                  letter-spacing:.05em; margin-bottom:6px;">Long-form Video</div>
+      <div class="pub-row">
+        <span class="pub-plat">YouTube long-form</span>
+        <span class="pub-time">Thursday 14:00 UTC</span>
+      </div>
+      <div class="pub-row">
+        <span class="pub-plat">Facebook Video</span>
+        <span class="pub-time">Thursday 16:00 UTC</span>
+      </div>
+    </div>
+    <div>
+      <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase;
+                  letter-spacing:.05em; margin-bottom:6px;">Shorts / Reels</div>
+      <div class="pub-row">
+        <span class="pub-plat">YouTube Shorts</span>
+        <span class="pub-time">Thursday 15:30 UTC</span>
+      </div>
+      <div class="pub-row">
+        <span class="pub-plat">Instagram Reels</span>
+        <span class="pub-time">Friday 11:00 UTC</span>
+      </div>
+      <div class="pub-row">
+        <span class="pub-plat">TikTok</span>
+        <span class="pub-time">Friday 13:00 UTC</span>
+      </div>
+    </div>
+  </div>
+  <p style="font-size:11px; color:var(--muted); margin-top:10px;">
+    These rules will be replaced by learning engine recommendations once sufficient
+    per-platform analytics are available.
+  </p>
+</div>
+
+
 <div style="margin-top:calc(var(--gap)*2); font-size:11px; color:var(--muted);">
   <a href="/api/infrastructure/workers" style="color:var(--muted);">/api/infrastructure/workers</a>
-  &ensp;·&ensp; Read-only. No controls on this page.
+  &ensp;·&ensp; Schedule controls call /api/schedule/&lt;id&gt;/resume and /api/schedule/&lt;id&gt;/status.
 </div>
+
+
+<script>
+function scheduleAction(scheduleId, action, btn) {
+  var resultEl = document.getElementById('sar-' + scheduleId);
+  btn.disabled = true;
+  btn.textContent = action === 'resume' ? '▶ Resuming…' : '⏸ Pausing…';
+  if (resultEl) resultEl.textContent = '';
+
+  var url = action === 'resume'
+    ? '/api/schedule/' + scheduleId + '/resume'
+    : '/api/schedule/' + scheduleId + '/status';
+  var body = action === 'resume' ? {} : {status: 'paused'};
+
+  fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      if (resultEl) {
+        resultEl.style.color = 'var(--green)';
+        if (action === 'resume' && d.next_run_at) {
+          resultEl.textContent = '✓ Resumed — next run: ' + d.next_run_at.slice(0,16).replace('T',' ') + ' UTC';
+        } else {
+          resultEl.textContent = '✓ ' + (action === 'resume' ? 'Resumed' : 'Paused');
+        }
+      }
+      setTimeout(function() { window.location.reload(); }, 1800);
+    } else {
+      btn.disabled = false;
+      btn.textContent = action === 'resume' ? '▶ Resume' : '⏸ Pause';
+      if (resultEl) {
+        resultEl.style.color = 'var(--red)';
+        resultEl.textContent = '✗ ' + (d.error || 'failed');
+      }
+    }
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.textContent = action === 'resume' ? '▶ Resume' : '⏸ Pause';
+    if (resultEl) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = '✗ network error';
+    }
+  });
+}
+</script>
 
 </body>
 </html>

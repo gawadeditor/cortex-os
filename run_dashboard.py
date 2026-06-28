@@ -2872,6 +2872,127 @@ def api_schedule_status(schedule_id):
     return jsonify(result), http_status
 
 
+@app.route("/api/schedule/<schedule_id>/resume", methods=["POST"])
+def api_schedule_resume(schedule_id):
+    """
+    Resume a paused schedule and advance next_run_at to the next future slot.
+
+    Resuming without advancing next_run_at would cause tick() to fire
+    immediately if next_run_at is stale (e.g. days in the past). This
+    endpoint sets status=active AND computes the next valid future time
+    based on cadence and the preferred run hour (06:00 UTC by default).
+
+    Returns {ok, schedule_id, status, next_run_at}.
+    """
+    from datetime import datetime, timezone, timedelta
+    from hypogeum.scheduler import set_schedule_status, set_next_run, compute_next_run
+    from hypogeum.db import get_connection
+
+    db = _db_path()
+    try:
+        conn = get_connection(db)
+        try:
+            row = conn.execute(
+                "SELECT * FROM schedules WHERE schedule_id=?", (schedule_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    if row is None:
+        return jsonify({"ok": False, "error": "schedule not found"}), 404
+
+    row = dict(row)
+    cadence = row.get("cadence") or "daily"
+
+    # Compute next future slot: today or tomorrow at 06:00 UTC
+    now = datetime.now(timezone.utc)
+    candidate = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+
+    # For weekly cadence, advance to same weekday next week if candidate is today
+    if cadence == "weekly":
+        candidate += timedelta(weeks=1)
+
+    # 1. Set status active
+    r1 = set_schedule_status(schedule_id, "active", db_path=db)
+    if not r1.get("ok"):
+        return jsonify(r1), 400
+
+    # 2. Advance next_run_at to future slot
+    try:
+        set_next_run(schedule_id, candidate, db_path=db)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"resumed but next_run reset failed: {exc}"}), 500
+
+    return jsonify({
+        "ok":          True,
+        "schedule_id": schedule_id,
+        "status":      "active",
+        "next_run_at": candidate.isoformat(),
+    })
+
+
+@app.route("/api/platforms/tiktok/refresh", methods=["POST"])
+def api_tiktok_refresh():
+    """
+    Refresh the TikTok access token using the stored refresh_token.
+
+    Uses hypogeum.publishing.tiktok.refresh_tiktok_token() which exchanges
+    the stored refresh_token for a new 24-hour access token and writes
+    it back to secret_profiles.
+
+    Returns {ok, expires_at, publish_mode, video_publish_scope_missing, note}.
+    """
+    try:
+        from hypogeum.publishing.tiktok import refresh_tiktok_token
+        new_token = refresh_tiktok_token(db_path=_db_path())
+    except Exception as exc:
+        return jsonify({
+            "ok":    False,
+            "error": str(exc),
+            "note":  "Refresh failed. The refresh_token may have expired or the TikTok API is unreachable.",
+        }), 400
+
+    # Read back the updated credential to confirm expiry
+    import json as _json
+    from hypogeum.meta_analytics import get_meta_token, get_meta_token_expiry
+    expiry = get_meta_token_expiry("tiktok", db_path=_db_path())
+
+    # Read publish mode from credential_data
+    publish_mode = "upload_to_inbox"
+    video_publish_scope_missing = True
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(_db_path())
+        try:
+            row = conn.execute(
+                "SELECT credential_data FROM secret_profiles WHERE provider='tiktok' AND status='active' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        if row:
+            cred = _json.loads(dict(row)["credential_data"])
+            publish_mode = cred.get("publish_mode", "upload_to_inbox")
+            video_publish_scope_missing = bool(cred.get("video_publish_scope_missing", True))
+    except Exception:
+        pass
+
+    return jsonify({
+        "ok":                        True,
+        "expires_at":                expiry,
+        "publish_mode":              publish_mode,
+        "video_publish_scope_missing": video_publish_scope_missing,
+        "note": (
+            "Token refreshed. Publish mode: upload_to_inbox only. "
+            "video.publish scope is missing — videos upload to creator inbox "
+            "and require manual publish from the TikTok app."
+        ),
+    })
+
+
 @app.route("/api/schedules", methods=["GET"])
 def api_schedules_list():
     """
@@ -6250,7 +6371,15 @@ def _build_workers_context() -> dict:
     except Exception:
         workers.append(_unknown("Publish Health", "publishing_outcomes"))
 
-    return {"ok": True, "workers": workers}
+    # Include raw schedules for the control panel
+    raw_schedules = []
+    try:
+        from hypogeum.dashboard_api import get_schedules as _gs
+        raw_schedules = _gs(_db_path()) or []
+    except Exception:
+        pass
+
+    return {"ok": True, "workers": workers, "schedules": raw_schedules}
 
 
 @app.route("/infrastructure/workers")

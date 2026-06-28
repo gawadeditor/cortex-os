@@ -8,7 +8,8 @@
   <style>
     /* Queue rows */
     .queue-item { display:flex; align-items:flex-start; gap:12px;
-                  padding:12px 16px; border-bottom:1px solid var(--border); }
+                  padding:12px 16px; border-bottom:1px solid var(--border);
+                  position:relative; }
     .queue-item:last-child { border-bottom:none; }
     .queue-rank { width:20px; flex-shrink:0; font-size:12px; font-weight:700;
                   color:var(--muted); padding-top:3px; text-align:center; }
@@ -125,6 +126,13 @@
     </a>
     {% endif %}
   </div>
+  {% if queue_topics %}
+  <div style="padding:8px 16px 4px; font-size:12px; color:var(--muted);
+              border-bottom:1px solid var(--border);">
+    The run scheduler picks from this queue automatically on its configured schedule.
+    Use <strong>Options</strong> on any row only to force an immediate run.
+  </div>
+  {% endif %}
 
   {% if queue_topics %}
   {% for t in queue_topics %}
@@ -145,22 +153,37 @@
         <span>priority {{ t.priority }}</span>
       </div>
     </div>
-    <div class="queue-actions">
-      <form method="POST" action="/create/launch" style="display:inline;">
-        <input type="hidden" name="channel_id"   value="{{ t.channel_id }}">
-        <input type="hidden" name="topic"        value="{{ t.topic_text }}">
-        <input type="hidden" name="video_type"   value="long_video">
-        <input type="hidden" name="quality_mode" value="balanced">
-        <input type="hidden" name="platforms"    value="youtube">
-        <button type="submit" class="btn btn-approve"
-                style="font-size:12px; padding:4px 12px;">&#9654; Start</button>
-      </form>
+    <div class="queue-actions" style="align-items:flex-start;">
       <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
         <button type="submit" class="btn"
                 onclick="return confirm('Remove this topic?')"
                 style="font-size:12px; padding:4px 8px; color:var(--muted);"
                 title="Remove from queue">&#10005;</button>
       </form>
+      <details>
+        <summary style="list-style:none; cursor:pointer; font-size:11px; color:var(--muted);
+                        padding:4px 8px; border:1px solid var(--border); border-radius:var(--radius);
+                        white-space:nowrap; background:transparent;">
+          Options &#9654;
+        </summary>
+        <div style="position:absolute; right:0; margin-top:4px; z-index:10;
+                    background:var(--surface); border:1px solid var(--border);
+                    border-radius:var(--radius); padding:8px 10px; min-width:180px;
+                    box-shadow:0 4px 12px rgba(0,0,0,.4);">
+          <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">
+            The run scheduler picks this up automatically. Force-start only if needed.
+          </div>
+          <form method="POST" action="/create/launch">
+            <input type="hidden" name="channel_id"   value="{{ t.channel_id }}">
+            <input type="hidden" name="topic"        value="{{ t.topic_text }}">
+            <input type="hidden" name="video_type"   value="long_video">
+            <input type="hidden" name="quality_mode" value="balanced">
+            <input type="hidden" name="platforms"    value="youtube">
+            <button type="submit" class="btn btn-approve"
+                    style="font-size:11px; padding:4px 12px; width:100%;">&#9654; Force-start now</button>
+          </form>
+        </div>
+      </details>
     </div>
   </div>
   {% endfor %}

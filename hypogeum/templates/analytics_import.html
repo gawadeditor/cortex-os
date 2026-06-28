@@ -51,6 +51,18 @@
   <span class="page-meta">Sync from YouTube or import data manually</span>
 </div>
 
+{# ── Migration-only banner ── #}
+<div style="background:#1e1a00; border:1px solid var(--yellow); border-radius:var(--radius);
+            padding:10px 14px; margin-bottom:var(--gap); font-size:12px; color:var(--yellow);
+            display:flex; gap:10px; align-items:flex-start;">
+  <span style="flex-shrink:0;">&#9888;</span>
+  <span>
+    <strong>One-time historical data migration only.</strong>
+    For ongoing analytics, data is collected automatically from connected platforms via the background sync worker.
+    Use this page only to backfill data that predates the sync connection, or for platforms without an API connector.
+  </span>
+</div>
+
 {# Flash messages #}
 {% if flash == 'ok' %}
   <div class="flash flash-ok">Import successful — insights extracted.</div>
@@ -234,7 +246,15 @@ function syncYouTube(event, windowDays) {
       <div class="hint">First row must be the header. Maps YouTube Studio, TikTok, Instagram, and Facebook CSV export columns automatically.</div>
     </div>
 
-    <div style="margin-top:18px;">
+    <div style="margin-top:14px;">
+      <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer; margin-bottom:10px;">
+        <input type="checkbox" id="confirm-migration" required
+               style="margin-top:2px; flex-shrink:0; accent-color:var(--blue);">
+        <span style="font-size:12px; color:var(--muted);">
+          I understand this is a one-time historical import. Ongoing analytics are collected
+          automatically by the background sync worker.
+        </span>
+      </label>
       <button type="submit" class="btn btn-save">Import</button>
     </div>
   </form>

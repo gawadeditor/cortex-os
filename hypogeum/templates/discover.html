@@ -110,8 +110,8 @@
     {% if candidates %}&ensp;·&ensp;{{ candidates|length }} candidate{% if candidates|length != 1 %}s{% endif %}{% endif %}
     {% if queued_topics %}&ensp;·&ensp;{{ queued_topics|length }} queued{% endif %}
   </span>
-  <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
-    {% if channels and channels|length > 1 %}
+  {% if channels and channels|length > 1 %}
+  <div style="margin-left:auto;">
     <form method="GET" action="/discover" style="display:inline;">
       <select name="channel_id" onchange="this.form.submit()"
               style="padding:4px 8px; background:var(--surface); border:1px solid var(--border);
@@ -122,19 +122,38 @@
         {% endfor %}
       </select>
     </form>
-    {% endif %}
-    <div id="discover-status" role="status" aria-live="polite"></div>
-    <button id="btn-run" type="button" class="btn"
-            style="font-size:12px;"
-            onclick="runDiscovery()"
-            {% if discovery_status == 'running' %}disabled{% endif %}>
-      {% if discovery_status == 'running' %}Running…{% else %}Run Discovery Cycle{% endif %}
-    </button>
   </div>
+  {% endif %}
 </div>
 <p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
   Discovery runs automatically on schedule. The candidates below were scored by the last cycle.
 </p>
+
+{# ── Emergency: manual trigger ── #}
+<details style="margin-bottom:var(--gap);">
+  <summary style="padding:8px 14px; background:var(--surface); border:1px solid var(--border);
+                  border-radius:var(--radius); font-size:12px; color:var(--muted);
+                  list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
+    <span style="font-size:10px;">&#9654;</span>
+    Emergency: manually trigger discovery cycle
+    <span style="font-size:11px; margin-left:4px;">(scheduled worker handles this automatically)</span>
+  </summary>
+  <div class="card" style="border-top:none; border-radius:0 0 var(--radius) var(--radius);
+                            padding:14px 16px; margin-top:0;">
+    <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+      Only use this to force an immediate cycle for debugging or if the scheduler is not running.
+      In normal operation the discovery worker fires on its configured schedule.
+    </p>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <div id="discover-status" role="status" aria-live="polite"></div>
+      <button id="btn-run" type="button" class="btn btn-save"
+              onclick="runDiscovery()"
+              {% if discovery_status == 'running' %}disabled{% endif %}>
+        {% if discovery_status == 'running' %}Running…{% else %}Run Discovery Cycle{% endif %}
+      </button>
+    </div>
+  </div>
+</details>
 
 {# ── Flash messages ── #}
 {% if flash == 'approved' %}
@@ -264,52 +283,64 @@
   <div class="empty-state">
     <div style="font-size:32px;">&#128269;</div>
     <div style="font-weight:600; color:var(--text); margin-top:8px; margin-bottom:6px;">No candidates yet</div>
-    <div>Click <strong>Run Discovery Cycle</strong> to score topic candidates.</div>
+    <div>The discovery worker will score candidates on its next scheduled run.</div>
+    <div style="margin-top:6px; font-size:12px;">
+      To force an immediate cycle, expand <strong>Emergency: manually trigger discovery cycle</strong> above.
+    </div>
   </div>
   {% endif %}
 </div>
 
-{# ── Queue panel ── #}
+{# ── Queue panel — collapsed; worker starts these automatically ── #}
 {% if queued_topics %}
-<div class="card queue-panel" style="padding:0; margin-top:var(--gap);">
-  <div class="section-title">
-    Production Queue
-    <span style="font-weight:400; font-size:11px; margin-left:6px;">— {{ queued_topics|length }} topic{% if queued_topics|length != 1 %}s{% endif %} waiting</span>
-    <a href="/create" style="font-size:11px; font-weight:400; margin-left:auto; float:right; color:var(--blue);">Run next &#8594;</a>
-  </div>
-  {% for t in queued_topics %}
-  <div class="queue-row">
-    <div class="queue-topic">
-      <div class="queue-topic-text">{{ t.topic_text }}</div>
-      <div class="queue-meta">
-        {% if t.source == 'discovered' %}
-          <span class="queue-source-disc">&#128270; discovered</span>
-          {% if t.discovery_score is not none and t.discovery_score %}<span>score {{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
-        {% else %}
-          <span class="queue-source-manual">&#9998; manual</span>
-        {% endif %}
-        {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
-        <span>priority {{ t.priority }}</span>
+<details style="margin-top:var(--gap);">
+  <summary style="padding:8px 14px; background:var(--surface); border:1px solid var(--border);
+                  border-radius:var(--radius); font-size:12px; color:var(--muted);
+                  list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
+    <span style="font-size:10px;">&#9654;</span>
+    Emergency: force-start a queued topic
+    <span style="font-size:11px; margin-left:4px;">— {{ queued_topics|length }} topic{% if queued_topics|length != 1 %}s{% endif %} waiting
+      &ensp;·&ensp; <a href="/create" style="color:var(--blue);" onclick="event.stopPropagation()">View queue &#8594;</a>
+    </span>
+  </summary>
+  <div class="card queue-panel" style="padding:0; border-top:none; border-radius:0 0 var(--radius) var(--radius); margin-top:0;">
+    <div style="padding:10px 16px 6px; font-size:12px; color:var(--muted); border-bottom:1px solid var(--border);">
+      The run scheduler picks from this queue automatically. Only force-start for debugging.
+    </div>
+    {% for t in queued_topics %}
+    <div class="queue-row">
+      <div class="queue-topic">
+        <div class="queue-topic-text">{{ t.topic_text }}</div>
+        <div class="queue-meta">
+          {% if t.source == 'discovered' %}
+            <span class="queue-source-disc">&#128270; discovered</span>
+            {% if t.discovery_score is not none and t.discovery_score %}<span>score {{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
+          {% else %}
+            <span class="queue-source-manual">&#9998; manual</span>
+          {% endif %}
+          {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
+          <span>priority {{ t.priority }}</span>
+        </div>
+      </div>
+      <div style="display:flex; gap:4px; flex-shrink:0; align-items:center;">
+        <form method="POST" action="/create/launch" style="display:inline;">
+          <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
+          <input type="hidden" name="topic" value="{{ t.topic_text }}">
+          <input type="hidden" name="video_type" value="long_video">
+          <input type="hidden" name="quality_mode" value="balanced">
+          <input type="hidden" name="platforms" value="youtube">
+          <button type="submit" class="btn btn-approve"
+                  style="font-size:11px; padding:3px 10px;">&#9654; Start</button>
+        </form>
+        <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
+          <button type="submit" class="btn" onclick="return confirm('Remove this topic from queue?')"
+                  style="font-size:11px; padding:3px 8px; color:var(--muted);">&#10005;</button>
+        </form>
       </div>
     </div>
-    <div style="display:flex; gap:4px; flex-shrink:0; align-items:center;">
-      <form method="POST" action="/create/launch" style="display:inline;">
-        <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
-        <input type="hidden" name="topic" value="{{ t.topic_text }}">
-        <input type="hidden" name="video_type" value="long_video">
-        <input type="hidden" name="quality_mode" value="balanced">
-        <input type="hidden" name="platforms" value="youtube">
-        <button type="submit" class="btn btn-approve"
-                style="font-size:11px; padding:3px 10px;">&#9654; Start</button>
-      </form>
-      <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
-        <button type="submit" class="btn" onclick="return confirm('Remove this topic from queue?')"
-                style="font-size:11px; padding:3px 8px; color:var(--muted);">&#10005;</button>
-      </form>
-    </div>
+    {% endfor %}
   </div>
-  {% endfor %}
-</div>
+</details>
 {% endif %}
 
 {# ── Manual override ── #}

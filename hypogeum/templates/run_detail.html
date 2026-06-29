@@ -67,6 +67,7 @@
 {% if recovery and d.run.status == 'failed' %}
 <div class="card" style="border-color:
   {% if recovery.failure_class == 'resumable' %}#2ea043
+  {% elif recovery.failure_class == 'finance_gate' %}#d4a017
   {% elif recovery.failure_class == 'retryable' %}#8b6914
   {% elif recovery.failure_class == 'fatal' %}#da3633
   {% else %}#8b6914{% endif %};">
@@ -74,9 +75,11 @@
   <div class="card-title" style="display:flex; align-items:center; gap:8px;">
     <span style="color:
       {% if recovery.failure_class == 'resumable' %}var(--green)
+      {% elif recovery.failure_class == 'finance_gate' %}#d4a017
       {% elif recovery.failure_class == 'fatal' %}var(--red)
       {% else %}var(--yellow){% endif %};">
       {% if recovery.failure_class == 'resumable' %}⟳ Resumable
+      {% elif recovery.failure_class == 'finance_gate' %}💰 Finance Gate
       {% elif recovery.failure_class == 'retryable' %}↻ Retryable
       {% elif recovery.failure_class == 'credential' %}🔑 Credential Required
       {% elif recovery.failure_class == 'config' %}⚙ Config Fix Required
@@ -108,10 +111,18 @@
     </div>
     {% if recovery.vpd_checkpoints.batches %}
     {% for b in recovery.vpd_checkpoints.batches %}
-    <div style="font-size:12px; color:var(--green); padding:2px 0;">✓ Prompt batch {{ b }} (scenes {{ b*10+1 }}–{{ (b+1)*10 }})</div>
+    {% set n_sc = recovery.vpd_checkpoints.b_batch_scene_counts.get(b, 0) %}
+    <div style="font-size:12px; color:var(--green); padding:2px 0;">
+      ✓ Stage B batch {{ b }}{% if n_sc %} — {{ n_sc }} scene{{ 's' if n_sc != 1 else '' }}{% endif %}
+    </div>
     {% endfor %}
+    {% if recovery.vpd_checkpoints.b_scenes_done %}
+    <div style="font-size:12px; color:var(--muted); padding:2px 0;">
+      {{ recovery.vpd_checkpoints.b_scenes_done }} scene prompt{{ 's' if recovery.vpd_checkpoints.b_scenes_done != 1 else '' }} completed
+    </div>
+    {% endif %}
     {% else %}
-    <div style="font-size:12px; color:var(--muted); padding:2px 0;">— No prompt batches completed</div>
+    <div style="font-size:12px; color:var(--muted); padding:2px 0;">— No Stage B prompt batches completed</div>
     {% endif %}
   </div>
   {% endif %}
@@ -163,6 +174,235 @@
   </div>
 
 </div>
+{% endif %}
+
+{# ── Finance Gate Panel (finance_gate failures only) ── #}
+{% if recovery and recovery.failure_class == 'finance_gate' %}
+{% set fg = recovery.finance_gate_detail %}
+<div class="card" style="border-color:#d4a017; margin-bottom:var(--gap);">
+
+  <div class="card-title" style="display:flex; align-items:center; gap:8px; color:#d4a017;">
+    💰 Finance Gate — Budget Ceiling Exceeded
+    <span style="font-size:11px; color:var(--muted); font-weight:400;">{{ recovery.failed_stage }}</span>
+  </div>
+
+  {# ── Spend table ── #}
+  <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px;">
+    <div style="background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
+                padding:10px 12px; text-align:center;">
+      <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px;">Estimated Spend</div>
+      <div style="font-size:20px; font-weight:700; color:var(--red); font-family:monospace;">
+        ${{ "%.4f"|format(fg.estimated_spend_usd) }}
+      </div>
+    </div>
+    <div style="background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
+                padding:10px 12px; text-align:center;">
+      <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px;">Budget Ceiling</div>
+      <div style="font-size:20px; font-weight:700; color:var(--text); font-family:monospace;">
+        ${{ "%.2f"|format(fg.budget_ceiling_usd) }}
+      </div>
+    </div>
+    <div style="background:var(--bg); border:1px solid #d4a017; border-radius:var(--radius);
+                padding:10px 12px; text-align:center;">
+      <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px;">Overage</div>
+      <div style="font-size:20px; font-weight:700; color:#d4a017; font-family:monospace;">
+        +${{ "%.4f"|format(fg.overage_usd) }}
+      </div>
+    </div>
+  </div>
+
+  {# ── Cost breakdown ── #}
+  {% if fg.cost_breakdown %}
+  {% set cb = fg.cost_breakdown %}
+  <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px;">Cost breakdown</div>
+  <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:14px;">
+    <tbody>
+      {% if cb.estimated_muapi_usd is defined %}
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:4px 0; color:var(--muted);">MUAPI video ({{ cb.scene_count or '?' }} scenes)</td>
+        <td style="text-align:right; font-family:monospace; padding:4px 0;">${{ "%.4f"|format(cb.estimated_muapi_usd) }}</td>
+      </tr>
+      {% if cb.model_breakdown %}
+      {% for model, count in cb.model_breakdown.items() %}
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:3px 0 3px 14px; color:var(--muted); font-size:11px;">↳ {{ model }} × {{ count }}</td>
+        <td></td>
+      </tr>
+      {% endfor %}
+      {% endif %}
+      {% endif %}
+      {% if cb.estimated_narration_usd is defined %}
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:4px 0; color:var(--muted);">ElevenLabs narration ({{ cb.narration_chars or 0 }} chars)</td>
+        <td style="text-align:right; font-family:monospace; padding:4px 0;">${{ "%.4f"|format(cb.estimated_narration_usd) }}</td>
+      </tr>
+      {% endif %}
+      {% if cb.estimated_music_usd is defined %}
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:4px 0; color:var(--muted);">ElevenLabs music ({{ cb.section_count or 0 }} tracks)</td>
+        <td style="text-align:right; font-family:monospace; padding:4px 0;">${{ "%.4f"|format(cb.estimated_music_usd) }}</td>
+      </tr>
+      {% endif %}
+      {% if cb.estimated_openrouter_usd is defined %}
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:4px 0; color:var(--muted);">LLM planning (OpenRouter)</td>
+        <td style="text-align:right; font-family:monospace; padding:4px 0;">${{ "%.4f"|format(cb.estimated_openrouter_usd) }}</td>
+      </tr>
+      {% endif %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <div style="font-size:12px; color:var(--muted); margin-bottom:14px;">
+    VPD planning is complete. All Stage A and Stage B checkpoints are on disk.
+    The only remaining spend is MUAPI video generation.
+    <strong>No planning stages will re-bill</strong> on the next run.
+  </div>
+
+  {# ── Actions ── #}
+  <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px;">Operator actions</div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px;">
+
+    <button class="btn" id="btn-finance-approve"
+            style="background:rgba(210,160,23,.12); border-color:#d4a017; color:#d4a017;"
+            onclick="financeApprove('{{ d.run.run_id }}', this)">
+      ✓ Approve this run once
+    </button>
+
+    <button class="btn" id="btn-raise-ceiling"
+            style="border-color:var(--blue); color:var(--blue);"
+            onclick="showRaiseCeiling(this)">
+      ↑ Raise budget ceiling
+    </button>
+
+    <a href="/runs" class="btn">← All Runs</a>
+    <span id="finance-action-result" style="font-size:12px;"></span>
+  </div>
+
+  {# ── Approve once note ── #}
+  <div id="finance-approve-note" style="display:none; margin-bottom:12px; padding:10px 12px;
+       background:rgba(210,160,23,.07); border:1px solid rgba(210,160,23,.3);
+       border-radius:var(--radius); font-size:12px;">
+    <div style="font-weight:600; color:#d4a017; margin-bottom:6px;">Approve this run once</div>
+    <div style="color:var(--muted); margin-bottom:8px;">
+      Creates a single-use approval (expires 24 h). The run will proceed past the ceiling.
+      The ceiling itself is not changed — future runs will still be gated.
+    </div>
+    <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+      <div style="flex:1; min-width:200px;">
+        <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Justification (optional)</label>
+        <input type="text" id="finance-approve-note-input" maxlength="200"
+               placeholder="e.g. One-time approval for ep_000 launch"
+               style="width:100%; padding:6px 8px; font-size:12px; font-family:inherit;
+                      background:var(--bg); border:1px solid var(--border);
+                      border-radius:var(--radius); color:var(--text);">
+      </div>
+      <button class="btn" style="background:rgba(210,160,23,.15); border-color:#d4a017; color:#d4a017; white-space:nowrap;"
+              onclick="submitFinanceApprove('{{ d.run.run_id }}', this)">
+        Confirm Approval
+      </button>
+      <button class="btn" onclick="document.getElementById('finance-approve-note').style.display='none'">Cancel</button>
+    </div>
+  </div>
+
+  {# ── Raise ceiling panel ── #}
+  <div id="raise-ceiling-panel" style="display:none; margin-bottom:12px; padding:10px 12px;
+       background:rgba(88,166,255,.06); border:1px solid rgba(88,166,255,.3);
+       border-radius:var(--radius); font-size:12px;">
+    <div style="font-weight:600; color:var(--blue); margin-bottom:6px;">Raise budget ceiling</div>
+    <div style="color:var(--muted); margin-bottom:8px;">
+      Writes <code>FINANCE_BUDGET_CEILING_USD</code> to <code>.env</code> immediately.
+      Takes effect on the next run. All future episodes will use the new ceiling.
+    </div>
+    <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+      <div>
+        <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">
+          New ceiling (USD) — current: ${{ "%.2f"|format(fg.budget_ceiling_usd) }}
+        </label>
+        <input type="number" id="new-ceiling-input" min="0" max="9999" step="1"
+               value="{{ fg.estimated_spend_usd|round(0,'ceil')|int + 5 }}"
+               style="width:100px; padding:6px 8px; font-size:12px; font-family:monospace;
+                      background:var(--bg); border:1px solid var(--border);
+                      border-radius:var(--radius); color:var(--text);">
+      </div>
+      <button class="btn" style="border-color:var(--blue); color:var(--blue);"
+              onclick="submitRaiseCeiling(this)">
+        Save ceiling
+      </button>
+      <button class="btn" onclick="document.getElementById('raise-ceiling-panel').style.display='none'">Cancel</button>
+      <span id="ceiling-result" style="font-size:12px;"></span>
+    </div>
+    <div style="font-size:11px; color:var(--muted); margin-top:6px;">
+      After saving, click <strong>▶ Re-run Episode</strong> in the Recovery panel above to re-queue with the new ceiling.
+    </div>
+  </div>
+
+</div>
+
+<script>
+function financeApprove(runId, btn) {
+  btn.style.display = 'none';
+  document.getElementById('finance-approve-note').style.display = 'block';
+}
+function submitFinanceApprove(runId, btn) {
+  var note = (document.getElementById('finance-approve-note-input').value || '').trim();
+  var res  = document.getElementById('finance-action-result');
+  btn.disabled = true;
+  btn.textContent = 'Approving…';
+  fetch('/api/run/' + runId + '/finance-approve', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note: note || null}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    document.getElementById('finance-approve-note').style.display = 'none';
+    if (d.ok) {
+      if (res) {
+        res.style.color = 'var(--green)';
+        res.textContent = '✓ Approved. Run re-queued — worker will process it next tick.';
+      }
+    } else {
+      btn.disabled = false; btn.textContent = 'Confirm Approval';
+      if (res) { res.style.color = 'var(--red)'; res.textContent = '✗ ' + (d.error || 'approval failed'); }
+    }
+  })
+  .catch(function() {
+    btn.disabled = false; btn.textContent = 'Confirm Approval';
+    if (res) { res.style.color = 'var(--red)'; res.textContent = '✗ network error'; }
+  });
+}
+function showRaiseCeiling(btn) {
+  document.getElementById('raise-ceiling-panel').style.display = 'block';
+}
+function submitRaiseCeiling(btn) {
+  var val = parseFloat(document.getElementById('new-ceiling-input').value);
+  var res = document.getElementById('ceiling-result');
+  if (isNaN(val) || val < 0) {
+    if (res) { res.style.color = 'var(--red)'; res.textContent = '✗ invalid value'; }
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  fetch('/api/setup/budget-ceiling', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ceiling: val}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false; btn.textContent = 'Save ceiling';
+    if (d.ok) {
+      if (res) { res.style.color = 'var(--green)'; res.textContent = '✓ Ceiling set to $' + d.new_ceiling.toFixed(2); }
+    } else {
+      if (res) { res.style.color = 'var(--red)'; res.textContent = '✗ ' + (d.error || 'failed'); }
+    }
+  })
+  .catch(function() {
+    btn.disabled = false; btn.textContent = 'Save ceiling';
+    if (res) { res.style.color = 'var(--red)'; res.textContent = '✗ network error'; }
+  });
+}
+</script>
 {% endif %}
 
 {# ── Stage timeline ── #}

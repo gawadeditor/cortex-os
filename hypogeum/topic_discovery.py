@@ -432,15 +432,23 @@ def _normalize_candidate_v2(opp: dict) -> dict:
         "exhausted":   "rejected",
     }
     opp_status = opp.get("status", "active")
+    score = round(float(
+        opp.get("final_composite")
+        or opp.get("priority_score")
+        or opp.get("initial_composite")
+        or 0.0
+    ), 4)
+
+    # Include score breakdown when present (from v2 Topic Ideator prompt)
+    breakdown = opp.get("score_breakdown") or {}
+
     return {
         "candidate_id":         opp.get("opportunity_id", str(uuid.uuid4())),
         "topic":                opp.get("topic_text") or opp.get("canonical_subject", ""),
-        "score":                round(float(
-            opp.get("final_composite")
-            or opp.get("priority_score")
-            or opp.get("initial_composite")
-            or 0.0
-        ), 4),
+        "score":                score,
+        "score_breakdown":      breakdown,
+        "angle":                opp.get("angle", ""),
+        "evidence_signal":      opp.get("evidence_signal", ""),
         "source":               opp.get("generation_source", "llm"),
         "status":               status_map.get(opp_status, "pending"),
         "selected":             1 if opp_status in ("selected", "enqueued") else 0,

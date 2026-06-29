@@ -79,9 +79,11 @@ Logging events emitted:
   vpd_stage_a_completed         — info  — full skeleton written after A3 merge
   vpd_stage_a_resumed           — info  — full skeleton checkpoint found, skipping A1/A2/A3
   vpd_stage_b_batch_started     — info  — before each Stage B run_agent() call
-  vpd_stage_b_batch_resumed     — info  — Stage B batch checkpoint found, skipping call
-  vpd_stage_b_batch_completed   — info  — Stage B batch prompts merged into skeleton
-  vpd_planning_completed        — info  — all planning stages done
+  vpd_stage_b_batch_resumed              — info  — Stage B batch checkpoint found, skipping call
+  vpd_stage_b_batch_completed            — info  — Stage B batch prompts merged into skeleton
+  vpd_stage_b_batch_overflow             — warn  — TruncatedResponse; batch halved and retried
+  vpd_stage_b_batch_overflow_unsplittable — error — batch_size=1 still truncates; re-raised
+  vpd_planning_completed                 — info  — all planning stages done
   vpd_muapi_phase_started       — info  — before MUAPI execution loop
   vpd_ref_image_started         — info  — before each generate_reference_image()
   vpd_ref_image_completed       — info  — after each generate_reference_image()
@@ -116,6 +118,7 @@ from hypogeum.muapi import (
     MUAPIBudgetGuard,
     MUAPIQuotaExhausted,
 )
+from hypogeum.openrouter import TruncatedResponse
 from hypogeum.schemas import SchemaError, validate
 
 
@@ -126,8 +129,10 @@ from hypogeum.schemas import SchemaError, validate
 _CLAUDE_SONNET   = "anthropic/claude-sonnet-4.6"
 _AGENT_NAME      = "visual_package_director"
 
-# Stage A1: non-scene metadata — budget 4,096 (entities, palettes, thumbnail brief)
-_VPD_SKELETON_META_MAX_TOKENS        = 4_096
+# Stage A1: non-scene metadata — budget 6,144 (entities × 6, palettes, thumbnail brief)
+# Rationale: A1 output is bounded (≤6 entities, ≤3 thumbnail candidates, no scenes)
+# but can reach 3,000-5,000 tokens for complex multi-entity episodes.
+_VPD_SKELETON_META_MAX_TOKENS        = 6_144
 # Stage A2: scene skeleton per batch — budget 4,096 (12 scenes × ~250 tok ≈ 3,000 tok output)
 _VPD_SKELETON_SCENE_BATCH_MAX_TOKENS = 4_096
 # Hard ceiling on beats per Stage A2 batch (never exceed regardless of estimate)
@@ -409,47 +414,77 @@ def run_visual_package_director(
 
     # ------------------------------------------------------------------
     # Stage B — Cinematic prompts (batched, SCENE_PROMPT_BATCH_SIZE per call)
-    # Checkpoint: vpd_prompts_batch_{i}_{episode_id}.json per batch
+    # Checkpoint: vpd_prompts_batch_{i}_{episode_id}.json per batch.
+    #
+    # Uses a while loop so batch size can be halved when TruncatedResponse
+    # is raised (finish_reason == "length"). Each halving is logged and the
+    # same scene range is retried at the smaller size. If batch_size reaches
+    # 1 and the call still truncates, the error is re-raised (unsplittable).
+    #
+    # On checkpoint resume, scene_cursor advances by the actual number of
+    # prompts in the checkpoint file — safe even when batch sizes differ
+    # between the original run and the resume.
     # ------------------------------------------------------------------
     scenes = visual_package.get("scenes", [])
-    batches = [
-        scenes[i : i + _SCENE_PROMPT_BATCH_SIZE]
-        for i in range(0, len(scenes), _SCENE_PROMPT_BATCH_SIZE)
-    ]
-    for batch_idx, batch in enumerate(batches):
+    scene_cursor = 0
+    batch_idx = 0
+    _b_batch_size = _SCENE_PROMPT_BATCH_SIZE  # local mutable — may be halved on overflow
+
+    while scene_cursor < len(scenes):
+        batch = scenes[scene_cursor : scene_cursor + _b_batch_size]
+        if not batch:
+            break
+
         batch_path = _resolve_output_dir / f"vpd_prompts_batch_{batch_idx}_{episode_id}.json"
+
         if batch_path.exists():
             log.info("vpd_stage_b_batch_resumed", batch=batch_idx, path=str(batch_path))
             prompts_result = json.loads(batch_path.read_text(encoding="utf-8"))
-        else:
-            batch_input = {
-                "task": "write_scene_prompts",
-                "episode_metadata": visual_package.get("episode_metadata", {}),
-                "scenes": [
-                    {
-                        "scene_id": s.get("scene_id"),
-                        "scene_index": s.get("scene_index"),
-                        "source_type": s.get("source_type"),
-                        "visual_spec": s.get("visual_spec", {}),
-                        "narrative_signals": s.get("narrative_signals", []),
-                        "entity_appearances": s.get("entity_appearances", []),
-                        "production_spec": {
-                            "aspect_ratio": s.get("production_spec", {}).get("aspect_ratio", "16:9"),
-                            "duration_seconds": s.get("production_spec", {}).get("duration_seconds", 8),
-                            "primary_tier": s.get("production_spec", {}).get(
-                                "provider_routing", {}
-                            ).get("primary_tier", 2),
-                        },
-                    }
-                    for s in batch
-                ],
-            }
+            n_in_ckpt = len(prompts_result.get("scene_prompts", []))
+            _merge_scene_prompts(visual_package, prompts_result)
             log.info(
-                "vpd_stage_b_batch_started",
+                "vpd_stage_b_batch_completed",
                 batch=batch_idx,
-                scenes_in_batch=len(batch),
-                max_tokens=_VPD_PROMPT_BATCH_MAX_TOKENS,
+                prompts_merged=n_in_ckpt,
+                resumed=True,
             )
+            # Advance by actual count in checkpoint (may differ if batch_size changed)
+            scene_cursor += n_in_ckpt if n_in_ckpt > 0 else len(batch)
+            batch_idx += 1
+            continue
+
+        batch_input = {
+            "task": "write_scene_prompts",
+            "episode_metadata": visual_package.get("episode_metadata", {}),
+            "scenes": [
+                {
+                    "scene_id": s.get("scene_id"),
+                    "scene_index": s.get("scene_index"),
+                    "source_type": s.get("source_type"),
+                    "visual_spec": s.get("visual_spec", {}),
+                    "narrative_signals": s.get("narrative_signals", []),
+                    "entity_appearances": s.get("entity_appearances", []),
+                    "production_spec": {
+                        "aspect_ratio": s.get("production_spec", {}).get("aspect_ratio", "16:9"),
+                        "duration_seconds": s.get("production_spec", {}).get("duration_seconds", 8),
+                        "primary_tier": s.get("production_spec", {}).get(
+                            "provider_routing", {}
+                        ).get("primary_tier", 2),
+                    },
+                }
+                for s in batch
+            ],
+        }
+        log.info(
+            "vpd_stage_b_batch_started",
+            batch=batch_idx,
+            scenes_in_batch=len(batch),
+            scene_cursor=scene_cursor,
+            batch_size=_b_batch_size,
+            max_tokens=_VPD_PROMPT_BATCH_MAX_TOKENS,
+        )
+
+        try:
             prompts_result = run_agent(
                 agent_name=_AGENT_NAME,
                 model_slug=_CLAUDE_SONNET,
@@ -461,17 +496,41 @@ def run_visual_package_director(
                 config=config,
                 output_dir=None,
             )
-            batch_path.write_text(
-                json.dumps(prompts_result, indent=2, ensure_ascii=False), encoding="utf-8"
+        except TruncatedResponse as exc:
+            if _b_batch_size <= 1:
+                log.error(
+                    "vpd_stage_b_batch_overflow_unsplittable",
+                    batch=batch_idx,
+                    completion_tokens=exc.completion_tokens,
+                    max_tokens=exc.max_tokens_set,
+                    scenes_in_batch=len(batch),
+                )
+                raise
+            new_size = max(1, _b_batch_size // 2)
+            log.warn(
+                "vpd_stage_b_batch_overflow",
+                batch=batch_idx,
+                completion_tokens=exc.completion_tokens,
+                max_tokens=exc.max_tokens_set,
+                old_batch_size=_b_batch_size,
+                new_batch_size=new_size,
+                scene_cursor=scene_cursor,
             )
+            _b_batch_size = new_size
+            continue  # retry same scene_cursor with smaller batch
 
-        # Merge prompts into skeleton scenes
+        batch_path.write_text(
+            json.dumps(prompts_result, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        n_written = len(prompts_result.get("scene_prompts", []))
         _merge_scene_prompts(visual_package, prompts_result)
         log.info(
             "vpd_stage_b_batch_completed",
             batch=batch_idx,
-            prompts_merged=len(prompts_result.get("scene_prompts", [])),
+            prompts_merged=n_written,
         )
+        scene_cursor += len(batch)
+        batch_idx += 1
 
     # ------------------------------------------------------------------
     # Stage C — Package assembly and final validation
@@ -521,9 +580,12 @@ def run_visual_package_director(
             scene_count=post_vpd_finance.get("cost_breakdown", {}).get("scene_count"),
         )
         if post_vpd_finance.get("verdict") == "BLOCKED":
-            raise FinancePostVPDBlockedError(
-                episode_id=episode_id, record=post_vpd_finance
-            )
+            # Check for an operator-granted single-use approval before blocking.
+            _approved = _check_finance_approval(episode_id, post_vpd_finance, log)
+            if not _approved:
+                raise FinancePostVPDBlockedError(
+                    episode_id=episode_id, record=post_vpd_finance
+                )
 
     # ------------------------------------------------------------------
     # Phase 2 — MUAPI execution
@@ -964,3 +1026,58 @@ def _write_final_package(
     )
 
 
+# ---------------------------------------------------------------------------
+# Finance approval check
+# ---------------------------------------------------------------------------
+
+def _check_finance_approval(
+    episode_id: str,
+    finance_record: dict,
+    log,
+) -> bool:
+    """
+    Check whether the operator has granted a single-use finance approval for
+    this episode. If a valid (pending, non-expired) approval exists, consume it,
+    log the event, and return True (run may proceed past the budget ceiling).
+
+    Returns False when no valid approval exists (caller should raise
+    FinancePostVPDBlockedError).
+
+    Non-blocking: any DB error returns False so the gate behaves safely.
+    """
+    from datetime import datetime, timezone
+    from hypogeum.db import (
+        get_connection,
+        get_valid_finance_approval,
+        consume_finance_approval,
+    )
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(None)
+        try:
+            approval = get_valid_finance_approval(conn, episode_id, now)
+            if approval is None:
+                return False
+            consume_finance_approval(conn, approval["approval_id"])
+            conn.commit()
+        finally:
+            conn.close()
+
+        log.info(
+            "vpd_finance_gate_approved",
+            episode_id=episode_id,
+            approval_id=approval["approval_id"],
+            approved_by=approval.get("approved_by", "operator"),
+            estimated_spend_usd=finance_record.get("estimated_spend_usd"),
+            ceiling_at_approval=approval.get("ceiling_at_approval"),
+            overage_usd=approval.get("overage_usd"),
+        )
+        return True
+
+    except Exception as exc:
+        log.warn(
+            "vpd_finance_approval_check_failed",
+            episode_id=episode_id,
+            error=str(exc)[:200],
+        )
+        return False  # safe default: block when approval check fails

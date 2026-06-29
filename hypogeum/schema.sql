@@ -738,7 +738,8 @@ CREATE TABLE IF NOT EXISTS run_queue (
     completed_at      TEXT,
     failed_at         TEXT,
     error_message     TEXT,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    cancel_requested  INTEGER NOT NULL DEFAULT 0
 );
 
 -- General status lookup (most frequent query path)
@@ -1545,3 +1546,50 @@ CREATE INDEX IF NOT EXISTS idx_releases_episode    ON releases(episode_id);
 CREATE INDEX IF NOT EXISTS idx_releases_topic      ON releases(topic_id);
 CREATE INDEX IF NOT EXISTS idx_releases_target     ON releases(target_publish_at);
 CREATE INDEX IF NOT EXISTS idx_releases_status     ON releases(status);
+
+-- ---------------------------------------------------------------------------
+-- finance_approvals — operator-granted single-use overrides for BLOCKED runs
+-- ---------------------------------------------------------------------------
+-- One row per approval. The pipeline checks this table before raising
+-- FinancePostVPDBlockedError. A valid (non-expired, non-consumed) approval
+-- lets the run proceed past the budget ceiling for this episode only.
+--
+-- Lifecycle: pending → consumed (run completed) | expired (24h elapsed)
+
+CREATE TABLE IF NOT EXISTS finance_approvals (
+    approval_id             TEXT    NOT NULL PRIMARY KEY,
+    episode_id              TEXT    NOT NULL,
+    run_id                  TEXT,           -- run that was blocked; NULL if approved proactively
+    approved_at             TEXT    NOT NULL,
+    approved_by             TEXT    NOT NULL DEFAULT 'operator',
+    estimated_spend_usd     REAL    NOT NULL,
+    ceiling_at_approval     REAL    NOT NULL,
+    overage_usd             REAL    NOT NULL,
+    note                    TEXT,
+    expires_at              TEXT    NOT NULL,  -- ISO 8601 UTC; auto-set to approved_at + 24h
+    status                  TEXT    NOT NULL DEFAULT 'pending'
+                                CHECK(status IN ('pending','consumed','expired'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_finance_approvals_episode ON finance_approvals(episode_id);
+CREATE INDEX IF NOT EXISTS idx_finance_approvals_status  ON finance_approvals(status);
+
+-- ---------------------------------------------------------------------------
+-- worker_control
+-- Key-value store for cross-process worker control signals.
+-- Written by dashboard operator; polled by worker between pipeline stages.
+--
+-- Standard keys:
+--   queue_paused    '0' | '1'  — pause new job claiming (worker skips poll)
+--   stop_requested  '0' | '1'  — stop worker after current job finishes
+--   worker_status   'stopped' | 'idle' | 'claiming' | 'running' | 'cancelling'
+--   active_queue_id UUID or ''  — queue_id of the currently executing item
+--   active_run_id   UUID or ''  — run_id of the currently executing run
+--   worker_id       UUID or ''  — UUID of the current worker process
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS worker_control (
+    key        TEXT NOT NULL PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);

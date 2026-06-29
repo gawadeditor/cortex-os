@@ -65,7 +65,7 @@ from hypogeum.topic_discovery import (
 # ---------------------------------------------------------------------------
 
 _AGENT_NAME = "topic_ideator"
-_MAX_TOKENS = 4_096
+_MAX_TOKENS = 6_144   # raised from 4096: score_breakdown adds ~120 tokens per candidate
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _PROMPT_FILE = _PROMPTS_DIR / "topic_ideator.txt"
 

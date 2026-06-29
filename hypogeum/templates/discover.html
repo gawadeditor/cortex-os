@@ -125,9 +125,22 @@
   </div>
   {% endif %}
 </div>
-<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
+<p style="font-size:12px; color:var(--muted); margin-bottom:8px;">
   Discovery runs automatically on schedule. The candidates below were scored by the last cycle.
 </p>
+<div style="margin-bottom:var(--gap); padding:8px 12px; background:rgba(210,153,34,.06);
+            border:1px solid rgba(210,153,34,.2); border-radius:var(--radius);
+            font-size:11px; color:var(--muted); line-height:1.7;">
+  <strong style="color:var(--yellow);">&#9888; Scoring status: rubric-based, not analytics-backed.</strong>
+  Scores reflect an LLM-assigned breakdown across 8 dimensions (click potential, curiosity gap,
+  evidence strength, visual potential, retention, feasibility, channel fit, novelty).
+  Scores vary per candidate (typical range 0.45–0.85) but are not yet calibrated against
+  real channel performance data.
+  <em>Cached candidates from before the last discovery cycle may still show 0.70
+  (old constant score) — run a fresh cycle to get real scores.</em>
+  <br><strong>Backlog:</strong> Replace with analytics-backed scoring once YouTube/social connectors provide
+  real CTR, retention, and watch-time signals.
+</div>
 
 {# ── Emergency: manual trigger ── #}
 <details style="margin-bottom:var(--gap);">
@@ -235,17 +248,57 @@
         {% endif %}
       </div>
 
+      {# ── Score breakdown (when LLM-assigned scores are present) ── #}
+      {% if c.score_breakdown %}
+      <div style="margin-top:6px; margin-bottom:4px;">
+        <div style="font-size:10px; color:var(--muted); text-transform:uppercase;
+                    letter-spacing:.04em; margin-bottom:4px;">Score breakdown</div>
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:3px 8px;">
+          {% set bd = c.score_breakdown %}
+          {% for dim, label in [
+            ('click_potential',      'Click'),
+            ('curiosity_gap',        'Curiosity'),
+            ('evidence_strength',    'Evidence'),
+            ('visual_potential',     'Visual'),
+            ('retention_potential',  'Retention'),
+            ('production_feasibility','Feasibility'),
+            ('channel_fit',          'Fit'),
+            ('novelty',              'Novelty')
+          ] %}
+          {% if bd.get(dim) is not none %}
+          {% set v = bd.get(dim, 0) %}
+          <div style="display:flex; flex-direction:column; gap:2px;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase;
+                        letter-spacing:.03em; white-space:nowrap;">{{ label }}</div>
+            <div style="display:flex; align-items:center; gap:3px;">
+              <div style="flex:1; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
+                <div style="width:{{ (v / 10 * 100)|int }}%; height:100%; border-radius:2px;
+                            background:{% if v >= 8 %}var(--green){% elif v >= 5 %}var(--yellow){% else %}var(--muted){% endif %};"></div>
+              </div>
+              <span style="font-size:9px; font-weight:700; font-family:monospace;
+                           color:{% if v >= 8 %}var(--green){% elif v >= 5 %}var(--yellow){% else %}var(--muted){% endif %};">{{ v }}</span>
+            </div>
+          </div>
+          {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
       {# ── Rationale ── #}
-      {% if c.ctr_rationale or c.retention_rationale or c.watch_time_rationale or c.risk %}
+      {% if c.ctr_rationale or c.retention_rationale or c.watch_time_rationale or c.evidence_signal or c.risk %}
       <div class="rationale-grid">
         {% if c.ctr_rationale %}
-        <span class="rationale-lbl">Click</span><span>{{ c.ctr_rationale }}</span>
+        <span class="rationale-lbl">Hook</span><span>{{ c.ctr_rationale }}</span>
         {% endif %}
         {% if c.retention_rationale %}
-        <span class="rationale-lbl">Retention</span><span>{{ c.retention_rationale }}</span>
+        <span class="rationale-lbl">Distinction</span><span>{{ c.retention_rationale }}</span>
         {% endif %}
         {% if c.watch_time_rationale %}
-        <span class="rationale-lbl">Watch time</span><span>{{ c.watch_time_rationale }}</span>
+        <span class="rationale-lbl">Visual</span><span>{{ c.watch_time_rationale }}</span>
+        {% endif %}
+        {% if c.evidence_signal %}
+        <span class="rationale-lbl">Evidence</span><span>{{ c.evidence_signal }}</span>
         {% endif %}
         {% if c.risk %}
         <span class="rationale-lbl">Risk</span>
@@ -292,28 +345,31 @@
   {% endif %}
 </div>
 
-{# ── Queue panel — collapsed; worker starts these automatically ── #}
+{# ── Queue panel ── #}
 {% if queued_topics %}
 <details style="margin-top:var(--gap);">
   <summary style="padding:8px 14px; background:var(--surface); border:1px solid var(--border);
                   border-radius:var(--radius); font-size:12px; color:var(--muted);
                   list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
     <span style="font-size:10px;">&#9654;</span>
-    Emergency: force-start a queued topic
+    Production queue
     <span style="font-size:11px; margin-left:4px;">— {{ queued_topics|length }} topic{% if queued_topics|length != 1 %}s{% endif %} waiting
-      &ensp;·&ensp; <a href="/create" style="color:var(--blue);" onclick="event.stopPropagation()">View queue &#8594;</a>
+      &ensp;·&ensp; <a href="/create" style="color:var(--blue);" onclick="event.stopPropagation()">Full queue view &#8594;</a>
     </span>
   </summary>
   <div class="card queue-panel" style="padding:0; border-top:none; border-radius:0 0 var(--radius) var(--radius); margin-top:0;">
     <div style="padding:10px 16px 6px; font-size:12px; color:var(--muted); border-bottom:1px solid var(--border);">
-      The run scheduler picks from this queue automatically. Only force-start for debugging.
+      The worker picks topics automatically. Use Start only to bypass the scheduler immediately.
     </div>
     {% for t in queued_topics %}
     <div class="queue-row">
       <div class="queue-topic">
         <div class="queue-topic-text">{{ t.topic_text }}</div>
         <div class="queue-meta">
-          {% if t.source == 'discovered' %}
+          {% if t.source == 'rerun' %}
+            <span style="color:var(--yellow); font-weight:600;">&#8635; recover</span>
+            {% if t.episode_id %}<span style="font-size:10px;"><code>{{ t.episode_id }}</code></span>{% endif %}
+          {% elif t.source == 'discovered' %}
             <span class="queue-source-disc">&#128270; discovered</span>
             {% if t.discovery_score is not none and t.discovery_score %}<span>score {{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
           {% else %}
@@ -322,6 +378,11 @@
           {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
           <span>priority {{ t.priority }}</span>
         </div>
+        {% if t.source == 'rerun' %}
+        <div style="font-size:10px; color:var(--muted); margin-top:3px; line-height:1.6;">
+          Checkpoint resume: same episode_id · skips completed stages · reuses VPD skeleton + Stage B batches
+        </div>
+        {% endif %}
       </div>
       <div style="display:flex; gap:4px; flex-shrink:0; align-items:center;">
         <form method="POST" action="/create/launch" style="display:inline;">
@@ -330,8 +391,10 @@
           <input type="hidden" name="video_type" value="long_video">
           <input type="hidden" name="quality_mode" value="balanced">
           <input type="hidden" name="platforms" value="youtube">
-          <button type="submit" class="btn btn-approve"
-                  style="font-size:11px; padding:3px 10px;">&#9654; Start</button>
+          <button type="submit" class="btn {% if t.source == 'rerun' %}btn-approve{% endif %}"
+                  style="font-size:11px; padding:3px 10px; white-space:nowrap;">
+            {% if t.source == 'rerun' %}&#8635; Resume{% else %}&#9654; Start{% endif %}
+          </button>
         </form>
         <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
           <button type="submit" class="btn" onclick="return confirm('Remove this topic from queue?')"

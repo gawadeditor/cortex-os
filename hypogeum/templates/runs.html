@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Runs — Factory OS</title>
   {% include '_base_style.html' %}
+  <style>
+    .badge-orphaned { background:#2a1a00; color:#d29922; border:1px solid #9e6a03; }
+    .orphan-note { font-size:10px; color:#d29922; display:block; margin-top:2px; }
+  </style>
 </head>
 <body>
 {% include '_nav.html' %}
@@ -54,7 +58,14 @@
             <br><span class="muted" style="font-size:11px;">{{ r.episode_topic[:60] }}</span>
           {% endif %}
         </td>
-        <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+        <td>
+          {% if r.error_message and r.error_message.startswith('Run orphaned') %}
+            <span class="badge badge-orphaned">orphaned</span>
+            <span class="orphan-note">worker not active</span>
+          {% else %}
+            <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+          {% endif %}
+        </td>
         <td class="muted" style="font-size:12px; white-space:nowrap;">
           {{ r.started_at[:16] if r.started_at else '—' }}
         </td>

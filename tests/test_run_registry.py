@@ -367,6 +367,7 @@ class TestStateMachine:
             "queued", "running", "paused",
             "awaiting_review", "awaiting_publish_approval",
             "publishing", "completed", "failed", "blocked",
+            "cancelled",   # operator-requested mid-run cancellation
         }
         assert RUN_STATES == expected
 

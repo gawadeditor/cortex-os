@@ -57,11 +57,21 @@
                      letter-spacing: .05em; margin-top: 4px; }
 
     /* Status badge chip */
-    .badge-worker-idle    { background: #0d1f12; color: var(--green); border: 1px solid #2ea043; }
-    .badge-worker-running { background: #0d1620; color: var(--blue);  border: 1px solid #1f6feb; }
-    .badge-worker-error   { background: #1f0a09; color: var(--red);   border: 1px solid #da3633; }
-    .badge-worker-unknown { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
-    .badge-worker-paused  { background: #1e1a00; color: var(--yellow); border: 1px solid #9e6a03; }
+    .badge-worker-idle      { background: #0d1f12; color: var(--green); border: 1px solid #2ea043; }
+    .badge-worker-running   { background: #0d1620; color: var(--blue);  border: 1px solid #1f6feb; }
+    .badge-worker-claiming  { background: #0d1620; color: var(--blue);  border: 1px solid #1f6feb; }
+    .badge-worker-error     { background: #1f0a09; color: var(--red);   border: 1px solid #da3633; }
+    .badge-worker-unknown   { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+    .badge-worker-paused    { background: #1e1a00; color: var(--yellow); border: 1px solid #9e6a03; }
+    .badge-worker-cancelling { background: #1e0a1e; color: #d2a8ff; border: 1px solid #8957e5; }
+    .dot-cancelling { background: #8957e5; animation: pulse 0.8s ease-in-out infinite; }
+    .badge-queue-paused { background: #1e1a00; color: var(--yellow); border: 1px solid #9e6a03;
+                          font-size:10px; padding:1px 8px; border-radius:3px; display:inline-block; }
+    .btn-cancel-run { font-size: 10px; padding: 2px 8px; border-radius: var(--radius);
+                      border: 1px solid var(--red); color: var(--red);
+                      background: transparent; cursor: pointer; white-space:nowrap; }
+    .btn-cancel-run:hover { background: rgba(218,54,51,.12); }
+    .btn-cancel-run:disabled { opacity: .4; cursor: default; }
 
     /* ── Schedule control panel ── */
     .sched-table      { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -118,13 +128,135 @@
 
 <div class="page-header">
   <h1>Infrastructure Workers</h1>
-  <span class="page-meta">Background worker state and last outcomes</span>
+  <span class="page-meta">Worker process control &amp; background job state</span>
 </div>
 
-<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
-  Worker status is read from existing database tables.
-  Workers with no records show <em>unknown</em> status until they run.
-</p>
+{# ══════════════════════════════════════════════════════
+   PRODUCTION WORKER PROCESS CONTROL
+   This is the only place to start/stop the pipeline worker without a terminal.
+══════════════════════════════════════════════════════ #}
+<div class="card" style="margin-bottom:var(--gap); border-color:
+  {% if worker_process.status == 'running' %}var(--blue)
+  {% elif worker_process.status == 'crashed' %}var(--red)
+  {% else %}var(--border){% endif %};">
+
+  <div class="card-title" style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+    <span class="status-dot dot-{{ worker_process.status_class }}" id="wp-status-dot"></span>
+    Production Worker
+    <span class="badge badge-worker-{{ worker_process.status_class }}"
+          style="font-size:10px; padding:1px 8px;" id="wp-status-badge">
+      {{ worker_process.status_label | upper }}
+    </span>
+    {% if worker_process.queue_paused %}
+    <span class="badge-queue-paused" id="wp-queue-paused-badge">QUEUE PAUSED</span>
+    {% else %}
+    <span class="badge-queue-paused" id="wp-queue-paused-badge" style="display:none;">QUEUE PAUSED</span>
+    {% endif %}
+    {% if worker_process.pid %}
+    <span style="font-size:11px; color:var(--muted); margin-left:4px;">PID {{ worker_process.pid }}</span>
+    {% endif %}
+    <button onclick="refreshWorkerStatus()" style="margin-left:auto; font-size:11px; padding:2px 8px;
+            background:none; border:1px solid var(--border); border-radius:var(--radius);
+            color:var(--muted); cursor:pointer;" title="Refresh status">&#8635;</button>
+  </div>
+
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+    The worker auto-picks queued topics, runs the full 9-stage pipeline, and handles
+    checkpoint recovery for failed runs. <strong>No terminal required</strong> — use the controls below.
+  </p>
+
+  {# ── Worker Controls ── #}
+  <div style="margin-bottom:10px;">
+    <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase;
+                letter-spacing:.05em; margin-bottom:6px;">Worker Process</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:6px;">
+      <button class="btn btn-approve" id="btn-worker-start"
+              onclick="workerAction('start', this)"
+              {% if worker_process.running %}disabled style="opacity:.4;"{% endif %}>
+        ▶ Start Worker
+      </button>
+      <button class="btn" id="btn-worker-stop"
+              onclick="workerAction('stop', this)"
+              style="border-color:var(--red); color:var(--red);"
+              {% if not worker_process.running %}disabled style="opacity:.4;"{% endif %}>
+        ⏹ Stop Worker
+      </button>
+      <button class="btn" id="btn-worker-once"
+              onclick="workerAction('run-once', this)"
+              style="border-color:var(--yellow); color:var(--yellow);">
+        ▶ Run Once
+      </button>
+      <span id="worker-action-result" style="font-size:12px; color:var(--muted); margin-left:4px;"></span>
+    </div>
+    <div style="font-size:11px; color:var(--muted); line-height:1.7;">
+      <strong style="color:var(--text);">▶ Start Worker</strong> — runs the continuous loop (60 s interval); auto-picks queued jobs.<br>
+      <strong style="color:var(--text);">⏹ Stop Worker</strong> — sends SIGTERM + sets stop flag; worker finishes current job then exits.<br>
+      <strong style="color:var(--text);">▶ Run Once</strong> — claims exactly one queued job now (bypass scheduler); exits when done.
+    </div>
+  </div>
+
+  {# ── Queue Controls ── #}
+  <div style="border-top:1px solid var(--border); padding-top:10px; margin-bottom:14px;">
+    <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase;
+                letter-spacing:.05em; margin-bottom:6px;">Queue</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:6px;">
+      <button class="btn" id="btn-queue-pause"
+              onclick="queueAction('pause', this)"
+              style="border-color:var(--yellow); color:var(--yellow);"
+              {% if queue_paused %}disabled style="opacity:.4;"{% endif %}>
+        ⏸ Pause Queue
+      </button>
+      <button class="btn btn-approve" id="btn-queue-resume"
+              onclick="queueAction('resume', this)"
+              {% if not queue_paused %}disabled style="opacity:.4;"{% endif %}>
+        ▶ Resume Queue
+      </button>
+      <span id="queue-action-result" style="font-size:12px; color:var(--muted); margin-left:4px;"></span>
+    </div>
+    <div style="font-size:11px; color:var(--muted); line-height:1.7;">
+      <strong style="color:var(--text);">⏸ Pause Queue</strong> — worker skips claiming new jobs; active run continues.<br>
+      <strong style="color:var(--text);">▶ Resume Queue</strong> — restore normal job claiming.
+    </div>
+  </div>
+
+  {# ── Failed runs shortcut ── #}
+  <div style="display:flex; gap:12px; flex-wrap:wrap; font-size:12px; margin-bottom:14px;">
+    <a href="/runs?status=failed" class="btn" style="font-size:11px; padding:4px 12px;">
+      ✗ View failed runs →
+    </a>
+    <a href="/create" class="btn" style="font-size:11px; padding:4px 12px;">
+      ↑ Production queue →
+    </a>
+  </div>
+
+  {# ── Worker log tail ── #}
+  <details id="worker-log-details">
+    <summary style="font-size:11px; color:var(--muted); cursor:pointer; padding:4px 0;
+                    list-style:none; display:flex; align-items:center; gap:6px;">
+      <span style="font-size:9px;">&#9654;</span>
+      Worker log (last 40 lines)
+      <span style="font-size:10px; margin-left:4px; color:var(--muted);">
+        — <code style="font-size:9px;">.hypogeum-assets/worker.log</code>
+      </span>
+      <button onclick="event.preventDefault(); event.stopPropagation(); refreshWorkerLog()"
+              style="margin-left:auto; font-size:10px; padding:1px 6px; background:none;
+                     border:1px solid var(--border); border-radius:var(--radius);
+                     color:var(--muted); cursor:pointer;">Refresh</button>
+    </summary>
+    <div id="worker-log-container"
+         style="margin-top:8px; padding:10px 12px; background:var(--bg);
+                border:1px solid var(--border); border-radius:var(--radius);
+                font-family:monospace; font-size:11px; line-height:1.6;
+                max-height:300px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;">
+      {% if worker_log_lines %}
+        {% for line in worker_log_lines %}{{ line }}
+{% endfor %}
+      {% else %}
+        <span style="color:var(--muted);">No worker log entries yet. Start the worker to see output.</span>
+      {% endif %}
+    </div>
+  </details>
+</div>
 
 {% if not ok %}
 <div class="card" style="border-color:var(--red); margin-bottom:var(--gap); padding:12px 16px;">
@@ -299,6 +431,88 @@
 
 
 {# ══════════════════════════════════════════════════════
+   RUN QUEUE SNAPSHOT
+══════════════════════════════════════════════════════ #}
+<div class="card" style="margin-top:var(--gap); padding:16px 20px;">
+  <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+    <div class="card-title" style="margin-bottom:0;">Run Queue</div>
+    {% if queue_paused %}
+    <span class="badge-queue-paused">PAUSED</span>
+    {% endif %}
+  </div>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+    Active queue items — ordered by claim priority (claimed first, then priority, then rerun-before-schedule, then newest-first).
+    Use <strong>Cancel Run</strong> to abort the active run between pipeline stages (checkpoints preserved).
+  </p>
+  {% if queue_items %}
+  <table style="width:100%; border-collapse:collapse; font-size:12px; font-family:monospace;">
+    <thead>
+      <tr style="color:var(--muted); text-align:left; border-bottom:1px solid var(--border);">
+        <th style="padding:4px 8px;">#</th>
+        <th style="padding:4px 8px;">Status</th>
+        <th style="padding:4px 8px;">Source</th>
+        <th style="padding:4px 8px;">Channel</th>
+        <th style="padding:4px 8px;">Episode ID</th>
+        <th style="padding:4px 8px;">Recovery From</th>
+        <th style="padding:4px 8px;">Created</th>
+        <th style="padding:4px 8px;">Queue ID</th>
+        <th style="padding:4px 8px;">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for item in queue_items %}
+      <tr style="border-bottom:1px solid var(--border); {% if item.status == 'claimed' %}background:rgba(0,120,255,.05);{% endif %}"
+          id="qrow-{{ item.queue_id }}">
+        <td style="padding:4px 8px; color:var(--muted);">{{ loop.index }}</td>
+        <td style="padding:4px 8px;">
+          {% if item.cancel_requested %}
+          <span style="color:#d2a8ff; font-weight:600;">CANCELLING</span>
+          {% else %}
+          <span style="color:{% if item.status == 'claimed' %}var(--blue){% else %}var(--yellow){% endif %}; font-weight:600;">
+            {{ item.status | upper }}
+          </span>
+          {% endif %}
+        </td>
+        <td style="padding:4px 8px;">
+          {% if item.source == 'rerun' %}
+          <span style="color:var(--green); font-weight:600;">{{ item.source }}</span>
+          {% else %}
+          <span style="color:var(--muted);">{{ item.source or '—' }}</span>
+          {% endif %}
+        </td>
+        <td style="padding:4px 8px;">{{ item.channel_id or '—' }}</td>
+        <td style="padding:4px 8px; color:{% if item.episode_id %}var(--text){% else %}var(--muted){% endif %};">
+          {{ item.episode_id or '—' }}
+        </td>
+        <td style="padding:4px 8px; color:var(--muted);">
+          {{ (item.recovery_from_run_id or '—')[:8] }}{% if item.recovery_from_run_id %}…{% endif %}
+        </td>
+        <td style="padding:4px 8px; color:var(--muted);">{{ item.created_at or '—' }}</td>
+        <td style="padding:4px 8px; color:var(--muted);">{{ item.queue_id[:8] }}…</td>
+        <td style="padding:4px 8px;">
+          {% if item.status == 'claimed' and not item.cancel_requested %}
+          <button class="btn-cancel-run"
+                  onclick="cancelRun('{{ item.queue_id }}', this)"
+                  title="Cancel this run at the next stage boundary">
+            ✕ Cancel Run
+          </button>
+          {% elif item.cancel_requested %}
+          <span style="font-size:10px; color:#d2a8ff;">cancelling…</span>
+          {% else %}
+          <span style="font-size:10px; color:var(--muted);">—</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div style="color:var(--muted); font-size:13px; padding:8px 0;">Queue is empty — no active or pending work items.</div>
+  {% endif %}
+</div>
+
+
+{# ══════════════════════════════════════════════════════
    PRODUCTION TIMELINE
 ══════════════════════════════════════════════════════ #}
 <div class="card" style="margin-top:var(--gap); padding:16px 20px;">
@@ -422,6 +636,151 @@
 
 
 <script>
+// ── Worker process controls ──────────────────────────────────────────────
+function workerAction(action, btn) {
+  var resultEl = document.getElementById('worker-action-result');
+  var startBtn = document.getElementById('btn-worker-start');
+  var stopBtn  = document.getElementById('btn-worker-stop');
+
+  btn.disabled = true;
+  if (resultEl) resultEl.textContent = 'Working…';
+
+  fetch('/api/worker/' + action, {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (resultEl) {
+      resultEl.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+      resultEl.textContent = (d.ok ? '✓ ' : '✗ ') + (d.note || d.error || '');
+    }
+    if (d.ok) {
+      setTimeout(function() { refreshWorkerStatus(); }, 1200);
+    } else {
+      btn.disabled = false;
+    }
+  })
+  .catch(function(e) {
+    btn.disabled = false;
+    if (resultEl) { resultEl.style.color = 'var(--red)'; resultEl.textContent = '✗ network error'; }
+  });
+}
+
+// ── Queue pause / resume ─────────────────────────────────────────────────
+function queueAction(action, btn) {
+  var resultEl  = document.getElementById('queue-action-result');
+  var pauseBtn  = document.getElementById('btn-queue-pause');
+  var resumeBtn = document.getElementById('btn-queue-resume');
+  var pauseBadgeCard = document.getElementById('wp-queue-paused-badge');
+
+  btn.disabled = true;
+  if (resultEl) resultEl.textContent = 'Working…';
+
+  var url = action === 'pause' ? '/api/worker/pause-queue' : '/api/worker/resume-queue';
+  fetch(url, {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (resultEl) {
+      resultEl.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+      resultEl.textContent = (d.ok ? '✓ ' : '✗ ') + (d.note || d.error || '');
+    }
+    if (d.ok) {
+      var paused = !!d.queue_paused;
+      if (pauseBtn)  pauseBtn.disabled  = paused;
+      if (resumeBtn) resumeBtn.disabled = !paused;
+      if (pauseBadgeCard) {
+        pauseBadgeCard.style.display = paused ? '' : 'none';
+      }
+    } else {
+      btn.disabled = false;
+    }
+  })
+  .catch(function(e) {
+    btn.disabled = false;
+    if (resultEl) { resultEl.style.color = 'var(--red)'; resultEl.textContent = '✗ network error'; }
+  });
+}
+
+// ── Cancel active run ────────────────────────────────────────────────────
+function cancelRun(queueId, btn) {
+  if (!confirm('Cancel this run? The pipeline will stop at the next stage boundary. Checkpoints are preserved.')) return;
+  btn.disabled = true;
+  btn.textContent = 'cancelling…';
+
+  fetch('/api/worker/cancel-run/' + queueId, {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      // Update the row status cell to show "CANCELLING"
+      var row = document.getElementById('qrow-' + queueId);
+      if (row) {
+        var statusCell = row.cells[1];
+        if (statusCell) statusCell.innerHTML = '<span style="color:#d2a8ff; font-weight:600;">CANCELLING</span>';
+        var actionCell = row.cells[8];
+        if (actionCell) actionCell.innerHTML = '<span style="font-size:10px; color:#d2a8ff;">cancelling…</span>';
+      }
+    } else {
+      btn.disabled = false;
+      btn.textContent = '✕ Cancel Run';
+      alert('Cancel failed: ' + (d.error || d.note || 'unknown error'));
+    }
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.textContent = '✕ Cancel Run';
+    alert('Network error — cancel request may not have been received.');
+  });
+}
+
+function refreshWorkerStatus() {
+  fetch('/api/worker/status')
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    var badge  = document.getElementById('wp-status-badge');
+    var dot    = document.getElementById('wp-status-dot');
+    var startB = document.getElementById('btn-worker-start');
+    var stopB  = document.getElementById('btn-worker-stop');
+    var qBadge = document.getElementById('wp-queue-paused-badge');
+    var pBtn   = document.getElementById('btn-queue-pause');
+    var rBtn   = document.getElementById('btn-queue-resume');
+
+    if (badge) {
+      badge.textContent = d.status_label ? d.status_label.toUpperCase() : d.status.toUpperCase();
+      badge.className = 'badge badge-worker-' + (d.status_class || d.status);
+    }
+    if (dot) {
+      var dotClass = 'status-dot dot-' + (d.status_class || d.status);
+      dot.className = dotClass;
+    }
+    if (startB) startB.disabled = d.running;
+    if (stopB)  stopB.disabled  = !d.running;
+    if (qBadge) qBadge.style.display = d.queue_paused ? '' : 'none';
+    if (pBtn)   pBtn.disabled  = !!d.queue_paused;
+    if (rBtn)   rBtn.disabled  = !d.queue_paused;
+    var res = document.getElementById('worker-action-result');
+    if (res && res.textContent === 'Working…') res.textContent = '';
+  })
+  .catch(function() {});
+}
+
+function refreshWorkerLog() {
+  fetch('/api/worker/logs?n=60')
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    var container = document.getElementById('worker-log-container');
+    if (!container) return;
+    if (d.lines && d.lines.length) {
+      container.textContent = d.lines.join('\n');
+      container.scrollTop = container.scrollHeight;
+    } else {
+      container.textContent = 'No worker log entries yet.';
+    }
+  })
+  .catch(function() {});
+}
+
+// Auto-refresh status every 8 s while the page is open
+setInterval(refreshWorkerStatus, 8000);
+
+// ── Schedule controls ────────────────────────────────────────────────────
 function scheduleAction(scheduleId, action, btn) {
   var resultEl = document.getElementById('sar-' + scheduleId);
   btn.disabled = true;

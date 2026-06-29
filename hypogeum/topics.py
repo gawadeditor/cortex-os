@@ -188,6 +188,7 @@ def enqueue_topic(
     source: str = "manual",
     discovery_score: Optional[float] = None,
     candidate_id: Optional[str] = None,
+    episode_id: Optional[str] = None,
 ) -> str:
     """
     Add a topic to the episode backlog for a channel.
@@ -200,6 +201,9 @@ def enqueue_topic(
                           Raises ChannelNotFoundError if not found. Default False —
                           the CLI and import helpers pass True explicitly.
         db_path:          Override DB path (for tests).
+        episode_id:       Optional episode_id to preserve for reruns. When set, the
+                          queue worker reuses this episode_id so pipeline checkpoints
+                          on disk are picked up. Reruns bypass the duplicate check.
 
     Returns:
         New topic_id (UUID4 string).
@@ -209,6 +213,7 @@ def enqueue_topic(
         ChannelNotFoundError: If validate_channel=True and the channel does not exist.
         DuplicateTopicError: If an identical queued/claimed topic already exists
                              for this channel (case-insensitive, whitespace-normalised).
+                             NOT raised when source='rerun' (reruns always proceed).
     """
     if not topic_text or not topic_text.strip():
         raise ValueError("topic_text must be a non-empty string.")
@@ -228,7 +233,8 @@ def enqueue_topic(
 
     conn = get_connection(db_path)
     try:
-        if _has_active_duplicate(conn, channel_id, clean_text):
+        # Reruns bypass dedup — same topic text is expected and intentional
+        if source != "rerun" and _has_active_duplicate(conn, channel_id, clean_text):
             raise DuplicateTopicError(channel_id, clean_text)
 
         insert_episode_topic(
@@ -242,6 +248,7 @@ def enqueue_topic(
             candidate_id=candidate_id,
             created_at=now,
             updated_at=now,
+            episode_id=episode_id,
         )
         conn.commit()
     finally:

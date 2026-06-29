@@ -72,6 +72,7 @@ from typing import Callable, List, Optional
 import hypogeum.pipeline as _pipeline_module  # patched by tests via monkeypatch
 
 from hypogeum.db import (
+    abort_queue_item,
     cancel_queue_item,
     claim_next_queue_item,
     complete_queue_item,
@@ -81,7 +82,9 @@ from hypogeum.db import (
     get_queue_item,
     initialize_schema,
     insert_queue_item,
+    is_cancel_requested,
     release_queue_item,
+    set_worker_control,
     update_scheduled_run_status,
 )
 
@@ -113,6 +116,8 @@ def enqueue(
     channel_id: Optional[str] = None,
     episode_id: Optional[str] = None,
     priority: int = 0,
+    source: Optional[str] = None,
+    recovery_from_run_id: Optional[str] = None,
 ) -> str:
     """
     Add a work item to the run queue.
@@ -122,13 +127,17 @@ def enqueue(
     Does not execute the pipeline or generate any content.
 
     Args:
-        db_path:          Override DB path (for tests).
-        scheduled_run_id: FK to scheduled_runs row (optional).
-        schedule_id:      Denormalized schedule FK (optional).
-        channel_id:       Channel scope (optional).
-        episode_id:       Future-use episode linkage (optional).
-        priority:         Claim ordering — lower integer = higher priority.
-                          Default 0. Use negative values for urgent items.
+        db_path:               Override DB path (for tests).
+        scheduled_run_id:      FK to scheduled_runs row (optional).
+        schedule_id:           Denormalized schedule FK (optional).
+        channel_id:            Channel scope (optional).
+        episode_id:            Links queue item to a specific episode for reruns.
+        priority:              Claim ordering — lower integer = higher priority.
+                               Default 0. Use negative values for urgent items.
+        source:                'rerun' | 'schedule' | 'manual'. Used for claim
+                               ordering (reruns are preferred over schedules).
+        recovery_from_run_id:  run_id of the failed run this item recovers.
+                               Set for source='rerun' items.
 
     Returns:
         New queue_id (UUID4 string).
@@ -149,6 +158,8 @@ def enqueue(
             channel_id=channel_id,
             episode_id=episode_id,
             priority=priority,
+            source=source,
+            recovery_from_run_id=recovery_from_run_id,
         )
         conn.commit()
     finally:
@@ -408,6 +419,7 @@ class ProcessResult:
         "skipped"   — CALOG denied the run; item released or failed
         "empty"     — queue was empty; nothing claimed
         "no_topic"  — channel has no queued topics; queue item released
+        "cancelled" — operator cancelled the run; item marked cancelled
     """
     status: str
     queue_id: Optional[str]
@@ -578,13 +590,35 @@ def process_next(
             from hypogeum.config import Config
             config = Config()
 
-        episode_id = claimed.get("episode_id") or f"ep_{queue_id[:8]}"
+        # Prefer episode_id from the topic row (set for reruns to reuse disk checkpoints),
+        # fall back to the queue row's episode_id, then to a hash of the queue_id.
+        _topic_ep_id = (topic_row.get("episode_id") if using_backlog and topic_row else None)
+        episode_id = _topic_ep_id or claimed.get("episode_id") or f"ep_{queue_id[:8]}"
+
+        # Cancellation check: polled by pipeline.py between every stage.
+        # Also updates worker_status to 'cancelling' on first detection.
+        def _cancel_check() -> bool:
+            cancelled = is_cancel_requested(queue_id, db_path=db_path)
+            if cancelled:
+                try:
+                    set_worker_control("worker_status", "cancelling", db_path=db_path)
+                except Exception:
+                    pass
+            return cancelled
+
+        # Write running status before pipeline starts
+        try:
+            set_worker_control("worker_status", "running", db_path=db_path)
+            set_worker_control("active_queue_id", queue_id, db_path=db_path)
+        except Exception:
+            pass
 
         _pipeline_module.run_pipeline(
             topic_input=topic_text,
             episode_id=episode_id,
             config=config,
             channel_id=channel_id,
+            cancel_check=_cancel_check,
         )
 
         # Mark topic consumed on success (backlog path only)
@@ -593,12 +627,41 @@ def process_next(
             consume_topic(topic_id, db_path=db_path)
 
         complete(queue_id, worker_id, db_path=db_path)
+        try:
+            set_worker_control("worker_status", "idle", db_path=db_path)
+            set_worker_control("active_queue_id", "", db_path=db_path)
+        except Exception:
+            pass
         return ProcessResult(
             status="completed",
             queue_id=queue_id,
             channel_id=channel_id,
             worker_id=worker_id,
             dry_run=False,
+            topic_id=topic_id,
+        )
+
+    except _pipeline_module.PipelineCancelledError as exc:
+        # Operator cancelled — force-cancel the queue item and release the topic.
+        abort_queue_item(queue_id, db_path=db_path)
+        if topic_id is not None and using_backlog:
+            try:
+                from hypogeum.topics import release_topic
+                release_topic(topic_id, db_path=db_path)
+            except Exception:
+                pass
+        try:
+            set_worker_control("worker_status", "idle", db_path=db_path)
+            set_worker_control("active_queue_id", "", db_path=db_path)
+        except Exception:
+            pass
+        return ProcessResult(
+            status="cancelled",
+            queue_id=queue_id,
+            channel_id=channel_id,
+            worker_id=worker_id,
+            dry_run=False,
+            error_message="cancelled by operator request",
             topic_id=topic_id,
         )
 
@@ -621,6 +684,11 @@ def process_next(
             except Exception:
                 pass  # never let cleanup block the result
 
+        try:
+            set_worker_control("worker_status", "idle", db_path=db_path)
+            set_worker_control("active_queue_id", "", db_path=db_path)
+        except Exception:
+            pass
         return ProcessResult(
             status="failed",
             queue_id=queue_id,
@@ -655,13 +723,14 @@ class PollResult:
     failed: int = 0
     skipped: int = 0
     no_topic: int = 0
+    cancelled: int = 0
     stop_reason: str = "empty"
     stall_streak: int = 0
     results: List[ProcessResult] = field(default_factory=list)
 
     @property
     def total_processed(self) -> int:
-        return self.completed + self.failed + self.skipped + self.no_topic
+        return self.completed + self.failed + self.skipped + self.no_topic + self.cancelled
 
 
 def poll(
@@ -749,6 +818,9 @@ def poll(
                 stall_streak = 0
             elif pr.status == "failed":
                 result.failed += 1
+                stall_streak = 0
+            elif pr.status == "cancelled":
+                result.cancelled += 1
                 stall_streak = 0
             elif pr.status == "skipped":
                 result.skipped += 1

@@ -472,9 +472,22 @@ def _parse_openrouter_response(
             "total_tokens":      int(usage_raw.get("total_tokens", 0)),
         }
     except (KeyError, IndexError, TypeError) as exc:
-        raise HardFailure(
-            f"Malformed OpenRouter response — could not parse choices: {exc}"
+        log.error(
+            "openrouter_malformed_choices",
+            error=str(exc),
+            top_level_keys=repr(list(data.keys()))[:200],
+            choices_present="choices" in data,
+            choices_count=(
+                len(data["choices"])
+                if isinstance(data.get("choices"), list)
+                else None
+            ),
+            has_error_field=bool(data.get("error")),
+            action="retrying",
         )
+        # Transient provider glitch — not a permanent hard failure.
+        # Raise retryable so call_claude() retries once then falls back to Anthropic.
+        raise _RetryableError(status_code=200)
 
     if finish_reason == "content_filter":
         log.error(

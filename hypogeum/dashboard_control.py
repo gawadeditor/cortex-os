@@ -362,6 +362,7 @@ def enqueue_topic(
     source:      str             = "manual",
     discovery_score: Optional[float] = None,
     candidate_id:    Optional[str]   = None,
+    episode_id:      Optional[str]   = None,
 ) -> dict:
     """
     Enqueue a topic for a channel. Returns Result dict.
@@ -369,6 +370,9 @@ def enqueue_topic(
     Also computes and writes the publish calendar fields:
       target_publish_at      — next Thursday 14:00 UTC (YouTube long-form default slot)
       production_deadline_at — target_publish_at - 24 hours (latest safe production start)
+
+    episode_id: when set (e.g. for reruns), passed to topics.enqueue_topic so the
+      worker reuses the existing episode_id and its on-disk checkpoints.
     """
     try:
         from hypogeum.topics import (
@@ -390,6 +394,7 @@ def enqueue_topic(
             source=source,
             discovery_score=discovery_score,
             candidate_id=candidate_id,
+            episode_id=episode_id,
         )
 
         # Write publish calendar fields onto the newly inserted row

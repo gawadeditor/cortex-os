@@ -49,7 +49,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from hypogeum.agents.asset_archive_agent import run_asset_archive
 from hypogeum.agents.assembly_agent import run_assembly_agent
@@ -82,7 +82,7 @@ from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_block
 from hypogeum.post_run_intelligence import run_post_run_intelligence
 from hypogeum.production_metadata import write_analytics_pending, write_production_metadata
 from hypogeum.logger import get_logger
-from hypogeum.run_registry import complete_run, fail_run, register_run, transition_run_state
+from hypogeum.run_registry import cancel_run, complete_run, fail_run, register_run, transition_run_state
 from hypogeum.startup import StartupReport, run_startup_checks
 
 
@@ -240,6 +240,27 @@ class FinanceBudgetBlockedError(PipelineError):
         )
 
 
+class PipelineCancelledError(PipelineError):
+    """
+    Operator requested cancellation between pipeline stages.
+
+    Raised after completing the current atomic stage operation — the stage
+    that was running is allowed to finish before the pipeline stops.
+    Checkpoints on disk are preserved so the run can be resumed.
+
+    Attributes:
+        episode_id  — episode identifier from the cancelled run.
+        stage_after — name of the stage that just completed when cancel was detected.
+    """
+    def __init__(self, episode_id: str, stage_after: str) -> None:
+        self.episode_id = episode_id
+        self.stage_after = stage_after
+        super().__init__(
+            f"Episode {episode_id!r} cancelled by operator after stage {stage_after!r}. "
+            f"Checkpoints are preserved — resume with a rerun."
+        )
+
+
 class ChannelNotFoundError(PipelineError):
     """
     No channel record exists in the DB for the requested channel_id.
@@ -357,6 +378,7 @@ def run_pipeline(
     youtube_privacy: str = "public",
     channel_id: Optional[str] = "hypogeum",
     db_path: Optional[Path] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> PipelineResult:
     """
     Execute the full 9-agent pipeline end-to-end.
@@ -499,6 +521,8 @@ def run_pipeline(
             decision=validation_scorecard.get("decision"),
             overall_score=validation_scorecard.get("overall_score"),
         )
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="executive_producer")
 
         # -----------------------------------------------------------------------
         # 3. Research Director
@@ -530,6 +554,8 @@ def run_pipeline(
             raise PackageDeficiencyError(episode_id=episode_id, pdr=pdr)
 
         log.info("pipeline_stage_completed", agent="research_director")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="research_director")
 
         # -----------------------------------------------------------------------
         # 4. Narrative Architect
@@ -549,6 +575,8 @@ def run_pipeline(
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="narrative_architect")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="narrative_architect")
 
         # -----------------------------------------------------------------------
         # 5. Script Engine
@@ -568,6 +596,8 @@ def run_pipeline(
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="script_engine")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="script_engine")
 
         # -----------------------------------------------------------------------
         # 6. Finance Agent — budget authorization gate (pre-generation spend)
@@ -603,6 +633,9 @@ def run_pipeline(
             )
             raise FinanceBudgetBlockedError(episode_id=episode_id, record=finance_authorization)
 
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="finance_agent_authorization")
+
         # -----------------------------------------------------------------------
         # 7. Visual Package Director
         # -----------------------------------------------------------------------
@@ -621,6 +654,8 @@ def run_pipeline(
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="visual_package_director")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="visual_package_director")
 
         # -----------------------------------------------------------------------
         # 7b. Thumbnail Director
@@ -641,6 +676,8 @@ def run_pipeline(
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="thumbnail_director")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="thumbnail_director")
 
         # -----------------------------------------------------------------------
         # 8. Audio Agent (takes Script Package — parallel path to VPD+TD in M3)
@@ -668,6 +705,8 @@ def run_pipeline(
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="audio_agent")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="audio_agent")
 
         # -----------------------------------------------------------------------
         # 9. Assembly Agent
@@ -692,6 +731,8 @@ def run_pipeline(
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="assembly_agent")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="assembly_agent")
 
         # -----------------------------------------------------------------------
         # 9b. Asset Archive — catalog all generated assets (non-blocking)
@@ -752,6 +793,9 @@ def run_pipeline(
             )
             raise QARejectedError(episode_id=episode_id, report=qa_approval_report)
 
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="qa_agent")
+
         # -----------------------------------------------------------------------
         # 11. Rights & Compliance Agent
         # -----------------------------------------------------------------------
@@ -784,6 +828,9 @@ def run_pipeline(
                 failures=compliance_report.get("failures", []),
             )
             raise ComplianceRejectedError(episode_id=episode_id, report=compliance_report)
+
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="compliance_agent")
 
         # -----------------------------------------------------------------------
         # 11b. Approval gate — human review required by compliance report
@@ -1019,6 +1066,32 @@ def run_pipeline(
         )
 
         return result
+
+    except PipelineCancelledError as _exc:
+        # Operator cancelled the run between stages. Mark the run cancelled (not
+        # failed) so the operator can distinguish intentional stops from errors.
+        # Checkpoints on disk are preserved — the run can be resumed via rerun.
+        if run_id is not None:
+            try:
+                cancel_run(run_id, episode_id)
+            except Exception:
+                pass
+        if _current_stage_id is not None:
+            _record_stage_failed(
+                _current_stage_id, _current_stage_t0,
+                f"cancelled: {_exc.stage_after}", log, db_path=db_path,
+            )
+        try:
+            clear_run_context()
+        except Exception:
+            pass
+        log.info(
+            "pipeline_run_cancelled",
+            episode_id=episode_id,
+            stage_after=_exc.stage_after,
+        )
+        raise
+
     except Exception as _exc:
         if run_id is not None:
             try:
@@ -1328,16 +1401,44 @@ def _run_visual_package_director(
     Max tokens: 32,768
     Output schema: visual_package
 
-    Checkpoint: if a visual_package plan already exists on disk (Phase 1 done,
-    Phase 2 not yet run), skips Phase 1 and resumes directly at Phase 2.
+    Checkpoint: three paths based on disk state:
+      1. No visual_package on disk → run Phase 1 (planning) + Phase 2 (MUAPI).
+      2. visual_package on disk, all assets terminal-success → skip entirely.
+      3. visual_package on disk, some assets failed or missing → skip Phase 1,
+         resume Phase 2 (submit_scene skips already-downloaded clips via file check).
+
+    Phase 2 is complete only when ALL assets are in a terminal successful state
+    (generated / reused / dry_run). A mix of generated + generation_failed means
+    Phase 2 must resume to re-attempt the failed scenes.
     """
     existing_plan = _load_package(episode_id, "visual_package", output_dir)
     if existing_plan is not None:
         log = get_logger(episode_id=episode_id, agent="pipeline")
+        assets = existing_plan.get("asset_manifest", {}).get("assets", [])
+        # ALL assets must be terminal-successful to skip Phase 2 entirely.
+        # Any generation_failed means submit_scene must retry those scenes.
+        _TERMINAL_SUCCESS = {"generated", "reused", "dry_run"}
+        phase2_done = bool(assets) and all(
+            a.get("generation_status") in _TERMINAL_SUCCESS for a in assets
+        )
+        if phase2_done:
+            log.info(
+                "pipeline_stage_skipped",
+                agent="visual_package_director",
+                reason="phase2_complete",
+                assets_total=len(assets),
+            )
+            return existing_plan
+        failed_count = sum(
+            1 for a in assets
+            if a.get("generation_status") not in _TERMINAL_SUCCESS
+        )
         log.info(
             "pipeline_stage_skipped",
             agent="visual_package_director_phase1",
             reason="existing_plan",
+            assets_total=len(assets),
+            assets_to_retry=failed_count,
         )
         return run_visual_package_director_from_plan(
             visual_package=existing_plan,
@@ -1370,7 +1471,14 @@ def _run_thumbnail_director(
     Model: Sonnet 4.6
     Max tokens: 4,096
     Output schema: thumbnail_package
+
+    Checkpoint: loads existing thumbnail_package from disk if present.
     """
+    pkg = _load_package(episode_id, "thumbnail_package", output_dir)
+    if pkg is not None:
+        log = get_logger(episode_id=episode_id, agent="pipeline")
+        log.info("pipeline_stage_skipped", agent="thumbnail_director", reason="existing_output")
+        return pkg
     _resolve_output_dir = output_dir or (
         Path(__file__).resolve().parent.parent
         / ".hypogeum-assets" / "episodes" / episode_id

@@ -32,6 +32,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Worker control DB helpers — imported lazily to avoid startup failures
+_WC_AVAILABLE = False
+
 _PROJECT_ROOT = Path(__file__).resolve().parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -81,6 +84,24 @@ signal.signal(signal.SIGTERM, _handle_signal)
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _wc_set(key: str, value: str, db_path: Path) -> None:
+    """Write a worker_control value. Silently swallows all errors."""
+    try:
+        from hypogeum.db import set_worker_control
+        set_worker_control(key, value, db_path=db_path)
+    except Exception:
+        pass
+
+
+def _wc_get(key: str, default: str, db_path: Path) -> str:
+    """Read a worker_control value. Returns default on any error."""
+    try:
+        from hypogeum.db import get_worker_control
+        return get_worker_control(key, default=default, db_path=db_path)
+    except Exception:
+        return default
 
 
 def _sync_analytics_background(db_path: Path, config) -> None:
@@ -260,11 +281,13 @@ def run_iteration(
     Execute one scheduler → consume → poll cycle.
 
     Returns a summary dict with counts from each step.
+    Queue-paused mode: tick and consume run normally, but poll is skipped.
     """
     from hypogeum.scheduler import tick
     from hypogeum.queue import consume_scheduled_runs, poll
 
     now = _now_utc()
+    queue_paused = _wc_get("queue_paused", "0", db_path) == "1"
 
     # Step 0: autonomous queue refill — runs before tick() so newly enqueued
     # topics are visible to the scheduler in the same iteration.
@@ -300,28 +323,36 @@ def run_iteration(
     else:
         log.debug("consume nothing_pending")
 
-    # Step 3: poll — claim one item from run_queue and execute
-    poll_result = poll(
-        worker_id=worker_id,
-        db_path=db_path,
-        dry_run=dry_run,
-        max_iterations=1,
-        sleep_interval=0.0,
-        config=config,
-    )
-
-    proc = next((r for r in poll_result.results if r.status != "empty"), None)
-    if proc:
-        log.info(
-            "poll status=%s queue_id=%s channel=%s dry_run=%s%s",
-            proc.status,
-            proc.queue_id,
-            proc.channel_id or "(factory)",
-            dry_run,
-            f" error={proc.error_message[:120]}" if proc.error_message else "",
-        )
+    # Step 3: poll — claim one item from run_queue and execute.
+    # Skip poll entirely when the queue is paused by operator.
+    if queue_paused:
+        log.info("poll queue_paused skipping_claim")
+        from hypogeum.queue import PollResult
+        poll_result = PollResult()
+        proc = None
     else:
-        log.debug("poll queue_empty")
+        _wc_set("worker_status", "claiming", db_path)
+        poll_result = poll(
+            worker_id=worker_id,
+            db_path=db_path,
+            dry_run=dry_run,
+            max_iterations=1,
+            sleep_interval=0.0,
+            config=config,
+        )
+
+        proc = next((r for r in poll_result.results if r.status != "empty"), None)
+        if proc:
+            log.info(
+                "poll status=%s queue_id=%s channel=%s dry_run=%s%s",
+                proc.status,
+                proc.queue_id,
+                proc.channel_id or "(factory)",
+                dry_run,
+                f" error={proc.error_message[:120]}" if proc.error_message else "",
+            )
+        else:
+            log.debug("poll queue_empty")
 
     # Step 4: background analytics sync — every _ANALYTICS_SYNC_EVERY_N iterations
     analytics_synced = False
@@ -333,11 +364,12 @@ def run_iteration(
     return {
         "scheduled_runs_created": len(sr_ids),
         "queue_items_created":    len(queue_ids),
-        "poll_status":            proc.status if proc else "empty",
+        "poll_status":            proc.status if proc else ("paused" if queue_paused else "empty"),
         "poll_stop_reason":       poll_result.stop_reason,
         "dry_run":                dry_run,
         "discovery":              discovery_result,
         "analytics_synced":       analytics_synced,
+        "queue_paused":           queue_paused,
     }
 
 
@@ -376,11 +408,41 @@ def run_worker(
         worker_id, mode, interval, db_path, channel_id or "all",
     )
 
+    # Register this worker in the control table so the dashboard can show status.
+    # Do NOT reset stop_requested here — the dashboard may have set it before
+    # the worker started, and the loop checks it first thing.
+    _wc_set("worker_id",      worker_id,    db_path)
+    _wc_set("worker_status",  "idle",       db_path)
+    _wc_set("active_queue_id", "",          db_path)
+
+    # Reconcile orphaned runs before the loop starts. Any run stuck as 'running'
+    # from a previous worker crash is stale — the current worker does not own it.
+    try:
+        from hypogeum.orphan_runs import reconcile_orphaned_runs
+        orphaned = reconcile_orphaned_runs(
+            db_path=db_path,
+            worker_process_alive=False,  # this worker hasn't claimed anything yet
+            worker_db_status="idle",
+        )
+        if orphaned:
+            log.info("startup_reconcile orphaned_count=%d run_ids=%s", len(orphaned), orphaned)
+    except Exception as exc:
+        log.warning("startup_reconcile_error error=%s", exc)
+
     iteration = 0
+    stop_reason = "once"
     while not _shutdown_requested:
         iteration += 1
         log.info("iteration=%d", iteration)
 
+        # Check dashboard stop_requested signal
+        if _wc_get("stop_requested", "0", db_path) == "1":
+            log.info("worker_stop_requested_by_dashboard")
+            _wc_set("stop_requested", "0", db_path)
+            stop_reason = "dashboard_stop"
+            break
+
+        _wc_set("worker_status", "claiming", db_path)
         try:
             result = run_iteration(
                 worker_id=worker_id,
@@ -391,16 +453,21 @@ def run_worker(
                 iteration=iteration,
             )
             log.info(
-                "iteration=%d done sr_created=%d q_created=%d poll=%s",
+                "iteration=%d done sr_created=%d q_created=%d poll=%s%s",
                 iteration,
                 result["scheduled_runs_created"],
                 result["queue_items_created"],
                 result["poll_status"],
+                " [queue_paused]" if result.get("queue_paused") else "",
             )
         except Exception as exc:
             log.error("iteration=%d error=%s", iteration, exc, exc_info=True)
+        finally:
+            _wc_set("worker_status", "idle", db_path)
 
         if once or _shutdown_requested:
+            if _shutdown_requested:
+                stop_reason = "signal"
             break
 
         log.debug("sleeping interval=%ss", interval)
@@ -409,10 +476,11 @@ def run_worker(
         while time.monotonic() < deadline and not _shutdown_requested:
             time.sleep(min(1.0, deadline - time.monotonic()))
 
+    _wc_set("worker_status", "stopped", db_path)
     log.info(
         "worker_stopped iterations=%d reason=%s",
         iteration,
-        "signal" if _shutdown_requested else "once",
+        stop_reason if not _shutdown_requested else "signal",
     )
     return 0
 

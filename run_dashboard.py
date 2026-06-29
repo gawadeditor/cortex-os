@@ -3173,6 +3173,7 @@ def api_action_resolve_signal(signal_id):
 
 @app.route("/api/runs", methods=["GET"])
 def api_runs():
+    _reconcile_stale_runs()
     status = request.args.get("status")
     limit  = min(int(request.args.get("limit", 100)), 500)
     return jsonify(list_runs(db_path=_db_path(), status=status or None, limit=limit))
@@ -3392,6 +3393,7 @@ def api_preflight():
 
 @app.route("/runs")
 def runs_page():
+    _reconcile_stale_runs()
     status = request.args.get("status")
     runs   = list_runs(db_path=_db_path(), status=status or None)
     return render_template("runs.html",
@@ -3447,11 +3449,18 @@ def _classify_run_recovery(detail: dict) -> dict:
         # Stage B cinematic prompt batch checkpoints
         batch_files   = sorted(ep_dir.glob(f"vpd_prompts_batch_*_{episode_id}.json")) if ep_dir.exists() else []
         batch_indices = []
+        b_batch_scene_counts: dict = {}  # batch_idx → scene count in that checkpoint
         for bf in batch_files:
             m = _re.search(r"vpd_prompts_batch_(\d+)_", bf.name)
             if m:
-                batch_indices.append(int(m.group(1)))
-        # Estimate completed scene count from A2 batch files (rough: read each file)
+                bidx = int(m.group(1))
+                batch_indices.append(bidx)
+                try:
+                    bd = _json.loads(bf.read_text(encoding="utf-8"))
+                    b_batch_scene_counts[bidx] = len(bd.get("scene_prompts", []))
+                except Exception:
+                    b_batch_scene_counts[bidx] = 0
+        # Count completed scenes from Stage A2 batch files
         a2_scene_count = 0
         for af in a2_files:
             try:
@@ -3459,15 +3468,19 @@ def _classify_run_recovery(detail: dict) -> dict:
                 a2_scene_count += len(batch_data.get("scenes", []))
             except Exception:
                 pass
+        # Count completed scenes from Stage B checkpoints (for display)
+        b_scenes_done = sum(b_batch_scene_counts.values())
 
         vpd_checkpoints = {
-            "skeleton":         skeleton_ok,
-            "a1_meta":          a1_ok,
-            "a2_batches":       sorted(a2_indices),
-            "a2_batch_count":   len(a2_indices),
-            "a2_scene_count":   a2_scene_count,
-            "batches":          sorted(batch_indices),
-            "b_batch_count":    len(batch_indices),
+            "skeleton":            skeleton_ok,
+            "a1_meta":             a1_ok,
+            "a2_batches":          sorted(a2_indices),
+            "a2_batch_count":      len(a2_indices),
+            "a2_scene_count":      a2_scene_count,
+            "batches":             sorted(batch_indices),
+            "b_batch_count":       len(batch_indices),
+            "b_batch_scene_counts": b_batch_scene_counts,
+            "b_scenes_done":       b_scenes_done,
         }
 
     # ── Classify failure ──────────────────────────────────────────────────
@@ -3481,15 +3494,60 @@ def _classify_run_recovery(detail: dict) -> dict:
     is_quota          = any(k in error_msg for k in ("402", "quota", "Quota", "budget", "Budget"))
     is_muapi          = "MUAPI" in error_msg
     is_vpd            = "visual_package_director" in (failed_stage or "")
+    is_finance_gate   = "finance gate BLOCKED" in error_msg or "FinanceBudgetBlocked" in error_msg or "FinancePostVPDBlocked" in error_msg
+
+    # ── Finance gate: parse spend/ceiling from the on-disk finance record ─
+    finance_gate_detail: dict = {}
+    if is_finance_gate:
+        _ep = episode_id
+        _ep_dir = _ASSETS_ROOT_PATH / "episodes" / _ep
+        for _fname in (
+            f"finance_post_vpd_authorization_{_ep}.json",
+            f"finance_authorization_{_ep}.json",
+        ):
+            _fp = _ep_dir / _fname
+            if _fp.exists():
+                try:
+                    _fd = _json.loads(_fp.read_text(encoding="utf-8"))
+                    finance_gate_detail = {
+                        "estimated_spend_usd": _fd.get("estimated_spend_usd", 0.0),
+                        "budget_ceiling_usd":  _fd.get("budget_ceiling_usd", 0.0),
+                        "overage_usd": round(
+                            float(_fd.get("estimated_spend_usd", 0.0))
+                            - float(_fd.get("budget_ceiling_usd", 0.0)), 4
+                        ),
+                        "cost_breakdown": _fd.get("cost_breakdown", {}),
+                        "phase": _fd.get("phase", ""),
+                    }
+                except Exception:
+                    pass
+                break
 
     if is_vpd and is_truncation:
         failure_class = "resumable"
-        why = (
-            "Visual Package Director output exceeded the model token limit. "
-            "Stage A is split (A1 metadata + A2 scene batches + A3 merge) with dynamic "
-            "batch sizing. Stage A now resumes from A1/A2 checkpoints. "
-            "Earlier completed stages are reused when the rerun path supports it."
-        )
+        _has_skeleton = vpd_checkpoints.get("skeleton", False)
+        _b_done = vpd_checkpoints.get("b_batch_count", 0)
+        if _has_skeleton and _b_done > 0:
+            _last_b = vpd_checkpoints.get("batches", [])[-1] if vpd_checkpoints.get("batches") else "?"
+            why = (
+                f"Stage B (cinematic prompts) overflowed at batch {_last_b}: "
+                f"model hit max_tokens before completing the prompt batch. "
+                f"Re-run resumes from A1/A2 checkpoints; Stage B retries the failed batch with a smaller size. "
+                "Earlier completed stages are reused via their own output files on disk."
+            )
+        elif _has_skeleton:
+            why = (
+                "Stage B (cinematic prompts) token overflow — no batches completed. "
+                "Re-run resumes from A1/A2 checkpoints; Stage B starts with a smaller batch size. "
+                "Earlier completed stages are reused via their own output files on disk."
+            )
+        else:
+            why = (
+                "Visual Package Director output exceeded the model token limit during Stage A or B. "
+                "Stage A uses dynamic batch sizing (A1 + A2 batches + A3 merge). "
+                "Re-run resumes from A1/A2 checkpoints at the last completed stage. "
+                "Earlier completed stages are reused via their own output files on disk."
+            )
         reuse = []
         if vpd_checkpoints.get("skeleton"):
             reuse.append(
@@ -3514,23 +3572,110 @@ def _classify_run_recovery(detail: dict) -> dict:
             else:
                 reuse.append("Stage A2 scene batches — not yet started, will run on rerun")
         n_b = vpd_checkpoints.get("b_batch_count", 0)
+        b_scenes_done = vpd_checkpoints.get("b_scenes_done", 0)
         if n_b > 0:
+            scene_counts = vpd_checkpoints.get("b_batch_scene_counts", {})
             for b in vpd_checkpoints.get("batches", []):
+                n_sc_b = scene_counts.get(b, 0)
+                sc_label = f" ({n_sc_b} scene{'s' if n_sc_b != 1 else ''})" if n_sc_b else ""
                 reuse.append(
-                    f"Stage B prompt batch {b} (scenes {b*10+1}–{(b+1)*10}) — "
-                    "already on disk, will not be re-billed"
+                    f"Stage B prompt batch {b}{sc_label} — "
+                    "cinematic prompts on disk, will not be re-billed"
                 )
+        if b_scenes_done > 0 and n_b > 0:
+            reuse.append(
+                f"Total {b_scenes_done} scene prompt(s) completed across {n_b} Stage B batch(es)"
+            )
         # reuse stays empty if no checkpoints found — template shows nothing to reuse
         safe_action    = (
-            "Re-run episode — earlier stages (EP, Research, Script) re-execute; "
-            "VPD resumes from the last completed A1/A2 checkpoint"
+            "Click Re-run — same episode_id is preserved so all checkpoints on disk are reused. "
+            "Earlier stages (EP, Research, Script) skip via their own output files; "
+            "VPD resumes from Stage A skeleton and completed Stage B batches."
         )
-        blocked_action = "Cannot resume mid-pipeline without re-executing earlier stages"
+        blocked_action = "Do not manually delete checkpoint files before re-running"
+    elif is_finance_gate:
+        failure_class = "finance_gate"
+        est   = finance_gate_detail.get("estimated_spend_usd", 0.0)
+        ceil_ = finance_gate_detail.get("budget_ceiling_usd", 0.0)
+        over  = finance_gate_detail.get("overage_usd", 0.0)
+        why = (
+            f"Budget ceiling exceeded. Estimated spend: ${est:.4f} USD — "
+            f"ceiling: ${ceil_:.2f} USD — overage: ${over:.4f} USD. "
+            "VPD planning is complete and all Stage B cinematic prompts are on disk. "
+            "Only video generation (MUAPI) spend would be incurred on next run."
+        )
+        # Reuse list: VPD work already done
+        reuse = []
+        if vpd_checkpoints.get("skeleton"):
+            reuse.append(
+                "Stage A skeleton (full scene plan + entities + thumbnail brief) — "
+                "already on disk, will not be re-billed"
+            )
+        _b_done_fg = vpd_checkpoints.get("b_batch_count", 0)
+        if _b_done_fg > 0:
+            _sc_fg = vpd_checkpoints.get("b_scenes_done", 0)
+            reuse.append(
+                f"{_b_done_fg} Stage B prompt batch(es) ({_sc_fg} scene prompts) — "
+                "cinematic prompts on disk, will not be re-billed"
+            )
+            reuse.append(
+                "Only MUAPI video generation will incur new spend on next run"
+            )
+        safe_action = (
+            "Approve this run once via the Finance Gate panel below — "
+            "VPD checkpoints are preserved and no planning stages will re-run."
+        )
+        blocked_action = "Do not raise the ceiling permanently if this is a one-off exception"
+        can_rerun = bool(episode.get("topic") or episode.get("title"))
     elif is_vpd and not is_truncation:
+        # Retryable VPD failure (schema error, MUAPI, etc. — not finance gate).
+        # Checkpoints may still exist on disk even though the failure was not a
+        # truncation — inspect them and surface them so the operator knows what
+        # VPD work will be preserved on rerun.
+        _has_skeleton_r = vpd_checkpoints.get("skeleton", False)
+        _b_done_r       = vpd_checkpoints.get("b_batch_count", 0)
+        _has_any_ckpt   = _has_skeleton_r or vpd_checkpoints.get("a1_meta", False) or _b_done_r > 0
+
         failure_class  = "retryable"
         why            = f"Visual Package Director raised an error: {error_msg[:120]}"
-        reuse          = []
-        safe_action    = "Re-run episode — will retry VPD from scratch (no existing checkpoints)"
+
+        if _has_any_ckpt:
+            reuse = []
+            if _has_skeleton_r:
+                reuse.append(
+                    "Stage A skeleton (full scene plan + entities + thumbnail brief) — "
+                    "already on disk, will not be re-billed"
+                )
+            else:
+                if vpd_checkpoints.get("a1_meta"):
+                    reuse.append(
+                        "Stage A1 meta (entities, palettes, thumbnail brief) — "
+                        "already on disk, will not be re-billed"
+                    )
+                n_a2 = vpd_checkpoints.get("a2_batch_count", 0)
+                n_sc = vpd_checkpoints.get("a2_scene_count", 0)
+                if n_a2 > 0:
+                    reuse.append(
+                        f"Stage A2 scene batches: {n_a2} batch(es), ~{n_sc} scene(s) — "
+                        "already on disk, will not be re-billed"
+                    )
+            if _b_done_r > 0:
+                scene_counts_r = vpd_checkpoints.get("b_batch_scene_counts", {})
+                for b in vpd_checkpoints.get("batches", []):
+                    n_sc_b = scene_counts_r.get(b, 0)
+                    sc_label = f" ({n_sc_b} scene{'s' if n_sc_b != 1 else ''})" if n_sc_b else ""
+                    reuse.append(
+                        f"Stage B prompt batch {b}{sc_label} — "
+                        "cinematic prompts on disk, will not be re-billed"
+                    )
+            safe_action = (
+                "Re-run episode — resolve the failure cause first, then re-run. "
+                "VPD checkpoints on disk will be reused; planning stages will not re-bill."
+            )
+        else:
+            reuse       = []
+            safe_action = "Re-run episode — no VPD checkpoints found; VPD will run from scratch"
+
         blocked_action = "If BGA is enabled, review VPD output before re-running"
     elif is_quota or (is_muapi and is_quota):
         failure_class  = "config"
@@ -3550,6 +3695,93 @@ def _classify_run_recovery(detail: dict) -> dict:
         reuse          = []
         safe_action    = "Review error in logs; this requires a developer fix"
         blocked_action = "Re-running will fail again without a code fix"
+    elif failed_stage == "thumbnail_director":
+        # TD failure: EP/RD/NA/SE completed; VPD may be complete or partial.
+        # Surface exactly what happens on rerun so the operator has full clarity.
+        _TERM_SUCCESS = {"generated", "reused", "dry_run"}
+        failure_class = "retryable"
+        _ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+        reuse = []
+        _ep_pkg_files = [
+            (f"validation_scorecard_{episode_id}.json",
+             "Executive Producer — on disk, will not re-bill"),
+            (f"research_package_{episode_id}.json",
+             "Research Director — on disk, will not re-bill"),
+            (f"narrative_package_{episode_id}.json",
+             "Narrative Architect — on disk, will not re-bill"),
+            (f"script_package_{episode_id}.json",
+             "Script Engine — on disk, will not re-bill"),
+        ]
+        for _fname, _label in _ep_pkg_files:
+            if (_ep_dir / _fname).exists():
+                reuse.append(_label)
+        _vpd_path = _ep_dir / f"visual_package_{episode_id}.json"
+        _vpd_complete    = False  # all scenes terminal-success
+        _vpd_gen_count   = 0
+        _vpd_fail_count  = 0
+        _vpd_total_count = 0
+        if _vpd_path.exists():
+            try:
+                _vpd = _json.loads(_vpd_path.read_text(encoding="utf-8"))
+                _assets = _vpd.get("asset_manifest", {}).get("assets", [])
+                _vpd_total_count = len(_assets)
+                _vpd_gen_count   = sum(1 for _a in _assets if _a.get("generation_status") in _TERM_SUCCESS)
+                _vpd_fail_count  = _vpd_total_count - _vpd_gen_count
+                _vpd_complete    = bool(_assets) and _vpd_fail_count == 0
+            except Exception:
+                pass
+            if _vpd_complete:
+                reuse.append(
+                    f"Visual Package Director — all {_vpd_gen_count} video clip"
+                    f"{'s' if _vpd_gen_count != 1 else ''} on disk, will not re-bill"
+                )
+            elif _vpd_gen_count > 0:
+                reuse.append(
+                    f"Visual Package Director — {_vpd_gen_count}/{_vpd_total_count} clips on disk"
+                    f" (will be reused); {_vpd_fail_count} clip"
+                    f"{'s' if _vpd_fail_count != 1 else ''} failed and will be re-attempted via MUAPI"
+                )
+            else:
+                reuse.append(
+                    "Visual Package Director — visual_package on disk; no clips yet generated"
+                )
+        _is_malformed = (
+            "Malformed" in error_msg
+            or "could not parse" in error_msg.lower()
+            or "malformed" in error_msg.lower()
+        )
+        if _vpd_complete:
+            _td_timing = "Thumbnail Director will execute immediately after re-run starts"
+            if _is_malformed:
+                why = (
+                    "Thumbnail Director hit a malformed API response (transient provider glitch). "
+                    f"All {_vpd_gen_count} video clips are on disk. "
+                    "Re-run skips directly to Thumbnail Director."
+                )
+            else:
+                why = (
+                    f"Thumbnail Director failed: {error_msg[:100]}. "
+                    f"All {_vpd_gen_count} video clips are on disk — only TD will re-run."
+                )
+            safe_action = "Re-run episode — only Thumbnail Director will re-execute"
+        else:
+            _td_timing = (
+                f"Thumbnail Director will execute after MUAPI regenerates "
+                f"{_vpd_fail_count} remaining clip{'s' if _vpd_fail_count != 1 else ''}"
+            )
+            why = (
+                f"Thumbnail Director failed: {error_msg[:80]}. "
+                f"MUAPI video generation is partially complete "
+                f"({_vpd_gen_count}/{_vpd_total_count} clips). "
+                f"Re-run resumes MUAPI for the {_vpd_fail_count} failed clip"
+                f"{'s' if _vpd_fail_count != 1 else ''}, then runs Thumbnail Director."
+            )
+            safe_action = (
+                f"Re-run episode — MUAPI resumes {_vpd_fail_count} remaining clip"
+                f"{'s' if _vpd_fail_count != 1 else ''}, then Thumbnail Director runs"
+            )
+        reuse.append(_td_timing)
+        blocked_action = "Do not delete episode files before re-running"
     else:
         failure_class  = "retryable"
         why            = f"{failed_stage} failed: {error_msg[:160]}"
@@ -3557,17 +3789,20 @@ def _classify_run_recovery(detail: dict) -> dict:
         safe_action    = "Re-run episode — likely a transient API or network error"
         blocked_action = "If the error recurs, investigate logs"
 
-    can_rerun = failure_class in ("resumable", "retryable") and bool(episode.get("topic") or episode.get("title"))
+    # finance_gate sets can_rerun inline; all other classes use the default below
+    if failure_class != "finance_gate":
+        can_rerun = failure_class in ("resumable", "retryable") and bool(episode.get("topic") or episode.get("title"))
 
     return {
-        "failed_stage":    failed_stage,
-        "failure_class":   failure_class,
-        "why":             why,
-        "reuse_summary":   reuse,
-        "safe_action":     safe_action,
-        "blocked_action":  blocked_action,
-        "can_rerun":       can_rerun,
-        "vpd_checkpoints": vpd_checkpoints,
+        "failed_stage":       failed_stage,
+        "failure_class":      failure_class,
+        "why":                why,
+        "reuse_summary":      reuse,
+        "safe_action":        safe_action,
+        "blocked_action":     blocked_action,
+        "can_rerun":          can_rerun,
+        "vpd_checkpoints":    vpd_checkpoints,
+        "finance_gate_detail": finance_gate_detail,
     }
 
 
@@ -3613,14 +3848,13 @@ def api_run_rerun(run_id: str):
     """
     Re-enqueue the episode from a failed run for a new pipeline execution.
 
-    If a duplicate queued/claimed topic already exists, returns code='duplicate'
-    with the existing topic_id and status so the caller can show the operator
-    the "Use Existing" / "Cancel Entry" options without creating a second copy.
+    Cancels all existing queued (not claimed) episode_topics and run_queue items
+    for this episode_id before inserting a fresh pair — ensures exactly ONE
+    queued rerun row exists and the worker always picks the most recent intent.
 
     Returns:
-        {ok, topic_id, episode_id, note}           — on success
-        {ok, code, duplicate_topic_id, duplicate_status, note}  — on duplicate
-        {ok, error}                                 — on other errors
+        {ok, topic_id, episode_id, note}  — on success
+        {ok, error}                        — on other errors
     """
     detail = get_run_detail(run_id, db_path=_db_path())
     if detail is None:
@@ -3636,38 +3870,190 @@ def api_run_rerun(run_id: str):
     if not topic:
         return jsonify({"ok": False, "error": "episode has no topic text — cannot re-enqueue"}), 422
 
-    channel_id = episode.get("channel_id") or "hypogeum"
+    # channel_id is on the runs row (V2 migration); episodes table has no channel_id column
+    channel_id   = run.get("channel_id") or episode.get("channel_id") or "hypogeum"
+    episode_id   = run.get("episode_id")  # preserve so worker reuses disk checkpoints
+
+    # ── Cancel stale queued items for this episode before inserting fresh ones ──
+    # Prevents the worker from picking an older queued row for the same episode
+    # instead of this new rerun intent. Does not touch 'claimed' rows.
+    if episode_id:
+        try:
+            from hypogeum.db import (
+                get_connection as _gc,
+                cancel_queued_topics_for_episode as _cqt,
+                cancel_queued_run_queue_items_for_episode as _cqrq,
+            )
+            from datetime import datetime, timezone as _tz
+            _now_iso = datetime.now(_tz.utc).isoformat()
+            _conn = _gc(_db_path())
+            try:
+                _cqt(_conn, episode_id, _now_iso)
+                _cqrq(_conn, episode_id, _now_iso)
+                _conn.commit()
+            finally:
+                _conn.close()
+        except Exception:
+            pass  # non-fatal — stale rows will still lose to claim ordering
+
     result = enqueue_topic(
         channel_id, topic,
-        priority=10,
+        priority=-1,   # negative = higher urgency than normal queued topics (0–10)
         db_path=_db_path(),
         source="rerun",
+        episode_id=episode_id,
     )
 
     if not result.get("ok"):
-        if result.get("code") == "duplicate":
-            # Find the existing entry so the UI can display it
-            existing = _find_active_duplicate_topic(channel_id, topic, _db_path())
-            return jsonify({
-                "ok":                 False,
-                "code":               "duplicate",
-                "duplicate_topic_id": existing["topic_id"] if existing else None,
-                "duplicate_status":   existing["status"]   if existing else "queued",
-                "duplicate_source":   existing["source"]   if existing else None,
-                "note":               (
-                    "A queued entry already covers this episode. "
-                    "The worker will execute it when the scheduler runs. "
-                    "You can cancel the existing entry and force a new re-run, "
-                    "or leave it as-is."
-                ),
-            }), 409
         return jsonify({"ok": False, "error": result.get("error", "enqueue failed")}), 500
+
+    # Create an immediate run_queue entry linked to this episode + recovery context.
+    # The worker's claim query prefers source='rerun' at highest priority so this
+    # item is claimed before any stale scheduled items in the same channel.
+    try:
+        from hypogeum.queue import enqueue as _enqueue_queue
+        _enqueue_queue(
+            channel_id=channel_id,
+            episode_id=episode_id,
+            priority=-10,
+            source="rerun",
+            recovery_from_run_id=run_id,
+            db_path=_db_path(),
+        )
+    except Exception:
+        pass  # non-blocking: episode_topics rerun row will still be picked up
 
     return jsonify({
         "ok":         True,
         "topic_id":   result.get("topic_id"),
-        "episode_id": run.get("episode_id"),
-        "note":       "Episode re-queued. VPD checkpoints on disk will be reused by the new run.",
+        "episode_id": episode_id,
+        "note":       (
+            "Episode re-queued with the same episode_id. "
+            "Stage A skeleton and completed Stage B prompt batches on disk "
+            "will be reused — only incomplete stages will re-run."
+        ),
+    })
+
+
+@app.route("/api/run/<run_id>/finance-approve", methods=["POST"])
+def api_run_finance_approve(run_id: str):
+    """
+    Grant a single-use over-budget approval for a finance-gate-blocked run.
+
+    Creates a finance_approvals record (status='pending', expires in 24h).
+    On the next pipeline execution for this episode_id, the approval is
+    consumed and the run proceeds past the budget ceiling.
+
+    The run is automatically re-queued so the worker picks it up immediately.
+
+    Request body (JSON):
+        note: optional string — operator justification for the audit trail
+
+    Returns:
+        {ok, approval_id, episode_id, expires_at,
+         estimated_spend_usd, ceiling_at_approval, overage_usd, note}
+    """
+    import uuid as _uuid_mod
+    from datetime import datetime, timedelta, timezone as _tz
+
+    detail = get_run_detail(run_id, db_path=_db_path())
+    if detail is None:
+        return jsonify({"ok": False, "error": "run not found"}), 404
+
+    run     = detail["run"]
+    episode = detail["episode"]
+    episode_id = run.get("episode_id", "")
+
+    if run.get("status") != "failed":
+        return jsonify({"ok": False, "error": "run is not in failed state"}), 409
+
+    # Load cost breakdown from on-disk finance record
+    ep_dir = _ASSETS_ROOT_PATH / "episodes" / episode_id
+    finance_record = None
+    for fname in (
+        f"finance_post_vpd_authorization_{episode_id}.json",
+        f"finance_authorization_{episode_id}.json",
+    ):
+        fp = ep_dir / fname
+        if fp.exists():
+            try:
+                finance_record = _json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+            break
+
+    if finance_record is None:
+        return jsonify({
+            "ok": False,
+            "error": "no finance record found on disk for this episode — cannot approve",
+        }), 422
+
+    if finance_record.get("verdict") != "BLOCKED":
+        return jsonify({
+            "ok": False,
+            "error": f"finance record verdict is '{finance_record.get('verdict')}', not BLOCKED",
+        }), 422
+
+    body = request.get_json(silent=True) or {}
+    note = (body.get("note") or "").strip() or None
+
+    estimated  = float(finance_record.get("estimated_spend_usd", 0.0))
+    ceiling    = float(finance_record.get("budget_ceiling_usd", 0.0))
+    overage    = round(estimated - ceiling, 4)
+    now        = datetime.now(_tz.utc)
+    expires_at = (now + timedelta(hours=24)).isoformat()
+    approval_id = f"fa_{_uuid_mod.uuid4().hex[:16]}"
+
+    from hypogeum.db import get_connection as _gc, insert_finance_approval
+    try:
+        conn = _gc(_db_path())
+        try:
+            insert_finance_approval(
+                conn,
+                approval_id=approval_id,
+                episode_id=episode_id,
+                run_id=run_id,
+                approved_at=now.isoformat(),
+                approved_by="operator",
+                estimated_spend_usd=estimated,
+                ceiling_at_approval=ceiling,
+                overage_usd=overage,
+                expires_at=expires_at,
+                note=note,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"DB write failed: {exc}"}), 500
+
+    # Re-queue with the same episode_id so the worker picks it up immediately
+    topic = episode.get("topic") or episode.get("title", "")
+    channel_id = run.get("channel_id") or episode.get("channel_id") or "hypogeum"
+    if topic:
+        try:
+            enqueue_topic(channel_id, topic, priority=-1, db_path=_db_path(),
+                          source="rerun", episode_id=episode_id)
+            from hypogeum.queue import enqueue as _enqueue_queue
+            _enqueue_queue(channel_id=channel_id, priority=-10, db_path=_db_path())
+        except Exception:
+            pass  # non-blocking: approval is stored; worker will pick up on next schedule tick
+
+    return jsonify({
+        "ok":                  True,
+        "approval_id":         approval_id,
+        "episode_id":          episode_id,
+        "estimated_spend_usd": estimated,
+        "ceiling_at_approval": ceiling,
+        "overage_usd":         overage,
+        "expires_at":          expires_at,
+        "note":                note,
+        "message":             (
+            f"Approved. Run re-queued with episode_id {episode_id!r}. "
+            f"The worker will proceed past the ${ceiling:.2f} ceiling "
+            f"(estimated spend ${estimated:.4f}). "
+            "Approval expires in 24 h and is single-use."
+        ),
     })
 
 
@@ -6011,8 +6397,9 @@ def discover_page():
         conn = get_connection(db)
         try:
             rows = conn.execute(
-                """SELECT topic_id, topic_text, status, priority, source,
-                          discovery_score, candidate_id, created_at, updated_at
+                """SELECT topic_id, channel_id, topic_text, status, priority, source,
+                          discovery_score, candidate_id, created_at, updated_at,
+                          episode_id
                    FROM episode_topics
                    WHERE channel_id = ? AND status = 'queued'
                    ORDER BY priority ASC, created_at ASC""",
@@ -6605,6 +6992,317 @@ def api_compare_results():
 # Phase 6 — Infrastructure > Workers
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Worker process controller
+#
+# run_worker.py runs as a separate OS process. The dashboard manages it via
+# a PID file (.hypogeum-assets/worker.pid). The worker's stdout/stderr are
+# captured to .hypogeum-assets/worker.log for log inspection from the UI.
+#
+# Three modes:
+#   start    — launch the continuous loop (interval 60 s); PID written to file
+#   run-once — launch with --once; process exits after claiming one job; no PID file
+#   stop     — SIGTERM the running worker; PID file removed
+# ---------------------------------------------------------------------------
+
+_WORKER_PID_FILE = _ASSETS_ROOT_PATH / "worker.pid"
+_WORKER_LOG_FILE = _ASSETS_ROOT_PATH / "worker.log"
+
+
+def _get_worker_pid() -> "Optional[int]":
+    """Return the PID of the running worker process, or None if not running."""
+    try:
+        pid = int(_WORKER_PID_FILE.read_text().strip())
+        import signal as _sig
+        os.kill(pid, 0)   # raises OSError if process is dead
+        return pid
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _worker_status_dict() -> dict:
+    """Return a plain dict describing the current worker process state."""
+    from hypogeum.db import get_worker_control
+    db = _db_path()
+
+    pid = _get_worker_pid()
+    queue_paused = False
+    try:
+        queue_paused = get_worker_control("queue_paused", default="0", db_path=db) == "1"
+    except Exception:
+        pass
+
+    if pid:
+        # Worker process is alive — read fine-grained status from DB
+        db_status = "running"
+        try:
+            db_status = get_worker_control("worker_status", default="running", db_path=db)
+        except Exception:
+            pass
+
+        _status_class_map = {
+            "idle":       "idle",
+            "claiming":   "running",
+            "running":    "running",
+            "cancelling": "paused",
+            "stopped":    "unknown",
+        }
+        _status_label_map = {
+            "idle":       "Idle",
+            "claiming":   "Claiming",
+            "running":    "Running",
+            "cancelling": "Cancelling",
+            "stopped":    "Stopped",
+        }
+        status_class = _status_class_map.get(db_status, "running")
+        status_label = _status_label_map.get(db_status, db_status.title())
+        if queue_paused:
+            status_label += " (queue paused)"
+        return {
+            "running":      True,
+            "pid":          pid,
+            "status":       db_status,
+            "status_label": status_label,
+            "status_class": status_class,
+            "queue_paused": queue_paused,
+        }
+
+    # Check if the PID file exists but process is dead (crashed / killed)
+    stale = _WORKER_PID_FILE.exists()
+    if stale:
+        return {"running": False, "pid": None, "status": "crashed",
+                "status_label": "Crashed (stale PID file)", "status_class": "error",
+                "queue_paused": queue_paused}
+    return {"running": False, "pid": None, "status": "stopped",
+            "status_label": "Stopped", "status_class": "unknown",
+            "queue_paused": queue_paused}
+
+
+def _read_worker_log_tail(n: int = 40) -> list[str]:
+    """Return the last n non-empty lines from worker.log, newest last."""
+    try:
+        if not _WORKER_LOG_FILE.exists():
+            return []
+        with _WORKER_LOG_FILE.open("r", errors="replace") as fh:
+            lines = fh.readlines()
+        return [l.rstrip() for l in lines[-n:] if l.strip()]
+    except Exception:
+        return []
+
+
+def _reconcile_stale_runs() -> list[str]:
+    """
+    Reconcile orphaned runs in the background (best-effort, never raises).
+
+    Reads worker state then delegates to orphan_runs.reconcile_orphaned_runs().
+    Returns the list of run_ids that were marked failed (may be empty).
+    """
+    try:
+        from hypogeum.orphan_runs import reconcile_orphaned_runs
+        ws = _worker_status_dict()
+        return reconcile_orphaned_runs(
+            db_path=_db_path(),
+            worker_process_alive=ws.get("running", False),
+            worker_db_status=ws.get("status", "stopped"),
+        )
+    except Exception:
+        return []
+
+
+@app.route("/api/worker/status")
+def api_worker_status():
+    """Return current worker process state (running/stopped/crashed, PID)."""
+    _reconcile_stale_runs()
+    return jsonify(_worker_status_dict())
+
+
+@app.route("/api/worker/start", methods=["POST"])
+def api_worker_start():
+    """
+    Start run_worker.py as a background process (continuous 60-second loop).
+
+    Returns {ok, pid, note} on success or {ok, error, pid} if already running.
+    The worker's stdout+stderr are appended to worker.log.
+    """
+    existing_pid = _get_worker_pid()
+    if existing_pid:
+        return jsonify({
+            "ok": False,
+            "error": "already_running",
+            "pid": existing_pid,
+            "note": f"Worker is already running (PID {existing_pid}). Stop it first.",
+        }), 409
+
+    _ASSETS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+    log_fh = open(_WORKER_LOG_FILE, "a")  # append so history is preserved
+    try:
+        import sys as _sys
+        proc = _subprocess.Popen(
+            [_sys.executable, str(_ROOT / "run_worker.py")],
+            stdout=log_fh,
+            stderr=log_fh,
+            cwd=str(_ROOT),
+        )
+    except Exception as exc:
+        log_fh.close()
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    _WORKER_PID_FILE.write_text(str(proc.pid))
+    return jsonify({
+        "ok": True,
+        "pid": proc.pid,
+        "note": f"Worker started (PID {proc.pid}). Auto-picks queued jobs every 60 s.",
+    })
+
+
+@app.route("/api/worker/stop", methods=["POST"])
+def api_worker_stop():
+    """
+    Send SIGTERM to the running worker and set stop_requested in the DB.
+
+    The worker handles SIGTERM gracefully (finishes current iteration then exits).
+    The DB flag provides a fallback signal in case SIGTERM is missed.
+    Returns {ok, pid, note} or {ok, error} if no worker is running.
+    """
+    import signal as _sig
+    from hypogeum.db import set_worker_control
+    pid = _get_worker_pid()
+    if not pid:
+        _WORKER_PID_FILE.unlink(missing_ok=True)
+        return jsonify({"ok": False, "error": "not_running",
+                        "note": "No worker process found."}), 404
+
+    # Set DB flag first so even if SIGTERM is slow to deliver, the worker will
+    # notice on its next iteration check.
+    try:
+        set_worker_control("stop_requested", "1", db_path=_db_path())
+    except Exception:
+        pass
+
+    try:
+        os.kill(pid, _sig.SIGTERM)
+    except OSError as exc:
+        _WORKER_PID_FILE.unlink(missing_ok=True)
+        return jsonify({"ok": False, "error": str(exc),
+                        "note": "Process may have already exited. PID file removed."}), 500
+
+    _WORKER_PID_FILE.unlink(missing_ok=True)
+    return jsonify({
+        "ok": True,
+        "pid": pid,
+        "note": f"SIGTERM sent to worker (PID {pid}). It will finish its current job then exit.",
+    })
+
+
+@app.route("/api/worker/cancel-run/<queue_id>", methods=["POST"])
+def api_worker_cancel_run(queue_id: str):
+    """
+    Request cancellation of the currently executing run (identified by queue_id).
+
+    Sets cancel_requested=1 on the run_queue row. The worker polls this flag
+    between pipeline stages and raises PipelineCancelledError at the next stage
+    boundary, marking the run cancelled and releasing the worker.
+
+    Only works for items with status='claimed' (i.e., actively executing).
+    Queued-but-not-yet-claimed items should use DELETE /api/queue/<id> instead.
+    """
+    from hypogeum.db import request_cancel_for_queue_item
+    ok = request_cancel_for_queue_item(queue_id, db_path=_db_path())
+    if ok:
+        return jsonify({
+            "ok": True,
+            "queue_id": queue_id,
+            "note": (
+                "Cancel requested. The worker will stop at the next stage boundary "
+                "and mark the run cancelled. Checkpoints are preserved."
+            ),
+        })
+    return jsonify({
+        "ok": False,
+        "queue_id": queue_id,
+        "error": "not_found_or_terminal",
+        "note": "Queue item not found or already in a terminal state.",
+    }), 404
+
+
+@app.route("/api/worker/pause-queue", methods=["POST"])
+def api_worker_pause_queue():
+    """
+    Pause the run queue — the worker will skip claiming new jobs.
+
+    Tick and consume (schedule promotion) continue running normally.
+    The currently executing run (if any) is NOT affected.
+    Use /api/worker/cancel-run/<queue_id> to cancel the active run.
+    """
+    from hypogeum.db import set_worker_control
+    try:
+        set_worker_control("queue_paused", "1", db_path=_db_path())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({
+        "ok": True,
+        "queue_paused": True,
+        "note": "Queue paused. Worker will finish current job then stop claiming.",
+    })
+
+
+@app.route("/api/worker/resume-queue", methods=["POST"])
+def api_worker_resume_queue():
+    """Resume a paused queue — the worker resumes claiming jobs normally."""
+    from hypogeum.db import set_worker_control
+    try:
+        set_worker_control("queue_paused", "0", db_path=_db_path())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({
+        "ok": True,
+        "queue_paused": False,
+        "note": "Queue resumed. Worker will claim the next available job on its next tick.",
+    })
+
+
+@app.route("/api/worker/run-once", methods=["POST"])
+def api_worker_run_once():
+    """
+    Start run_worker.py with --once: claims exactly one queued job, runs it, exits.
+
+    Does NOT write a PID file (process is short-lived).
+    Useful to immediately process the next queued topic or rerun without
+    waiting for the scheduler.
+    Returns {ok, pid, note}.
+    """
+    _ASSETS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+    log_fh = open(_WORKER_LOG_FILE, "a")
+    try:
+        import sys as _sys
+        proc = _subprocess.Popen(
+            [_sys.executable, str(_ROOT / "run_worker.py"), "--once"],
+            stdout=log_fh,
+            stderr=log_fh,
+            cwd=str(_ROOT),
+        )
+    except Exception as exc:
+        log_fh.close()
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify({
+        "ok": True,
+        "pid": proc.pid,
+        "note": (
+            f"Run-once worker started (PID {proc.pid}). "
+            "Claims next queued topic, executes it, then exits. "
+            "Checkpoints are honoured — failed runs resume from the last completed stage."
+        ),
+    })
+
+
+@app.route("/api/worker/logs")
+def api_worker_logs():
+    """Return the last N lines of worker.log as a JSON array of strings."""
+    n = min(int(request.args.get("n", 60)), 300)
+    lines = _read_worker_log_tail(n)
+    return jsonify({"ok": True, "lines": lines, "log_path": str(_WORKER_LOG_FILE)})
+
 def _build_workers_context() -> dict:
     """
     Collect background worker state from existing DB tables only.
@@ -6838,18 +7536,75 @@ def _build_workers_context() -> dict:
     except Exception:
         pass
 
-    return {"ok": True, "workers": workers, "schedules": raw_schedules}
+    # ── Queue snapshot ─────────────────────────────────────────────────────
+    # Active (queued + claimed) run_queue rows, ordered by claim priority.
+    # Provides operator visibility into what the worker will pick next.
+    queue_items: list[dict] = []
+    try:
+        conn = _conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT queue_id, channel_id, episode_id, priority, status,
+                       source, recovery_from_run_id, created_at, queued_at,
+                       claimed_at, worker_id, cancel_requested
+                FROM run_queue
+                WHERE status IN ('queued', 'claimed')
+                ORDER BY
+                    CASE WHEN status = 'claimed' THEN 0 ELSE 1 END ASC,
+                    priority ASC,
+                    CASE WHEN source = 'rerun' THEN 0 ELSE 1 END ASC,
+                    created_at DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            cols = [
+                "queue_id", "channel_id", "episode_id", "priority", "status",
+                "source", "recovery_from_run_id", "created_at", "queued_at",
+                "claimed_at", "worker_id", "cancel_requested",
+            ]
+            for row in rows:
+                item = dict(zip(cols, row))
+                item["queued_at"]   = _ts(item.get("queued_at"))
+                item["created_at"]  = _ts(item.get("created_at"))
+                item["claimed_at"]  = _ts(item.get("claimed_at"))
+                queue_items.append(item)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # Queue paused state
+    queue_paused = False
+    try:
+        from hypogeum.db import get_worker_control as _gwc
+        queue_paused = _gwc("queue_paused", default="0", db_path=db) == "1"
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "workers": workers,
+        "schedules": raw_schedules,
+        "queue_items": queue_items,
+        "queue_paused": queue_paused,
+    }
 
 
 @app.route("/infrastructure/workers")
 def infrastructure_workers_page():
     ctx = _build_workers_context()
+    ctx["worker_process"] = _worker_status_dict()
+    ctx["worker_log_lines"] = _read_worker_log_tail(40)
+    # queue_paused is already in ctx from _build_workers_context()
     return render_template("infrastructure_workers.html", **ctx)
 
 
 @app.route("/api/infrastructure/workers")
 def api_infrastructure_workers():
-    return jsonify(_build_workers_context())
+    ctx = _build_workers_context()
+    ctx["worker_process"] = _worker_status_dict()
+    return jsonify(ctx)
 
 
 # ===========================================================================
@@ -7547,6 +8302,23 @@ def main():
 
     print(f"Factory OS Dashboard → http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")
+
+    # Reconcile orphaned runs at startup — any run stuck as 'running' with no
+    # worker is stale from a previous crash. Mark them failed before serving traffic.
+    try:
+        from hypogeum.orphan_runs import reconcile_orphaned_runs
+        orphaned = reconcile_orphaned_runs(
+            db_path=_db_path(),
+            worker_process_alive=False,  # worker is never running at dashboard startup
+            worker_db_status="stopped",
+        )
+        if orphaned:
+            print(f"  ⚠ Orphaned runs reconciled at startup: {len(orphaned)} marked failed.")
+            for rid in orphaned:
+                print(f"    {rid}")
+    except Exception as _startup_exc:
+        print(f"  [startup reconcile skipped: {_startup_exc}]")
+
     app.run(host=args.host, port=args.port, debug=False)
 
 

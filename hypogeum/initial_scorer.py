@@ -1,4 +1,32 @@
 """
+hypogeum/initial_scorer.py — Initial scoring for Discovery Director v2
+
+SCORING STATUS (2026-06-29): RUBRIC-BASED, NOT ANALYTICS-BACKED
+  Scores currently derive from two sources:
+    1. LLM-assigned score_breakdown (primary, when v2 prompt returns it):
+       8 dimensions scored 1–10 by the Topic Ideator. Scores reflect the LLM's
+       assessment of each candidate against a documented rubric. They produce
+       genuine cross-candidate differentiation (typical spread: 0.45–0.85).
+    2. Structural length signals (fallback): text character length of mystery_hook
+       and differentiation_claim. Produces 0.70 for all well-formed LLM outputs
+       (no differentiation) — this path fires only when score_breakdown is absent.
+
+  WHAT THIS IS NOT: scores do not yet use real YouTube/TikTok/Instagram/Facebook
+  channel performance data. The analytics_delta component (±0.20 cap) is present
+  but returns 0.0 until the platform connectors complete and populate
+  platform_analytics with source='api' rows.
+
+TODO (backlog):
+  Replace rubric-only discovery scoring with analytics-backed discovery scoring
+  using actual YouTube/TikTok/Instagram/Facebook performance signals once
+  connectors are complete. Specifically:
+    - Use click-through rates of past episodes to calibrate click_potential weights
+    - Use audience retention curves to calibrate retention_potential weights
+    - Use watch time per topic cluster to calibrate curiosity_gap weights
+    - Replace LLM self-assessment with delta from channel-specific KPI baseline
+  This will make discovery scoring a genuine predictor of production ROI rather
+  than a structural heuristic.
+
 hypogeum/initial_scorer.py — Deterministic initial scoring for Discovery Director v2
 
 Computes initial_composite for a candidate opportunity produced by the
@@ -203,6 +231,40 @@ def _analytics_delta(candidate: dict, signal_ctx: dict) -> float:
 # Public API
 # ---------------------------------------------------------------------------
 
+_SCORE_BREAKDOWN_WEIGHTS: dict[str, float] = {
+    "click_potential":      0.20,
+    "curiosity_gap":        0.20,
+    "evidence_strength":    0.15,
+    "visual_potential":     0.10,
+    "retention_potential":  0.15,
+    "production_feasibility": 0.10,
+    "channel_fit":          0.05,
+    "novelty":              0.05,
+}
+
+
+def _composite_from_breakdown(breakdown: dict) -> Optional[float]:
+    """
+    Compute a weighted composite in [0.0, 1.0] from an LLM-assigned score_breakdown.
+
+    Each subscore is 1–10; the weight table sums to 1.0.
+    Returns None if the breakdown dict is empty or malformed.
+    """
+    if not breakdown or not isinstance(breakdown, dict):
+        return None
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for key, weight in _SCORE_BREAKDOWN_WEIGHTS.items():
+        val = breakdown.get(key)
+        if val is not None:
+            weighted_sum += (float(val) / 10.0) * weight
+            total_weight += weight
+    if total_weight <= 0:
+        return None
+    # Normalize in case only a subset of keys is present
+    return round(weighted_sum / total_weight, 4)
+
+
 def compute_score(
     candidate: dict,
     signal_ctx: Optional[dict] = None,
@@ -211,30 +273,42 @@ def compute_score(
     """
     Compute the initial_composite score for a v2 candidate opportunity.
 
-    This is the sole source of initial_composite. Call this after
-    parse_opportunity_batch() has stripped unknown fields and injected
-    canonical_subject.
+    Primary path (v2 prompt): when candidate contains a score_breakdown dict with
+    8 LLM-assigned subscores (1–10), compute a weighted composite as the base score.
+    This produces genuine cross-candidate differentiation since the LLM evaluates
+    each dimension independently per topic.
+
+    Fallback path: when score_breakdown is absent or malformed, fall back to
+    structural length signals (mystery_hook + differentiation_claim character count).
+    This path produces 0.70 for well-formed LLM output — a known limitation that
+    motivates keeping the v2 prompt in sync.
+
+    In both paths, novelty penalty and analytics delta are applied on top.
 
     Args:
-        candidate:       Dict produced by Topic Ideator + canonical_subject
-                         injection. Expected keys: topic_text, canonical_subject,
-                         angle, mystery_hook, differentiation_claim,
-                         visual_signal, evidence_signal.
-                         Missing keys degrade gracefully (return partial score).
+        candidate:       Dict from parse_opportunity_batch() + _enrich_and_filter().
+                         May include score_breakdown if the v2 prompt returned it.
         signal_ctx:      Output of _build_signal_context(). None or
                          has_real_analytics=False → analytics delta is 0.0.
-        existing_topics: Set of canonical_subject strings already enqueued or
-                         recently consumed. Presence → novelty penalty applied.
+        existing_topics: Set of canonical_subject strings already queued or consumed.
+                         Presence triggers novelty penalty.
 
     Returns:
         float in [0.0, 1.0], rounded to 4 decimal places.
         Returns 0.0 (not raises) on any unexpected exception.
     """
     try:
-        score = float(os.getenv("DISCOVERY_BASE_SCORE", str(_BASE_SCORE)))
+        breakdown = candidate.get("score_breakdown")
+        composite = _composite_from_breakdown(breakdown)
 
-        score += _score_mystery_hook(str(candidate.get("mystery_hook") or ""))
-        score += _score_differentiation(str(candidate.get("differentiation_claim") or ""))
+        if composite is not None:
+            # Primary path: use LLM-assigned breakdown as base score
+            score = composite
+        else:
+            # Fallback: structural length signals only
+            score = float(os.getenv("DISCOVERY_BASE_SCORE", str(_BASE_SCORE)))
+            score += _score_mystery_hook(str(candidate.get("mystery_hook") or ""))
+            score += _score_differentiation(str(candidate.get("differentiation_claim") or ""))
 
         canonical = str(candidate.get("canonical_subject") or "")
         if existing_topics and canonical and canonical in existing_topics:

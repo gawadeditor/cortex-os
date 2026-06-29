@@ -103,6 +103,7 @@ RUN_STATES = frozenset({
     "completed",
     "failed",
     "blocked",
+    "cancelled",   # operator-requested mid-run cancellation
 })
 
 # Allowed transitions: from_state (or None for initial) → set of valid to_states
@@ -112,18 +113,19 @@ _VALID_TRANSITIONS: dict[Optional[str], frozenset] = {
     "running":                   frozenset({
                                      "paused", "awaiting_review",
                                      "awaiting_publish_approval", "publishing",
-                                     "completed", "failed", "blocked",
+                                     "completed", "failed", "blocked", "cancelled",
                                  }),
-    "paused":                    frozenset({"running", "failed", "blocked"}),
-    "awaiting_review":           frozenset({"awaiting_publish_approval", "failed", "blocked"}),
-    "awaiting_publish_approval": frozenset({"publishing", "failed", "blocked"}),
-    "publishing":                frozenset({"completed", "failed", "blocked"}),
+    "paused":                    frozenset({"running", "failed", "blocked", "cancelled"}),
+    "awaiting_review":           frozenset({"awaiting_publish_approval", "failed", "blocked", "cancelled"}),
+    "awaiting_publish_approval": frozenset({"publishing", "failed", "blocked", "cancelled"}),
+    "publishing":                frozenset({"completed", "failed", "blocked", "cancelled"}),
     "completed":                 frozenset(),   # terminal
     "failed":                    frozenset(),   # terminal
     "blocked":                   frozenset(),   # terminal (unblocking deferred to P3-04)
+    "cancelled":                 frozenset(),   # terminal — operator-requested cancellation
 }
 
-_TERMINAL_STATES = frozenset({"completed", "failed", "blocked"})
+_TERMINAL_STATES = frozenset({"completed", "failed", "blocked", "cancelled"})
 
 # OIS signals emitted on specific state arrivals
 _TRANSITION_OIS_SIGNALS: dict[str, tuple[str, str]] = {
@@ -660,3 +662,61 @@ def fail_run(
         pass
 
     _append_index(run_id, episode_id, "failed", rdir)
+
+
+def cancel_run(
+    run_id: str,
+    episode_id: str,
+    db_path: Optional[Path] = None,
+    runs_dir: Optional[Path] = None,
+) -> None:
+    """
+    Mark a run as cancelled by operator request.
+
+    Façade over transition_run_state("cancelled"). Also updates the JSON
+    file and appends to index.jsonl.
+
+    Args:
+        run_id:     UUID4 string returned by register_run().
+        episode_id: Episode identifier (for index entry).
+        db_path:    Override SQLite path.
+        runs_dir:   Override JSON/index directory.
+    """
+    cancelled_at = _now_iso()
+
+    try:
+        transition_run_state(
+            run_id=run_id,
+            to_state="cancelled",
+            triggered_by="operator",
+            trigger_source="worker_control",
+            reason="operator_cancel_requested",
+            episode_id=episode_id,
+            db_path=db_path,
+        )
+    except (InvalidRunTransitionError, Exception):
+        # Fallback: write cancelled status directly
+        conn = get_connection(_db_path(db_path))
+        try:
+            conn.execute(
+                "UPDATE runs SET status = 'cancelled', completed_at = ?, exit_code = 2 "
+                "WHERE run_id = ?",
+                (cancelled_at, run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    rdir = _runs_dir(runs_dir)
+    json_path = rdir / f"{run_id}.json"
+    try:
+        if json_path.exists():
+            record = json.loads(json_path.read_text(encoding="utf-8"))
+            record["status"] = "cancelled"
+            record["completed_at"] = cancelled_at
+            record["exit_code"] = 2
+            _write_run_json(run_id, record, rdir)
+    except Exception:
+        pass
+
+    _append_index(run_id, episode_id, "cancelled", rdir)

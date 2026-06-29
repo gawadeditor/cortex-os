@@ -268,7 +268,8 @@ def list_episode_topics(
                 SELECT topic_id, channel_id, topic_text, status,
                        priority, created_at, claimed_at, consumed_at,
                        source, discovery_score, candidate_id,
-                       target_publish_at, production_deadline_at
+                       target_publish_at, production_deadline_at,
+                       episode_id
                 FROM episode_topics
                 {where}
                 ORDER BY priority ASC, created_at ASC

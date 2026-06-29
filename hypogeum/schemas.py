@@ -975,9 +975,16 @@ _OPPORTUNITY_STRING_FIELDS = frozenset({
     "differentiation_claim", "visual_signal", "evidence_signal",
 })
 
-# Known scoring field names that the LLM should never produce.
-# Logged distinctly so prompt-drift diagnostics can distinguish scoring
-# leakage from genuinely unexpected unknown fields.
+# score_breakdown is the one LLM-produced structured field that IS allowed.
+# It contains 8 integer scores (1–10) assigned by the Topic Ideator prompt.
+# parse_opportunity_batch() passes it through; initial_scorer.py aggregates it.
+_SCORE_BREAKDOWN_KEYS = frozenset({
+    "click_potential", "curiosity_gap", "evidence_strength", "visual_potential",
+    "retention_potential", "production_feasibility", "channel_fit", "novelty",
+})
+
+# Numeric fields that the LLM must NOT produce on its own (initial_composite etc.).
+# Logged as prompt-drift diagnostics when detected.
 _NUMERIC_SCORING_FIELDS = frozenset({
     "initial_composite", "final_composite", "score", "rank",
     "priority_score", "source_score", "composite", "rating",
@@ -1014,10 +1021,31 @@ def parse_opportunity_batch(raw_batch: dict) -> dict:
         for key, val in opp.items():
             if key in _OPPORTUNITY_STRING_FIELDS:
                 kept[key] = val
+            elif key == "score_breakdown":
+                # Validate shape: must be a dict with recognised keys and int/float values
+                if isinstance(val, dict):
+                    cleaned_breakdown = {}
+                    for bk, bv in val.items():
+                        if bk in _SCORE_BREAKDOWN_KEYS and isinstance(bv, (int, float)):
+                            cleaned_breakdown[bk] = max(1, min(10, int(round(bv))))
+                        else:
+                            _log.warning(
+                                "opportunity_batch.parse score_breakdown[%s]=%r stripped — "
+                                "unknown key or non-numeric value",
+                                bk, bv,
+                            )
+                    if cleaned_breakdown:
+                        kept["score_breakdown"] = cleaned_breakdown
+                else:
+                    _log.warning(
+                        "opportunity_batch.parse score_breakdown is not a dict at "
+                        "opportunities[%d] — stripped",
+                        i,
+                    )
             elif key in _NUMERIC_SCORING_FIELDS:
                 _log.warning(
                     "opportunity_batch.parse numeric scoring field stripped "
-                    "opportunities[%d].%s=%r — scoring is owned by initial_scorer.py; "
+                    "opportunities[%d].%s=%r — use score_breakdown for LLM scores; "
                     "check Topic Ideator prompt",
                     i, key, val,
                 )
@@ -1025,7 +1053,7 @@ def parse_opportunity_batch(raw_batch: dict) -> dict:
                 _log.warning(
                     "opportunity_batch.parse unknown field stripped "
                     "opportunities[%d].%s=%r — LLM output must contain only "
-                    "the six approved string fields",
+                    "the six approved string fields plus score_breakdown",
                     i, key, val,
                 )
         cleaned_opps.append(kept)

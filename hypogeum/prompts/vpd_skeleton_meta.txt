@@ -184,6 +184,21 @@ Respond with a JSON object. No prose, no markdown, no code fences.
   }
 }
 
+OUTPUT SIZE CONSTRAINTS (hard limits — required to keep Stage A1 JSON under 5,000 tokens):
+6. locked_entities[]: maximum 6 entries total.
+7. entity.visual_spec.description: maximum 2 sentences (≤ 30 words). No paragraph prose.
+8. entity.visual_spec.period_detail: maximum 10 words.
+9. entity.visual_spec.distinctive_markers: maximum 3 entries, each ≤ 6 words.
+10. entity.visual_spec.accuracy_basis: maximum 10 words.
+11. entity.period_accuracy_notes: maximum 10 words.
+12. period_palettes[]: maximum 2 entries.
+13. palette.lighting_characteristics: maximum 8 words.
+14. palette.texture_notes: maximum 8 words.
+15. thumbnail candidates[]: maximum 3 entries total.
+16. Each thumbnail candidate field (description, supporting_evidence_or_reasoning): maximum 15 words.
+17. visual_integrity_log.entries[]: maximum 2 entries.
+18. known_limitations[]: maximum 2 entries.
+
 CRITICAL CONSTRAINTS:
 1. Do not output a "scenes" key.
 2. reference_image_asset_id must be null for every entity.

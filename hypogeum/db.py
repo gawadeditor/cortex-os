@@ -117,6 +117,13 @@ _V3_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+_V4_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    # run_queue: operator cancellation flag polled by pipeline between stages
+    "run_queue": [
+        ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+}
+
 _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "runs": [
         ("duration_ms",          "INTEGER"),
@@ -190,9 +197,16 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         # Publish calendar linkage — when this episode should go live (P12-21)
         ("target_publish_at",      "TEXT"),  # ISO 8601 UTC — intended platform publish time
         ("production_deadline_at", "TEXT"),  # = target_publish_at - 24h — latest safe production start
+        # Rerun: preserves episode_id so pipeline checkpoints on disk are reused.
+        # NULL for new topics; set for reruns via api_run_rerun.
+        ("episode_id", "TEXT"),
     ],
     "publish_calendar": [
         ("release_id", "TEXT"),   # P12-22: FK → releases.release_id
+    ],
+    "run_queue": [
+        ("source",               "TEXT"),  # 'rerun' | 'schedule' | 'manual'
+        ("recovery_from_run_id", "TEXT"),  # FK → runs.run_id; set for reruns only
     ],
 }
 
@@ -261,14 +275,19 @@ def _apply_v3_column_migrations(conn: sqlite3.Connection) -> None:
     _apply_column_migrations(conn, _V3_COLUMN_MIGRATIONS)
 
 
+def _apply_v4_column_migrations(conn: sqlite3.Connection) -> None:
+    """Apply v4 column additions (worker control). Idempotent."""
+    _apply_column_migrations(conn, _V4_COLUMN_MIGRATIONS)
+
+
 def initialize_schema(db_path: Optional[Path] = None) -> None:
     """
-    Create all tables and indexes defined in schema.sql, then apply v2
+    Create all tables and indexes defined in schema.sql, then apply v2–v4
     column migrations to existing v1 tables.
 
     Idempotent: safe to call on every pipeline startup.
       - CREATE TABLE IF NOT EXISTS handles new tables and views.
-      - _apply_v2_column_migrations() handles new columns on existing tables.
+      - _apply_v*_column_migrations() handles new columns on existing tables.
     Existing tables and their data are never dropped or modified.
 
     Args:
@@ -282,6 +301,7 @@ def initialize_schema(db_path: Optional[Path] = None) -> None:
         conn.commit()
         _apply_v2_column_migrations(conn)
         _apply_v3_column_migrations(conn)
+        _apply_v4_column_migrations(conn)
     finally:
         conn.close()
 
@@ -1454,19 +1474,21 @@ def insert_queue_item(
     channel_id: Optional[str] = None,
     episode_id: Optional[str] = None,
     priority: int = 0,
+    source: Optional[str] = None,
+    recovery_from_run_id: Optional[str] = None,
 ) -> None:
     """Insert a new queued work item with status='queued'."""
     conn.execute(
         """
         INSERT INTO run_queue
             (queue_id, scheduled_run_id, schedule_id, channel_id, episode_id,
-             priority, status, queued_at, created_at)
+             priority, status, queued_at, created_at, source, recovery_from_run_id)
         VALUES
-            (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
         """,
         (
             queue_id, scheduled_run_id, schedule_id, channel_id, episode_id,
-            priority, queued_at, created_at,
+            priority, queued_at, created_at, source, recovery_from_run_id,
         ),
     )
 
@@ -1484,8 +1506,13 @@ def claim_next_queue_item(
     the same row will produce rowcount=1 for exactly one of them and rowcount=0
     for the other. The loser receives None and must retry or give up.
 
-    Ordering: priority ASC (lower number = higher priority), then queued_at ASC
-    (FIFO within the same priority band).
+    Ordering:
+      1. priority ASC  — lower integer = higher urgency
+      2. source='rerun' before other sources — checkpoint recovery wins
+      3. For reruns: created_at DESC — newest rerun intent wins (avoids stale reruns
+         for the wrong episode from blocking the correct newer rerun).
+         For regular items: NULL (tiebreaker skipped, falls through to #4).
+      4. queued_at ASC  — FIFO within the same priority+source bucket.
 
     Args:
         conn:       Open connection (FK enforcement active).
@@ -1496,12 +1523,18 @@ def claim_next_queue_item(
         Dict of the claimed run_queue row, or None if no queued item exists
         or if another worker claimed the candidate first.
     """
-    # Step 1: identify the best candidate without modifying it
+    # Step 1: identify the best candidate without modifying it.
+    # Reruns: newest wins (created_at DESC, using NULL for non-reruns to skip).
+    # Regular items: FIFO (queued_at ASC as final tiebreaker).
     candidate = conn.execute(
         """
         SELECT queue_id FROM run_queue
         WHERE status = 'queued'
-        ORDER BY priority ASC, queued_at ASC
+        ORDER BY
+            priority ASC,
+            CASE WHEN source = 'rerun' THEN 0 ELSE 1 END ASC,
+            CASE WHEN source = 'rerun' THEN created_at ELSE NULL END DESC,
+            queued_at ASC
         LIMIT 1
         """
     ).fetchone()
@@ -1754,6 +1787,7 @@ def insert_episode_topic(
     source: str = "manual",
     discovery_score: Optional[float] = None,
     candidate_id: Optional[str] = None,
+    episode_id: Optional[str] = None,
 ) -> None:
     """Insert a new topic into the episode backlog with status='queued'."""
     conn.execute(
@@ -1761,13 +1795,13 @@ def insert_episode_topic(
         INSERT INTO episode_topics
             (topic_id, channel_id, topic_text, status, priority,
              source, discovery_score, candidate_id,
-             created_at, updated_at)
+             created_at, updated_at, episode_id)
         VALUES
-            (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
         """,
         (topic_id, channel_id, topic_text, priority,
          source, discovery_score, candidate_id,
-         created_at, updated_at),
+         created_at, updated_at, episode_id),
     )
 
 
@@ -1783,7 +1817,9 @@ def claim_next_episode_topic(
     identified by the prior SELECT. Two concurrent callers racing on the same
     row will each get rowcount=1 or rowcount=0 — exactly one wins.
 
-    Ordering: priority ASC (lower = higher urgency), then created_at ASC (FIFO).
+    Ordering: priority ASC (lower = higher urgency), then source='rerun' before
+    other sources, then created_at DESC (newest rerun first — the most recent
+    rerun intent wins over stale older rerun rows for the same episode).
 
     Args:
         conn:       Open connection.
@@ -1798,7 +1834,10 @@ def claim_next_episode_topic(
         """
         SELECT topic_id FROM episode_topics
         WHERE channel_id = ? AND status = 'queued'
-        ORDER BY priority ASC, created_at ASC
+        ORDER BY
+            priority ASC,
+            CASE WHEN source = 'rerun' THEN 0 ELSE 1 END ASC,
+            created_at DESC
         LIMIT 1
         """,
         (channel_id,),
@@ -1822,6 +1861,55 @@ def claim_next_episode_topic(
         "SELECT * FROM episode_topics WHERE topic_id = ?", (topic_id,)
     ).fetchone()
     return dict(row) if row else None
+
+
+def cancel_queued_topics_for_episode(
+    conn: sqlite3.Connection,
+    episode_id: str,
+    cancelled_at: str,
+) -> int:
+    """
+    Cancel all queued (not yet claimed) episode_topics rows for a given episode_id.
+
+    Called before inserting a new rerun topic so that only ONE queued rerun
+    row exists per episode at any time. Does not touch 'claimed' rows — those
+    are owned by an active worker.
+
+    Returns the number of rows cancelled.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE episode_topics
+        SET status = 'cancelled', updated_at = ?
+        WHERE episode_id = ? AND status = 'queued'
+        """,
+        (cancelled_at, episode_id),
+    )
+    return cursor.rowcount
+
+
+def cancel_queued_run_queue_items_for_episode(
+    conn: sqlite3.Connection,
+    episode_id: str,
+    cancelled_at: str,
+) -> int:
+    """
+    Cancel all queued (not yet claimed) run_queue rows for a given episode_id.
+
+    Called before inserting a new rerun queue item so stale channel triggers
+    linked to this episode do not compete with the fresh one.
+
+    Returns the number of rows cancelled.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE run_queue
+        SET status = 'cancelled', failed_at = ?
+        WHERE episode_id = ? AND status = 'queued'
+        """,
+        (cancelled_at, episode_id),
+    )
+    return cursor.rowcount
 
 
 def update_episode_topic_status(
@@ -2236,3 +2324,190 @@ def get_latest_model_comparison(
     else:
         d["results"] = []
     return d
+
+
+# ===========================================================================
+# Finance approval helpers
+# ===========================================================================
+
+def insert_finance_approval(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    episode_id: str,
+    approved_at: str,
+    estimated_spend_usd: float,
+    ceiling_at_approval: float,
+    overage_usd: float,
+    expires_at: str,
+    run_id: Optional[str] = None,
+    approved_by: str = "operator",
+    note: Optional[str] = None,
+) -> None:
+    """Insert a finance approval record (status='pending')."""
+    conn.execute(
+        """
+        INSERT INTO finance_approvals
+            (approval_id, episode_id, run_id, approved_at, approved_by,
+             estimated_spend_usd, ceiling_at_approval, overage_usd,
+             note, expires_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        """,
+        (approval_id, episode_id, run_id, approved_at, approved_by,
+         estimated_spend_usd, ceiling_at_approval, overage_usd,
+         note, expires_at),
+    )
+
+
+def get_valid_finance_approval(
+    conn: sqlite3.Connection,
+    episode_id: str,
+    now_iso: str,
+) -> Optional[dict]:
+    """
+    Return the most recent pending, non-expired finance approval for episode_id.
+    Returns None if no valid approval exists.
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM finance_approvals
+        WHERE episode_id = ? AND status = 'pending' AND expires_at > ?
+        ORDER BY approved_at DESC
+        LIMIT 1
+        """,
+        (episode_id, now_iso),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def consume_finance_approval(
+    conn: sqlite3.Connection,
+    approval_id: str,
+) -> None:
+    """Mark a finance approval as consumed (run proceeded)."""
+    conn.execute(
+        "UPDATE finance_approvals SET status = 'consumed' WHERE approval_id = ?",
+        (approval_id,),
+    )
+
+
+def list_finance_approvals(
+    conn: sqlite3.Connection,
+    episode_id: Optional[str] = None,
+) -> list:
+    """Return finance_approvals rows, optionally filtered by episode_id."""
+    if episode_id:
+        rows = conn.execute(
+            "SELECT * FROM finance_approvals WHERE episode_id = ? ORDER BY approved_at DESC",
+            (episode_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM finance_approvals ORDER BY approved_at DESC LIMIT 100"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# worker_control table helpers (P-WC: Worker Control)
+# ---------------------------------------------------------------------------
+
+def get_worker_control(
+    key: str,
+    default: str = "",
+    db_path: Optional[Path] = None,
+) -> str:
+    """Read a worker_control value by key. Returns default if key absent or on error."""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM worker_control WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+    except Exception:
+        return default
+    finally:
+        conn.close()
+
+
+def set_worker_control(
+    key: str,
+    value: str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Upsert a worker_control key-value pair. Safe to call from any process."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO worker_control (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, value, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is_cancel_requested(
+    queue_id: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Return True if cancel_requested=1 on the given run_queue row."""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT cancel_requested FROM run_queue WHERE queue_id = ?",
+            (queue_id,),
+        ).fetchone()
+        return bool(row and row["cancel_requested"])
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def request_cancel_for_queue_item(
+    queue_id: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """
+    Set cancel_requested=1 on a run_queue item (queued or claimed).
+
+    Returns True if the row was found and updated, False if not found or
+    already in a terminal state (completed/failed/cancelled).
+    """
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE run_queue SET cancel_requested = 1 "
+            "WHERE queue_id = ? AND status IN ('queued', 'claimed')",
+            (queue_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def abort_queue_item(
+    queue_id: str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """
+    Force-cancel a run_queue item, transitioning it to 'cancelled' regardless
+    of current status. Used when a pipeline run is cancelled by the operator.
+    No-op for items already in terminal states (completed/failed/cancelled).
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE run_queue SET status = 'cancelled', failed_at = ? "
+            "WHERE queue_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
+            (now, queue_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()

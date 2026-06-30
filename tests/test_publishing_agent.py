@@ -988,8 +988,9 @@ class TestPlaceholderShortGuard:
             assert meta.get("publishAt") == "2026-07-02T14:00:00+00:00", "Short must have publishAt"
 
     def test_vpd_suppress_shorts_false_when_flag_enabled(self):
-        """ENABLE_DEDICATED_SHORT_GENERATION=true → scene plan input has no shorts_count=0 constraint."""
+        """ENABLE_DEDICATED_SHORT_GENERATION=true → scene plan input includes shorts_scripts and source_type=short beats."""
         from hypogeum.agents.scene_planner import build_scene_plan_input
+        from hypogeum.agents.visual_package_director import _flatten_beats_for_a2
         from unittest.mock import MagicMock
 
         config = MagicMock()
@@ -1008,12 +1009,23 @@ class TestPlaceholderShortGuard:
         }
         input_pkg = build_scene_plan_input(sp, config, "ep_test_on")
 
+        # 1. No shorts_count=0 constraint — VPD will plan short scenes
         constraints = input_pkg.get("generation_constraints", {})
         assert constraints.get("shorts_count", -1) != 0, (
             "shorts_count must NOT be 0 when ENABLE_DEDICATED_SHORT_GENERATION=True"
         )
-        # Shorts scripts must be included (not stripped) in the compacted script
-        assert "shorts_scripts" in input_pkg.get("script_package", {})
+        # 2. shorts_scripts are NOT stripped from the input package
+        assert "shorts_scripts" in input_pkg.get("script_package", {}), (
+            "shorts_scripts must be passed to VPD when flag is enabled"
+        )
+        # 3. _flatten_beats_for_a2 on this input produces source_type=short beats
+        beats = _flatten_beats_for_a2(input_pkg)
+        short_beats = [b for b in beats if b.get("source_type") == "short"]
+        assert len(short_beats) == 1, (
+            "Expected 1 short beat in flattened plan when shorts_scripts present and flag enabled"
+        )
+        assert short_beats[0]["short_id"] == "short_001"
+        assert short_beats[0]["beat_id"] == "sh1b01"
 
     def test_vpd_suppress_shorts_true_when_flag_disabled(self):
         """ENABLE_DEDICATED_SHORT_GENERATION=false → scene plan input suppresses shorts."""

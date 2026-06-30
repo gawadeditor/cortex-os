@@ -2590,3 +2590,128 @@ class TestAssemblyManifestContract:
             narrative_package={"arc": "mystery"},
         )
         assert err is None
+
+
+# ---------------------------------------------------------------------------
+# TestShortsRendersNotPlaceholder
+# Regression: when VPD produces real short scenes (source_type=short) and
+# the mp4 assets exist on disk, assembly must set non-empty video_asset_id
+# on shorts_renders (not placeholder stubs). When no short scenes exist,
+# all 3 slots must be placeholder stubs.
+# ---------------------------------------------------------------------------
+
+class TestShortsRendersNotPlaceholder:
+
+    def _run(self, cfg, visual, narration, thumbnails, tmp_path):
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_sh")
+        _setup_narration_on_disk(narration, assets_root)
+        mtp = _make_music_track_package(episode_id="ep_sh", tmp_path=tmp_path)
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                return run_assembly_agent(
+                    visual_package=visual,
+                    narration_package=narration,
+                    thumbnail_package=thumbnails,
+                    config=cfg,
+                    episode_id="ep_sh",
+                    output_dir=tmp_path / "ep_sh",
+                )
+
+    def test_real_short_scenes_produce_non_placeholder_video_asset_ids(self, tmp_path):
+        """
+        When visual_package includes scenes with source_type=short and the clip
+        files exist on disk, assembly must write real video_asset_ids to
+        shorts_renders (not empty placeholders).
+        """
+        cfg = _make_config()
+        visual = _make_visual_package(episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+
+        result = self._run(cfg, visual, narration, thumbnails, tmp_path)
+
+        shorts_renders = result.get("shorts_renders", [])
+        assert len(shorts_renders) == 3
+
+        # The 3 real short IDs from _make_visual_package are sh_001, sh_002, sh_003
+        real_shorts = [sr for sr in shorts_renders if "_placeholder" not in sr.get("short_id", "")]
+        assert len(real_shorts) == 3, (
+            f"Expected 3 real (non-placeholder) short renders, got: "
+            f"{[sr['short_id'] for sr in shorts_renders]}"
+        )
+        for sr in real_shorts:
+            assert sr["video_asset_id"] != "", (
+                f"short {sr['short_id']} must have a non-empty video_asset_id "
+                f"when clip assets exist on disk"
+            )
+
+    def test_no_short_scenes_produces_all_placeholder_shorts(self, tmp_path):
+        """
+        When visual_package has only main_episode scenes (no source_type=short),
+        all 3 shorts_renders slots must be placeholder stubs.
+        """
+        cfg = _make_config()
+        # Main-only visual package — no short scenes
+        main_only_scenes = [
+            {
+                "scene_id": "sc_001", "scene_index": 0,
+                "source_type": "main_episode",
+                "narration_reference": "b_001",
+                "asset_id": "episodes/ep_sh/sc_001",
+                "production_spec": {"duration_seconds": 8},
+                "narrative_signals": [], "section_reference": "s01",
+            },
+            {
+                "scene_id": "sc_002", "scene_index": 1,
+                "source_type": "main_episode",
+                "narration_reference": "b_002",
+                "asset_id": "episodes/ep_sh/sc_002",
+                "production_spec": {"duration_seconds": 8},
+                "narrative_signals": [], "section_reference": "s01",
+            },
+        ]
+        visual = _make_visual_package(scenes=main_only_scenes, episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+
+        result = self._run(cfg, visual, narration, thumbnails, tmp_path)
+
+        shorts_renders = result.get("shorts_renders", [])
+        assert len(shorts_renders) == 3
+
+        for sr in shorts_renders:
+            assert "_placeholder" in sr["short_id"], (
+                f"Expected placeholder short_id, got {sr['short_id']!r}"
+            )
+            assert sr["video_asset_id"] == "", (
+                f"Placeholder short must have empty video_asset_id, got {sr['video_asset_id']!r}"
+            )
+
+    def test_placeholder_short_ids_not_counted_as_successful_deliverables(self, tmp_path):
+        """
+        Placeholder shorts must not appear as production_ready=True deliverables.
+        Assembly's package_integrity.production_ready must not be affected by
+        placeholder shorts missing their video files.
+        """
+        cfg = _make_config()
+        visual = _make_visual_package(episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+
+        result = self._run(cfg, visual, narration, thumbnails, tmp_path)
+
+        # Real shorts from the visual package are present and have files → production_ready
+        assert result["package_integrity"]["production_ready"] is True
+
+        # Verify: placeholder shorts have scene_count=0 and empty video_asset_id
+        placeholder_shorts = [
+            sr for sr in result["shorts_renders"]
+            if "_placeholder" in sr.get("short_id", "")
+        ]
+        for ph in placeholder_shorts:
+            assert ph["scene_count"] == 0
+            assert ph["video_asset_id"] == ""

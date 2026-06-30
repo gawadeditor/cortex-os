@@ -441,7 +441,7 @@ class Config:
         self.MUAPI_DRY_RUN = _get_bool("MUAPI_DRY_RUN", default=False)
         self.MUAPI_ALLOW_PAID_FALLBACKS = _get_bool("MUAPI_ALLOW_PAID_FALLBACKS", default=False)
         self.ENABLE_DEDICATED_SHORT_GENERATION = _get_bool(
-            "ENABLE_DEDICATED_SHORT_GENERATION", default=False
+            "ENABLE_DEDICATED_SHORT_GENERATION", default=True
         )
 
         # --- Smoke Test Mode ---

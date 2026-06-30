@@ -752,6 +752,7 @@ def run_cost_ledger(
     narration_package: Optional[dict] = None,
     visual_package: Optional[dict] = None,
     output_dir: Optional[Path] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """
     Post-run cost ledger. Called after Archive Agent. Non-blocking.
@@ -934,6 +935,7 @@ def run_cost_ledger(
     record = {
         "finance_id": f"fl_{uuid.uuid4().hex[:12]}",
         "episode_id": episode_id,
+        "run_id": run_id,
         "phase": "ledger",
         "recorded_at": _now_iso(),
         "verdict": verdict,

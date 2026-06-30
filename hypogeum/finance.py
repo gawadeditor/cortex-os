@@ -259,6 +259,25 @@ def write_episode_rollup(
         except Exception:
             pass  # JSON write failure is non-fatal
 
+        # Roll total_cost_usd into the runs table so the dashboard can display it.
+        # Uses episode_id to aggregate across all runs (reruns share the same episode).
+        try:
+            conn2 = get_connection(resolved_db)
+            try:
+                episode_total = conn2.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM costs WHERE episode_id = ?",
+                    (episode_id,),
+                ).fetchone()[0]
+                conn2.execute(
+                    "UPDATE runs SET total_cost_usd = ? WHERE run_id = ?",
+                    (round(episode_total, 6), run_id),
+                )
+                conn2.commit()
+            finally:
+                conn2.close()
+        except Exception:
+            pass  # DB write failure is non-fatal; rollup JSON is the source of truth
+
         return rollup
 
     except Exception:

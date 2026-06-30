@@ -966,6 +966,7 @@ def run_pipeline(
             narration_package=narration_package,
             visual_package=visual_package,
             output_dir=output_dir,
+            run_id=run_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
@@ -1686,6 +1687,7 @@ def _run_cost_ledger(
     output_dir: Optional[Path],
     narration_package: Optional[dict] = None,
     visual_package: Optional[dict] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """
     Finance Agent — post-run cost ledger (R50 — implemented).
@@ -1709,6 +1711,7 @@ def _run_cost_ledger(
         narration_package=narration_package,
         visual_package=visual_package,
         output_dir=output_dir,
+        run_id=run_id,
     )
 
 

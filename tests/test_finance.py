@@ -384,3 +384,181 @@ class TestPipelineIntegration:
         from hypogeum import pipeline
         src = inspect.getsource(pipeline)
         assert "write_episode_rollup" in src
+
+
+# ---------------------------------------------------------------------------
+# TestCostRollupToRunsTable
+# Regression: write_episode_rollup must persist total_cost_usd to runs.total_cost_usd.
+# ---------------------------------------------------------------------------
+
+class TestCostRollupToRunsTable:
+
+    def _make_store(self, tmp_path, run_id="run-r1", episode_id="ep_r1"):
+        db_path = tmp_path / "h.db"
+        initialize_schema(db_path)
+        conn = get_connection(db_path)
+        insert_run(conn, run_id, episode_id, "2026-07-01T10:00:00Z")
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def _insert_cost(self, db_path, run_id, episode_id, cost_usd, provider="elevenlabs"):
+        import uuid as _uuid
+        from hypogeum.db import insert_cost
+        conn = get_connection(db_path)
+        try:
+            insert_cost(
+                conn,
+                cost_id=str(_uuid.uuid4()),
+                run_id=run_id,
+                episode_id=episode_id,
+                provider=provider,
+                call_type="tts",
+                cost_usd=cost_usd,
+                called_at="2026-07-01T10:00:00Z",
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_run_cost(self, db_path, run_id):
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT total_cost_usd FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            return row["total_cost_usd"] if row else None
+        finally:
+            conn.close()
+
+    def test_rollup_writes_total_cost_to_runs_table(self, tmp_path):
+        """write_episode_rollup must update runs.total_cost_usd."""
+        db_path = self._make_store(tmp_path)
+        self._insert_cost(db_path, "run-r1", "ep_r1", 2.50)
+        self._insert_cost(db_path, "run-r1", "ep_r1", 1.25)
+
+        write_episode_rollup("run-r1", "ep_r1", db_path=db_path,
+                             finance_dir=tmp_path / "fin")
+
+        cost = self._get_run_cost(db_path, "run-r1")
+        assert cost is not None, "total_cost_usd must not be NULL after rollup"
+        assert abs(cost - 3.75) < 1e-4, f"Expected 3.75, got {cost}"
+
+    def test_rollup_aggregates_across_reruns_for_same_episode(self, tmp_path):
+        """
+        Episode cost = sum across all runs. A rerun's rollup must write the
+        episode total (not just the rerun's own costs) to its run row.
+        This reflects the real spend per episode, including failed earlier runs.
+        """
+        db_path = tmp_path / "h.db"
+        initialize_schema(db_path)
+        conn = get_connection(db_path)
+        insert_run(conn, "run-orig", "ep_multi", "2026-07-01T10:00:00Z")
+        insert_run(conn, "run-rerun", "ep_multi", "2026-07-01T11:00:00Z")
+        conn.commit()
+        conn.close()
+
+        # Original run spent $5 on narration
+        self._insert_cost(db_path, "run-orig", "ep_multi", 5.0, provider="elevenlabs")
+        # Rerun spent $3 on video
+        self._insert_cost(db_path, "run-rerun", "ep_multi", 3.0, provider="muapi")
+
+        # Rollup for the rerun should reflect episode total ($8)
+        write_episode_rollup("run-rerun", "ep_multi", db_path=db_path,
+                             finance_dir=tmp_path / "fin")
+
+        cost = self._get_run_cost(db_path, "run-rerun")
+        assert cost is not None
+        assert abs(cost - 8.0) < 1e-4, (
+            f"Rerun total_cost_usd must include original run costs (episode total=8.0), got {cost}"
+        )
+
+    def test_rollup_returns_zero_when_no_costs(self, tmp_path):
+        """Rollup on a run with no cost records writes 0.0, not NULL."""
+        db_path = self._make_store(tmp_path, "run-zero", "ep_zero")
+        write_episode_rollup("run-zero", "ep_zero", db_path=db_path,
+                             finance_dir=tmp_path / "fin")
+
+        cost = self._get_run_cost(db_path, "run-zero")
+        assert cost is not None, "total_cost_usd must be 0.0, not NULL, when no costs exist"
+        assert cost == 0.0
+
+    def test_runs_total_cost_not_null_after_rollup(self, tmp_path):
+        """Dashboard invariant: runs.total_cost_usd must never be NULL after rollup."""
+        db_path = self._make_store(tmp_path)
+        self._insert_cost(db_path, "run-r1", "ep_r1", 1.0)
+        write_episode_rollup("run-r1", "ep_r1", db_path=db_path,
+                             finance_dir=tmp_path / "fin")
+
+        cost = self._get_run_cost(db_path, "run-r1")
+        assert cost is not None, (
+            "runs.total_cost_usd must not be NULL — dashboard relies on this column"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestFinanceRecordRunId
+# Regression: finance_record (phase=ledger) must include run_id.
+# ---------------------------------------------------------------------------
+
+class TestFinanceRecordRunId:
+
+    def _minimal_pkg(self):
+        return {
+            "package_metadata": {"render_package_id": "rp_test", "episode_id": "ep_test"},
+            "episode_render": {"video_asset_id": "", "caption_asset_id": "", "duration_seconds": 0.0},
+            "shorts_renders": [],
+            "thumbnail_references": [],
+            "music_log": [],
+            "metadata_source": {},
+            "assembly_qa_report": {},
+            "package_integrity": {"production_ready": True},
+        }
+
+    def test_finance_ledger_record_contains_run_id(self, tmp_path):
+        """run_cost_ledger must include run_id in the returned record."""
+        from hypogeum.agents.finance_agent import run_cost_ledger
+        from unittest.mock import MagicMock
+
+        config = MagicMock()
+        config.FINANCE_BUDGET_CEILING_USD = 50.0
+        config.FINANCE_LEDGER_PATH = None
+        config.ELEVENLABS_COST_PER_1K_CHARS = 0.30
+        config.MUAPI_T2_COST_PER_CLIP = 0.60
+
+        record = run_cost_ledger(
+            final_render_package=self._minimal_pkg(),
+            publishing_record={},
+            archive_record={},
+            episode_id="ep_test",
+            config=config,
+            run_id="run-test-abc",
+            output_dir=tmp_path,
+        )
+
+        assert record.get("run_id") == "run-test-abc", (
+            f"finance_record must contain run_id, got: {record.get('run_id')!r}"
+        )
+
+    def test_finance_ledger_run_id_none_when_not_passed(self, tmp_path):
+        """run_cost_ledger without run_id produces run_id=None (explicit null, not missing)."""
+        from hypogeum.agents.finance_agent import run_cost_ledger
+        from unittest.mock import MagicMock
+
+        config = MagicMock()
+        config.FINANCE_BUDGET_CEILING_USD = 50.0
+        config.FINANCE_LEDGER_PATH = None
+        config.ELEVENLABS_COST_PER_1K_CHARS = 0.30
+        config.MUAPI_T2_COST_PER_CLIP = 0.60
+
+        record = run_cost_ledger(
+            final_render_package=self._minimal_pkg(),
+            publishing_record={},
+            archive_record={},
+            episode_id="ep_test",
+            config=config,
+            output_dir=tmp_path,
+        )
+
+        assert "run_id" in record, "run_id key must always be present in finance_record"
+        assert record["run_id"] is None

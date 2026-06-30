@@ -146,17 +146,19 @@ class TestProductionReadyRules:
         assert verdict["production_ready"] is False
         assert any("sh_002" in f for f in verdict["failures"])
 
-    def test_partial_render_does_not_block_if_files_exist(self):
-        """render_status=partial with all files present → production_ready=True (CONDITIONAL)."""
+    def test_partial_render_with_missing_clips_blocks_production_ready(self):
+        """
+        render_status=partial with any missing clips → production_ready=False.
+        Missing clips produce visible freeze/still frames via tpad hold.
+        """
         manifest = _make_manifest(
             render_status="partial",
             clip_rate=0.9,
             missing_clips=["sc_05"],
         )
         verdict = run_final_render_reviewer(manifest, "ep_test")
-        # partial render alone doesn't block if files exist
-        assert verdict["production_ready"] is True
-        assert verdict["overall_verdict"] == "CONDITIONAL"
+        assert verdict["production_ready"] is False
+        assert any("clip_availability" in f for f in verdict["failures"])
 
     def test_clip_availability_below_60_blocks_production_ready(self):
         """clip_availability_rate < 0.60 → production_ready=False."""
@@ -168,17 +170,21 @@ class TestProductionReadyRules:
         verdict = run_final_render_reviewer(manifest, "ep_test")
         assert verdict["production_ready"] is False
 
-    def test_clip_availability_between_60_and_100_is_warning_not_failure(self):
-        """clip_availability_rate 0.60–0.99 → production_ready=True (CONDITIONAL, not blocked)."""
+    def test_clip_availability_between_60_and_100_blocks_production_ready(self):
+        """
+        clip_availability_rate 0.60–0.99 → production_ready=False.
+        Previously this was only a warning; now any missing clip blocks.
+        Freeze frames are visible defects that must not be published.
+        """
         manifest = _make_manifest(
             render_status="partial",
             clip_rate=0.75,
             missing_clips=["sc_01", "sc_02", "sc_03"],
         )
         verdict = run_final_render_reviewer(manifest, "ep_test")
-        assert verdict["production_ready"] is True
-        assert verdict["overall_verdict"] == "CONDITIONAL"
-        assert any("clip_availability" in w for w in verdict["warnings"])
+        assert verdict["production_ready"] is False
+        assert verdict["overall_verdict"] == "REJECTED"
+        assert any("clip_availability" in f for f in verdict["failures"])
 
     def test_max_scene_hold_over_45s_blocks_production_ready(self):
         """max_scene_hold_seconds > 45.0 → production_ready=False (extreme hold threshold)."""
@@ -545,6 +551,75 @@ class TestSchemaContract:
             "c_media_specs", "c_audio_qa",
         ):
             assert required in check_ids, f"Missing check: {required}"
+
+
+# ---------------------------------------------------------------------------
+# TestFreezeFrameGuard
+# Regression: any missing clip must block publishing.
+# Missing clips produce visible freeze/still frames via tpad=stop_mode=clone.
+# The 60% threshold allowed 87.9%-available episodes to publish with 4 frozen
+# scenes. The new guard: clip_rate < 1.0 → production_ready=False → QA REJECTED.
+# ---------------------------------------------------------------------------
+
+class TestFreezeFrameGuard:
+
+    def test_single_missing_clip_blocks_publishing(self):
+        """Even one missing clip (99% availability) → production_ready=False."""
+        manifest = _make_manifest(clip_rate=0.99, missing_clips=["sc_07"])
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        assert verdict["production_ready"] is False, (
+            "One missing clip must block publishing — it produces a freeze frame"
+        )
+        assert verdict["overall_verdict"] == "REJECTED"
+
+    def test_87pct_availability_blocks_publishing(self):
+        """
+        Regression for ep_20260629075717_c7abfd: 87.9% availability (4/33 clips
+        missing) was previously allowed as a CONDITIONAL. Must now be REJECTED.
+        """
+        manifest = _make_manifest(
+            render_status="partial",
+            clip_rate=0.8788,
+            missing_clips=["s01", "s04", "s12", "s16"],
+        )
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        assert verdict["production_ready"] is False
+        assert verdict["overall_verdict"] == "REJECTED"
+        assert any("freeze frame" in f for f in verdict["failures"]), (
+            "Failure message must mention freeze frames"
+        )
+
+    def test_100pct_availability_is_production_ready(self):
+        """All clips present → production_ready=True (no freeze frames possible)."""
+        manifest = _make_manifest(clip_rate=1.0, missing_clips=[])
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        assert verdict["production_ready"] is True
+        check = next(c for c in verdict["checks"] if c["check_id"] == "c_clip_availability")
+        assert check["status"] == "pass"
+
+    def test_missing_clip_failure_message_mentions_freeze_frames(self):
+        """Failure message must make clear WHY missing clips are blocking."""
+        manifest = _make_manifest(clip_rate=0.8, missing_clips=["sc_01", "sc_02"])
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        all_failures = " ".join(verdict["failures"])
+        assert "freeze" in all_failures.lower(), (
+            f"Failure must mention freeze frames. Got: {verdict['failures']}"
+        )
+
+    def test_missing_clip_check_status_is_fail_not_warn(self):
+        """c_clip_availability check must be 'fail', not 'warn', when any clip missing."""
+        manifest = _make_manifest(clip_rate=0.95, missing_clips=["sc_03"])
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        clip_check = next(c for c in verdict["checks"] if c["check_id"] == "c_clip_availability")
+        assert clip_check["status"] == "fail", (
+            f"c_clip_availability must be 'fail' when clips missing, got {clip_check['status']!r}"
+        )
+
+    def test_clips_missing_appears_in_human_review_reasons(self):
+        """Missing clips must trigger human review recommendation."""
+        manifest = _make_manifest(clip_rate=0.9, missing_clips=["sc_01"])
+        verdict = run_final_render_reviewer(manifest, "ep_test")
+        assert "clips_missing" in verdict["human_review_reasons"]
 
 
 # ---------------------------------------------------------------------------

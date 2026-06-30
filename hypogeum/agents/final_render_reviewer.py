@@ -185,14 +185,18 @@ def run_final_render_reviewer(
     clip_rate = render_output_manifest.get("clip_availability_rate", 1.0) or 1.0
     missing_clips = render_output_manifest.get("missing_clips", [])
 
-    if clip_rate < 0.60:
+    if clip_rate < 1.0:
+        # Any missing clip produces visible freeze/still frames via tpad hold.
+        # Block publishing regardless of how many clips are missing.
+        n_missing = len(missing_clips)
         _add_check(checks, "c_clip_availability", "fail",
-                   f"clip_availability_rate={clip_rate:.1%} < 60% threshold")
-        failures.append(f"clip_availability: {clip_rate:.1%} below 60% threshold")
-    elif clip_rate < 1.0:
-        _add_check(checks, "c_clip_availability", "warn",
-                   f"clip_availability_rate={clip_rate:.1%} — some clips missing")
-        warnings.append(f"clip_availability: {clip_rate:.1%} — {len(missing_clips)} clip(s) missing")
+                   f"clip_availability_rate={clip_rate:.1%} — "
+                   f"{n_missing} missing clip(s) will produce freeze frames; "
+                   f"regenerate before publishing")
+        failures.append(
+            f"clip_availability: {clip_rate:.1%} — {n_missing} clip(s) missing; "
+            f"freeze frames not acceptable in published video"
+        )
         human_review_reasons.append("clips_missing")
     else:
         _add_check(checks, "c_clip_availability", "pass",

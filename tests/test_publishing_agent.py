@@ -210,9 +210,15 @@ def _patch_platforms(
         yield
 
 
-def _run(pkg, config, episode_id, tmp_path):
+def _run(pkg, config, episode_id, tmp_path, publish_at="2026-07-02T14:00:00+00:00"):
+    """Run publishing agent with a scheduled publish_at by default (production behaviour)."""
     (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
-    return run_publishing_agent(pkg, config, episode_id, output_dir=tmp_path, project_root=tmp_path)
+    return run_publishing_agent(
+        pkg, config, episode_id,
+        output_dir=tmp_path,
+        project_root=tmp_path,
+        publish_at=publish_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -627,3 +633,137 @@ class TestSchemaValidation:
         assert "captions_submitted" in meta
         assert "thumbnail_applied" in meta
         assert "end_screen_applied" in meta
+
+
+# ---------------------------------------------------------------------------
+# TestPublishScheduleGuard
+# Regression: autonomous uploads must be private+scheduled, never public.
+# Missing schedule must block upload (skipped), not default to public.
+# ---------------------------------------------------------------------------
+
+class TestPublishScheduleGuard:
+
+    def _run_with(self, tmp_path, publish_at=None, youtube_privacy="public",
+                  capture_metadata=None):
+        """Run publishing agent and optionally capture upload metadata."""
+        config = _make_config()
+        pkg = _make_final_render_package("ep_sched_test", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        captured = {}
+
+        def spy_upload(config, access_token, video_path, metadata, episode_id):
+            captured.update(metadata)
+            return "yt_vid_scheduled"
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video", side_effect=spy_upload):
+                result = run_publishing_agent(
+                    pkg, config, "ep_sched_test",
+                    output_dir=tmp_path,
+                    project_root=tmp_path,
+                    youtube_privacy=youtube_privacy,
+                    publish_at=publish_at,
+                )
+        if capture_metadata is not None:
+            capture_metadata.update(captured)
+        return result
+
+    def test_scheduled_upload_uses_private_privacy(self, tmp_path):
+        """publish_at set → privacyStatus must be 'private'."""
+        meta = {}
+        self._run_with(tmp_path, publish_at="2026-07-02T14:00:00+00:00", capture_metadata=meta)
+        assert meta.get("privacyStatus") == "private", (
+            f"Expected 'private' for scheduled upload, got {meta.get('privacyStatus')!r}"
+        )
+
+    def test_scheduled_upload_sets_publish_at_in_metadata(self, tmp_path):
+        """publish_at set → publishAt must appear in video metadata sent to YouTube."""
+        meta = {}
+        self._run_with(tmp_path, publish_at="2026-07-02T14:00:00+00:00", capture_metadata=meta)
+        assert meta.get("publishAt") == "2026-07-02T14:00:00+00:00", (
+            f"Expected publishAt in metadata, got {meta!r}"
+        )
+
+    def test_no_schedule_blocks_youtube_upload(self, tmp_path):
+        """publish_at=None + default public → YouTube upload must be skipped."""
+        upload_called = []
+
+        config = _make_config()
+        pkg = _make_final_render_package("ep_nosch", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        def spy_upload(*args, **kwargs):
+            upload_called.append(True)
+            return "yt_vid_leaked"
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video", side_effect=spy_upload):
+                result = run_publishing_agent(
+                    pkg, config, "ep_nosch",
+                    output_dir=tmp_path,
+                    project_root=tmp_path,
+                    publish_at=None,
+                    youtube_privacy="public",
+                )
+
+        assert not upload_called, (
+            "YouTube upload must be blocked when no publish schedule is set"
+        )
+
+    def test_no_schedule_records_skipped_not_failed(self, tmp_path):
+        """Blocked upload is recorded as 'skipped' with no_publish_schedule reason."""
+        config = _make_config()
+        pkg = _make_final_render_package("ep_nosch2", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        with _patch_platforms():
+            result = run_publishing_agent(
+                pkg, config, "ep_nosch2",
+                output_dir=tmp_path,
+                project_root=tmp_path,
+                publish_at=None,
+                youtube_privacy="public",
+            )
+
+        yt_main = next(
+            (r for r in result["platform_results"]
+             if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"),
+            None,
+        )
+        assert yt_main is not None
+        assert yt_main["status"] == "skipped"
+        assert yt_main.get("skipped_reason") == "no_publish_schedule"
+
+    def test_explicit_private_without_schedule_uploads(self, tmp_path):
+        """youtube_privacy='private' with no publish_at allows upload (CLI/Episode Zero path)."""
+        upload_called = []
+
+        config = _make_config()
+        pkg = _make_final_render_package("ep_cli_priv", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        def spy_upload(config, access_token, video_path, metadata, episode_id):
+            upload_called.append(metadata.get("privacyStatus"))
+            return "yt_vid_private"
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video", side_effect=spy_upload):
+                run_publishing_agent(
+                    pkg, config, "ep_cli_priv",
+                    output_dir=tmp_path,
+                    project_root=tmp_path,
+                    publish_at=None,
+                    youtube_privacy="private",
+                )
+
+        assert upload_called, "Expected upload to proceed with explicit private privacy"
+        assert upload_called[0] == "private"
+
+    def test_scheduled_upload_never_public(self, tmp_path):
+        """publish_at set → privacyStatus must never be 'public'."""
+        meta = {}
+        self._run_with(tmp_path, publish_at="2026-07-02T14:00:00+00:00", capture_metadata=meta)
+        assert meta.get("privacyStatus") != "public", (
+            "privacyStatus must not be 'public' when a publish schedule is set"
+        )

@@ -210,6 +210,7 @@ def run_publishing_agent(
     episode_id: str,
     output_dir: Optional[Path] = None,
     youtube_privacy: str = "public",
+    publish_at: Optional[str] = None,
     project_root: Optional[Path] = None,
 ) -> dict:
     """
@@ -220,9 +221,14 @@ def run_publishing_agent(
         config:               Loaded Config instance.
         episode_id:           Episode identifier for log correlation and file paths.
         output_dir:           Optional output directory override.
-        youtube_privacy:      YouTube privacy status for all uploads — "public", "private",
-                              or "unlisted". Default "public". Pass "private" for Episode Zero
-                              and test runs to prevent accidental public publishing.
+        youtube_privacy:      YouTube privacy status — "public", "private", or "unlisted".
+                              Ignored when publish_at is set (privacy is forced to "private").
+                              When publish_at is None and youtube_privacy is "public", all
+                              YouTube uploads are blocked (no_publish_schedule guard).
+        publish_at:           ISO 8601 UTC datetime for scheduled publishing. When set,
+                              privacyStatus is forced to "private" and publishAt is sent to
+                              the YouTube API so the platform schedules the go-live.
+                              When None and youtube_privacy="public", upload is blocked.
 
     Returns:
         publishing_record dict (schema-validated, written to disk).
@@ -237,6 +243,36 @@ def run_publishing_agent(
         episode_id=episode_id,
         agent_version=_AGENT_VERSION,
     )
+
+    # ------------------------------------------------------------------
+    # Resolve effective YouTube privacy and publishAt.
+    #
+    # Rules (in priority order):
+    #   1. publish_at set → force private + schedule via YouTube publishAt API
+    #   2. youtube_privacy explicitly non-public → honour it (CLI / Episode Zero)
+    #   3. publish_at None AND youtube_privacy "public" → block: no schedule guard
+    #
+    # _yt_block=True means skip all YouTube uploads with "no_publish_schedule".
+    # ------------------------------------------------------------------
+    if publish_at is not None:
+        _yt_privacy: str = "private"
+        _yt_publish_at: Optional[str] = publish_at
+        _yt_block: bool = False
+    elif youtube_privacy != "public":
+        _yt_privacy = youtube_privacy
+        _yt_publish_at = None
+        _yt_block = False
+    else:
+        # No schedule and caller did not override privacy — block upload.
+        _yt_privacy = "private"
+        _yt_publish_at = None
+        _yt_block = True
+        log.warn(
+            "publishing_youtube_blocked_no_schedule",
+            episode_id=episode_id,
+            reason="publish_at is None and youtube_privacy='public'; "
+                   "autonomous uploads require a publish schedule",
+        )
 
     # Resolve paths
     assets_root = _resolve_assets_root(output_dir)
@@ -488,6 +524,17 @@ def run_publishing_agent(
         if youtube_pdr:
             record.add_failure(youtube_pdr)
         failed_count += 1
+    elif _yt_block:
+        # No publish schedule — block upload rather than going public
+        entry = make_result_entry(
+            platform="youtube",
+            deliverable_type="main_episode",
+            status="skipped",
+            skipped_reason="no_publish_schedule",
+            title=get_episode_title(metadata_source),
+            ai_disclosure_included=False,
+        )
+        record.append_result(entry)
     else:
         # Build metadata
         episode_title = get_episode_title(metadata_source)
@@ -497,9 +544,11 @@ def run_publishing_agent(
             "description": yt_description,
             "tags": [],
             "categoryId": str(config.YOUTUBE_DEFAULT_CATEGORY_ID),
-            "privacyStatus": youtube_privacy,
+            "privacyStatus": _yt_privacy,
             "madeForKids": False,
         }
+        if _yt_publish_at:
+            video_metadata["publishAt"] = _yt_publish_at
 
         video_path = _resolve_asset_path(main_video_id, assets_root, ".mp4")
 
@@ -720,6 +769,19 @@ def run_publishing_agent(
                 failed_count += 1
             continue
 
+        if _yt_block:
+            entry = make_result_entry(
+                platform="youtube",
+                deliverable_type="short",
+                status="skipped",
+                short_id=short_id,
+                skipped_reason="no_publish_schedule",
+                title=get_short_title(metadata_source, short_id),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            continue
+
         short_title = get_short_title(metadata_source, short_id) or get_episode_title(metadata_source)
         short_description = build_youtube_short_description(
             metadata_source, short_id=short_id, episode_id=episode_id
@@ -729,9 +791,11 @@ def run_publishing_agent(
             "description": short_description,
             "tags": [],
             "categoryId": str(config.YOUTUBE_DEFAULT_CATEGORY_ID),
-            "privacyStatus": youtube_privacy,
+            "privacyStatus": _yt_privacy,
             "madeForKids": False,
         }
+        if _yt_publish_at:
+            short_metadata["publishAt"] = _yt_publish_at
 
         short_video_path = _resolve_asset_path(sr_video_id, assets_root, ".mp4")
 

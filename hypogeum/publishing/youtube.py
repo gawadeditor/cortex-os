@@ -238,6 +238,12 @@ def _resumable_upload(
     Phase 2: Upload file in chunks.
     """
     # Build snippet + status body
+    _status: dict = {
+        "privacyStatus": metadata.get("privacyStatus", "public"),
+        "madeForKids": metadata.get("madeForKids", False),
+    }
+    if metadata.get("publishAt"):
+        _status["publishAt"] = metadata["publishAt"]
     body = {
         "snippet": {
             "title": metadata.get("title", "")[:100],
@@ -245,10 +251,7 @@ def _resumable_upload(
             "tags": metadata.get("tags", []),
             "categoryId": str(metadata.get("categoryId", "27")),
         },
-        "status": {
-            "privacyStatus": metadata.get("privacyStatus", "public"),
-            "madeForKids": metadata.get("madeForKids", False),
-        },
+        "status": _status,
     }
 
     file_size = video_path.stat().st_size

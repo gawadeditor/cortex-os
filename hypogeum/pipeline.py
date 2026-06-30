@@ -909,12 +909,17 @@ def run_pipeline(
             output_schema="publishing_record",
             db_path=db_path,
         )
+        # Resolve publish schedule. The autonomous worker path never passes
+        # youtube_privacy, so it defaults "public". We override: if a schedule
+        # exists → private + publishAt; if not → block (no public uploads).
+        _episode_publish_at = _get_episode_publish_at(episode_id, db_path)
         publishing_record = _run_publishing_agent(
             final_render_package=final_render_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
             youtube_privacy=youtube_privacy,
+            publish_at=_episode_publish_at,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
@@ -1736,12 +1741,37 @@ def _run_asset_archive(
     )
 
 
+def _get_episode_publish_at(episode_id: str, db_path: Optional[Path]) -> Optional[str]:
+    """
+    Return target_publish_at from the most recent consumed episode_topics row, or None.
+
+    None means no publish schedule is recorded — the pipeline will block YouTube upload
+    rather than default to public.
+    """
+    try:
+        from hypogeum.db import _db_path as _resolve_db_path
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            row = conn.execute(
+                "SELECT target_publish_at FROM episode_topics "
+                "WHERE episode_id = ? AND target_publish_at IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (episode_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row["target_publish_at"] if row else None
+    except Exception:
+        return None
+
+
 def _run_publishing_agent(
     final_render_package: dict,
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
     youtube_privacy: str = "public",
+    publish_at: Optional[str] = None,
 ) -> dict:
     """
     Publishing Agent (M5.2 — implemented).
@@ -1762,4 +1792,5 @@ def _run_publishing_agent(
         episode_id=episode_id,
         output_dir=output_dir,
         youtube_privacy=youtube_privacy,
+        publish_at=publish_at,
     )

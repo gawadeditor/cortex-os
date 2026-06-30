@@ -43,6 +43,7 @@ def _write_jpeg(path: Path, width: int, height: int) -> None:
 
 
 def _good_plan() -> dict:
+    """Minimal valid generation plan with the layered system fields required by QA."""
     return {
         "thumbnail_generation_plan_id": "tgp_test",
         "episode_id": "ep_test",
@@ -53,8 +54,20 @@ def _good_plan() -> dict:
                     "rank": 1,
                     "image_prompt": "A pharaoh in torchlight.",
                     "aspect_ratio": "16:9",
-                    "ctr_rationale": "Strong curiosity gap.",
+                    "ctr_rationale": "Strong curiosity gap: viewer cannot identify the source.",
                     "text_overlay": {"text": "Who did this?", "placement": "bottom"},
+                    "composition_plan": {
+                        "focal_zone": "center",
+                        "text_zone": "bottom_overlay_shadow",
+                        "dominant_tone": "near_black",
+                        "negative_space_zones": ["bottom_overlay_shadow"],
+                    },
+                    "typography_plan": {
+                        "headline": "WHO DID THIS",
+                        "emphasis": "THIS",
+                        "zone": "bottom_overlay_shadow",
+                        "layout": "stacked",
+                    },
                 }
             ]
         },
@@ -461,3 +474,229 @@ class TestReferenceImageQAOverall:
         # asset_class and asset_id not provided → warn
         assert report["overall_status"] == "warn"
         assert report["failures"] == []
+
+
+# ---------------------------------------------------------------------------
+# TestLayeredThumbnailGuard
+# Regression: old generic thumbnail path (no composition_plan / typography_plan)
+# must be rejected by QA. The layered system (composition_plan + typography_plan
+# + ctr_rationale) is the only acceptable production path.
+# ---------------------------------------------------------------------------
+
+def _make_thumbnail(tmp_path: Path) -> Path:
+    p = tmp_path / "thumbnails" / "candidate_1.jpg"
+    _write_jpeg(p, 1280, 720)
+    return p
+
+
+def _layered_plan(focal_zones=("center", "left", "right")) -> dict:
+    """Build a generation_plan with full layered system data on all 3 candidates."""
+    return {
+        "thumbnail_generation_plan_id": "tgp_layered",
+        "episode_id": "ep_test",
+        "main_episode": {
+            "ranked_candidates": [
+                {
+                    "candidate_id": f"c{i+1}",
+                    "rank": i + 1,
+                    "image_prompt": f"Dramatic scene {i+1} with text zone reserved.",
+                    "aspect_ratio": "16:9",
+                    "ctr_rationale": f"Curiosity gap: rank {i+1} — viewer cannot look away.",
+                    "text_overlay": {"text": f"HOOK TEXT {i+1}", "placement": "bottom"},
+                    "composition_plan": {
+                        "focal_zone": focal_zones[i],
+                        "text_zone": "bottom_overlay_shadow",
+                        "dominant_tone": "near_black",
+                        "negative_space_zones": ["bottom_overlay_shadow"],
+                    },
+                    "typography_plan": {
+                        "headline": f"HEADLINE {i+1}",
+                        "emphasis": "THEM",
+                        "zone": "bottom_overlay_shadow",
+                        "layout": "stacked",
+                    },
+                }
+                for i in range(3)
+            ]
+        },
+        "shorts": [],
+    }
+
+
+def _old_generic_plan() -> dict:
+    """Build a generation_plan without composition_plan / typography_plan (old generic path)."""
+    return {
+        "thumbnail_generation_plan_id": "tgp_old",
+        "episode_id": "ep_test",
+        "main_episode": {
+            "ranked_candidates": [
+                {
+                    "candidate_id": "c1",
+                    "rank": 1,
+                    "image_prompt": "Colosseum exterior at sunset.",
+                    "aspect_ratio": "16:9",
+                    "ctr_rationale": "",
+                    "text_overlay": {"text": "COLOSSEUM", "placement": "bottom"},
+                    # No composition_plan, no typography_plan
+                }
+            ]
+        },
+        "shorts": [],
+    }
+
+
+class TestLayeredThumbnailGuard:
+
+    # ---- F: Composition plan / text safe zone ----
+
+    def test_layered_thumbnail_passes_composition_check(self, tmp_path):
+        """Full layered plan passes c_thumbnail_composition_plan."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=_layered_plan())
+        comp_check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_composition_plan"),
+            None,
+        )
+        assert comp_check is not None, "c_thumbnail_composition_plan check must be present"
+        assert comp_check["status"] == "pass", f"Expected pass, got: {comp_check}"
+
+    def test_old_generic_thumbnail_fails_composition_check(self, tmp_path):
+        """Missing composition_plan → c_thumbnail_composition_plan=fail → overall fail."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=_old_generic_plan())
+        comp_check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_composition_plan"),
+            None,
+        )
+        assert comp_check is not None
+        assert comp_check["status"] == "fail", (
+            "Old generic path (no composition_plan) must fail c_thumbnail_composition_plan"
+        )
+        assert report["overall_status"] == "fail"
+
+    def test_missing_text_zone_fails_composition_check(self, tmp_path):
+        """composition_plan with empty text_zone → fail."""
+        plan = _layered_plan()
+        plan["main_episode"]["ranked_candidates"][0]["composition_plan"]["text_zone"] = ""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=plan)
+        comp_check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_composition_plan")
+        assert comp_check["status"] == "fail"
+        assert "text_zone" in comp_check["detail"]
+
+    # ---- G: Typography plan ----
+
+    def test_layered_thumbnail_passes_typography_check(self, tmp_path):
+        """Full layered plan passes c_thumbnail_typography_plan."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=_layered_plan())
+        typo_check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_typography_plan"),
+            None,
+        )
+        assert typo_check is not None
+        assert typo_check["status"] == "pass"
+
+    def test_old_generic_thumbnail_fails_typography_check(self, tmp_path):
+        """Missing typography_plan → c_thumbnail_typography_plan=fail."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=_old_generic_plan())
+        typo_check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_typography_plan"),
+            None,
+        )
+        assert typo_check is not None
+        assert typo_check["status"] == "fail"
+
+    def test_empty_headline_fails_typography_check(self, tmp_path):
+        """typography_plan with empty headline → fail."""
+        plan = _layered_plan()
+        plan["main_episode"]["ranked_candidates"][0]["typography_plan"]["headline"] = ""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=plan)
+        typo_check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_typography_plan")
+        assert typo_check["status"] == "fail"
+
+    # ---- H: Curiosity gap / ctr_rationale ----
+
+    def test_layered_thumbnail_passes_curiosity_gap_check(self, tmp_path):
+        """Non-empty ctr_rationale → c_thumbnail_curiosity_gap=pass."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=_layered_plan())
+        cg_check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_curiosity_gap"),
+            None,
+        )
+        assert cg_check is not None
+        assert cg_check["status"] == "pass"
+
+    def test_missing_ctr_rationale_fails_curiosity_gap_check(self, tmp_path):
+        """Empty ctr_rationale → c_thumbnail_curiosity_gap=fail."""
+        plan = _layered_plan()
+        plan["main_episode"]["ranked_candidates"][0]["ctr_rationale"] = ""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=plan)
+        cg_check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_curiosity_gap")
+        assert cg_check["status"] == "fail"
+        assert report["overall_status"] == "fail"
+
+    # ---- I: Composition distinctness ----
+
+    def test_distinct_compositions_pass(self, tmp_path):
+        """3 candidates with different focal_zones pass c_thumbnail_composition_distinctness."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=_layered_plan(("center", "left", "right")))
+        dist_check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_composition_distinctness"),
+            None,
+        )
+        assert dist_check is not None
+        assert dist_check["status"] == "pass"
+
+    def test_all_same_composition_fails_distinctness_check(self, tmp_path):
+        """All 3 candidates with the same focal_zone fail c_thumbnail_composition_distinctness."""
+        p = _make_thumbnail(tmp_path)
+        # All three have focal_zone="center"
+        report = run_thumbnail_qa(p, generation_plan=_layered_plan(("center", "center", "center")))
+        dist_check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_composition_distinctness"),
+            None,
+        )
+        assert dist_check is not None
+        assert dist_check["status"] == "fail", (
+            "All 3 candidates sharing the same focal_zone must fail distinctness check"
+        )
+        assert report["overall_status"] == "fail"
+
+    # ---- End-to-end: old vs. new path ----
+
+    def test_old_generic_thumbnail_overall_fails(self, tmp_path):
+        """The old generic path (no composition/typography plans) produces overall_status=fail."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p, generation_plan=_old_generic_plan())
+        assert report["overall_status"] == "fail", (
+            "Old generic thumbnail path must be rejected by QA"
+        )
+
+    def test_layered_thumbnail_overall_passes(self, tmp_path):
+        """A full layered thumbnail (composition + typography + rationale) passes QA."""
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(
+            p,
+            asset_class="thumbnail_image",
+            generation_plan=_layered_plan(),
+        )
+        # Should have no failures from the new checks
+        new_check_ids = {
+            "c_thumbnail_composition_plan",
+            "c_thumbnail_typography_plan",
+            "c_thumbnail_curiosity_gap",
+            "c_thumbnail_composition_distinctness",
+        }
+        failures_from_new = [
+            f for f in report["failures"]
+            if any(cid.replace("c_thumbnail_", "") in f for cid in new_check_ids)
+        ]
+        assert not failures_from_new, (
+            f"Layered thumbnail must not fail the new checks: {failures_from_new}"
+        )

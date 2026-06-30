@@ -211,6 +211,128 @@ def run_thumbnail_qa(
             )
 
     # ------------------------------------------------------------------
+    # Check F — Composition plan + text safe zone (layered system guard)
+    #
+    # composition_plan is ONLY attached in concept-driven mode.
+    # Absence means the old generic VPD-scene-candidate path was used,
+    # which produces weaker thumbnails without reserved text zones.
+    # ------------------------------------------------------------------
+    if generation_plan is not None:
+        main_ep_f = generation_plan.get("main_episode", {})
+        rank1_f = next(
+            (c for c in main_ep_f.get("ranked_candidates", []) if c.get("rank") == 1),
+            None,
+        )
+        if rank1_f is None:
+            _add_check(checks, "c_thumbnail_composition_plan", "warn",
+                       "rank-1 candidate not found — composition plan check skipped")
+            warnings.append("thumbnail_composition_plan: rank-1 candidate missing from plan")
+        else:
+            comp_plan = rank1_f.get("composition_plan")
+            if comp_plan is None:
+                _add_check(checks, "c_thumbnail_composition_plan", "fail",
+                           "rank-1 candidate has no composition_plan — "
+                           "old generic thumbnail path detected; layered system required")
+                failures.append(
+                    "thumbnail_composition_plan: missing composition_plan on rank-1 candidate — "
+                    "concept-driven layered thumbnail system not active"
+                )
+            else:
+                text_zone = comp_plan.get("text_zone", "")
+                if not text_zone:
+                    _add_check(checks, "c_thumbnail_composition_plan", "fail",
+                               "composition_plan.text_zone is empty — "
+                               "no reserved safe zone for typography overlay")
+                    failures.append(
+                        "thumbnail_composition_plan: text_zone is empty — "
+                        "typography has no reserved safe zone; text may overlap subject"
+                    )
+                else:
+                    _add_check(checks, "c_thumbnail_composition_plan", "pass",
+                               f"composition_plan.text_zone={text_zone!r} — safe zone reserved")
+
+    # ------------------------------------------------------------------
+    # Check G — Typography plan (headline + emphasis present)
+    # ------------------------------------------------------------------
+    if generation_plan is not None:
+        main_ep_g = generation_plan.get("main_episode", {})
+        rank1_g = next(
+            (c for c in main_ep_g.get("ranked_candidates", []) if c.get("rank") == 1),
+            None,
+        )
+        if rank1_g is not None:
+            typo_plan = rank1_g.get("typography_plan")
+            if typo_plan is None:
+                _add_check(checks, "c_thumbnail_typography_plan", "fail",
+                           "rank-1 candidate has no typography_plan — "
+                           "old generic thumbnail path detected; layered system required")
+                failures.append(
+                    "thumbnail_typography_plan: missing typography_plan on rank-1 candidate — "
+                    "no structured headline/emphasis layout defined"
+                )
+            else:
+                headline = str(typo_plan.get("headline", "")).strip()
+                if not headline:
+                    _add_check(checks, "c_thumbnail_typography_plan", "fail",
+                               "typography_plan.headline is empty — "
+                               "no hook text defined for on-screen overlay")
+                    failures.append(
+                        "thumbnail_typography_plan: headline is empty — "
+                        "published thumbnail will lack structured text hook"
+                    )
+                else:
+                    _add_check(checks, "c_thumbnail_typography_plan", "pass",
+                               f"typography_plan.headline={headline!r} — hook text defined")
+
+    # ------------------------------------------------------------------
+    # Check H — Curiosity gap / CTR concept reasoning present
+    # ------------------------------------------------------------------
+    if generation_plan is not None:
+        main_ep_h = generation_plan.get("main_episode", {})
+        rank1_h = next(
+            (c for c in main_ep_h.get("ranked_candidates", []) if c.get("rank") == 1),
+            None,
+        )
+        if rank1_h is not None:
+            rationale = str(rank1_h.get("ctr_rationale") or "").strip()
+            if not rationale:
+                _add_check(checks, "c_thumbnail_curiosity_gap", "fail",
+                           "rank-1 candidate has no ctr_rationale — "
+                           "no curiosity gap or emotional trigger reasoning recorded")
+                failures.append(
+                    "thumbnail_curiosity_gap: ctr_rationale absent on rank-1 candidate — "
+                    "concept/curiosity gap reasoning required before generation"
+                )
+            else:
+                _add_check(checks, "c_thumbnail_curiosity_gap", "pass",
+                           "rank-1 candidate has ctr_rationale — curiosity gap reasoning present")
+
+    # ------------------------------------------------------------------
+    # Check I — Composition distinctness (no all-same focal_zone across 3 candidates)
+    # ------------------------------------------------------------------
+    if generation_plan is not None:
+        all_cands = generation_plan.get("main_episode", {}).get("ranked_candidates", [])
+        plans_with_zones = [
+            c.get("composition_plan", {}).get("focal_zone")
+            for c in all_cands
+            if c.get("composition_plan") and c["composition_plan"].get("focal_zone")
+        ]
+        if len(plans_with_zones) == 3:
+            unique_zones = set(plans_with_zones)
+            if len(unique_zones) == 1:
+                _add_check(checks, "c_thumbnail_composition_distinctness", "fail",
+                           f"all 3 candidates have identical focal_zone={plans_with_zones[0]!r} — "
+                           "no A/B/C composition diversity; regenerate with distinct layouts")
+                failures.append(
+                    f"thumbnail_composition_distinctness: all 3 candidates share "
+                    f"focal_zone={plans_with_zones[0]!r} — not distinct enough for A/B/C testing"
+                )
+            else:
+                _add_check(checks, "c_thumbnail_composition_distinctness", "pass",
+                           f"3 candidates have distinct focal_zones: "
+                           f"{sorted(unique_zones)}")
+
+    # ------------------------------------------------------------------
     # Overall status
     # ------------------------------------------------------------------
     if failures:

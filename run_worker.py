@@ -40,6 +40,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 _DEFAULT_DB    = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
+_WORKER_PID_FILE = _PROJECT_ROOT / ".hypogeum-assets" / "worker.pid"
 _DEFAULT_INTERVAL = 60  # seconds between iterations
 
 # Analytics sync runs every this many iterations (default 60 = hourly at 60s interval).
@@ -407,6 +408,27 @@ def run_worker(
         "worker_started worker_id=%s mode=%s interval=%ss db=%s channel=%s",
         worker_id, mode, interval, db_path, channel_id or "all",
     )
+
+    # Write PID file so the dashboard can detect this worker regardless of whether
+    # it was started via the dashboard UI or directly from the CLI. Without this,
+    # _get_worker_pid() returns None for CLI workers, causing the dashboard's
+    # orphan reconciliation to falsely mark active runs as orphaned.
+    try:
+        _WORKER_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _WORKER_PID_FILE.write_text(str(_os.getpid()))
+    except Exception as exc:
+        log.warning("worker_pid_file_write_failed error=%s", exc)
+
+    # Remove PID file when this process exits for any reason (normal or signal).
+    import atexit as _atexit
+    _pid_str = str(_os.getpid())
+    def _remove_pid_file():
+        try:
+            if _WORKER_PID_FILE.exists() and _WORKER_PID_FILE.read_text().strip() == _pid_str:
+                _WORKER_PID_FILE.unlink()
+        except Exception:
+            pass
+    _atexit.register(_remove_pid_file)
 
     # Register this worker in the control table so the dashboard can show status.
     # Do NOT reset stop_requested here — the dashboard may have set it before

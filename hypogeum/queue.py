@@ -299,6 +299,9 @@ def release(
 # Scheduler integration
 # ---------------------------------------------------------------------------
 
+_NULL_CONTEXT_CANCEL_MSG = "Cancelled invalid scheduler queue item"
+
+
 def consume_scheduled_runs(
     db_path: Optional[Path] = None,
 ) -> list[str]:
@@ -306,8 +309,13 @@ def consume_scheduled_runs(
     Promote all pending scheduled_runs to run_queue entries.
 
     For each scheduled_run with status='pending':
-      1. Insert a run_queue row with status='queued'.
-      2. Update the scheduled_run status to 'triggered'.
+      1. Skip (cancel) if both channel_id and episode_id are NULL — no execution
+         context exists and the queue item would loop forever as no_topic.
+      2. Otherwise: insert a run_queue row with status='queued' and mark the
+         scheduled_run as 'triggered'.
+
+    Also cancels any existing queued/claimed run_queue rows that have both
+    channel_id and episode_id NULL (stale NULL items from prior ticks).
 
     Does not execute the pipeline. Does not generate content.
     Does not publish. Pure state promotion.
@@ -316,15 +324,39 @@ def consume_scheduled_runs(
         db_path: Override DB path (for tests).
 
     Returns:
-        List of queue_ids created (one per promoted scheduled_run).
+        List of queue_ids created (one per valid promoted scheduled_run).
     """
     now = _iso(_now_utc())
     created_ids: list[str] = []
 
     conn = get_connection(db_path)
     try:
+        # Cancel any stale NULL-context queue items left over from previous ticks.
+        conn.execute(
+            """
+            UPDATE run_queue
+               SET status        = 'cancelled',
+                   error_message = ?,
+                   failed_at     = ?
+             WHERE channel_id IS NULL
+               AND episode_id IS NULL
+               AND status IN ('queued', 'claimed')
+            """,
+            (_NULL_CONTEXT_CANCEL_MSG, now),
+        )
+
         pending = get_pending_scheduled_runs(conn)
         for row in pending:
+            if row["channel_id"] is None and row["episode_id"] is None:
+                # No execution context — skip promotion, mark scheduled_run cancelled.
+                update_scheduled_run_status(
+                    conn,
+                    scheduled_run_id=row["scheduled_run_id"],
+                    status="cancelled",
+                    triggered_at=now,
+                )
+                continue
+
             queue_id = _new_id()
             insert_queue_item(
                 conn,

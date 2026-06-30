@@ -456,7 +456,9 @@ class TestSchedulerIntegration:
 
     def test_consume_promotes_pending_to_queued(self, db_path):
         past = _now() - timedelta(minutes=1)
-        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        # Must use channel scope — factory scope with no channel/episode is skipped
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_t1",
+                        cadence="daily", next_run_at=past)
         tick(db_path=db_path, now=_now())  # creates scheduled_run status='pending'
         queue_ids = consume_scheduled_runs(db_path=db_path)
         assert len(queue_ids) == 1
@@ -465,7 +467,8 @@ class TestSchedulerIntegration:
 
     def test_consume_marks_scheduled_run_triggered(self, db_path):
         past = _now() - timedelta(minutes=1)
-        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_t2",
+                        cadence="daily", next_run_at=past)
         tick(db_path=db_path, now=_now())
         consume_scheduled_runs(db_path=db_path)
         conn = get_connection(db_path)
@@ -479,7 +482,8 @@ class TestSchedulerIntegration:
 
     def test_consume_links_scheduled_run_id(self, db_path):
         past = _now() - timedelta(minutes=1)
-        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_t3",
+                        cadence="daily", next_run_at=past)
         sr_ids = tick(db_path=db_path, now=_now())
         queue_ids = consume_scheduled_runs(db_path=db_path)
         row = _queue_row(db_path, queue_ids[0])
@@ -487,7 +491,8 @@ class TestSchedulerIntegration:
 
     def test_consume_twice_does_not_double_enqueue(self, db_path):
         past = _now() - timedelta(minutes=1)
-        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_t4",
+                        cadence="daily", next_run_at=past)
         tick(db_path=db_path, now=_now())
         first = consume_scheduled_runs(db_path=db_path)
         second = consume_scheduled_runs(db_path=db_path)  # nothing pending now
@@ -496,8 +501,9 @@ class TestSchedulerIntegration:
 
     def test_consume_multiple_pending_runs(self, db_path):
         past = _now() - timedelta(minutes=1)
-        for _ in range(4):
-            create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        for i in range(4):
+            create_schedule(db_path=db_path, scope="channel", channel_id=f"ch_m{i}",
+                            cadence="daily", next_run_at=past)
         tick(db_path=db_path, now=_now())
         queue_ids = consume_scheduled_runs(db_path=db_path)
         assert len(queue_ids) == 4
@@ -529,6 +535,206 @@ class TestSchedulerIntegration:
         create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
         tick(db_path=db_path, now=_now())
         consume_scheduled_runs(db_path=db_path)
+
+
+# ===========================================================================
+# 6b. NULL context queue item guard (regression)
+#
+# Root cause: factory-scope schedules with channel_id=NULL and episode_id=NULL
+# were promoted to run_queue unconditionally. poll() can't resolve a topic
+# without a channel_id, returns no_topic, RELEASES (not cancels) the item,
+# which loops indefinitely and blocks real reruns on every worker tick.
+# ===========================================================================
+
+class TestNullContextQueueGuard:
+
+    def _factory_schedule(self, db_path, past):
+        """Create a factory-scope schedule (channel_id=None) firing in the past."""
+        return create_schedule(
+            db_path=db_path,
+            scope="factory",
+            channel_id=None,
+            cadence="daily",
+            next_run_at=past,
+        )
+
+    def _channel_schedule(self, db_path, past, channel_id="ch_prod"):
+        """Create a channel-scope schedule (channel_id set) firing in the past."""
+        return create_schedule(
+            db_path=db_path,
+            scope="channel",
+            channel_id=channel_id,
+            cadence="daily",
+            next_run_at=past,
+        )
+
+    def test_factory_schedule_no_topic_not_promoted_to_queue(self, db_path):
+        """
+        A factory-scope scheduled_run (channel_id=None, episode_id=None) must NOT
+        be promoted to run_queue. It would loop forever as no_topic.
+        """
+        past = _now() - timedelta(minutes=1)
+        self._factory_schedule(db_path, past)
+        tick(db_path=db_path, now=_now())
+        queue_ids = consume_scheduled_runs(db_path=db_path)
+
+        assert queue_ids == [], (
+            "Factory-scope schedule with no channel/episode must not create a queue item"
+        )
+
+    def test_factory_schedule_scheduled_run_marked_cancelled(self, db_path):
+        """Skipped NULL-context scheduled_runs are marked cancelled, not triggered."""
+        past = _now() - timedelta(minutes=1)
+        self._factory_schedule(db_path, past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT status FROM scheduled_runs WHERE scheduled_run_id=?",
+                (sr_ids[0],),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["status"] == "cancelled", (
+            f"NULL-context scheduled_run must be cancelled, got {row['status']!r}"
+        )
+
+    def test_existing_null_queue_items_are_cancelled_on_next_consume(self, db_path):
+        """
+        Stale NULL-context items already sitting in run_queue (queued or claimed)
+        are cancelled when consume_scheduled_runs is next called.
+        """
+        now_str = _iso(_now())
+        queue_id = str(uuid.uuid4())
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO run_queue
+                    (queue_id, channel_id, episode_id, status, priority, queued_at, created_at)
+                VALUES (?, NULL, NULL, 'queued', 0, ?, ?)
+                """,
+                (queue_id, now_str, now_str),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        consume_scheduled_runs(db_path=db_path)  # no new pending rows; cleanup fires
+
+        row = _queue_row(db_path, queue_id)
+        assert row["status"] == "cancelled", (
+            f"Stale NULL queue item must be cancelled by consume_scheduled_runs, "
+            f"got {row['status']!r}"
+        )
+        assert "Cancelled invalid scheduler queue item" in (row.get("error_message") or "")
+
+    def test_null_queue_item_not_claimed_by_poll(self, db_path):
+        """
+        A NULL-context queue item must not be claimable — it would block
+        the worker with a no_topic loop. After cancellation by consume it
+        must not appear as claimable.
+        """
+        now_str = _iso(_now())
+        null_qid = str(uuid.uuid4())
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO run_queue
+                    (queue_id, channel_id, episode_id, status, priority, queued_at, created_at)
+                VALUES (?, NULL, NULL, 'queued', 0, ?, ?)
+                """,
+                (null_qid, now_str, now_str),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # consume cancels the NULL item
+        consume_scheduled_runs(db_path=db_path)
+
+        # claim_next must find nothing
+        worker_id = _worker()
+        claimed = claim_next(worker_id=worker_id, db_path=db_path)
+        assert claimed is None, (
+            "claim_next must not claim a cancelled NULL-context queue item"
+        )
+
+    def test_channel_schedule_still_promoted(self, db_path):
+        """Channel-scope scheduled_runs (channel_id set) are still promoted normally."""
+        past = _now() - timedelta(minutes=1)
+        self._channel_schedule(db_path, past, channel_id="ch_valid")
+
+        # Channel must exist in CALOG for consume to proceed without error
+        from hypogeum.calog import set_channel_state
+        set_channel_state("ch_valid", "active", db_path=db_path)
+
+        tick(db_path=db_path, now=_now())
+        queue_ids = consume_scheduled_runs(db_path=db_path)
+
+        assert len(queue_ids) == 1, "Channel-scope schedule must still produce a queue item"
+        row = _queue_row(db_path, queue_ids[0])
+        assert row["channel_id"] == "ch_valid"
+        assert row["status"] == "queued"
+
+    def test_valid_rerun_remains_claimable_alongside_null_item(self, db_path):
+        """
+        When a NULL-context item exists in the queue alongside a real rerun,
+        the real rerun is still claimable after consume_scheduled_runs cancels
+        the NULL item.
+        """
+        from hypogeum.topics import enqueue_topic
+        from hypogeum.calog import set_channel_state
+
+        set_channel_state("ch_rerun", "active", db_path=db_path)
+
+        # Insert a real rerun queue item
+        now_str = _iso(_now() - timedelta(seconds=10))
+        rerun_qid = str(uuid.uuid4())
+        topic_id = enqueue_topic(
+            channel_id="ch_rerun",
+            topic_text="Colosseum Hypogeum",
+            db_path=db_path,
+            source="rerun",
+        )
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO run_queue
+                    (queue_id, channel_id, episode_id, status, priority, source, queued_at, created_at)
+                VALUES (?, 'ch_rerun', NULL, 'queued', -10, 'rerun', ?, ?)
+                """,
+                (rerun_qid, now_str, now_str),
+            )
+            # Insert NULL-context item with lower priority (higher number = lower priority)
+            null_qid = str(uuid.uuid4())
+            null_str = _iso(_now())
+            conn.execute(
+                """
+                INSERT INTO run_queue
+                    (queue_id, channel_id, episode_id, status, priority, queued_at, created_at)
+                VALUES (?, NULL, NULL, 'queued', 0, ?, ?)
+                """,
+                (null_qid, null_str, null_str),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # consume cancels the NULL item
+        consume_scheduled_runs(db_path=db_path)
+
+        # Claim should return the real rerun, not the null item
+        worker_id = _worker()
+        claimed = claim_next(worker_id=worker_id, db_path=db_path)
+        assert claimed is not None, "Real rerun must still be claimable"
+        assert claimed["queue_id"] == rerun_qid, (
+            f"Expected rerun queue_id {rerun_qid}, got {claimed['queue_id']!r}"
+        )
 
 
 # ===========================================================================

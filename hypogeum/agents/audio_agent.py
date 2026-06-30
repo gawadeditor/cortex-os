@@ -151,7 +151,7 @@ def run_audio_agent(
     # ------------------------------------------------------------------
     main_beats = _collect_main_beats(script_package)
 
-    if config.SMOKE_TEST_MAX_NARRATION_BEATS > 0:
+    if config.SMOKE_TEST_MODE and config.SMOKE_TEST_MAX_NARRATION_BEATS > 0:
         original_count = len(main_beats)
         main_beats = main_beats[:config.SMOKE_TEST_MAX_NARRATION_BEATS]
         log.info(

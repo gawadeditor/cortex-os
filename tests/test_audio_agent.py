@@ -1097,6 +1097,21 @@ def _make_smoke_audio_config(max_beats: int) -> Config:
         "ELEVENLABS_API_KEY": "test-xi",
         "ELEVENLABS_VOICE_ID": "voice-abc",
         "ELEVENLABS_TIMEOUT_SECONDS": "10",
+        "SMOKE_TEST_MODE": "true",
+        "SMOKE_TEST_MAX_NARRATION_BEATS": str(max_beats),
+    }
+    with patch.dict(os.environ, env, clear=True):
+        return Config()
+
+
+def _make_production_config_with_stale_beat_cap(max_beats: int) -> Config:
+    """Simulate the production misconfiguration: SMOKE_TEST_MODE=false but MAX_NARRATION_BEATS set."""
+    env = {
+        "OPENROUTER_API_KEY": "or-key",
+        "ELEVENLABS_API_KEY": "test-xi",
+        "ELEVENLABS_VOICE_ID": "voice-abc",
+        "ELEVENLABS_TIMEOUT_SECONDS": "10",
+        "SMOKE_TEST_MODE": "false",
         "SMOKE_TEST_MAX_NARRATION_BEATS": str(max_beats),
     }
     with patch.dict(os.environ, env, clear=True):
@@ -1156,6 +1171,105 @@ class TestBeatCap:
         # SMOKE_TEST_MAX_NARRATION_BEATS=0 → all 3 beats pass through
         cfg = _make_config()  # default: SMOKE_TEST_MAX_NARRATION_BEATS=0
         beats = self._run_and_capture_beats(cfg, tmp_path)
+        assert len(beats) == 3
+
+    def test_cap_not_applied_when_smoke_mode_false(self, tmp_path):
+        # Regression: SMOKE_TEST_MODE=false + SMOKE_TEST_MAX_NARRATION_BEATS=3
+        # must NOT cap beats. This was the production bug that silently limited
+        # 33-beat episodes to 3 narration segments, causing 30/33 silent scenes.
+        cfg = _make_production_config_with_stale_beat_cap(max_beats=3)
+        beats = self._run_and_capture_beats(cfg, tmp_path)
+        # _SCRIPT_PACKAGE has 3 main beats — all must pass through
+        assert len(beats) == 3, (
+            f"Expected all 3 beats to pass through when SMOKE_TEST_MODE=false, "
+            f"got {len(beats)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestBeatCap33 — 33-beat production episode regression
+# ---------------------------------------------------------------------------
+
+def _make_33beat_script_package() -> dict:
+    """Build a script_package with 33 main beats spread across 6 sections."""
+    beats_per_section = [4, 6, 6, 6, 5, 6]
+    sections = []
+    beat_counter = 1
+    for idx, count in enumerate(beats_per_section, start=1):
+        beats = []
+        for _ in range(count):
+            beats.append({"beat_id": f"b_{beat_counter:03d}", "text": f"Beat {beat_counter}."})
+            beat_counter += 1
+        sections.append({"section_id": f"s_{idx:03d}", "title": f"Section {idx}", "narration_beats": beats})
+    return {
+        "episode_metadata": {"episode_id": "ep_33beat", "episode_title": "33 Beat Test"},
+        "sections": sections,
+        "shorts_scripts": [],
+        "traceability_manifest": {},
+        "script_integrity": {},
+    }
+
+
+class TestBeatCap33:
+    """
+    Regression: 33-beat production episode with SMOKE_TEST_MODE=false and
+    SMOKE_TEST_MAX_NARRATION_BEATS=3 must deliver all 33 beats to VGO.
+    This was the exact configuration that produced the ep_20260629075717_c7abfd
+    silent-scene failure (30/33 scenes silent, 240s narration gap).
+    """
+
+    def _capture_vgo_beats(self, cfg, tmp_path) -> list:
+        sp = _make_33beat_script_package()
+        captured = {}
+
+        def fake_vgo(main_beats, **kwargs):
+            captured["main_beats"] = list(main_beats)
+            vgo = MagicMock()
+            vgo.narration_segments = []
+            vgo.stitched_tracks = [
+                {"track_id": "main", "source_type": "main_episode",
+                 "asset_id": "ep/narration/main.mp3", "local_path": str(tmp_path)}
+            ]
+            vgo.main_results = []
+            vgo.shorts_results = []
+            vgo.short_track_paths = []
+            vgo.total_chars_billed = 0
+            return vgo
+
+        with (
+            patch("hypogeum.agents.audio_agent.run_voice_generation_operator", side_effect=fake_vgo),
+            patch("hypogeum.agents.audio_agent.run_caption_agent", return_value={"captions": []}),
+            patch("hypogeum.agents.audio_agent.run_audio_qa", return_value={
+                "overall_status": "pass",
+                "production_ready": True,
+                "beats_failed": 0,
+                "total_beats": 0,
+                "failure_rate": 0.0,
+                "total_characters_billed": 0,
+            }),
+        ):
+            run_audio_agent(sp, cfg, "ep_33beat", tmp_path, skip_shorts=True)
+        return captured["main_beats"]
+
+    def test_33_beats_all_reach_vgo_in_production_mode(self, tmp_path):
+        """33 beats with SMOKE_TEST_MODE=false must all reach VGO, even if MAX_NARRATION_BEATS=3."""
+        cfg = _make_production_config_with_stale_beat_cap(max_beats=3)
+        beats = self._capture_vgo_beats(cfg, tmp_path)
+        assert len(beats) == 33, (
+            f"Expected 33 beats to reach VGO in production mode, got {len(beats)}. "
+            f"SMOKE_TEST_MODE=false must not activate the beat cap."
+        )
+
+    def test_33_beats_all_reach_vgo_with_cap_zero(self, tmp_path):
+        """33 beats with MAX_NARRATION_BEATS=0 (unlimited) must all pass through."""
+        cfg = _make_config()
+        beats = self._capture_vgo_beats(cfg, tmp_path)
+        assert len(beats) == 33
+
+    def test_33_beats_capped_to_3_in_smoke_mode(self, tmp_path):
+        """In SMOKE_TEST_MODE=true with MAX_NARRATION_BEATS=3, only 3 beats reach VGO."""
+        cfg = _make_smoke_audio_config(max_beats=3)
+        beats = self._capture_vgo_beats(cfg, tmp_path)
         assert len(beats) == 3
 
 

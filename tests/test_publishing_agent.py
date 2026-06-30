@@ -767,3 +767,320 @@ class TestPublishScheduleGuard:
         assert meta.get("privacyStatus") != "public", (
             "privacyStatus must not be 'public' when a publish schedule is set"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestPlaceholderShortGuard
+# Regression: placeholder shorts (sh_000_placeholder, sh_001_placeholder,
+# sh_002_placeholder) from assembly padding must be skipped cleanly, not
+# counted as failures. Real shorts with missing files remain failures.
+# ---------------------------------------------------------------------------
+
+def _make_pkg_with_placeholder_shorts(episode_id: str, tmp_path: Path) -> dict:
+    """Build a final_render_package where shorts_renders are all placeholders."""
+    base = _make_final_render_package(episode_id, tmp_path)
+    base["shorts_renders"] = [
+        {
+            "short_id": f"sh_{i:03d}_placeholder",
+            "video_asset_id": "",
+            "duration_seconds": 0.0,
+            "resolution": "1080x1920",
+            "frame_rate": 30,
+            "scene_count": 0,
+            "caption_asset_id": "",
+            "text_overlays_applied": 0,
+            "text_overlays_skipped": [],
+        }
+        for i in range(3)
+    ]
+    return base
+
+
+def _make_pkg_with_real_shorts(episode_id: str, tmp_path: Path) -> dict:
+    """Build a final_render_package with real short video assets on disk."""
+    base = _make_final_render_package(episode_id, tmp_path)
+    ep_dir = tmp_path / f"episodes/{episode_id}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    short_renders = []
+    for i in range(3):
+        short_id = f"sh_{i:03d}"
+        video_path = ep_dir / f"short_{i}_{episode_id}.mp4"
+        video_path.write_bytes(b"fake short video")
+        short_renders.append({
+            "short_id": short_id,
+            "video_asset_id": f"episodes/{episode_id}/short_{i}_{episode_id}",
+            "duration_seconds": 45.0,
+            "resolution": "1080x1920",
+            "frame_rate": 30,
+            "scene_count": 3,
+            "caption_asset_id": "",
+            "text_overlays_applied": 0,
+            "text_overlays_skipped": [],
+        })
+    base["shorts_renders"] = short_renders
+    # Update metadata to have matching short titles
+    base["metadata_source"]["shorts_titles"] = {
+        f"sh_{i:03d}": f"Short {i+1}" for i in range(3)
+    }
+    return base
+
+
+class TestPlaceholderShortGuard:
+    """
+    Regression: assembly pads shorts_renders to exactly 3 with placeholder stubs
+    when ENABLE_DEDICATED_SHORT_GENERATION=false (default). These placeholders must
+    be skipped cleanly by the publishing agent — not counted as failures.
+    """
+
+    def _result_by(self, results, platform, short_id):
+        return next(
+            (r for r in results
+             if r["platform"] == platform and r.get("short_id") == short_id),
+            None,
+        )
+
+    def test_placeholder_shorts_skipped_not_failed_youtube(self, tmp_path):
+        """Placeholder YouTube shorts produce skipped, not failed, results."""
+        config = _make_config()
+        pkg = _make_pkg_with_placeholder_shorts("ep_ph_yt", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        with _patch_platforms():
+            result = run_publishing_agent(
+                pkg, config, "ep_ph_yt",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+            )
+
+        for i in range(3):
+            short_id = f"sh_{i:03d}_placeholder"
+            r = self._result_by(result["platform_results"], "youtube", short_id)
+            assert r is not None, f"Expected result for {short_id}"
+            assert r["status"] == "skipped", f"{short_id}: expected skipped, got {r['status']}"
+            assert r.get("skipped_reason") == "short_not_produced"
+
+    def test_placeholder_shorts_skipped_not_failed_instagram(self, tmp_path):
+        """Placeholder Instagram shorts produce skipped, not failed, results."""
+        config = _make_config()
+        pkg = _make_pkg_with_placeholder_shorts("ep_ph_ig", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        with _patch_platforms():
+            result = run_publishing_agent(
+                pkg, config, "ep_ph_ig",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+            )
+
+        for i in range(3):
+            short_id = f"sh_{i:03d}_placeholder"
+            r = self._result_by(result["platform_results"], "instagram", short_id)
+            assert r is not None
+            assert r["status"] == "skipped"
+            assert r.get("skipped_reason") == "short_not_produced"
+
+    def test_placeholder_shorts_skipped_not_failed_tiktok(self, tmp_path):
+        """Placeholder TikTok shorts produce skipped, not failed, results."""
+        config = _make_config()
+        pkg = _make_pkg_with_placeholder_shorts("ep_ph_tt", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        with _patch_platforms(tiktok_avail=True):
+            result = run_publishing_agent(
+                pkg, config, "ep_ph_tt",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+            )
+
+        for i in range(3):
+            short_id = f"sh_{i:03d}_placeholder"
+            r = self._result_by(result["platform_results"], "tiktok", short_id)
+            assert r is not None
+            assert r["status"] == "skipped"
+            assert r.get("skipped_reason") == "short_not_produced"
+
+    def test_placeholder_shorts_do_not_increment_failed_count(self, tmp_path):
+        """Placeholder shorts must not push failure count above the PDR threshold."""
+        config = _make_config()
+        pkg = _make_pkg_with_placeholder_shorts("ep_ph_pdr", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        with _patch_platforms():
+            result = run_publishing_agent(
+                pkg, config, "ep_ph_pdr",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+            )
+
+        # PDR is issued when > 3 non-TikTok failures; placeholder shorts must not count
+        pdr_failures = result.get("failures", [])
+        pdr_threshold_hit = any(
+            "threshold exceeded" in str(f.get("deficiency_items", "")).lower()
+            for f in pdr_failures
+        )
+        assert not pdr_threshold_hit, (
+            "Placeholder shorts must not push failure count above PDR threshold"
+        )
+
+    def test_real_shorts_with_missing_files_still_fail(self, tmp_path):
+        """Real short_ids (non-placeholder) with missing video files still count as failures."""
+        config = _make_config()
+        pkg = _make_final_render_package("ep_real_miss", tmp_path)
+        # Use paths that definitely do not exist on disk (different prefix)
+        pkg["shorts_renders"] = [
+            {
+                "short_id": f"sh_{i:03d}",
+                "video_asset_id": f"episodes/ep_real_miss/missing_short_{i}_ep_real_miss",
+                "duration_seconds": 45.0,
+                "resolution": "1080x1920",
+                "frame_rate": 30,
+                "scene_count": 3,
+                "caption_asset_id": "",
+                "text_overlays_applied": 0,
+                "text_overlays_skipped": [],
+            }
+            for i in range(3)
+        ]
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        with _patch_platforms():
+            result = run_publishing_agent(
+                pkg, config, "ep_real_miss",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+            )
+
+        failed_yt_shorts = [
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube"
+            and r["deliverable_type"] == "short"
+            and r["status"] == "failed"
+        ]
+        assert len(failed_yt_shorts) == 3, (
+            "Real short_ids with missing files must be counted as failures"
+        )
+
+    def test_real_shorts_with_files_get_publish_at(self, tmp_path):
+        """Real short uploads receive publishAt in their metadata."""
+        config = _make_config()
+        pkg = _make_pkg_with_real_shorts("ep_real_shorts", tmp_path)
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        short_metas = []
+
+        def spy_upload(config, access_token, video_path, metadata, episode_id):
+            short_metas.append(dict(metadata))
+            return f"yt_vid_{len(short_metas)}"
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video", side_effect=spy_upload):
+                run_publishing_agent(
+                    pkg, config, "ep_real_shorts",
+                    output_dir=tmp_path, project_root=tmp_path,
+                    publish_at="2026-07-02T14:00:00+00:00",
+                )
+
+        # First call is main episode, subsequent are shorts
+        short_upload_metas = short_metas[1:]  # skip main episode
+        assert len(short_upload_metas) == 3, "Expected 3 short uploads"
+        for meta in short_upload_metas:
+            assert meta.get("privacyStatus") == "private", "Short must be private when scheduled"
+            assert meta.get("publishAt") == "2026-07-02T14:00:00+00:00", "Short must have publishAt"
+
+    def test_vpd_suppress_shorts_false_when_flag_enabled(self):
+        """ENABLE_DEDICATED_SHORT_GENERATION=true → scene plan input has no shorts_count=0 constraint."""
+        from hypogeum.agents.scene_planner import build_scene_plan_input
+        from unittest.mock import MagicMock
+
+        config = MagicMock()
+        config.ENABLE_DEDICATED_SHORT_GENERATION = True
+        config.EPISODE_ZERO_MAX_SCENES = 0
+
+        sp = {
+            "sections": [{"section_id": "s01", "title": "H", "narration_beats": [
+                {"beat_id": "b_001", "text": "Main beat.", "beat_type": "narration"},
+            ], "visual_directions": ""}],
+            "shorts_scripts": [{"short_id": "short_001", "visual_directions": "",
+                                 "narration_beats": [{"beat_id": "sh1b01", "text": "Short.", "beat_type": "narration"}],
+                                 "text_overlays": []}],
+            "episode_metadata": {}, "script_integrity": {}, "traceability_manifest": {},
+            "chapter_markers": [], "shorts_extraction_markers": [],
+        }
+        input_pkg = build_scene_plan_input(sp, config, "ep_test_on")
+
+        constraints = input_pkg.get("generation_constraints", {})
+        assert constraints.get("shorts_count", -1) != 0, (
+            "shorts_count must NOT be 0 when ENABLE_DEDICATED_SHORT_GENERATION=True"
+        )
+        # Shorts scripts must be included (not stripped) in the compacted script
+        assert "shorts_scripts" in input_pkg.get("script_package", {})
+
+    def test_vpd_suppress_shorts_true_when_flag_disabled(self):
+        """ENABLE_DEDICATED_SHORT_GENERATION=false → scene plan input suppresses shorts."""
+        from hypogeum.agents.scene_planner import build_scene_plan_input
+        from unittest.mock import MagicMock
+
+        config = MagicMock()
+        config.ENABLE_DEDICATED_SHORT_GENERATION = False
+        config.EPISODE_ZERO_MAX_SCENES = 0
+
+        sp = {
+            "sections": [{"section_id": "s01", "title": "H", "narration_beats": [
+                {"beat_id": "b_001", "text": "Main beat.", "beat_type": "narration"},
+            ], "visual_directions": ""}],
+            "shorts_scripts": [{"short_id": "short_001", "visual_directions": "",
+                                 "narration_beats": [{"beat_id": "sh1b01", "text": "Short.", "beat_type": "narration"}],
+                                 "text_overlays": []}],
+            "episode_metadata": {}, "script_integrity": {}, "traceability_manifest": {},
+            "chapter_markers": [], "shorts_extraction_markers": [],
+        }
+        input_pkg = build_scene_plan_input(sp, config, "ep_test_off")
+
+        constraints = input_pkg.get("generation_constraints", {})
+        assert constraints.get("shorts_count") == 0, (
+            "shorts_count must be 0 when ENABLE_DEDICATED_SHORT_GENERATION=False"
+        )
+        # Shorts scripts must be stripped from the compacted script when suppressed
+        compacted = input_pkg.get("script_package", {})
+        assert not compacted.get("shorts_scripts"), (
+            "shorts_scripts must be stripped when suppress_shorts=True"
+        )
+
+    def test_vpd_shorts_beats_included_when_not_suppressed(self):
+        """When flag enabled, _flatten_beats_for_a2 includes short beats in the plan."""
+        from hypogeum.agents.visual_package_director import _flatten_beats_for_a2
+
+        input_pkg = {
+            "script_package": {
+                "sections": [{"section_id": "s01", "visual_directions": "",
+                               "narration_beats": [{"beat_id": "b_001", "text": "Main.", "beat_type": "narration"}]}],
+                "shorts_scripts": [{"short_id": "short_001", "visual_directions": "",
+                                    "narration_beats": [{"beat_id": "sh1b01", "text": "Short.", "beat_type": "narration"}]}],
+            },
+            "generation_constraints": {},  # no shorts_count=0 → shorts not suppressed
+        }
+        beats = _flatten_beats_for_a2(input_pkg)
+
+        short_beats = [b for b in beats if b.get("source_type") == "short"]
+        main_beats = [b for b in beats if b.get("source_type") == "main_episode"]
+        assert len(main_beats) == 1
+        assert len(short_beats) == 1, "Short beats must be included when shorts_count not 0"
+        assert short_beats[0]["short_id"] == "short_001"
+
+    def test_vpd_shorts_beats_excluded_when_suppressed(self):
+        """When shorts_count=0 in constraints, _flatten_beats_for_a2 excludes short beats."""
+        from hypogeum.agents.visual_package_director import _flatten_beats_for_a2
+
+        input_pkg = {
+            "script_package": {
+                "sections": [{"section_id": "s01", "visual_directions": "",
+                               "narration_beats": [{"beat_id": "b_001", "text": "Main.", "beat_type": "narration"}]}],
+                "shorts_scripts": [{"short_id": "short_001", "visual_directions": "",
+                                    "narration_beats": [{"beat_id": "sh1b01", "text": "Short.", "beat_type": "narration"}]}],
+            },
+            "generation_constraints": {"shorts_count": 0},
+        }
+        beats = _flatten_beats_for_a2(input_pkg)
+
+        short_beats = [b for b in beats if b.get("source_type") == "short"]
+        assert short_beats == [], "Short beats must be excluded when shorts_count=0"

@@ -782,6 +782,21 @@ def run_publishing_agent(
             record.append_result(entry)
             continue
 
+        # Placeholder stubs have no video asset — skip cleanly, do not count as failure.
+        # Real shorts with a missing file (non-placeholder) still count as failures below.
+        if "_placeholder" in short_id and not sr_video_id:
+            entry = make_result_entry(
+                platform="youtube",
+                deliverable_type="short",
+                status="skipped",
+                short_id=short_id,
+                skipped_reason="short_not_produced",
+                title=get_short_title(metadata_source, short_id),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            continue
+
         short_title = get_short_title(metadata_source, short_id) or get_episode_title(metadata_source)
         short_description = build_youtube_short_description(
             metadata_source, short_id=short_id, episode_id=episode_id
@@ -990,6 +1005,19 @@ def run_publishing_agent(
         short_id = sr.get("short_id", "")
         sr_video_id = sr.get("video_asset_id", "")
 
+        if "_placeholder" in short_id and not sr_video_id:
+            entry = make_result_entry(
+                platform="instagram",
+                deliverable_type="short",
+                status="skipped",
+                short_id=short_id,
+                skipped_reason="short_not_produced",
+                title=get_short_title(metadata_source, short_id),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            continue
+
         if not meta_available or ig_auth_failed:
             reason = "meta_auth_failed" if not meta_available else "instagram_auth_failed"
             entry = make_result_entry(
@@ -1186,6 +1214,19 @@ def run_publishing_agent(
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
         sr_video_id = sr.get("video_asset_id", "")
+
+        if "_placeholder" in short_id and not sr_video_id:
+            entry = make_result_entry(
+                platform="tiktok",
+                deliverable_type="short",
+                status="skipped",
+                short_id=short_id,
+                skipped_reason="short_not_produced",
+                title=get_short_title(metadata_source, short_id),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            continue
 
         if not tiktok_available:
             entry = make_result_entry(

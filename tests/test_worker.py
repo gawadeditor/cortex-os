@@ -37,12 +37,14 @@ def _setup_db(db_path: Path) -> str:
     """Initialize schema and seed one active daily schedule due in the past."""
     from hypogeum.db import initialize_schema
     from hypogeum.scheduler import create_schedule
+    from hypogeum.calog import set_channel_state
 
     initialize_schema(db_path)
+    set_channel_state("hypogeum", "active", triggered_by="test_setup", db_path=db_path)
     schedule_id = create_schedule(
         db_path=db_path,
         scope="factory",
-        channel_id=None,
+        channel_id="hypogeum",
         cadence="daily",
         next_run_at=_past(10),
         label="test_schedule",
@@ -311,12 +313,12 @@ class TestDryRunFalseCallsProcessPath:
     def test_run_iteration_dry_run_false_reaches_pipeline(self, tmp_path):
         """run_iteration(dry_run=False) must reach run_pipeline.
 
-        Uses a factory-scoped queue item (channel_id=None) with a custom
+        Uses a channel-scoped queue item (channel_id='hypogeum') with a custom
         topic_resolver to bypass CALOG and topic-backlog lookups.
         """
         db = tmp_path / "h.db"
         _setup_db(db)
-        _enqueue_directly(db, channel_id=None)
+        _enqueue_directly(db)
 
         from run_worker import run_iteration
 
@@ -334,7 +336,7 @@ class TestDryRunFalseCallsProcessPath:
             )
 
         # Re-enqueue for a dry_run comparison
-        _enqueue_directly(db, channel_id=None)
+        _enqueue_directly(db)
         result_dry = run_iteration(
             worker_id=str(uuid.uuid4()),
             db_path=db,

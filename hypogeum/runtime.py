@@ -134,6 +134,18 @@ def smoke_run(
 
     try:
         # ---------------------------------------------------------------
+        # Step 0: Ensure the channel is in 'active' state so that
+        #         poll()'s CALOG check does not skip the queue item.
+        # ---------------------------------------------------------------
+        from hypogeum.calog import get_channel_state, set_channel_state
+        if get_channel_state("hypogeum", db_path=db_path) != "active":
+            set_channel_state(
+                "hypogeum", "active",
+                triggered_by="smoke_run",
+                db_path=db_path,
+            )
+
+        # ---------------------------------------------------------------
         # Step 1: Create a factory-scoped manual schedule with a past
         #         next_run_at so tick() fires it immediately.
         # ---------------------------------------------------------------
@@ -141,7 +153,7 @@ def smoke_run(
         schedule_id = create_schedule(
             db_path=db_path,
             scope="factory",
-            channel_id=None,
+            channel_id="hypogeum",
             cadence="manual",
             next_run_at=past,
             label="smoke_test",

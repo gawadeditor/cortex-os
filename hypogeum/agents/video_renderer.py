@@ -84,6 +84,8 @@ def render_episode(
     episode_id: str,
     ffmpeg_timeout: int,
     log,
+    end_page_path: Optional[Path] = None,
+    end_page_duration: float = 20.0,
 ) -> dict:
     """
     Execute all ffmpeg renders for one episode and return a render_output_manifest.
@@ -132,6 +134,30 @@ def render_episode(
     if not (main_success and main_output_path.exists() and main_output_path.stat().st_size > 0):
         render_status = "failed"
         ffmpeg_errors.append("main_episode_render_failed")
+    elif end_page_path is not None and end_page_path.exists():
+        # Append static end-page card to the main render (main episode only, never shorts).
+        end_page_ok = _append_end_page(
+            main_output_path=main_output_path,
+            end_page_path=end_page_path,
+            duration=end_page_duration,
+            episode_id=episode_id,
+            timeout=ffmpeg_timeout,
+            log=log,
+        )
+        if not end_page_ok:
+            # Non-fatal: log the failure but keep the body render as-is.
+            log.warn(
+                "assembly_end_page_append_failed",
+                episode_id=episode_id,
+                end_page_path=str(end_page_path),
+            )
+        else:
+            log.info(
+                "assembly_end_page_appended",
+                episode_id=episode_id,
+                end_page_path=str(end_page_path),
+                end_page_duration_seconds=end_page_duration,
+            )
 
     # --- Shorts renders ---
     short_output_paths: List[Tuple[str, Path]] = []
@@ -501,6 +527,127 @@ def _run_ffmpeg(
         output_path=str(output_path),
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Internal: end-page append
+# ---------------------------------------------------------------------------
+
+def _append_end_page(
+    main_output_path: Path,
+    end_page_path: Path,
+    duration: float,
+    episode_id: str,
+    timeout: int,
+    log,
+) -> bool:
+    """
+    Append a static end-page PNG card to the main episode video.
+
+    Two-pass strategy:
+      1. Generate a short video clip from the PNG (same codec/resolution as main).
+      2. Concat the body + end-page clip using the ffmpeg concat demuxer (-c copy).
+
+    Both clips are encoded at MAIN_RESOLUTION with yuv420p / libx264 / aac so
+    the concat demuxer can stream-copy without re-encoding.
+
+    Returns True on success, False on any failure. Non-fatal — caller logs a warn.
+    """
+    body_path  = main_output_path.with_suffix(".body.mp4")
+    clip_path  = main_output_path.with_suffix(".endpage.mp4")
+    list_path  = main_output_path.with_suffix(".concat.txt")
+    width, height = MAIN_RESOLUTION.split("x")
+
+    try:
+        # --- 1. Rename body to temp ---
+        main_output_path.rename(body_path)
+
+        # --- 2. Create end-page video clip ---
+        ep_cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-framerate", str(FRAME_RATE),
+            "-t", f"{duration:.3f}",
+            "-i", str(end_page_path),
+            "-f", "lavfi",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-filter_complex",
+            (
+                f"[0:v]scale={width}:{height}"
+                f":force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
+                f"[1:a]volume=0.0[aout]"
+            ),
+            "-map", "[vout]",
+            "-map", "[aout]",
+            "-c:v", _VIDEO_CODEC,
+            "-c:a", _AUDIO_CODEC,
+            "-b:a", _AUDIO_BITRATE,
+            "-crf", _CRF,
+            "-pix_fmt", "yuv420p",
+            "-t", f"{duration:.3f}",
+            str(clip_path),
+        ]
+        clip_ok = _run_ffmpeg(
+            cmd=ep_cmd,
+            output_path=clip_path,
+            component="end_page_clip",
+            episode_id=episode_id,
+            timeout=timeout,
+            log=log,
+        )
+        if not clip_ok:
+            body_path.rename(main_output_path)
+            return False
+
+        # --- 3. Concat body + end-page clip ---
+        list_path.write_text(
+            f"file '{body_path.name}'\nfile '{clip_path.name}'\n",
+            encoding="utf-8",
+        )
+        concat_cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_path),
+            "-c", "copy",
+            str(main_output_path),
+        ]
+        concat_ok = _run_ffmpeg(
+            cmd=concat_cmd,
+            output_path=main_output_path,
+            component="end_page_concat",
+            episode_id=episode_id,
+            timeout=timeout,
+            log=log,
+        )
+        if not concat_ok:
+            # Restore body as the best available output
+            if main_output_path.exists():
+                main_output_path.unlink()
+            body_path.rename(main_output_path)
+            return False
+
+        return True
+
+    except Exception as exc:
+        log.error(
+            "assembly_end_page_error",
+            episode_id=episode_id,
+            error=str(exc),
+        )
+        # Best-effort restore
+        if body_path.exists() and not main_output_path.exists():
+            body_path.rename(main_output_path)
+        return False
+    finally:
+        # Clean up temp files regardless of outcome
+        for p in (body_path, clip_path, list_path):
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------

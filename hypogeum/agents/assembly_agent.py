@@ -302,6 +302,45 @@ def run_assembly_agent(
         passes_threshold=clip_availability_rate >= _CLIP_AVAILABILITY_THRESHOLD,
     )
 
+    # ------------------------------------------------------------------
+    # A2. Clip Repair — attempt to fill gaps before QA rejects.
+    #     Strategy A: semantic reuse of existing clips (no consecutive dupes).
+    #     Strategy B: MUAPI generation for remaining gaps (capped by config).
+    #     Only runs if CLIP_REPAIR_ENABLED (default True) and clips are missing.
+    # ------------------------------------------------------------------
+    if missing_clips and getattr(config, "CLIP_REPAIR_ENABLED", True):
+        from hypogeum.agents.clip_repair_agent import run_clip_repair  # noqa: PLC0415
+        run_clip_repair(
+            visual_package=visual_package,
+            missing_scene_ids=list(missing_clips),
+            present_clip_ids=list(present_clips),
+            assets_root=assets_root,
+            config=config,
+            episode_id=episode_id,
+            log=log,
+        )
+        # Recompute availability — repaired clips should now exist on disk
+        present_clips = []
+        missing_clips = []
+        for _scene in scenes:
+            _found = find_clip_asset_id(_scene, asset_lookup, assets_root, episode_id)
+            if _found is not None:
+                _clip_path = asset_lookup.get(_found) or (assets_root / f"{_found}.mp4")
+                if _clip_path.exists():
+                    present_clips.append(_found)
+                else:
+                    missing_clips.append(_scene.get("scene_id", _found))
+            else:
+                missing_clips.append(_scene.get("scene_id", "unknown"))
+        clip_availability_rate = len(present_clips) / total_clips if total_clips > 0 else 0.0
+        log.info(
+            "assembly_clip_availability_after_repair",
+            episode_id=episode_id,
+            present_clips=len(present_clips),
+            missing_clips=len(missing_clips),
+            clip_availability_rate=round(clip_availability_rate, 4),
+        )
+
     if clip_availability_rate < _CLIP_AVAILABILITY_THRESHOLD:
         pdr = _build_pdr(
             episode_id=episode_id,
@@ -450,6 +489,11 @@ def run_assembly_agent(
             assets_root / f"{_short_asset_id}.mp3" if _short_asset_id else None
         )
 
+    # Resolve end-page path: auto-discover from assets_root/end-page.png.
+    # Only passed to the renderer when the file actually exists on disk.
+    _end_page_path = assets_root / "end-page.png"
+    _end_page_duration = float(getattr(config, "END_PAGE_DURATION_SECONDS", 20))
+
     render_manifest = render_episode(
         timeline_plan=timeline_plan,
         main_narration_path=main_narration_path,
@@ -462,6 +506,8 @@ def run_assembly_agent(
         episode_id=episode_id,
         ffmpeg_timeout=ffmpeg_timeout,
         log=log,
+        end_page_path=_end_page_path if _end_page_path.exists() else None,
+        end_page_duration=_end_page_duration,
     )
     render_status = render_manifest["render_status"]
 

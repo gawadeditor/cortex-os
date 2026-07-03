@@ -445,6 +445,14 @@ class Config:
             "ENABLE_DEDICATED_SHORT_GENERATION", default=True
         )
 
+        # --- Assembly / Render ---
+        # END_PAGE_DURATION_SECONDS: how long the static end-page card is held (default 20s).
+        self.END_PAGE_DURATION_SECONDS = _get_int("END_PAGE_DURATION_SECONDS", default=20)
+        # CLIP_REPAIR_ENABLED: run the clip repair pipeline before QA rejection (default True).
+        self.CLIP_REPAIR_ENABLED = _get_bool("CLIP_REPAIR_ENABLED", default=True)
+        # CLIP_REPAIR_MAX_GENERATED: max extra clips to generate in Strategy B (default 5).
+        self.CLIP_REPAIR_MAX_GENERATED = _get_int("CLIP_REPAIR_MAX_GENERATED", default=5)
+
         # --- Smoke Test Mode ---
         self.SMOKE_TEST_MODE = _get_bool("SMOKE_TEST_MODE", default=False)
         self.SMOKE_TEST_MAX_NARRATION_BEATS = _get_int("SMOKE_TEST_MAX_NARRATION_BEATS", default=0)

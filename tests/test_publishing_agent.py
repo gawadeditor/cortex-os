@@ -191,7 +191,7 @@ def _patch_platforms(
          patch(f"{_YT}.upload_thumbnail", return_value=True), \
          patch(f"{_YT}.upload_captions", return_value=True), \
          patch(f"{_YT}.apply_end_screen", return_value=True), \
-         patch(f"{_YT}.search_prior_episode", return_value=None), \
+         patch(f"{_YT}.search_best_end_screen_videos", return_value=["yt_prior_001", "yt_prior_002"]), \
          patch(f"{_META}.refresh_meta_token",
                side_effect=meta_refresh_exc if meta_refresh_exc else None,
                return_value=meta_token if not meta_refresh_exc else None), \
@@ -1097,3 +1097,213 @@ class TestPlaceholderShortGuard:
 
         short_beats = [b for b in beats if b.get("source_type") == "short"]
         assert short_beats == [], "Short beats must be excluded when shorts_count=0"
+
+
+# ---------------------------------------------------------------------------
+# TestYouTubeEndScreen
+# Tests for auto-selection of two prior videos for end screen slots.
+# ---------------------------------------------------------------------------
+
+class TestYouTubeEndScreen:
+    """
+    Tests for the two-slot YouTube end screen:
+      - search_best_end_screen_videos is called with count=2
+      - apply_end_screen receives video_ids= list (not legacy prior_video_id)
+      - SUBSCRIBE slot logic in apply_end_screen() itself
+      - backward-compat: single prior_video_id still works
+    """
+
+    def test_end_screen_uses_two_video_ids(self, tmp_path):
+        """apply_end_screen is called with video_ids containing up to 2 items."""
+        config = _make_config()
+        pkg = _make_final_render_package("ep_es_two_001", tmp_path)
+        captured_kwargs = {}
+
+        def spy_apply_end_screen(**kwargs):
+            captured_kwargs.update(kwargs)
+            return True
+
+        with _patch_platforms():
+            with patch(f"{_YT}.apply_end_screen", side_effect=spy_apply_end_screen):
+                _run(pkg, config, "ep_es_two_001", tmp_path)
+
+        assert "video_ids" in captured_kwargs, "apply_end_screen must receive video_ids="
+        assert len(captured_kwargs["video_ids"]) == 2
+
+    def test_end_screen_left_slot_is_first_video_id(self, tmp_path):
+        """The left slot VIDEO element uses video_ids[0]."""
+        from hypogeum.publishing.youtube import apply_end_screen as _apply
+        import unittest.mock as um
+
+        cfg = MagicMock()
+        cfg.YOUTUBE_CHANNEL_ID = "UCtest"
+        posted_body = {}
+
+        def spy_post(url, headers, params, json, timeout):
+            posted_body.update(json)
+            r = MagicMock()
+            r.ok = True
+            r.status_code = 200
+            r.json.return_value = {}
+            return r
+
+        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
+             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
+                   side_effect=lambda fn, **kw: fn()):
+            _apply(
+                config=cfg,
+                access_token="tok",
+                video_id="vid_new",
+                duration_seconds=300.0,
+                video_ids=["vid_prior_1", "vid_prior_2"],
+                episode_id="ep_es_left",
+            )
+
+        elements = posted_body.get("endscreen", {}).get("elements", [])
+        video_elements = [e for e in elements if e.get("type") == "VIDEO"]
+        assert len(video_elements) == 2
+        left = next(
+            e for e in video_elements
+            if e["position"]["cornerPosition"] == "TOP_LEFT"
+        )
+        assert left["videoId"] == "vid_prior_1"
+
+    def test_end_screen_right_slot_is_second_video_id(self, tmp_path):
+        """The right slot VIDEO element uses video_ids[1]."""
+        from hypogeum.publishing.youtube import apply_end_screen as _apply
+
+        cfg = MagicMock()
+        posted_body = {}
+
+        def spy_post(url, headers, params, json, timeout):
+            posted_body.update(json)
+            r = MagicMock()
+            r.ok = True
+            r.status_code = 200
+            r.json.return_value = {}
+            return r
+
+        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
+             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
+                   side_effect=lambda fn, **kw: fn()):
+            _apply(
+                config=cfg,
+                access_token="tok",
+                video_id="vid_new",
+                duration_seconds=300.0,
+                video_ids=["vid_prior_1", "vid_prior_2"],
+                episode_id="ep_es_right",
+            )
+
+        elements = posted_body.get("endscreen", {}).get("elements", [])
+        video_elements = [e for e in elements if e.get("type") == "VIDEO"]
+        right = next(
+            e for e in video_elements
+            if e["position"]["cornerPosition"] == "TOP_RIGHT"
+        )
+        assert right["videoId"] == "vid_prior_2"
+
+    def test_subscribe_moves_to_bottom_right_with_two_video_slots(self, tmp_path):
+        """SUBSCRIBE is placed at BOTTOM_RIGHT when two VIDEO cards are present."""
+        from hypogeum.publishing.youtube import apply_end_screen as _apply
+
+        cfg = MagicMock()
+        posted_body = {}
+
+        def spy_post(url, headers, params, json, timeout):
+            posted_body.update(json)
+            r = MagicMock()
+            r.ok = True
+            r.status_code = 200
+            r.json.return_value = {}
+            return r
+
+        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
+             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
+                   side_effect=lambda fn, **kw: fn()):
+            _apply(
+                config=cfg,
+                access_token="tok",
+                video_id="vid_new",
+                duration_seconds=300.0,
+                video_ids=["vid_a", "vid_b"],
+                episode_id="ep_es_sub",
+            )
+
+        elements = posted_body.get("endscreen", {}).get("elements", [])
+        subscribe = next(e for e in elements if e.get("type") == "SUBSCRIBE")
+        assert subscribe["position"]["cornerPosition"] == "BOTTOM_RIGHT"
+
+    def test_subscribe_stays_top_right_with_single_prior_video_id(self, tmp_path):
+        """Backward-compat: single prior_video_id → SUBSCRIBE at TOP_RIGHT."""
+        from hypogeum.publishing.youtube import apply_end_screen as _apply
+
+        cfg = MagicMock()
+        posted_body = {}
+
+        def spy_post(url, headers, params, json, timeout):
+            posted_body.update(json)
+            r = MagicMock()
+            r.ok = True
+            r.status_code = 200
+            r.json.return_value = {}
+            return r
+
+        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
+             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
+                   side_effect=lambda fn, **kw: fn()):
+            _apply(
+                config=cfg,
+                access_token="tok",
+                video_id="vid_new",
+                duration_seconds=300.0,
+                prior_video_id="vid_single",  # legacy arg
+                episode_id="ep_es_legacy",
+            )
+
+        elements = posted_body.get("endscreen", {}).get("elements", [])
+        subscribe = next(e for e in elements if e.get("type") == "SUBSCRIBE")
+        assert subscribe["position"]["cornerPosition"] == "TOP_RIGHT"
+
+    def test_search_best_end_screen_videos_returns_list(self, tmp_path):
+        """search_best_end_screen_videos() returns up to count video IDs."""
+        from hypogeum.publishing.youtube import search_best_end_screen_videos
+
+        cfg = MagicMock()
+        cfg.YOUTUBE_CHANNEL_ID = "UCtest"
+
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        mock_resp.json.return_value = {
+            "items": [
+                {"id": {"videoId": "vid_001"}},
+                {"id": {"videoId": "vid_002"}},
+                {"id": {"videoId": "vid_003"}},
+            ]
+        }
+
+        with patch("hypogeum.publishing.youtube.requests.get", return_value=mock_resp):
+            result = search_best_end_screen_videos(
+                config=cfg,
+                access_token="tok",
+                episode_id="ep_es_search",
+                count=2,
+            )
+
+        assert result == ["vid_001", "vid_002"]
+
+    def test_search_best_end_screen_videos_returns_empty_on_network_error(self):
+        """search_best_end_screen_videos() returns [] when HTTP fails."""
+        from hypogeum.publishing.youtube import search_best_end_screen_videos
+        import requests as _req
+
+        cfg = MagicMock()
+        cfg.YOUTUBE_CHANNEL_ID = "UCtest"
+
+        with patch("hypogeum.publishing.youtube.requests.get",
+                   side_effect=_req.RequestException("timeout")):
+            result = search_best_end_screen_videos(
+                config=cfg, access_token="tok", episode_id="ep_es_fail",
+            )
+
+        assert result == []

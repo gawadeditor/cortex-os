@@ -637,21 +637,23 @@ def run_publishing_agent(
                             episode_id=episode_id,
                         )
 
-                # End screen
+                # End screen — automatically select best two prior videos for
+                # left and right slots; no manual selection required.
                 end_screen_applied = False
                 duration_seconds = ep_render.get("duration_seconds", 0.0)
                 if duration_seconds > 20:
-                    prior_vid = yt_client.search_prior_episode(
+                    end_screen_video_ids = yt_client.search_best_end_screen_videos(
                         config=config,
                         access_token=youtube_token,
                         episode_id=episode_id,
+                        count=2,
                     )
                     end_screen_applied = yt_client.apply_end_screen(
                         config=config,
                         access_token=youtube_token,
                         video_id=yt_main_id,
                         duration_seconds=duration_seconds,
-                        prior_video_id=prior_vid,
+                        video_ids=end_screen_video_ids,
                         episode_id=episode_id,
                     )
 

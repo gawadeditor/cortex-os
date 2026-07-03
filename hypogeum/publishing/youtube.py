@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import requests
 
@@ -556,18 +556,27 @@ def apply_end_screen(
     duration_seconds: float,
     prior_video_id: Optional[str] = None,
     episode_id: Optional[str] = None,
+    video_ids: Optional[List[str]] = None,
 ) -> bool:
     """
-    Apply a YouTube end screen with subscribe button and optionally a prior episode card.
+    Apply a YouTube end screen with subscribe button and up to two video cards.
     Non-blocking — failure does not affect video published status.
+
+    Slot assignment (when video_ids is provided):
+      Left slot  (TOP_LEFT):  video_ids[0] — most recent prior episode
+      Right slot (TOP_RIGHT replaced by video_ids[1] — second most recent):
+        The SUBSCRIBE button moves to BOTTOM_RIGHT when two video cards are used.
 
     Args:
         config:          Config instance.
         access_token:    Fresh YouTube access token.
         video_id:        YouTube video ID to apply end screen to.
         duration_seconds: Video duration in seconds (end screen appears in final 20s).
-        prior_video_id:  Optional prior episode video ID for "watch next" card.
+        prior_video_id:  Backward-compat: single prior episode video ID (left slot).
+                         Ignored when video_ids is provided.
         episode_id:      For log correlation.
+        video_ids:       Up to 2 video IDs for left/right slots. When provided,
+                         overrides prior_video_id.
 
     Returns:
         True on success, False on failure (non-blocking).
@@ -575,27 +584,38 @@ def apply_end_screen(
     global _quota_used
     log = get_logger(episode_id=episode_id, agent="youtube")
 
+    # Resolve video slots: video_ids takes precedence over legacy prior_video_id.
+    _slots: List[str] = []
+    if video_ids:
+        _slots = [v for v in video_ids if v][:2]
+    elif prior_video_id:
+        _slots = [prior_video_id]
+
     # End screen appears in the last 20 seconds
     start_offset_ms = max(0, int((duration_seconds - 20) * 1000))
     end_offset_ms = int(duration_seconds * 1000)
 
-    elements = [
-        {
-            "type": "SUBSCRIBE",
-            "position": {"type": "FROM_TOP", "cornerPosition": "TOP_RIGHT"},
-            "startOffsetMs": start_offset_ms,
-            "endOffsetMs": end_offset_ms,
-        }
-    ]
+    _corner_positions = ["TOP_LEFT", "TOP_RIGHT"]
+    elements: List[dict] = []
 
-    if prior_video_id:
+    for i, vid in enumerate(_slots):
         elements.append({
             "type": "VIDEO",
-            "position": {"type": "FROM_TOP", "cornerPosition": "TOP_LEFT"},
+            "position": {"type": "FROM_TOP", "cornerPosition": _corner_positions[i]},
             "startOffsetMs": start_offset_ms,
             "endOffsetMs": end_offset_ms,
-            "videoId": prior_video_id,
+            "videoId": vid,
         })
+
+    # SUBSCRIBE button: BOTTOM_RIGHT when two video cards occupy the top corners,
+    # TOP_RIGHT otherwise.
+    subscribe_corner = "BOTTOM_RIGHT" if len(_slots) >= 2 else "TOP_RIGHT"
+    elements.append({
+        "type": "SUBSCRIBE",
+        "position": {"type": "FROM_TOP", "cornerPosition": subscribe_corner},
+        "startOffsetMs": start_offset_ms,
+        "endOffsetMs": end_offset_ms,
+    })
 
     body = {
         "id": video_id,
@@ -704,6 +724,73 @@ def search_prior_episode(
             return vid
 
     return None
+
+
+def search_best_end_screen_videos(
+    config: Config,
+    access_token: str,
+    episode_id: Optional[str] = None,
+    count: int = 2,
+) -> List[str]:
+    """
+    Return the IDs of the best videos to fill end-screen slots.
+
+    Selection strategy: the `count` most recently uploaded videos on the channel,
+    excluding the current episode (identified by episode_id in the upload title,
+    if present). Returns up to `count` video IDs ordered by recency.
+
+    Args:
+        config:       Config with YOUTUBE_CHANNEL_ID.
+        access_token: Fresh YouTube access token.
+        episode_id:   Current episode ID — excluded from results when identifiable.
+        count:        Maximum number of video IDs to return (default 2).
+
+    Returns:
+        List of video ID strings (may be shorter than count if channel has fewer videos).
+    """
+    global _quota_used
+    log = get_logger(episode_id=episode_id, agent="youtube")
+
+    params = {
+        "part": "id",
+        "channelId": config.YOUTUBE_CHANNEL_ID,
+        "type": "video",
+        "order": "date",
+        "maxResults": min(10, count + 3),  # fetch a few extra to allow exclusions
+    }
+    headers = _auth_headers(access_token)
+
+    try:
+        resp = requests.get(_YT_SEARCH, headers=headers, params=params, timeout=30)
+    except requests.RequestException as exc:
+        log.warn("youtube_end_screen_search_failed", episode_id=episode_id, error=str(exc))
+        return []
+
+    if not resp.ok:
+        log.warn(
+            "youtube_end_screen_search_failed",
+            episode_id=episode_id,
+            status_code=resp.status_code,
+        )
+        return []
+
+    _quota_used += _QUOTA_SEARCH
+
+    data = resp.json()
+    items = data.get("items", [])
+    result: List[str] = []
+    for item in items:
+        vid = item.get("id", {}).get("videoId", "")
+        if vid and len(result) < count:
+            result.append(vid)
+
+    log.info(
+        "youtube_end_screen_videos_selected",
+        episode_id=episode_id,
+        video_ids=result,
+        slots_filled=len(result),
+    )
+    return result
 
 
 def reset_quota_counter() -> None:

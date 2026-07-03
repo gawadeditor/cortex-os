@@ -71,6 +71,7 @@ def _make_config(
     cfg.TIKTOK_ACCESS_TOKEN = "tt_token" if has_tiktok else None
     cfg.TIKTOK_OPEN_ID = "tt_open_id" if has_tiktok else None
     cfg.tiktok_available = has_tiktok
+    cfg.YOUTUBE_DRY_RUN = False  # must be explicit False — MagicMock attributes are truthy
     return cfg
 
 

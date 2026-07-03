@@ -554,15 +554,31 @@ def run_publishing_agent(
 
         if video_path and video_path.exists():
             try:
-                yt_main_id = yt_client.upload_video(
-                    config=config,
-                    access_token=youtube_token,
-                    video_path=video_path,
-                    metadata=video_metadata,
-                    episode_id=episode_id,
-                )
-                youtube_main_published = True
-                youtube_main_video_id = yt_main_id
+                if getattr(config, "YOUTUBE_DRY_RUN", False):
+                    # Dry-run: log the metadata that WOULD be sent to YouTube API.
+                    # Proves privacyStatus and publishAt are correctly assembled
+                    # without spending upload quota or creating a live video.
+                    yt_main_id = f"dry_run_{episode_id[:8]}"
+                    youtube_main_published = True
+                    youtube_main_video_id = yt_main_id
+                    log.info(
+                        "publishing_youtube_main_dry_run",
+                        episode_id=episode_id,
+                        dry_run_video_id=yt_main_id,
+                        would_send_privacy_status=video_metadata.get("privacyStatus"),
+                        would_send_publish_at=video_metadata.get("publishAt"),
+                        would_send_title=video_metadata.get("title", "")[:60],
+                    )
+                else:
+                    yt_main_id = yt_client.upload_video(
+                        config=config,
+                        access_token=youtube_token,
+                        video_path=video_path,
+                        metadata=video_metadata,
+                        episode_id=episode_id,
+                    )
+                    youtube_main_published = True
+                    youtube_main_video_id = yt_main_id
 
                 log.info(
                     "publishing_youtube_main_uploaded",
@@ -835,13 +851,23 @@ def run_publishing_agent(
             continue
 
         try:
-            yt_short_id = yt_client.upload_video(
-                config=config,
-                access_token=youtube_token,
-                video_path=short_video_path,
-                metadata=short_metadata,
-                episode_id=episode_id,
-            )
+            if getattr(config, "YOUTUBE_DRY_RUN", False):
+                yt_short_id = f"dry_run_{short_id[:8]}"
+                log.info(
+                    "publishing_youtube_short_dry_run",
+                    episode_id=episode_id,
+                    short_id=short_id,
+                    would_send_privacy_status=short_metadata.get("privacyStatus"),
+                    would_send_publish_at=short_metadata.get("publishAt"),
+                )
+            else:
+                yt_short_id = yt_client.upload_video(
+                    config=config,
+                    access_token=youtube_token,
+                    video_path=short_video_path,
+                    metadata=short_metadata,
+                    episode_id=episode_id,
+                )
 
             # Short thumbnail
             short_thumb_applied = False

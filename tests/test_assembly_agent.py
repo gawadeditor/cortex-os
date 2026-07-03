@@ -52,6 +52,8 @@ def _make_config() -> Config:
         "OPENROUTER_API_KEY": "or-key",
         "ELEVENLABS_API_KEY": "xi-key",
         "ELEVENLABS_VOICE_ID": "voice-abc",
+        # Disable clip repair so existing assembly tests observe raw availability rates.
+        "CLIP_REPAIR_ENABLED": "false",
     }
     with patch.dict(os.environ, env, clear=True):
         return Config()

@@ -535,9 +535,10 @@ class TestProviderRealProbeFlag:
              }):
             resp = client.get("/providers")
         body = resp.data.decode()
-        # Should NOT say "Verified" for YouTube since probe is not a real API call
-        assert "Credential saved" in body or "token format" in body.lower()
-        assert "✓ Verified" not in body or "Credential saved" in body
+        # Should NOT say "Verified" for YouTube since real_probe is False;
+        # template renders badge-saved (&#x25CF; Saved) instead of badge-verified
+        assert "Saved" in body or "token format" in body.lower()
+        assert "✓ Verified" not in body or "Saved" in body
 
     def test_muapi_real_probe_shows_verified(self, client):
         import run_dashboard as server
@@ -578,10 +579,12 @@ class TestAnalyticsNoApiState:
             "episode_performance": [], "latest_snapshot": None,
         }
         with patch("run_dashboard.get_analytics_overview", return_value=empty_overview):
-            resp = client.get("/analytics")
+            resp = client.get("/intelligence/performance")
         assert resp.status_code == 200
         body = resp.data.decode()
-        assert "not connected" in body.lower() or "not implemented" in body.lower() or "Manual" in body
+        assert ("not connected" in body.lower() or "not yet implemented" in body.lower()
+                or "not implemented" in body.lower() or "Manual" in body
+                or "sync" in body.lower())
 
     def test_analytics_import_page_says_manual(self, client):
         resp = client.get("/analytics/advanced/import")

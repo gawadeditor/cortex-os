@@ -272,11 +272,16 @@ def _run_muapi_leg(
 
     while time.time() < deadline:
         time.sleep(poll_interval)
-        poll_r = _req.get(
-            f"{cfg.MUAPI_BASE_URL}/predictions/{request_id}/result",
-            headers={"x-api-key": api_key},
-            timeout=20,
-        )
+        try:
+            poll_r = _req.get(
+                f"{cfg.MUAPI_BASE_URL}/predictions/{request_id}/result",
+                headers={"x-api-key": api_key},
+                timeout=20,
+            )
+        except _req.exceptions.RequestException as poll_err:
+            log.info("comparison_muapi_poll_error", leg=leg_key,
+                     request_id=request_id, error=str(poll_err)[:120])
+            continue  # transient network error — keep polling until deadline
         if poll_r.status_code != 200:
             continue
 

@@ -827,13 +827,16 @@ class TestVPDWiring:
         cfg.EPISODE_ZERO_MAX_SCENES = 0
         cfg.ENABLE_DEDICATED_SHORT_GENERATION = False
 
-        # Patch at source module — VPD uses a local import so patch must be on BGA module
+        # Patch at source module — VPD uses a local import so patch must be on BGA module.
+        # validate is mocked so the minimal _make_visual_package fixture doesn't need to
+        # satisfy the full visual_package schema (Stage A3 validation).
         with (
             patch("hypogeum.agents.visual_package_director.run_agent", return_value=vp),
             patch("hypogeum.agents.brand_guardian_agent.run_bga_pass1") as mock_bga,
             patch("hypogeum.agents.visual_package_director._execute_muapi_phase", return_value=vp),
             patch("hypogeum.agents.visual_package_director._write_final_package"),
             patch("hypogeum.agents.visual_package_director.build_thumbnail_handoff_brief"),
+            patch("hypogeum.agents.visual_package_director.validate"),
         ):
             run_visual_package_director({}, cfg, "ep_001", output_dir=tmp_path)
 
@@ -853,6 +856,7 @@ class TestVPDWiring:
             patch("hypogeum.agents.visual_package_director._execute_muapi_phase", return_value=vp),
             patch("hypogeum.agents.visual_package_director._write_final_package"),
             patch("hypogeum.agents.visual_package_director.build_thumbnail_handoff_brief"),
+            patch("hypogeum.agents.visual_package_director.validate"),
         ):
             run_visual_package_director({}, cfg, "ep_001", output_dir=tmp_path)
 
@@ -870,6 +874,7 @@ class TestVPDWiring:
 
         with (
             patch("hypogeum.agents.visual_package_director.run_agent", return_value=vp),
+            patch("hypogeum.agents.visual_package_director.validate"),
             patch(
                 "hypogeum.agents.brand_guardian_agent.run_bga_pass1",
                 side_effect=BGARejectedError("ep_001", 1, fake_report),

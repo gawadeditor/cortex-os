@@ -1067,12 +1067,15 @@ class TestThumbnailGenerationAgentRegistry:
         assert failure_calls == 2
         assert success_calls == 1
 
-        # version_index should increment: 0, 1 for failures; 2 for success
+        # version_index increments within each _generate_for_deliverable call but resets
+        # when a new candidate gets its own call (new deliverable_id, new version counter).
+        # candidate_1: attempt-1 → vi=0 (fail), attempt-2 → vi=1 (fail); exhausted.
+        # candidate_2: attempt-1 → vi=0 (success on 3rd overall call).
         attempt_kwargs = [
             call.kwargs for call in mock_reg.register_asset_attempt.call_args_list
         ]
         version_indexes = [kw["version_index"] for kw in attempt_kwargs]
-        assert version_indexes == [0, 1, 2]
+        assert version_indexes == [0, 1, 0]
 
     def test_halt_calls_failure_and_reraises(self, tmp_path):
         import hypogeum.agents.thumbnail_generation_agent as _tga

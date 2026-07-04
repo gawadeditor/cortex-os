@@ -116,6 +116,7 @@ _ALL_ENV_VARS = [
     # repopulate them with production values, then re-set to muapi for MUAPI-path tests.
     "THUMBNAIL_IMAGE_PROVIDER", "THUMBNAIL_FALLBACK_PROVIDER",
     "THUMBNAIL_FALLBACK2_PROVIDER", "THUMBNAIL_FALLBACK_MODEL",
+    "THUMBNAIL_IMAGE_MODEL",
 ]
 
 
@@ -152,6 +153,9 @@ def make_config(
     os.environ["THUMBNAIL_FALLBACK_PROVIDER"] = "muapi"
     os.environ["THUMBNAIL_FALLBACK2_PROVIDER"] = "muapi"
     os.environ["THUMBNAIL_FALLBACK_MODEL"] = "flux-2-dev"
+    # Pin THUMBNAIL_IMAGE_MODEL to match image_model so MUAPI-path tests hit the
+    # expected endpoint. Default changed to gpt-image-2-text-to-image in production.
+    os.environ["THUMBNAIL_IMAGE_MODEL"] = image_model
     try:
         return Config()
     finally:

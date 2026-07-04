@@ -55,9 +55,9 @@ class TestTIGPromptFile:
         assert "_PROMPT_FILE" in source, (
             "TIG module must define _PROMPT_FILE for disk-based prompt loading"
         )
-        # Must use read_text to load from disk
-        assert "read_text" in source, (
-            "TIG module must call read_text() to load _SYSTEM_PROMPT from disk"
+        # Must use load_prompt (or read_text directly) to load from disk
+        assert "load_prompt" in source or "read_text" in source, (
+            "TIG module must call load_prompt() or read_text() to load _SYSTEM_PROMPT from disk"
         )
 
     def test_tig_module_no_longer_has_hardcoded_multiline_prompt(self):
@@ -69,14 +69,18 @@ class TestTIGPromptFile:
         )
 
     def test_tig_system_prompt_matches_file(self):
-        """The _SYSTEM_PROMPT loaded at runtime must equal the contents of the .txt file."""
-        # Import the module and compare
+        """The _SYSTEM_PROMPT loaded at runtime must equal the body of thumbnail_identity_guardian.txt.
+
+        load_prompt() strips versioning headers (# KEY: VALUE lines) before returning the body,
+        so we compare against the stripped body, not the raw file content.
+        """
         import importlib
         import hypogeum.agents.thumbnail_identity_guardian as tig_mod
+        from hypogeum.prompt_loader import load_prompt
         importlib.reload(tig_mod)
-        expected = _TIG_PROMPT_FILE.read_text(encoding="utf-8")
+        expected = load_prompt(_TIG_PROMPT_FILE)
         assert tig_mod._SYSTEM_PROMPT == expected, (
-            "_SYSTEM_PROMPT in module must exactly match thumbnail_identity_guardian.txt"
+            "_SYSTEM_PROMPT in module must exactly match the body of thumbnail_identity_guardian.txt"
         )
 
 

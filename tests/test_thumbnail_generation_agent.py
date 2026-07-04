@@ -114,7 +114,7 @@ class TestGenerateThumbnails:
         side = lambda deliverable_id, **kw: _make_result(deliverable_id)
         with patch(_PATCH, side_effect=side):
             result = generate_thumbnails(plan, MagicMock(), "ep_001", tmp_path, log)
-        assert result["main_asset_id"] == "episodes/ep_001/thumbnails/main"
+        assert result["main_asset_id"] == "episodes/ep_001/thumbnails/candidate_1"
 
     def test_returns_main_ok_true_on_success(self, tmp_path):
         log = _make_log()
@@ -145,7 +145,7 @@ class TestGenerateThumbnails:
         log = _make_log()
         plan = _make_generation_plan()
         def fail_main(deliverable_id, **kwargs):
-            if deliverable_id == "main":
+            if deliverable_id.startswith("candidate_"):
                 raise MUAPIError("main failed")
             return _make_result(deliverable_id)
         with patch(_PATCH, side_effect=fail_main):
@@ -202,24 +202,26 @@ class TestGenerateThumbnails:
             return _make_result(deliverable_id)
         with patch(_PATCH, side_effect=capture):
             generate_thumbnails(plan, MagicMock(), "ep_001", tmp_path, log)
-        assert call_prompts[0][0] == "main"
+        assert call_prompts[0][0] == "candidate_1"
         rank1_prompt = plan["main_episode"]["ranked_candidates"][0]["image_prompt"]
         assert call_prompts[0][1] == rank1_prompt
 
-    def test_rank_2_attempted_when_rank_1_fails_all_attempts(self, tmp_path):
+    def test_all_ranked_candidates_attempted_for_main(self, tmp_path):
+        # Production code now generates ALL ranked candidates (A/B/C comparison);
+        # rank-2 is always attempted, not only when rank-1 fails.
         log = _make_log()
         plan = _make_generation_plan()
         rank2_prompt = plan["main_episode"]["ranked_candidates"][1]["image_prompt"]
         call_prompts = []
         def capturing(deliverable_id, image_prompt, **kwargs):
             call_prompts.append((deliverable_id, image_prompt))
-            if deliverable_id == "main" and image_prompt != rank2_prompt:
-                raise MUAPIError("rank-1 fail")
             return _make_result(deliverable_id)
         with patch(_PATCH, side_effect=capturing):
             result = generate_thumbnails(plan, MagicMock(), "ep_001", tmp_path, log)
-        main_prompts = [p for d, p in call_prompts if d == "main"]
-        assert rank2_prompt in main_prompts
+        deliverables_tried = [d for d, p in call_prompts]
+        assert "candidate_1" in deliverables_tried
+        assert "candidate_2" in deliverables_tried
+        assert rank2_prompt in [p for d, p in call_prompts if d == "candidate_2"]
         assert result["main_ok"] is True
 
     def test_each_candidate_tried_max_attempts_times(self, tmp_path):
@@ -250,19 +252,20 @@ class TestGenerateThumbnails:
         plan = _make_generation_plan()
         main_ratios = []
         def capture(deliverable_id, aspect_ratio, **kwargs):
-            if deliverable_id == "main":
+            if deliverable_id.startswith("candidate_"):
                 main_ratios.append(aspect_ratio)
             return _make_result(deliverable_id)
         with patch(_PATCH, side_effect=capture):
             generate_thumbnails(plan, MagicMock(), "ep_001", tmp_path, log)
-        assert main_ratios == ["16:9"]
+        assert len(main_ratios) > 0
+        assert all(ar == "16:9" for ar in main_ratios)
 
     def test_generate_thumbnail_called_with_9_16_for_shorts(self, tmp_path):
         log = _make_log()
         plan = _make_generation_plan()
         short_ratios = []
         def capture(deliverable_id, aspect_ratio, **kwargs):
-            if deliverable_id != "main":
+            if deliverable_id.startswith("sh_"):
                 short_ratios.append(aspect_ratio)
             return _make_result(deliverable_id)
         with patch(_PATCH, side_effect=capture):
@@ -327,5 +330,5 @@ class TestGenerateThumbnails:
         }
         with patch(_PATCH, side_effect=MUAPIError("fail")):
             result = generate_thumbnails(plan, MagicMock(), "ep_001", tmp_path, log)
-        assert result["main_asset_id"] == "episodes/ep_001/thumbnails/main_failed"
+        assert result["main_asset_id"] == "episodes/ep_001/thumbnails/candidate_1_failed"
         assert result["main_ok"] is False

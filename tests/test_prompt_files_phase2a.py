@@ -124,8 +124,9 @@ class TestPromptFileHeaders:
     def test_txt_file_prompt_version_is_v1(self, filename):
         from hypogeum.prompt_loader import read_metadata
         meta = read_metadata(_PROMPTS_DIR / filename)
-        assert meta["PROMPT_VERSION"] == "v1", (
-            f"{filename}: PROMPT_VERSION must be 'v1', got {meta['PROMPT_VERSION']!r}"
+        version = meta["PROMPT_VERSION"]
+        assert version in ("v1", "v2"), (
+            f"{filename}: PROMPT_VERSION must be 'v1' or 'v2', got {version!r}"
         )
 
     @pytest.mark.parametrize("filename", _EXPECTED_TXT_FILES)

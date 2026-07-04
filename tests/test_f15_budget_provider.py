@@ -274,9 +274,12 @@ class TestVerifyProvider:
         assert result["status"] == STATUS_VERIFIED
 
     def test_verify_freepik_not_verifiable(self, db, monkeypatch):
+        # freepik now has a real probe (Phase 1J). A bad key returns STATUS_FAILED.
         monkeypatch.setenv("FREEPIK_API_KEY", "fpk-some-key")
-        result = verify_provider("freepik", db_path=db)
-        assert result["status"] == STATUS_NOT_VERIFIABLE
+        fail_probe = MagicMock(return_value=(False, "HTTP 401 — invalid API key", 50))
+        with patch.dict("hypogeum.provider_verifier._PROBES", {"freepik": fail_probe}):
+            result = verify_provider("freepik", db_path=db)
+        assert result["status"] == STATUS_FAILED
 
     def test_verify_missing_credential_returns_missing(self, db, monkeypatch):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -352,10 +355,14 @@ class TestGetAllProviderStatuses:
         assert statuses["openrouter"]["status"] == STATUS_VERIFIED
 
     def test_freepik_has_not_verifiable_after_verify(self, db, monkeypatch):
+        # freepik now has a real probe (Phase 1J); not_verifiable=False after failed verify.
         monkeypatch.setenv("FREEPIK_API_KEY", "fpk-key")
-        verify_provider("freepik", db_path=db)
+        fail_probe = MagicMock(return_value=(False, "HTTP 401 — invalid API key", 50))
+        with patch.dict("hypogeum.provider_verifier._PROBES", {"freepik": fail_probe}):
+            verify_provider("freepik", db_path=db)
         statuses = get_all_provider_statuses(db_path=db)
-        assert statuses.get("freepik", {}).get("not_verifiable") is True
+        assert statuses.get("freepik", {}).get("status") == STATUS_FAILED
+        assert statuses.get("freepik", {}).get("not_verifiable") is False
 
 
 # ---------------------------------------------------------------------------
@@ -386,11 +393,14 @@ class TestProviderVerifyRoute:
         assert data["status"] == STATUS_MISSING
 
     def test_verify_freepik_returns_not_verifiable(self, client, monkeypatch):
+        # freepik now has a real probe (Phase 1J); bad key → STATUS_FAILED.
         monkeypatch.setenv("FREEPIK_API_KEY", "fpk-key")
-        resp = client.post("/api/providers/verify/freepik")
+        fail_probe = MagicMock(return_value=(False, "HTTP 401 — invalid API key", 50))
+        with patch.dict("hypogeum.provider_verifier._PROBES", {"freepik": fail_probe}):
+            resp = client.post("/api/providers/verify/freepik")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["status"] == STATUS_NOT_VERIFIABLE
+        assert data["status"] == STATUS_FAILED
 
     def test_verify_seedance_route_exists(self, client, monkeypatch):
         monkeypatch.setenv("MUAPI_API_KEY", "mu-key")

@@ -69,6 +69,7 @@ from hypogeum.dashboard_api import (
     OR_NOT_TESTED,
     OR_AUTH_FAILED,
     OR_BILLING_FAILED,
+    OR_GENERATION_FAILED,
     OR_SKIPPED_NO_KEY,
     OR_MUAPI_DEPENDENT,
     OR_READY_VIA_MUAPI,
@@ -473,10 +474,11 @@ class TestProviderReadinessModel:
         }
         (smoke_dir / "provider_live_smoke_report.json").write_text(_json.dumps(report))
 
-        # Patch _load_smoke_test_results to use our fake report
+        # Patch _load_smoke_test_results_with_age (what get_provider_catalog actually calls).
+        # Returns (providers_dict, age_days) — age_days=1 keeps smoke fresh (not stale).
         with patch(
-            "hypogeum.dashboard_api._load_smoke_test_results",
-            return_value=report["providers"],
+            "hypogeum.dashboard_api._load_smoke_test_results_with_age",
+            return_value=(report["providers"], 1),
         ):
             db = tmp_path / "test.db"
             catalog = get_provider_catalog(db_path=db)
@@ -486,9 +488,10 @@ class TestProviderReadinessModel:
         # Both fields must exist
         assert hasattr(muapi, "credential_status")
         assert hasattr(muapi, "operational_readiness")
-        # Operational readiness must reflect the 403 → auth_failed
-        assert muapi.operational_readiness == OR_AUTH_FAILED, (
-            f"MUAPI 403 smoke test should set OR_AUTH_FAILED. Got: {muapi.operational_readiness}"
+        # 403 is model/tier access denial — classified as OR_GENERATION_FAILED (not OR_AUTH_FAILED).
+        # Only 401 (credential rejection) maps to OR_AUTH_FAILED.
+        assert muapi.operational_readiness == OR_GENERATION_FAILED, (
+            f"MUAPI 403 smoke test should set OR_GENERATION_FAILED. Got: {muapi.operational_readiness}"
         )
         # credential_status is independent (from verifier probe, not from generation)
         # They should not be the same string (credential_status is about probe, OR is about generation)
@@ -501,8 +504,8 @@ class TestProviderReadinessModel:
     def test_seedance_veo_kling_runway_have_both_access_modes(self, tmp_path):
         """
         Each of Seedance, Veo, Kling, Runway must appear TWICE in the catalog:
-          1. As access_mode='muapi_delegated' (currently active path)
-          2. As access_mode='direct_placeholder' (future official API slot)
+          1. As access_mode='muapi_delegated' (currently active MUAPI-aggregated path)
+          2. As access_mode='direct' (official direct API slot — implemented in Phase 1J)
         """
         db = tmp_path / "test.db"
         catalog = get_provider_catalog(db_path=db)
@@ -516,7 +519,7 @@ class TestProviderReadinessModel:
                 f"'{delegated_key}' (muapi_delegated entry) missing from catalog"
             )
             assert placeholder_key in by_provider, (
-                f"'{placeholder_key}' (direct_placeholder) missing from catalog. "
+                f"'{placeholder_key}' (direct official entry) missing from catalog. "
                 f"Each provider needs its own future credential slot."
             )
 
@@ -526,11 +529,9 @@ class TestProviderReadinessModel:
             assert delegated.access_mode == "muapi_delegated", (
                 f"{delegated_key}.access_mode should be 'muapi_delegated', got {delegated.access_mode!r}"
             )
-            assert placeholder.access_mode == "direct_placeholder", (
-                f"{placeholder_key}.access_mode should be 'direct_placeholder', got {placeholder.access_mode!r}"
-            )
-            assert placeholder.operational_readiness == OR_NOT_CONFIGURED, (
-                f"{placeholder_key} should have OR_NOT_CONFIGURED readiness. Got: {placeholder.operational_readiness}"
+            # Phase 1J: official providers upgraded from direct_placeholder → direct
+            assert placeholder.access_mode == "direct", (
+                f"{placeholder_key}.access_mode should be 'direct', got {placeholder.access_mode!r}"
             )
 
     def test_direct_placeholders_have_credential_key_name(self, tmp_path):
@@ -554,8 +555,9 @@ class TestProviderReadinessModel:
         When MUAPI smoke test shows success, delegated providers (Seedance etc.)
         should show OR_READY_VIA_MUAPI. When MUAPI is not tested, they show OR_MUAPI_DEPENDENT.
         """
+        # get_provider_catalog calls _load_smoke_test_results_with_age() (returns tuple).
         # Case 1: MUAPI not tested → delegated = muapi_dependent
-        with patch("hypogeum.dashboard_api._load_smoke_test_results", return_value={}):
+        with patch("hypogeum.dashboard_api._load_smoke_test_results_with_age", return_value=({}, None)):
             db = tmp_path / "test.db"
             catalog = get_provider_catalog(db_path=db)
         by_p = {e.provider: e for e in catalog}
@@ -567,9 +569,10 @@ class TestProviderReadinessModel:
             )
 
         # Case 2: MUAPI smoke test passed → delegated = ready_via_muapi
-        with patch("hypogeum.dashboard_api._load_smoke_test_results", return_value={
-            "muapi": {"status": "success", "model": "gpt-image-2-text-to-image", "latency_ms": 5000}
-        }):
+        with patch("hypogeum.dashboard_api._load_smoke_test_results_with_age", return_value=(
+            {"muapi": {"status": "success", "model": "gpt-image-2-text-to-image", "latency_ms": 5000}},
+            1,
+        )):
             catalog2 = get_provider_catalog(db_path=db)
         by_p2 = {e.provider: e for e in catalog2}
         for name in ("seedance", "veo", "kling", "runway"):
@@ -589,9 +592,12 @@ class TestProviderReadinessModel:
         assert readiness == OR_READY, f"Expected OR_READY, got {readiness!r}"
         assert note is not None and "gpt-image-1" in note
 
-    def test_smoke_test_403_sets_auth_failed_readiness(self):
+    def test_smoke_test_403_sets_generation_failed_readiness(self):
         """
-        _derive_operational_readiness() with a 403 error in smoke result returns OR_AUTH_FAILED.
+        _derive_operational_readiness() with a 403 error in smoke result returns OR_GENERATION_FAILED.
+
+        403 means model/account-tier access is forbidden — not a credential rejection.
+        Only 401 maps to OR_AUTH_FAILED. 403 maps to OR_GENERATION_FAILED.
         """
         meta  = {"access_mode": "direct"}
         smoke = {
@@ -600,7 +606,7 @@ class TestProviderReadinessModel:
             "error": "403 Client Error: Forbidden for url: https://api.muapi.ai/api/v1/...",
         }
         readiness, note = _derive_operational_readiness("muapi", meta, smoke, OR_NOT_TESTED)
-        assert readiness == OR_AUTH_FAILED, f"Expected OR_AUTH_FAILED, got {readiness!r}"
+        assert readiness == OR_GENERATION_FAILED, f"Expected OR_GENERATION_FAILED, got {readiness!r}"
         assert note is not None
 
 

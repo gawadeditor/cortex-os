@@ -109,9 +109,11 @@ class TestVideoProviderPairs:
         assert "runway_official" in providers_html
 
     def test_official_placeholder_label(self, providers_html):
-        """All official placeholders must be labelled as 'Official API — not yet implemented'."""
-        assert "Official API — not yet implemented" in providers_html, (
-            "Placeholder label 'Official API — not yet implemented' not found."
+        """Official providers (Phase 1J) have access_mode='direct' and OR_NOT_TESTED.
+        The template renders OR_NOT_TESTED as 'Not tested' in the Generation row badge.
+        """
+        assert "Not tested" in providers_html, (
+            "Expected 'Not tested' badge for untested direct providers not found."
         )
 
     def test_via_muapi_badge_present(self, providers_html):

@@ -80,8 +80,9 @@ class TestCreatePageBasic:
         assert "<!DOCTYPE html>" in html or "<!doctype html>" in html.lower()
 
     def test_create_page_title(self, client):
+        # Page renamed from "Create" to "Production Queue" in factory OS reframe
         html = _html(client)
-        assert "Create" in html
+        assert "Production Queue" in html or "Create" in html
 
     def test_create_page_no_external_cdn(self, client):
         html = _html(client)
@@ -108,14 +109,15 @@ class TestCreateFormElements:
         assert 'value="short"' in html or "Short" in html
 
     def test_has_video_type_reel(self, client):
+        # reel video type was removed; form now supports long_video and short only
         html = _html(client)
-        assert 'value="reel"' in html or "Reel" in html
+        assert "long_video" in html or "short" in html.lower()
 
     def test_has_all_three_video_types(self, client):
+        # reel removed; verify the two remaining video types are present
         html = _html(client)
         assert "long_video" in html or "Long video" in html
         assert "short" in html.lower()
-        assert "reel" in html.lower()
 
     def test_has_target_platforms(self, client):
         html = _html(client)

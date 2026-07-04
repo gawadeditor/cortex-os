@@ -529,7 +529,7 @@ class TestLatestEpisodeFromPublishingOutcomes:
 
         overview = get_executive_overview(db_path=db_path)
         ep = next((e for e in overview["recent_episodes"]
-                   if "ep_with_vid" in (e.get("title") or "")), None)
+                   if e.get("episode_id") == "ep_with_vid"), None)
         assert ep is not None
         assert ep.get("platform_video_id") == "yt_video_id_1"
         assert ep.get("url") == "https://youtube.com/watch?v=yt_video_id_1"
@@ -538,10 +538,30 @@ class TestLatestEpisodeFromPublishingOutcomes:
         import run_dashboard as _mod
         _mod.app.config["TESTING"] = True
         _mod.app.config["DB_PATH"] = str(db_path)
+        # "Platform ID" column header only renders when recent_episodes is non-empty
+        fake_overview = {
+            "recent_episodes": [{
+                "episode_id": "ep_fake", "title": "Fake Episode",
+                "published_at": "2026-01-01T00:00:00", "status": "complete",
+                "views": 100, "ctr": None, "retention": None,
+                "platform_video_id": "vid_fake", "url": None,
+            }],
+            "production": {"current_episode": None, "display_title": None,
+                           "current_stage": None, "progress_pct": 0, "queue_size": 0},
+            "analytics": {"subscribers": None, "views": None, "watch_time_h": None,
+                          "revenue_usd": None, "growth_pct": None},
+            "platform_state": None, "channel_profile": None,
+            "views_chart": [], "demo_warning": None,
+            "factory_health": {"status_label": "OK", "active_count": 0,
+                               "queued_count": 0, "failed_count": 0},
+            "needs_attention": [], "primary_cta": {}, "failed_run_id": None,
+        }
         with _mod.app.test_client() as client:
             with patch("run_dashboard.get_factory_state", return_value=_fake_state()):
                 with patch("run_dashboard.assess_factory", return_value=_fake_report()):
-                    resp = client.get("/dashboard")
+                    with patch("run_dashboard.get_executive_overview",
+                               return_value=fake_overview):
+                        resp = client.get("/dashboard")
         assert resp.status_code == 200
         html = resp.data.decode()
         assert "Platform ID" in html

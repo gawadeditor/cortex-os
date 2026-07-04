@@ -955,19 +955,21 @@ class TestProviderUITruth:
         assert "Meta Graph API" in body
 
     def test_tiktok_no_active_test_button(self, client):
-        """TikTok must not show a Test button that silently returns not_verifiable."""
+        """TikTok credential connect flow uses Paste Token, not a silent not_verifiable check."""
         with patch("run_dashboard.list_secret_profiles", return_value=[]), \
              patch("run_dashboard.get_all_provider_statuses", return_value={}):
             resp = client.get("/providers")
         body = resp.data.decode()
-        assert "Verified at publish time" in body
+        # TikTok now uses a Paste Token connect flow
+        assert "Paste Token" in body or "/platforms/connect/tiktok" in body
 
     def test_youtube_shows_oauth2(self, client):
+        # YouTube OAuth flow is now triggered via the Authorize with Google button
         with patch("run_dashboard.list_secret_profiles", return_value=[]), \
              patch("run_dashboard.get_all_provider_statuses", return_value={}):
             resp = client.get("/providers")
         body = resp.data.decode()
-        assert "OAuth 2.0" in body
+        assert "Authorize with Google" in body or "/platforms/youtube/authorize" in body
 
     def test_instagram_cred_type_is_oauth2_token(self):
         import run_dashboard as s

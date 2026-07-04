@@ -8,8 +8,9 @@ Official API surface (verified 2026-07-04 via SDK + docs):
   Poll:     GET  /requests/{request_id}/status
   Cancel:   POST /requests/{request_id}/cancel
   Upload:   POST /files/generate-upload-url → PUT to presigned URL
-  Statuses: Queued | InProgress | Completed | Failed | NSFW | Cancelled
-  Result:   completed response → {"output": {"media_url": ["url"]}, "status": "Completed"}
+  Statuses: queued | in_progress | completed | failed | nsfw | cancelled  (all lowercase)
+  Submit:   response → {"id": "...", "type": "image2video", "jobs": [...]}  (request_id = resp["id"])
+  Result:   completed response → {"status": "completed", "request_id": "...", "video": {"url": "https://...mp4"}}
 
 DoP model tiers (Image-to-Video, 5-second default clips):
   dop-lite      cheapest, fastest             ~$0.14/5s clip
@@ -233,15 +234,18 @@ def submit_dop_generation(
 
     headers = {**_auth_header(cfg), "Content-Type": "application/json"}
 
-    payload: dict = {
+    # Higgsfield API requires generation parameters nested under a "params" key.
+    # Verified from 422 response: {"detail":[{"loc":["body","params"],"msg":"Field required"}]}
+    inner: dict = {
         "model": model,
         "prompt": prompt,
-        "input_images": [image_url],
+        "input_images": [{"type": "image_url", "image_url": image_url}],
         "duration": duration,
     }
     if seed is not None:
-        payload["seed"] = seed
+        inner["seed"] = seed
 
+    payload = {"params": inner}
     submit_time = time.time()
 
     r = requests.post(
@@ -262,7 +266,11 @@ def submit_dop_generation(
         raise HiggsFieldError(f"Submit failed: HTTP {r.status_code} — {r.text[:400]}")
 
     resp = r.json()
-    request_id: str = resp["request_id"]
+    # Submit response uses "id" as the request identifier, not "request_id"
+    # Verified 2026-07-04: {"id": "...", "type": "image2video", "jobs": [...]}
+    request_id: str = resp.get("id") or resp.get("request_id") or ""
+    if not request_id:
+        raise HiggsFieldError(f"Submit response missing id/request_id: {r.text[:400]}")
     log.info("hf_job_submitted", request_id=request_id, model=model, duration=duration)
 
     # Poll until terminal state
@@ -288,13 +296,15 @@ def submit_dop_generation(
             continue
 
         data = status_r.json()
+        # Statuses are lowercase: queued | in_progress | completed | failed | nsfw | cancelled
+        # Verified 2026-07-04 from live API responses
         status: str = data.get("status", "")
         log.info("hf_poll_cycle", request_id=request_id, status=status)
 
-        if status == "Completed":
-            output = data.get("output", {})
-            urls = output.get("media_url", [])
-            output_url = urls[0] if urls else None
+        if status == "completed":
+            # Completed response: {"status": "completed", "video": {"url": "https://...mp4"}}
+            video = data.get("video", {})
+            output_url = video.get("url") if video else None
             complete_time = time.time()
             log.info("hf_job_completed", request_id=request_id,
                      elapsed=round(complete_time - submit_time, 1), output_url=output_url)
@@ -310,7 +320,7 @@ def submit_dop_generation(
                 "dry_run": False,
             }
 
-        if status == "Failed":
+        if status == "failed":
             complete_time = time.time()
             log.warn("hf_job_failed", request_id=request_id,
                      elapsed=round(complete_time - submit_time, 1))
@@ -326,11 +336,11 @@ def submit_dop_generation(
                 "dry_run": False,
             }
 
-        if status == "NSFW":
+        if status == "nsfw":
             log.warn("hf_nsfw_rejected", request_id=request_id)
             raise HiggsFieldContentError(f"Generation rejected as NSFW: {request_id}")
 
-        if status in ("Cancelled",):
+        if status == "cancelled":
             return {
                 "request_id": request_id,
                 "status": "Cancelled",
@@ -342,7 +352,7 @@ def submit_dop_generation(
                 "elapsed_seconds": round(time.time() - submit_time, 1),
                 "dry_run": False,
             }
-        # Queued / InProgress — keep polling
+        # queued / in_progress — keep polling
 
     log.warn("hf_timeout", request_id=request_id, timeout_seconds=timeout, model=model)
     return {
@@ -404,11 +414,11 @@ def check_credentials(cfg: Config) -> dict:
         if r.status_code == 401:
             log.error("hf_auth_failure", status=401, phase="credential_check")
             return {"valid": False, "error": "auth_rejected", "detail": "HTTP 401 — invalid key/secret"}
-        if r.status_code == 404:
-            # Endpoint may not exist; treat a 404 as credential-valid (the auth passed)
-            return {"valid": True, "error": None, "detail": "HTTP 404 on /requests — auth likely OK"}
-        if r.status_code == 200:
-            return {"valid": True, "error": None, "detail": "HTTP 200 — credentials valid"}
+        if r.status_code in (200, 404, 405):
+            # 200: endpoint exists and auth passed
+            # 404: endpoint not found but auth was evaluated (would be 401 if bad creds)
+            # 405: wrong HTTP method but auth was evaluated — credentials are valid
+            return {"valid": True, "error": None, "detail": f"HTTP {r.status_code} — credentials valid"}
         return {
             "valid": False,
             "error": f"http_{r.status_code}",

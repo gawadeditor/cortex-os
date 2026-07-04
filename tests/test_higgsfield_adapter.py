@@ -277,21 +277,24 @@ class TestSubmitDopPolling:
     def _submit_resp(self, request_id: str = "req_test_123"):
         mock = MagicMock()
         mock.status_code = 200
-        mock.json.return_value = {"request_id": request_id}
+        # Real API returns "id" at top level, not "request_id"
+        mock.json.return_value = {"id": request_id, "type": "image2video", "jobs": []}
         mock.text = ""
         return mock
 
     def _poll_resp(self, status: str, output_url: str = None):
         mock = MagicMock()
         mock.status_code = 200
+        # Real API statuses are lowercase: queued|in_progress|completed|failed|nsfw|cancelled
         body = {"status": status}
         if output_url:
-            body["output"] = {"media_url": [output_url]}
+            # Real API uses {"video": {"url": "..."}} for completed responses
+            body["video"] = {"url": output_url}
         mock.json.return_value = body
         return mock
 
     def test_completed_poll_returns_result(self, cfg_with_creds):
-        poll_resp = self._poll_resp("Completed", "https://cdn.example.com/video.mp4")
+        poll_resp = self._poll_resp("completed", "https://cdn.example.com/video.mp4")
         with patch("hypogeum.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
              patch("hypogeum.higgsfield.requests.get",
@@ -307,7 +310,7 @@ class TestSubmitDopPolling:
         assert result["dry_run"] is False
 
     def test_failed_poll_returns_failed(self, cfg_with_creds):
-        poll_resp = self._poll_resp("Failed")
+        poll_resp = self._poll_resp("failed")
         with patch("hypogeum.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
              patch("hypogeum.higgsfield.requests.get",
@@ -322,7 +325,7 @@ class TestSubmitDopPolling:
         assert result["cost_usd"] == 0.0  # failed = refunded
 
     def test_nsfw_poll_raises_content_error(self, cfg_with_creds):
-        poll_resp = self._poll_resp("NSFW")
+        poll_resp = self._poll_resp("nsfw")
         with patch("hypogeum.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
              patch("hypogeum.higgsfield.requests.get",
@@ -335,7 +338,7 @@ class TestSubmitDopPolling:
                 )
 
     def test_cancelled_poll_returns_cancelled(self, cfg_with_creds):
-        poll_resp = self._poll_resp("Cancelled")
+        poll_resp = self._poll_resp("cancelled")
         with patch("hypogeum.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
              patch("hypogeum.higgsfield.requests.get",
@@ -351,7 +354,7 @@ class TestSubmitDopPolling:
         # Set a very short timeout so the loop exits immediately
         cfg_with_creds.HIGGSFIELD_TIMEOUT_SECONDS = 0
         cfg_with_creds.HIGGSFIELD_POLL_INTERVAL_SECONDS = 0
-        poll_resp = self._poll_resp("InProgress")
+        poll_resp = self._poll_resp("in_progress")
         with patch("hypogeum.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
              patch("hypogeum.higgsfield.requests.get",
@@ -383,7 +386,7 @@ class TestSubmitDopPolling:
                 prompt="test", image_url="https://example.com/img.jpg",
                 seed=12345,
             )
-        assert captured["payload"]["seed"] == 12345
+        assert captured["payload"]["params"]["seed"] == 12345
 
     def test_no_seed_omitted_from_payload(self, cfg_with_creds):
         captured = {}
@@ -405,7 +408,7 @@ class TestSubmitDopPolling:
                 prompt="test", image_url="https://example.com/img.jpg",
                 seed=None,
             )
-        assert "seed" not in captured["payload"]
+        assert "seed" not in captured["payload"]["params"]
 
     def test_auth_header_format(self, cfg_with_creds):
         captured_headers = {}

@@ -864,8 +864,8 @@ class TestFinanceAgentSchema:
             })
 
     def test_schema_count_updated(self):
-        # finance_record is schema #23; vpd_scene_prompts_batch is #29
-        assert len(SCHEMA_NAMES) == 29
+        # finance_record is schema #23; archive_record + asset_archive_record added (#30, #31)
+        assert len(SCHEMA_NAMES) == 31
 
     def test_finance_record_in_schema_names(self):
         assert "finance_record" in SCHEMA_NAMES

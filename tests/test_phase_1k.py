@@ -305,19 +305,26 @@ class TestPublishingSaveCredential:
         return html[pub_start:comp_div]
 
     def test_save_credential_button_present(self, client):
-        assert "Save Credential" in self._pub_slice(client)
+        # SP connect flow replaced by platform OAuth buttons (Meta) and Paste Token (TikTok)
+        pub = self._pub_slice(client)
+        assert ("Authorize with Meta" in pub or "Paste Token" in pub
+                or "/platforms/meta/authorize" in pub
+                or "/platforms/connect/tiktok" in pub)
 
     def test_tiktok_sp_connect_link(self, client):
+        # TikTok now uses /platforms/connect/tiktok (Paste Token flow)
         pub = self._pub_slice(client)
-        assert "/providers/content/connect/tiktok" in pub
+        assert "/platforms/connect/tiktok" in pub
 
     def test_instagram_sp_connect_link(self, client):
+        # Instagram now uses /platforms/meta/authorize (Meta OAuth flow)
         pub = self._pub_slice(client)
-        assert "/providers/content/connect/instagram" in pub
+        assert "/platforms/meta/authorize" in pub
 
     def test_facebook_sp_connect_link(self, client):
+        # Facebook now uses /platforms/meta/authorize (Meta OAuth flow)
         pub = self._pub_slice(client)
-        assert "/providers/content/connect/facebook" in pub
+        assert "/platforms/meta/authorize" in pub
 
     def test_youtube_has_no_sp_connect_link(self, client):
         # YouTube uses OAuth flow only — no Secret Profile SP link

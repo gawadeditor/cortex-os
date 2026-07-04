@@ -273,6 +273,16 @@ class Config:
     ENABLE_DEDICATED_SHORT_GENERATION: bool  # allow VPD to plan/generate 9:16 Short scenes; default: false
 
     # ------------------------------------------------------------------
+    # Higgsfield AI (comparison / evaluation only — not wired into pipeline)
+    # ------------------------------------------------------------------
+    HF_API_KEY: Optional[str]            # Higgsfield Cloud API key ID
+    HF_API_SECRET: Optional[str]         # Higgsfield Cloud API secret
+    HIGGSFIELD_BASE_URL: str             # default: https://platform.higgsfield.ai
+    HIGGSFIELD_TIMEOUT_SECONDS: int      # default: 180
+    HIGGSFIELD_POLL_INTERVAL_SECONDS: int  # default: 5
+    HIGGSFIELD_DRY_RUN: bool             # default: false — if true, no real API calls
+
+    # ------------------------------------------------------------------
     # Smoke Test Mode — minimal end-to-end run with capped scene/beat counts
     # ------------------------------------------------------------------
     SMOKE_TEST_MODE: bool                # master switch; default: false
@@ -452,6 +462,16 @@ class Config:
         self.CLIP_REPAIR_ENABLED = _get_bool("CLIP_REPAIR_ENABLED", default=True)
         # CLIP_REPAIR_MAX_GENERATED: max extra clips to generate in Strategy B (default 5).
         self.CLIP_REPAIR_MAX_GENERATED = _get_int("CLIP_REPAIR_MAX_GENERATED", default=5)
+
+        # --- Higgsfield (comparison only) ---
+        self.HF_API_KEY = _get_optional("HF_API_KEY")
+        self.HF_API_SECRET = _get_optional("HF_API_SECRET")
+        self.HIGGSFIELD_BASE_URL = _get_optional(
+            "HIGGSFIELD_BASE_URL", default="https://platform.higgsfield.ai"
+        )
+        self.HIGGSFIELD_TIMEOUT_SECONDS = _get_int("HIGGSFIELD_TIMEOUT_SECONDS", default=180)
+        self.HIGGSFIELD_POLL_INTERVAL_SECONDS = _get_int("HIGGSFIELD_POLL_INTERVAL_SECONDS", default=5)
+        self.HIGGSFIELD_DRY_RUN = _get_bool("HIGGSFIELD_DRY_RUN", default=False)
 
         # --- Smoke Test Mode ---
         self.SMOKE_TEST_MODE = _get_bool("SMOKE_TEST_MODE", default=False)

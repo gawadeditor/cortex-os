@@ -90,12 +90,15 @@ _DEFAULT_REFERENCE_IMAGE = (
 
 ALL_LEGS: dict[str, dict] = {
     # ---- Seedance 2.0 — primary benchmark legs ----
-    # Verified 2026-07-04: seedance-2-t2v and seedance-2-i2v exist in MUAPI catalog
-    # Both accept duration param (1–10s); 10s chosen for fair comparison with Veo3-fast 8s
+    # Verified 2026-07-04 via live endpoint probe:
+    #   seedance-2-t2v / seedance-2-i2v are catalog *aliases* — they return HTTP 404
+    #   The routable endpoints are seedance-2-text-to-video-fast ($0.75, dynamic)
+    #   and seedance-2-image-to-video-fast ($0.75, dynamic).
+    #   Duration param: int, range 4–15s, default 5. We use 10s for fair comparison.
     "muapi_seedance2_t2v": {
         "provider": "muapi",
         "mode": "t2v",
-        "model": "seedance-2-t2v",
+        "model": "seedance-2-text-to-video-fast",
         "label": "MUAPI Seedance 2 T2V",
         "price_per_clip_usd": 0.75,
         "clip_duration_s": 10,
@@ -104,7 +107,7 @@ ALL_LEGS: dict[str, dict] = {
     "muapi_seedance2_i2v": {
         "provider": "muapi",
         "mode": "i2v",
-        "model": "seedance-2-i2v",
+        "model": "seedance-2-image-to-video-fast",
         "label": "MUAPI Seedance 2 I2V",
         "price_per_clip_usd": 0.75,
         "clip_duration_s": 10,
@@ -261,7 +264,9 @@ def _run_muapi_leg(
              request_id=request_id, model=model)
 
     # Poll
-    timeout = cfg.MUAPI_TIMEOUT_SECONDS
+    # Benchmark jobs may run longer than the production default (180s).
+    # Use at least 360s so Veo3-fast I2V and 10s Seedance clips have room to finish.
+    timeout = max(cfg.MUAPI_TIMEOUT_SECONDS, 360)
     poll_interval = cfg.MUAPI_POLL_INTERVAL_SECONDS
     deadline = time.time() + timeout
 

@@ -1818,8 +1818,9 @@ def claim_next_episode_topic(
     row will each get rowcount=1 or rowcount=0 — exactly one wins.
 
     Ordering: priority ASC (lower = higher urgency), then source='rerun' before
-    other sources, then created_at DESC (newest rerun first — the most recent
-    rerun intent wins over stale older rerun rows for the same episode).
+    other sources, then created_at DESC for reruns only (newest rerun intent wins
+    over stale older rerun rows for the same episode), then created_at ASC for
+    FIFO ordering within the same priority+source bucket.
 
     Args:
         conn:       Open connection.
@@ -1837,7 +1838,8 @@ def claim_next_episode_topic(
         ORDER BY
             priority ASC,
             CASE WHEN source = 'rerun' THEN 0 ELSE 1 END ASC,
-            created_at DESC
+            CASE WHEN source = 'rerun' THEN created_at ELSE NULL END DESC,
+            created_at ASC
         LIMIT 1
         """,
         (channel_id,),

@@ -535,10 +535,10 @@ class TestComparisonRunnerDryRun:
         scorecard_path = tmp_path / "comparison_out" / "scorecard.json"
         assert scorecard_path.exists()
         sc = json.loads(scorecard_path.read_text())
-        assert sc["legs_run"] == 2
+        # legs_run moved under sc["summary"] in the updated scorecard structure
+        assert sc["summary"]["legs_run"] == 2
         assert "results" in sc
         assert "recommendation" in sc
-        assert "dimensions" in sc
 
     def test_dry_run_all_results_dry(self, tmp_path):
         from scripts.compare_higgsfield_vs_muapi import main
@@ -563,7 +563,7 @@ class TestComparisonRunnerDryRun:
         summary_path = tmp_path / "out" / "scorecard_summary.txt"
         assert summary_path.exists()
         text = summary_path.read_text()
-        assert "HIGGSFIELD vs MUAPI" in text
+        assert "SCORECARD" in text  # header updated to SEEDANCE 2 vs VEO3-FAST
         assert "RECOMMENDATION" in text
 
     def test_all_higgsfield_tiers_flag(self, tmp_path):

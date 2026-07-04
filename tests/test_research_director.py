@@ -975,39 +975,39 @@ class TestPipelineIntegration:
         }
         return scorecard, brief
 
-    def test_pipeline_stub_delegates_to_run_research_director(self):
+    def test_pipeline_stub_delegates_to_run_research_director(self, tmp_path):
         cfg = make_config()
         rp = _make_research_package()
         with patch("hypogeum.pipeline.run_research_director",
                    return_value=(rp, None)) as mock_rd:
             result = pipeline_rd_stub(
                 topic_brief=BRIEF, config=cfg,
-                episode_id=EPISODE_ID, output_dir=None,
+                episode_id=EPISODE_ID, output_dir=tmp_path,
             )
         mock_rd.assert_called_once()
         assert result == (rp, None)
 
-    def test_pipeline_stub_passes_topic_brief(self):
+    def test_pipeline_stub_passes_topic_brief(self, tmp_path):
         cfg = make_config()
         with patch("hypogeum.pipeline.run_research_director",
                    return_value=(_make_research_package(), None)) as mock_rd:
             pipeline_rd_stub(
                 topic_brief=BRIEF, config=cfg,
-                episode_id=EPISODE_ID, output_dir=None,
+                episode_id=EPISODE_ID, output_dir=tmp_path,
             )
         assert mock_rd.call_args.kwargs["topic_brief"] is BRIEF
 
-    def test_pipeline_stub_passes_episode_id(self):
+    def test_pipeline_stub_passes_episode_id(self, tmp_path):
         cfg = make_config()
         with patch("hypogeum.pipeline.run_research_director",
                    return_value=(_make_research_package(), None)) as mock_rd:
             pipeline_rd_stub(
                 topic_brief=BRIEF, config=cfg,
-                episode_id=EPISODE_ID, output_dir=None,
+                episode_id=EPISODE_ID, output_dir=tmp_path,
             )
         assert mock_rd.call_args.kwargs["episode_id"] == EPISODE_ID
 
-    def test_pdr_returned_raises_package_deficiency_error(self):
+    def test_pdr_returned_raises_package_deficiency_error(self, tmp_path):
         from hypogeum.pipeline import run_pipeline
         cfg = make_config()
         pdr = _build_pdr("ep_001", "MAJOR",
@@ -1021,10 +1021,10 @@ class TestPipelineIntegration:
              patch("hypogeum.pipeline.run_startup_checks",
                    return_value=self._make_startup_report()):
             with pytest.raises(PackageDeficiencyError) as exc_info:
-                run_pipeline("Test", EPISODE_ID, cfg)
+                run_pipeline("Test", EPISODE_ID, cfg, output_dir=tmp_path)
         assert exc_info.value.episode_id == EPISODE_ID
 
-    def test_pdr_attached_to_exception(self):
+    def test_pdr_attached_to_exception(self, tmp_path):
         from hypogeum.pipeline import run_pipeline
         cfg = make_config()
         pdr = _build_pdr("ep_001", "MAJOR",
@@ -1038,7 +1038,7 @@ class TestPipelineIntegration:
              patch("hypogeum.pipeline.run_startup_checks",
                    return_value=self._make_startup_report()):
             with pytest.raises(PackageDeficiencyError) as exc_info:
-                run_pipeline("Test", EPISODE_ID, cfg)
+                run_pipeline("Test", EPISODE_ID, cfg, output_dir=tmp_path)
         assert exc_info.value.pdr is pdr
 
     def test_success_continues_to_next_agent(self):

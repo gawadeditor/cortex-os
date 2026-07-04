@@ -849,28 +849,28 @@ class TestPipelineIntegration:
         }
         return sc, brief
 
-    def test_stub_delegates_to_run_narrative_architect(self):
+    def test_stub_delegates_to_run_narrative_architect(self, tmp_path):
         cfg = make_config()
         np_pkg = _make_narrative_package()
         with patch("hypogeum.pipeline.run_narrative_architect",
                    return_value=np_pkg) as mock_na:
-            result = pipeline_na_stub({}, cfg, EPISODE_ID, None)
+            result = pipeline_na_stub({}, cfg, EPISODE_ID, tmp_path)
         mock_na.assert_called_once()
         assert result is np_pkg
 
-    def test_stub_passes_research_package(self):
+    def test_stub_passes_research_package(self, tmp_path):
         cfg = make_config()
         rp = _make_research_package()
         with patch("hypogeum.pipeline.run_narrative_architect",
                    return_value=_make_narrative_package()) as mock_na:
-            pipeline_na_stub(rp, cfg, EPISODE_ID, None)
+            pipeline_na_stub(rp, cfg, EPISODE_ID, tmp_path)
         assert mock_na.call_args.kwargs["research_package"] is rp
 
-    def test_stub_passes_episode_id(self):
+    def test_stub_passes_episode_id(self, tmp_path):
         cfg = make_config()
         with patch("hypogeum.pipeline.run_narrative_architect",
                    return_value=_make_narrative_package()) as mock_na:
-            pipeline_na_stub({}, cfg, EPISODE_ID, None)
+            pipeline_na_stub({}, cfg, EPISODE_ID, tmp_path)
         assert mock_na.call_args.kwargs["episode_id"] == EPISODE_ID
 
     def test_success_continues_to_vpd_stub(self):
@@ -915,12 +915,12 @@ class TestPipelineIntegration:
             result = run_pipeline("Test Topic", EPISODE_ID, cfg)
         assert result.status == "completed"
 
-    def test_exception_propagates_through_pipeline(self):
+    def test_exception_propagates_through_pipeline(self, tmp_path):
         cfg = make_config()
         err = SchemaError("narrative_package", "shorts_selection", "must have exactly 3")
         with patch("hypogeum.pipeline.run_narrative_architect", side_effect=err):
             with pytest.raises(SchemaError) as exc_info:
-                pipeline_na_stub({}, cfg, EPISODE_ID, None)
+                pipeline_na_stub({}, cfg, EPISODE_ID, tmp_path)
         assert exc_info.value is err
 
     def test_stub_passes_output_dir(self):

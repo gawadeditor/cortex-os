@@ -727,7 +727,7 @@ class TestPipelineIntegration:
             checked_at="2026-06-01T10:00:00Z",
         )
 
-    def test_pipeline_stub_delegates_to_run_executive_producer(self):
+    def test_pipeline_stub_delegates_to_run_executive_producer(self, tmp_path):
         cfg = make_config()
         scorecard = _make_scorecard("PASS")
         brief = _make_brief()
@@ -735,45 +735,45 @@ class TestPipelineIntegration:
                    return_value=(scorecard, brief)) as mock_ep:
             result = pipeline_ep_stub(
                 topic_input=TOPIC, config=cfg,
-                episode_id=EPISODE_ID, output_dir=None,
+                episode_id=EPISODE_ID, output_dir=tmp_path,
             )
         mock_ep.assert_called_once()
         assert result == (scorecard, brief)
 
-    def test_pipeline_stub_passes_topic_input(self):
+    def test_pipeline_stub_passes_topic_input(self, tmp_path):
         cfg = make_config()
         with patch("hypogeum.pipeline.run_executive_producer",
                    return_value=(_make_scorecard("PASS"), _make_brief())) as mock_ep:
             pipeline_ep_stub(
                 topic_input=TOPIC, config=cfg,
-                episode_id=EPISODE_ID, output_dir=None,
+                episode_id=EPISODE_ID, output_dir=tmp_path,
             )
         call_kwargs = mock_ep.call_args.kwargs
         assert call_kwargs["topic_input"] == TOPIC
 
-    def test_pipeline_stub_passes_config(self):
+    def test_pipeline_stub_passes_config(self, tmp_path):
         cfg = make_config()
         with patch("hypogeum.pipeline.run_executive_producer",
                    return_value=(_make_scorecard("PASS"), _make_brief())) as mock_ep:
             pipeline_ep_stub(
                 topic_input=TOPIC, config=cfg,
-                episode_id=EPISODE_ID, output_dir=None,
+                episode_id=EPISODE_ID, output_dir=tmp_path,
             )
         call_kwargs = mock_ep.call_args.kwargs
         assert call_kwargs["config"] is cfg
 
-    def test_pipeline_stub_passes_episode_id(self):
+    def test_pipeline_stub_passes_episode_id(self, tmp_path):
         cfg = make_config()
         with patch("hypogeum.pipeline.run_executive_producer",
                    return_value=(_make_scorecard("PASS"), _make_brief())) as mock_ep:
             pipeline_ep_stub(
                 topic_input=TOPIC, config=cfg,
-                episode_id=EPISODE_ID, output_dir=None,
+                episode_id=EPISODE_ID, output_dir=tmp_path,
             )
         call_kwargs = mock_ep.call_args.kwargs
         assert call_kwargs["episode_id"] == EPISODE_ID
 
-    def test_pipeline_reject_raises_pipeline_rejected_error(self):
+    def test_pipeline_reject_raises_pipeline_rejected_error(self, tmp_path):
         from hypogeum.pipeline import run_pipeline
         cfg = make_config()
         scorecard = _make_scorecard("REJECT", 5.0)
@@ -786,10 +786,10 @@ class TestPipelineIntegration:
                 from hypogeum.startup import StartupReport
                 mock_startup.return_value = self._make_startup_report()
                 with pytest.raises(PipelineRejectedError) as exc_info:
-                    run_pipeline(TOPIC, EPISODE_ID, cfg)
+                    run_pipeline(TOPIC, EPISODE_ID, cfg, output_dir=tmp_path)
         assert exc_info.value.episode_id == EPISODE_ID
 
-    def test_pipeline_reject_attaches_scorecard(self):
+    def test_pipeline_reject_attaches_scorecard(self, tmp_path):
         from hypogeum.pipeline import run_pipeline
         cfg = make_config()
         scorecard = _make_scorecard("REJECT", 5.0)
@@ -802,7 +802,7 @@ class TestPipelineIntegration:
                 from hypogeum.startup import StartupReport
                 mock_startup.return_value = self._make_startup_report()
                 with pytest.raises(PipelineRejectedError) as exc_info:
-                    run_pipeline(TOPIC, EPISODE_ID, cfg)
+                    run_pipeline(TOPIC, EPISODE_ID, cfg, output_dir=tmp_path)
         assert exc_info.value.scorecard is scorecard
 
     def test_pipeline_pass_continues_to_next_agent(self):

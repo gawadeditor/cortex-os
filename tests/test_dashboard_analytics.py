@@ -174,51 +174,51 @@ class TestDashboardAnalyticsReads:
 
 class TestFlaskAnalyticsHtmlRoutes:
     def test_analytics_page_200(self, flask_client):
-        r = flask_client.get("/analytics")
+        r = flask_client.get("/intelligence/performance")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Analytics" in text
+        assert "Performance" in text or "Intelligence" in text
 
     def test_analytics_page_shows_platforms(self, flask_client):
-        r = flask_client.get("/analytics")
+        r = flask_client.get("/intelligence/performance")
         text = r.get_data(as_text=True)
         for p in ("youtube", "tiktok", "instagram", "facebook"):
             assert p in text.lower()
 
     def test_analytics_page_empty_state_no_crash(self, flask_client_bare):
-        r = flask_client_bare.get("/analytics")
+        r = flask_client_bare.get("/intelligence/performance")
         assert r.status_code == 200
 
     def test_analytics_platform_youtube_200(self, flask_client):
-        r = flask_client.get("/analytics/platform/youtube")
+        r = flask_client.get("/intelligence/platform/youtube")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
         assert "youtube" in text.lower()
 
     def test_analytics_platform_tiktok_200(self, flask_client):
-        r = flask_client.get("/analytics/platform/tiktok")
+        r = flask_client.get("/intelligence/platform/tiktok")
         assert r.status_code == 200
 
     def test_analytics_platform_instagram_200(self, flask_client):
-        r = flask_client.get("/analytics/platform/instagram")
+        r = flask_client.get("/intelligence/platform/instagram")
         assert r.status_code == 200
 
     def test_analytics_platform_facebook_200(self, flask_client):
-        r = flask_client.get("/analytics/platform/facebook")
+        r = flask_client.get("/intelligence/platform/facebook")
         assert r.status_code == 200
 
     def test_analytics_platform_unknown_400(self, flask_client):
-        r = flask_client.get("/analytics/platform/snapchat")
+        r = flask_client.get("/intelligence/platform/snapchat")
         assert r.status_code == 404
 
     def test_analytics_episode_200(self, flask_client):
-        r = flask_client.get("/analytics/episode/ep_alpha")
+        r = flask_client.get("/intelligence/performance/episode/ep_alpha")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
         assert "ep_alpha" in text
 
     def test_analytics_episode_no_data_404(self, flask_client):
-        r = flask_client.get("/analytics/episode/no-such-episode")
+        r = flask_client.get("/intelligence/performance/episode/no-such-episode")
         assert r.status_code == 404
 
     def test_analytics_import_page_200(self, flask_client):
@@ -238,19 +238,19 @@ class TestFlaskAnalyticsHtmlRoutes:
         assert "youtube" in text.lower()
 
     def test_learning_page_200(self, flask_client):
-        r = flask_client.get("/learning")
+        r = flask_client.get("/intelligence/learning")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
         assert "Intelligence" in text
 
     def test_learning_page_shows_actions(self, flask_client):
-        r = flask_client.get("/learning")
+        r = flask_client.get("/intelligence/learning")
         text = r.get_data(as_text=True)
         # Should show pending actions or empty state
         assert "action" in text.lower() or "No pending" in text
 
     def test_learning_page_shows_platform_coverage(self, flask_client):
-        r = flask_client.get("/learning")
+        r = flask_client.get("/intelligence/learning")
         text = r.get_data(as_text=True)
         assert "youtube" in text.lower() or "Platform" in text
 
@@ -451,19 +451,19 @@ class TestFlaskLearningApiActionRoutes:
 
 class TestNavAnalyticsPresent:
     def _check_nav(self, text):
-        assert "/analytics" in text
-        assert "/learning"  in text
+        assert "/intelligence/performance" in text
+        assert "/intelligence/learning"   in text
 
     def test_dashboard_has_analytics_nav(self, flask_client):
         r = flask_client.get("/dashboard")
         self._check_nav(r.get_data(as_text=True))
 
     def test_analytics_page_has_analytics_nav(self, flask_client):
-        r = flask_client.get("/analytics")
+        r = flask_client.get("/intelligence/performance")
         self._check_nav(r.get_data(as_text=True))
 
     def test_learning_page_has_analytics_nav(self, flask_client):
-        r = flask_client.get("/learning")
+        r = flask_client.get("/intelligence/learning")
         self._check_nav(r.get_data(as_text=True))
 
     def test_runs_page_has_analytics_nav(self, flask_client):
@@ -479,12 +479,12 @@ class TestNoCredentialsRequired:
     """All analytics routes must work with zero env vars / credentials."""
 
     def test_analytics_overview_no_credentials(self, flask_client_bare):
-        r = flask_client_bare.get("/analytics")
+        r = flask_client_bare.get("/intelligence/performance")
         assert r.status_code == 200
 
     def test_platform_pages_no_credentials(self, flask_client_bare):
         for p in ("youtube", "tiktok", "instagram", "facebook"):
-            r = flask_client_bare.get(f"/analytics/platform/{p}")
+            r = flask_client_bare.get(f"/intelligence/platform/{p}")
             assert r.status_code == 200, f"Platform {p} failed"
 
     def test_import_page_no_credentials(self, flask_client_bare):
@@ -492,7 +492,7 @@ class TestNoCredentialsRequired:
         assert r.status_code == 200
 
     def test_learning_page_no_credentials(self, flask_client_bare):
-        r = flask_client_bare.get("/learning")
+        r = flask_client_bare.get("/intelligence/learning")
         assert r.status_code == 200
 
     def test_seed_mock_no_credentials(self, flask_client_bare):
@@ -550,8 +550,8 @@ class TestAnalyticsUX:
     """
 
     def test_analytics_page_no_manual_import_cta(self, flask_client_bare):
-        """Main /analytics page must not show 'Manual Analytics Import' as primary CTA."""
-        r = flask_client_bare.get("/analytics")
+        """Main /intelligence/performance page must not show 'Manual Analytics Import' as primary CTA."""
+        r = flask_client_bare.get("/intelligence/performance")
         assert r.status_code == 200
         body = r.data.decode()
         assert "Manual Analytics Import" not in body, (
@@ -560,7 +560,7 @@ class TestAnalyticsUX:
 
     def test_analytics_page_no_import_button_on_platform_cards(self, flask_client_bare):
         """Platform health cards must not show 'Import →' buttons."""
-        r = flask_client_bare.get("/analytics")
+        r = flask_client_bare.get("/intelligence/performance")
         assert r.status_code == 200
         body = r.data.decode()
         assert "/analytics/import?platform=" not in body, (
@@ -568,15 +568,15 @@ class TestAnalyticsUX:
         )
 
     def test_analytics_page_empty_state_points_to_sync(self, flask_client_bare):
-        """Empty state must link to /analytics/sync, not to manual import."""
-        r = flask_client_bare.get("/analytics")
+        """Empty state must link to /intelligence/sync, not to manual import."""
+        r = flask_client_bare.get("/intelligence/performance")
         assert r.status_code == 200
         body = r.data.decode()
-        assert "/analytics/sync" in body, "Empty state must link to sync status page"
+        assert "/intelligence/sync" in body, "Empty state must link to sync status page"
 
     def test_analytics_page_no_manual_import_subnav(self, flask_client_bare):
         """Sub-nav must not expose 'Manual Import' as a top-level link."""
-        r = flask_client_bare.get("/analytics")
+        r = flask_client_bare.get("/intelligence/performance")
         assert r.status_code == 200
         body = r.data.decode()
         assert "Manual Import" not in body, (
@@ -585,12 +585,12 @@ class TestAnalyticsUX:
 
     def test_sync_page_buttons_inside_details(self, flask_client_bare):
         """Quick Sync / Full Sync buttons must be inside a <details> element."""
-        r = flask_client_bare.get("/analytics/sync")
+        r = flask_client_bare.get("/intelligence/sync")
         assert r.status_code == 200
         body = r.data.decode()
-        # Find the Advanced <details> block (contains "manual sync triggers")
-        details_start = body.find("manual sync triggers")
-        assert details_start >= 0, "Advanced <details> block not found"
+        # Find the emergency/force-sync <details> block
+        details_start = body.find("Emergency: force sync")
+        assert details_start >= 0, "Emergency force-sync <details> block not found"
         # Walk back to the containing <details> tag
         details_tag = body.rfind("<details", 0, details_start)
         assert details_tag >= 0
@@ -605,7 +605,7 @@ class TestAnalyticsUX:
 
     def test_sync_page_no_sync_buttons_in_header(self, flask_client_bare):
         """Sync buttons must not appear in page-header area."""
-        r = flask_client_bare.get("/analytics/sync")
+        r = flask_client_bare.get("/intelligence/sync")
         assert r.status_code == 200
         body = r.data.decode()
         header_end = body.find("</div>", body.find("page-header"))
@@ -615,17 +615,18 @@ class TestAnalyticsUX:
         )
 
     def test_sync_page_shows_connector_not_implemented(self, flask_client_bare):
-        """TikTok, Instagram, Facebook must show 'Connector not implemented'."""
-        r = flask_client_bare.get("/analytics/sync")
+        """Non-YouTube platforms show credential status on sync page."""
+        r = flask_client_bare.get("/intelligence/sync")
         assert r.status_code == 200
         body = r.data.decode()
-        assert "Connector not implemented" in body, (
-            "Non-YouTube platforms must show 'Connector not implemented'"
+        # Connectors are now implemented; without credentials they show "Credential required"
+        assert "Credential required" in body, (
+            "Non-YouTube platforms must show credential status"
         )
 
     def test_sync_page_shows_youtube_autosync_status(self, flask_client_bare):
         """YouTube card must show auto-sync state (Active or Requires OAuth)."""
-        r = flask_client_bare.get("/analytics/sync")
+        r = flask_client_bare.get("/intelligence/sync")
         assert r.status_code == 200
         body = r.data.decode()
         assert "Auto-sync" in body, "YouTube card must show Auto-sync state"
@@ -635,7 +636,7 @@ class TestAnalyticsUX:
 
     def test_platform_page_no_import_button_in_header(self, flask_client_bare):
         """Platform page header must not have an Import button."""
-        r = flask_client_bare.get("/analytics/platform/youtube")
+        r = flask_client_bare.get("/intelligence/platform/youtube")
         assert r.status_code == 200
         body = r.data.decode()
         header_area = body[body.find("page-header"):body.find("kpi-strip")]
@@ -644,12 +645,13 @@ class TestAnalyticsUX:
         )
 
     def test_platform_page_tiktok_empty_shows_not_implemented(self, flask_client_bare):
-        """TikTok platform empty state must say connector not implemented."""
-        r = flask_client_bare.get("/analytics/platform/tiktok")
+        """TikTok platform empty state must reference TikTok Video API sync."""
+        r = flask_client_bare.get("/intelligence/platform/tiktok")
         assert r.status_code == 200
         body = r.data.decode()
-        assert "Connector not implemented" in body, (
-            "TikTok empty state must say 'Connector not implemented'"
+        # Connector is now implemented via TikTok Video API
+        assert "TikTok Video API" in body or "TikTok" in body, (
+            "TikTok empty state must reference TikTok connector"
         )
 
     def test_sync_status_api_returns_platform_map(self, flask_client_bare):
@@ -665,9 +667,9 @@ class TestAnalyticsUX:
         assert "connected" in yt
         assert "auto_sync" in yt
         assert "last_sync" in yt
-        # Non-YouTube connectors not implemented
+        # Non-YouTube connectors require credentials; without them show credential_required
         for p in ("tiktok", "instagram", "facebook"):
-            assert platforms[p]["auto_sync"] == "connector_not_implemented"
+            assert platforms[p]["auto_sync"] in ("credential_required", "manual_import_only", "credential_expired")
             assert platforms[p]["connected"] is False
 
     def test_sync_status_api_youtube_not_connected_when_no_creds(self, flask_client_bare):

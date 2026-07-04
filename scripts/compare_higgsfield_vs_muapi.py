@@ -101,6 +101,41 @@ ALL_LEGS = {
         "price_per_clip_usd": 0.60,
         "clip_duration_s": 8,
     },
+    # Explicit named aliases for the veo3-fast legs (same models, clearer --legs arg)
+    "muapi_veo3_fast_t2v": {
+        "provider": "muapi",
+        "mode": "t2v",
+        "model": "veo3-fast-text-to-video",
+        "label": "MUAPI veo3-fast T2V",
+        "price_per_clip_usd": 0.60,
+        "clip_duration_s": 8,
+    },
+    "muapi_veo3_fast_i2v": {
+        "provider": "muapi",
+        "mode": "i2v",
+        "model": "veo3-fast-image-to-video",
+        "label": "MUAPI veo3-fast I2V",
+        "price_per_clip_usd": 0.60,
+        "clip_duration_s": 8,
+    },
+    # Seedance 2.0 — $0.75/clip, dynamic pricing
+    # Verified 2026-07-04: same images_list param for I2V, duration optional
+    "muapi_seedance2_t2v": {
+        "provider": "muapi",
+        "mode": "t2v",
+        "model": "seedance-2-t2v",
+        "label": "MUAPI Seedance 2 T2V",
+        "price_per_clip_usd": 0.75,
+        "clip_duration_s": 5,  # model default; 10s also supported
+    },
+    "muapi_seedance2_i2v": {
+        "provider": "muapi",
+        "mode": "i2v",
+        "model": "seedance-2-i2v",
+        "label": "MUAPI Seedance 2 I2V",
+        "price_per_clip_usd": 0.75,
+        "clip_duration_s": 5,  # model default; 10s also supported
+    },
     "higgsfield_dop_lite": {
         "provider": "higgsfield",
         "mode": "i2v",
@@ -699,12 +734,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Reference image for I2V legs
     reference_image_path = args.reference_image or _DEFAULT_REFERENCE_IMAGE
     if not reference_image_path.exists():
-        print(
-            f"WARNING: Reference image not found at {reference_image_path}\n"
-            f"         I2V legs (muapi_i2v, higgsfield_*) will be skipped.\n"
-            f"         Provide --reference-image <path> or place an image at:\n"
-            f"         {reference_image_path}"
-        )
+        if args.reference_image and _DEFAULT_REFERENCE_IMAGE.exists():
+            print(
+                f"WARNING: --reference-image not found: {reference_image_path}\n"
+                f"         Falling back to default: {_DEFAULT_REFERENCE_IMAGE}"
+            )
+            reference_image_path = _DEFAULT_REFERENCE_IMAGE
+        else:
+            print(
+                f"WARNING: Reference image not found at {reference_image_path}\n"
+                f"         I2V legs will be skipped.\n"
+                f"         Provide --reference-image <path> or place an image at:\n"
+                f"         {_DEFAULT_REFERENCE_IMAGE}"
+            )
 
     print(f"\nComparison run: {run_id}")
     print(f"Output dir:     {base_out}")
@@ -726,9 +768,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return 1
             print("       Higgsfield legs will be marked as skipped. Continuing MUAPI legs.\n")
 
-    # Upload reference image to MUAPI for I2V leg (get hosted URL)
+    # Upload reference image to MUAPI for any MUAPI I2V leg (get hosted URL)
+    muapi_i2v_legs = [k for k in legs_to_run
+                      if ALL_LEGS.get(k, {}).get("provider") == "muapi"
+                      and ALL_LEGS.get(k, {}).get("mode") == "i2v"]
     muapi_reference_url: Optional[str] = None
-    if "muapi_i2v" in legs_to_run and not args.dry_run and not cfg.MUAPI_DRY_RUN:
+    if muapi_i2v_legs and not args.dry_run and not cfg.MUAPI_DRY_RUN:
         if reference_image_path.exists():
             try:
                 import requests as _req

@@ -782,7 +782,8 @@ class TestNavPresent:
         assert "/runs"      in text
         assert "/episodes"  in text
         assert "/approvals" in text
-        assert "/signals"   in text
+        # /signals is not in the shared _nav.html; it appears on dashboard home and
+        # command page only — not a primary nav item on runs/episodes/approvals pages
         # /preflight is in the Command page's Investigate section, not primary nav
 
     def test_dashboard_has_nav(self, flask_client):

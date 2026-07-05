@@ -440,6 +440,57 @@ def run_assembly_agent(
     )
 
     # ------------------------------------------------------------------
+    # B3. Assembly Intelligence — detect clip exhaustion, tpad freezes,
+    # visible holds, and audio transition issues before rendering.
+    # Results are embedded in timeline_qa_report for downstream QA checks.
+    # ------------------------------------------------------------------
+    try:
+        from hypogeum.agents.assembly_intelligence import run_assembly_intelligence  # noqa: PLC0415
+        _all_timeline_entries: List = list(main_timeline)
+        for _st in shorts_timelines.values():
+            _all_timeline_entries.extend(_st)
+        # music_tracks not yet available here — pass empty dict (music checks
+        # will run after C. Music sourcing when assembly_intelligence is called
+        # again with full music_tracks)
+        assembly_intel_report = run_assembly_intelligence(
+            timeline_entries=_all_timeline_entries,
+            music_tracks={},
+            output_dir=episode_dir,
+            episode_id=episode_id,
+        )
+        # Merge assembly intelligence issues into timeline_qa_report warnings/failures
+        for issue in assembly_intel_report.get("issues", []):
+            if issue.get("severity") == "BLOCKING":
+                timeline_qa_report.setdefault("failures", []).append(
+                    f"assembly_intelligence: {issue['issue_type']}: {issue['description']}"
+                )
+            else:
+                timeline_qa_report.setdefault("warnings", []).append(
+                    f"assembly_intelligence: {issue['issue_type']}: {issue['description']}"
+                )
+        # Degrade timeline_qa overall_status if blocking issues were found
+        if assembly_intel_report.get("blocking_count", 0) > 0:
+            if timeline_qa_report.get("overall_status") not in ("fail",):
+                timeline_qa_report["overall_status"] = "fail"
+        elif assembly_intel_report.get("warning_count", 0) > 0:
+            if timeline_qa_report.get("overall_status") == "pass":
+                timeline_qa_report["overall_status"] = "warn"
+        log.info(
+            "assembly_intelligence_integrated",
+            episode_id=episode_id,
+            blocking_count=assembly_intel_report.get("blocking_count", 0),
+            warning_count=assembly_intel_report.get("warning_count", 0),
+            overall_status=assembly_intel_report.get("overall_status", "pass"),
+        )
+    except Exception as _ai_exc:  # noqa: BLE001
+        log.warn(
+            "assembly_intelligence_skipped",
+            episode_id=episode_id,
+            reason=str(_ai_exc),
+            note="Assembly Intelligence failed to run — timeline QA unaffected",
+        )
+
+    # ------------------------------------------------------------------
     # C. Music sourcing — delegated to Music Agent
     # Assembly Agent must not call generate_music_track directly.
     # ------------------------------------------------------------------

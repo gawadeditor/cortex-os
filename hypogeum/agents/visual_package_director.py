@@ -3,7 +3,7 @@ hypogeum/agents/visual_package_director.py — Visual Package Director agent (M2
 
 Two-phase execution + Thumbnail Handoff Brief extraction:
 
-  Phase 1 — Claude planning (Stage A split into A1 + A2 + A3):
+  Phase 1 — Claude planning (Stage A split into A1 + A2 + A3 + A4 + Diversity + Visual Intent QA):
 
     Stage A1 — metadata (vpd_skeleton_meta schema):
       Claude receives the compact script_package and produces all non-scene sections of
@@ -23,6 +23,24 @@ Two-phase execution + Thumbnail Handoff Brief extraction:
       skeleton. Scene counts in episode_metadata, package_integrity, and
       provider_routing_manifest are patched from the actual scene list.
       Writes: visual_package_skeleton_{episode_id}.json.
+
+    Stage A4 — Scene Presentation Planner (vpd_presentation_plan_batch schema):
+      For every scene, Claude determines HOW the narrative intent will be communicated
+      cinematically — selecting a presentation_method from the Visual Language Engine
+      and defining camera_strategy, spatial_relationship, and forbidden_techniques.
+      This plan is injected into each scene before Stage B writes prompts.
+      Max tokens: 4,096. Checkpoint: vpd_a4_presentation_{episode_id}.json.
+
+    Shot Diversity Planner:
+      Assigns shot_scale, camera_movement, camera_angle, composition, color_palette,
+      environment, subject, visual_motif, and reuse_allowed to every scene.
+      Runs after A4 and before B. Checkpoint: sdp_{episode_id}.json.
+
+    Visual Intent QA:
+      Verifies every written primary_prompt satisfies its presentation_plan before
+      generation credits are spent. Scenes that fail are retried with rejection_reason
+      injected into Stage B context. Max 1 retry per scene.
+      Checkpoint: vpd_visual_intent_qa_{episode_id}.json.
 
   Stage B — cinematic prompts (batched):
     Claude writes primary_prompt + fallback_prompt for each scene. Batched at
@@ -83,6 +101,15 @@ Logging events emitted:
   vpd_stage_b_batch_completed            — info  — Stage B batch prompts merged into skeleton
   vpd_stage_b_batch_overflow             — warn  — TruncatedResponse; batch halved and retried
   vpd_stage_b_batch_overflow_unsplittable — error — batch_size=1 still truncates; re-raised
+  vpd_stage_a4_started                   — info  — before Stage A4 run_agent() call
+  vpd_stage_a4_resumed                   — info  — Stage A4 checkpoint found, skipping call
+  vpd_stage_a4_completed                 — info  — Stage A4 written to checkpoint
+  vpd_shot_diversity_started             — info  — before Shot Diversity Planner
+  vpd_shot_diversity_completed           — info  — after Shot Diversity Planner
+  vpd_visual_intent_qa_started           — info  — before Visual Intent QA
+  vpd_visual_intent_qa_completed         — info  — after Visual Intent QA
+  vpd_visual_intent_qa_scene_rejected    — warn  — scene failed QA, retry
+  vpd_visual_intent_qa_scene_retry_failed — error — scene still failed after retry
   vpd_planning_completed                 — info  — all planning stages done
   vpd_muapi_phase_started       — info  — before MUAPI execution loop
   vpd_ref_image_started         — info  — before each generate_reference_image()
@@ -164,6 +191,19 @@ _PROMPT_FILE = _PROMPTS_DIR / "visual_package_director.txt"
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "visual_package_director"
 _CINEMATIC_SKILL_FILE = _SKILLS_DIR / "cinematic_prompt_architecture.md"
 
+# Visual Intelligence skill files
+_VI_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "visual_intelligence"
+_VLE_SKILL_FILE = _VI_SKILLS_DIR / "visual_language_engine.md"
+
+# Stage A4 — Scene Presentation Planner
+_SCENE_PRESENTATION_PLANNER_PROMPT_FILE = _PROMPTS_DIR / "vpd_scene_presentation_planner.txt"
+_VPD_PRESENTATION_PLAN_MAX_TOKENS = 4_096
+_PRESENTATION_PLAN_BATCH_SIZE = 15
+
+# Visual Intent QA prompt
+_VISUAL_INTENT_QA_PROMPT_FILE = _PROMPTS_DIR / "vpd_visual_intent_qa.txt"
+_VISUAL_INTENT_QA_MAX_TOKENS = 2_048
+
 
 # ---------------------------------------------------------------------------
 # System prompts — loaded once at import time
@@ -181,11 +221,19 @@ def _load_scene_batch_prompt() -> str:
 def _load_scene_prompts_prompt() -> str:
     return compose_system_prompt(_SCENE_PROMPTS_PROMPT_FILE, _CINEMATIC_SKILL_FILE)
 
+def _load_presentation_planner_prompt() -> str:
+    return compose_system_prompt(_SCENE_PRESENTATION_PLANNER_PROMPT_FILE, _VLE_SKILL_FILE)
 
-SYSTEM_PROMPT: str        = _load_system_prompt()
-META_PROMPT: str          = _load_meta_prompt()
-SCENE_BATCH_PROMPT: str   = _load_scene_batch_prompt()
-SCENE_PROMPTS_PROMPT: str = _load_scene_prompts_prompt()
+def _load_visual_intent_qa_prompt() -> str:
+    return compose_system_prompt(_VISUAL_INTENT_QA_PROMPT_FILE)
+
+
+SYSTEM_PROMPT: str              = _load_system_prompt()
+META_PROMPT: str                = _load_meta_prompt()
+SCENE_BATCH_PROMPT: str         = _load_scene_batch_prompt()
+SCENE_PROMPTS_PROMPT: str       = _load_scene_prompts_prompt()
+PRESENTATION_PLANNER_PROMPT: str = _load_presentation_planner_prompt()
+VISUAL_INTENT_QA_PROMPT: str    = _load_visual_intent_qa_prompt()
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +461,103 @@ def run_visual_package_director(
         )
 
     # ------------------------------------------------------------------
+    # Stage A4 — Scene Presentation Planner
+    # For every scene, determine HOW the narrative intent should be
+    # communicated cinematically BEFORE prompts are written.
+    # This makes presentation decisions immutable — Stage B cannot
+    # override them, only satisfy them.
+    # Checkpoint: vpd_a4_presentation_{episode_id}.json
+    # ------------------------------------------------------------------
+    a4_path = _resolve_output_dir / f"vpd_a4_presentation_{episode_id}.json"
+    if a4_path.exists():
+        log.info("vpd_stage_a4_resumed", path=str(a4_path))
+        presentation_plans_result = json.loads(a4_path.read_text(encoding="utf-8"))
+    else:
+        scenes_for_a4 = [
+            {
+                "scene_id": s.get("scene_id"),
+                "scene_index": s.get("scene_index"),
+                "source_type": s.get("source_type"),
+                "visual_spec": s.get("visual_spec", {}),
+                "narrative_signals": s.get("narrative_signals", []),
+            }
+            for s in visual_package.get("scenes", [])
+        ]
+        a4_input = {
+            "task": "plan_scene_presentations",
+            "episode_metadata": visual_package.get("episode_metadata", {}),
+            "scenes": scenes_for_a4,
+        }
+        log.info(
+            "vpd_stage_a4_started",
+            scenes=len(scenes_for_a4),
+            max_tokens=_VPD_PRESENTATION_PLAN_MAX_TOKENS,
+        )
+        presentation_plans_result = run_agent(
+            agent_name=_AGENT_NAME,
+            model_slug=_CLAUDE_SONNET,
+            system_prompt=PRESENTATION_PLANNER_PROMPT,
+            input_package=a4_input,
+            output_schema="vpd_presentation_plan_batch",
+            episode_id=episode_id,
+            max_tokens=_VPD_PRESENTATION_PLAN_MAX_TOKENS,
+            config=config,
+            output_dir=None,
+        )
+        a4_path.write_text(
+            json.dumps(presentation_plans_result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        log.info(
+            "vpd_stage_a4_completed",
+            plans=len(presentation_plans_result.get("presentation_plans", [])),
+            path=str(a4_path),
+        )
+
+    # Inject presentation_plan into each scene (keyed by scene_id)
+    _presentation_plan_map = {
+        p["scene_id"]: p
+        for p in presentation_plans_result.get("presentation_plans", [])
+    }
+    for scene in visual_package.get("scenes", []):
+        sid = scene.get("scene_id")
+        if sid in _presentation_plan_map:
+            scene["presentation_plan"] = _presentation_plan_map[sid]
+
+    # ------------------------------------------------------------------
+    # Shot Diversity Planner — distributes visual variety across episode
+    # Must run after presentation planning (A4) and before prompt writing (B)
+    # so Stage B knows the assigned shot_scale, camera_movement etc.
+    # ------------------------------------------------------------------
+    log.info(
+        "vpd_shot_diversity_started",
+        episode_id=episode_id,
+        scenes=len(visual_package.get("scenes", [])),
+    )
+    from hypogeum.agents.shot_diversity_planner import run_shot_diversity_planner  # noqa: PLC0415
+    diversity_plan = run_shot_diversity_planner(
+        visual_package=visual_package,
+        episode_id=episode_id,
+        config=config,
+        output_dir=_resolve_output_dir,
+    )
+    # Inject diversity assignments into each scene
+    _diversity_map = {
+        a["scene_id"]: a
+        for a in diversity_plan.get("scene_assignments", [])
+    }
+    for scene in visual_package.get("scenes", []):
+        sid = scene.get("scene_id")
+        if sid in _diversity_map:
+            scene["diversity_assignment"] = _diversity_map[sid]
+    log.info(
+        "vpd_shot_diversity_completed",
+        episode_id=episode_id,
+        assignments=len(_diversity_map),
+        diversity_score=diversity_plan.get("diversity_score", 0.0),
+    )
+
+    # ------------------------------------------------------------------
     # Stage B — Cinematic prompts (batched, SCENE_PROMPT_BATCH_SIZE per call)
     # Checkpoint: vpd_prompts_batch_{i}_{episode_id}.json per batch.
     #
@@ -471,6 +616,8 @@ def run_visual_package_director(
                             "provider_routing", {}
                         ).get("primary_tier", 2),
                     },
+                    "presentation_plan": s.get("presentation_plan", {}),
+                    "diversity_assignment": s.get("diversity_assignment", {}),
                 }
                 for s in batch
             ],
@@ -531,6 +678,20 @@ def run_visual_package_director(
         )
         scene_cursor += len(batch)
         batch_idx += 1
+
+    # ------------------------------------------------------------------
+    # Visual Intent QA — Pre-generation prompt review
+    # Verifies every prompt satisfies its presentation_plan before
+    # spending generation credits. Scenes that fail are retried
+    # with rejection_reason injected into Stage B.
+    # ------------------------------------------------------------------
+    _run_visual_intent_qa(
+        visual_package=visual_package,
+        episode_id=episode_id,
+        config=config,
+        output_dir=_resolve_output_dir,
+        log=log,
+    )
 
     # ------------------------------------------------------------------
     # Stage C — Package assembly and final validation
@@ -827,6 +988,182 @@ def _merge_scene_prompts(visual_package: dict, prompts_result: dict) -> None:
         routing = scene.setdefault("production_spec", {}).setdefault("provider_routing", {})
         routing["primary_prompt"]  = sp.get("primary_prompt", "")
         routing["fallback_prompt"] = sp.get("fallback_prompt", "")
+
+
+# ---------------------------------------------------------------------------
+# Visual Intent QA helper — pre-generation prompt verification
+# ---------------------------------------------------------------------------
+
+def _run_visual_intent_qa(
+    visual_package: dict,
+    episode_id: str,
+    config: Config,
+    output_dir: Path,
+    log: object,
+) -> None:
+    """
+    Run Visual Intent QA over all scenes that have a primary_prompt and a
+    presentation_plan. Scenes that fail are retried via Stage B with the
+    rejection_reason prepended to the scene context. Max 1 retry per scene.
+
+    Mutates visual_package in-place if any scene prompts are rewritten on retry.
+
+    Args:
+        visual_package: Visual Package dict with scenes that have presentation_plan
+                        and primary_prompt injected.
+        episode_id:     Episode identifier.
+        config:         Loaded Config instance.
+        output_dir:     Directory for the QA checkpoint file.
+        log:            Structured logger instance.
+    """
+    ckpt_path = output_dir / f"vpd_visual_intent_qa_{episode_id}.json"
+
+    # Build list of scenes with both a primary_prompt and a presentation_plan
+    scenes_for_qa = []
+    for s in visual_package.get("scenes", []):
+        primary_prompt = (
+            s.get("production_spec", {}).get("provider_routing", {}).get("primary_prompt", "")
+        )
+        plan = s.get("presentation_plan", {})
+        if primary_prompt and plan:
+            scenes_for_qa.append({
+                "scene_id": s.get("scene_id"),
+                "primary_prompt": primary_prompt,
+                "presentation_plan": plan,
+            })
+
+    if not scenes_for_qa:
+        # No scenes ready for QA — skip silently (normal for bare skeleton runs)
+        return
+
+    log.info(
+        "vpd_visual_intent_qa_started",
+        episode_id=episode_id,
+        scenes_for_qa=len(scenes_for_qa),
+    )
+
+    if ckpt_path.exists():
+        qa_result = json.loads(ckpt_path.read_text(encoding="utf-8"))
+    else:
+        qa_input = {
+            "task": "visual_intent_qa",
+            "episode_metadata": visual_package.get("episode_metadata", {}),
+            "scenes": scenes_for_qa,
+        }
+        qa_result = run_agent(
+            agent_name=_AGENT_NAME,
+            model_slug=_CLAUDE_SONNET,
+            system_prompt=VISUAL_INTENT_QA_PROMPT,
+            input_package=qa_input,
+            output_schema="vpd_visual_intent_qa_batch",
+            episode_id=episode_id,
+            max_tokens=_VISUAL_INTENT_QA_MAX_TOKENS,
+            config=config,
+            output_dir=None,
+        )
+        ckpt_path.write_text(
+            json.dumps(qa_result, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    # Build a lookup of scene_id → QA result
+    qa_map = {
+        r["scene_id"]: r
+        for r in qa_result.get("qa_results", [])
+        if isinstance(r, dict) and r.get("scene_id")
+    }
+
+    # Build a lookup of scene_id → scene object for retry
+    scene_map = {
+        s.get("scene_id"): s for s in visual_package.get("scenes", [])
+    }
+
+    failed_scenes = [
+        (sid, r)
+        for sid, r in qa_map.items()
+        if not r.get("qa_pass", True)
+    ]
+
+    pass_count = len(qa_map) - len(failed_scenes)
+    log.info(
+        "vpd_visual_intent_qa_completed",
+        episode_id=episode_id,
+        total=len(qa_map),
+        passed=pass_count,
+        failed=len(failed_scenes),
+    )
+
+    # Retry failed scenes (max 1 retry per scene)
+    for sid, qa_result_item in failed_scenes:
+        scene = scene_map.get(sid)
+        if not scene:
+            continue
+
+        rejection_reason = qa_result_item.get("rejection_reason", "")
+        log.warn(
+            "vpd_visual_intent_qa_scene_rejected",
+            episode_id=episode_id,
+            scene_id=sid,
+            rejection_reason=rejection_reason,
+        )
+
+        # Build a retry batch for this single scene
+        primary_prompt = (
+            scene.get("production_spec", {}).get("provider_routing", {}).get("primary_prompt", "")
+        )
+        retry_input = {
+            "task": "write_scene_prompts",
+            "episode_metadata": visual_package.get("episode_metadata", {}),
+            "scenes": [
+                {
+                    "scene_id": sid,
+                    "scene_index": scene.get("scene_index"),
+                    "source_type": scene.get("source_type"),
+                    "visual_spec": scene.get("visual_spec", {}),
+                    "narrative_signals": scene.get("narrative_signals", []),
+                    "entity_appearances": scene.get("entity_appearances", []),
+                    "production_spec": {
+                        "aspect_ratio": scene.get("production_spec", {}).get("aspect_ratio", "16:9"),
+                        "duration_seconds": scene.get("production_spec", {}).get("duration_seconds", 8),
+                        "primary_tier": scene.get("production_spec", {}).get(
+                            "provider_routing", {}
+                        ).get("primary_tier", 2),
+                    },
+                    "presentation_plan": scene.get("presentation_plan", {}),
+                    "diversity_assignment": scene.get("diversity_assignment", {}),
+                    "_qa_rejection_reason": (
+                        f"PREVIOUS PROMPT FAILED QA. Rejection reason: {rejection_reason} "
+                        f"Previous prompt: {primary_prompt[:300]}"
+                    ),
+                }
+            ],
+        }
+
+        try:
+            retry_result = run_agent(
+                agent_name=_AGENT_NAME,
+                model_slug=_CLAUDE_SONNET,
+                system_prompt=SCENE_PROMPTS_PROMPT,
+                input_package=retry_input,
+                output_schema="vpd_scene_prompts_batch",
+                episode_id=episode_id,
+                max_tokens=_VPD_PROMPT_BATCH_MAX_TOKENS,
+                config=config,
+                output_dir=None,
+            )
+            # Inject the rewritten prompt back into the scene
+            _merge_scene_prompts(visual_package, retry_result)
+            log.info(
+                "vpd_visual_intent_qa_scene_retry_succeeded",
+                episode_id=episode_id,
+                scene_id=sid,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "vpd_visual_intent_qa_scene_retry_failed",
+                episode_id=episode_id,
+                scene_id=sid,
+                error=str(exc),
+            )
 
 
 def run_visual_package_director_from_plan(

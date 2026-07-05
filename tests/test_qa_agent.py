@@ -117,12 +117,33 @@ def _good_thumbnail_package() -> dict:
     }
 
 
+def _write_editorial_qa_approved(output_dir: Path, episode_id: str = "ep_test") -> None:
+    """Write a passing editorial_qa report to output_dir for QA agent tests."""
+    report = {
+        "report_id": f"editorial_qa_{episode_id}_test",
+        "episode_id": episode_id,
+        "evaluated_at": "2026-07-05T12:00:00+00:00",
+        "overall_verdict": "APPROVED",
+        "approved": True,
+        "checks": [
+            {"check_id": f"check_{i:02d}", "status": "pass", "detail": "OK"}
+            for i in range(1, 9)
+        ],
+        "failures": [],
+        "warnings": [],
+    }
+    (output_dir / f"editorial_qa_{episode_id}.json").write_text(
+        json.dumps(report), encoding="utf-8"
+    )
+
+
 # ---------------------------------------------------------------------------
 # TestQAAgentApproved
 # ---------------------------------------------------------------------------
 
 class TestQAAgentApproved:
     def test_approved_verdict_all_inputs_present(self, tmp_path):
+        _write_editorial_qa_approved(tmp_path)
         report = run_qa_agent(
             final_render_package=_good_final_render_package(),
             episode_id="ep_test",
@@ -135,6 +156,7 @@ class TestQAAgentApproved:
         assert report["verdict"] == "APPROVED"
 
     def test_approved_sets_approved_true(self, tmp_path):
+        _write_editorial_qa_approved(tmp_path)
         report = run_qa_agent(
             final_render_package=_good_final_render_package(),
             episode_id="ep_test",
@@ -147,6 +169,7 @@ class TestQAAgentApproved:
         assert report["approved"] is True
 
     def test_approved_has_no_failures(self, tmp_path):
+        _write_editorial_qa_approved(tmp_path)
         report = run_qa_agent(
             final_render_package=_good_final_render_package(),
             episode_id="ep_test",
@@ -159,6 +182,7 @@ class TestQAAgentApproved:
         assert report["failures"] == []
 
     def test_approved_has_no_warnings(self, tmp_path):
+        _write_editorial_qa_approved(tmp_path)
         report = run_qa_agent(
             final_render_package=_good_final_render_package(),
             episode_id="ep_test",
@@ -396,6 +420,7 @@ class TestQAAgentChecks:
             "c_thumbnail_dimensions",
             "c_description_present",
             "c_chapter_markers",
+            "c_editorial_qa",
         }
         assert expected == check_ids
 
@@ -412,6 +437,7 @@ class TestQAAgentChecks:
             assert check["status"] in ("pass", "warn", "fail")
 
     def test_check_status_pass_when_all_clean(self, tmp_path):
+        _write_editorial_qa_approved(tmp_path)
         report = run_qa_agent(
             final_render_package=_good_final_render_package(),
             episode_id="ep_test",

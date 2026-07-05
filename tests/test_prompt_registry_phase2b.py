@@ -46,6 +46,11 @@ _EXPECTED_NAMES = {
     "vpd_scene_prompts",
     "vpd_skeleton_meta",
     "vpd_skeleton_scene_batch",
+    # Visual Intelligence V1–V4 prompt files
+    "vpd_scene_presentation_planner",
+    "vpd_visual_intent_qa",
+    "shot_diversity_planner",
+    "editorial_qa",
 }
 
 _REQUIRED_META_KEYS = {"PROMPT_VERSION", "OWNER_AGENT", "MODEL_TARGET", "PURPOSE"}

@@ -4,7 +4,7 @@ hypogeum/schemas.py — Schema validators for all pipeline output packages
 Every agent calls validate(schema_name, package) before sealing its output.
 Validation is fail-fast: the first structural problem raises SchemaError immediately.
 
-Validated schemas (27 total):
+Validated schemas (31 total):
   1.  validation_scorecard          — Executive Producer topic validation result
   2.  topic_brief                   — Executive Producer topic brief
   3.  package_deficiency_report     — PDR issued by any agent
@@ -31,6 +31,10 @@ Validated schemas (27 total):
   24. bga_compliance_report           — Brand Guardian Agent (v1A) Pass 1/2 audit report; APPROVED/APPROVED_WITH_FLAGS/REJECTED
   25. signal_record                   — Phase 5B normalized analytics signal; ingested from analytics_snapshot
   26. opportunity_batch               — Discovery Director v2 Topic Ideator parsed output; no numeric fields permitted
+  27. vpd_presentation_plan_batch     — Stage A4: Scene Presentation Planner; one plan per scene with method + forbidden techniques
+  28. vpd_visual_intent_qa_batch      — Visual Intent QA: pre-generation binary pass/fail check per scene prompt
+  29. shot_diversity_plan             — Shot Diversity Planner: per-scene shot_scale, camera_movement, environment assignments
+  30. editorial_qa_report             — Editorial QA: episode-level visual pattern checks; APPROVED/WARNING/REJECTED
 
 Design principles:
   - Stdlib only; no external JSON Schema library
@@ -1134,6 +1138,112 @@ def _validate_opportunity_batch(p: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Visual Intelligence schemas (V1–V4)
+# ---------------------------------------------------------------------------
+
+def _validate_vpd_presentation_plan_batch(p: dict) -> None:
+    """V1 — Stage A4: Scene Presentation Planner output."""
+    s = "vpd_presentation_plan_batch"
+    plans = _req_list(p, s, "presentation_plans", min_length=1)
+    for i, plan in enumerate(plans):
+        path = f"presentation_plans[{i}]"
+        if not isinstance(plan, dict):
+            raise SchemaError(s, path, "each presentation_plan must be a dict")
+        _req_str(plan, s, "scene_id", path=path)
+        _req_str(plan, s, "narrative_goal", path=path)
+        _req_str(plan, s, "visual_concept", path=path)
+        _req_str(plan, s, "presentation_method", path=path)
+        _req_str(plan, s, "camera_strategy", path=path)
+        _req_str(plan, s, "spatial_relationship", path=path)
+        _req_list(plan, s, "forbidden_techniques", path=path)
+
+
+def _validate_vpd_visual_intent_qa_batch(p: dict) -> None:
+    """V2 — Visual Intent QA: per-scene pre-generation prompt review."""
+    s = "vpd_visual_intent_qa_batch"
+    results = _req_list(p, s, "qa_results", min_length=1)
+    for i, result in enumerate(results):
+        path = f"qa_results[{i}]"
+        if not isinstance(result, dict):
+            raise SchemaError(s, path, "each qa_result must be a dict")
+        _req_str(result, s, "scene_id", path=path)
+        _req(result, s, "qa_pass", bool, path=path)
+        # rejection_reason may be null/None when qa_pass is True
+        if "rejection_reason" not in result:
+            raise SchemaError(s, f"{path}.rejection_reason", "missing required field")
+        rr = result["rejection_reason"]
+        if rr is not None and not isinstance(rr, str):
+            raise SchemaError(
+                s, f"{path}.rejection_reason",
+                f"expected str | null, got {type(rr).__name__}"
+            )
+        checks = _req_dict(result, s, "checks", path=path)
+        for check_key in (
+            "narrative_goal_met",
+            "presentation_method_satisfied",
+            "spatial_relationship_present",
+            "forbidden_techniques_absent",
+        ):
+            _req(checks, s, check_key, bool, path=f"{path}.checks")
+
+
+def _validate_shot_diversity_plan(p: dict) -> None:
+    """V3 — Shot Diversity Planner output."""
+    s = "shot_diversity_plan"
+    _req_str(p, s, "episode_id")
+    dm = _req_dict(p, s, "diversity_map")
+    _req_list(dm, s, "shot_scales", path="diversity_map")
+    _req_list(dm, s, "camera_movements", path="diversity_map")
+    _req_list(dm, s, "environments", path="diversity_map")
+    _req_list(dm, s, "compositions", path="diversity_map")
+    assignments = _req_list(p, s, "scene_assignments", min_length=1)
+    for i, assignment in enumerate(assignments):
+        path = f"scene_assignments[{i}]"
+        if not isinstance(assignment, dict):
+            raise SchemaError(s, path, "each scene_assignment must be a dict")
+        _req_str(assignment, s, "scene_id", path=path)
+        _req_str(assignment, s, "shot_scale", path=path)
+        _req_str(assignment, s, "camera_movement", path=path)
+        _req_str(assignment, s, "camera_angle", path=path)
+        _req_str(assignment, s, "composition", path=path)
+        _req_str(assignment, s, "color_palette", path=path)
+        _req_str(assignment, s, "environment", path=path)
+        _req_str(assignment, s, "subject", path=path)
+        _req_str(assignment, s, "visual_motif", path=path)
+        _req(assignment, s, "reuse_allowed", bool, path=path)
+    _req_list(p, s, "violations")
+    for i, v in enumerate(p.get("violations", [])):
+        path = f"violations[{i}]"
+        if not isinstance(v, dict):
+            raise SchemaError(s, path, "each violation must be a dict")
+        _req_str(v, s, "violation_id", path=path)
+        _req_str(v, s, "violation_type", path=path)
+        _req_list(v, s, "scenes_affected", path=path)
+        _req_str(v, s, "description", path=path)
+    _req_numeric(p, s, "diversity_score")
+
+
+def _validate_editorial_qa_report(p: dict) -> None:
+    """V4 — Editorial QA report."""
+    s = "editorial_qa_report"
+    _req_str(p, s, "report_id")
+    _req_str(p, s, "episode_id")
+    _req_str(p, s, "evaluated_at")
+    _req_in(p, s, "overall_verdict", ("APPROVED", "WARNING", "REJECTED"))
+    _req(p, s, "approved", bool)
+    checks = _req_list(p, s, "checks")
+    for i, ck in enumerate(checks):
+        path = f"checks[{i}]"
+        if not isinstance(ck, dict):
+            raise SchemaError(s, path, "each check must be a dict")
+        _req_str(ck, s, "check_id", path=path)
+        _req_in(ck, s, "status", ("pass", "warn", "fail"), path=path)
+        _req_str(ck, s, "detail", path=path)
+    _req_list(p, s, "failures")
+    _req_list(p, s, "warnings")
+
+
+# ---------------------------------------------------------------------------
 # VPD Stage B — scene prompts batch validator
 # ---------------------------------------------------------------------------
 
@@ -1227,6 +1337,11 @@ _VALIDATORS = {
     "vpd_scene_prompts_batch":   _validate_vpd_scene_prompts_batch,
     "vpd_skeleton_meta":         _validate_vpd_skeleton_meta,
     "vpd_skeleton_scene_batch":  _validate_vpd_skeleton_scene_batch,
+    # Visual Intelligence (V1–V4)
+    "vpd_presentation_plan_batch":  _validate_vpd_presentation_plan_batch,
+    "vpd_visual_intent_qa_batch":   _validate_vpd_visual_intent_qa_batch,
+    "shot_diversity_plan":          _validate_shot_diversity_plan,
+    "editorial_qa_report":          _validate_editorial_qa_report,
 }
 
 # Expose schema names for discovery and testing

@@ -398,6 +398,60 @@ def run_qa_agent(
                    f"chapter markers present: {len(section_titles)} section(s)")
 
     # ------------------------------------------------------------------
+    # Check 15 — Editorial QA (visual pattern review)
+    # Reads editorial_qa_{episode_id}.json from the episode directory if
+    # present. Warns (not fails) when the file is absent for backward
+    # compatibility with episodes produced before Visual Intelligence V4.
+    # ------------------------------------------------------------------
+    editorial_qa_path = None
+    if output_dir is not None:
+        _eq_path = Path(output_dir) / f"editorial_qa_{episode_id}.json"
+        if _eq_path.exists():
+            editorial_qa_path = _eq_path
+    else:
+        _default_eq = (
+            Path(__file__).resolve().parent.parent.parent
+            / ".hypogeum-assets" / "episodes" / episode_id
+            / f"editorial_qa_{episode_id}.json"
+        )
+        if _default_eq.exists():
+            editorial_qa_path = _default_eq
+
+    if editorial_qa_path is not None:
+        try:
+            import json as _json  # noqa: PLC0415
+            editorial_qa = _json.loads(editorial_qa_path.read_text(encoding="utf-8"))
+            eq_verdict = editorial_qa.get("overall_verdict", "REJECTED")
+            if eq_verdict == "REJECTED":
+                _add_check(checks, "c_editorial_qa", "fail",
+                           f"editorial_qa_report.overall_verdict=REJECTED — "
+                           f"{len(editorial_qa.get('failures', []))} visual pattern failure(s)")
+                for f in editorial_qa.get("failures", []):
+                    failures.append(f"editorial_qa: {f}")
+            elif eq_verdict == "WARNING":
+                eq_warnings = editorial_qa.get("warnings", [])
+                _add_check(checks, "c_editorial_qa", "warn",
+                           f"editorial_qa_report.overall_verdict=WARNING — "
+                           f"{len(eq_warnings)} visual pattern issue(s)")
+                for w in eq_warnings:
+                    warnings.append(f"editorial_qa: {w}")
+            else:
+                _add_check(checks, "c_editorial_qa", "pass",
+                           "editorial_qa_report.overall_verdict=APPROVED — "
+                           "all visual pattern checks clean")
+        except Exception as _exc:  # noqa: BLE001
+            _add_check(checks, "c_editorial_qa", "warn",
+                       f"editorial_qa_report could not be read: {_exc}")
+            warnings.append(f"editorial_qa: could not read report — {_exc}")
+    else:
+        _add_check(checks, "c_editorial_qa", "warn",
+                   "editorial_qa_report not found — run Editorial QA before publishing "
+                   "(backward-compatible: warning only)")
+        warnings.append(
+            "editorial_qa: not found — editorial QA not run for this episode"
+        )
+
+    # ------------------------------------------------------------------
     # Determine final verdict
     # ------------------------------------------------------------------
     approved = len(failures) == 0

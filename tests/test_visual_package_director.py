@@ -350,13 +350,55 @@ def _make_prompts_batch(plan: dict) -> dict:
     }
 
 
+def _make_presentation_plan_batch(plan: dict) -> dict:
+    """Return a minimal vpd_presentation_plan_batch result for Stage A4 mock."""
+    scenes = plan.get("scenes", [])
+    return {
+        "presentation_plans": [
+            {
+                "scene_id": s.get("scene_id", "s01"),
+                "narrative_goal": "Establish the scene",
+                "visual_concept": "A historical environment is shown",
+                "presentation_method": "slow_reveal",
+                "camera_strategy": "Controlled slow push in from darkness",
+                "spatial_relationship": "Subject emerges from shadow in one continuous frame",
+                "forbidden_techniques": ["split_screen"],
+            }
+            for s in scenes
+        ]
+    }
+
+
+def _make_visual_intent_qa_batch(plan: dict) -> dict:
+    """Return a minimal vpd_visual_intent_qa_batch result for Visual Intent QA mock."""
+    scenes = plan.get("scenes", [])
+    return {
+        "qa_results": [
+            {
+                "scene_id": s.get("scene_id", "s01"),
+                "qa_pass": True,
+                "rejection_reason": None,
+                "checks": {
+                    "narrative_goal_met": True,
+                    "presentation_method_satisfied": True,
+                    "spatial_relationship_present": True,
+                    "forbidden_techniques_absent": True,
+                },
+            }
+            for s in scenes
+        ]
+    }
+
+
 def _stage_side_effect(plan: dict):
     """
-    Return a side_effect list for run_agent matching the new A1+A2+B call sequence.
+    Return a side_effect list for run_agent matching the A1+A2+A4+B+QA call sequence.
 
     Stage A1: non-scene metadata → return plan without "scenes" key.
     Stage A2: one scene batch call (test scripts always have ≤12 beats) → return scenes.
+    Stage A4: presentation planner → return presentation_plan_batch.
     Stage B: one prompts call per _SCENE_PROMPT_BATCH_SIZE scenes → return prompts batch.
+    Visual Intent QA: qa result → return qa_batch.
     """
     import math
     from hypogeum.agents.visual_package_director import _SCENE_PROMPT_BATCH_SIZE
@@ -369,11 +411,17 @@ def _stage_side_effect(plan: dict):
     # A2: one batch result wrapping all scenes (test scripts always fit in one batch)
     a2_result = {"scenes": scenes}
 
+    # A4: presentation plan batch
+    a4_result = _make_presentation_plan_batch(plan)
+
     # B: one result per batch of _SCENE_PROMPT_BATCH_SIZE scenes
     n_b = max(1, math.ceil(len(scenes) / _SCENE_PROMPT_BATCH_SIZE))
     b_results = [_make_prompts_batch(plan)] * n_b
 
-    return [meta, a2_result] + b_results
+    # Visual Intent QA: one result for all scenes that have prompts + plans
+    qa_result = _make_visual_intent_qa_batch(plan)
+
+    return [meta, a2_result, a4_result] + b_results + [qa_result]
 
 
 def _make_script_package(episode_id: str = "ep_001") -> dict:

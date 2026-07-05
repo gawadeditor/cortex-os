@@ -299,7 +299,6 @@ def _build_timeline(
 
         # Determine scene duration from narration beats (narration-anchored sync)
         narration_ref = scene.get("narration_reference", "")
-        beat_duration = _get_beat_duration(narration_ref, segment_by_beat)
 
         # Spec duration from Visual Package (5s or 8s per MUAPI constraints)
         spec_duration = float(scene.get("production_spec", {}).get("duration_seconds", 8.0))
@@ -319,10 +318,7 @@ def _build_timeline(
         # delivers ~10s for an 8s spec), so hold_seconds must be computed from the real duration.
         clip_duration = _probe_clip_duration(clip_path, fallback=spec_duration)
 
-        # Effective duration: narration-anchored (never trim narration)
-        scene_duration = beat_duration if beat_duration > 0 else clip_duration
-
-        # Narration segment path
+        # Narration segment path — resolved before beat_duration so we can probe the file.
         narration_path: Optional[Path] = None
         if narration_ref and narration_ref in segment_by_beat:
             seg = segment_by_beat[narration_ref]
@@ -330,6 +326,27 @@ def _build_timeline(
             if audio_asset_id:
                 p = assets_root / f"{audio_asset_id}.mp3"
                 narration_path = p if p.exists() else None
+
+        # Beat duration: prefer actual narration file duration (probed via ffprobe) over the
+        # declared narration_package.duration_seconds value.
+        #
+        # Root cause of the truncation bug: ElevenLabs appends ~130ms of silence to every
+        # generated clip. The narration_package records only the speech content duration (from
+        # ElevenLabs API metadata), so it systematically underestimates each beat by ~130ms.
+        # Across 33 beats this accumulates to ~4.5s — enough to cut the final sentence of the
+        # last beat when the video is trimmed to the declared total.
+        #
+        # Probing the actual .mp3 file gives the true duration including the ElevenLabs tail,
+        # so the video timeline exactly matches the audio content.
+        declared_beat_duration = _get_beat_duration(narration_ref, segment_by_beat)
+        if narration_path is not None:
+            actual_narr_dur = _probe_clip_duration(narration_path, fallback=declared_beat_duration)
+            beat_duration = actual_narr_dur if actual_narr_dur > 0.5 else declared_beat_duration
+        else:
+            beat_duration = declared_beat_duration
+
+        # Effective duration: narration-anchored (never trim narration)
+        scene_duration = beat_duration if beat_duration > 0 else clip_duration
 
         # Music section from narrative signals
         music_section = _derive_music_category_for_scene(scene)

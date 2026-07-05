@@ -64,7 +64,8 @@ _VIDEO_CODEC           = "libx264"
 _AUDIO_CODEC           = "aac"
 _AUDIO_BITRATE         = "128k"
 _CRF                   = "23"
-_MUSIC_AMPLITUDE_FACTOR = 0.126   # ≈ −18 dB beneath narration
+_MUSIC_AMPLITUDE_FACTOR = 0.20    # ≈ −14 dB beneath narration (audible background bed)
+_MUSIC_TAIL_SECONDS    = 2.5      # music continues this many seconds after VO ends
 _DEFAULT_TIMEOUT        = 600     # seconds
 
 
@@ -135,6 +136,9 @@ def render_episode(
         render_status = "failed"
         ffmpeg_errors.append("main_episode_render_failed")
     elif end_page_path is not None and end_page_path.exists():
+        # Probe body duration so _append_end_page can start music at the correct offset.
+        body_duration = _probe_output_duration(main_output_path)
+
         # Append static end-page card to the main render (main episode only, never shorts).
         end_page_ok = _append_end_page(
             main_output_path=main_output_path,
@@ -143,6 +147,8 @@ def render_episode(
             episode_id=episode_id,
             timeout=ffmpeg_timeout,
             log=log,
+            music_track=main_music_track,
+            body_duration=body_duration,
         )
         if not end_page_ok:
             # Non-fatal: log the failure but keep the body render as-is.
@@ -206,7 +212,7 @@ def render_episode(
         if e.clip_path is not None and e.clip_path.exists()
     )
 
-    return _build_render_output_manifest(
+    manifest = _build_render_output_manifest(
         episode_id=episode_id,
         render_status=render_status,
         main_output_path=main_output_path,
@@ -220,6 +226,20 @@ def render_episode(
         hold_gap_dur=hold_gap_dur,
         max_scene_hold=max_scene_hold,
     )
+
+    # Music QA facts — used by rerender_ep.py report
+    music_dur_used = 0.0
+    if main_music_track is not None:
+        music_dur_used = _probe_output_duration(main_music_track.local_path)
+    music_continues = (
+        main_music_track is not None
+        and end_page_path is not None
+        and end_page_path.exists()
+    )
+    manifest["music_duration_used_s"] = round(music_dur_used, 3)
+    manifest["music_continues_under_end_page"] = music_continues
+
+    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +276,8 @@ def _render_main_episode(
         )
         return False
 
-    expected_duration = sum_timeline_duration(timeline)
+    narr_duration = sum_timeline_duration(timeline)
+    expected_duration = narr_duration + _MUSIC_TAIL_SECONDS
 
     # Render to a raw temp path first, then always apply a duration trim pass.
     # This guarantees the final body is exactly expected_duration regardless of
@@ -270,6 +291,7 @@ def _render_main_episode(
         output_path=raw_output,
         resolution=MAIN_RESOLUTION,
         episode_id=episode_id,
+        music_tail_seconds=_MUSIC_TAIL_SECONDS,
     )
     ok = _run_ffmpeg(
         cmd=cmd,
@@ -392,6 +414,54 @@ def _probe_output_duration(path: Path) -> float:
         except Exception:
             pass
     return 0.0
+
+
+def _probe_music_usable_duration(music_path: Path) -> float:
+    """
+    Return the usable looping duration of a music track — i.e., the duration
+    BEFORE any end-of-track fade-out silence.
+
+    Runs silencedetect and looks for a silence whose end is within 3s of the
+    track's total duration (indicating a fade-out). Returns the start of that
+    silence as the usable duration so the loop unit excludes the fade.
+
+    Falls back to the full track duration if no end-fade is detected.
+    """
+    import re as _re
+    track_dur = _probe_output_duration(music_path)
+    if track_dur <= 0:
+        return 0.0
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-i", str(music_path),
+             "-af", "silencedetect=noise=-50dB:d=0.5",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60,
+        )
+        output = r.stderr
+    except Exception:
+        return track_dur
+
+    # Parse silence segments
+    segments: list = []
+    start = None
+    for line in output.splitlines():
+        ms = _re.search(r"silence_start:\s*([\d.]+)", line)
+        if ms:
+            start = float(ms.group(1))
+        me = _re.search(r"silence_end:\s*([\d.]+)", line)
+        if me and start is not None:
+            segments.append({"start": start, "end": float(me.group(1))})
+            start = None
+
+    # Find last silence whose end is within 3s of track end (end-fade indicator)
+    for seg in reversed(segments):
+        if abs(seg["end"] - track_dur) < 3.0:
+            # Return start of this fade-out, with 0.1s margin
+            usable = max(1.0, seg["start"] - 0.1)
+            return usable
+
+    return track_dur
 
 
 def _trim_video_to_duration(
@@ -542,24 +612,27 @@ def _build_ffmpeg_concat_command(
     resolution: str,
     episode_id: str,
     is_short: bool = False,
+    music_tail_seconds: float = 0.0,
 ) -> List[str]:
     """
     Build an ffmpeg command list for concatenating scenes with audio.
 
-    Strategy B — tpad hold-based assembly:
-    - Each clip is first trimmed to its beat_duration when clip_duration > beat_duration,
-      then padded (last frame frozen via tpad) when beat_duration > clip_duration.
-    - A hard trim=[vout]trim=0:total_duration[vout_safe];setpts=PTS-STARTPTS is applied
-      after concat to guarantee body duration never exceeds total_duration regardless
-      of any ffmpeg filter-graph or -t interaction issues (observed in ffmpeg 8.1 with
-      large filter graphs: -t output flag alone fails to limit output).
-    - This preserves exact audio/video sync without re-encoding audio.
+    Strategy B — motion-extension assembly:
+    - Each clip is trimmed to its beat_duration when clip_duration > beat_duration.
+    - When beat_duration > clip_duration by >1s: setpts slow-motion (factor ≤2.0)
+      or loop+trim (factor >2.0) — NO tpad freeze for main content.
+    - When beat_duration > clip_duration by ≤1s: tpad emergency fallback.
+    - A hard trim=0:narr_dur after concat prevents any accumulation past the total.
+    - When music_tail_seconds > 0 (main episode only): a short tpad hold is appended
+      to the video AFTER the narration ends so music can continue over a static frame
+      before the end page. This is an intentional outro pause, not a mid-content freeze.
 
     Audio mixing:
-    - Narration at 0 dB reference (volume=1.0).
-    - Music at −18 dB (volume=_MUSIC_AMPLITUDE_FACTOR ≈ 0.126).
-    - amix with duration=first so audio never outlasts the video.
-    - atrim applied to narration to hard-limit audio to total_duration as well.
+    - Narration at 0 dB reference (volume=1.0), hard-trimmed to narration duration.
+    - Narration padded with silence for music_tail_seconds so amix does not cut early.
+    - Music input uses -stream_loop -1 so it covers the entire body regardless of length.
+    - Music at _MUSIC_AMPLITUDE_FACTOR (≈ −14 dB) — audible background bed under VO.
+    - amix with duration=first; first input is narration padded to body_dur.
     """
     width, height = resolution.split("x")
 
@@ -659,20 +732,34 @@ def _build_ffmpeg_concat_command(
         if clip_count > 0:
             filter_parts.extend(tpad_filter_parts)
             concat_inputs = "".join(concat_input_labels)
-            # After concat: hard-trim to total_duration + reset PTS.
-            # This prevents any per-clip rounding or tpad overflow from accumulating
-            # into a body that exceeds the narration duration.
-            filter_parts.append(
-                f"{concat_inputs}concat=n={clip_count}:v=1:a=0[vconcat];"
-                f"[vconcat]trim=0:{total_duration:.6f},"
-                f"setpts=PTS-STARTPTS[vout]"
-            )
+            # After concat: hard-trim to narration duration + reset PTS.
+            # For main episode with a music tail: hold the last frame for music_tail_seconds
+            # so music can continue over a static frame before the end page. This is an
+            # intentional outro pause (not a mid-content freeze).
+            narr_dur = total_duration  # = sum of actual narration beat durations
+            body_dur = narr_dur + music_tail_seconds
+            if music_tail_seconds > 0.001:
+                filter_parts.append(
+                    f"{concat_inputs}concat=n={clip_count}:v=1:a=0[vconcat];"
+                    f"[vconcat]trim=0:{narr_dur:.6f},setpts=PTS-STARTPTS[vbody];"
+                    f"[vbody]tpad=stop_mode=clone:stop_duration={music_tail_seconds:.3f}[vout]"
+                )
+            else:
+                filter_parts.append(
+                    f"{concat_inputs}concat=n={clip_count}:v=1:a=0[vconcat];"
+                    f"[vconcat]trim=0:{narr_dur:.6f},setpts=PTS-STARTPTS[vout]"
+                )
+        else:
+            narr_dur = total_duration
+            body_dur = narr_dur + music_tail_seconds
         video_map = "[vout]"
     else:
         # No clips — generate a black video of the required duration
+        narr_dur = total_duration
+        body_dur = narr_dur + music_tail_seconds
         inputs += [
             "-f", "lavfi",
-            "-i", f"color=c=black:s={resolution}:r={FRAME_RATE}:d={total_duration:.3f}",
+            "-i", f"color=c=black:s={resolution}:r={FRAME_RATE}:d={body_dur:.3f}",
         ]
         video_map = "0:v"
 
@@ -689,29 +776,78 @@ def _build_ffmpeg_concat_command(
         narration_idx = None
 
     if has_music:
+        # Load music file once (no stream_loop — looping is done in the filter graph via
+        # aloop to avoid including any end-of-track fade-out in the loop unit).
         inputs += ["-i", str(music_track.local_path)]
         music_idx = audio_input_index
         audio_input_index += 1
+        # Probe the usable portion of the track (before any fade-out silence near the end).
+        # aloop will loop only [0, usable_dur] to prevent the fade from re-appearing on
+        # each loop boundary. usable_samples is the loop unit size in samples.
+        _music_usable_dur = _probe_music_usable_duration(music_track.local_path)
+        try:
+            _music_sr_result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "stream=sample_rate",
+                 "-of", "csv=p=0", str(music_track.local_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            _music_sample_rate = int(_music_sr_result.stdout.strip().splitlines()[0])
+        except Exception:
+            _music_sample_rate = 44100
+        _music_usable_samples = int(_music_usable_dur * _music_sample_rate)
     else:
         music_idx = None
+        _music_usable_dur = 0.0
+        _music_usable_samples = 0
+        _music_sample_rate = 44100
 
-    # Audio filter: mix narration + music, or narration only, or music only, or silence.
-    # atrim on narration hard-limits audio to total_duration to match the video body.
+    # Audio filter: mix narration + music.
+    # narration is hard-trimmed to narr_dur (VO content only).
+    # When music_tail_seconds > 0: narration is padded with silence to body_dur so
+    # amix does not cut the music early when duration=first. Music plays at full level
+    # through both the VO section and the music tail.
     if has_narration and has_music:
-        filter_parts.append(
-            f"[{narration_idx}:a]atrim=0:{total_duration:.6f},asetpts=PTS-STARTPTS,volume=1.0[narr];"
-            f"[{music_idx}:a]volume={_MUSIC_AMPLITUDE_FACTOR}[msc];"
-            f"[narr][msc]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        # Music loop prefix: loop only the usable portion of the track (before any
+        # end-of-track fade-out). aloop=loop=-1:size=N loops the first N samples
+        # indefinitely, then atrim caps the result to exactly body_dur.
+        # This prevents the track's natural fade-out from reappearing on each loop.
+        _music_loop_prefix = (
+            f"[{music_idx}:a]"
+            f"atrim=0:{_music_usable_dur:.6f},asetpts=PTS-STARTPTS,"
+            f"aloop=loop=-1:size={_music_usable_samples},"
+            f"atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,"
+            f"volume={_MUSIC_AMPLITUDE_FACTOR}[msc]"
         )
+        if music_tail_seconds > 0.001:
+            # apad=pad_dur unconditionally appends exactly music_tail_seconds of silence
+            # after the narration content, regardless of declared stream duration.
+            # apad=whole_dur=X is unreliable here because atrim/asetpts may strip the
+            # duration metadata, causing apad to add no padding at all.
+            filter_parts.append(
+                f"[{narration_idx}:a]atrim=0:{narr_dur:.6f},asetpts=PTS-STARTPTS,"
+                f"volume=1.0,apad=pad_dur={music_tail_seconds:.6f}[narr];"
+                f"{_music_loop_prefix};"
+                f"[narr][msc]amix=inputs=2:duration=longest:dropout_transition=0[aout]"
+            )
+        else:
+            filter_parts.append(
+                f"[{narration_idx}:a]atrim=0:{narr_dur:.6f},asetpts=PTS-STARTPTS,volume=1.0[narr];"
+                f"{_music_loop_prefix};"
+                f"[narr][msc]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            )
         audio_map = "[aout]"
     elif has_narration:
         filter_parts.append(
-            f"[{narration_idx}:a]atrim=0:{total_duration:.6f},asetpts=PTS-STARTPTS,volume=1.0[aout]"
+            f"[{narration_idx}:a]atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,volume=1.0[aout]"
         )
         audio_map = "[aout]"
     elif has_music:
         filter_parts.append(
-            f"[{music_idx}:a]volume={_MUSIC_AMPLITUDE_FACTOR}[aout]"
+            f"[{music_idx}:a]"
+            f"atrim=0:{_music_usable_dur:.6f},asetpts=PTS-STARTPTS,"
+            f"aloop=loop=-1:size={_music_usable_samples},"
+            f"atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,"
+            f"volume={_MUSIC_AMPLITUDE_FACTOR}[aout]"
         )
         audio_map = "[aout]"
     else:
@@ -738,7 +874,7 @@ def _build_ffmpeg_concat_command(
         "-crf", _CRF,
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        "-t", f"{total_duration:.6f}",
+        "-t", f"{body_dur:.6f}",
         str(output_path),
     ]
 
@@ -821,13 +957,19 @@ def _append_end_page(
     episode_id: str,
     timeout: int,
     log,
+    music_track=None,
+    body_duration: float = 0.0,
 ) -> bool:
     """
     Append a static end-page PNG card to the main episode video.
 
+    When music_track is supplied the end-page clip carries music continuing from
+    where the body left off (offset = body_duration % music_track_duration), so
+    the music bed plays seamlessly through the end page without a cut.
+
     Two-pass strategy:
       1. Generate a short video clip from the PNG (same codec/resolution as main).
-      2. Concat the body + end-page clip using the ffmpeg concat demuxer (-c copy).
+      2. Concat the body + end-page clip via filter_complex re-encode.
 
     Both clips are encoded at MAIN_RESOLUTION with yuv420p / libx264 / aac so
     the concat demuxer can stream-copy without re-encoding.
@@ -843,32 +985,88 @@ def _append_end_page(
         # --- 1. Rename body to temp ---
         main_output_path.rename(body_path)
 
-        # --- 2. Create end-page video clip ---
-        ep_cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1",
-            "-framerate", str(FRAME_RATE),
-            "-t", f"{duration:.3f}",
-            "-i", str(end_page_path),
-            "-f", "lavfi",
-            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-filter_complex",
-            (
-                f"[0:v]scale={width}:{height}"
-                f":force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
-                f"[1:a]volume=0.0[aout]"
-            ),
-            "-map", "[vout]",
-            "-map", "[aout]",
-            "-c:v", _VIDEO_CODEC,
-            "-c:a", _AUDIO_CODEC,
-            "-b:a", _AUDIO_BITRATE,
-            "-crf", _CRF,
-            "-pix_fmt", "yuv420p",
-            "-t", f"{duration:.3f}",
-            str(clip_path),
-        ]
+        # --- 2. Create end-page video clip (with music if available) ---
+        has_ep_music = (
+            music_track is not None
+            and music_track.local_path.exists()
+            and body_duration > 0
+        )
+        if has_ep_music:
+            # Music continues seamlessly from where the body ended.
+            # The body uses aloop over [0, usable_dur], so at body_duration the music
+            # is at position (body_duration % usable_dur) within the usable portion.
+            usable_dur = _probe_music_usable_duration(music_track.local_path)
+            usable_dur = usable_dur if usable_dur > 1.0 else _probe_output_duration(music_track.local_path)
+            music_offset = body_duration % usable_dur if usable_dur > 0 else 0.0
+            # For the end page, seek to music_offset within [0, usable_dur] and loop
+            # only the usable portion (via aloop) for the end-page duration.
+            try:
+                _ep_sr_result = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "stream=sample_rate",
+                     "-of", "csv=p=0", str(music_track.local_path)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                _ep_sr = int(_ep_sr_result.stdout.strip().splitlines()[0])
+            except Exception:
+                _ep_sr = 44100
+            # Remaining usable samples after music_offset, used as the aloop loop size
+            ep_remaining = usable_dur - music_offset
+            ep_remaining_samples = int(ep_remaining * _ep_sr)
+            ep_usable_samples = int(usable_dur * _ep_sr)
+            ep_cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-framerate", str(FRAME_RATE),
+                "-t", f"{duration:.3f}",
+                "-i", str(end_page_path),
+                "-ss", f"{music_offset:.6f}",
+                "-i", str(music_track.local_path),
+                "-filter_complex",
+                (
+                    f"[0:v]scale={width}:{height}"
+                    f":force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
+                    f"[1:a]atrim=0:{ep_remaining:.6f},asetpts=PTS-STARTPTS,"
+                    f"aloop=loop=-1:size={ep_usable_samples},"
+                    f"atrim=0:{duration:.6f},asetpts=PTS-STARTPTS,"
+                    f"volume={_MUSIC_AMPLITUDE_FACTOR}[aout]"
+                ),
+                "-map", "[vout]",
+                "-map", "[aout]",
+                "-c:v", _VIDEO_CODEC,
+                "-c:a", _AUDIO_CODEC,
+                "-b:a", _AUDIO_BITRATE,
+                "-crf", _CRF,
+                "-pix_fmt", "yuv420p",
+                "-t", f"{duration:.3f}",
+                str(clip_path),
+            ]
+        else:
+            ep_cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-framerate", str(FRAME_RATE),
+                "-t", f"{duration:.3f}",
+                "-i", str(end_page_path),
+                "-f", "lavfi",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-filter_complex",
+                (
+                    f"[0:v]scale={width}:{height}"
+                    f":force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
+                    f"[1:a]volume=0.0[aout]"
+                ),
+                "-map", "[vout]",
+                "-map", "[aout]",
+                "-c:v", _VIDEO_CODEC,
+                "-c:a", _AUDIO_CODEC,
+                "-b:a", _AUDIO_BITRATE,
+                "-crf", _CRF,
+                "-pix_fmt", "yuv420p",
+                "-t", f"{duration:.3f}",
+                str(clip_path),
+            ]
         clip_ok = _run_ffmpeg(
             cmd=ep_cmd,
             output_path=clip_path,

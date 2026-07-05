@@ -798,11 +798,11 @@ class TestMusicSourcingChain:
 
 class TestAudioMixingOrchestration:
 
-    def test_music_at_minus18db_relative_to_narration(self):
-        """Music amplitude factor is ≈0.126 (−18 dB relative to narration at 0 dB)."""
+    def test_music_at_minus14db_relative_to_narration(self):
+        """Music amplitude factor is ≈0.20 (−14 dB relative to narration at 0 dB)."""
         from hypogeum.agents.video_renderer import _MUSIC_AMPLITUDE_FACTOR
-        # −18 dB = 10^(−18/20) ≈ 0.126
-        expected = 10 ** (-18 / 20)
+        # −14 dB = 10^(−14/20) ≈ 0.200
+        expected = 10 ** (-14 / 20)
         assert abs(_MUSIC_AMPLITUDE_FACTOR - expected) < 0.01
 
     def test_section_without_music_uses_narration_only(self, tmp_path):

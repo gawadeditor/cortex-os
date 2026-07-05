@@ -389,16 +389,17 @@ def _probe_output_duration(path: Path) -> float:
     """
     Return the video duration of a rendered file via ffprobe.
 
-    Tries stream-level duration first; falls back to container format duration.
-    Some ffmpeg renders omit stream-level duration in the header (storing it only
-    in the moov container atom), so the fallback ensures the guard always fires
-    correctly when the body is overlong.
+    Collects durations from all three probes (video stream, audio stream,
+    container format) and returns the maximum.  This guards against the ffmpeg
+    8.x regression where the video-stream tkhd header reports a shorter duration
+    than the actual sample table (stts) — the audio stream and format duration
+    always reflect the true length.
 
-    Returns 0.0 only when both probes fail — the guard condition (actual > expected + 1)
+    Returns 0.0 only when all probes fail — the guard condition (actual > expected + 1)
     is safely False in that case, preventing a spurious trim on an unreadable file.
     """
-    for args in [
-        # 1st try: video stream duration
+    probe_args_list = [
+        # video stream duration (may be short due to tkhd/stts mismatch in ffmpeg 8.x)
         [
             "ffprobe", "-v", "quiet",
             "-select_streams", "v:0",
@@ -406,24 +407,34 @@ def _probe_output_duration(path: Path) -> float:
             "-of", "csv=p=0",
             str(path),
         ],
-        # 2nd try: container format duration
+        # audio stream duration
+        [
+            "ffprobe", "-v", "quiet",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=duration",
+            "-of", "csv=p=0",
+            str(path),
+        ],
+        # container format duration (most reliable)
         [
             "ffprobe", "-v", "quiet",
             "-show_entries", "format=duration",
             "-of", "csv=p=0",
             str(path),
         ],
-    ]:
+    ]
+    durations = []
+    for args in probe_args_list:
         try:
             result = subprocess.run(
                 args, capture_output=True, text=True, timeout=30,
             )
             val = result.stdout.strip()
             if result.returncode == 0 and val:
-                return float(val)
+                durations.append(float(val))
         except Exception:
             pass
-    return 0.0
+    return max(durations) if durations else 0.0
 
 
 def _run_blackdetect_qa(
@@ -807,6 +818,19 @@ def _build_ffmpeg_concat_command(
                         f"{scale_label}fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{exact_label}"
                     )
                     concat_input_labels.append(exact_label)
+                clip_idx += 1
+            else:
+                # Missing clip: insert a black-frame lavfi source for the beat duration so the
+                # video timeline stays in sync with the narration. Without this the video stream
+                # ends early (sum of present beats only) while audio runs the full body.
+                _beat_dur = max(0.1, entry.duration_seconds)
+                inputs += [
+                    "-f", "lavfi",
+                    "-i", f"color=c=black:s={width}x{height}:r={FRAME_RATE}:d={_beat_dur:.3f}",
+                ]
+                black_label = f"[blk{clip_idx}]"
+                tpad_filter_parts.append(f"[{clip_idx}:v]null{black_label}")
+                concat_input_labels.append(black_label)
                 clip_idx += 1
 
         clip_count = clip_idx

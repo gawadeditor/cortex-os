@@ -133,8 +133,8 @@ class TestProductionReadyRules:
         verdict = run_final_render_reviewer(manifest, "ep_test")
         assert verdict["production_ready"] is False
 
-    def test_missing_short_blocks_production_ready(self):
-        """A short with file_exists=False → production_ready=False."""
+    def test_missing_short_does_not_block_production_ready(self):
+        """Phase 2: missing short does NOT block main episode."""
         shorts = [
             {"short_id": "sh_001", "file_path": "/ep/s0.mp4",
              "file_exists": True, "file_size_bytes": 5_000_000},
@@ -143,8 +143,11 @@ class TestProductionReadyRules:
         ]
         manifest = _make_manifest(shorts=shorts)
         verdict = run_final_render_reviewer(manifest, "ep_test")
-        assert verdict["production_ready"] is False
-        assert any("sh_002" in f for f in verdict["failures"])
+        assert verdict["production_ready"] is True
+        assert verdict["main_episode_complete"] is True
+        assert verdict["shorts_runtime_status"] == "failed"
+        assert any("sh_002" in f for f in verdict["shorts_failures"])
+        assert not any("sh_002" in f for f in verdict["failures"])
 
     def test_partial_render_with_missing_clips_blocks_production_ready(self):
         """

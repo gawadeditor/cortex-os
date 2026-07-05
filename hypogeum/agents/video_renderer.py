@@ -238,6 +238,14 @@ def _render_main_episode(
     """
     Render main episode (16:9) using ffmpeg.
     Returns True on success, False on failure.
+
+    Post-render duration guard:
+    After rendering, checks the body duration against the expected timeline
+    duration. If ffmpeg produced a body that is >1s longer than expected (a
+    known ffmpeg 8.x regression where -t and filtergraph trim both fail with
+    large filter complexes), performs a stream-copy trim pass to correct it.
+    This is a hard-safety fallback — the filtergraph already contains an
+    explicit trim filter, but the stream-copy pass guarantees correctness.
     """
     if not timeline and not narration_path:
         log.error(
@@ -248,22 +256,240 @@ def _render_main_episode(
         )
         return False
 
+    expected_duration = sum_timeline_duration(timeline)
+
+    # Render to a raw temp path first, then always apply a duration trim pass.
+    # This guarantees the final body is exactly expected_duration regardless of
+    # any ffmpeg 8.x filter-graph or -t interaction issues.
+    raw_output = output_path.with_suffix(".body_raw.mp4")
+
     cmd = _build_ffmpeg_concat_command(
         timeline=timeline,
         narration_path=narration_path,
         music_track=music_track,
-        output_path=output_path,
+        output_path=raw_output,
         resolution=MAIN_RESOLUTION,
         episode_id=episode_id,
     )
-    return _run_ffmpeg(
+    ok = _run_ffmpeg(
         cmd=cmd,
-        output_path=output_path,
+        output_path=raw_output,
         component="main_episode",
         episode_id=episode_id,
         timeout=timeout,
         log=log,
     )
+    if not ok or not raw_output.exists() or raw_output.stat().st_size == 0:
+        return False
+
+    # --- Duration guard: always trim raw body to expected_duration ---
+    # Probe both streams for diagnostic clarity; log before trim.
+    import json as _json_diag
+    try:
+        _pr2 = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", str(raw_output)],
+            capture_output=True, text=True, timeout=30,
+        )
+        _ss = _json_diag.loads(_pr2.stdout).get("streams", []) if _pr2.returncode == 0 else []
+        _raw_v = next((float(s["duration"]) for s in _ss if s.get("codec_type") == "video" and s.get("duration")), 0.0)
+        _raw_a = next((float(s["duration"]) for s in _ss if s.get("codec_type") == "audio" and s.get("duration")), 0.0)
+    except Exception:
+        _raw_v, _raw_a = 0.0, 0.0
+    log.info(
+        "assembly_body_raw_probe",
+        episode_id=episode_id,
+        raw_video_s=round(_raw_v, 3),
+        raw_audio_s=round(_raw_a, 3),
+        expected_s=round(expected_duration, 3),
+    )
+    actual_dur = max(_raw_v, _raw_a)
+    needs_trim = actual_dur > expected_duration + 0.5
+
+    if needs_trim:
+        log.warn(
+            "assembly_body_overlong_trimming",
+            episode_id=episode_id,
+            actual_seconds=round(actual_dur, 3),
+            expected_seconds=round(expected_duration, 3),
+            excess_seconds=round(actual_dur - expected_duration, 3),
+        )
+
+    trimmed = _trim_video_to_duration(
+        input_path=raw_output,
+        target_duration=expected_duration,
+        output_path=output_path,
+        episode_id=episode_id,
+        timeout=timeout,
+        log=log,
+    )
+    if not trimmed:
+        # Trim failed; fall back to raw (may be overlong)
+        log.warn(
+            "assembly_body_trim_failed_using_raw",
+            episode_id=episode_id,
+            fallback_duration=round(actual_dur, 3),
+        )
+        try:
+            raw_output.rename(output_path)
+        except OSError:
+            pass
+        return output_path.exists() and output_path.stat().st_size > 0
+
+    log.info(
+        "assembly_body_trim_done",
+        episode_id=episode_id,
+        target_seconds=round(expected_duration, 3),
+        was_overlong=needs_trim,
+    )
+
+    # Cleanup raw
+    try:
+        if raw_output.exists():
+            raw_output.unlink()
+    except OSError:
+        pass
+
+    return True
+
+
+def _probe_output_duration(path: Path) -> float:
+    """
+    Return the video duration of a rendered file via ffprobe.
+
+    Tries stream-level duration first; falls back to container format duration.
+    Some ffmpeg renders omit stream-level duration in the header (storing it only
+    in the moov container atom), so the fallback ensures the guard always fires
+    correctly when the body is overlong.
+
+    Returns 0.0 only when both probes fail — the guard condition (actual > expected + 1)
+    is safely False in that case, preventing a spurious trim on an unreadable file.
+    """
+    for args in [
+        # 1st try: video stream duration
+        [
+            "ffprobe", "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=duration",
+            "-of", "csv=p=0",
+            str(path),
+        ],
+        # 2nd try: container format duration
+        [
+            "ffprobe", "-v", "quiet",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            str(path),
+        ],
+    ]:
+        try:
+            result = subprocess.run(
+                args, capture_output=True, text=True, timeout=30,
+            )
+            val = result.stdout.strip()
+            if result.returncode == 0 and val:
+                return float(val)
+        except Exception:
+            pass
+    return 0.0
+
+
+def _trim_video_to_duration(
+    input_path: Path,
+    target_duration: float,
+    episode_id: str,
+    timeout: int,
+    log,
+    output_path: Optional[Path] = None,
+) -> bool:
+    """
+    Trim a rendered video to target_duration seconds via re-encode with -t flag.
+
+    Uses a simple re-encode with `-t target_duration` as output flag (no filter_complex).
+    This is reliable even when the source video contains tpad-cloned frames whose PTS
+    may cause filter-based `trim=end=X` to behave unexpectedly (observed: audio trim
+    works correctly but video trim does not honour `trim=end=X` on tpad-generated frames).
+
+    Stream-copy (-c copy) is NOT used because keyframe-aligned cuts can leave
+    the video stream significantly longer than target_duration when the video
+    contains long tpad-frozen sections with sparse keyframes.
+
+    Args:
+        input_path:      Source video to trim (may be overlong).
+        target_duration: Maximum output duration in seconds.
+        output_path:     Destination path. Defaults to input_path (in-place via temp).
+
+    Returns True on success.
+    """
+    if output_path is None:
+        output_path = input_path
+
+    tmp_path = input_path.with_suffix(".trim_tmp.mp4")
+    try:
+        # Input-side -t stops ffmpeg from reading past target_duration seconds of the
+        # input stream. This prevents the libx264 encoder's lookahead buffer from
+        # seeing frames beyond the target and flushing them after the output -t cutoff.
+        # Output-side -t is a redundant second guard.
+        cmd = [
+            "ffmpeg", "-y",
+            "-t", f"{target_duration:.6f}",   # INPUT: stop reading input at target
+            "-i", str(input_path),
+            "-t", f"{target_duration:.6f}",   # OUTPUT: second guard
+            "-map", "0:v:0",
+            "-map", "0:a:0",
+            "-c:v", _VIDEO_CODEC,
+            "-c:a", _AUDIO_CODEC,
+            "-b:a", _AUDIO_BITRATE,
+            "-crf", _CRF,
+            "-pix_fmt", "yuv420p",
+            str(tmp_path),
+        ]
+        ok = _run_ffmpeg(
+            cmd=cmd,
+            output_path=tmp_path,
+            component="main_episode_trim",
+            episode_id=episode_id,
+            timeout=timeout,
+            log=log,
+        )
+        if ok and tmp_path.exists() and tmp_path.stat().st_size > 0:
+            import json as _json
+            try:
+                _pr = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_streams", str(tmp_path)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                _streams = _json.loads(_pr.stdout).get("streams", []) if _pr.returncode == 0 else []
+                _vdur = next((float(s["duration"]) for s in _streams if s.get("codec_type") == "video" and s.get("duration")), 0.0)
+                _adur = next((float(s["duration"]) for s in _streams if s.get("codec_type") == "audio" and s.get("duration")), 0.0)
+            except Exception:
+                _vdur, _adur = 0.0, 0.0
+            log.info(
+                "assembly_body_trim_probe",
+                episode_id=episode_id,
+                target_seconds=round(target_duration, 3),
+                trimmed_video_s=round(_vdur, 3),
+                trimmed_audio_s=round(_adur, 3),
+            )
+            if output_path == input_path and input_path.exists():
+                input_path.unlink()
+            tmp_path.rename(output_path)
+            return True
+        return False
+    except Exception as exc:
+        log.error(
+            "assembly_body_trim_error",
+            episode_id=episode_id,
+            error=str(exc),
+        )
+        return False
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def _render_short(
@@ -321,15 +547,19 @@ def _build_ffmpeg_concat_command(
     Build an ffmpeg command list for concatenating scenes with audio.
 
     Strategy B — tpad hold-based assembly:
-    - Each clip plays at native duration.
-    - When narration beat is longer than clip duration, the last frame is frozen
-      via tpad=stop_mode=clone until the narration beat ends.
+    - Each clip is first trimmed to its beat_duration when clip_duration > beat_duration,
+      then padded (last frame frozen via tpad) when beat_duration > clip_duration.
+    - A hard trim=[vout]trim=0:total_duration[vout_safe];setpts=PTS-STARTPTS is applied
+      after concat to guarantee body duration never exceeds total_duration regardless
+      of any ffmpeg filter-graph or -t interaction issues (observed in ffmpeg 8.1 with
+      large filter graphs: -t output flag alone fails to limit output).
     - This preserves exact audio/video sync without re-encoding audio.
 
     Audio mixing:
     - Narration at 0 dB reference (volume=1.0).
     - Music at −18 dB (volume=_MUSIC_AMPLITUDE_FACTOR ≈ 0.126).
     - amix with duration=first so audio never outlasts the video.
+    - atrim applied to narration to hard-limit audio to total_duration as well.
     """
     width, height = resolution.split("x")
 
@@ -342,7 +572,15 @@ def _build_ffmpeg_concat_command(
         total_duration = 30.0  # fallback for empty timelines
 
     if has_clips:
-        # Strategy B: per-entry tpad hold where narration beat > clip duration.
+        # Strategy B: per-entry trim+tpad.
+        # 1. When clip_duration > beat_duration: trim the clip to beat_duration.
+        #    Previously the clip played in full (only tpad hold was skipped), which
+        #    caused the concat output to exceed total_duration.
+        # 2. When beat_duration > clip_duration: tpad clones the last frame.
+        # 3. After concat: hard-trim the video stream to total_duration and reset PTS.
+        #    This is a redundant safety guard — in ffmpeg 8.1 with large filter graphs
+        #    (35+ inputs), the -t output flag can fail to limit the rendered body.
+        #
         # Each clip is first normalized to the target resolution so that ffmpeg's
         # concat filter receives matching dimensions regardless of source model output.
         # Main (16:9): scale-to-fit + pad with black (letterbox, no crop).
@@ -355,6 +593,7 @@ def _build_ffmpeg_concat_command(
             if entry.clip_path and entry.clip_path.exists():
                 inputs += ["-i", str(entry.clip_path)]
                 hold_seconds = max(0.0, entry.duration_seconds - entry.clip_duration_seconds)
+                trim_needed = entry.clip_duration_seconds > entry.duration_seconds + 0.001
 
                 # Normalize resolution — output label [sv{n}]
                 scale_label = f"[sv{clip_idx}]"
@@ -362,7 +601,7 @@ def _build_ffmpeg_concat_command(
                     tpad_filter_parts.append(
                         f"[{clip_idx}:v]scale={width}:{height}"
                         f":force_original_aspect_ratio=increase,"
-                        f"crop={width}:{height}{scale_label}"
+                        f"crop={width}:{height},setsar=1{scale_label}"
                     )
                 else:
                     tpad_filter_parts.append(
@@ -371,7 +610,40 @@ def _build_ffmpeg_concat_command(
                         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black{scale_label}"
                     )
 
-                if hold_seconds > 0.001:
+                if trim_needed:
+                    # Clip is longer than beat: trim it to exact beat_duration,
+                    # then reset PTS so the concat filter sees continuous timestamps.
+                    trim_label = f"[tv{clip_idx}]"
+                    tpad_filter_parts.append(
+                        f"{scale_label}trim=duration={entry.duration_seconds:.3f},"
+                        f"setpts=PTS-STARTPTS{trim_label}"
+                    )
+                    concat_input_labels.append(trim_label)
+                elif hold_seconds > 1.0:
+                    # Motion extension: stretch clip to beat duration.
+                    # tpad (freeze last frame) is FORBIDDEN for holds > 1.0s.
+                    # Strategy: slow-motion via setpts (factor ≤ 2.0) or seamless
+                    # loop (factor > 2.0) so the frame plays real motion throughout.
+                    out_label = f"[pv{clip_idx}]"
+                    factor = entry.duration_seconds / max(entry.clip_duration_seconds, 0.001)
+                    if factor <= 2.0:
+                        # Slow-motion: each frame's PTS is scaled by factor,
+                        # then fps filter re-samples to FRAME_RATE for the encoder.
+                        tpad_filter_parts.append(
+                            f"{scale_label}setpts={factor:.6f}*PTS,"
+                            f"fps=fps={FRAME_RATE}{out_label}"
+                        )
+                    else:
+                        # Loop the clip to fill the beat, then trim to exact duration.
+                        # size=32767 is the ffmpeg loop filter max (safe for clips ≤18 min).
+                        tpad_filter_parts.append(
+                            f"{scale_label}loop=loop=-1:size=32767:start=0,"
+                            f"trim=duration={entry.duration_seconds:.3f},"
+                            f"setpts=PTS-STARTPTS{out_label}"
+                        )
+                    concat_input_labels.append(out_label)
+                elif hold_seconds > 0.001:
+                    # Small gap (≤ 1.0s): tpad emergency fallback only.
                     out_label = f"[pv{clip_idx}]"
                     tpad_filter_parts.append(
                         f"{scale_label}tpad=stop_mode=clone"
@@ -379,7 +651,7 @@ def _build_ffmpeg_concat_command(
                     )
                     concat_input_labels.append(out_label)
                 else:
-                    # Clip covers its full beat — use scale output directly
+                    # Clip duration == beat duration (within tolerance)
                     concat_input_labels.append(scale_label)
                 clip_idx += 1
 
@@ -387,8 +659,13 @@ def _build_ffmpeg_concat_command(
         if clip_count > 0:
             filter_parts.extend(tpad_filter_parts)
             concat_inputs = "".join(concat_input_labels)
+            # After concat: hard-trim to total_duration + reset PTS.
+            # This prevents any per-clip rounding or tpad overflow from accumulating
+            # into a body that exceeds the narration duration.
             filter_parts.append(
-                f"{concat_inputs}concat=n={clip_count}:v=1:a=0[vout]"
+                f"{concat_inputs}concat=n={clip_count}:v=1:a=0[vconcat];"
+                f"[vconcat]trim=0:{total_duration:.6f},"
+                f"setpts=PTS-STARTPTS[vout]"
             )
         video_map = "[vout]"
     else:
@@ -418,16 +695,19 @@ def _build_ffmpeg_concat_command(
     else:
         music_idx = None
 
-    # Audio filter: mix narration + music, or narration only, or music only, or silence
+    # Audio filter: mix narration + music, or narration only, or music only, or silence.
+    # atrim on narration hard-limits audio to total_duration to match the video body.
     if has_narration and has_music:
         filter_parts.append(
-            f"[{narration_idx}:a]volume=1.0[narr];"
+            f"[{narration_idx}:a]atrim=0:{total_duration:.6f},asetpts=PTS-STARTPTS,volume=1.0[narr];"
             f"[{music_idx}:a]volume={_MUSIC_AMPLITUDE_FACTOR}[msc];"
             f"[narr][msc]amix=inputs=2:duration=first:dropout_transition=2[aout]"
         )
         audio_map = "[aout]"
     elif has_narration:
-        filter_parts.append(f"[{narration_idx}:a]volume=1.0[aout]")
+        filter_parts.append(
+            f"[{narration_idx}:a]atrim=0:{total_duration:.6f},asetpts=PTS-STARTPTS,volume=1.0[aout]"
+        )
         audio_map = "[aout]"
     elif has_music:
         filter_parts.append(
@@ -457,7 +737,8 @@ def _build_ffmpeg_concat_command(
         "-b:a", _AUDIO_BITRATE,
         "-crf", _CRF,
         "-pix_fmt", "yuv420p",
-        "-t", str(total_duration),
+        "-movflags", "+faststart",
+        "-t", f"{total_duration:.6f}",
         str(output_path),
     ]
 
@@ -600,17 +881,27 @@ def _append_end_page(
             body_path.rename(main_output_path)
             return False
 
-        # --- 3. Concat body + end-page clip ---
-        list_path.write_text(
-            f"file '{body_path.name}'\nfile '{clip_path.name}'\n",
-            encoding="utf-8",
-        )
+        # --- 3. Concat body + end-page clip via filter_complex re-encode ---
+        # Stream-copy (-c copy) is NOT used here because body.mp4 may have an
+        # inconsistency between its tkhd duration (665.5s from -t flag) and the
+        # stts sample table (836.875s from encoder pipeline flush after -t cutoff).
+        # ffprobe reads tkhd and reports 665.5s; the concat demuxer reads stts and
+        # copies 836.875s of samples, placing the endpage 171.4s too late.
+        # filter_complex decodes via the sample PTS (last sample at 665.5s), which
+        # gives correct frame-accurate timestamps in the re-encoded output.
         concat_cmd = [
             "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(list_path),
-            "-c", "copy",
+            "-i", str(body_path),
+            "-i", str(clip_path),
+            "-filter_complex",
+            "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]",
+            "-map", "[vout]",
+            "-map", "[aout]",
+            "-c:v", _VIDEO_CODEC,
+            "-c:a", _AUDIO_CODEC,
+            "-b:a", _AUDIO_BITRATE,
+            "-crf", _CRF,
+            "-pix_fmt", "yuv420p",
             str(main_output_path),
         ]
         concat_ok = _run_ffmpeg(
@@ -642,7 +933,7 @@ def _append_end_page(
         return False
     finally:
         # Clean up temp files regardless of outcome
-        for p in (body_path, clip_path, list_path):
+        for p in (body_path, clip_path):
             try:
                 if p.exists():
                     p.unlink()

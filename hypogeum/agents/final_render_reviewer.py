@@ -160,24 +160,47 @@ def run_final_render_reviewer(
                    f"main episode file present ({main_size:,} bytes)")
 
     # ------------------------------------------------------------------
-    # Check 3 — Shorts renders file existence
+    # Check 3 — Shorts renders file existence (Phase 2: fully decoupled)
+    # Shorts failures go into isolated fields only — never into main failures/warnings.
     # ------------------------------------------------------------------
     shorts_renders = render_output_manifest.get("shorts_renders", [])
+    shorts_passed, _shorts_check_failures = _check_shorts_readiness(shorts_renders)
+
+    # Isolated lists — never merged into main failures / warnings
+    shorts_failures_list: list[str] = []
+    shorts_warnings_list: list[str] = []
+
     real_shorts = [sr for sr in shorts_renders
                    if not sr.get("short_id", "").endswith("_placeholder")]
-    missing_shorts = [sr["short_id"] for sr in real_shorts
-                      if not sr.get("file_exists", False)]
 
-    if real_shorts and missing_shorts:
-        _add_check(checks, "c_shorts_render_exists", "fail",
-                   f"missing shorts: {missing_shorts}")
-        failures.append(f"shorts_renders: {len(missing_shorts)} short(s) missing: {missing_shorts}")
+    if _shorts_check_failures:
+        # Missing real shorts — isolated into shorts_failures_list only
+        for sf in _shorts_check_failures:
+            _add_check(checks, "c_shorts_render_exists", "fail",
+                       f"missing shorts: {sf}")
+            shorts_failures_list.append(f"shorts_renders: {sf}")
     elif real_shorts:
         _add_check(checks, "c_shorts_render_exists", "pass",
-                   f"all {len(real_shorts)} short(s) present")
+                   "all real short(s) present")
     else:
         _add_check(checks, "c_shorts_render_exists", "pass",
                    "no shorts configured")
+
+    # Derive shorts_runtime_status from the extracted result
+    if not real_shorts:
+        shorts_runtime_status = "not_planned"
+    elif _shorts_check_failures:
+        shorts_runtime_status = "failed"
+    else:
+        shorts_runtime_status = "complete"
+
+    # Derive shorts_review_verdict (independent of main episode)
+    if not real_shorts:
+        shorts_review_verdict = "NOT_PLANNED"
+    elif shorts_failures_list:
+        shorts_review_verdict = "REJECTED"
+    else:
+        shorts_review_verdict = "APPROVED"
 
     # ------------------------------------------------------------------
     # Check 4 — Clip availability
@@ -325,7 +348,10 @@ def run_final_render_reviewer(
     # ------------------------------------------------------------------
     # Determine final verdict
     # ------------------------------------------------------------------
-    production_ready = len(failures) == 0
+    # main_episode_complete mirrors production_ready — uses the same failures list.
+    # Keep production_ready as an alias for backward compatibility.
+    main_episode_complete = len(failures) == 0
+    production_ready = main_episode_complete
 
     if not production_ready:
         overall_verdict = "REJECTED"
@@ -366,10 +392,17 @@ def run_final_render_reviewer(
         "manifest_id": manifest_id,
         "reviewed_at": reviewed_at,
         "production_ready": production_ready,
+        # Runtime decoupling: main_episode_complete is the canonical field;
+        # production_ready is kept as a backward-compatible alias.
+        "main_episode_complete": main_episode_complete,
+        "shorts_runtime_status": shorts_runtime_status,
+        "shorts_review_verdict": shorts_review_verdict,
         "overall_verdict": overall_verdict,
         "checks": checks,
         "failures": failures,
         "warnings": warnings,
+        "shorts_failures": shorts_failures_list,
+        "shorts_warnings": shorts_warnings_list,
         "human_review_recommended": human_review_recommended,
         "human_review_reasons": unique_reasons,
     }
@@ -381,6 +414,35 @@ def run_final_render_reviewer(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _check_shorts_readiness(
+    shorts_renders: list[dict],
+) -> tuple[bool, list[str]]:
+    """
+    Evaluate the shorts_renders list from a render_output_manifest.
+
+    Placeholder shorts (short_id ending with '_placeholder') are always skipped.
+
+    Returns:
+        (shorts_passed, shorts_failures) where:
+          - shorts_passed: True if all real shorts have file_exists=True (or none exist)
+          - shorts_failures: list of human-readable failure strings for missing real shorts
+    """
+    real_shorts = [
+        sr for sr in shorts_renders
+        if not sr.get("short_id", "").endswith("_placeholder")
+    ]
+    missing_short_ids = [
+        sr["short_id"] for sr in real_shorts
+        if not sr.get("file_exists", False)
+    ]
+    if missing_short_ids:
+        failures = [
+            f"{len(missing_short_ids)} short(s) missing: {missing_short_ids}"
+        ]
+        return False, failures
+    return True, []
+
 
 def _add_check(
     checks: list,

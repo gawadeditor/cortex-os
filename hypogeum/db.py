@@ -126,15 +126,18 @@ _V4_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
 
 _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "runs": [
-        ("duration_ms",          "INTEGER"),
-        ("stage_count",          "INTEGER"),
-        ("stage_success_count",  "INTEGER"),
-        ("total_cost_usd",       "REAL"),
-        ("resume_from_stage",    "TEXT"),
-        ("pipeline_version",     "TEXT"),
-        ("channel_id",           "TEXT"),   # P1-02: channel profile linkage
-        ("queued_at",            "TEXT"),   # P3-03: RLG — set when run enters queued state
-        ("paused_at",            "TEXT"),   # P3-03: RLG — set when run enters paused state
+        ("duration_ms",               "INTEGER"),
+        ("stage_count",               "INTEGER"),
+        ("stage_success_count",       "INTEGER"),
+        ("total_cost_usd",            "REAL"),
+        ("resume_from_stage",         "TEXT"),
+        ("pipeline_version",          "TEXT"),
+        ("channel_id",                "TEXT"),   # P1-02: channel profile linkage
+        ("queued_at",                 "TEXT"),   # P3-03: RLG — set when run enters queued state
+        ("paused_at",                 "TEXT"),   # P3-03: RLG — set when run enters paused state
+        # Runtime decoupling: independent per-deliverable status columns.
+        ("main_episode_runtime_status", "TEXT DEFAULT 'not_planned'"),
+        ("shorts_runtime_status",       "TEXT DEFAULT 'not_planned'"),
     ],
     "episodes": [
         ("youtube_video_id",  "TEXT"),

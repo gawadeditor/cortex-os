@@ -116,10 +116,14 @@ def run_qa_agent(
     warnings: list[str] = []
 
     # ------------------------------------------------------------------
-    # Check 1 — Render package production_ready
+    # Check 1 — Render package main episode readiness
+    # Prefers main_episode_complete (new field) with production_ready as
+    # backward-compatible fallback so legacy packages without the new field
+    # continue to work unchanged.
     # ------------------------------------------------------------------
     pkg_integrity = final_render_package.get("package_integrity", {})
-    pkg_ready = pkg_integrity.get("production_ready", False)
+    pkg_ready = pkg_integrity.get("main_episode_complete",
+               pkg_integrity.get("production_ready", False))
 
     if not isinstance(pkg_ready, bool) or not pkg_ready:
         _add_check(checks, "c_render_package_production_ready", "fail",

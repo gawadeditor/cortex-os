@@ -5123,6 +5123,15 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
     # Publish checklist for the Publishing tab (disk-only: credential check from DB)
     publish_checklist = _build_disk_publish_checklist(episode_id, ep_state, qa_summary, artifacts, thumbnail_pkg)
 
+    # Runtime decoupling status — read from final_render_package on disk with safe fallbacks.
+    _frp_pkg = load_disk_pkg(ep_dir, "final_render_package", episode_id)
+    _frp_integrity = _frp_pkg.get("package_integrity", {}) if _frp_pkg else {}
+    _main_episode_runtime_status = _frp_integrity.get(
+        "main_episode_runtime_status",
+        "complete" if artifacts.get("has_render") else "not_planned",
+    )
+    _shorts_runtime_status = _frp_integrity.get("shorts_runtime_status", "not_planned")
+
     return {
         "episode_id":       episode_id,
         "display_title":    artifacts.get("display_title") or topic or episode_id,
@@ -5141,6 +5150,9 @@ def _make_disk_episode_detail(episode_id: str, artifacts: dict) -> dict:
         "run_duration_fmt": run_dur_fmt,
         "total_cost_usd":   cost_usd,
         "stage_count":      scene_cnt,
+        # Runtime decoupling: per-deliverable status for main episode and shorts.
+        "main_episode_runtime_status": _main_episode_runtime_status,
+        "shorts_runtime_status":       _shorts_runtime_status,
         # Four-way state (production/release/publish/analytics)
         **ep_state,
         "thumbnail_status_label": tn_status_label,

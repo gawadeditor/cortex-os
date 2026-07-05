@@ -614,6 +614,11 @@ def _validate_narration_package(p: dict) -> None:
     _req(pi, s, "production_ready", bool, path="package_integrity")
 
 
+_RUNTIME_STATUS_VALUES = (
+    "pending", "ready", "running", "complete", "failed", "skipped", "not_planned"
+)
+
+
 def _validate_final_render_package(p: dict) -> None:
     s = "final_render_package"
     _req_dict(p, s, "package_metadata")
@@ -655,6 +660,26 @@ def _validate_final_render_package(p: dict) -> None:
     _req_dict(p, s, "package_integrity")
     pi = p["package_integrity"]
     _req(pi, s, "production_ready", bool, path="package_integrity")
+    # Optional runtime decoupling fields (additive — absent on legacy packages)
+    # main_episode_complete: independent bool for main episode readiness
+    if "main_episode_complete" in pi and not isinstance(pi["main_episode_complete"], bool):
+        raise SchemaError(s, "package_integrity.main_episode_complete",
+                          "must be bool when present")
+    # Runtime status strings — allowed values: pending|ready|running|complete|failed|skipped|not_planned
+    for _status_field in (
+        "main_episode_runtime_status",
+        "shorts_runtime_status",      # deprecated: use shorts_runtime_status
+        "social_runtime_status",
+        "archive_runtime_status",
+        "analytics_runtime_status",
+    ):
+        if _status_field in pi:
+            _val = pi[_status_field]
+            if not isinstance(_val, str) or _val not in _RUNTIME_STATUS_VALUES:
+                raise SchemaError(
+                    s, f"package_integrity.{_status_field}",
+                    f"must be one of {_RUNTIME_STATUS_VALUES} when present, got {_val!r}"
+                )
 
 
 def _validate_publishing_record(p: dict) -> None:
@@ -750,6 +775,29 @@ def _validate_render_review_verdict(p: dict) -> None:
     _req_list(p, s, "warnings")
     _req(p, s, "human_review_recommended", bool)
     _req_list(p, s, "human_review_reasons")
+    # Optional runtime decoupling fields (additive — absent on legacy verdicts)
+    if "main_episode_complete" in p and not isinstance(p["main_episode_complete"], bool):
+        raise SchemaError(s, "main_episode_complete", "must be bool when present")
+    if "shorts_runtime_status" in p:
+        _val = p["shorts_runtime_status"]
+        if not isinstance(_val, str) or _val not in _RUNTIME_STATUS_VALUES:
+            raise SchemaError(
+                s, "shorts_runtime_status",
+                f"must be one of {_RUNTIME_STATUS_VALUES} when present, got {_val!r}"
+            )
+    # Phase 2 decoupling fields (additive — absent on legacy verdicts → silently pass)
+    _SHORTS_VERDICT_VALUES = ("APPROVED", "CONDITIONAL", "REJECTED", "NOT_PLANNED")
+    if "shorts_review_verdict" in p:
+        _srv = p["shorts_review_verdict"]
+        if not isinstance(_srv, str) or _srv not in _SHORTS_VERDICT_VALUES:
+            raise SchemaError(
+                s, "shorts_review_verdict",
+                f"must be one of {_SHORTS_VERDICT_VALUES} when present, got {_srv!r}"
+            )
+    if "shorts_failures" in p and not isinstance(p["shorts_failures"], list):
+        raise SchemaError(s, "shorts_failures", "must be list when present")
+    if "shorts_warnings" in p and not isinstance(p["shorts_warnings"], list):
+        raise SchemaError(s, "shorts_warnings", "must be list when present")
 
 
 def _validate_media_specs_report(p: dict) -> None:

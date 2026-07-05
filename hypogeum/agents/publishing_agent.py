@@ -295,6 +295,25 @@ def run_publishing_agent(
     thumbnail_refs = final_render_package.get("thumbnail_references", [])
 
     # ------------------------------------------------------------------
+    # Runtime status observability: log both fields for operational monitoring.
+    # Publishing agent does NOT gate on these — the QA agent already enforces
+    # production_ready before this agent is called. This is observability only.
+    # ------------------------------------------------------------------
+    _pkg_integrity = final_render_package.get("package_integrity", {})
+    log.info(
+        "publishing_runtime_status_check",
+        episode_id=episode_id,
+        main_episode_complete=_pkg_integrity.get(
+            "main_episode_complete",
+            _pkg_integrity.get("production_ready", False),
+        ),
+        shorts_runtime_status=_pkg_integrity.get("shorts_runtime_status", "not_planned"),
+        main_episode_runtime_status=_pkg_integrity.get(
+            "main_episode_runtime_status", "not_planned"
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # PRE-FLIGHT 1: ai_disclosure_text hard gate
     # ------------------------------------------------------------------
     try:

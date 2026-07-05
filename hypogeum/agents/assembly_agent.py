@@ -740,6 +740,8 @@ def run_assembly_agent(
             "input_thumbnail_package_id": thumbnail_package.get("thumbnail_package_id", ""),
             "scenes_expected": total_clips,
             "scenes_rendered": present_count,
+            # DEPRECATED: shorts_complete — use shorts_runtime_status instead.
+            # Kept for backward compatibility with existing packages and tests.
             "shorts_complete": len(short_ids) > 0 and all(
                 s["file_exists"] for s in _manifest_shorts
             ),
@@ -747,6 +749,18 @@ def run_assembly_agent(
             "thumbnails_included": bool(thumbnail_references),
             "music_complete": len(sections_without_music) == 0,
             "production_ready": production_ready,
+            # Runtime decoupling fields — independent per-deliverable status.
+            # main_episode_complete: canonical readiness gate for main upload.
+            # Fallback to production_ready for safety if reviewer omits the field.
+            "main_episode_complete": review_verdict.get(
+                "main_episode_complete", production_ready
+            ),
+            "main_episode_runtime_status": "complete" if production_ready else "failed",
+            "shorts_runtime_status": review_verdict.get("shorts_runtime_status", "not_planned"),
+            # Social, archive, analytics are downstream of publishing — always not_planned here.
+            "social_runtime_status": "not_planned",
+            "archive_runtime_status": "not_planned",
+            "analytics_runtime_status": "not_planned",
         },
         "timeline_qa_report": timeline_qa_report,
     }

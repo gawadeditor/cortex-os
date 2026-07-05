@@ -1281,8 +1281,8 @@ class TestProductionReadyEvaluation:
 
         assert result["package_integrity"]["production_ready"] is False
 
-    def test_production_ready_false_when_short_missing(self, tmp_path):
-        """production_ready is False when at least one Short is missing."""
+    def test_production_ready_not_blocked_when_short_missing(self, tmp_path):
+        """Phase 2: missing short does NOT block production_ready (main episode unaffected)."""
         cfg = _make_config()
         visual = _make_visual_package()
         narration = _make_narration_package()
@@ -1322,7 +1322,8 @@ class TestProductionReadyEvaluation:
                     output_dir=tmp_path / "ep_001",
                 )
 
-        assert result["package_integrity"]["production_ready"] is False
+        # Phase 2: missing shorts do NOT block main episode
+        assert result["package_integrity"]["production_ready"] is True
 
     def test_production_ready_false_when_render_failed(self, tmp_path):
         """production_ready is False when render_status is 'failed'."""

@@ -256,11 +256,22 @@ def run_assembly_agent(
             # asset_id is relative from .hypogeum-assets/ without extension
             asset_lookup[aid] = assets_root / f"{aid}.mp4"
 
-    # Validate clip availability for main episode + all shorts
+    # Scenes with generation_status="deferred" are intentionally parked (no clip
+    # will ever be generated for them in this run). Exclude them from the clip
+    # availability count so they don't count as missing and fail QA.
+    deferred_scene_ids: set = {
+        a["scene_id"]
+        for a in assets_list
+        if a.get("generation_status") == "deferred" and a.get("scene_id")
+    }
+
+    # Validate clip availability for main episode + all shorts (deferred excluded)
     present_clips: List[str] = []
     missing_clips: List[str] = []
 
     for scene in scenes:
+        if scene.get("scene_id") in deferred_scene_ids:
+            continue  # intentionally parked — not a missing clip
         found_asset_id = find_clip_asset_id(scene, asset_lookup, assets_root, episode_id)
         if found_asset_id is not None:
             clip_path = asset_lookup.get(found_asset_id)
@@ -287,7 +298,10 @@ def run_assembly_agent(
             )
             missing_clips.append(scene.get("scene_id", "unknown"))
 
-    total_clips = len(scenes)
+    # Count scenes actually skipped (not unique IDs — some scene_ids appear
+    # more than once in the scenes list due to duplicate manifest entries).
+    deferred_in_scenes = sum(1 for s in scenes if s.get("scene_id") in deferred_scene_ids)
+    total_clips = len(scenes) - deferred_in_scenes
     present_count = len(present_clips)
     clip_availability_rate = present_count / total_clips if total_clips > 0 else 0.0
 
@@ -297,6 +311,7 @@ def run_assembly_agent(
         total_clips=total_clips,
         present_clips=present_count,
         missing_clips=len(missing_clips),
+        deferred_clips=deferred_in_scenes,
         clip_availability_rate=round(clip_availability_rate, 4),
         threshold=_CLIP_AVAILABILITY_THRESHOLD,
         passes_threshold=clip_availability_rate >= _CLIP_AVAILABILITY_THRESHOLD,
@@ -323,6 +338,8 @@ def run_assembly_agent(
         present_clips = []
         missing_clips = []
         for _scene in scenes:
+            if _scene.get("scene_id") in deferred_scene_ids:
+                continue  # intentionally parked — skip
             _found = find_clip_asset_id(_scene, asset_lookup, assets_root, episode_id)
             if _found is not None:
                 _clip_path = asset_lookup.get(_found) or (assets_root / f"{_found}.mp4")

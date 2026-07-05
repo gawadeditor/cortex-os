@@ -1423,7 +1423,7 @@ def _run_visual_package_director(
         assets = existing_plan.get("asset_manifest", {}).get("assets", [])
         # ALL assets must be terminal-successful to skip Phase 2 entirely.
         # Any generation_failed means submit_scene must retry those scenes.
-        _TERMINAL_SUCCESS = {"generated", "reused", "dry_run"}
+        _TERMINAL_SUCCESS = {"generated", "reused", "dry_run", "deferred"}
         phase2_done = bool(assets) and all(
             a.get("generation_status") in _TERMINAL_SUCCESS for a in assets
         )

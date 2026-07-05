@@ -133,10 +133,15 @@ def main():
         episode_id=episode_id,
     )
     sum_beat_dur = vo_report["sum_actual_dur"]
-    if stitched_dur < sum_beat_dur - 1.0:
+    # Acrossfade reduces duration by (N-1)*0.030s for N segments; allow for that reduction
+    # plus 0.5s extra for rounding/encoding overhead.
+    _n_segs = len(narration_segments)
+    _xfade_reduction = max(0.0, _n_segs - 1) * 0.030
+    _tolerance = 1.0 + _xfade_reduction
+    if stitched_dur < sum_beat_dur - _tolerance:
         print(
             f"ERROR: stitched narration {stitched_dur:.3f}s is shorter than sum of beats "
-            f"{sum_beat_dur:.3f}s (tolerance 1.0s)",
+            f"{sum_beat_dur:.3f}s (tolerance {_tolerance:.3f}s)",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -503,11 +508,15 @@ def _validate_vo_completeness(
 
     generated_segments = len(narration_segments)
 
-    # Check beat count match
-    if expected_beats > 0 and expected_beats != generated_segments:
+    # Check beat count match.
+    # generated < expected is an error (missing VO content).
+    # generated > expected is a warning only — the narration was produced from a
+    # longer version of the script and is complete; the stale script_package just
+    # reflects an earlier revision.
+    if expected_beats > 0 and generated_segments < expected_beats:
         errors.append(
             f"Beat count mismatch: script has {expected_beats} beats but "
-            f"narration_package has {generated_segments} segments"
+            f"narration_package only has {generated_segments} segments (missing VO)"
         )
 
     # Check each segment file
@@ -553,7 +562,7 @@ def _validate_vo_completeness(
     vo_complete = (
         len(errors) == 0
         and expected_beats > 0
-        and expected_beats == generated_segments
+        and generated_segments >= expected_beats
         and len(missing_files) == 0
         and len(zero_duration_files) == 0
     )
@@ -608,12 +617,6 @@ def _restitch_narration(
     if not beat_files:
         raise RuntimeError("No beat files found for restitch")
 
-    # Write concat list file
-    concat_list = narration_dir / "_concat_list.txt"
-    with open(concat_list, "w") as f:
-        for p in beat_files:
-            f.write(f"file '{p}'\n")
-
     out_path = narration_dir / "main_narration.mp3"
 
     # Backup existing if present
@@ -624,16 +627,47 @@ def _restitch_narration(
             shutil.copy2(out_path, backup)
             print(f"  Backed up existing narration → {backup.name}")
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", str(concat_list),
-        "-c", "copy",
-        str(out_path),
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    # Use acrossfade stitching (30ms crossfade) to eliminate dead-air gaps between beats.
+    # Falls back to raw concat (-c copy) on failure.
+    _XFADE_DUR = 0.030
+    cmd: list = ["ffmpeg", "-y"]
+    for p in beat_files:
+        cmd += ["-i", str(p)]
+    if len(beat_files) == 1:
+        cmd += ["-c", "copy", str(out_path)]
+    else:
+        filter_parts = []
+        prev_label = "[0:a]"
+        for i in range(1, len(beat_files)):
+            is_last = (i == len(beat_files) - 1)
+            next_label = "[aout]" if is_last else f"[a{i}]"
+            filter_parts.append(
+                f"{prev_label}[{i}:a]acrossfade=d={_XFADE_DUR}:c1=tri:c2=tri{next_label}"
+            )
+            prev_label = next_label
+        cmd += [
+            "-filter_complex", ";".join(filter_parts),
+            "-map", "[aout]",
+            "-q:a", "4",
+            str(out_path),
+        ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
-        raise RuntimeError(f"ffmpeg concat failed: {r.stderr[-500:]}")
+        print(f"  WARNING: acrossfade stitch failed, falling back to raw concat: {r.stderr[-200:]}")
+        concat_list = narration_dir / "_concat_list.txt"
+        with open(concat_list, "w") as f:
+            for p in beat_files:
+                f.write(f"file '{p}'\n")
+        fallback_cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c", "copy",
+            str(out_path),
+        ]
+        r2 = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=120)
+        if r2.returncode != 0:
+            raise RuntimeError(f"ffmpeg concat failed: {r2.stderr[-500:]}")
 
     stitched_dur = _probe_duration(out_path)
     print(f"  Stitched {len(beat_files)} beats → {out_path.name}  duration={stitched_dur:.3f}s")

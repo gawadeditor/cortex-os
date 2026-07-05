@@ -53,6 +53,7 @@ Logging events:
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -367,38 +368,97 @@ def _stitch_segments(
     log,
 ) -> Path:
     """
-    Concatenate MP3 segment files into a single stitched narration track.
+    Stitch MP3 segment files into a single narration track via ffmpeg acrossfade.
 
-    Uses raw byte concatenation — valid for MP3 (streaming format).
-    Silence gaps between segments are not inserted here; Assembly Agent
-    handles inter-segment timing and timeline synchronisation.
+    Uses a 30ms crossfade (acrossfade) between consecutive segments to eliminate
+    the audible dead-air gaps (0.4–0.8s) that raw byte concatenation introduces at
+    MP3 frame boundaries. Falls back to raw byte concatenation if ffmpeg fails.
 
-    Writes an empty file if no segments are provided (all beats failed).
+    Writes an empty file if no valid segments are provided.
     Always returns output_path.
     """
+    valid = [r for r in results if r.local_path.exists()]
+
     log.info(
         "vgo_stitching_started",
         component=component,
         segment_count=len(results),
+        valid_count=len(valid),
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    all_bytes = bytearray()
-    for result in results:
-        if result.local_path.exists():
-            all_bytes.extend(result.local_path.read_bytes())
+    if not valid:
+        output_path.write_bytes(b"")
+        log.info(
+            "vgo_stitching_completed",
+            component=component,
+            output_path=str(output_path),
+            total_bytes=0,
+            segments_included=0,
+        )
+        return output_path
 
-    output_path.write_bytes(bytes(all_bytes))
+    if len(valid) == 1:
+        output_path.write_bytes(valid[0].local_path.read_bytes())
+        log.info(
+            "vgo_stitching_completed",
+            component=component,
+            output_path=str(output_path),
+            total_bytes=output_path.stat().st_size,
+            segments_included=1,
+        )
+        return output_path
+
+    # Build ffmpeg acrossfade chain: 30ms crossfade eliminates dead-air at beat boundaries.
+    _XFADE_DUR = 0.030  # 30ms — long enough to bridge gaps, short enough to be inaudible
+    cmd: List[str] = ["ffmpeg", "-y"]
+    for r in valid:
+        cmd += ["-i", str(r.local_path)]
+
+    # Chain: [0:a][1:a]acrossfade...[a1]; [a1][2:a]acrossfade...[a2]; ... [aout]
+    filter_parts = []
+    prev_label = "[0:a]"
+    for i in range(1, len(valid)):
+        is_last = (i == len(valid) - 1)
+        next_label = "[aout]" if is_last else f"[a{i}]"
+        filter_parts.append(
+            f"{prev_label}[{i}:a]acrossfade=d={_XFADE_DUR}:c1=tri:c2=tri{next_label}"
+        )
+        prev_label = next_label
+
+    cmd += [
+        "-filter_complex", ";".join(filter_parts),
+        "-map", "[aout]",
+        "-q:a", "4",   # VBR ~165 kbps — matches ElevenLabs MP3 output quality
+        str(output_path),
+    ]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg acrossfade exit {proc.returncode}: {proc.stderr[-500:]}"
+            )
+    except Exception as exc:
+        log.warn(
+            "vgo_stitching_acrossfade_fallback",
+            component=component,
+            error=str(exc),
+        )
+        # Fallback: raw byte concatenation
+        all_bytes = bytearray()
+        for r in valid:
+            all_bytes.extend(r.local_path.read_bytes())
+        output_path.write_bytes(bytes(all_bytes))
 
     log.info(
         "vgo_stitching_completed",
         component=component,
         output_path=str(output_path),
-        total_bytes=len(all_bytes),
-        segments_included=len(results),
+        total_bytes=output_path.stat().st_size if output_path.exists() else 0,
+        segments_included=len(valid),
     )
-
     return output_path
 
 

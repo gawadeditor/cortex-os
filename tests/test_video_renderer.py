@@ -293,8 +293,9 @@ class TestBuildFfmpegConcatCommand:
 
     def test_tpad_applied_when_narration_longer_than_clip(self, tmp_path):
         """
-        Given entry.duration_seconds=20s and clip_duration_seconds=8s,
-        the ffmpeg filter_complex includes tpad=stop_mode=clone:stop_duration=12.000.
+        Given entry.duration_seconds=20s and clip_duration_seconds=8s, factor=2.5 > 2.0,
+        so the ping-pong loop branch is used (not tpad). The filter_complex includes
+        the reverse+concat+loop chain and the output is labelled [pv0].
         """
         clip_path = tmp_path / "clip.mp4"
         clip_path.write_bytes(b"FAKEVIDEO")
@@ -311,12 +312,16 @@ class TestBuildFfmpegConcatCommand:
         )
 
         cmd_str = " ".join(str(c) for c in cmd)
-        assert "tpad=stop_mode=clone:stop_duration=12.000" in cmd_str
+        # factor=2.5 > 2.0 → ping-pong branch (not tpad)
+        assert "reverse" in cmd_str
+        assert "loop=loop=-1" in cmd_str
+        assert "[pv0]" in cmd_str
 
     def test_each_entry_gets_own_hold_before_concat(self, tmp_path):
         """
-        Multiple entries each get their own tpad hold before the concat filter.
-        The pv0/pv1 output labels are used as concat inputs.
+        Multiple entries with factor > 2.0 each get their own ping-pong loop before concat.
+        Both entries use clip_duration=8s with beat durations 21s and 23s (factors 2.6 and 2.9).
+        The output labels [pv0] and [pv1] are used as concat inputs.
         """
         clip1 = tmp_path / "clip1.mp4"
         clip2 = tmp_path / "clip2.mp4"
@@ -338,10 +343,13 @@ class TestBuildFfmpegConcatCommand:
         )
 
         cmd_str = " ".join(str(c) for c in cmd)
-        assert "stop_duration=13.000" in cmd_str
-        assert "stop_duration=15.000" in cmd_str
+        # Both entries use factor > 2.0 → ping-pong branch
+        assert "reverse" in cmd_str
         assert "[pv0]" in cmd_str
         assert "[pv1]" in cmd_str
+        # Both entries must trim to their respective beat durations
+        assert "trim=duration=21.000" in cmd_str
+        assert "trim=duration=23.000" in cmd_str
 
     def test_t_flag_equals_timeline_duration_not_clip_duration(self, tmp_path):
         """
@@ -498,9 +506,9 @@ class TestRunFfmpeg:
 
 class TestAudioMixingInternals:
 
-    def test_music_amplitude_factor_is_minus18db(self):
-        """_MUSIC_AMPLITUDE_FACTOR is ≈0.126 (−18 dB relative to narration at 0 dB)."""
-        expected = 10 ** (-18 / 20)
+    def test_music_amplitude_factor_is_minus14db(self):
+        """_MUSIC_AMPLITUDE_FACTOR is ≈0.20 (−14 dB relative to narration at 0 dB) — audible background bed."""
+        expected = 10 ** (-14 / 20)
         assert abs(_MUSIC_AMPLITUDE_FACTOR - expected) < 0.01
 
     def test_section_without_music_uses_narration_only(self, tmp_path):
@@ -613,8 +621,8 @@ class TestResolutionNormalization:
         assert "[sv1]" in fc
         assert "concat=n=2" in fc
 
-    def test_tpad_chains_from_sv_label(self, tmp_path):
-        """When hold is needed, tpad receives [sv0] input, not raw [0:v]."""
+    def test_motion_extension_chains_from_sv_label(self, tmp_path):
+        """When hold > 1.0s with factor > 2.0, the ping-pong branch receives [sv0] input."""
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"FAKEVIDEO")
         entry = _make_entry(duration_seconds=20.0, clip_duration_seconds=8.0, clip_path=clip)
@@ -623,8 +631,8 @@ class TestResolutionNormalization:
             output_path=tmp_path / "out.mp4", resolution="1920x1080", episode_id="ep_t",
         )
         fc = self._fc(cmd)
-        # tpad must receive normalized input, not raw stream
-        assert "[sv0]tpad" in fc
+        # factor=2.5 > 2.0 → ping-pong branch receives normalized [sv0] input
+        assert "[sv0]split=2" in fc
         assert "[pv0]" in fc
 
     def test_short_uses_scale_crop_not_pad(self, tmp_path):

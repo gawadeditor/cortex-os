@@ -67,6 +67,7 @@ _CRF                   = "23"
 _MUSIC_AMPLITUDE_FACTOR = 0.20    # ≈ −14 dB beneath narration (audible background bed)
 _MUSIC_TAIL_SECONDS    = 2.5      # music continues this many seconds after VO ends
 _DEFAULT_TIMEOUT        = 600     # seconds
+_CLIP_TAIL_FADE_SECS   = 2 / FRAME_RATE  # 2-frame fade-out at each clip boundary (≈ 67ms)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,15 @@ def render_episode(
                 end_page_path=str(end_page_path),
                 end_page_duration_seconds=end_page_duration,
             )
+
+    # --- Post-render blackdetect QA gate ---
+    if main_success and main_output_path.exists() and main_output_path.stat().st_size > 0:
+        _run_blackdetect_qa(
+            output_path=main_output_path,
+            episode_id=episode_id,
+            timeout=ffmpeg_timeout,
+            log=log,
+        )
 
     # --- Shorts renders ---
     short_output_paths: List[Tuple[str, Path]] = []
@@ -414,6 +424,53 @@ def _probe_output_duration(path: Path) -> float:
         except Exception:
             pass
     return 0.0
+
+
+def _run_blackdetect_qa(
+    output_path: Path,
+    episode_id: str,
+    timeout: int,
+    log,
+) -> None:
+    """
+    Post-render blackdetect QA gate.
+
+    Runs ffmpeg blackdetect (d=0.5s, pix_th=0.10) on the final output and logs
+    any detected black frame clusters as warnings. Non-blocking — never fails the
+    render, only surfaces QA signals for editorial review.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-i", str(output_path),
+                "-vf", "blackdetect=d=0.5:pix_th=0.10",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=min(timeout, 180),
+        )
+        # ffmpeg writes blackdetect events to stderr
+        black_events = [
+            line.strip() for line in result.stderr.splitlines()
+            if "black_start" in line
+        ]
+        if black_events:
+            log.warn(
+                "assembly_blackdetect_events",
+                episode_id=episode_id,
+                event_count=len(black_events),
+                events=black_events[:5],
+            )
+        else:
+            log.info(
+                "assembly_blackdetect_clean",
+                episode_id=episode_id,
+            )
+    except Exception as exc:
+        log.warn(
+            "assembly_blackdetect_failed",
+            episode_id=episode_id,
+            error=str(exc),
+        )
 
 
 def _probe_music_usable_duration(music_path: Path) -> float:
@@ -686,10 +743,13 @@ def _build_ffmpeg_concat_command(
                 if trim_needed:
                     # Clip is longer than beat: trim it to exact beat_duration,
                     # then reset PTS so the concat filter sees continuous timestamps.
+                    # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
                     trim_label = f"[tv{clip_idx}]"
+                    _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
                     tpad_filter_parts.append(
                         f"{scale_label}trim=duration={entry.duration_seconds:.3f},"
-                        f"setpts=PTS-STARTPTS{trim_label}"
+                        f"setpts=PTS-STARTPTS,"
+                        f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{trim_label}"
                     )
                     concat_input_labels.append(trim_label)
                 elif hold_seconds > 1.0:
@@ -702,30 +762,51 @@ def _build_ffmpeg_concat_command(
                     if factor <= 2.0:
                         # Slow-motion: each frame's PTS is scaled by factor,
                         # then fps filter re-samples to FRAME_RATE for the encoder.
+                        # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
+                        _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
                         tpad_filter_parts.append(
                             f"{scale_label}setpts={factor:.6f}*PTS,"
-                            f"fps=fps={FRAME_RATE}{out_label}"
+                            f"fps=fps={FRAME_RATE},"
+                            f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
                         )
                     else:
-                        # Loop the clip to fill the beat, then trim to exact duration.
-                        # size=32767 is the ffmpeg loop filter max (safe for clips ≤18 min).
+                        # Ping-pong loop: forward then reverse, then loop the combined cycle.
+                        # At each loop boundary the end of "reverse" (frame 0) seamlessly
+                        # matches the start of "forward" (also frame 0), eliminating the
+                        # visible 8-second reset cut that loop=loop=-1 produces.
+                        clip_frames = max(1, round(entry.clip_duration_seconds * FRAME_RATE))
+                        ping_pong_frames = clip_frames * 2
+                        _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
                         tpad_filter_parts.append(
-                            f"{scale_label}loop=loop=-1:size=32767:start=0,"
+                            f"{scale_label}split=2[ff{clip_idx}][rf{clip_idx}];"
+                            f"[rf{clip_idx}]reverse[rv{clip_idx}];"
+                            f"[ff{clip_idx}][rv{clip_idx}]concat=n=2:v=1:a=0[pp{clip_idx}];"
+                            f"[pp{clip_idx}]loop=loop=-1:size={ping_pong_frames}:start=0,"
                             f"trim=duration={entry.duration_seconds:.3f},"
-                            f"setpts=PTS-STARTPTS{out_label}"
+                            f"setpts=PTS-STARTPTS,"
+                            f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
                         )
                     concat_input_labels.append(out_label)
                 elif hold_seconds > 0.001:
                     # Small gap (≤ 1.0s): tpad emergency fallback only.
+                    # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
                     out_label = f"[pv{clip_idx}]"
+                    _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
                     tpad_filter_parts.append(
                         f"{scale_label}tpad=stop_mode=clone"
-                        f":stop_duration={hold_seconds:.3f}{out_label}"
+                        f":stop_duration={hold_seconds:.3f},"
+                        f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
                     )
                     concat_input_labels.append(out_label)
                 else:
-                    # Clip duration == beat duration (within tolerance)
-                    concat_input_labels.append(scale_label)
+                    # Clip duration == beat duration (within tolerance).
+                    # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
+                    exact_label = f"[ev{clip_idx}]"
+                    _fade_st = max(0.0, entry.clip_duration_seconds - _CLIP_TAIL_FADE_SECS)
+                    tpad_filter_parts.append(
+                        f"{scale_label}fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{exact_label}"
+                    )
+                    concat_input_labels.append(exact_label)
                 clip_idx += 1
 
         clip_count = clip_idx
@@ -764,7 +845,8 @@ def _build_ffmpeg_concat_command(
         video_map = "0:v"
 
     # Audio inputs
-    audio_input_index = len(inputs) // 2  # number of ffmpeg -i inputs so far
+    # Count actual -i arguments (not len//2 — lavfi adds "-f lavfi -i" = 4 items for 1 input)
+    audio_input_index = inputs.count("-i")
     has_narration = narration_path is not None and narration_path.exists()
     has_music = music_track is not None and music_track.local_path.exists()
 
@@ -858,6 +940,15 @@ def _build_ffmpeg_concat_command(
         ]
         audio_map = f"{audio_input_index}:a"
 
+    # Loudnorm: target −16 LUFS / −1.5 TP for broadcast-safe output.
+    # Single-pass mode — avoids a second encode while providing a reasonable
+    # approximation of the integrated loudness target.
+    if audio_map == "[aout]":
+        filter_parts.append(
+            "[aout]loudnorm=I=-16:TP=-1.5:LRA=11[aout_final]"
+        )
+        audio_map = "[aout_final]"
+
     cmd: List[str] = ["ffmpeg", "-y"]
     cmd += inputs
 
@@ -871,6 +962,7 @@ def _build_ffmpeg_concat_command(
         "-c:v", _VIDEO_CODEC,
         "-c:a", _AUDIO_CODEC,
         "-b:a", _AUDIO_BITRATE,
+        "-ac", "2",
         "-crf", _CRF,
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
@@ -1087,19 +1179,30 @@ def _append_end_page(
         # copies 836.875s of samples, placing the endpage 171.4s too late.
         # filter_complex decodes via the sample PTS (last sample at 665.5s), which
         # gives correct frame-accurate timestamps in the re-encoded output.
+        #
+        # -t cap: prevents audio tail bleed that extended final duration by ~16.6s.
+        # Fade-out: 2s video+audio fade to black at the very end of the episode.
+        total_dur = body_duration + duration
+        fade_start = max(0.0, total_dur - 2.0)
         concat_cmd = [
             "ffmpeg", "-y",
             "-i", str(body_path),
             "-i", str(clip_path),
             "-filter_complex",
-            "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]",
+            (
+                "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vc][ac];"
+                f"[vc]fade=t=out:st={fade_start:.3f}:d=2[vout];"
+                f"[ac]afade=t=out:st={fade_start:.3f}:d=2[aout]"
+            ),
             "-map", "[vout]",
             "-map", "[aout]",
             "-c:v", _VIDEO_CODEC,
             "-c:a", _AUDIO_CODEC,
             "-b:a", _AUDIO_BITRATE,
+            "-ac", "2",
             "-crf", _CRF,
             "-pix_fmt", "yuv420p",
+            "-t", f"{total_dur:.6f}",
             str(main_output_path),
         ]
         concat_ok = _run_ffmpeg(

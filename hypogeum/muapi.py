@@ -103,6 +103,17 @@ _VEO3_MODELS: frozenset[str] = frozenset({
     "veo3-image-to-video",
 })
 
+# Veo3.1 models — explicitly send duration + resolution (1080p supported; $0.39/gen)
+# Confirmed 2026-07-06: veo3.1-lite-text-to-video ($0.39) is the correct lower-cost
+# path. veo3.1-fast costs $0.78 and does not honour resolution="1080p" (provider
+# mismatch confirmed via ffprobe). Duration and resolution MUST be sent explicitly.
+_VEO3_1_MODELS: frozenset[str] = frozenset({
+    "veo3.1-lite-text-to-video",
+    "veo3.1-fast-text-to-video",   # kept for completeness; costs $0.78, ignores resolution
+})
+_VEO3_1_DEFAULT_DURATION: int = 8
+_VEO3_1_DEFAULT_RESOLUTION: str = "1080p"
+
 # MUAPI models that accept a duration enum (5 or 8 only)
 _RUNWAY_MODELS: frozenset[str] = frozenset({
     "runway-text-to-video",
@@ -168,6 +179,8 @@ MODEL_CREDIT_COSTS: dict[str, float] = {
     "veo3-text-to-video": 2.5,
     "veo3-image-to-video": 2.5,
     "veo3-fast-text-to-video": 0.6,
+    "veo3.1-lite-text-to-video": 0.39,   # confirmed 2026-07-06: $0.39, better quality, 1080p candidate
+    "veo3.1-fast-text-to-video": 0.78,  # confirmed 2026-07-06: $0.78 actual cost; ignores resolution param
     "runway-text-to-video": 0.15,   # confirmed 2026-06-05 probe: 12 credits @ $0.0125/credit
     "runway-image-to-video": 0.15,  # assumed same tier as T2V
     "flux-2-dev": 0.015,
@@ -1899,7 +1912,10 @@ def _attempt_generation(
     """
     model = _tier_to_model(tier, reference_image_url, config)
     endpoint = f"{config.MUAPI_BASE_URL}/{model}"
-    payload = _build_job_payload(prompt, model, aspect_ratio, requested_duration, reference_image_url)
+    payload = _build_job_payload(
+        prompt, model, aspect_ratio, requested_duration, reference_image_url,
+        video_resolution=config.MUAPI_VIDEO_RESOLUTION,
+    )
 
     # M5.6 — Budget check before paid submission (skipped in dry-run — no real cost)
     if budget_guard is not None and not config.MUAPI_DRY_RUN:
@@ -2660,18 +2676,24 @@ def _build_job_payload(
     aspect_ratio: str,
     requested_duration: float,
     reference_image_url: Optional[str],
+    video_resolution: str = _VEO3_1_DEFAULT_RESOLUTION,
 ) -> dict:
     """
     Build the request payload for a MUAPI generation job.
 
     Duration handling:
-      - Veo3 models: no duration parameter (fixed 8s by provider)
+      - Veo3 models (legacy): no duration parameter (fixed 8s by provider)
+      - Veo3.1 models: duration + resolution sent explicitly (confirmed 2026-07-06)
       - Runway models: duration = 5 or 8 (integer enum; rounded from requested)
 
+    Resolution handling:
+      - Veo3.1: resolution sent explicitly (default "1080p"; overridable via video_resolution)
+      - All other models: resolution field omitted (provider determines from aspect_ratio)
+
     I2V conditioning — field names differ by provider:
-      - Veo3 I2V:   images_list = [url]  (array; confirmed architecture-index.md D7)
-      - Runway I2V: image_url   = url    (single string; confirmed 2026-06-06 live probe:
-                    422 body {"loc":["body","image_url"],"msg":"Field required"})
+      - Veo3 / Veo3.1 I2V: images_list = [url]  (array)
+      - Runway I2V:         image_url   = url    (single string; confirmed 2026-06-06 live probe:
+                            422 body {"loc":["body","image_url"],"msg":"Field required"})
       - Only included when reference_image_url is non-empty
     """
     payload: dict = {
@@ -2679,8 +2701,15 @@ def _build_job_payload(
         "aspect_ratio": aspect_ratio,
     }
 
-    if model in _VEO3_MODELS:
-        # Veo3: fixed 8s, no duration param
+    if model in _VEO3_1_MODELS:
+        # Veo3.1: explicitly send duration and resolution (1080p supported; $0.39/gen)
+        payload["duration"] = _VEO3_1_DEFAULT_DURATION
+        payload["resolution"] = video_resolution
+        if reference_image_url:
+            payload["images_list"] = [reference_image_url]
+
+    elif model in _VEO3_MODELS:
+        # Veo3 (legacy): fixed 8s, no duration param, no resolution param
         if reference_image_url:
             # I2V model: images_list takes array of URLs (max 1)
             payload["images_list"] = [reference_image_url]
@@ -2693,7 +2722,7 @@ def _build_job_payload(
         if reference_image_url:
             # Runway I2V (runway-image-to-video): uses "image_url" (single string).
             # Confirmed 2026-06-06 via live probe — 422 body: {"loc": ["body","image_url"],
-            # "msg": "Field required"}. NOTE: Veo3 I2V uses "images_list" (array) — different.
+            # "msg": "Field required"}. NOTE: Veo3/Veo3.1 I2V uses "images_list" (array) — different.
             payload["image_url"] = reference_image_url
 
     # For image models: no duration or images_list

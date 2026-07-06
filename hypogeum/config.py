@@ -243,8 +243,9 @@ class Config:
     MUAPI_API_KEY: Optional[str]
     MUAPI_BASE_URL: str                       # default: https://api.muapi.ai/api/v1
     MUAPI_T1_MODEL: str                       # default: veo3-text-to-video ($2.50/gen, premium)
-    MUAPI_T2_MODEL: str                       # default: veo3-fast-text-to-video ($0.60/gen, primary production tier)
-    MUAPI_T3_MODEL: str                       # default: veo3-fast-text-to-video ($0.60/gen, cheap-mode alias)
+    MUAPI_T2_MODEL: str                       # default: veo3.1-lite-text-to-video ($0.39/gen, primary production tier)
+    MUAPI_T3_MODEL: str                       # default: veo3.1-lite-text-to-video ($0.39/gen, cheap-mode alias)
+    MUAPI_VIDEO_RESOLUTION: str               # default: 1080p (sent explicitly for veo3.1 models)
     MUAPI_I2V_MODEL: str                      # default: veo3-image-to-video
     MUAPI_IMAGE_MODEL: str                    # legacy alias — use THUMBNAIL_IMAGE_MODEL
     THUMBNAIL_IMAGE_PROVIDER: str             # default: openrouter (primary)
@@ -421,8 +422,9 @@ class Config:
             "MUAPI_BASE_URL", default="https://api.muapi.ai/api/v1"
         )
         self.MUAPI_T1_MODEL = _get_optional("MUAPI_T1_MODEL", default="veo3-text-to-video")
-        self.MUAPI_T2_MODEL = _get_optional("MUAPI_T2_MODEL", default="veo3-fast-text-to-video")
-        self.MUAPI_T3_MODEL = _get_optional("MUAPI_T3_MODEL", default="veo3-fast-text-to-video")
+        self.MUAPI_T2_MODEL = _get_optional("MUAPI_T2_MODEL", default="veo3.1-lite-text-to-video")
+        self.MUAPI_T3_MODEL = _get_optional("MUAPI_T3_MODEL", default="veo3.1-lite-text-to-video")
+        self.MUAPI_VIDEO_RESOLUTION = _get_optional("MUAPI_VIDEO_RESOLUTION", default="1080p")
         self.MUAPI_I2V_MODEL = _get_optional("MUAPI_I2V_MODEL", default="veo3-image-to-video")
         self.MUAPI_IMAGE_MODEL = _get_optional("MUAPI_IMAGE_MODEL", default="flux-2-dev")  # legacy
         self.THUMBNAIL_IMAGE_PROVIDER = _get_optional("THUMBNAIL_IMAGE_PROVIDER", default="openrouter")
@@ -479,7 +481,7 @@ class Config:
         if self.SMOKE_TEST_MODE:
             if self.EPISODE_ZERO_MAX_SCENES == 0:
                 self.EPISODE_ZERO_MAX_SCENES = 2
-            # Force T2 for all scenes in smoke test — T2=veo3-fast-text-to-video since 2026-06-27
+            # Force T2 for all scenes in smoke test — T2=veo3.1-lite-text-to-video since 2026-07-06
             if not self.MUAPI_RUNWAY_ONLY_MODE and not self.MUAPI_CHEAP_MODE:
                 self.MUAPI_RUNWAY_ONLY_MODE = True
 

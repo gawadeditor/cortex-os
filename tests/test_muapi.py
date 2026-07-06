@@ -124,7 +124,7 @@ def make_config(
     muapi_key: str = "muapi-test-key",
     t1_model: str = "veo3-text-to-video",
     t2_model: str = "runway-text-to-video",
-    t3_model: str = "veo3-fast-text-to-video",
+    t3_model: str = "veo3.1-lite-text-to-video",
     i2v_model: str = "veo3-image-to-video",
     image_model: str = "flux-2-dev",
     poll_interval: int = 0,   # 0 for tests (no real sleep)
@@ -319,7 +319,7 @@ class TestSubmitSceneSuccess:
 
             result = submit_scene(spec, config, "ep_001", tmp_path)
 
-        assert result["model_used"] == "veo3-fast-text-to-video"
+        assert result["model_used"] == "veo3.1-lite-text-to-video"
 
     def test_x_api_key_header_used(self, tmp_path):
         config = make_config(muapi_key="my-real-key")
@@ -1013,6 +1013,7 @@ class TestSubmitSceneVeo3NoDuration:
         assert "duration" not in payload
 
     def test_veo3_t3_has_no_duration_field(self, tmp_path):
+        """Legacy veo3-fast (in _VEO3_MODELS) must NOT include duration."""
         config = make_config(t3_model="veo3-fast-text-to-video")
         spec = make_scene_spec(primary_tier=3, duration_seconds=8.0)
 
@@ -1028,6 +1029,26 @@ class TestSubmitSceneVeo3NoDuration:
 
         payload = mock_post.call_args[1]["json"]
         assert "duration" not in payload
+        assert "resolution" not in payload
+
+    def test_veo3_1_t3_has_duration_and_resolution(self, tmp_path):
+        """veo3.1-lite (new default T3) must include duration=8 and resolution='1080p'."""
+        config = make_config(t3_model="veo3.1-lite-text-to-video")
+        spec = make_scene_spec(primary_tier=3, duration_seconds=8.0)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+
+            mock_post.return_value = _mock_submit_ok()
+            mock_get.return_value = _mock_poll_completed()
+            submit_scene(spec, config, "ep_001", tmp_path)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["duration"] == 8
+        assert payload["resolution"] == "1080p"
 
 
 # ---------------------------------------------------------------------------
@@ -1103,7 +1124,7 @@ class TestHealthCheck:
         assert result == "unavailable"
 
     def test_t3_model_endpoint_used(self):
-        config = make_config(t3_model="veo3-fast-text-to-video")
+        config = make_config(t3_model="veo3.1-lite-text-to-video")
 
         m = MagicMock()
         m.status_code = 200
@@ -1114,7 +1135,7 @@ class TestHealthCheck:
             check_muapi_health(config)
 
         endpoint = mock_post.call_args[0][0]
-        assert "veo3-fast-text-to-video" in endpoint
+        assert "veo3.1-lite-text-to-video" in endpoint
 
 
 # ---------------------------------------------------------------------------
@@ -1272,7 +1293,7 @@ class TestInternalHelpers:
 
     def test_tier3_maps_to_t3_model(self):
         config = make_config()
-        assert _tier_to_model(3, None, config) == "veo3-fast-text-to-video"
+        assert _tier_to_model(3, None, config) == "veo3.1-lite-text-to-video"
 
     def test_reference_image_url_overrides_tier_to_i2v(self):
         config = make_config()
@@ -1307,14 +1328,73 @@ class TestInternalHelpers:
         assert payload["duration"] == 8
 
     def test_veo3_fast_payload_sends_aspect_ratio(self):
-        # veo3-fast-text-to-video is in _VEO3_MODELS — aspect_ratio is sent in the payload.
-        # Note: the provider may generate square output regardless (observed 2026-06-09
-        # during ep_smoke_01), but the payload is correct. No client-side fix applies.
+        # veo3-fast-text-to-video (legacy) is in _VEO3_MODELS — no duration, no resolution.
         payload = _build_job_payload(
             "prompt", "veo3-fast-text-to-video", "16:9", 8.0, None
         )
         assert payload["aspect_ratio"] == "16:9"
         assert "duration" not in payload
+        assert "resolution" not in payload
+
+    # --- veo3.1 payload tests (2026-07-06: new primary T2/T3 model) ---
+
+    def test_veo3_1_fast_payload_sends_duration(self):
+        """veo3.1 model must include duration=8 explicitly."""
+        payload = _build_job_payload(
+            "prompt", "veo3.1-lite-text-to-video", "16:9", 8.0, None
+        )
+        assert payload["duration"] == 8
+
+    def test_veo3_1_fast_payload_sends_resolution_1080p(self):
+        """veo3.1 model must include resolution='1080p' by default."""
+        payload = _build_job_payload(
+            "prompt", "veo3.1-lite-text-to-video", "16:9", 8.0, None
+        )
+        assert payload["resolution"] == "1080p"
+
+    def test_veo3_1_fast_payload_sends_aspect_ratio(self):
+        """veo3.1 model must include aspect_ratio in payload."""
+        payload = _build_job_payload(
+            "prompt", "veo3.1-lite-text-to-video", "16:9", 8.0, None
+        )
+        assert payload["aspect_ratio"] == "16:9"
+
+    def test_veo3_1_fast_payload_resolution_overridable(self):
+        """video_resolution param overrides the default '1080p'."""
+        payload = _build_job_payload(
+            "prompt", "veo3.1-lite-text-to-video", "16:9", 8.0, None,
+            video_resolution="720p",
+        )
+        assert payload["resolution"] == "720p"
+
+    def test_veo3_1_i2v_payload_has_images_list(self):
+        """veo3.1 with reference image must use images_list (array), same as veo3."""
+        ref = "https://cdn.higgsfield.ai/ref.jpg"
+        payload = _build_job_payload(
+            "prompt", "veo3.1-lite-text-to-video", "16:9", 8.0, ref
+        )
+        assert payload["images_list"] == [ref]
+        assert "image_url" not in payload
+
+    def test_veo3_1_payload_no_extra_fields(self):
+        """veo3.1 T2V must not include image_url or images_list when no reference."""
+        payload = _build_job_payload(
+            "prompt", "veo3.1-lite-text-to-video", "16:9", 8.0, None
+        )
+        assert "image_url" not in payload
+        assert "images_list" not in payload
+
+    def test_veo3_1_complete_payload_shape(self):
+        """Full canonical payload for veo3.1 T2V: prompt, aspect_ratio, duration, resolution."""
+        payload = _build_job_payload(
+            "cinematic landscape", "veo3.1-lite-text-to-video", "16:9", 8.0, None
+        )
+        assert payload == {
+            "prompt": "cinematic landscape",
+            "aspect_ratio": "16:9",
+            "duration": 8,
+            "resolution": "1080p",
+        }
 
     def test_veo3_i2v_payload_has_images_list(self):
         payload = _build_job_payload(

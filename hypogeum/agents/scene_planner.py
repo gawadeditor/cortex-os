@@ -44,8 +44,8 @@ PROVIDER_CAPABILITIES: dict = {
         },
         "quality_tiers": {
             "1": "premium quality — veo3-text-to-video ($2.50/gen); reserve for hero/opening scenes",
-            "2": "standard — veo3-fast-text-to-video ($0.60/gen) [primary production tier; use for all scenes unless T1 is justified]",
-            "3": "cheap-mode alias — veo3-fast-text-to-video ($0.60/gen) [same model as T2; used when MUAPI_CHEAP_MODE=true]",
+            "2": "standard — veo3.1-lite-text-to-video ($0.39/gen, 1080p candidate) [primary production tier; use for all scenes unless T1 is justified]",
+            "3": "cheap-mode alias — veo3.1-lite-text-to-video ($0.39/gen, 1080p candidate) [same model as T2; used when MUAPI_CHEAP_MODE=true]",
         },
         "i2v_note": (
             "When a final-locked entity has a reference image, Python code injects "

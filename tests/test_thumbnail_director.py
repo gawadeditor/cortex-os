@@ -187,7 +187,11 @@ def _make_generation_plan(episode_id: str = "ep_001") -> dict:
                     "image_prompt": (
                         "Ancient Egyptian interior vault, warm amber torchlight pooling "
                         "on carved sandstone walls, near-black void surrounding, "
-                        "wide atmospheric depth, dramatic chiaroscuro, empty chamber"
+                        "wide atmospheric depth, dramatic chiaroscuro, empty chamber. "
+                        "Top 12% of frame near-black and completely clear of all subject detail, "
+                        "reserved for wordmark overlay. "
+                        "Bottom 10% of frame completely empty — no scene content, no inscriptions, "
+                        "no symbols, no captions, no labels."
                     ),
                     "aspect_ratio": "16:9",
                     "ctr_rationale": "Highest candidate_strength_score; curiosity gap served.",
@@ -199,11 +203,15 @@ def _make_generation_plan(episode_id: str = "ep_001") -> dict:
                     "image_prompt": (
                         "Ancient Egyptian temple ruins at dusk, crumbling pylons against "
                         "near-black sky, warm golden-hour light raking across stone, "
-                        "deep atmospheric perspective, wide establishing shot"
+                        "deep atmospheric perspective, wide establishing shot. "
+                        "Top 12% of frame near-black and completely clear of all subject detail, "
+                        "reserved for wordmark overlay. "
+                        "Bottom 10% of frame completely empty — no scene content, no inscriptions, "
+                        "no symbols, no captions, no labels."
                     ),
                     "aspect_ratio": "16:9",
                     "ctr_rationale": "Exterior ruins variant; strong atmospheric depth.",
-                    "text_overlay": {"text": "Who was he hiding?", "placement": "bottom"},
+                    "text_overlay": {"text": "What did they find?", "placement": "bottom"},
                 },
                 {
                     "candidate_id": "td_ep_001_style_C",
@@ -211,11 +219,15 @@ def _make_generation_plan(episode_id: str = "ep_001") -> dict:
                     "image_prompt": (
                         "Lone shadowed human silhouette standing at base of massive "
                         "ancient stone pylon, near-black background, warm amber key "
-                        "light from one side, scale contrast emphasising monumental age"
+                        "light from one side, scale contrast emphasising monumental age. "
+                        "Top 12% of frame near-black and completely clear of all subject detail, "
+                        "reserved for wordmark overlay. "
+                        "Bottom 10% of frame completely empty — no scene content, no inscriptions, "
+                        "no symbols, no captions, no labels."
                     ),
                     "aspect_ratio": "16:9",
                     "ctr_rationale": "Silhouette scale contrast; reinforces mystery and grandeur.",
-                    "text_overlay": {"text": "Who was he hiding?", "placement": "bottom"},
+                    "text_overlay": {"text": "Why was it buried?", "placement": "bottom"},
                 },
             ]
         },

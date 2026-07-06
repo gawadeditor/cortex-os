@@ -96,6 +96,14 @@ def _make_candidate(rank: int, prompt: str, hook: str, cid: str = None) -> dict:
     }
 
 
+_ZONE_RESERVATION = (
+    " Top 12% of frame near-black and completely clear of all subject detail, "
+    "reserved for wordmark overlay. "
+    "Bottom 10% of frame completely empty — no scene content, no inscriptions, "
+    "no symbols, no captions, no labels."
+)
+
+
 def _make_distinct_plan(episode_id: str = "ep_001") -> dict:
     return {
         "thumbnail_generation_plan_id": f"tgp_{episode_id}",
@@ -105,19 +113,22 @@ def _make_distinct_plan(episode_id: str = "ep_001") -> dict:
                 _make_candidate(1,
                     "A single artifact of impossible precision suspended in pure darkness, "
                     "no context, no origin, only the object and the void — the gear teeth "
-                    "casting geometric shadows in amber torchlight, cinematic wide shot",
+                    "casting geometric shadows in amber torchlight, cinematic wide shot."
+                    + _ZONE_RESERVATION,
                     "IT SHOULDN'T EXIST",
                     "tsc_ep_001_A"),
                 _make_candidate(2,
                     "An empty stone archive shelf in amber torchlight, the outline of a "
                     "small object still faintly pressed into the dust, something removed "
-                    "and not returned — deep shadow beyond the shelf, near-black void",
+                    "and not returned — deep shadow beyond the shelf, near-black void."
+                    + _ZONE_RESERVATION,
                     "THE KNOWLEDGE DIED",
                     "tsc_ep_001_B"),
                 _make_candidate(3,
                     "A vast ancient harbour at night, one tiny corroded fragment catching "
                     "the last amber glow of a dying fire against the black water — "
-                    "immeasurably small against immeasurably old, atmospheric wide shot",
+                    "immeasurably small against immeasurably old, atmospheric wide shot."
+                    + _ZONE_RESERVATION,
                     "ONLY THE MACHINE SURVIVED",
                     "tsc_ep_001_C"),
             ]

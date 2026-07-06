@@ -125,14 +125,48 @@ def _make_visual_package(n_scenes: int = 3) -> dict:
     }
 
 
+_DISTINCT_MAIN_PROMPTS = [
+    (
+        "Subterranean vault corridor, near-black void, warm amber torchlight "
+        "raking across ancient carved stone, atmospheric depth. "
+        "Top 12% of frame near-black and completely clear of all subject detail, "
+        "reserved for wordmark overlay. "
+        "Bottom 10% of frame completely empty — no scene content, no inscriptions, "
+        "no symbols, no captions, no labels."
+    ),
+    (
+        "Aerial view of collapsed Roman amphitheatre at dusk, deep shadow "
+        "filling the arena floor, golden-hour rim light on stone tiers. "
+        "Top 12% of frame near-black and completely clear of all subject detail, "
+        "reserved for wordmark overlay. "
+        "Bottom 10% of frame completely empty — no scene content, no inscriptions, "
+        "no symbols, no captions, no labels."
+    ),
+    (
+        "Lone silhouette standing at threshold of massive ancient doorway, "
+        "near-black background, bronze light from one side, scale contrast. "
+        "Top 12% of frame near-black and completely clear of all subject detail, "
+        "reserved for wordmark overlay. "
+        "Bottom 10% of frame completely empty — no scene content, no inscriptions, "
+        "no symbols, no captions, no labels."
+    ),
+]
+
+_DISTINCT_MAIN_HOOKS = [
+    "Who was he hiding?",
+    "What did they find?",
+    "Why was it buried?",
+]
+
+
 def _make_generation_plan(n_main: int = 3, n_shorts: int = 0) -> dict:
     main_cands = [
         {
             "candidate_id": f"main_{i:02d}",
             "rank": i,
-            "image_prompt": f"Dark stone ruins with gold wordmark, candidate {i}",
+            "image_prompt": _DISTINCT_MAIN_PROMPTS[(i - 1) % len(_DISTINCT_MAIN_PROMPTS)],
             "aspect_ratio": "16:9",
-            "text_overlay": None,
+            "text_overlay": {"text": _DISTINCT_MAIN_HOOKS[(i - 1) % len(_DISTINCT_MAIN_HOOKS)], "placement": "bottom"},
         }
         for i in range(1, n_main + 1)
     ]
@@ -794,6 +828,7 @@ class TestExtractPass2Candidates:
 
     def test_null_text_overlay_becomes_empty_string(self):
         plan = _make_generation_plan(n_main=1)
+        plan["main_episode"]["ranked_candidates"][0]["text_overlay"] = None
         candidates = _extract_pass2_candidates(plan)
         assert candidates[0]["text_overlay"] == ""
 

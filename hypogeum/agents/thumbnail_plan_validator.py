@@ -9,8 +9,32 @@ Public API:
     validate_post_compositing(candidate) -> dict
     validate_all_candidates_pre_generation(candidates) -> dict
     validate_ctr_readability(candidates) -> dict
+    validate_prompt_zone_reservations(candidate) -> dict
+    validate_all_prompts_zone_reservations(candidates) -> dict
+
+Exceptions:
+    ThumbnailPreGenerationError — raised by thumbnail_director when any blocking
+        validator fires. Callers may catch this to halt the pipeline cleanly.
 """
 from __future__ import annotations
+
+
+class ThumbnailPreGenerationError(RuntimeError):
+    """
+    Raised when a pre-generation thumbnail validator fires a blocking failure.
+
+    Attributes:
+        validator:  Name of the validator that fired (e.g. "ctr_readability").
+        failures:   List of failure strings from the validator result.
+    """
+
+    def __init__(self, validator: str, failures: list) -> None:
+        self.validator = validator
+        self.failures = failures
+        summary = "; ".join(str(f) for f in failures[:3])
+        super().__init__(
+            f"Thumbnail pre-generation blocked by {validator!r}: {summary}"
+        )
 
 
 def validate_composition_typography_pre_generation(candidate: dict) -> dict:
@@ -40,6 +64,12 @@ def validate_composition_typography_pre_generation(candidate: dict) -> dict:
     errors: list[str] = []
     prompt_lower = prompt.lower()
 
+    # composite_mode=True means the PIL compositor handles typography placement
+    # independently of the image_prompt. Checks 2 and 3 (which require the image
+    # model to reserve a zone for text) do not apply — the image model is not
+    # responsible for accommodating typography in this mode.
+    composite_mode = bool(candidate.get("composite_mode"))
+
     # 1. Zone consistency
     comp_zone = comp.get("text_zone", "")
     typo_zone = typo.get("zone", "")
@@ -48,15 +78,15 @@ def validate_composition_typography_pre_generation(candidate: dict) -> dict:
             f"composition_plan.text_zone ({comp_zone!r}) != typography_plan.zone ({typo_zone!r})"
         )
 
-    # 2. image_prompt mentions reserved text zone
-    if comp_zone and not _prompt_mentions_zone(prompt_lower, comp_zone):
+    # 2. image_prompt mentions reserved text zone (skip in composite mode)
+    if not composite_mode and comp_zone and not _prompt_mentions_zone(prompt_lower, comp_zone):
         errors.append(
             f"image_prompt does not mention reserved text zone {comp_zone!r}"
         )
 
-    # 3. image_prompt mentions negative space
+    # 3. image_prompt mentions negative space (skip in composite mode)
     neg_zones = comp.get("negative_space_zones", [])
-    if neg_zones and not _prompt_mentions_negative_space(prompt_lower, neg_zones):
+    if not composite_mode and neg_zones and not _prompt_mentions_negative_space(prompt_lower, neg_zones):
         errors.append(
             "image_prompt does not mention negative space or reserved empty zones"
         )
@@ -147,9 +177,19 @@ def validate_ctr_readability(candidates: list[dict]) -> dict:
 
     # Per-candidate checks
     for c in candidates:
-        cid  = c.get("candidate_id", "unknown")
-        comp = c.get("composition_plan") or {}
-        typo = c.get("typography_plan") or {}
+        cid      = c.get("candidate_id", "unknown")
+        comp_raw = c.get("composition_plan")
+        typo_raw = c.get("typography_plan")
+
+        # Skip per-candidate CTR checks when no composition_plan is present.
+        # Consistent with validate_composition_typography_pre_generation: plans
+        # are optional in legacy-mode (LLM writes them inline). CTR rules only
+        # fire when the plan is explicitly present and contains failing values.
+        if comp_raw is None:
+            continue
+
+        comp = comp_raw
+        typo = typo_raw or {}
 
         env_level    = comp.get("environment_level", "none")
         focal_scale  = comp.get("focal_scale", "medium")
@@ -250,19 +290,23 @@ def validate_prompt_zone_reservations(candidate: dict) -> dict:
             "reserved for wordmark overlay'"
         )
 
-    # Bottom 10% clean zone — must forbid model-generated text
+    # Bottom 10% clean zone — must forbid model-generated text (BLOCKING)
+    # Promoted from warning to error: if the bottom zone is not reserved, the image
+    # model will render scene content there, making the PIL hook text invisible or
+    # illegible. This directly caused the missing hook text failure on ep_reg_vi_colosseum.
     bottom_zone_phrases = [
         "bottom 10%", "bottom 12%", "bottom 8%",
         "no text", "no inscription", "no inscriptions", "no caption", "no captions",
         "no symbols", "no labels", "no lettering", "no writing",
         "no model-generated text", "no generated text", "completely empty",
-        "no marks", "no decorative marks",
+        "no marks", "no decorative marks", "empty bottom", "bottom safe zone",
+        "bottom_safe_zone",
     ]
     if not any(p in prompt for p in bottom_zone_phrases):
-        warnings.append(
-            "image_prompt does not explicitly forbid model-generated text in the bottom zone. "
-            "Add: 'bottom 10% of frame completely empty — no inscriptions, no symbols, no captions, "
-            "no labels' to prevent hallucinated text."
+        errors.append(
+            "image_prompt does not explicitly reserve the bottom hook text zone. "
+            "Add: 'bottom 10% of frame completely empty — no scene content, no inscriptions, "
+            "no symbols, no captions, no labels' to ensure PIL hook text is legible."
         )
 
     # Inscription invitation — words that invite model to render text on image

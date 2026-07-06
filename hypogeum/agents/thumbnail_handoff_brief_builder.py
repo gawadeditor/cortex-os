@@ -40,6 +40,57 @@ from hypogeum.schemas import validate
 
 _AGENT_NAME = "visual_package_director"  # preserved for audit log continuity
 
+# ---------------------------------------------------------------------------
+# Constraint normalization
+#
+# The VPD LLM sometimes writes negative_constraints that mandate warm amber
+# as the dominant palette ("palette must stay warm ochre and amber") — this
+# directly contradicts the brand bible's void_black dominant requirement.
+#
+# This list of substrings identifies those constraints. Any negative_constraint
+# that contains one of these strings is replaced with the correct brand rule.
+# ---------------------------------------------------------------------------
+
+_AMBER_MANDATE_PATTERNS: tuple[str, ...] = (
+    "palette must stay warm",
+    "stay warm ochre",
+    "warm ochre and amber",
+    "no cool blue dominant lighting",   # this phrasing paired with amber mandate
+)
+
+_BRAND_CANONICAL_CONSTRAINT = (
+    "void_black / near-black must be the dominant background tone — "
+    "warm amber and gold appear as accent lighting only, not as background fill; "
+    "no bright orange, bright amber, or high-key warm dominance"
+)
+
+
+def _normalize_constraints(constraints: list[str]) -> list[str]:
+    """
+    Enforce brand-correct palette constraint in negative_constraints.
+
+    Replaces any VPD-generated constraint that mandates warm amber dominance
+    with the canonical void_black dominant rule from the brand bible.
+    Appends the canonical rule if no amber-mandate pattern is found but the
+    canonical rule is also absent (idempotent — will not add duplicates).
+    """
+    normalized: list[str] = []
+    replaced = False
+    for c in constraints:
+        if any(pat in c.lower() for pat in _AMBER_MANDATE_PATTERNS):
+            if not replaced:
+                normalized.append(_BRAND_CANONICAL_CONSTRAINT)
+                replaced = True
+            # drop the offending constraint; do not carry it forward
+        else:
+            normalized.append(c)
+
+    # Guarantee the canonical rule is present even if no pattern matched
+    if not replaced and _BRAND_CANONICAL_CONSTRAINT not in normalized:
+        normalized.append(_BRAND_CANONICAL_CONSTRAINT)
+
+    return normalized
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -91,7 +142,9 @@ def build_thumbnail_handoff_brief(
         "short_candidates": embedded.get("short_candidates", []),
         "primary_subject_identity": embedded.get("primary_subject_identity", {}),
         "episode_color_palette": embedded.get("episode_color_palette", ""),
-        "negative_constraints": embedded.get("negative_constraints", []),
+        "negative_constraints": _normalize_constraints(
+            embedded.get("negative_constraints", [])
+        ),
     }
 
     validate("thumbnail_handoff_brief", brief)

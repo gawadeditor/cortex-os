@@ -59,12 +59,13 @@ Background:
 - Depth created by atmospheric darkness or shadow, not by white space
 - No white, no beige, no tan, no warm-brown dominant backgrounds
 
-Wordmark (small brand element — not the hero):
-- THE HYPOGEUM CHRONICLES wordmark is composited at small scale onto 16:9 thumbnails as channel branding
-- The wordmark occupies a small zone (8–10% of thumbnail area) in the upper frame — it is NOT the dominant visual
-- The story image is what the viewer notices first; the brand is what confirms the channel
-- The top 12% of frame must remain near-black or very deep shadow to keep the wordmark legible at its reduced size
-- Design so the viewer notices the story, then reads the brand — not the other way round
+Wordmark (PRIMARY COMPOSITIONAL ANCHOR — mandatory):
+- THE / HYPOGEUM / — CHRONICLES — is the primary visual anchor of every Hypogeum thumbnail
+- HYPOGEUM must be dominant, large, and immediately readable at YouTube thumbnail scale (~320px wide)
+- The wordmark is what the viewer's eye establishes first as the channel identity; the story image supports this — not the other way round
+- The top 12% of frame must remain near-black or very deep shadow — this is the wordmark landing zone and must be completely clear of subject detail
+- Do NOT treat the wordmark as an afterthought overlay. The generated image must compositionally accommodate a large dominant wordmark in the upper frame
+- Prompts must explicitly instruct the image model to keep the top 12% near-black and empty — this is a hard compositional requirement, not an optional note
 
 Subject treatment:
 - Archaeological subject occupies the mid-to-background, not the foreground
@@ -578,5 +579,6 @@ CRITICAL CONSTRAINTS — MUST NOT BE VIOLATED:
 7. primary_subject_identity must appear in the rank-1 main_episode candidate prompt.
 8. negative_constraints must not be violated in any image_prompt.
 9. text_overlay for ALL THREE main_episode candidates MUST be non-null. Each must have "text" (string, 3–5 words) and "placement" ("top" | "bottom"). The text may be the same across candidates but the compositions must differ.
-10. Every image_prompt must follow the Hypogeum dark brand palette: near-black background, warm amber/bronze/gold accents, dramatic chiaroscuro — see SECTION 2B. Warm tones only.
-11. Respond with valid JSON only. No prose, no markdown, no code fences.
+10. Every image_prompt must follow the Hypogeum dark brand palette: near-black / void_black DOMINANT background, warm amber/bronze/gold as accent lighting only — never as dominant background fill. Explicitly forbid warm amber or ochre as the background base tone — see SECTION 2B.
+11. Every main_episode image_prompt MUST include an explicit top-zone reservation — "top 12% of frame near-black and empty" or equivalent — to protect the dominant wordmark landing zone. Prompts that omit this will be rejected by the pre-generation validator.
+12. Respond with valid JSON only. No prose, no markdown, no code fences.

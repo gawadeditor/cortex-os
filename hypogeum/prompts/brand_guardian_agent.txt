@@ -42,11 +42,30 @@ Any of the following make a scene BLOCKING:
 - Light or white dominant surfaces (bright white walls, white backgrounds)
 - Modern urban environment as setting (glass skyscrapers, contemporary city)
 
-**Category D — Thumbnail-specific blocking (Pass 2 only, rules E-TH01, E-TH07, E-L01 through E-L09)**
+**Category D — Thumbnail-specific blocking (Pass 2 only, rules E-TH01–E-TH07, E-L01 through E-L09)**
 For thumbnail candidates, these are BLOCKING:
 - Human face as primary compositional subject (rule E-TH01: zero faces in any thumbnail)
 - Light or bright background (rule E-TH07: all thumbnails must have dark atmospheric backgrounds)
 - Wordmark structure violated when wordmark is specified: not three-line, wrong hierarchy, missing em-dashes around CHRONICLES, CHRONICLES larger than HYPOGEUM
+- Warm amber, ochre, or golden tone as the DOMINANT BACKGROUND fill of the image (rule E-TH02).
+  Warm tones are permitted as accent lighting and mid-ground highlights only. A prompt is in violation
+  when it describes warm amber or ochre as the background base, dominant atmosphere, or primary
+  environmental tone — e.g. "warm amber fills the frame", "ochre-dominant interior", "golden sandy
+  floor dominates the lower half". The correct standard is void_black / near-black dominant.
+  Flag prompt excerpts that use warm tones as the primary background descriptor.
+- Two or more prominent human figures as dual foreground compositional subjects (rule E-TH03).
+  A single small human silhouette against architectural scale is ON-REGISTER. Two figures placed
+  symmetrically in left and right foreground positions as primary framing elements are BLOCKING —
+  they compete with the wordmark and violate the face rule in spirit even if no direct faces are shown.
+  Flag prompts that describe two figures flanking the frame or placed as matched foreground subjects.
+- image_prompt does not explicitly reserve the top 12% as near-black / empty for the dominant wordmark
+  (rule E-TH04). Every main_episode prompt must contain language that keeps the top zone clear of
+  subject detail. Absence of this reservation means the image model will place scene content in the
+  wordmark zone, making the brand identity illegible. Flag prompts that have no top-zone reservation phrase.
+- image_prompt does not explicitly reserve the bottom zone as empty for PIL hook text (rule E-TH05).
+  Without an explicit prohibition, the image model will render scene content, figures, or architectural
+  detail at the bottom of the frame, making PIL-composited hook text invisible or illegible.
+  Flag prompts with no bottom-zone reservation phrase.
 
 **Category E — Typography violations when explicitly specified (rules E-T01 through E-T03)**
 BLOCKING only if the image prompt explicitly specifies a typeface AND that typeface is not Cinzel or Raleway:

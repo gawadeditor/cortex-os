@@ -340,9 +340,16 @@ class TestConceptDrivenModeRules:
         for word in ["corroded", "bronze", "fragment", "gear", "tablet", "column", "torch"]:
             assert word in prompt_lower, f"Expected '{word}' in FORBIDDEN list in SECTION 11C"
 
-    def test_wordmark_is_not_hero_in_prompt(self):
-        """Prompt must say wordmark is small branding, not the hero."""
-        assert "not the hero" in SYSTEM_PROMPT.lower() or "small brand" in SYSTEM_PROMPT.lower()
+    def test_wordmark_is_primary_anchor_in_prompt(self):
+        """Prompt must establish the wordmark as the primary compositional anchor."""
+        prompt_lower = SYSTEM_PROMPT.lower()
+        # The old "story first, brand second" framing has been replaced with
+        # wordmark-dominant language. Assert the new correct framing is present.
+        assert (
+            "primary compositional anchor" in prompt_lower
+            or "dominant wordmark" in prompt_lower
+            or "wordmark landing zone" in prompt_lower
+        ), "Section 2B must establish the wordmark as primary compositional anchor"
 
 
 # ---------------------------------------------------------------------------

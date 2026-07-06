@@ -69,6 +69,7 @@ from typing import Optional
 from hypogeum.agents.thumbnail_generation_agent import generate_thumbnails
 from hypogeum.agents.thumbnail_killer_concept_validator import validate_concept_quality
 from hypogeum.agents.thumbnail_plan_validator import (
+    ThumbnailPreGenerationError,
     validate_all_candidates_pre_generation,
     validate_all_prompts_zone_reservations,
     validate_ctr_readability,
@@ -186,6 +187,9 @@ def run_thumbnail_director(
             failures=distinctness_result["failures"],
             concept_driven=concept_brief is not None,
         )
+        raise ThumbnailPreGenerationError(
+            "prompt_distinctness", distinctness_result["failures"]
+        )
     if distinctness_result["warnings"]:
         log.warn(
             "td_prompt_distinctness_warnings",
@@ -214,9 +218,12 @@ def run_thumbnail_director(
     # ------------------------------------------------------------------
     plan_validation = validate_all_candidates_pre_generation(main_candidates_for_validation)
     if not plan_validation["passed"]:
-        log.warn(
-            "td_plan_validation_warnings",
+        log.error(
+            "td_plan_validation_failed",
             failures=plan_validation["failures"],
+        )
+        raise ThumbnailPreGenerationError(
+            "composition_typography_plan", plan_validation["failures"]
         )
 
     # ------------------------------------------------------------------
@@ -228,6 +235,9 @@ def run_thumbnail_director(
             "td_ctr_readability_failed",
             errors=ctr_validation["errors"],
             concept_driven=concept_brief is not None,
+        )
+        raise ThumbnailPreGenerationError(
+            "ctr_readability", ctr_validation["errors"]
         )
     if ctr_validation["warnings"]:
         log.warn(
@@ -243,6 +253,9 @@ def run_thumbnail_director(
         log.error(
             "td_zone_reservation_failed",
             failures=zone_validation["failures"],
+        )
+        raise ThumbnailPreGenerationError(
+            "zone_reservations", [f["errors"] for f in zone_validation["failures"]]
         )
     if zone_validation["warnings"]:
         log.warn(

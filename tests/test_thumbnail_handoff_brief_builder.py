@@ -179,7 +179,10 @@ class TestBuildThumbnailHandoffBrief:
     def test_negative_constraints_preserved(self, tmp_path):
         vp = _make_visual_package()
         brief = build_thumbnail_handoff_brief(vp, "ep_001", tmp_path)
-        assert brief["negative_constraints"] == ["No supernatural elements"]
+        # _normalize_constraints preserves original constraints and appends the
+        # canonical void_black dominant rule when no amber-mandate pattern is found.
+        assert "No supernatural elements" in brief["negative_constraints"]
+        assert any("void_black" in c for c in brief["negative_constraints"])
 
     def test_central_curiosity_gap_preserved(self, tmp_path):
         vp = _make_visual_package()

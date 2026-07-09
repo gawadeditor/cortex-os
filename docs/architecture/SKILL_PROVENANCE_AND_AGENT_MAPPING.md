@@ -119,8 +119,29 @@ The following is a hard rule for all future skill-related work in this repositor
 
 ---
 
-## 6. Next Safe Step
+## 6. Seedance2 Upstream Verification
 
-Do not begin any external-skill installation work yet. The single next smallest safe step is to **obtain a real, explicit upstream source (URL or official install command) for exactly one of the six BLOCKED skills named in `SKILLS_AND_AGENTS_AUDIT.md` §6** — starting with whichever one is most immediately useful to unblock current pipeline work (per `CURRENT_PHASE.md`'s "Skill redesign" priority, this is most plausibly a Veo/Seedance-related skill given the existing internal `veo_translation_skill.md`/`seedance_translation_skill.md` reference docs already in production use). This is a sourcing decision, not an implementation step — it requires the user to supply or confirm the actual external source before any file is written, per the Installation Policy in §5. No other skill or agent work should proceed ahead of this.
+**Canonical URL:** `https://github.com/dexhunter/seedance2-skill`
+
+**Status: VERIFIED / do not install yet.**
+
+- **Verified real Claude Skill:** confirmed via GitHub API (`api.github.com/repos/dexhunter/seedance2-skill`) — public, non-fork, 2,647 stars, 269 forks, created 2026-02-11, last code push 2026-02-18. Root `SKILL.md` (15,337 bytes) carries valid Claude Skill YAML frontmatter (`name: seedance-prompt-en`, `description: ...`); a parallel `zh/SKILL.md` (17,450 bytes) provides a Chinese-language variant. Not a bare script or unrelated repo — a genuine, well-formed Claude Skill.
+- **License:** MIT (`LICENSE` file present at repo root, confirmed via API `license.spdx_id: MIT`).
+- **Install method from upstream (as documented in the repo's own `README.md`):**
+  - Option A (repo's stated recommendation) — manual copy: `cp SKILL.md ~/.claude/skills/seedance-prompt-en.md` (flat renamed file, not a `<name>/SKILL.md` directory).
+  - Option B — `npx skills add dexhunter/seedance2-skill` via the third-party `agentskills.io` CLI ecosystem (not an Anthropic-native mechanism).
+  - No installation has been performed. This section documents the method for a future, separately-authorized task only.
+- **Intended Hypogeum target: `hypogeum/agents/visual_package_director.py` Stage B only** — the same stage that currently loads `seedance_translation_skill.compact.md` (per §2 of this document). No other stage of VPD, and no other agent, is a candidate target.
+- **Agents that must NOT receive it:** every other LLM-calling agent — `executive_producer.py`, `research_director.py`, `narrative_architect.py`, `script_engine.py`, `shot_diversity_planner.py` (receives cinematic vocabulary only, not provider-translation content), `thumbnail_prompt_writer.py`, `thumbnail_identity_guardian.py`, `brand_guardian_agent.py`, `thumbnail_strategy.py`, `hypogeum/discovery/topic_ideator.py`. None of these write Seedance-facing video prompts; injecting this skill into any of them would repeat the "generic skill loaded where not needed" anti-pattern this document's §4 confirms is currently absent.
+- **Reconciliation required before any adoption — do not blindly replace:** direct comparison of upstream `SKILL.md` against `hypogeum/skills/seedance_translation_skill.md` found the input-limits table in Hypogeum's internal skill — "Images: up to 9... Videos: up to 3 (mp4, mov; max 50 MB each, total duration 2–15s)... Audio: up to 3 (mp3, wav; max 15 MB each, total ≤ 15s)... Total files: up to 12 combined" — is **verbatim-identical** to the upstream repo's table, cited internally under evidence tag `SEED-COMM-01` ("attributed to official ByteDance documentation by source", confidence L3) without ever naming this URL. Hypogeum's existing skill therefore appears to already share content with this exact upstream source, undocumented until now. Two concrete discrepancies must be resolved as part of any future reconciliation, not skipped:
+  - **Product surface mismatch:** upstream documents **Jimeng Seedance 2.0** (ByteDance's consumer app, resolution capped 480p–720p). Hypogeum's production path runs through **BytePlus Ark** / **MUAPI**, and Hypogeum's internal skill documents a broader resolution range (480p–4K on the full model tier) than upstream states — a direct overwrite would silently narrow Hypogeum's documented capability.
+  - **Duration configuration history:** Hypogeum's internal skill contains its own explicit self-correction ("Previous versions of this skill documented 5-second duration as 'fixed' for Seedance. This was incorrect — it reflected the Hypogeum MUAPI pipeline configuration... not the model's capability"). Any reconciliation must not reintroduce that same conflation between Hypogeum's current pipeline defaults and the model's actual supported range.
+  - Per Installation Policy §5 rule 4, if this upstream skill is ever adopted, any Hypogeum-specific reconciliation of these two points must live in a separate thin wrapper/config note — the upstream file's own content must not be edited in place, and Hypogeum's existing internal skill must not be deleted or silently overwritten without an explicit reconciliation decision.
+
+---
+
+## 7. Next Safe Step
+
+Do not begin any external-skill installation work yet, including for `seedance2-skill` — §6 verifies its authenticity but does not authorize installation. The single next smallest safe step remains: **obtain a real, explicit upstream source (URL or official install command) for the remaining unresolved BLOCKED skills named in `SKILLS_AND_AGENTS_AUDIT.md` §6** (Humanizer, GPT Image2, Veo Prompt Director, Veo Tools, UI/UX Pro Max — Seedance2 is now sourced per §6 above but still not installed), or, alternatively, make the explicit reconciliation decision for Seedance2 described in §6 before any installation proceeds. This is a sourcing/decision step, not an implementation step. No other skill or agent work should proceed ahead of this.
 
 No implementation is authorized by this document.

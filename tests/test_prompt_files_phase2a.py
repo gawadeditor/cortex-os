@@ -71,7 +71,7 @@ _AGENT_PROMPT_ATTRS = {
     "thumbnail_identity_guardian": ("hypogeum.agents.thumbnail_identity_guardian", "_SYSTEM_PROMPT"),
     "brand_guardian_agent":     ("hypogeum.agents.brand_guardian_agent",     "SYSTEM_PROMPT"),
     "topic_ideator":            ("hypogeum.discovery.topic_ideator",         "SYSTEM_PROMPT"),
-    "thumbnail_strategy":       ("hypogeum.skills.thumbnail_strategy",       "SYSTEM_PROMPT"),
+    "thumbnail_strategy":       ("hypogeum.agents.thumbnail_strategy",       "SYSTEM_PROMPT"),
 }
 
 

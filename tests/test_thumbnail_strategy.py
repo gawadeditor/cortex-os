@@ -48,7 +48,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hypogeum.schemas import SchemaError, validate
-from hypogeum.skills.thumbnail_strategy import _build_strategy_brief, run_thumbnail_strategy
+from hypogeum.agents.thumbnail_strategy import _build_strategy_brief, run_thumbnail_strategy
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +340,7 @@ class TestThumbnailStrategySkill:
         expected["episode_id"] = "ep_001"
         expected["thumbnail_concept_brief_id"] = "tcb_ep_001"
 
-        with patch("hypogeum.skills.thumbnail_strategy.run_agent", return_value=expected):
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent", return_value=expected):
             result = run_thumbnail_strategy(
                 topic_brief=_make_topic_brief(),
                 script_package=_make_script_package(),
@@ -356,7 +356,7 @@ class TestThumbnailStrategySkill:
     def test_passes_correct_schema_to_run_agent(self, tmp_path):
         config = _make_mock_config()
 
-        with patch("hypogeum.skills.thumbnail_strategy.run_agent",
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent",
                    return_value=_make_valid_brief()) as mock_run:
             run_thumbnail_strategy(
                 topic_brief=_make_topic_brief(),
@@ -372,7 +372,7 @@ class TestThumbnailStrategySkill:
     def test_passes_correct_agent_name(self, tmp_path):
         config = _make_mock_config()
 
-        with patch("hypogeum.skills.thumbnail_strategy.run_agent",
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent",
                    return_value=_make_valid_brief()) as mock_run:
             run_thumbnail_strategy(
                 topic_brief=_make_topic_brief(),
@@ -388,7 +388,7 @@ class TestThumbnailStrategySkill:
     def test_task_key_is_generate_thumbnail_concepts(self, tmp_path):
         config = _make_mock_config()
 
-        with patch("hypogeum.skills.thumbnail_strategy.run_agent",
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent",
                    return_value=_make_valid_brief()) as mock_run:
             run_thumbnail_strategy(
                 topic_brief=_make_topic_brief(),
@@ -404,7 +404,7 @@ class TestThumbnailStrategySkill:
     def test_strategy_brief_in_input_package(self, tmp_path):
         config = _make_mock_config()
 
-        with patch("hypogeum.skills.thumbnail_strategy.run_agent",
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent",
                    return_value=_make_valid_brief()) as mock_run:
             run_thumbnail_strategy(
                 topic_brief=_make_topic_brief(),
@@ -425,7 +425,7 @@ class TestThumbnailStrategySkill:
         config = _make_mock_config()
         config.OPENROUTER_SONNET_MODEL_ID = "anthropic/claude-sonnet-4.6"
 
-        with patch("hypogeum.skills.thumbnail_strategy.run_agent",
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent",
                    return_value=_make_valid_brief()) as mock_run:
             run_thumbnail_strategy(
                 topic_brief=_make_topic_brief(),

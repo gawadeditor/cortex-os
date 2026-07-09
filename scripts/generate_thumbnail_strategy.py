@@ -29,7 +29,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from hypogeum.config import Config
-from hypogeum.skills.thumbnail_strategy import run_thumbnail_strategy
+from hypogeum.agents.thumbnail_strategy import run_thumbnail_strategy
 
 _ASSETS_ROOT = _ROOT / ".hypogeum-assets" / "episodes"
 

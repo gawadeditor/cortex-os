@@ -752,7 +752,7 @@ Appears in:
 
 **D-10 — thumbnail_strategy.txt and thumbnail_strategy.py**
 - `prompts/thumbnail_strategy.txt` (7,271 chars) — loaded by `skills/thumbnail_strategy.py`
-- `hypogeum/skills/thumbnail_strategy.py` — Python agent module misplaced in skills/
+- `hypogeum/agents/thumbnail_strategy.py` — Python agent module misplaced in skills/
 - Neither is wired to the pipeline
 - Creates confusion between the concept-driven TD path (wired) and this standalone path (not wired)
 

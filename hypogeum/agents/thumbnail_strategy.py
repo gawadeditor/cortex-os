@@ -1,5 +1,5 @@
 """
-hypogeum/skills/thumbnail_strategy.py — Thumbnail Strategy Skill (Phase 1)
+hypogeum/agents/thumbnail_strategy.py — Thumbnail Strategy Skill (Phase 1)
 
 Generates three marketing-concept CTR hypotheses for a given episode BEFORE
 any visual package or scene planning occurs. This is the entry point for

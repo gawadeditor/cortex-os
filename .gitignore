@@ -7,8 +7,22 @@
 client_secret*.json
 client_secrets.json
 
-# Claude Code session data
-.claude/
+# Claude Code session data — ignored by default; only the versioned
+# Graphify project-scoped skill setup is tracked (see docs/architecture/
+# GRAPHIFY_FIRST_WORKFLOW.md). .claude/settings.json is NOT tracked here:
+# it currently mixes Graphify hooks with machine-specific Octogent hooks.
+# Reinstall local hook enforcement with `graphify install --project`.
+.claude/*
+!.claude/CLAUDE.md
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/graphify/
+.claude/skills/graphify/*
+!.claude/skills/graphify/SKILL.md
+!.claude/skills/graphify/.graphify_version
+!.claude/skills/graphify/references/
+.claude/skills/graphify/references/*
+!.claude/skills/graphify/references/*.md
 
 # Octogent integration
 .octogent/

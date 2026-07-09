@@ -10,6 +10,15 @@
 
 ---
 
+## Correction Note (post-audit, same date)
+
+The original §5 finding below ("8 skills present in both `~/.claude/skills/<name>/SKILL.md` and `.claude/skills/<name>.md`, byte-for-byte matching") was refined by an actual sha256 verification pass, not just the `wc -c` byte-count comparison this audit originally relied on:
+
+- **6 of the 8 were confirmed byte-identical** (`bga-preflight`, `budget-run`, `collect`, `cost-forensic`, `diagnostics`, `brand-extract`) — sha256 matched exactly between the project flat file and the global `SKILL.md`. These 6 project-level duplicate files have been **removed**. Note for future audits: none of these 6 were ever tracked by git — `.claude/skills/*` is gitignored except the `graphify` subtree (see `.gitignore` lines 15–25) — so their removal produces no `git diff`/`git status` entry; the global `SKILL.md` copies (also outside this repo, under `~/.claude/skills/`) remain the sole surviving copy of each.
+- **2 of the 8 were NOT byte-identical** (`visual-review`, `ep0-run`) — the project-level flat copies contain newer/different content than the global versions (e.g. `ep0-run.md` project copy has an added checkpoint-file table; `visual-review.md` project copy has an added "Attachment Note" section not present globally). These are **not duplicates** and were **not touched**. They require a later explicit merge/source-of-truth decision (which version is canonical, whether to reconcile content into one location) — do not delete either copy automatically.
+
+---
+
 ## 1. Existing Skills Inventory
 
 ### 1a. Internal agent skills — `hypogeum/skills/` (Python-loaded, injected into LLM system prompts)
@@ -138,8 +147,8 @@ These wrap MUAPI (video/image gen), ElevenLabs (voice), FFmpeg (assembly), YouTu
 
 **Agents missing required skill support:** None found as hard requirements. Two soft candidates are noted in §3a as open questions (Script Engine's "visual directions," reactivated Brand Guardian's brand-bible content) — neither is a confirmed gap, both require a product decision before any wiring.
 
-**Redundant skills (structural, confirmed):**
-- The 8 skills present in *both* `/Users/gawadeditor/.claude/skills/<name>/SKILL.md` (global, proper frontmatter format) and `.claude/skills/<name>.md` (project, flat format) — `bga-preflight`, `budget-run`, `collect`, `cost-forensic`, `diagnostics`, `brand-extract`, `visual-review`, `ep0-run`. Byte-for-byte sizes match exactly between the two locations (e.g. `diagnostics.md` is 4,171 B in both), meaning these are literal duplicates, not independently-evolved variants. This is the clearest standardization target: decide which location is canonical (global vs project) and remove the other, once implementation is authorized.
+**Redundant skills (structural, confirmed) — see Correction Note at top of document for resolution:**
+- The 8 skills present in *both* `/Users/gawadeditor/.claude/skills/<name>/SKILL.md` (global, proper frontmatter format) and `.claude/skills/<name>.md` (project, flat format) — `bga-preflight`, `budget-run`, `collect`, `cost-forensic`, `diagnostics`, `brand-extract`, `visual-review`, `ep0-run`. This original finding was based on `wc -c` byte-count matching only. A follow-up sha256 verification pass (see Correction Note) found 6 were true byte-identical duplicates and have since been removed from the project location; 2 (`visual-review`, `ep0-run`) were false positives — their project copies contain genuinely different, newer content and remain in place pending a manual merge decision.
 
 **Reconstructed skills that must later be replaced by upstream originals:** None identified as "reconstructed" in the sense of imitating a known upstream skill. The `graphify` skill (`.claude/skills/graphify/SKILL.md`) is itself upstream-installed (not reconstructed) and should not be hand-edited. No other skill in this repo claims to be a stand-in for an unavailable upstream original.
 

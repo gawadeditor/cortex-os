@@ -1,24 +1,29 @@
 """
 hypogeum/higgsfield.py — Higgsfield AI video generation client
 
-Official API surface (verified 2026-07-04 via SDK + docs):
+Official API surface (verified 2026-07-06 via docs.higgsfield.ai + live probe):
   Auth:     Authorization: Key {api_key}:{api_secret}  (both required)
   Base:     https://platform.higgsfield.ai
-  Submit:   POST /v1/image2video/dop          (DoP I2V — primary Higgsfield model family)
+  Submit:   POST /{model_id}                  e.g. POST /higgsfield-ai/dop/standard
   Poll:     GET  /requests/{request_id}/status
   Cancel:   POST /requests/{request_id}/cancel
   Upload:   POST /files/generate-upload-url → PUT to presigned URL
+  Webhook:  ?hf_webhook={url} query param on submit
   Statuses: queued | in_progress | completed | failed | nsfw | cancelled  (all lowercase)
-  Submit:   response → {"id": "...", "type": "image2video", "jobs": [...]}  (request_id = resp["id"])
-  Result:   completed response → {"status": "completed", "request_id": "...", "video": {"url": "https://...mp4"}}
+  Submit:   response → {"status":"queued","request_id":"...","status_url":"...","cancel_url":"..."}
+  Result:   completed → {"status":"completed","request_id":"...","video":{"url":"https://...mp4"}}
 
-DoP model tiers (Image-to-Video, 5-second default clips):
-  dop-lite      cheapest, fastest             ~$0.14/5s clip
-  dop-turbo     1.5× faster, higher quality   ~$0.42/5s clip
-  dop-preview   highest quality               ~$0.57/5s clip
+DoP model tiers (Image-to-Video only — requires reference image_url):
+  dop-lite      cheapest, fastest             ~$0.14/gen   path: /higgsfield-ai/dop/lite
+  dop-standard  standard quality              ~$0.28/gen   path: /higgsfield-ai/dop/standard
+  dop-turbo     faster, higher quality        ~$0.42/gen   path: /higgsfield-ai/dop/turbo
 
-NOTE: All three DoP models are Image-to-Video only. A reference image must be uploaded
-first via the file-upload flow. Duration defaults to 5s; 8s support is not confirmed.
+NOTE: Higgsfield Cloud REST API is I2V only. There is no Text-to-Video endpoint.
+Documentation: https://docs.higgsfield.ai/docs/guides/video.md ("Generate Videos from Images")
+The "Generate Videos from Text" guide does not exist in the official documentation.
+
+Request body (flat, no params wrapper):
+  {"prompt": "...", "image_url": "https://cdn-url-to-reference-image.jpg", "duration": 5}
 
 Credential env vars (separate key+secret required):
   HF_API_KEY     — Higgsfield Cloud API key ID
@@ -74,14 +79,21 @@ _DEFAULT_TIMEOUT_SECONDS = 180
 _DEFAULT_POLL_INTERVAL = 5
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB download chunks
 
-# Pricing (USD per generation) — verified 2026-07-04 from official sources
+# Pricing (USD per generation) — verified 2026-07-06 from official docs + live probe
 PRICING: dict[str, float] = {
-    "dop-lite":    0.14,   # 5s clip
-    "dop-turbo":   0.42,   # 5s clip
-    "dop-preview": 0.57,   # 5s clip
+    "dop-lite":     0.14,   # 5s clip  — path: /higgsfield-ai/dop/lite
+    "dop-standard": 0.28,   # 5s clip  — path: /higgsfield-ai/dop/standard
+    "dop-turbo":    0.42,   # 5s clip  — path: /higgsfield-ai/dop/turbo
 }
 
-# All DoP models require an image input
+# Map from public model name → API path variant (used in POST /{vendor}/{product}/{variant})
+_DOP_VARIANT: dict[str, str] = {
+    "dop-lite":     "lite",
+    "dop-standard": "standard",
+    "dop-turbo":    "turbo",
+}
+
+# All DoP models are Image-to-Video and require a reference image_url
 DOP_MODELS = frozenset(PRICING.keys())
 
 
@@ -234,22 +246,22 @@ def submit_dop_generation(
 
     headers = {**_auth_header(cfg), "Content-Type": "application/json"}
 
-    # Higgsfield API requires generation parameters nested under a "params" key.
-    # Verified from 422 response: {"detail":[{"loc":["body","params"],"msg":"Field required"}]}
-    inner: dict = {
-        "model": model,
+    # Official API (2026-07-06): POST /{vendor}/{product}/{variant} with flat body.
+    # Docs: https://docs.higgsfield.ai/docs/guides/video.md
+    # Body: {"prompt": "...", "image_url": "...", "duration": N}  — no "params" wrapper.
+    variant = _DOP_VARIANT[model]
+    payload: dict = {
         "prompt": prompt,
-        "input_images": [{"type": "image_url", "image_url": image_url}],
+        "image_url": image_url,
         "duration": duration,
     }
     if seed is not None:
-        inner["seed"] = seed
+        payload["seed"] = seed
 
-    payload = {"params": inner}
     submit_time = time.time()
 
     r = requests.post(
-        f"{_BASE_URL}/v1/image2video/dop",
+        f"{_BASE_URL}/higgsfield-ai/dop/{variant}",
         json=payload,
         headers=headers,
         timeout=30,
@@ -266,11 +278,10 @@ def submit_dop_generation(
         raise HiggsFieldError(f"Submit failed: HTTP {r.status_code} — {r.text[:400]}")
 
     resp = r.json()
-    # Submit response uses "id" as the request identifier, not "request_id"
-    # Verified 2026-07-04: {"id": "...", "type": "image2video", "jobs": [...]}
-    request_id: str = resp.get("id") or resp.get("request_id") or ""
+    # Official submit response: {"status":"queued","request_id":"...","status_url":"..."}
+    request_id: str = resp.get("request_id") or resp.get("id") or ""
     if not request_id:
-        raise HiggsFieldError(f"Submit response missing id/request_id: {r.text[:400]}")
+        raise HiggsFieldError(f"Submit response missing request_id: {r.text[:400]}")
     log.info("hf_job_submitted", request_id=request_id, model=model, duration=duration)
 
     # Poll until terminal state
@@ -403,22 +414,26 @@ def check_credentials(cfg: Config) -> dict:
             "detail": "HF_API_KEY and HF_API_SECRET must both be set",
         }
 
-    # Attempt a minimal authenticated request — list recent requests (0-cost probe)
+    # Auth probe: POST /higgsfield-ai/dop/lite with empty body.
+    # 422 = path exists + auth accepted (validation error on missing fields) → valid
+    # 401/403 = auth rejected → invalid
+    # The server rejects ALL GET requests with 405 before checking auth, so GET probes
+    # cannot distinguish valid from invalid credentials.
     try:
-        r = requests.get(
-            f"{_BASE_URL}/requests",
-            headers=_auth_header(cfg),
-            params={"limit": 1},
+        r = requests.post(
+            f"{_BASE_URL}/higgsfield-ai/dop/lite",
+            json={},
+            headers={**_auth_header(cfg), "Content-Type": "application/json"},
             timeout=15,
         )
-        if r.status_code == 401:
-            log.error("hf_auth_failure", status=401, phase="credential_check")
-            return {"valid": False, "error": "auth_rejected", "detail": "HTTP 401 — invalid key/secret"}
-        if r.status_code in (200, 404, 405):
-            # 200: endpoint exists and auth passed
-            # 404: endpoint not found but auth was evaluated (would be 401 if bad creds)
-            # 405: wrong HTTP method but auth was evaluated — credentials are valid
-            return {"valid": True, "error": None, "detail": f"HTTP {r.status_code} — credentials valid"}
+        if r.status_code == 422:
+            # Validation error on empty body = auth passed, path exists
+            return {"valid": True, "error": None, "detail": "HTTP 422 — credentials valid (validation error on empty body)"}
+        if r.status_code in (401, 403):
+            log.error("hf_auth_failure", status=r.status_code, phase="credential_check")
+            return {"valid": False, "error": "auth_rejected", "detail": f"HTTP {r.status_code} — invalid key/secret"}
+        if r.status_code == 200:
+            return {"valid": True, "error": None, "detail": "HTTP 200 — credentials valid"}
         return {
             "valid": False,
             "error": f"http_{r.status_code}",

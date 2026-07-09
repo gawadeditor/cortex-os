@@ -87,22 +87,24 @@ def cfg_dry_run():
 class TestPricingAndModels:
 
     def test_pricing_has_all_three_tiers(self):
+        # API updated 2026-07-06: dop-preview replaced with dop-standard
         assert "dop-lite" in PRICING
         assert "dop-turbo" in PRICING
-        assert "dop-preview" in PRICING
+        assert "dop-standard" in PRICING
 
     def test_pricing_values_positive(self):
         for model, price in PRICING.items():
             assert price > 0, f"Price for {model} must be positive"
 
     def test_dop_models_set_contains_all_tiers(self):
+        # API updated 2026-07-06: dop-preview replaced with dop-standard
         assert "dop-lite" in DOP_MODELS
         assert "dop-turbo" in DOP_MODELS
-        assert "dop-preview" in DOP_MODELS
+        assert "dop-standard" in DOP_MODELS
 
     def test_dop_lite_cheapest(self):
         assert PRICING["dop-lite"] < PRICING["dop-turbo"]
-        assert PRICING["dop-lite"] < PRICING["dop-preview"]
+        assert PRICING["dop-lite"] < PRICING["dop-standard"]
 
 
 # ---------------------------------------------------------------------------
@@ -124,32 +126,40 @@ class TestCheckCredentials:
         assert result["valid"] is False
 
     def test_both_present_makes_api_request(self, cfg_with_creds):
+        # check_credentials now uses POST /higgsfield-ai/dop/lite (not GET /requests).
+        # The server rejects ALL GET requests with 405 regardless of auth — so GET
+        # cannot distinguish valid from invalid credentials.
+        # 422 = validation error on empty body = path exists + auth accepted.
         mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"requests": []}
-        with patch("hypogeum.higgsfield.requests.get", return_value=mock_resp):
+        mock_resp.status_code = 422
+        mock_resp.json.return_value = {"detail": [{"msg": "Field required", "loc": ["body", "prompt"]}]}
+        mock_resp.text = ""
+        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is True
 
     def test_401_returns_auth_rejected(self, cfg_with_creds):
         mock_resp = MagicMock()
         mock_resp.status_code = 401
-        with patch("hypogeum.higgsfield.requests.get", return_value=mock_resp):
+        mock_resp.text = "Unauthorized"
+        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is False
         assert result["error"] == "auth_rejected"
 
-    def test_404_treated_as_valid(self, cfg_with_creds):
-        # /requests endpoint may not exist; 404 means auth passed
+    def test_422_treated_as_valid(self, cfg_with_creds):
+        # 422 = auth passed, path exists, validation error on missing fields
         mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        with patch("hypogeum.higgsfield.requests.get", return_value=mock_resp):
+        mock_resp.status_code = 422
+        mock_resp.json.return_value = {"detail": [{"msg": "Field required"}]}
+        mock_resp.text = ""
+        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is True
 
     def test_network_error_returns_invalid(self, cfg_with_creds):
         import requests as _req
-        with patch("hypogeum.higgsfield.requests.get",
+        with patch("hypogeum.higgsfield.requests.post",
                    side_effect=_req.ConnectionError("no route")):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is False
@@ -277,8 +287,11 @@ class TestSubmitDopPolling:
     def _submit_resp(self, request_id: str = "req_test_123"):
         mock = MagicMock()
         mock.status_code = 200
-        # Real API returns "id" at top level, not "request_id"
-        mock.json.return_value = {"id": request_id, "type": "image2video", "jobs": []}
+        # Official API response (2026-07-06): request_id at top level
+        # {"status":"queued","request_id":"...","status_url":"...","cancel_url":"..."}
+        mock.json.return_value = {"status": "queued", "request_id": request_id,
+                                  "status_url": f"https://platform.higgsfield.ai/requests/{request_id}/status",
+                                  "cancel_url": f"https://platform.higgsfield.ai/requests/{request_id}/cancel"}
         mock.text = ""
         return mock
 
@@ -386,7 +399,8 @@ class TestSubmitDopPolling:
                 prompt="test", image_url="https://example.com/img.jpg",
                 seed=12345,
             )
-        assert captured["payload"]["params"]["seed"] == 12345
+        # New flat schema: seed is at top level, not nested under params
+        assert captured["payload"]["seed"] == 12345
 
     def test_no_seed_omitted_from_payload(self, cfg_with_creds):
         captured = {}
@@ -408,7 +422,8 @@ class TestSubmitDopPolling:
                 prompt="test", image_url="https://example.com/img.jpg",
                 seed=None,
             )
-        assert "seed" not in captured["payload"]["params"]
+        # New flat schema: seed should not be present at top level
+        assert "seed" not in captured["payload"]
 
     def test_auth_header_format(self, cfg_with_creds):
         captured_headers = {}

@@ -1,3 +1,9 @@
+# STYLE_SYSTEM_SYNCED: thumbnail_style_system.md
+# LAYER: deterministic structural checks only
+# This file enforces the checkable structural subset of the thumbnail style system:
+# zone phrase presence, hook distinctness, composition field types, aspect ratios.
+# Semantic and artistic quality checks (product-shot composition, CGI appearance,
+# temperature contrast) belong in brand_guardian_agent.py (BGA Pass 2).
 """
 hypogeum/agents/thumbnail_plan_validator.py — Pre-generation and post-compositing
 validators for composition_plan and typography_plan.
@@ -181,22 +187,28 @@ def validate_ctr_readability(candidates: list[dict]) -> dict:
         comp_raw = c.get("composition_plan")
         typo_raw = c.get("typography_plan")
 
-        # Skip per-candidate CTR checks when no composition_plan is present.
-        # Consistent with validate_composition_typography_pre_generation: plans
-        # are optional in legacy-mode (LLM writes them inline). CTR rules only
-        # fire when the plan is explicitly present and contains failing values.
-        if comp_raw is None:
+        # Skip per-candidate CTR checks when no composition_plan is present or
+        # when it is an empty dict {}. An empty dict is treated as absent —
+        # Claude sometimes outputs {} as a schema placeholder in legacy mode,
+        # and its default field values (environment_level='none', focal_scale=
+        # 'medium') would produce false-positive product-shot errors on prompts
+        # that clearly describe rich environments.
+        if not comp_raw:  # None or {}
             continue
 
         comp = comp_raw
         typo = typo_raw or {}
 
-        env_level    = comp.get("environment_level", "none")
+        # Use sentinel None to distinguish absent key from explicit "none" value.
+        env_level    = comp.get("environment_level")   # None if key absent
         focal_scale  = comp.get("focal_scale", "medium")
         readability  = comp.get("subject_readability_at_320px", "required")
         emph_scale   = typo.get("emphasis_scale", 1.0)
 
-        # 1. Product-shot isolation — non-absent subject with no environment
+        # 1. Product-shot isolation — only fire when environment_level is
+        # explicitly set to "none". An absent key means no plan guidance was
+        # given; the default "none" would produce false positives on prompts
+        # that describe rich environments but omit the field.
         if env_level == "none" and focal_scale not in ("absent", "trace"):
             errors.append(
                 f"{cid}: environment_level='none' with focal_scale='{focal_scale}' "

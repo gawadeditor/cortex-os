@@ -55,6 +55,7 @@ from hypogeum.agents.thumbnail_killer_concept_validator import (
     validate_concept_quality_or_raise,
 )
 from hypogeum.agents.thumbnail_prompt_writer import SYSTEM_PROMPT
+from hypogeum.agents.brand_guardian_agent import SYSTEM_PROMPT as BGA_SYSTEM_PROMPT
 from hypogeum.muapi import (
     _OVERLAY_FONT_CANDIDATES,
     _WORDMARK_COLOR_HYPOGEUM,
@@ -539,4 +540,203 @@ class TestWordmarkAndSubtitleScaling:
         # Warm parchment palette — any warm cream tuple, not pure white (255, 255, 255)
         assert "255, 255, 255" not in source, (
             "Subtitle must not use pure white (255, 255, 255) — must use warm cream/parchment"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestStyleSystemSync
+# ---------------------------------------------------------------------------
+
+class TestStyleSystemSync:
+    """
+    Regression tests: thumbnail_director.txt must remain in sync with
+    thumbnail_style_system.md as the canonical source of truth.
+
+    These tests catch reintroduction of the specific contradictions and
+    omissions that caused the ep_003 and ep_reg_vi_colosseum failures.
+    Failure means a rule was removed from the runtime prompt without
+    updating the style system first.
+    """
+
+    def test_cool_secondary_not_globally_forbidden(self):
+        """
+        The old blanket prohibition '\"cool\" palette or atmosphere (triggers E-C05)'
+        must not exist. Only electric/neon/sci-fi blue is forbidden, not all cool tones.
+        Style system §2.1, §3.2: cool secondary is REQUIRED for temperature contrast.
+        """
+        assert '"cool" palette or atmosphere' not in SYSTEM_PROMPT, (
+            "Blanket prohibition on '\"cool\" palette or atmosphere' must be removed. "
+            "Style system §3.2 requires a cool secondary accent for temperature contrast. "
+            "Only electric/neon/sci-fi blue is forbidden — not natural cool atmosphere."
+        )
+        assert '"cold" as a lighting or atmosphere descriptor (triggers E-C05' not in SYSTEM_PROMPT, (
+            "Blanket prohibition on 'cold' descriptor must be removed. "
+            "Natural cool atmosphere (storm sky, stone grey) is permitted by style system §2.1."
+        )
+
+    def test_cool_secondary_light_source_required(self):
+        """
+        Style system §2.1: A secondary cooler light source is REQUIRED.
+        The prompt must affirmatively instruct for this — not just permit it.
+        """
+        assert "SECONDARY COOL LIGHT SOURCE" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must contain 'SECONDARY COOL LIGHT SOURCE' instruction. "
+            "Monochromatic amber warmth is a documented failure pattern (style system §9 gap analysis)."
+        )
+
+    def test_near_black_ceiling_no_unlimited_void(self):
+        """
+        Style system §10.3: Near-black at 50–65% of frame, not unlimited void.
+        Frames with 70–80%+ void read as gallery art, not YouTube mystery content.
+        The phrase 'gallery art' is the canonical failure description.
+        """
+        assert "gallery art" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must warn against unlimited void / 'gallery art' failure "
+            "per style system §10.3. Add: 'frames with 70–80%+ near-black read as gallery art'."
+        )
+
+    def test_two_composition_sizes_monumental_range(self):
+        """
+        Style system §1.1: Monumental approach = 45–65% of right frame.
+        Must be explicitly stated — not inferred from the old one-third rule.
+        """
+        assert "45–65%" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must specify Monumental approach (45–65%) per style system §1.1. "
+            "The two-size rule is the canonical replacement for the one-third minimum."
+        )
+
+    def test_two_composition_sizes_scale_contrast_range(self):
+        """
+        Style system §1.1: Scale Contrast approach = 5–12% of frame height.
+        """
+        assert "5–12%" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must specify Scale Contrast approach (5–12%) per style system §1.1."
+        )
+
+    def test_product_shot_middle_zone_forbidden(self):
+        """
+        Style system §1.1: 30–50% of frame area is the forbidden product-shot zone.
+        Must be named explicitly — it is the most common thumbnail failure pattern.
+        """
+        assert "30–50%" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must name the forbidden 30–50% product-shot zone "
+            "per style system §1.1."
+        )
+
+    def test_environmental_context_required(self):
+        """
+        Style system §10.3: Every subject must exist in a real ancient world.
+        The phrase 'environmental context' must appear as a named requirement.
+        """
+        assert "ENVIRONMENTAL CONTEXT REQUIRED" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must include 'ENVIRONMENTAL CONTEXT REQUIRED' rule "
+            "per style system §10.3."
+        )
+
+    def test_photographic_credibility_required(self):
+        """
+        Style system §7.4: All ep_003 candidates read as CGI renders, not photographic.
+        The prompt must instruct for photographic credibility.
+        """
+        assert "PHOTOGRAPHIC CREDIBILITY" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must include 'PHOTOGRAPHIC CREDIBILITY' rule "
+            "per style system §7.4."
+        )
+
+    def test_scale_anchor_required(self):
+        """
+        Style system §7.4: Zero scale anchors is a documented zero-score failure
+        across all three ep_003 candidates. Must require scale anchors.
+        """
+        assert "SCALE ANCHOR" in SYSTEM_PROMPT, (
+            "SYSTEM_PROMPT must include 'SCALE ANCHOR' requirement per style system §7.4."
+        )
+
+    def test_style_system_synced_header_present(self):
+        """
+        thumbnail_director.txt must carry a STYLE_SYSTEM_SYNCED header in the metadata
+        block at the top of the file. Headers are stripped by load_prompt before being
+        sent to the LLM — this test reads the raw file, not SYSTEM_PROMPT.
+        """
+        from pathlib import Path
+        raw = (
+            Path(__file__).parent.parent / "hypogeum" / "prompts" / "thumbnail_director.txt"
+        ).read_text(encoding="utf-8")
+        assert "STYLE_SYSTEM_SYNCED" in raw, (
+            "thumbnail_director.txt must carry '# STYLE_SYSTEM_SYNCED: thumbnail_style_system.md' "
+            "header at the top of the file."
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestBGAStyleSystemSync
+# ---------------------------------------------------------------------------
+
+class TestBGAStyleSystemSync:
+    """
+    Regression tests: brand_guardian_agent.txt must enforce SEMANTIC checks only.
+    Structural/phrase checks belong in thumbnail_plan_validator.py.
+    These tests catch re-introduction of duplicated validator work in BGA.
+    """
+
+    def test_zone_phrase_check_removed_from_bga(self):
+        """
+        E-TH04/E-TH05 as zone-phrase checks (checking for 'top 12%' / 'bottom zone'
+        reservation text) are thumbnail_plan_validator.py's job — not BGA's.
+        BGA's E-TH04/E-TH05 must be semantic product-shot and CGI checks instead.
+        """
+        assert "explicitly reserve the top 12%" not in BGA_SYSTEM_PROMPT, (
+            "BGA must not check for zone reservation phrases — that is the validator's job. "
+            "E-TH04 must be the product-shot composition semantic check."
+        )
+        assert "explicitly reserve the bottom zone" not in BGA_SYSTEM_PROMPT, (
+            "BGA must not check for bottom zone reservation phrases — that is the validator's job. "
+            "E-TH05 must be the CGI appearance semantic check."
+        )
+
+    def test_product_shot_semantic_check_in_bga(self):
+        """
+        BGA E-TH04 must check for isolated subject in void with no environmental context —
+        a semantic judgment that code cannot make deterministically.
+        """
+        bga_lower = BGA_SYSTEM_PROMPT.lower()
+        assert "product-shot composition" in bga_lower or (
+            "isolated" in bga_lower and "void" in bga_lower and "e-th04" in bga_lower
+        ), (
+            "BGA must include semantic product-shot composition check (E-TH04)."
+        )
+
+    def test_cgi_appearance_check_in_bga(self):
+        """
+        BGA E-TH05 must check for CGI/rendered appearance language in image_prompts.
+        """
+        bga_lower = BGA_SYSTEM_PROMPT.lower()
+        assert "cgi appearance" in bga_lower or (
+            ("concept art" in bga_lower or "3d render" in bga_lower)
+            and "e-th05" in bga_lower
+        ), (
+            "BGA must include semantic CGI/rendered appearance check (E-TH05)."
+        )
+
+    def test_temperature_contrast_flag_in_bga(self):
+        """
+        BGA E-TH06 must flag thumbnail prompts with no temperature contrast —
+        monochromatic warm amber is a style system failure (§9 gap analysis).
+        """
+        assert "E-TH06" in BGA_SYSTEM_PROMPT, (
+            "BGA must include E-TH06 temperature contrast FLAG per style system §9."
+        )
+
+    def test_bga_style_system_synced_header_present(self):
+        """
+        brand_guardian_agent.txt must carry a STYLE_SYSTEM_SYNCED header in the metadata
+        block. Headers are stripped by load_prompt — read the raw file here.
+        """
+        from pathlib import Path
+        raw = (
+            Path(__file__).parent.parent / "hypogeum" / "prompts" / "brand_guardian_agent.txt"
+        ).read_text(encoding="utf-8")
+        assert "STYLE_SYSTEM_SYNCED" in raw, (
+            "brand_guardian_agent.txt must carry '# STYLE_SYSTEM_SYNCED: thumbnail_style_system.md' "
+            "header at the top of the file."
         )

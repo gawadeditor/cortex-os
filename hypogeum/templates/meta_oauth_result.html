@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Meta Authorization{% if ok %} Complete{% else %} Failed{% endif %} — Factory OS</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="breadcrumb">
+  <a href="/dashboard">Dashboard</a>
+  <span class="breadcrumb-sep">›</span>
+  <a href="/providers">Providers</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>Meta OAuth Result</span>
+</div>
+
+<div class="page-header">
+  <h1>Meta Authorization</h1>
+</div>
+
+{% if ok %}
+<div class="card" style="max-width:520px; border-color:#2ea043; padding:18px;">
+  <div style="color:#3fb950; font-weight:700; font-size:15px; margin-bottom:8px;">
+    &#x2713; Authorization complete
+  </div>
+  <div style="font-size:13px; color:var(--muted); line-height:1.6;">
+    Long-lived Meta access token stored for Facebook and Instagram.
+    Token is valid for approximately 60 days and will be refreshed automatically at publish time.
+  </div>
+  <div style="margin-top:14px; display:flex; gap:10px;">
+    <a href="/providers" class="btn btn-save">View Providers →</a>
+  </div>
+</div>
+{% else %}
+<div class="card" style="max-width:580px; border-color:var(--red); padding:18px;">
+  <div style="color:var(--red); font-weight:700; font-size:15px; margin-bottom:8px;">
+    &#x2717; Authorization failed: {{ error }}
+  </div>
+  {% if error_description %}
+  <div style="font-size:13px; color:var(--muted); margin-bottom:14px; line-height:1.6;">
+    {{ error_description }}
+  </div>
+  {% endif %}
+
+  <div style="font-size:12px; background:var(--bg); border:1px solid var(--border);
+              border-radius:var(--radius); padding:12px; font-family:monospace;
+              line-height:1.8; color:var(--muted);">
+    <div><strong style="color:var(--text);">error</strong>: {{ error }}</div>
+    {% if error_description %}
+    <div><strong style="color:var(--text);">error_description</strong>: {{ error_description }}</div>
+    {% endif %}
+    {% if redirect_uri %}
+    <div><strong style="color:var(--text);">redirect_uri</strong>: {{ redirect_uri }}</div>
+    {% endif %}
+    {% if scope %}
+    <div><strong style="color:var(--text);">scope</strong>: {{ scope }}</div>
+    {% endif %}
+  </div>
+
+  {% if error == "redirect_uri_mismatch" or "redirect" in (error_description or "") %}
+  <div style="margin-top:12px; padding:10px 12px; background:#1a1200;
+              border:1px solid var(--yellow); border-radius:var(--radius);
+              font-size:12px; color:#d29922; line-height:1.6;">
+    <strong>Fix:</strong> Add this exact redirect URI to your Meta app's Valid OAuth Redirect URIs:<br>
+    <code style="color:var(--text);">{{ redirect_uri }}</code><br><br>
+    Go to developers.facebook.com → your app → Facebook Login → Settings → Valid OAuth Redirect URIs.
+  </div>
+  {% endif %}
+
+  <div style="margin-top:14px; display:flex; gap:10px;">
+    <a href="/platforms/meta/authorize" class="btn btn-save">Retry Authorization</a>
+    <a href="/providers" class="btn">Back</a>
+  </div>
+</div>
+{% endif %}
+
+</body>
+</html>

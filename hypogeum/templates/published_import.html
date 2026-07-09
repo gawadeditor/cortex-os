@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Import Published Video — Factory OS</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="breadcrumb">
+  <a href="/dashboard">Dashboard</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>Import Published Video</span>
+</div>
+
+<div class="page-header">
+  <h1>Import Published Video</h1>
+  <span class="page-meta">Record a published video manually without live API access</span>
+</div>
+
+{% if flash == 'ok' %}
+  <div class="flash flash-ok">Published video record saved. It will now appear on the dashboard.</div>
+{% endif %}
+{% if error %}
+  <div class="flash flash-err">{{ error }}</div>
+{% endif %}
+
+<div class="card" style="max-width:640px; padding:16px;">
+  <div class="card-title">Video details</div>
+  <form method="POST" action="/published/import">
+
+    <div class="field">
+      <label>Episode ID</label>
+      {% if episodes %}
+        <select name="episode_id" required style="width:100%;">
+          <option value="">— select episode —</option>
+          {% for ep in episodes %}
+            <option value="{{ ep.episode_id }}">
+              {{ ep.episode_id }}{% if ep.title or ep.topic %} — {{ ep.title or ep.topic }}{% endif %}
+            </option>
+          {% endfor %}
+        </select>
+        <div class="hint">Or type a custom ID below (overrides dropdown).</div>
+        <input type="text" name="episode_id_custom" id="episode_id_custom"
+               placeholder="Custom episode ID" style="width:100%; margin-top:6px;">
+      {% else %}
+        <input type="text" name="episode_id" required placeholder="e.g. ep_001" style="width:100%;">
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label>Platform</label>
+      <select name="platform" required style="width:100%;">
+        <option value="">— select platform —</option>
+        {% for p in valid_platforms %}
+          <option value="{{ p }}">{{ p | capitalize }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Publishing Status</label>
+      <select name="publishing_status" required style="width:100%;">
+        {% for s in valid_statuses %}
+          <option value="{{ s }}" {% if s == 'success' %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Platform Video ID</label>
+      <input type="text" name="platform_video_id" placeholder="e.g. dQw4w9WgXcQ" style="width:100%;">
+      <div class="hint">The video ID from the platform (YouTube video ID, TikTok post ID, etc.)</div>
+    </div>
+
+    <div class="field">
+      <label>Published At (optional)</label>
+      <input type="datetime-local" name="published_at" style="width:100%;">
+    </div>
+
+    <div class="field">
+      <label>URL (optional)</label>
+      <input type="url" name="url" placeholder="https://..." style="width:100%;">
+    </div>
+
+    <div class="field">
+      <label>Run ID (optional)</label>
+      <input type="text" name="run_id" placeholder="run_..." style="width:100%;">
+    </div>
+
+    <div class="field">
+      <label>Failure Reason (optional)</label>
+      <input type="text" name="failure_reason" placeholder="Only required for failed status"
+             style="width:100%;">
+    </div>
+
+    <div style="margin-top:18px; display:flex; gap:10px;">
+      <button type="submit" class="btn btn-save">Save Record</button>
+      <a href="/dashboard" class="btn">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<script>
+{% if episodes %}
+document.querySelector('form').addEventListener('submit', function() {
+  var custom = document.getElementById('episode_id_custom').value.trim();
+  if (custom) {
+    document.querySelector('select[name="episode_id"]').name = '_episode_id_dropdown';
+    var h = document.createElement('input');
+    h.type = 'hidden'; h.name = 'episode_id'; h.value = custom;
+    this.appendChild(h);
+  }
+});
+{% endif %}
+</script>
+</body>
+</html>

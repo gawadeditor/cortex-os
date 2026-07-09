@@ -161,8 +161,30 @@ The following is a hard rule for all future skill-related work in this repositor
 
 ---
 
-## 8. Next Safe Step
+## 8. Veo Tools Upstream Verification
 
-Do not begin any external-skill installation work yet, including for `seedance2-skill` (§6) or `veo-prompt-director` (§7) — both are verified but neither is authorized for installation. The single next smallest safe step remains: **obtain a real, explicit upstream source (URL or official install command) for the remaining unresolved BLOCKED skills named in `SKILLS_AND_AGENTS_AUDIT.md` §6** (Humanizer, GPT Image2, Veo Tools, UI/UX Pro Max — Seedance2 and Veo Prompt Director are now sourced per §6/§7 above but still not installed), or, alternatively, make the explicit reconciliation decisions described in §6 and §7 before any installation proceeds. This is a sourcing/decision step, not an implementation step. No other skill or agent work should proceed ahead of this.
+**Canonical upstream source:** `https://github.com/kdowswell/veo-tools`
+
+**Status: VERIFIED REPO / BLOCKED.**
+
+- **Verified real repo** — confirmed via GitHub API: public, non-fork, owner `kdowswell`, created 2026-01-25, 4 stars, 1 fork, 0 open issues, primary language TypeScript, MIT license (`license.spdx_id: MIT`, `LICENSE` file present, 1,070 B).
+- **License:** MIT — clean and independently verifiable, unlike the `veo-prompt-director-1.0.0.tar.gz` package (§7), which had no license at all.
+- **A Claude Code Plugin, not just a static skill.** The repo carries `.claude-plugin/marketplace.json` + `.claude-plugin/plugin.json`, installable via `/plugin marketplace add kdowswell/veo-tools` + `/plugin install veo-tools` (Claude Code's native plugin mechanism), bundling 4 distinct skills: `veo`, `veo-multi-shot`, `veo-setup`, `video-loop`.
+- **Contains executable TypeScript/Bash scripts** — `skills/veo/scripts/veo-generate.ts` (17,066 B), `skills/veo-multi-shot/scripts/veo-multi-generate.ts` (18,547 B), `skills/veo-multi-shot/scripts/assemble-clips.sh` (10,522 B), `skills/video-loop/scripts/create-loop.sh` (3,320 B). This is real, runnable automation, not passive reference documentation — a materially different category from both `seedance2-skill` (§6) and `veo-prompt-director` (§7).
+- **Calls Google Vertex AI directly.** Per the repo's own `README.md`, using it requires a Google Cloud account with billing enabled, the `gcloud` CLI, and a generated service-account credentials file — none of which exist anywhere in `hypogeum/config.py` today.
+- **Incompatible with Hypogeum's current MUAPI / provider-router / Finance-gate architecture.** Every video-generation call in this codebase routes through `hypogeum/muapi.py`, gated by the Finance Agent's budget-authorization checks (`FinancePostVPDBlockedError`, confirmed present via `graphify query`) and `hypogeum/agents/provider_router.py`'s tier logic. This tool's scripts would call Vertex AI directly, bypassing all of that if ever executed inside a pipeline run.
+- **Requires a human-in-the-loop approval workflow** — the tool's own documented phases (`UNDERSTAND → CRAFT → VALIDATE → PRESENT & AWAIT APPROVAL → GENERATE → ITERATE`) explicitly pause for human approval before every generation call. Hypogeum's pipeline agents (`visual_package_director.py` Stage B and others) are unattended and programmatic — this workflow pattern does not fit the pipeline as built.
+- **Target agents: none, under the current architecture.** No Hypogeum pipeline agent is structured to pause for interactive approval mid-generation or to call Vertex AI directly.
+- **Agents that must NOT receive it: all pipeline agents** — `visual_package_director.py`, `shot_diversity_planner.py`, `thumbnail_prompt_writer.py`, `thumbnail_identity_guardian.py`, `brand_guardian_agent.py`, `executive_producer.py`, `research_director.py`, `narrative_architect.py`, `script_engine.py`, `hypogeum/agents/thumbnail_strategy.py`, `hypogeum/discovery/topic_ideator.py`.
+- **Overlaps only partially, at the vocabulary/reference level.** The 5-Element Formula (`[Cinematography] + [Subject] + [Action] + [Context] + [Style & Ambiance]`) matches the structure already documented in Hypogeum's `veo_translation_skill.md` and in the `veo-prompt-director` package (§7). No overlap exists at the mechanism level — Hypogeum has no equivalent to this repo's generation scripts, GCP setup skill, or approval-gated workflow, because Hypogeum's pipeline is deliberately unattended and MUAPI-routed.
+- **Contains the same static-camera vocabulary conflict already found in §7.** `skills/veo/references/cinematography-lexicon.md` documents `static camera` as a legitimate term ("Fixed position | Observation, loops"), directly contradicting Hypogeum's `hypogeum/skills/visual_package_director/cinematic_prompt_architecture.md` (line 103): "Do not use `static` as a camera verb."
+- **Recommendation: do not install; do not use as a runtime skill; mark BLOCKED.** This is a higher-risk category than the prior two verifications — not a "should we merge some content" question but a "this bypasses our existing budget/provider-routing architecture entirely" question. Even passive reference use is of limited value, since its one reusable vocabulary component repeats an already-known conflict.
+- **Possible future use only if Hypogeum intentionally evaluates a separate GCP-direct provider path** — a deliberate, separately-scoped architectural decision, not part of the current Skill Standardization Phase or its scope.
+
+---
+
+## 9. Next Safe Step
+
+Do not begin any external-skill installation work yet, including for `seedance2-skill` (§6), `veo-prompt-director` (§7), or `veo-tools` (§8) — all three are verified but none are authorized for installation. The single next smallest safe step remains: **obtain a real, explicit upstream source (URL or official install command) for the remaining unresolved BLOCKED skills named in `SKILLS_AND_AGENTS_AUDIT.md` §6** (Humanizer, GPT Image2, UI/UX Pro Max — Seedance2, Veo Prompt Director, and Veo Tools are now sourced per §6/§7/§8 above but still not installed), or, alternatively, make the explicit reconciliation/scope decisions described in §6, §7, and §8 before any installation proceeds. This is a sourcing/decision step, not an implementation step. No other skill or agent work should proceed ahead of this.
 
 No implementation is authorized by this document.

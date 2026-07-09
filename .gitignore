@@ -28,3 +28,8 @@ env/
 .pytest_cache/
 tests/__pycache__/
 hypogeum/__pycache__/
+
+# Graphify generated outputs
+graphify-out/
+graphify-out/cost.json
+graphify-out/cache/

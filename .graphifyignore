@@ -1,0 +1,40 @@
+# Generated episode outputs — videos, audio, thumbnails, checkpoints
+.hypogeum-assets/
+
+# Graphify's own output (prevent circular ingestion)
+graphify-out/
+
+# Credentials
+.env
+.env.*
+.env.backup*
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs and databases
+*.log
+*.db
+*.sqlite
+
+# Screenshot and binary image noise at repo root
+*.png
+*.jpg
+*.jpeg
+brand_board.jpg
+tiktok_icon_1024.jpg
+
+# Platform-specific screenshots
+p12-*.png
+check*.png
+tiktok-*.png
+meta-*.png
+
+# Ad-hoc tooling
+.playwright-mcp/
+
+# Large entry points (index separately if desired)
+run_dashboard.py

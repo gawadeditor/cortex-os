@@ -33,6 +33,7 @@ from hypogeum.config import Config
 from hypogeum.logger import get_logger
 from hypogeum.prompt_loader import compose_system_prompt
 from hypogeum.schemas import validate
+from hypogeum import skill_registry as _skill_registry
 
 _AGENT_NAME = "shot_diversity_planner"
 _CLAUDE_SONNET = "anthropic/claude-sonnet-4.6"
@@ -41,13 +42,22 @@ _MAX_TOKENS = 4_096
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _PROMPT_FILE = _PROMPTS_DIR / "shot_diversity_planner.txt"
 
+# Visual Language Engine — provides shot scale, camera movement, and
+# composition vocabulary used when assigning diversity attributes to scenes.
+# B1: compact runtime version used by default (~5.1K chars vs 11K full).
+# Full skill retained at hypogeum/skills/visual_intelligence/visual_language_engine.md.
+_COMPILED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "compiled"
+_VLE_SKILL_FILE = _COMPILED_SKILLS_DIR / "visual_language_engine.compact.md"
+
+_SDP_ALL_SKILL_PATHS: list[Path] = [_VLE_SKILL_FILE]
+
 _DEFAULT_ASSETS_ROOT = (
     Path(__file__).resolve().parent.parent.parent / ".hypogeum-assets"
 )
 
 
 def _load_prompt() -> str:
-    return compose_system_prompt(_PROMPT_FILE)
+    return compose_system_prompt(_PROMPT_FILE, _VLE_SKILL_FILE)
 
 
 SYSTEM_PROMPT: str = _load_prompt()
@@ -81,6 +91,7 @@ def run_shot_diversity_planner(
     _resolve_dir.mkdir(parents=True, exist_ok=True)
 
     log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
+    _skill_registry.log_loaded_skills(_AGENT_NAME, _SDP_ALL_SKILL_PATHS, log)
 
     ckpt_path = _resolve_dir / f"sdp_{episode_id}.json"
 

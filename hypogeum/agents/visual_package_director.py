@@ -139,6 +139,7 @@ from hypogeum.agents.video_generation_agent import generate_all_scene_videos
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 from hypogeum.prompt_loader import compose_system_prompt
+from hypogeum import skill_registry as _skill_registry
 from hypogeum.muapi import (
     MUAPIAuthFailure,
     MUAPIBudgetExhausted,
@@ -192,8 +193,25 @@ _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "visual_packag
 _CINEMATIC_SKILL_FILE = _SKILLS_DIR / "cinematic_prompt_architecture.md"
 
 # Visual Intelligence skill files
+# B1: VLE compact version used by default for Stage A4 (~5.1K chars vs 11K full).
 _VI_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "visual_intelligence"
-_VLE_SKILL_FILE = _VI_SKILLS_DIR / "visual_language_engine.md"
+_COMPILED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "compiled"
+_VLE_SKILL_FILE = _COMPILED_SKILLS_DIR / "visual_language_engine.compact.md"
+
+# Provider translation skills — wired to Stage B (scene prompt writing)
+# B1: compact runtime versions used by default (~8K chars each vs 64K/56K full).
+# Full skills retained at hypogeum/skills/{veo,seedance}_translation_skill.md for audit.
+_COMPILED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "compiled"
+_VEO_TRANSLATION_SKILL_FILE      = _COMPILED_SKILLS_DIR / "veo_translation_skill.compact.md"
+_SEEDANCE_TRANSLATION_SKILL_FILE = _COMPILED_SKILLS_DIR / "seedance_translation_skill.compact.md"
+
+# All skill paths used by VPD — used for diagnostic logging
+_VPD_ALL_SKILL_PATHS: list[Path] = [
+    _CINEMATIC_SKILL_FILE,
+    _VLE_SKILL_FILE,
+    _VEO_TRANSLATION_SKILL_FILE,
+    _SEEDANCE_TRANSLATION_SKILL_FILE,
+]
 
 # Stage A4 — Scene Presentation Planner
 _SCENE_PRESENTATION_PLANNER_PROMPT_FILE = _PROMPTS_DIR / "vpd_scene_presentation_planner.txt"
@@ -219,7 +237,12 @@ def _load_scene_batch_prompt() -> str:
     return compose_system_prompt(_SKELETON_SCENE_PROMPT_FILE)
 
 def _load_scene_prompts_prompt() -> str:
-    return compose_system_prompt(_SCENE_PROMPTS_PROMPT_FILE, _CINEMATIC_SKILL_FILE)
+    return compose_system_prompt(
+        _SCENE_PROMPTS_PROMPT_FILE,
+        _CINEMATIC_SKILL_FILE,
+        _VEO_TRANSLATION_SKILL_FILE,
+        _SEEDANCE_TRANSLATION_SKILL_FILE,
+    )
 
 def _load_presentation_planner_prompt() -> str:
     return compose_system_prompt(_SCENE_PRESENTATION_PLANNER_PROMPT_FILE, _VLE_SKILL_FILE)
@@ -275,6 +298,7 @@ def run_visual_package_director(
         SchemaError           — Phase 1 output failed schema validation.
     """
     log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
+    _skill_registry.log_loaded_skills(_AGENT_NAME, _VPD_ALL_SKILL_PATHS, log)
 
     # ------------------------------------------------------------------
     # Phase 1 — Claude planning

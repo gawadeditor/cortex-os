@@ -42,7 +42,8 @@ from hypogeum.agents.thumbnail_composition_planner import plan_composition
 from hypogeum.agents.thumbnail_compositor import build_layer_prompts
 from hypogeum.agents.thumbnail_typography_planner import plan_typography
 from hypogeum.config import Config
-from hypogeum.prompt_loader import load_prompt
+from hypogeum.prompt_loader import compose_system_prompt
+from hypogeum import skill_registry as _skill_registry
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -53,9 +54,18 @@ _AGENT_NAME = "thumbnail_director"
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _PROMPT_FILE = _PROMPTS_DIR / "thumbnail_director.txt"
 
+# Thumbnail Intelligence Pipeline — authoritative stage reference for the
+# Thumbnail Director execution sequence (CTR → Composition → Typography → TIG → QA → MUAPI).
+# B1: compact runtime version used by default (~2.1K chars vs 4.4K full).
+# Full skill retained at hypogeum/skills/visual_intelligence/thumbnail_intelligence_pipeline.md.
+_COMPILED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "compiled"
+_THUMBNAIL_INTELLIGENCE_SKILL_FILE = _COMPILED_SKILLS_DIR / "thumbnail_intelligence_pipeline.compact.md"
+
+_TPW_ALL_SKILL_PATHS: list[Path] = [_THUMBNAIL_INTELLIGENCE_SKILL_FILE]
+
 
 def _load_system_prompt() -> str:
-    return load_prompt(_PROMPT_FILE)
+    return compose_system_prompt(_PROMPT_FILE, _THUMBNAIL_INTELLIGENCE_SKILL_FILE)
 
 
 SYSTEM_PROMPT: str = _load_system_prompt()
@@ -85,6 +95,8 @@ def write_thumbnail_prompts(
     candidates_count = len(handoff_brief.get("candidates", []))
     short_candidates_count = len(handoff_brief.get("short_candidates", []))
     concept_driven = concept_brief is not None and bool(concept_brief.get("concepts"))
+
+    _skill_registry.log_loaded_skills(_AGENT_NAME, _TPW_ALL_SKILL_PATHS, log)
 
     log.info(
         "td_planning_started",

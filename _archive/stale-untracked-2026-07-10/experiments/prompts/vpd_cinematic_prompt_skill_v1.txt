@@ -1,0 +1,145 @@
+---
+
+CINEMATIC PROMPT ARCHITECTURE SKILL — VPD UPGRADE v1
+Experiment: s30_prompt_upgrade_v1
+Status: EXPERIMENT — not active in production VPD skill chain
+
+Purpose: Teach VPD to generate long-form, high-density cinematic prompts that
+match the structural richness of elite provider examples. These prompts replace
+the 15-30 word format with a 120-200 word full-architecture format when a scene
+qualifies as CINEMATIC_TIER.
+
+This skill SUPPLEMENTS, NOT REPLACES the existing vpd_skill_appendix.txt rules.
+All existing constraints (BGA, documentary grammar, motion verb limits, time
+segmentation) remain in force. This skill adds structural depth on top.
+
+---
+
+WHEN TO APPLY
+
+Apply CINEMATIC_TIER prompt format when ALL of the following are true:
+  - duration_seconds = 8
+  - scene carries a narrative signal: reveal, clue, isolation, climax, or discovery
+  - provider routing is muapi Tier 2 or above
+  - no on-screen text or narration sync is required
+
+For all other scenes: use the standard 15-30 word formula from vpd_skill_appendix.txt.
+
+---
+
+CINEMATIC PROMPT ARCHITECTURE — REQUIRED STRUCTURE
+
+A CINEMATIC_TIER primary_prompt must contain all nine layers, in this order:
+
+  LAYER 1 — OPENING PREMISE
+  One sentence that frames the narrative identity of the shot. State what the
+  scene IS, not what it depicts. Example: "A relic of impossible precision
+  floats at the edge of recorded history."
+  Do NOT use: "this scene shows", "we see", "the video depicts".
+
+  LAYER 2 — FRAMING + SUBJECT DECLARATION
+  Shot type, camera position, and subject identity in one compound phrase.
+  Name the subject with full material specificity (see MATERIAL SPECIFICITY in
+  vpd_skill_appendix.txt). Example: "Extreme macro close-up, a single corroded
+  bronze gear fragment with layered green-brown marine patina occupies the left
+  third of a 16:9 frame."
+
+  LAYER 3 — LIGHTING PLAN
+  Name the light source type, direction (clock or compass), color temperature,
+  and the specific surface feature it illuminates. Then name the shadow
+  behavior. Minimum two sentences.
+  Example: "Warm amber directional light enters from the upper left at a low
+  oblique angle, raking across the corroded ridges and casting micro-shadow
+  relief into the gear teeth valleys. The opposing side recedes into deep
+  surrounding shadow with no ambient fill — a hard falloff to absolute darkness."
+
+  LAYER 4 — MATERIAL + TEXTURE DETAIL
+  Describe the physical surface in three or more distinct observations.
+  Address: oxidation/patina, structural damage, surface micro-detail.
+  Example: "The bronze face carries dense green-brown marine patina, with
+  copper-orange exposed at worn gear tooth edges. Fine cracks radiate from
+  the central bore. Microscopic pit corrosion creates a matte, light-absorbing
+  surface texture."
+
+  LAYER 5 — SPATIAL COMPOSITION
+  Describe what surrounds the subject. Name the void, the negative space, or
+  the environment with material specificity. State the subject-to-frame ratio.
+  Example: "The void behind the fragment is pure unlit black — no reflected
+  surface, no gradient falloff, no depth haze. Subject occupies one-third of
+  frame with breathing room below and to the right."
+
+  LAYER 6 — MOTION PHYSICS
+  State exactly one camera motion verb (per vpd_skill_appendix.txt rule).
+  Then describe how the subject itself behaves during the clip. If static,
+  say so explicitly and describe what the stillness communicates.
+  Example: "Camera: static, locked tripod, zero drift. Subject: motionless.
+  The scene's only motion is the thermal shift in light temperature as it
+  diffuses across the patina surface — no mechanical movement, no oscillation."
+
+  LAYER 7 — TIME SEGMENTATION
+  Required for all 8-second clips. Follow the exact 0-4s / 4-8s format from
+  vpd_skill_appendix.txt. No camera verbs inside segment descriptions.
+  Example:
+    "0-4s: fragment emerges from absolute darkness as light resolves across
+    corroded surface, patina micro-detail sharpening progressively.
+    4-8s: light temperature deepens from amber to copper, shadow edges harden
+    along gear teeth, void deepens to pure negative space."
+
+  LAYER 8 — TECHNICAL TAGS
+  Inline bracketed tags at the end of the prompt. Required minimum set:
+    [4K] [24fps] [aspect ratio: 16:9]
+  Add as applicable:
+    [macro] [anamorphic] [depth of field: {description}]
+    [color grade: {description}] [slow motion] [lens: {type}]
+  One tag per concept. No redundant tags.
+
+  LAYER 9 — NEGATIVE CONSTRAINTS
+  State what the scene must NOT contain. Use approved generic forms from
+  vpd_skill_appendix.txt PLUS scene-specific material exclusions.
+  Required form: "without [generic category]"
+  Scene-specific form: "no [specific material/element]"
+  Example: "[without modern surfaces] [without institutional display context]
+  [no ambient fill] [no background detail] [no lens flare]"
+
+---
+
+FALLBACK PROMPT RULES FOR CINEMATIC_TIER
+
+The fallback_prompt for a CINEMATIC_TIER scene must still follow the short
+format (10-20 words) from vpd_skill_appendix.txt, but must preserve:
+  - Material specificity (named material, not generic description)
+  - Lighting direction
+  - One negative constraint
+
+Example: "Corroded bronze gear fragment, amber directional light from upper left,
+deep shadow void, macro close-up, without modern surfaces."
+
+---
+
+BLUEPRINT IDENTIFIER
+
+Every CINEMATIC_TIER prompt must include a blueprint reference in the JSON
+output, not in the prompt text itself:
+  "prompt_blueprint": "vpd_cinematic_prompt_skill_v1"
+
+This allows post-run evaluation to identify which prompts used the new format.
+
+---
+
+EVALUATOR CHECKLIST — apply after writing CINEMATIC_TIER prompt
+
+  [ ] Opening premise present and written without "this scene shows / we see"
+  [ ] Subject named with full material specificity (not "old object" or "gear")
+  [ ] Lighting plan names: source type, direction, color temperature, shadow behavior
+  [ ] Material detail contains three or more distinct surface observations
+  [ ] Spatial composition states void/background material and subject-to-frame ratio
+  [ ] Exactly one camera motion verb in entire prompt (not in time segments)
+  [ ] Time segmentation present and contains no camera verbs
+  [ ] Technical tags include minimum required set [4K] [24fps] [aspect ratio: 16:9]
+  [ ] Negative constraints use approved generic forms + scene-specific exclusions
+  [ ] Fallback prompt preserves material specificity and one negative constraint
+  [ ] prompt_blueprint field set to "vpd_cinematic_prompt_skill_v1"
+  [ ] Primary prompt is 120-200 words
+  [ ] Fallback prompt is 10-20 words
+
+---

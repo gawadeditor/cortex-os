@@ -1,0 +1,79 @@
+---
+
+IMAGE PROMPT STRUCTURE SKILL
+Derived from: GPT-Image2-Skill (wuyoscar/GPT-Image2-Skill)
+
+This section supplements SECTION 11 and SECTION 11B above. Apply these rules
+to every image_prompt you write. They reinforce and do not override the brand
+constraints in SECTION 11B (warm palette, no cool blue, near-black background)
+or the zone reservation requirements in SECTION 11C (CONCEPT_DRIVEN_MODE).
+
+---
+
+ORDERING — structure before goal
+
+Build every image_prompt in this element sequence:
+  1. SCENE/ENVIRONMENT  — background and setting context first
+  2. SUBJECT            — the primary visual subject
+  3. KEY DETAIL         — one specific material, texture, age marker, or physical condition
+  4. CONSTRAINT         — at least two explicit inline negative clauses
+
+This ordering differs from the [Primary subject], [Action/State], [Setting]...
+format in SECTION 11. Apply this sequence instead for all prompts you write.
+
+Example transformation:
+
+  Before (subject-first):
+    "Corroded bronze gear fragments with green-brown marine patina, partial wooden
+     housing, visible precision gear teeth, isolated on a rough stone plinth in a
+     shadowed neoclassical archival alcove, wide close-up, warm amber spotlight,
+     burnt sienna background, dust motes and deep bronze shadow."
+
+  After (scene-first):
+    "Shadowed stone alcove with burnt sienna walls, amber spotlight from above,
+     ancient corroded bronze mechanism at centre-right, green-brown marine patina
+     and fractured wooden housing, no inscriptions, no modern elements, no ambient halo."
+
+---
+
+INLINE CONSTRAINT PLACEMENT
+
+Do not rely on negative_constraints[] from the Handoff Brief alone. Every
+image_prompt must contain at least two explicit negative clauses embedded
+directly within the prompt string itself, placed at the end of the prompt.
+
+Required negatives for all Hypogeum historical thumbnails:
+  "no inscriptions" or "no text"
+  "no modern elements" or "no contemporary objects"
+
+Add further negatives specific to each candidate's visual risk:
+  "no direct gaze"               — for any scene containing a human figure
+  "no museum label"              — for any artifact-on-surface composition
+  "no ambient halo or spotlight ring" — for all compositions (prevents product-shot isolation)
+  "no institutional lighting"    — reinforcement of BGA constraint
+
+These negatives are written inside image_prompt, after the positive description,
+as a comma-separated final clause.
+
+---
+
+SINGLE HERO SUBJECT
+
+One visually dominant subject per prompt. Do not enumerate multiple co-equal
+objects as a comma list ("gears, tablet, scroll, column"). If supporting elements
+appear, frame them as environmental context behind or around the single hero.
+
+The hero subject is named once, explicitly, in the SUBJECT position (element 2).
+Other objects appear only as texture or depth in the SCENE/ENVIRONMENT element.
+
+---
+
+QUALITY SIGNAL
+
+For 16:9 main episode thumbnails: include "photorealistic, high detail" as the
+final style phrase when the hero subject is a physical artifact where surface
+texture is critical to the curiosity gap (e.g. gear teeth, patina, inscriptions
+on metal or stone).
+
+For 9:16 Shorts thumbnails: include "dramatic vertical composition, mobile-optimised"
+as the final style phrase to signal vertical-fill intent to the image model.

@@ -1,0 +1,107 @@
+---
+
+VIDEO PROMPT STRUCTURE SKILL
+Derived from: Seedance2 (dexhunter/seedance2-skill),
+              Veo Video Prompt Director (mcpmarket.com/tools/skills/veo-video-prompt-director),
+              Veo Tools (kdowswell/veo-tools)
+
+This section supplements PROMPT WRITING above. Apply these rules to every
+primary_prompt and fallback_prompt you write. They do not override the
+DOCUMENTARY VISUAL GRAMMAR or MODERN INSTITUTIONS constraints — those remain
+absolute. These rules govern how prompts are structured and expressed within
+those constraints.
+
+---
+
+FORMULA — apply elements in this exact order
+
+Every primary_prompt must follow this sequence:
+  1. FRAMING      — shot type and camera position (e.g. "wide establishing shot", "macro close-up")
+  2. SUBJECT      — the primary visual subject
+  3. ACTION       — what is happening (motion, state, event — not dialogue, not speech)
+  4. CONTEXT      — period, setting, environment with at least one named material or texture
+  5. STYLE        — lighting type, palette register, atmosphere (warm lighting terms only — see constraints above)
+  6. CONSTRAINT   — one explicit negative clause using ONLY these safe generic forms:
+       "without modern lighting"
+       "without institutional display context"
+       "without presenter-style framing"
+       "without contemporary objects"
+       "without direct-to-camera gaze"
+     Do NOT write the name of the blocked element itself (e.g. do not write "fluorescent",
+     "museum", "facing camera" — write the generic alternative instead).
+
+The existing format [Subject], [Action/State], [Setting], [Camera/Framing],
+[Lighting], [Mood] remains valid. This formula reorders elements and adds the
+mandatory CONSTRAINT element at the end of every prompt. Apply this ordering
+to all prompts you write in this output.
+
+---
+
+SINGLE CAMERA MOVEMENT — one motion verb per prompt
+
+Each prompt may contain AT MOST ONE of the following motion verbs:
+  push in, pull back, pan, tilt, track, orbit, crane, aerial, static
+
+If two motion verbs appear in the same prompt (e.g. "slow pan, wide shot, tilt"),
+remove all but the one that best serves the narrative signal of that scene.
+When no movement is required, write "static" explicitly as the camera type.
+
+Conflicting descriptors are forbidden:
+  "slow pan" + "static" — remove one.
+  "tracking" + "overhead" — these imply different camera axes; choose one.
+
+---
+
+TIME SEGMENTATION — required for all 8-second scenes
+
+For every scene where duration_seconds = 8, include a temporal breakdown
+within the primary_prompt using this exact format:
+  "0-4s: [first half — subject state or action].
+   4-8s: [second half — subject detail shift or atmosphere change]."
+
+CRITICAL — camera verbs are FORBIDDEN inside time-segment descriptions:
+  The single camera motion verb (element 1 of the formula) governs the entire clip.
+  The 0-4s / 4-8s breakdown describes what happens to the SUBJECT or the scene — not
+  the camera. Do NOT write a camera motion verb inside a time-segment bracket.
+  WRONG: "4-8s: push into gear teeth" — "push" is a camera verb, forbidden here.
+  RIGHT: "4-8s: gear teeth fill frame as light shifts to raking angle"
+  WRONG: "4-8s: pull back to reveal full coastline" — "pull back" is a camera verb.
+  RIGHT: "4-8s: coastline extends to horizon as haze thickens"
+
+For 5-second scenes: no segmentation. A single continuous state or action is correct.
+
+Rationale: MUAPI renders 8-second clips as continuous sequences. A temporal
+breakdown allows the generation model to maintain coherent subject motion across the
+full duration rather than defaulting to a static or repeated action.
+
+---
+
+MATERIAL SPECIFICITY
+
+Name the surface, material, or texture explicitly in every prompt.
+
+AVOID: "ancient object", "old stone", "historical artifact", "bronze item"
+USE:   "corroded bronze with green-brown marine patina"
+       "worn limestone with chisel marks and fine dust"
+       "aged parchment with faded ink traces"
+       "rough-hewn granite block, pale grey with feldspar inclusions"
+
+One specific material or surface term is required in every primary_prompt.
+Fallback_prompt must name at least the material category (e.g. "corroded bronze").
+
+---
+
+SELF-VALIDATION — apply before finalising each prompt
+
+After drafting each primary_prompt, verify all five conditions:
+  [ ] Exactly one camera motion verb in the entire prompt (check both the framing element
+      AND the time-segment descriptions — camera verbs are forbidden in time segments)
+  [ ] At least one named material or surface texture
+  [ ] At least one constraint clause using only the approved generic forms above
+      (must NOT contain any BGA-blocked term name — use the generic alternative)
+  [ ] No conflicting motion descriptors
+  [ ] primary_prompt is 15–30 words; fallback_prompt is 10–15 words
+
+If any check fails, revise the prompt before including it in the output JSON.
+Do not document the validation result — simply apply it silently and produce
+corrected prompts.

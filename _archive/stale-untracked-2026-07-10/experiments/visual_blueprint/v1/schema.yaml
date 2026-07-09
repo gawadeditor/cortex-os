@@ -1,0 +1,104 @@
+# Visual Blueprint Schema v1
+# Structured decomposition of a cinematic scene into provider-composable layers.
+# All fields required unless marked optional.
+
+blueprint_version: "1.0"
+
+fields:
+  meta:
+    blueprint_id:       string        # e.g. "bp_s30_v1"
+    blueprint_version:  string        # schema version this blueprint targets
+    scene_id:           string        # source scene identifier
+    episode_id:         string        # source episode identifier
+    source_package:     string        # path to visual_package JSON
+
+  content_directive:
+    # Locked content elements the prompt must preserve exactly
+    subject:            string        # primary visual subject with material identity
+    setting:            string        # environment / space / void description
+    period:             string        # historical or temporal context
+    duration_seconds:   integer       # clip length (determines time segmentation)
+    aspect_ratio:       string        # e.g. "16:9"
+    continuity_notes:   string        # optional — cross-scene material matching
+
+  cinematic_layers:
+
+    premise:
+      statement:        string
+      # One sentence. Narrative identity of the shot — what the scene IS.
+      # Must NOT begin with: "this scene shows", "we see", "the video depicts".
+
+    framing:
+      shot_type:        string
+      # One of: wide_establishing, wide, medium, medium_close_up, close_up,
+      #         extreme_close_up, macro, overhead, low_angle
+      camera_position:  string        # spatial description of camera placement
+      subject_declaration: string     # subject + material specificity in one compound phrase
+
+    lighting:
+      source_type:      string
+      # One of: directional, diffuse, spotlight_overhead, raking_side,
+      #         oil_lamp, gaslight, golden_hour, clinical_white
+      direction:        string        # clock or compass: "upper left", "left", "overhead"
+      color_temperature: string       # e.g. "warm amber", "cool blue-green", "clinical white"
+      illuminated_feature: string     # what specific surface the light falls on
+      falloff:          string        # how the light falls off — shadow behavior description
+
+    material_detail:
+      # Minimum 3 distinct surface observations. Each must name a specific
+      # material property: oxidation state, structural damage, or micro-detail.
+      observation_1:    string
+      observation_2:    string
+      observation_3:    string
+      observation_4:    string        # optional
+
+    spatial_composition:
+      background:       string        # what occupies the space behind the subject
+      subject_frame_ratio: string     # fraction of frame the subject occupies
+      breathing_room:   string        # where negative space is positioned
+
+    motion:
+      camera_verb:      string
+      # Exactly ONE of: static, slow_pan, pull_back, push_in, orbit, crane, aerial, tilt, track
+      subject_behavior: string        # what the subject does (or: "motionless")
+      motion_qualifier: string        # optional — one additional motion quality descriptor
+
+    time_segmentation:
+      # Required when duration_seconds == 8.
+      # CRITICAL: camera verbs are FORBIDDEN inside segment descriptions.
+      # Segment text describes subject/scene state — never camera action.
+      segment_0_4s:     string
+      segment_4_8s:     string
+
+    technical_tags:
+      # Required minimum: resolution, framerate, aspect_ratio
+      resolution:       string        # "4K"
+      framerate:        string        # "24fps"
+      aspect_ratio:     string        # "16:9"
+      lens_type:        string        # optional: "macro", "anamorphic", "35mm"
+      depth_of_field:   string        # description of focal plane and falloff
+      color_grade:      string        # color palette description
+
+    constraints:
+      # generic: use only approved VPD generic forms
+      #   "without modern surfaces", "without institutional display context",
+      #   "without contemporary objects", "without modern lighting",
+      #   "without direct-to-camera gaze", "without presenter-style framing"
+      # scene_specific: any additional material/element exclusions
+      generic:          list[string]
+      scene_specific:   list[string]
+
+  provider_hints:
+    # Advisory metadata — not injected into prompts
+    primary_provider:   string        # "muapi", "runway", "veo"
+    fallback_provider:  string
+    tier:               integer       # 1, 2, or 3
+
+validation_rules:
+  - camera_verb_count_equals_1:        true
+  - time_segments_contain_no_camera_verbs: true
+  - material_observations_minimum:     3
+  - technical_tags_minimum_set:        [resolution, framerate, aspect_ratio]
+  - premise_no_forbidden_openers:      ["this scene shows", "we see", "the video depicts"]
+  - constraints_generic_minimum:       1
+  - subject_declaration_names_material: true

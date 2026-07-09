@@ -19,6 +19,17 @@ The original §5 finding below ("8 skills present in both `~/.claude/skills/<nam
 
 ---
 
+## Follow-Up Note (post-audit, 2026-07-10) — visual-review / ep0-run resolved
+
+A subsequent read-only investigation confirmed the two non-identical pairs flagged above (`visual-review`, `ep0-run`) were not ambiguous: in both cases the project copy was newer and strictly more accurate — for `ep0-run` specifically, the global copy contained a stale factual claim ("the pipeline does not currently checkpoint") contradicted by live checkpoint/resume logic confirmed in `hypogeum/pipeline.py`. On that basis:
+
+- **`.claude/skills/visual-review.md` and `.claude/skills/ep0-run.md` (project copies) were confirmed canonical.**
+- **The global `SKILL.md` copies were synchronized from the project copies** — `~/.claude/skills/visual-review/SKILL.md` and `~/.claude/skills/ep0-run/SKILL.md` were overwritten to match the project versions exactly (sha256-verified identical after sync). No content was authored or edited by hand; the global files now simply mirror the already-canonical project files.
+- **Backups of the pre-sync global files were created** at `~/.claude/skills/visual-review/SKILL.md.backup-2026-07-10` and `~/.claude/skills/ep0-run/SKILL.md.backup-2026-07-10` before either overwrite.
+- **The repo working tree remained clean throughout this sync** — `~/.claude/skills/` is outside this repository entirely (a different, global directory under the user's home folder, not `.claude/skills/` inside this repo), so neither the overwrite nor the backup files produce any `git status`/`git diff` entry here. Only this documentation update is a repo-tracked change.
+
+---
+
 ## 1. Existing Skills Inventory
 
 ### 1a. Internal agent skills — `hypogeum/skills/` (Python-loaded, injected into LLM system prompts)

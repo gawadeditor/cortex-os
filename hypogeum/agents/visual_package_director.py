@@ -101,9 +101,14 @@ Logging events emitted:
   vpd_stage_b_batch_completed            — info  — Stage B batch prompts merged into skeleton
   vpd_stage_b_batch_overflow             — warn  — TruncatedResponse; batch halved and retried
   vpd_stage_b_batch_overflow_unsplittable — error — batch_size=1 still truncates; re-raised
-  vpd_stage_a4_started                   — info  — before Stage A4 run_agent() call
-  vpd_stage_a4_resumed                   — info  — Stage A4 checkpoint found, skipping call
-  vpd_stage_a4_completed                 — info  — Stage A4 written to checkpoint
+  vpd_stage_a4_started                   — info  — before Stage A4 batched loop begins
+  vpd_stage_a4_batch_started             — info  — before each Stage A4 run_agent() call
+  vpd_stage_a4_batch_resumed             — info  — Stage A4 batch checkpoint found, skipping
+  vpd_stage_a4_batch_completed           — info  — Stage A4 batch plans merged
+  vpd_stage_a4_batch_overflow            — warn  — TruncatedResponse; batch halved and retried
+  vpd_stage_a4_batch_overflow_unsplittable — error — batch_size=1 still truncates; re-raised
+  vpd_stage_a4_resumed                   — info  — final A4 checkpoint found, skipping all batches
+  vpd_stage_a4_completed                 — info  — all A4 batches merged and written
   vpd_shot_diversity_started             — info  — before Shot Diversity Planner
   vpd_shot_diversity_completed           — info  — after Shot Diversity Planner
   vpd_visual_intent_qa_started           — info  — before Visual Intent QA
@@ -215,12 +220,13 @@ _VPD_ALL_SKILL_PATHS: list[Path] = [
 
 # Stage A4 — Scene Presentation Planner
 _SCENE_PRESENTATION_PLANNER_PROMPT_FILE = _PROMPTS_DIR / "vpd_scene_presentation_planner.txt"
-_VPD_PRESENTATION_PLAN_MAX_TOKENS = 4_096
-_PRESENTATION_PLAN_BATCH_SIZE = 15
+_VPD_PRESENTATION_PLAN_MAX_TOKENS = 8_192   # 15 scenes × ~200 tok/plan ≈ 3,000 tok; 8,192 has headroom
+_PRESENTATION_PLAN_BATCH_SIZE = 15           # batched like Stage B — halved on TruncatedResponse
 
 # Visual Intent QA prompt
 _VISUAL_INTENT_QA_PROMPT_FILE = _PROMPTS_DIR / "vpd_visual_intent_qa.txt"
-_VISUAL_INTENT_QA_MAX_TOKENS = 2_048
+_VISUAL_INTENT_QA_MAX_TOKENS = 4_096   # 10 scenes × ~150 tok/result ≈ 1,500 tok; 4,096 has headroom
+_VISUAL_INTENT_QA_BATCH_SIZE = 10      # batched: full prompts in input, short qa_results in output
 
 
 # ---------------------------------------------------------------------------
@@ -485,17 +491,20 @@ def run_visual_package_director(
         )
 
     # ------------------------------------------------------------------
-    # Stage A4 — Scene Presentation Planner
+    # Stage A4 — Scene Presentation Planner (batched)
     # For every scene, determine HOW the narrative intent should be
     # communicated cinematically BEFORE prompts are written.
-    # This makes presentation decisions immutable — Stage B cannot
-    # override them, only satisfy them.
-    # Checkpoint: vpd_a4_presentation_{episode_id}.json
+    # Batched like Stage B: _PRESENTATION_PLAN_BATCH_SIZE per call,
+    # TruncatedResponse halves the batch and retries.
+    # Final checkpoint: vpd_a4_presentation_{episode_id}.json
+    # Per-batch checkpoints: vpd_a4_presentation_batch_{i}_{episode_id}.json
     # ------------------------------------------------------------------
-    a4_path = _resolve_output_dir / f"vpd_a4_presentation_{episode_id}.json"
-    if a4_path.exists():
-        log.info("vpd_stage_a4_resumed", path=str(a4_path))
-        presentation_plans_result = json.loads(a4_path.read_text(encoding="utf-8"))
+    a4_final_path = _resolve_output_dir / f"vpd_a4_presentation_{episode_id}.json"
+    if a4_final_path.exists():
+        log.info("vpd_stage_a4_resumed", path=str(a4_final_path))
+        all_presentation_plans = json.loads(
+            a4_final_path.read_text(encoding="utf-8")
+        ).get("presentation_plans", [])
     else:
         scenes_for_a4 = [
             {
@@ -507,41 +516,120 @@ def run_visual_package_director(
             }
             for s in visual_package.get("scenes", [])
         ]
-        a4_input = {
-            "task": "plan_scene_presentations",
-            "episode_metadata": visual_package.get("episode_metadata", {}),
-            "scenes": scenes_for_a4,
-        }
         log.info(
             "vpd_stage_a4_started",
             scenes=len(scenes_for_a4),
+            batch_size=_PRESENTATION_PLAN_BATCH_SIZE,
             max_tokens=_VPD_PRESENTATION_PLAN_MAX_TOKENS,
         )
-        presentation_plans_result = run_agent(
-            agent_name=_AGENT_NAME,
-            model_slug=_CLAUDE_SONNET,
-            system_prompt=PRESENTATION_PLANNER_PROMPT,
-            input_package=a4_input,
-            output_schema="vpd_presentation_plan_batch",
-            episode_id=episode_id,
-            max_tokens=_VPD_PRESENTATION_PLAN_MAX_TOKENS,
-            config=config,
-            output_dir=None,
-        )
-        a4_path.write_text(
+
+        all_presentation_plans: list = []
+        a4_cursor = 0
+        a4_batch_idx = 0
+        _a4_batch_size = _PRESENTATION_PLAN_BATCH_SIZE
+
+        while a4_cursor < len(scenes_for_a4):
+            a4_batch = scenes_for_a4[a4_cursor : a4_cursor + _a4_batch_size]
+            if not a4_batch:
+                break
+
+            a4_batch_path = (
+                _resolve_output_dir
+                / f"vpd_a4_presentation_batch_{a4_batch_idx}_{episode_id}.json"
+            )
+            if a4_batch_path.exists():
+                log.info(
+                    "vpd_stage_a4_batch_resumed",
+                    batch=a4_batch_idx,
+                    path=str(a4_batch_path),
+                )
+                batch_result = json.loads(a4_batch_path.read_text(encoding="utf-8"))
+                _a4_ckpt_plans = batch_result.get("presentation_plans", [])
+                all_presentation_plans.extend(_a4_ckpt_plans)
+                # Advance by actual count in checkpoint (may differ if batch_size changed)
+                a4_cursor += len(_a4_ckpt_plans) if _a4_ckpt_plans else len(a4_batch)
+                a4_batch_idx += 1
+                continue
+
+            a4_input = {
+                "task": "plan_scene_presentations",
+                "batch_index": a4_batch_idx,
+                "episode_metadata": visual_package.get("episode_metadata", {}),
+                "scenes": a4_batch,
+            }
+            log.info(
+                "vpd_stage_a4_batch_started",
+                batch=a4_batch_idx,
+                scenes_in_batch=len(a4_batch),
+                a4_cursor=a4_cursor,
+                batch_size=_a4_batch_size,
+                max_tokens=_VPD_PRESENTATION_PLAN_MAX_TOKENS,
+            )
+            try:
+                batch_result = run_agent(
+                    agent_name=_AGENT_NAME,
+                    model_slug=_CLAUDE_SONNET,
+                    system_prompt=PRESENTATION_PLANNER_PROMPT,
+                    input_package=a4_input,
+                    output_schema="vpd_presentation_plan_batch",
+                    episode_id=episode_id,
+                    max_tokens=_VPD_PRESENTATION_PLAN_MAX_TOKENS,
+                    config=config,
+                    output_dir=None,
+                )
+            except TruncatedResponse as exc:
+                if _a4_batch_size <= 1:
+                    log.error(
+                        "vpd_stage_a4_batch_overflow_unsplittable",
+                        batch=a4_batch_idx,
+                        completion_tokens=exc.completion_tokens,
+                        max_tokens=exc.max_tokens_set,
+                        scenes_in_batch=len(a4_batch),
+                    )
+                    raise
+                new_size = max(1, _a4_batch_size // 2)
+                log.warn(
+                    "vpd_stage_a4_batch_overflow",
+                    batch=a4_batch_idx,
+                    old_batch_size=_a4_batch_size,
+                    new_batch_size=new_size,
+                    a4_cursor=a4_cursor,
+                )
+                _a4_batch_size = new_size
+                continue  # retry same cursor with smaller batch
+
+            a4_batch_path.write_text(
+                json.dumps(batch_result, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            batch_plans = batch_result.get("presentation_plans", [])
+            all_presentation_plans.extend(batch_plans)
+            log.info(
+                "vpd_stage_a4_batch_completed",
+                batch=a4_batch_idx,
+                plans_in_batch=len(batch_plans),
+                total_plans_so_far=len(all_presentation_plans),
+            )
+            a4_cursor += len(a4_batch)
+            a4_batch_idx += 1
+
+        # Merge all batches into final checkpoint
+        presentation_plans_result = {"presentation_plans": all_presentation_plans}
+        a4_final_path.write_text(
             json.dumps(presentation_plans_result, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         log.info(
             "vpd_stage_a4_completed",
-            plans=len(presentation_plans_result.get("presentation_plans", [])),
-            path=str(a4_path),
+            plans=len(all_presentation_plans),
+            batches=a4_batch_idx,
+            path=str(a4_final_path),
         )
 
     # Inject presentation_plan into each scene (keyed by scene_id)
     _presentation_plan_map = {
         p["scene_id"]: p
-        for p in presentation_plans_result.get("presentation_plans", [])
+        for p in all_presentation_plans
     }
     for scene in visual_package.get("scenes", []):
         sid = scene.get("scene_id")
@@ -1069,22 +1157,96 @@ def _run_visual_intent_qa(
     if ckpt_path.exists():
         qa_result = json.loads(ckpt_path.read_text(encoding="utf-8"))
     else:
-        qa_input = {
-            "task": "visual_intent_qa",
-            "episode_metadata": visual_package.get("episode_metadata", {}),
-            "scenes": scenes_for_qa,
-        }
-        qa_result = run_agent(
-            agent_name=_AGENT_NAME,
-            model_slug=_CLAUDE_SONNET,
-            system_prompt=VISUAL_INTENT_QA_PROMPT,
-            input_package=qa_input,
-            output_schema="vpd_visual_intent_qa_batch",
-            episode_id=episode_id,
-            max_tokens=_VISUAL_INTENT_QA_MAX_TOKENS,
-            config=config,
-            output_dir=None,
-        )
+        # Batched loop: full primary_prompts in input make each scene ~900 input tokens;
+        # output is short (~150 tok/scene). 10 scenes/batch keeps input manageable.
+        all_qa_results: list = []
+        qa_cursor = 0
+        qa_batch_idx = 0
+        _qa_batch_size = _VISUAL_INTENT_QA_BATCH_SIZE
+
+        while qa_cursor < len(scenes_for_qa):
+            qa_batch = scenes_for_qa[qa_cursor : qa_cursor + _qa_batch_size]
+            if not qa_batch:
+                break
+
+            qa_batch_path = (
+                output_dir
+                / f"vpd_visual_intent_qa_batch_{qa_batch_idx}_{episode_id}.json"
+            )
+            if qa_batch_path.exists():
+                log.info(
+                    "vpd_visual_intent_qa_batch_resumed",
+                    batch=qa_batch_idx,
+                    path=str(qa_batch_path),
+                )
+                batch_qa = json.loads(qa_batch_path.read_text(encoding="utf-8"))
+                _qa_ckpt_results = batch_qa.get("qa_results", [])
+                all_qa_results.extend(_qa_ckpt_results)
+                # Advance by actual count in checkpoint (may differ if batch_size changed)
+                qa_cursor += len(_qa_ckpt_results) if _qa_ckpt_results else len(qa_batch)
+                qa_batch_idx += 1
+                continue
+
+            qa_input = {
+                "task": "visual_intent_qa",
+                "batch_index": qa_batch_idx,
+                "episode_metadata": visual_package.get("episode_metadata", {}),
+                "scenes": qa_batch,
+            }
+            log.info(
+                "vpd_visual_intent_qa_batch_started",
+                batch=qa_batch_idx,
+                scenes_in_batch=len(qa_batch),
+                qa_cursor=qa_cursor,
+                batch_size=_qa_batch_size,
+                max_tokens=_VISUAL_INTENT_QA_MAX_TOKENS,
+            )
+            try:
+                batch_qa = run_agent(
+                    agent_name=_AGENT_NAME,
+                    model_slug=_CLAUDE_SONNET,
+                    system_prompt=VISUAL_INTENT_QA_PROMPT,
+                    input_package=qa_input,
+                    output_schema="vpd_visual_intent_qa_batch",
+                    episode_id=episode_id,
+                    max_tokens=_VISUAL_INTENT_QA_MAX_TOKENS,
+                    config=config,
+                    output_dir=None,
+                )
+            except TruncatedResponse as exc:
+                if _qa_batch_size <= 1:
+                    log.error(
+                        "vpd_visual_intent_qa_batch_overflow_unsplittable",
+                        batch=qa_batch_idx,
+                        completion_tokens=exc.completion_tokens,
+                        max_tokens=exc.max_tokens_set,
+                    )
+                    raise
+                new_size = max(1, _qa_batch_size // 2)
+                log.warn(
+                    "vpd_visual_intent_qa_batch_overflow",
+                    batch=qa_batch_idx,
+                    old_batch_size=_qa_batch_size,
+                    new_batch_size=new_size,
+                )
+                _qa_batch_size = new_size
+                continue
+
+            qa_batch_path.write_text(
+                json.dumps(batch_qa, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            batch_results = batch_qa.get("qa_results", [])
+            all_qa_results.extend(batch_results)
+            log.info(
+                "vpd_visual_intent_qa_batch_completed",
+                batch=qa_batch_idx,
+                results_in_batch=len(batch_results),
+                total_qa_results_so_far=len(all_qa_results),
+            )
+            qa_cursor += len(qa_batch)
+            qa_batch_idx += 1
+
+        qa_result = {"qa_results": all_qa_results}
         ckpt_path.write_text(
             json.dumps(qa_result, indent=2, ensure_ascii=False), encoding="utf-8"
         )

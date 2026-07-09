@@ -262,7 +262,23 @@ def generate_all_scene_videos(
     asset_index           = build_asset_index(visual_package)
     asset_manifest_assets = visual_package["asset_manifest"]["assets"]
 
+    # Statuses that mean "this scene already has a clip — do not submit to MUAPI".
+    # "deferred" is set externally (e.g. selective regeneration plan) to park a
+    # scene without consuming budget.  "reused"/"generated"/"dry_run" are the
+    # normal terminal-success values written by submit_scene or the salvage tool.
+    _SKIP_STATUSES = {"reused", "generated", "dry_run", "deferred"}
+
     for scene in scenes_sorted:
+        sid = scene.get("scene_id", "")
+        existing = asset_index.get(sid, {})
+        if existing.get("generation_status") in _SKIP_STATUSES:
+            log.info(
+                "vpd_scene_skipped",
+                scene_id=sid,
+                generation_status=existing.get("generation_status"),
+                reason="pre_populated_terminal_status",
+            )
+            continue
         generate_scene_video(
             scene, asset_index, asset_manifest_assets, entity_hosted_urls,
             config, episode_id, output_dir, log,

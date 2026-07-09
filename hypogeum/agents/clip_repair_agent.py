@@ -358,7 +358,11 @@ def _scene_description(scene: dict) -> str:
 
     signals = scene.get("narrative_signals", [])
     for sig in signals:
-        t = sig.get("signal_type", "") or sig.get("description", "") or ""
+        # narrative_signals may be dicts (legacy) or plain strings (new VPD A2 format)
+        if isinstance(sig, str):
+            t = sig
+        else:
+            t = sig.get("signal_type", "") or sig.get("description", "") or ""
         if t:
             parts.append(t)
 

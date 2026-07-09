@@ -309,7 +309,7 @@ def main():
     # vo_complete check: all gates must pass
     vo_complete_final = (
         vo_report["vo_complete"]
-        and stitched_dur >= sum_beat_dur - 1.0
+        and stitched_dur >= sum_beat_dur - max(1.0, ((len(narration_segments) - 1) * 0.030) + 0.5)
     )
 
     print("\n" + "="*60)

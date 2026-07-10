@@ -183,8 +183,37 @@ The following is a hard rule for all future skill-related work in this repositor
 
 ---
 
-## 9. Next Safe Step
+## 9. Humanizer Upstream Verification
 
-Do not begin any external-skill installation work yet, including for `seedance2-skill` (§6), `veo-prompt-director` (§7), or `veo-tools` (§8) — all three are verified but none are authorized for installation. The single next smallest safe step remains: **obtain a real, explicit upstream source (URL or official install command) for the remaining unresolved BLOCKED skills named in `SKILLS_AND_AGENTS_AUDIT.md` §6** (Humanizer, GPT Image2, UI/UX Pro Max — Seedance2, Veo Prompt Director, and Veo Tools are now sourced per §6/§7/§8 above but still not installed), or, alternatively, make the explicit reconciliation/scope decisions described in §6, §7, and §8 before any installation proceeds. This is a sourcing/decision step, not an implementation step. No other skill or agent work should proceed ahead of this.
+**Canonical upstream source:** `https://github.com/blader/humanizer`
+
+**Status: VERIFIED / STRONG ADOPTION CANDIDATE / NOT INSTALLED.**
+
+- **Real portable Claude/agent Skill, also packaged as a Claude Code Plugin.** `SKILL.md` carries valid YAML frontmatter (`name: humanizer`, `version: 2.8.2`, `description:`, `license: MIT`, `compatibility: any-agent`, `allowed-tools: [Read, Write, Edit, Grep, Glob, AskUserQuestion]`). `.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` are both present and both point at the same `SKILL.md` as the sole runtime artifact.
+- **Version:** 2.8.2.
+- **Pure Markdown — no executable scripts, API calls, credentials, billing surface, or build step.** The repo's own `AGENTS.md` states this explicitly: "There is no build step and no code to run." This is a categorically different, lower-risk artifact than `veo-tools` (§8) or the CLI portion of `GPT-Image2-Skill` (§7's sibling verification) — no new credential, no external billing, no bypass of any Hypogeum guardrail is possible merely by reading or composing this content.
+- **License:** MIT (`LICENSE`, confirmed via GitHub API `license.spdx_id: MIT`, restated in both `plugin.json` and `marketplace.json`).
+- **Runtime source of truth is the upstream `SKILL.md`** — per the repo's own `AGENTS.md`: "`SKILL.md` — the skill itself... This is the source of truth." `README.md` and the plugin manifests exist only for install/discovery convenience.
+- **Official installation methods:**
+  - `npx skills add blader/humanizer` (cross-agent Skills CLI; supports `--agent '*'` or a named harness)
+  - Claude Code plugin marketplace: `/plugin marketplace add blader/humanizer` then `/plugin install humanizer@humanizer`
+  - Manual: clone the repo and copy `SKILL.md` into any skill directory the harness expects
+  - No installation was performed.
+- **Intended Hypogeum target: `hypogeum/agents/script_engine.py` only.** Confirmed via `graphify query` that Script Engine's output ("narration beats") becomes actual spoken documentary narration (consumed by the audio pipeline / `NarrationSegmentResult`) — real, human-facing prose, which is exactly the surface Humanizer is built to improve.
+- **Agents that must NOT receive it:** `executive_producer.py`, `research_director.py`, `narrative_architect.py`, `visual_package_director.py`, `shot_diversity_planner.py`, `thumbnail_prompt_writer.py`, `thumbnail_identity_guardian.py`, `brand_guardian_agent.py`, `hypogeum/agents/thumbnail_strategy.py`, `hypogeum/discovery/topic_ideator.py` — none of these produce final human-facing prose; injecting a prose-humanizing instruction set into a structured-JSON-output, research, planning, visual, thumbnail, or verification stage would repeat the "generic skill loaded where not needed" anti-pattern this audit series has consistently kept absent.
+- **Humanizer fills a real capability gap.** Confirmed via the earlier provenance audit (§2 of this document): `script_engine.py` and `narrative_architect.py` currently load no skills at all, and no file anywhere in `hypogeum/skills/` addresses prose-quality or AI-writing-tell removal. Hypogeum has zero dedicated tooling for this today.
+- **No hard architectural blocker was found.** Unlike `veo-tools` (direct Vertex AI calls bypassing MUAPI/Finance-Agent) or the `GPT-Image2-Skill` CLI (direct OpenAI SDK calls), Humanizer requires no new integration surface to merely compose into a system prompt — Hypogeum's existing `compose_system_prompt()` mechanism (already used for `hypogeum/skills/*.md`) is structurally sufficient to carry pure-markdown content like this.
+- **No content conflict was found.** No claim in `SKILL.md` contradicts any existing Hypogeum hard rule (unlike the confirmed `Static`-camera-verb conflicts found in both Veo sources, §7/§8).
+- **Do not install or wire it yet** — the Skills Standardization Phase is still completing its full source audit and Decision Matrix; this verification establishes the source and suitability only, not authorization to adopt.
+- **Final adoption design must later choose between:**
+  1. injecting the upstream skill into Script Engine generation (via `compose_system_prompt()`, matching the pattern already used for VPD/SDP/thumbnail_prompt_writer), or
+  2. using it as a separate automated revision pass after script generation, before schema validation.
+- **Any Hypogeum-specific unattended-mode instructions must live in a separate thin wrapper or integration configuration.** The upstream `SKILL.md` must not be edited — its conversational framing (voice-calibration prompts, "paste your text here") would need to be adapted around, not rewritten, consistent with Installation Policy §5 rule 4.
+
+---
+
+## 10. Next Safe Step
+
+Do not begin any external-skill installation work yet, including for `seedance2-skill` (§6), `veo-prompt-director` (§7), `veo-tools` (§8), or `humanizer` (§9) — all four are verified but none are authorized for installation. The single next smallest safe step remains: **obtain a real, explicit upstream source (URL or official install command) for the remaining unresolved BLOCKED skills named in `SKILLS_AND_AGENTS_AUDIT.md` §6** (GPT Image2, UI/UX Pro Max — Seedance2, Veo Prompt Director, Veo Tools, and Humanizer are now sourced per §6/§7/§8/§9 above but still not installed), or, alternatively, make the explicit reconciliation/scope/integration-design decisions described in §6, §7, §8, and §9 before any installation proceeds. This is a sourcing/decision step, not an implementation step. No other skill or agent work should proceed ahead of this — in particular, UI/UX Pro Max or any other unverified skill is out of scope for the current task.
 
 No implementation is authorized by this document.

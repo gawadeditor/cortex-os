@@ -765,10 +765,10 @@ def _set(d: dict, key: str, value) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestSchemaRegistry:
-    def test_schema_names_has_35_entries(self):
-        assert len(SCHEMA_NAMES) == 35  # +4 for Visual Intelligence V1–V4 schemas
+    def test_schema_names_has_36_entries(self):
+        assert len(SCHEMA_NAMES) == 36  # +4 for Visual Intelligence V1–V4, +1 for humanized_script_package
 
-    def test_all_35_names_present(self):
+    def test_all_36_names_present(self):
         expected = {
             "validation_scorecard", "topic_brief", "package_deficiency_report",
             "research_package", "narrative_package", "script_package",
@@ -786,6 +786,8 @@ class TestSchemaRegistry:
             # Visual Intelligence V1–V4
             "vpd_presentation_plan_batch", "vpd_visual_intent_qa_batch",
             "shot_diversity_plan", "editorial_qa_report",
+            # Humanization Stage
+            "humanized_script_package",
         }
         assert set(SCHEMA_NAMES) == expected
 
@@ -1537,3 +1539,385 @@ class TestPublishingRecord:
             p = copy.deepcopy(_publishing_record())
             p["platform_results"][0]["status"] = status
             validate(self.S, p)
+
+
+# ---------------------------------------------------------------------------
+# TestHumanizedScriptPackage
+#
+# humanized_script_package is additive-only: docs/architecture/
+# HUMANIZATION_STAGE_DESIGN.md §5.2 — a new schema wrapping the source
+# script_package, never an in-place mutation of it. These tests do not touch
+# _script_package() or any other existing fixture.
+# ---------------------------------------------------------------------------
+
+_PINNED_HUMANIZER_SHA = "1b48564898e999219882660237fde01bf4843a0f"
+
+
+def _hsp_source_package() -> dict:
+    """Minimal valid script_package shape, embedded as source_script_package."""
+    return {
+        "episode_metadata": {"title": "The Antikythera Mechanism"},
+        "sections": [
+            {
+                "section_id": "s_001",
+                "title": "The Wreck",
+                "narration_beats": [
+                    {"beat_id": "nb_001", "text": "In 1901, divers found something extraordinary."}
+                ],
+            }
+        ],
+        "shorts_scripts": [],
+    }
+
+
+def _hsp_preservation(require_checks: bool = False) -> dict:
+    pv = {"passed": True, "hard_failures": [], "warnings": []}
+    if require_checks:
+        pv["checks"] = {
+            key: {"passed": True, "severity": "info", "details": None}
+            for key in (
+                "names", "dates", "numbers", "locations", "quotations", "citations",
+                "urls", "evidence_levels", "uncertainty_language", "negations",
+                "prohibited_claims", "beat_count", "beat_order", "schema_shape",
+                "timing_fields", "visual_direction_fields",
+            )
+        }
+    return pv
+
+
+def _hsp_beat(
+    beat_id: str = "nb_001",
+    original: str = "In 1901, divers found something extraordinary.",
+    humanized: str = "In 1901, divers found something extraordinary.",
+    status: str = "unchanged",
+) -> dict:
+    return {
+        "beat_id": beat_id,
+        "original_narration": original,
+        "humanized_narration": humanized,
+        "transformation_status": status,
+        "deterministic_rules_applied": [],
+        "llm_pass_applied": False,
+        "differences": [],
+        "warnings": [],
+        "preservation_validation": _hsp_preservation(require_checks=False),
+    }
+
+
+def _hsp_humanization(
+    mode: str = "OFF",
+    status: str = "not_run",
+    model_id=None,
+    provider=None,
+    fallback_used: bool = False,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    latency_ms=0,
+) -> dict:
+    return {
+        "stage_version": "1.0.0",
+        "mode": mode,
+        "status": status,
+        "input_hash": "sha256:input",
+        "output_hash": "sha256:output",
+        "skill_commit_sha": _PINNED_HUMANIZER_SHA,
+        "wrapper_version": "1.0.0",
+        "model_id": model_id,
+        "provider": provider,
+        "fallback_used": fallback_used,
+        "warnings": [],
+        "latency_ms": latency_ms,
+        "token_usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+        "preservation_validation": _hsp_preservation(require_checks=True),
+    }
+
+
+def _hsp_provenance(model_id=None) -> dict:
+    return {
+        "pipeline_run_id": "run_20260710_001",
+        "source_stage": "script_engine",
+        "source_schema": "script_package",
+        "source_schema_version": "v1",
+        "source_content_hash": "sha256:source",
+        "humanization_stage_version": "1.0.0",
+        "skill_source": "https://github.com/blader/humanizer",
+        "skill_commit_sha": _PINNED_HUMANIZER_SHA,
+        "wrapper_version": "1.0.0",
+        "model_id": model_id,
+        "created_at": "2026-07-10T00:00:00Z",
+    }
+
+
+def _humanized_script_package(**overrides) -> dict:
+    base = {
+        "episode_id": "ep_001",
+        "source_script_package": _hsp_source_package(),
+        "humanization": _hsp_humanization(),
+        "beats": [_hsp_beat()],
+        "provenance": _hsp_provenance(),
+    }
+    base.update(overrides)
+    return base
+
+
+class TestHumanizedScriptPackage:
+    S = "humanized_script_package"
+
+    # 1. Minimal valid package
+    def test_minimal_valid_passes(self):
+        validate(self.S, _humanized_script_package())
+
+    # 2. Full valid package
+    def test_full_valid_passes(self):
+        p = _humanized_script_package(
+            humanization=_hsp_humanization(
+                mode="LLM_CANARY", status="transformed",
+                model_id="anthropic/claude-sonnet-4.6", provider="openrouter",
+                fallback_used=False, input_tokens=120, output_tokens=80, latency_ms=850.5,
+            ),
+            beats=[
+                _hsp_beat(
+                    beat_id="nb_001",
+                    original="We delve into the pivotal moment of 1901.",
+                    humanized="In 1901, they explored a defining moment.",
+                    status="deterministic_and_llm",
+                )
+            ],
+            provenance=_hsp_provenance(model_id="anthropic/claude-sonnet-4.6"),
+        )
+        p["beats"][0]["deterministic_rules_applied"] = ["P01", "P07"]
+        p["beats"][0]["llm_pass_applied"] = True
+        p["beats"][0]["differences"] = [{"type": "vocabulary", "before": "delve into", "after": "explore"}]
+        validate(self.S, p)
+
+    # 3. Identical original/humanized narration accepted
+    def test_identical_original_and_humanized_narration_accepted(self):
+        p = _humanized_script_package(beats=[_hsp_beat(original="Same text.", humanized="Same text.")])
+        validate(self.S, p)
+
+    # 4. OFF mode accepted
+    def test_off_mode_accepted(self):
+        p = _humanized_script_package(humanization=_hsp_humanization(mode="OFF", status="not_run"))
+        validate(self.S, p)
+
+    # 5. SHADOW mode accepted
+    def test_shadow_mode_accepted(self):
+        p = _humanized_script_package(humanization=_hsp_humanization(mode="SHADOW", status="unchanged"))
+        validate(self.S, p)
+
+    # 6. DETERMINISTIC_ONLY with zero tokens accepted
+    def test_deterministic_only_zero_tokens_accepted(self):
+        p = _humanized_script_package(
+            humanization=_hsp_humanization(
+                mode="DETERMINISTIC_ONLY", status="transformed",
+                input_tokens=0, output_tokens=0,
+            )
+        )
+        validate(self.S, p)
+
+    # 7. LLM_CANARY with model/provider/token metadata accepted
+    def test_llm_canary_with_model_metadata_accepted(self):
+        p = _humanized_script_package(
+            humanization=_hsp_humanization(
+                mode="LLM_CANARY", status="transformed",
+                model_id="anthropic/claude-sonnet-4.6", provider="openrouter",
+                input_tokens=200, output_tokens=150,
+            )
+        )
+        validate(self.S, p)
+
+    # 8. Fallback preserving original accepted
+    def test_fallback_preserving_original_accepted(self):
+        p = _humanized_script_package(
+            humanization=_hsp_humanization(mode="LLM_CANARY", status="fallback", fallback_used=True),
+            beats=[_hsp_beat(original="Original text.", humanized="Original text.", status="reverted")],
+        )
+        validate(self.S, p)
+
+    # 9. Missing episode ID rejected
+    def test_missing_episode_id_rejected(self):
+        with pytest.raises(SchemaError):
+            validate(self.S, _drop(_humanized_script_package(), "episode_id"))
+
+    def test_empty_episode_id_rejected(self):
+        with pytest.raises(SchemaError):
+            validate(self.S, _humanized_script_package(episode_id=""))
+
+    # 10. Empty beats rejected
+    def test_empty_beats_rejected(self):
+        with pytest.raises(SchemaError):
+            validate(self.S, _humanized_script_package(beats=[]))
+
+    # 11. Duplicate beat IDs rejected
+    def test_duplicate_beat_ids_rejected(self):
+        p = _humanized_script_package(beats=[_hsp_beat(beat_id="nb_001"), _hsp_beat(beat_id="nb_001")])
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 12. Invalid mode rejected
+    def test_invalid_mode_rejected(self):
+        p = _humanized_script_package(humanization=_hsp_humanization(mode="TURBO"))
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 13. Invalid package status rejected
+    def test_invalid_status_rejected(self):
+        p = _humanized_script_package(humanization=_hsp_humanization(status="maybe"))
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 14. Invalid beat transformation status rejected
+    def test_invalid_beat_transformation_status_rejected(self):
+        p = _humanized_script_package(beats=[_hsp_beat(status="mostly_done")])
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 15. Negative token count rejected
+    def test_negative_input_tokens_rejected(self):
+        p = _humanized_script_package()
+        p["humanization"]["token_usage"]["input_tokens"] = -5
+        p["humanization"]["token_usage"]["total_tokens"] = -5 + p["humanization"]["token_usage"]["output_tokens"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 16. Negative latency rejected
+    def test_negative_latency_rejected(self):
+        p = _humanized_script_package(humanization=_hsp_humanization(latency_ms=-1))
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 17. Missing preservation result rejected
+    def test_missing_package_preservation_validation_rejected(self):
+        with pytest.raises(SchemaError):
+            validate(self.S, _drop(_humanized_script_package(), "humanization.preservation_validation"))
+
+    def test_preservation_validation_missing_passed_rejected(self):
+        p = _humanized_script_package()
+        del p["humanization"]["preservation_validation"]["passed"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_beat_missing_preservation_validation_rejected(self):
+        p = _humanized_script_package()
+        del p["beats"][0]["preservation_validation"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 18. Malformed skill commit SHA rejected
+    def test_malformed_skill_commit_sha_rejected(self):
+        p = _humanized_script_package()
+        p["humanization"]["skill_commit_sha"] = "not-a-sha"
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_short_skill_commit_sha_rejected(self):
+        p = _humanized_script_package()
+        p["provenance"]["skill_commit_sha"] = "1b4856"
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 19. Missing source provenance rejected
+    def test_missing_provenance_rejected(self):
+        with pytest.raises(SchemaError):
+            validate(self.S, _drop(_humanized_script_package(), "provenance"))
+
+    def test_missing_source_script_package_rejected(self):
+        with pytest.raises(SchemaError):
+            validate(self.S, _drop(_humanized_script_package(), "source_script_package"))
+
+    def test_source_script_package_empty_sections_rejected(self):
+        p = _humanized_script_package()
+        p["source_script_package"]["sections"] = []
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_skill_source_wrong_url_rejected(self):
+        p = _humanized_script_package()
+        p["provenance"]["skill_source"] = "https://github.com/someone/else"
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_missing_original_narration_rejected(self):
+        p = _humanized_script_package()
+        del p["beats"][0]["original_narration"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_missing_humanized_narration_rejected(self):
+        p = _humanized_script_package()
+        del p["beats"][0]["humanized_narration"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_fallback_used_with_no_usable_output_rejected(self):
+        p = _humanized_script_package(
+            humanization=_hsp_humanization(mode="LLM_CANARY", status="fallback", fallback_used=True),
+            beats=[_hsp_beat(original="Something happened.", humanized="", status="reverted")],
+        )
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_inconsistent_token_total_rejected(self):
+        p = _humanized_script_package()
+        p["humanization"]["token_usage"]["total_tokens"] = 9999
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # 20. Existing script_package validation remains unchanged
+    def test_existing_script_package_schema_unaffected(self):
+        validate("script_package", _script_package())
+
+    # 21. Existing schema registry/import tests remain passing — see
+    # TestSchemaRegistry.test_schema_names_has_36_entries /
+    # test_all_36_names_present, updated alongside this schema's addition.
+
+    # 22. Unknown additional fields follow the same acceptance/rejection
+    # policy as current repository schemas (permissive — extras are ignored,
+    # matching every other validator in this module).
+    def test_unknown_additional_top_level_field_accepted(self):
+        p = _humanized_script_package()
+        p["some_future_field"] = {"anything": True}
+        validate(self.S, p)
+
+    def test_unknown_additional_beat_field_accepted(self):
+        p = _humanized_script_package()
+        p["beats"][0]["extra_debug_info"] = "not part of the schema"
+        validate(self.S, p)
+
+    # 23. Arabic narration accepted
+    def test_arabic_narration_accepted(self):
+        p = _humanized_script_package(
+            beats=[_hsp_beat(
+                original="في عام 1901، عثر الغواصون على شيء استثنائي.",
+                humanized="في عام 1901، عثر الغواصون على شيء استثنائي.",
+            )]
+        )
+        validate(self.S, p)
+
+    # 24. Mixed Arabic/English narration accepted
+    def test_mixed_arabic_english_narration_accepted(self):
+        p = _humanized_script_package(
+            beats=[_hsp_beat(
+                original="In 1901, الغواصون found something في البحر extraordinary.",
+                humanized="In 1901, الغواصون found something في البحر extraordinary.",
+            )]
+        )
+        validate(self.S, p)
+
+    # 25. Direct quotations, dates, numbers, URLs, citations accepted as
+    # text without normalization or mutation
+    def test_quotations_dates_numbers_urls_citations_preserved_as_text(self):
+        text = (
+            'The diver said, "This changed everything," on March 15, 1901. '
+            'Source: https://example.org/antikythera (Smith, 2019), item #12A, 45.2% complete.'
+        )
+        beat = _hsp_beat(original=text, humanized=text)
+        p = _humanized_script_package(beats=[beat])
+        validate(self.S, p)
+        # validate() must not mutate its input
+        assert p["beats"][0]["original_narration"] == text
+        assert p["beats"][0]["humanized_narration"] == text

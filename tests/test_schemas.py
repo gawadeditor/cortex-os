@@ -1553,10 +1553,10 @@ class TestPublishingRecord:
 _PINNED_HUMANIZER_SHA = "1b48564898e999219882660237fde01bf4843a0f"
 
 
-def _hsp_source_package() -> dict:
+def _hsp_source_package(episode_id: str = "ep_001") -> dict:
     """Minimal valid script_package shape, embedded as source_script_package."""
     return {
-        "episode_metadata": {"title": "The Antikythera Mechanism"},
+        "episode_metadata": {"title": "The Antikythera Mechanism", "episode_id": episode_id},
         "sections": [
             {
                 "section_id": "s_001",
@@ -1790,6 +1790,32 @@ class TestHumanizedScriptPackage:
         with pytest.raises(SchemaError):
             validate(self.S, p)
 
+    # Boolean-as-int rejection — bool is a subclass of int in Python, so the
+    # generic numeric helpers would silently accept True/False as 1/0.
+    def test_input_tokens_true_rejected(self):
+        p = _humanized_script_package()
+        p["humanization"]["token_usage"]["input_tokens"] = True
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_output_tokens_false_rejected(self):
+        p = _humanized_script_package()
+        p["humanization"]["token_usage"]["output_tokens"] = False
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_total_tokens_true_rejected(self):
+        p = _humanized_script_package()
+        p["humanization"]["token_usage"]["total_tokens"] = True
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_latency_ms_true_rejected(self):
+        p = _humanized_script_package()
+        p["humanization"]["latency_ms"] = True
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
     # 17. Missing preservation result rejected
     def test_missing_package_preservation_validation_rejected(self):
         with pytest.raises(SchemaError):
@@ -1832,6 +1858,32 @@ class TestHumanizedScriptPackage:
     def test_source_script_package_empty_sections_rejected(self):
         p = _humanized_script_package()
         p["source_script_package"]["sections"] = []
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    # Episode-ID identity between top-level and embedded source package
+    def test_matching_episode_ids_accepted(self):
+        p = _humanized_script_package(
+            episode_id="ep_042", source_script_package=_hsp_source_package(episode_id="ep_042")
+        )
+        validate(self.S, p)
+
+    def test_missing_source_episode_id_rejected(self):
+        p = _humanized_script_package()
+        del p["source_script_package"]["episode_metadata"]["episode_id"]
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_empty_source_episode_id_rejected(self):
+        p = _humanized_script_package()
+        p["source_script_package"]["episode_metadata"]["episode_id"] = ""
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_mismatched_source_and_top_level_episode_ids_rejected(self):
+        p = _humanized_script_package(
+            episode_id="ep_001", source_script_package=_hsp_source_package(episode_id="ep_999")
+        )
         with pytest.raises(SchemaError):
             validate(self.S, p)
 

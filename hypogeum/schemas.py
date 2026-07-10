@@ -1336,9 +1336,19 @@ def _req_sha(d: dict, schema: str, key: str, path: str = "") -> str:
 
 
 def _req_nonneg_numeric(d: dict, schema: str, key: str, path: str = "") -> Any:
-    """Assert d[key] is a non-negative int or float."""
+    """
+    Assert d[key] is a non-negative int or float.
+
+    Humanization-specific: also rejects bool. bool is a subclass of int in
+    Python, so the generic _req_numeric()/_req() helpers (used unchanged by
+    every other schema in this module) would silently accept True/False as
+    1/0. This stricter check is local to this function only — no other
+    schema's numeric validation is affected.
+    """
     val = _req_numeric(d, schema, key, path)
     full = f"{path}.{key}".lstrip(".")
+    if isinstance(val, bool):
+        raise SchemaError(schema, full, f"must be a number, not bool, got {val!r}")
     if val < 0:
         raise SchemaError(schema, full, f"must be non-negative, got {val!r}")
     return val
@@ -1385,16 +1395,36 @@ def _validate_preservation_validation(
 def _validate_humanized_script_package(p: dict) -> None:
     s = "humanized_script_package"
 
-    _req_nonempty_str(p, s, "episode_id")
+    episode_id = _req_nonempty_str(p, s, "episode_id")
 
     # source_script_package — the complete original script_package, per
     # HUMANIZATION_STAGE_DESIGN.md §5.2's decision (a separate schema wrapping
     # the source, never an in-place mutation of it). Shallow structural check
     # only, matching this module's stated principle of not re-validating
     # every nested leaf of an already-independently-schema-owned package.
+    #
+    # episode_id note: hypogeum/schemas.py's own _validate_script_package
+    # does not require an episode_id field anywhere (confirmed directly —
+    # neither top-level nor inside episode_metadata), and the canonical
+    # script_package fixture carries none either. This schema requires
+    # episode_metadata.episode_id on the *embedded* source_script_package
+    # specifically, following the same convention narrative_package already
+    # uses (episode_metadata.episode_id) — this is an additive requirement
+    # scoped to humanized_script_package only; script_package's own schema
+    # is untouched. A production Humanization Stage will need Script Engine
+    # to populate this field before a real script_package can satisfy it.
     source = _req_dict(p, s, "source_script_package")
     _req_list(source, s, "sections", path="source_script_package", min_length=1)
     _req_list(source, s, "shorts_scripts", path="source_script_package")
+    source_meta = _req_dict(source, s, "episode_metadata", path="source_script_package")
+    source_episode_id = _req_nonempty_str(
+        source_meta, s, "episode_id", path="source_script_package.episode_metadata"
+    )
+    if source_episode_id != episode_id:
+        raise SchemaError(
+            s, "source_script_package.episode_metadata.episode_id",
+            f"must equal top-level episode_id ({episode_id!r}), got {source_episode_id!r}"
+        )
 
     # humanization
     h = _req_dict(p, s, "humanization")

@@ -1,0 +1,32 @@
+{
+  "$schema_note": "Machine-readable mirror of docs/architecture/UPSTREAM_SKILL_MANIFEST.md. The markdown document is authoritative; this file is a derived, regenerable index. Only sources with state INSTALLED or later have an entry here — sources still NOT INSTALLED per the manifest are not yet listed.",
+  "skills": [
+    {
+      "name": "humanizer",
+      "canonical_url": "https://github.com/blader/humanizer",
+      "owner": "blader",
+      "repository": "humanizer",
+      "pinned_commit_sha": "1b48564898e999219882660237fde01bf4843a0f",
+      "upstream_version": "2.8.2",
+      "retrieval_date": "2026-07-10",
+      "license_identifier": "MIT",
+      "installation_method": "manual pinned copy — files fetched directly from the pinned commit via raw.githubusercontent.com, independently re-fetched and diffed for verification; no npx skills / plugin marketplace installer used",
+      "upstream_directory_path": "third_party/skills/humanizer/1b48564898e999219882660237fde01bf4843a0f/",
+      "file_inventory": [
+        {
+          "path": "third_party/skills/humanizer/1b48564898e999219882660237fde01bf4843a0f/SKILL.md",
+          "size_bytes": 34017,
+          "sha256": "243aecdafecb5e11c2d45e2e088b7876e3f6eee34aa50c53f624d8468039afa8"
+        },
+        {
+          "path": "third_party/skills/humanizer/1b48564898e999219882660237fde01bf4843a0f/LICENSE",
+          "size_bytes": 1066,
+          "sha256": "4ac4810254ab36d45419141aeb8e69bf50652cfafe5b2dab947d06d44e5cbf96"
+        }
+      ],
+      "state": "INSTALLED / NOT WIRED / NOT ACTIVE",
+      "planned_target_later_task": "Humanization capability after hypogeum/agents/script_engine.py — not created by this task, per docs/architecture/SKILLS_CAPABILITY_AND_AGENT_DECISION_MATRIX.md §4",
+      "rollback_instructions": "Delete third_party/skills/humanizer/1b48564898e999219882660237fde01bf4843a0f/ and remove this entry from config/upstream_skills_manifest.json. No agent, prompt, schema, or pipeline file references this installation, so no other file requires any change to complete the rollback."
+    }
+  ]
+}

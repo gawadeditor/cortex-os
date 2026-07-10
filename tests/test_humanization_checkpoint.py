@@ -455,10 +455,15 @@ class TestIsolation:
         assert "run_agent" not in called_or_imported_names
         assert "run_humanization_stage" not in called_or_imported_names
 
-    def test_not_referenced_by_pipeline(self):
+    def test_referenced_by_pipeline_in_off_mode_only(self):
+        # Pipeline wiring is authorized for OFF mode only. Guard against
+        # silent escalation to DETERMINISTIC_ONLY or LLM activation without
+        # an explicit future task.
         pipeline_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hypogeum", "pipeline.py"
         )
         content = open(pipeline_path, encoding="utf-8").read()
-        assert "humanization_checkpoint" not in content
-        assert "humanization_stage" not in content
+        assert "humanization_checkpoint" in content
+        assert "humanization_stage" in content
+        assert 'mode="OFF"' in content
+        assert "DETERMINISTIC_ONLY" not in content

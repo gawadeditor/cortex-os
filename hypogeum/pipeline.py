@@ -56,6 +56,10 @@ from hypogeum.agents.assembly_agent import run_assembly_agent
 from hypogeum.agents.audio_agent import run_audio_agent
 from hypogeum.agents.executive_producer import run_executive_producer
 from hypogeum.agents.archive_agent import run_archive_agent
+from hypogeum.agents.humanization_stage import (
+    HumanizationStageError,
+    run_humanization_stage,
+)
 from hypogeum.agents.compliance_agent import run_compliance_agent
 from hypogeum.agents.finance_agent import run_budget_authorization, run_cost_ledger
 from hypogeum.agents.qa_agent import run_qa_agent
@@ -78,6 +82,10 @@ from hypogeum.db import (
     update_stage_execution_skipped,
 )
 from hypogeum.finance import clear_run_context, set_run_context, write_episode_rollup
+from hypogeum.humanization_checkpoint import (
+    load_reusable_humanization_checkpoint,
+    save_humanization_checkpoint,
+)
 from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_blocked, is_factory_blocked
 from hypogeum.post_run_intelligence import run_post_run_intelligence
 from hypogeum.production_metadata import write_analytics_pending, write_production_metadata
@@ -350,6 +358,7 @@ class PipelineResult:
     research_package: Optional[dict] = None
     narrative_package: Optional[dict] = None
     script_package: Optional[dict] = None
+    humanized_script_package: Optional[dict] = None
     finance_authorization: Optional[dict] = None
     visual_package: Optional[dict] = None
     thumbnail_package: Optional[dict] = None
@@ -598,6 +607,30 @@ def run_pipeline(
         log.info("pipeline_stage_completed", agent="script_engine")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="script_engine")
+
+        # -----------------------------------------------------------------------
+        # 5b. Humanization Stage — OFF mode only (hardcoded). Isolated capability:
+        # produces humanized_script_package alongside script_package without
+        # mutating or replacing it. No downstream stage consumes this package yet.
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="humanization_stage")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "humanization_stage", log,
+            output_schema="humanized_script_package",
+            db_path=db_path,
+        )
+        humanized_script_package = _run_humanization_stage(
+            episode_id=episode_id,
+            script_package=script_package,
+            pipeline_run_id=run_id,
+            output_dir=output_dir,
+            log=log,
+        )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
+        log.info("pipeline_stage_completed", agent="humanization_stage")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="humanization_stage")
 
         # -----------------------------------------------------------------------
         # 6. Finance Agent — budget authorization gate (pre-generation spend)
@@ -1047,6 +1080,7 @@ def run_pipeline(
             research_package=research_package,
             narrative_package=narrative_package,
             script_package=script_package,
+            humanized_script_package=humanized_script_package,
             finance_authorization=finance_authorization,
             visual_package=visual_package,
             thumbnail_package=thumbnail_package,
@@ -1388,6 +1422,75 @@ def _run_script_engine(
         episode_id=episode_id,
         output_dir=output_dir,
     )
+
+
+def _run_humanization_stage(
+    *,
+    episode_id: str,
+    script_package: dict,
+    pipeline_run_id: str,
+    output_dir: Optional[Path],
+    log,
+) -> dict:
+    """
+    Humanization Stage (isolated capability — OFF mode only, hardcoded).
+
+    Runs immediately after Script Engine. Delegates to
+    hypogeum.agents.humanization_stage.run_humanization_stage(), which never
+    mutates script_package — it only reads it and returns a separate
+    humanized_script_package. No downstream stage consumes this package yet;
+    it is produced, validated, checkpointed, and carried forward on
+    PipelineResult only.
+
+    Mode is hardcoded to "OFF" here — no config, env var, or feature flag
+    governs it. Raising the mode or wiring a downstream consumer are
+    separate, future, explicitly authorized changes.
+
+    Checkpoint: uses hypogeum.humanization_checkpoint's fingerprint-validated
+    reuse check (stricter than _load_package()'s plain existence check —
+    corruption raises rather than being treated as a cache miss). assets_root
+    mirrors the same output_dir override every other stage's checkpoint
+    honors for test isolation, falling back to the real .hypogeum-assets/
+    root otherwise.
+    """
+    assets_root = output_dir if output_dir is not None else _ASSETS_ROOT
+
+    reused = load_reusable_humanization_checkpoint(
+        assets_root=assets_root,
+        episode_id=episode_id,
+        script_package=script_package,
+        mode="OFF",
+    )
+    if reused is not None:
+        log.info(
+            "humanization_checkpoint_cache_hit",
+            episode_id=episode_id,
+            mode="OFF",
+            input_hash_prefix=reused["humanization"]["input_hash"][:12],
+        )
+        return reused
+
+    log.info("humanization_checkpoint_cache_miss", episode_id=episode_id, mode="OFF")
+
+    t0 = datetime.now(timezone.utc)
+    result = run_humanization_stage(
+        episode_id=episode_id,
+        script_package=script_package,
+        pipeline_run_id=pipeline_run_id,
+        mode="OFF",
+    )
+    elapsed_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000.0
+
+    log.info(
+        "humanization_validation_succeeded",
+        episode_id=episode_id,
+        mode="OFF",
+        elapsed_ms=round(elapsed_ms, 1),
+    )
+
+    save_humanization_checkpoint(assets_root=assets_root, episode_id=episode_id, package=result)
+
+    return result
 
 
 def _run_visual_package_director(

@@ -879,14 +879,14 @@ class TestLogging:
     def test_stage_started_for_all_agents(self):
         events = self._capture_log_events()
         stage_started = [e for _, e in events if e == "pipeline_stage_started"]
-        # 15 stages (9 original + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
-        assert len(stage_started) == 15
+        # 16 stages (9 original + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive + Humanization)
+        assert len(stage_started) == 16
 
     def test_stage_completed_for_all_agents(self):
         events = self._capture_log_events()
         stage_completed = [e for _, e in events if e == "pipeline_stage_completed"]
-        # 15 stages (9 original + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
-        assert len(stage_completed) == 15
+        # 16 stages (9 original + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive + Humanization)
+        assert len(stage_completed) == 16
 
     def test_started_before_completed(self):
         events = self._capture_log_events()

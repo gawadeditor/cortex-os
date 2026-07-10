@@ -445,12 +445,18 @@ class TestIsolation:
         for forbidden in ("run_agent(", "OpenAI(", "requests.", "httpx.", "subprocess."):
             assert forbidden not in source, f"found forbidden call surface: {forbidden}"
 
-    def test_not_referenced_by_pipeline(self):
+    def test_referenced_by_pipeline_in_off_mode_only(self):
+        # Pipeline wiring is authorized for OFF mode only (isolated capability,
+        # not yet consumed downstream). Guard against silent escalation to
+        # DETERMINISTIC_ONLY or LLM activation without an explicit future task.
         pipeline_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hypogeum", "pipeline.py"
         )
         content = open(pipeline_path, encoding="utf-8").read()
-        assert "humanization_stage" not in content
+        assert "humanization_stage" in content
+        assert "run_humanization_stage(" in content
+        assert 'mode="OFF"' in content
+        assert "DETERMINISTIC_ONLY" not in content
 
 
 # ---------------------------------------------------------------------------

@@ -451,3 +451,104 @@ class TestIsolation:
         )
         content = open(pipeline_path, encoding="utf-8").read()
         assert "humanization_stage" not in content
+
+
+# ---------------------------------------------------------------------------
+# TestFingerprintUnification
+#
+# Confirms humanization.input_hash is computed by the single canonical
+# hypogeum.humanization_fingerprint.build_humanization_fingerprint()
+# implementation — the fix for the previously-documented incompatibility
+# between this stage's own narration-only hash and the checkpoint layer's
+# broader fingerprint formula — and that no circular import was introduced
+# in resolving it.
+# ---------------------------------------------------------------------------
+
+class TestFingerprintUnification:
+    def test_stage_input_hash_equals_shared_fingerprint(self):
+        from hypogeum.humanization_fingerprint import build_humanization_fingerprint
+
+        pkg = _script_package()
+        r = run_humanization_stage(
+            episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="OFF",
+        )
+        expected = build_humanization_fingerprint(episode_id="ep_001", script_package=pkg, mode="OFF")
+        assert r["humanization"]["input_hash"] == expected
+
+    def test_reordered_keys_produce_same_stage_hash(self):
+        pkg_a = _script_package()
+        pkg_b = {
+            "shorts_scripts": pkg_a["shorts_scripts"],
+            "sections": pkg_a["sections"],
+            "episode_metadata": dict(reversed(list(pkg_a["episode_metadata"].items()))),
+        }
+        r_a = run_humanization_stage(episode_id="ep_001", script_package=pkg_a, pipeline_run_id="run_1", mode="OFF")
+        r_b = run_humanization_stage(episode_id="ep_001", script_package=pkg_b, pipeline_run_id="run_1", mode="OFF")
+        assert r_a["humanization"]["input_hash"] == r_b["humanization"]["input_hash"]
+
+    def test_changed_mode_changes_stage_hash(self):
+        pkg = _script_package()
+        r_off = run_humanization_stage(episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="OFF")
+        r_det = run_humanization_stage(episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="DETERMINISTIC_ONLY")
+        assert r_off["humanization"]["input_hash"] != r_det["humanization"]["input_hash"]
+
+    def test_changed_episode_id_changes_stage_hash(self):
+        pkg = _script_package()
+        r_a = run_humanization_stage(episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="OFF")
+        r_b = run_humanization_stage(episode_id="ep_002", script_package=pkg, pipeline_run_id="run_1", mode="OFF")
+        assert r_a["humanization"]["input_hash"] != r_b["humanization"]["input_hash"]
+
+    def test_arabic_narration_hashes_consistently(self):
+        pkg = _script_package()
+        pkg["sections"][0]["narration_beats"][0]["text"] = "في عام 1901، عثر الغواصون على شيء استثنائي."
+        r1 = run_humanization_stage(episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="OFF")
+        r2 = run_humanization_stage(episode_id="ep_001", script_package=pkg, pipeline_run_id="run_2", mode="OFF")
+        assert r1["humanization"]["input_hash"] == r2["humanization"]["input_hash"]
+
+    def test_mixed_arabic_english_narration_hashes_consistently(self):
+        pkg = _script_package()
+        pkg["sections"][0]["narration_beats"][0]["text"] = "In 1901, الغواصون found something في البحر extraordinary."
+        r1 = run_humanization_stage(episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="OFF")
+        r2 = run_humanization_stage(episode_id="ep_001", script_package=pkg, pipeline_run_id="run_2", mode="OFF")
+        assert r1["humanization"]["input_hash"] == r2["humanization"]["input_hash"]
+
+    def test_stage_does_not_import_checkpoint_persistence_functions(self):
+        import ast
+        import inspect
+
+        import hypogeum.agents.humanization_stage as mod
+        tree = ast.parse(inspect.getsource(mod))
+        imported_modules = {
+            node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        }
+        assert "hypogeum.humanization_checkpoint" not in imported_modules
+
+    def test_fingerprint_utility_imports_neither_stage_nor_checkpoint(self):
+        import ast
+        import inspect
+
+        import hypogeum.humanization_fingerprint as mod
+        tree = ast.parse(inspect.getsource(mod))
+        imported_modules = {
+            node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        }
+        assert "hypogeum.agents.humanization_stage" not in imported_modules
+        assert "hypogeum.humanization_checkpoint" not in imported_modules
+        # Dependency-neutral: no hypogeum import of any kind.
+        assert not any((m or "").startswith("hypogeum") for m in imported_modules)
+
+    def test_no_circular_import(self):
+        """
+        Importing all three modules together must not raise ImportError —
+        the real-world symptom of a circular dependency. Deliberately does
+        NOT use importlib.reload(): reloading a module replaces its class
+        objects (including HumanizationCheckpointError) with new instances
+        distinct from whatever other test modules already imported by
+        reference, silently breaking their pytest.raises(...) identity
+        checks for the rest of the process. A plain re-import (returning
+        the already-cached module, per normal Python import semantics) is
+        sufficient to prove these three modules co-exist without a cycle.
+        """
+        import hypogeum.agents.humanization_stage  # noqa: F401
+        import hypogeum.humanization_checkpoint  # noqa: F401
+        import hypogeum.humanization_fingerprint  # noqa: F401

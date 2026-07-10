@@ -45,28 +45,21 @@ _load_package() (the closest existing "checkpoint utility" precedent) does
 not log either. Wiring observability here is a pipeline-integration
 decision for a later, separate task.
 
-KNOWN INCOMPATIBILITY (documented per explicit instruction, not silently
-worked around): build_humanization_fingerprint() implements the fingerprint
-formula required by this module's own specification — a SHA-256 of
-{episode_id, script_package, mode, stage_version, wrapper_version,
-skill_commit_sha, model_id} in canonical JSON. hypogeum.agents.
-humanization_stage.run_humanization_stage() currently computes
-humanization.input_hash differently: SHA-256 of only the ordered list of
-original narration beat texts, via a non-canonical json.dumps() call (no
-sort_keys, no fixed separators). The two hashes are neither the same value
-nor derived from the same inputs for the same package. Per this task's
-explicit scope boundary, hypogeum/agents/humanization_stage.py is NOT
-modified here — load_reusable_humanization_checkpoint() compares the
-persisted humanization.input_hash field against a freshly computed
-build_humanization_fingerprint() exactly as specified, which means any
-checkpoint saved by today's run_humanization_stage() will be reported stale
-(reuse returns None) until a future task reconciles the two formulas. This
-is expected, safe behavior given the constraint against expanding scope —
-never a silent inconsistency.
+FORMERLY-DOCUMENTED INCOMPATIBILITY, NOW RESOLVED: this module previously
+contained its own build_humanization_fingerprint() implementation, separate
+from hypogeum.agents.humanization_stage.run_humanization_stage()'s own
+narration-only, non-canonical input_hash formula — meaning no checkpoint
+the stage produced could ever pass this layer's reuse check. Both modules
+now import the single canonical implementation from
+hypogeum/humanization_fingerprint.py (a dependency-neutral, standard-
+library-only module that imports neither of them, avoiding any circular
+dependency). This module re-exports that function rather than
+reimplementing it — see hypogeum/humanization_fingerprint.py for the actual
+formula and its docstring.
 
 Public API:
     HumanizationCheckpointError
-    build_humanization_fingerprint(...) -> str
+    build_humanization_fingerprint(...) -> str   (re-exported, see above)
     humanization_checkpoint_path(...) -> Path
     save_humanization_checkpoint(...) -> Path
     load_humanization_checkpoint(...) -> Optional[dict]
@@ -75,23 +68,34 @@ Public API:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 from pathlib import Path
 from typing import Optional
 
+from hypogeum.humanization_fingerprint import (
+    PINNED_HUMANIZER_SHA as _DEFAULT_SKILL_COMMIT_SHA,
+    STAGE_VERSION as _DEFAULT_STAGE_VERSION,
+    WRAPPER_VERSION as _DEFAULT_WRAPPER_VERSION,
+    build_humanization_fingerprint,
+)
 from hypogeum.schemas import SchemaError, validate
+
+__all__ = [
+    "HumanizationCheckpointError",
+    "build_humanization_fingerprint",
+    "humanization_checkpoint_path",
+    "save_humanization_checkpoint",
+    "load_humanization_checkpoint",
+    "load_reusable_humanization_checkpoint",
+]
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _CHECKPOINT_FILENAME_TEMPLATE = "humanized_script_package_{episode_id}.json"
-_DEFAULT_STAGE_VERSION = "0.1.0"
-_DEFAULT_WRAPPER_VERSION = "0.1.0"
-_DEFAULT_SKILL_COMMIT_SHA = "1b48564898e999219882660237fde01bf4843a0f"
 
 _UNSAFE_EPISODE_ID_CHARS = re.compile(r"[/\\\x00]")
 
@@ -107,47 +111,9 @@ class HumanizationCheckpointError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Fingerprint
+# Fingerprint — re-exported from hypogeum.humanization_fingerprint, the
+# single canonical implementation. No second implementation lives here.
 # ---------------------------------------------------------------------------
-
-def build_humanization_fingerprint(
-    *,
-    episode_id: str,
-    script_package: dict,
-    mode: str,
-    stage_version: str = _DEFAULT_STAGE_VERSION,
-    wrapper_version: str = _DEFAULT_WRAPPER_VERSION,
-    skill_commit_sha: str = _DEFAULT_SKILL_COMMIT_SHA,
-    model_id: Optional[str] = None,
-) -> str:
-    """
-    Return a stable SHA-256 hex digest over the complete set of inputs that
-    determine whether a previously-computed Humanization result may be
-    reused: the full script_package content, the episode identity, the
-    requested mode, and every version/identity field that, if changed,
-    would mean a prior result no longer describes the current
-    configuration.
-
-    Deterministic: canonical JSON (sort_keys=True, fixed separators,
-    ensure_ascii=False) means dict key insertion order never affects the
-    result, and identical logical input always produces the same digest.
-    """
-    payload = {
-        "episode_id": episode_id,
-        "script_package": script_package,
-        "mode": mode,
-        "stage_version": stage_version,
-        "wrapper_version": wrapper_version,
-        "skill_commit_sha": skill_commit_sha,
-        "model_id": model_id,
-    }
-    canonical = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------

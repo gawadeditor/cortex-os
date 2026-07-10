@@ -215,6 +215,43 @@ class TestLoadBehavior:
             load_humanization_checkpoint(assets_root=tmp_path, episode_id="ep_001")
 
 
+class TestFingerprintUnificationRoundTrip:
+    """
+    End-to-end confirmation that the fingerprint unification fix works: a
+    real run_humanization_stage() result — no manual input_hash override —
+    can now be saved and immediately reused as a genuine cache hit, for
+    both supported modes. Before the fix, every one of these would have
+    returned None (see the module docstring's formerly-documented
+    incompatibility note).
+    """
+
+    def test_off_mode_result_round_trips_as_cache_hit(self, tmp_path):
+        pkg = _script_package()
+        result = run_humanization_stage(
+            episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="OFF",
+        )
+        save_humanization_checkpoint(assets_root=tmp_path, episode_id="ep_001", package=result)
+
+        reused = load_reusable_humanization_checkpoint(
+            assets_root=tmp_path, episode_id="ep_001", script_package=pkg, mode="OFF",
+        )
+        assert reused is not None
+        assert reused == result
+
+    def test_deterministic_only_result_round_trips_as_cache_hit(self, tmp_path):
+        pkg = _script_package()
+        result = run_humanization_stage(
+            episode_id="ep_001", script_package=pkg, pipeline_run_id="run_1", mode="DETERMINISTIC_ONLY",
+        )
+        save_humanization_checkpoint(assets_root=tmp_path, episode_id="ep_001", package=result)
+
+        reused = load_reusable_humanization_checkpoint(
+            assets_root=tmp_path, episode_id="ep_001", script_package=pkg, mode="DETERMINISTIC_ONLY",
+        )
+        assert reused is not None
+        assert reused == result
+
+
 class TestReuseBehavior:
     def test_checkpoint_episode_mismatch_is_stale(self, tmp_path):
         """

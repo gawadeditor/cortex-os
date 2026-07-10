@@ -55,16 +55,27 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from hypogeum.humanization_fingerprint import (
+    PINNED_HUMANIZER_SHA,
+    STAGE_VERSION,
+    WRAPPER_VERSION,
+    build_humanization_fingerprint,
+)
 from hypogeum.humanizer import humanize_field
 from hypogeum.schemas import SchemaError, validate
 
 # ---------------------------------------------------------------------------
 # Constants
+#
+# Version/SHA constants are aliased from hypogeum.humanization_fingerprint —
+# the single source of truth also used by hypogeum.humanization_checkpoint —
+# rather than redefined here, so the two modules can never silently drift
+# apart on what "the current version" means.
 # ---------------------------------------------------------------------------
 
-_STAGE_VERSION = "0.1.0"
-_WRAPPER_VERSION = "0.1.0"
-_PINNED_SKILL_SHA = "1b48564898e999219882660237fde01bf4843a0f"
+_STAGE_VERSION = STAGE_VERSION
+_WRAPPER_VERSION = WRAPPER_VERSION
+_PINNED_SKILL_SHA = PINNED_HUMANIZER_SHA
 _SKILL_SOURCE = "https://github.com/blader/humanizer"
 _SOURCE_STAGE = "script_engine"
 _SOURCE_SCHEMA = "script_package"
@@ -152,6 +163,20 @@ def run_humanization_stage(
             f"mode must be one of {_SUPPORTED_MODES}, got {mode!r}"
         )
 
+    # Fingerprint the caller-provided script_package first — before any
+    # copying or mutation — using the same canonical formula
+    # hypogeum.humanization_checkpoint's reuse check computes independently,
+    # so a checkpoint saved from this result can actually be reused.
+    input_hash = build_humanization_fingerprint(
+        episode_id=episode_id,
+        script_package=script_package,
+        mode=mode,
+        stage_version=_STAGE_VERSION,
+        wrapper_version=_WRAPPER_VERSION,
+        skill_commit_sha=_PINNED_SKILL_SHA,
+        model_id=None,
+    )
+
     # 1/2 — never mutate the caller's script_package; work on a deep copy.
     source = copy.deepcopy(script_package)
 
@@ -178,7 +203,6 @@ def run_humanization_stage(
                 package_fallback_used = True
         beat_records.append(beat_record)
 
-    input_hash = _hash_texts([text for _beat_id, text in input_beats])
     output_hash = _hash_texts([b["humanized_narration"] for b in beat_records])
     source_content_hash = _hash_obj(source)
 

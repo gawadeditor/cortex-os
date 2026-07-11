@@ -141,6 +141,39 @@
 | Pin (for reference purposes only) | Tag `v1.0.0`, commit `f87f3a9e8531eb91f305722c5b2f5679318268d7` (matches main HEAD as of 2026-01-25) |
 | State | **NOT INSTALLED — not in the active installation sequence** |
 
+**Addendum — bounded reverification, 2026-07-11:**
+
+A bounded final verification of the decision above was performed on 2026-07-11 (read-only — no production code, test, or skill file was modified or installed). It confirms no drift since the original 2026-01-25/2026-07-10 findings recorded above:
+
+- Canonical source remains: `https://github.com/kdowswell/veo-tools`
+- Reverification result: **incompatible with Hypogeum's autonomous runtime architecture.**
+- Its workflow requires:
+  - interactive operation
+  - human approval before generation
+  - direct executable scripts
+  - direct GCP / Vertex AI provider execution
+- It is not a prompt-writing-only skill suitable for `compose_system_prompt()`.
+- No compatible existing owning agent was found (re-confirmed against the current `hypogeum/agents/` tree and `hypogeum/pipeline.py` — no human-approval or interactive-input hook exists anywhere in the pipeline).
+- No safe direct attachment point was found.
+- Attaching it would risk bypassing:
+  - Provider Router
+  - MUAPI
+  - Finance authorization
+  - existing generation governance
+
+  (re-confirmed: `hypogeum/agents/provider_router.py`, `hypogeum/agents/video_generation_agent.py`, and `hypogeum/agents/finance_agent.py` contain zero `run_agent`/`compose_system_prompt`/`call_claude`/`requests`/`httpx`/`subprocess` references; `hypogeum/muapi.py` remains the sole governed HTTP-egress point for generation providers.)
+- Final state remains:
+  - REFERENCE ONLY
+  - NOT INSTALLED
+  - NOT WIRED
+  - NOT ACTIVE
+  - DO NOT ATTACH
+- No new agent, stage, adapter, checkpoint, schema, provider, or additional LLM call is authorized.
+- Humanizer, GPT-Image2, Seedance2, and Veo Prompt Director remain the completed direct-attachment implementations (all four wired into their respective owning agents' existing `compose_system_prompt()` / `run_agent()` calls; see `config/upstream_skills_manifest.json`).
+- Veo Tools remains excluded from the runtime installation queue.
+
+This addendum does not alter or supersede the findings recorded above — it is a dated confirmation that they still hold.
+
 ### 3.6 GPT-Image2 Skill
 
 **Canonical source:** `https://github.com/wuyoscar/GPT-Image2-Skill`

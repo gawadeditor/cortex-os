@@ -97,6 +97,29 @@ _SEEDANCE_TRANSLATION_SKILL_COMPACT_FILE = (
     _REPO_ROOT / "hypogeum" / "skills" / "compiled" / "seedance_translation_skill.compact.md"
 )
 
+# Veo Prompt Director — no git repository, so no commit SHA. The package version
+# ("1.0.0", from SKILL.md's own metadata.mcpmarket-version frontmatter, matching the
+# archive filename) is used as the installation identifier instead.
+_VEO_PROMPT_DIRECTOR_VERSION = "1.0.0"
+_VEO_PROMPT_DIRECTOR_DIR = (
+    _REPO_ROOT / "third_party" / "skills" / "veo_prompt_director" / _VEO_PROMPT_DIRECTOR_VERSION
+)
+
+_VEO_PROMPT_DIRECTOR_EXPECTED_CHECKSUMS = {
+    "SKILL.md": "9f8e33977b6d7a5ebfb3576992c3e449303ae6049842344de449ba10b01db01d",
+    "references/advanced_workflows.md": "386f9e34a2f13b60371af0171659aa7f1f4953124de42ba9a7d9f9382bf9c53c",
+    "references/audio_directing.md": "237146aefce69dc23ada2c6fd88aeaa68cec8e881952e691e825890e80db5693",
+    "references/cinematography.md": "2db960d0e71deef538577b7a3966749a9f03a0f05528dabbc4477ef8741860bb",
+    "references/prompt_formula.md": "9d8ef6256b10e98a8eef7e2473871d5388d0f5ef8db66aae8c3a1a1a02325623",
+}
+
+_VEO_TRANSLATION_SKILL_FILE = (
+    _REPO_ROOT / "hypogeum" / "skills" / "veo_translation_skill.md"
+)
+_VEO_TRANSLATION_SKILL_COMPACT_FILE = (
+    _REPO_ROOT / "hypogeum" / "skills" / "compiled" / "veo_translation_skill.compact.md"
+)
+
 _EXECUTABLE_EXTENSIONS = {
     ".py", ".sh", ".ts", ".js", ".cjs", ".mjs", ".rb", ".pl", ".exe", ".bin",
 }
@@ -605,3 +628,216 @@ class TestSeedance2Rollback:
         """
         assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
         assert not (_REPO_ROOT / "hypogeum" / "agents" / "seedance2_stage.py").exists()
+
+
+class TestVeoPromptDirectorInstallation:
+    """
+    No git repository exists for this source — it is an authenticated MCP
+    Market package download, verified against the local archive checksum
+    already recorded in docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.4
+    (SHA-256 9e7f3600dc4eced97ccc17fcd4dc16e35ed4c2bfb3c2e7233137377991ae170e).
+    The package version ("1.0.0") is used as the installation identifier in
+    place of a commit SHA, per this task's explicit instruction.
+    """
+
+    def test_pinned_directory_exists(self):
+        assert _VEO_PROMPT_DIRECTOR_DIR.is_dir(), (
+            f"Expected pinned Veo Prompt Director directory at {_VEO_PROMPT_DIRECTOR_DIR}"
+        )
+
+    def test_directory_name_matches_package_version(self):
+        assert _VEO_PROMPT_DIRECTOR_DIR.name == _VEO_PROMPT_DIRECTOR_VERSION
+
+    def test_required_files_exist(self):
+        for rel_path in _VEO_PROMPT_DIRECTOR_EXPECTED_CHECKSUMS:
+            assert (_VEO_PROMPT_DIRECTOR_DIR / rel_path).is_file(), (
+                f"Missing required package file: {rel_path}"
+            )
+
+    def test_directory_structure_preserved(self):
+        """SKILL.md at the root, all 4 reference files under references/ —
+        the package's original directory structure, not flattened."""
+        assert (_VEO_PROMPT_DIRECTOR_DIR / "SKILL.md").is_file()
+        refs_dir = _VEO_PROMPT_DIRECTOR_DIR / "references"
+        assert refs_dir.is_dir()
+        assert {p.name for p in refs_dir.glob("*.md")} == {
+            "advanced_workflows.md", "audio_directing.md",
+            "cinematography.md", "prompt_formula.md",
+        }
+
+    def test_no_additional_files_present(self):
+        """Only the 5 files present in the original archive are installed —
+        nothing added, nothing dropped."""
+        actual_root_files = {p.name for p in _VEO_PROMPT_DIRECTOR_DIR.iterdir() if p.is_file()}
+        assert actual_root_files == {"SKILL.md"}
+        actual_ref_files = {
+            p.name for p in (_VEO_PROMPT_DIRECTOR_DIR / "references").iterdir() if p.is_file()
+        }
+        assert actual_ref_files == {
+            "advanced_workflows.md", "audio_directing.md",
+            "cinematography.md", "prompt_formula.md",
+        }
+
+    def test_checksums_match_recorded_manifest(self):
+        for rel_path, expected_sha256 in _VEO_PROMPT_DIRECTOR_EXPECTED_CHECKSUMS.items():
+            actual = _sha256(_VEO_PROMPT_DIRECTOR_DIR / rel_path)
+            assert actual == expected_sha256, (
+                f"{rel_path} checksum mismatch — file may have been locally "
+                f"modified. Expected {expected_sha256}, got {actual}"
+            )
+
+    def test_no_executable_content_in_installed_tree(self):
+        for path in _VEO_PROMPT_DIRECTOR_DIR.rglob("*"):
+            if path.is_file():
+                assert path.suffix.lower() not in _EXECUTABLE_EXTENSIONS, (
+                    f"Executable file found in Veo Prompt Director's pinned tree: {path}"
+                )
+
+    def test_manifest_json_records_exactly_one_entry(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entries = [s for s in data["skills"] if s["name"] == "veo-prompt-director"]
+        assert len(entries) == 1, "expected exactly one veo-prompt-director entry"
+        entry = entries[0]
+        assert entry["package_version"] == _VEO_PROMPT_DIRECTOR_VERSION
+        assert entry["pinned_commit_sha"] is None, (
+            "no git repository exists for this source — pinned_commit_sha must be null"
+        )
+        recorded_checksums = {
+            f["path"].split(f"{_VEO_PROMPT_DIRECTOR_VERSION}/", 1)[1]: f["sha256"]
+            for f in entry["file_inventory"]
+        }
+        assert recorded_checksums == _VEO_PROMPT_DIRECTOR_EXPECTED_CHECKSUMS
+
+    def test_manifest_records_no_git_repository_and_documents_why(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "veo-prompt-director")
+        assert entry["repository"] is None
+        assert "no commit SHA" in entry["pin_note"] or "no commit" in entry["pin_note"].lower()
+        assert "package version" in entry["pin_note"].lower()
+
+    def test_manifest_records_licensing_authority(self):
+        """The prior licensing block (no LICENSE file in the package) is documented
+        as lifted by the repository owner's explicit authority (authenticated MCP
+        Market download), not by discovery of a license file that doesn't exist."""
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "veo-prompt-director")
+        assert "no LICENSE file" in entry["license_note"] or "absent" in entry["license_note"].lower()
+        assert "MCP Market" in entry["license_note"]
+        assert "authority" in entry["license_note"].lower()
+
+    def test_manifest_records_visual_package_director_stage_b_as_owner(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "veo-prompt-director")
+        assert "visual_package_director.py" in entry["intended_owning_agent"]
+        assert "Stage B" in entry["intended_owning_agent"]
+
+
+class TestVeoPromptDirectorWiredIntoVisualPackageDirector:
+    """
+    Veo Prompt Director is a skill attached directly to Visual Package Director
+    Stage B's own existing LLM invocation (SCENE_PROMPTS_PROMPT / run_agent()) —
+    not a separate agent, pipeline stage, adapter, or checkpoint layer. Mirrors
+    TestSeedance2WiredIntoVisualPackageDirector above. Checks specifically for
+    the third_party/skills/veo_prompt_director path, never the generic word
+    "third_party" — visual_package_director.py already legitimately references
+    third_party/ for Seedance2.
+    """
+
+    def test_exactly_one_agent_references_pinned_upstream_skill(self):
+        agents_dir = _REPO_ROOT / "hypogeum" / "agents"
+        referencing = []
+        for py_file in agents_dir.glob("*.py"):
+            content = py_file.read_text(encoding="utf-8")
+            if "skills/veo_prompt_director" in content:
+                referencing.append(py_file.name)
+        assert referencing == ["visual_package_director.py"], (
+            f"Expected only visual_package_director.py to reference the pinned "
+            f"Veo Prompt Director skill, got: {referencing}"
+        )
+
+    def test_no_other_runtime_module_imports_veo_prompt_director_path(self):
+        hypogeum_dir = _REPO_ROOT / "hypogeum"
+        offenders = []
+        for py_file in hypogeum_dir.rglob("*.py"):
+            if py_file.name == "visual_package_director.py":
+                continue
+            content = py_file.read_text(encoding="utf-8")
+            if "skills/veo_prompt_director" in content:
+                offenders.append(str(py_file.relative_to(_REPO_ROOT)))
+        assert not offenders, (
+            f"No runtime module besides visual_package_director.py may reference "
+            f"the pinned Veo Prompt Director path: {offenders}"
+        )
+
+    def test_visual_package_director_composes_pinned_skill_path(self):
+        content = (
+            _REPO_ROOT / "hypogeum" / "agents" / "visual_package_director.py"
+        ).read_text(encoding="utf-8")
+        assert "PINNED_VEO_PROMPT_DIRECTOR_VERSION" in content
+        assert "compose_system_prompt" in content
+
+    def test_existing_internal_veo_translation_skill_unchanged(self):
+        """
+        This attachment task must not reconcile, merge, rewrite, summarize,
+        extract, or copy Veo Prompt Director content into the existing
+        internal Veo translation skill or its compact runtime variant.
+
+        As with Seedance2's equivalent test, a literal-string content check
+        cannot serve as the "unchanged" proof here without a pre-task
+        snapshot; `git diff` (this task's own required verification command)
+        is the authoritative signal. This test only confirms the files still
+        exist and are non-empty.
+        """
+        for skill_file in (_VEO_TRANSLATION_SKILL_FILE, _VEO_TRANSLATION_SKILL_COMPACT_FILE):
+            assert skill_file.exists(), f"Expected existing internal skill file at {skill_file}"
+            assert skill_file.read_text(encoding="utf-8").strip(), (
+                f"Expected non-empty existing internal skill file at {skill_file}"
+            )
+
+    def test_skill_registry_does_not_register_veo_prompt_director(self):
+        registry_content = (_REPO_ROOT / "hypogeum" / "skill_registry.py").read_text(
+            encoding="utf-8"
+        )
+        assert "veo_prompt_director" not in registry_content.lower()
+        assert "veo-prompt-director" not in registry_content.lower()
+
+    def test_manifest_state_is_installed_wired_active(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "veo-prompt-director")
+        assert entry["state"] == "INSTALLED / WIRED / ACTIVE"
+
+    def test_manifest_records_wired_to_visual_package_director_stage_b(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "veo-prompt-director")
+        assert "visual_package_director.py" in entry["wired_to"]
+        assert "Stage B" in entry["wired_to"]
+        assert "compose_system_prompt" in entry["wired_to"]
+        assert "run_agent" in entry["wired_to"]
+
+    def test_no_new_stage_adapter_checkpoint_or_provider_module_exists(self):
+        assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "veo_prompt_director_stage.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "veo_prompt_director_adapter.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "veo_prompt_director_checkpoint.py").exists()
+
+    def test_no_veo_prompt_director_schema_exists(self):
+        from hypogeum.schemas import SCHEMA_NAMES
+        assert not any("veo_prompt_director" in name.lower() for name in SCHEMA_NAMES)
+
+
+class TestVeoPromptDirectorRollback:
+    def test_rollback_scope_is_vpd_composition_bridge_and_manifest(self):
+        """
+        Rollback requires reverting exactly three things: the
+        _VEO_PROMPT_DIRECTOR_SKILL_PATH argument in
+        visual_package_director.py's compose_system_prompt() call (and its
+        supporting constants), the 'VEO PROMPT DIRECTOR SKILL USAGE' bridge
+        section in hypogeum/prompts/vpd_scene_prompts.txt, and this
+        manifest entry's state; deleting the pinned directory entirely is
+        optional beyond that. No adapter, checkpoint, or stage directory
+        exists for this to depend on.
+        """
+        assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "veo_prompt_director_stage.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "veo_prompt_director_adapter.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "veo_prompt_director_checkpoint.py").exists()

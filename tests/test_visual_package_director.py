@@ -1893,7 +1893,8 @@ class TestSeedance2StageBAttachment:
     def test_stage_b_prompt_equals_compose_system_prompt_with_expected_order(self):
         """SCENE_PROMPTS_PROMPT must equal compose_system_prompt() called with the
         base prompt, cinematic skill, internal Veo skill, internal Seedance skill,
-        and the pinned Seedance2 skill — in exactly that order."""
+        the pinned Seedance2 skill, and the pinned Veo Prompt Director skill —
+        in exactly that order."""
         import hypogeum.agents.visual_package_director as vpd
         from hypogeum.prompt_loader import compose_system_prompt
 
@@ -1903,6 +1904,7 @@ class TestSeedance2StageBAttachment:
             vpd._VEO_TRANSLATION_SKILL_FILE,
             vpd._SEEDANCE_TRANSLATION_SKILL_FILE,
             vpd._SEEDANCE2_SKILL_PATH,
+            vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH,
         )
         assert vpd.SCENE_PROMPTS_PROMPT == expected
 
@@ -2053,4 +2055,236 @@ class TestSeedance2StageBAttachment:
         import hypogeum.agents.visual_package_director as vpd
         pinned_content = vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8")
         internal_content = vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
+        assert pinned_content not in internal_content
+
+
+# ---------------------------------------------------------------------------
+# TestVeoPromptDirectorStageBAttachment
+# ---------------------------------------------------------------------------
+
+class TestVeoPromptDirectorStageBAttachment:
+    """Verify the pinned upstream Veo Prompt Director skill is attached directly to
+    Stage B's existing system prompt, appended after the pinned Seedance2 skill and
+    all pre-existing skills, that the bridge in vpd_scene_prompts.txt disables its
+    interactive/tool-invocation assumptions and names the Static-camera/fluorescent-
+    lighting conflicts, and that no new run_agent() call or external call surface
+    was introduced. Mirrors TestSeedance2StageBAttachment above.
+    """
+
+    # -- pinned installation -------------------------------------------------
+
+    def test_pinned_skill_path_exists(self):
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.exists(), (
+            f"Pinned Veo Prompt Director SKILL.md not found at "
+            f"{vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH}"
+        )
+
+    def test_pinned_version_is_recorded(self):
+        """No git SHA exists for this package source — the package version is used
+        as the installation identifier instead, per this task's explicit instruction."""
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd.PINNED_VEO_PROMPT_DIRECTOR_VERSION == "1.0.0"
+
+    def test_pinned_skill_path_uses_version_constant(self):
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd.PINNED_VEO_PROMPT_DIRECTOR_VERSION in str(vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH)
+
+    def test_reference_files_installed_alongside_skill_md(self):
+        """All 4 reference/ files must be installed verbatim alongside SKILL.md,
+        even though only SKILL.md is composed into the runtime prompt."""
+        import hypogeum.agents.visual_package_director as vpd
+        refs_dir = vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.parent / "references"
+        for name in (
+            "advanced_workflows.md",
+            "audio_directing.md",
+            "cinematography.md",
+            "prompt_formula.md",
+        ):
+            assert (refs_dir / name).is_file(), f"Missing installed reference file: {name}"
+
+    # -- verbatim composition --------------------------------------------------
+
+    def test_pinned_skill_verbatim_in_stage_b_prompt(self):
+        """The pinned SKILL.md content must appear byte-for-byte in SCENE_PROMPTS_PROMPT."""
+        import hypogeum.agents.visual_package_director as vpd
+        pinned_content = vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.read_text(encoding="utf-8")
+        assert pinned_content in vpd.SCENE_PROMPTS_PROMPT, (
+            "Pinned Veo Prompt Director SKILL.md must be composed verbatim into SCENE_PROMPTS_PROMPT"
+        )
+
+    def test_stage_b_prompt_equals_compose_system_prompt_with_expected_order(self):
+        """SCENE_PROMPTS_PROMPT must equal compose_system_prompt() called with all
+        six components in exactly this order: base prompt, cinematic skill, internal
+        Veo skill, internal Seedance skill, pinned Seedance2 skill, pinned Veo Prompt
+        Director skill."""
+        import hypogeum.agents.visual_package_director as vpd
+        from hypogeum.prompt_loader import compose_system_prompt
+
+        expected = compose_system_prompt(
+            vpd._SCENE_PROMPTS_PROMPT_FILE,
+            vpd._CINEMATIC_SKILL_FILE,
+            vpd._VEO_TRANSLATION_SKILL_FILE,
+            vpd._SEEDANCE_TRANSLATION_SKILL_FILE,
+            vpd._SEEDANCE2_SKILL_PATH,
+            vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH,
+        )
+        assert vpd.SCENE_PROMPTS_PROMPT == expected
+
+    def test_all_preexisting_skills_preserved(self):
+        import hypogeum.agents.visual_package_director as vpd
+        prompt = vpd.SCENE_PROMPTS_PROMPT
+        assert vpd._CINEMATIC_SKILL_FILE.read_text(encoding="utf-8") in prompt
+        assert vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8") in prompt
+        assert vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8") in prompt
+        assert vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8") in prompt
+
+    def test_veo_prompt_director_appears_after_all_preexisting_skills(self):
+        import hypogeum.agents.visual_package_director as vpd
+        prompt = vpd.SCENE_PROMPTS_PROMPT
+        cine_pos = prompt.find(vpd._CINEMATIC_SKILL_FILE.read_text(encoding="utf-8"))
+        veo_pos = prompt.find(vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8"))
+        seedance_pos = prompt.find(vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8"))
+        seedance2_pos = prompt.find(vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8"))
+        vpd_skill_pos = prompt.find(vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.read_text(encoding="utf-8"))
+        assert -1 not in (cine_pos, veo_pos, seedance_pos, seedance2_pos, vpd_skill_pos)
+        assert cine_pos < veo_pos < seedance_pos < seedance2_pos < vpd_skill_pos, (
+            "Veo Prompt Director must be appended last, after every pre-existing skill "
+            "and after the pinned Seedance2 skill, without reordering any of them"
+        )
+
+    # -- bridge section in vpd_scene_prompts.txt -------------------------------
+
+    def test_bridge_section_exists(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "VEO PROMPT DIRECTOR SKILL USAGE" in base_content
+
+    def test_bridge_appears_after_seedance2_bridge(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        seedance2_bridge_pos = base_content.find("SEEDANCE2 SKILL USAGE")
+        veo_bridge_pos = base_content.find("VEO PROMPT DIRECTOR SKILL USAGE")
+        assert seedance2_bridge_pos != -1 and veo_bridge_pos != -1
+        assert seedance2_bridge_pos < veo_bridge_pos
+
+    def test_bridge_disables_interactive_input_collection(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not ask the user for Subject, Action, Style" in base_content
+        assert "Do not present a checklist for confirmation" in base_content
+
+    def test_bridge_disables_multi_turn_and_iteration(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not offer to enhance or iterate on a prompt across multiple turns" in base_content
+        assert "Do not create a multi-turn workflow" in base_content
+
+    def test_bridge_disables_tool_and_provider_invocation(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not invoke any CLI, API, SDK, provider, or model" in base_content
+        assert "Do not attempt to generate, fetch, or reference an actual image file" in base_content
+        assert "Do not perform any file-writing operation" in base_content
+
+    def test_bridge_disables_standalone_output_format(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not emit its own YAML" in base_content
+
+    def test_bridge_names_static_camera_and_fluorescent_lighting_conflicts(self):
+        """The bridge must explicitly name the two known content conflicts flagged
+        by the ownership audit — Static camera movement and fluorescent lighting —
+        not just a generic precedence statement."""
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert '"Static"' in base_content
+        assert "fluorescent" in base_content.lower()
+
+    def test_bridge_preserves_existing_json_contract(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        veo_section = base_content[base_content.find("VEO PROMPT DIRECTOR SKILL USAGE"):]
+        assert "Write only primary_prompt and fallback_prompt" in veo_section
+        assert "Preserve scene_id and input scene order exactly" in veo_section
+        assert "provider-tier routing fields unchanged" in veo_section
+
+    def test_bridge_states_existing_requirements_take_precedence(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        veo_section = base_content[base_content.find("VEO PROMPT DIRECTOR SKILL USAGE"):]
+        assert "this prompt's requirements always win" in veo_section
+        assert "does not generate video and does not control provider routing" in veo_section
+
+    # -- call-site integrity (AST-based) ---------------------------------------
+
+    def test_stage_b_has_exactly_one_run_agent_call(self):
+        """Attaching Veo Prompt Director must not add a second Stage B run_agent()
+        call — the same AST-based check already used for Seedance2."""
+        import ast
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+
+        src = inspect.getsource(vpd.run_visual_package_director)
+        tree = ast.parse(src)
+
+        matches = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "run_agent":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "system_prompt" and isinstance(kw.value, ast.Name):
+                    if kw.value.id == "SCENE_PROMPTS_PROMPT":
+                        matches.append(node)
+
+        assert len(matches) == 1, (
+            f"Expected exactly one Stage B run_agent() call using SCENE_PROMPTS_PROMPT "
+            f"inside run_visual_package_director, found {len(matches)}"
+        )
+
+    def test_no_new_run_agent_call_sites_added_to_module(self):
+        """Total run_agent() call sites across the module must still equal 6 —
+        unchanged from the Seedance2 attachment task. Attaching Veo Prompt Director
+        must add zero new LLM invocations."""
+        import ast
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+
+        src = inspect.getsource(vpd)
+        tree = ast.parse(src)
+
+        call_count = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "run_agent":
+                call_count += 1
+
+        assert call_count == 6, (
+            f"Expected 6 total run_agent() call sites in visual_package_director.py "
+            f"(unchanged by Veo Prompt Director attachment), found {call_count}"
+        )
+
+    def test_no_new_external_call_surface_in_vpd_module(self):
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+        src = inspect.getsource(vpd)
+        assert "OpenAI(" not in src
+        assert "requests." not in src
+        assert "httpx." not in src
+        assert "subprocess." not in src
+
+    def test_veo_prompt_director_content_not_reconciled_into_internal_skills(self):
+        """The internal veo_translation_skill compact file must not contain the
+        pinned Veo Prompt Director SKILL.md content — attachment is composition,
+        not merging."""
+        import hypogeum.agents.visual_package_director as vpd
+        pinned_content = vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.read_text(encoding="utf-8")
+        internal_content = vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
         assert pinned_content not in internal_content

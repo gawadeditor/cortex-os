@@ -113,6 +113,56 @@
       "runtime_state": "Installed and wired. hypogeum/agents/visual_package_director.py Stage B composes the pinned SKILL.md verbatim into its system prompt on every call. No other Hypogeum module references third_party/skills/seedance2/.",
       "compatibility_findings": "SKILL.md's final section ('Interaction Instructions') documents a conversational workflow — ask the user what they want to create, ask what materials they have, draft, explain choices, offer variations, remind about constraints — designed for an interactive session, not Stage B's single-shot batched run_agent() call, which must emit only the strict JSON primary_prompt/fallback_prompt fields with no conversational turns. Resolved by the 'SEEDANCE2 SKILL USAGE' bridge section appended to hypogeum/prompts/vpd_scene_prompts.txt, of the same kind already proven for Humanizer (script_engine.txt HUMANIZATION section) and GPT-Image2 (thumbnail_director.txt SECTION 12B) — the bridge disables the interactive workflow and confirms Stage B's existing JSON output contract and brand/composition/historical-integrity/camera/lighting/palette/continuity requirements take precedence over anything Seedance2 suggests.",
       "rollback_instructions": "1) In hypogeum/agents/visual_package_director.py: remove _SEEDANCE2_SKILL_PATH from the compose_system_prompt() call inside _load_scene_prompts_prompt() (restoring the original 4-argument call), remove _SEEDANCE2_SKILL_PATH from _VPD_ALL_SKILL_PATHS, and remove the PINNED_SEEDANCE2_SHA / _THIRD_PARTY_ROOT / _SEEDANCE2_SKILL_PATH constants. 2) In hypogeum/prompts/vpd_scene_prompts.txt: remove the 'SEEDANCE2 SKILL USAGE' section and revert the # PROMPT_VERSION/# PURPOSE header lines. 3) Set this entry's state back to 'INSTALLED / NOT WIRED / NOT ACTIVE' and remove the wired_to field. 4) Optionally delete third_party/skills/seedance2/e06c7c63a766d623004a2807881c30685ce517af/ entirely and remove this manifest entry if full uninstallation (not just unwiring) is desired. No other agent, prompt, schema, or pipeline file references this installation, so no other file requires any change to complete the rollback."
+    },
+    {
+      "name": "veo-prompt-director",
+      "canonical_url": "authenticated MCP Market package download (mcpmarket.com Project Skill listing for veo-prompt-director) — not a git repository; no commit-hosting URL exists for this source",
+      "owner": "mcpmarket (package publisher of record per SKILL.md frontmatter `name: veo-prompt-director`)",
+      "repository": null,
+      "package_version": "1.0.0",
+      "pinned_commit_sha": null,
+      "pin_note": "This source has no git repository and therefore no commit SHA. Per this task's explicit instruction, the package version ('1.0.0', taken from SKILL.md's own metadata.mcpmarket-version frontmatter field, matching the archive filename veo-prompt-director-1.0.0.tar.gz) is used as the installation identifier instead, exactly as it appears in the installed directory name third_party/skills/veo_prompt_director/1.0.0/.",
+      "retrieval_date": "2026-07-11",
+      "license_identifier": "none present in the package (no LICENSE file, no license frontmatter field)",
+      "license_note": "Prior provenance audits (docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.4, docs/architecture/VIDEO_PROMPT_SKILLS_OWNERSHIP_AUDIT.md §7) recorded this package's license as absent/unresolved and blocked installation on that basis. That block was lifted by the repository owner's explicit authority: the package was obtained via an authenticated MCP Market download, and MCP Market's own official installation documentation supports installing Project Skills inside a repository and committing them with Git as part of a normal project workflow. This installation proceeds on that authority, not on the discovery of a LICENSE file — none exists in the package itself. No further licensing investigation was performed for this task, per explicit instruction.",
+      "installation_method": "manual verbatim copy of an already-locally-held, authenticated MCP Market package archive (/Users/gawadeditor/Desktop/veo-prompt-director-1.0.0.tar.gz, SHA-256 9e7f3600dc4eced97ccc17fcd4dc16e35ed4c2bfb3c2e7233137377991ae170e, 8,075 bytes) extracted as-is with no download step required; no npx skills / plugin marketplace installer used",
+      "upstream_directory_path": "third_party/skills/veo_prompt_director/1.0.0/",
+      "file_inventory": [
+        {
+          "path": "third_party/skills/veo_prompt_director/1.0.0/SKILL.md",
+          "size_bytes": 4047,
+          "sha256": "9f8e33977b6d7a5ebfb3576992c3e449303ae6049842344de449ba10b01db01d"
+        },
+        {
+          "path": "third_party/skills/veo_prompt_director/1.0.0/references/advanced_workflows.md",
+          "size_bytes": 5382,
+          "sha256": "386f9e34a2f13b60371af0171659aa7f1f4953124de42ba9a7d9f9382bf9c53c"
+        },
+        {
+          "path": "third_party/skills/veo_prompt_director/1.0.0/references/audio_directing.md",
+          "size_bytes": 2787,
+          "sha256": "237146aefce69dc23ada2c6fd88aeaa68cec8e881952e691e825890e80db5693"
+        },
+        {
+          "path": "third_party/skills/veo_prompt_director/1.0.0/references/cinematography.md",
+          "size_bytes": 5283,
+          "sha256": "2db960d0e71deef538577b7a3966749a9f03a0f05528dabbc4477ef8741860bb"
+        },
+        {
+          "path": "third_party/skills/veo_prompt_director/1.0.0/references/prompt_formula.md",
+          "size_bytes": 4863,
+          "sha256": "9d8ef6256b10e98a8eef7e2473871d5388d0f5ef8db66aae8c3a1a1a02325623"
+        }
+      ],
+      "excluded_from_installation": [],
+      "excluded_from_installation_note": "All 5 files present in the archive were installed verbatim — none excluded. This differs from Seedance2/GPT-Image2, whose upstream repositories contained additional files (Chinese-language variants, CLI scripts, plugin scaffolding) not present in this package's archive at all.",
+      "state": "INSTALLED / WIRED / ACTIVE",
+      "intended_owning_agent": "hypogeum/agents/visual_package_director.py — Stage B (the SCENE_PROMPTS_PROMPT run_agent() call that writes ranked scene primary_prompt/fallback_prompt), per docs/architecture/VIDEO_PROMPT_SKILLS_OWNERSHIP_AUDIT.md §3.4/§9 (reusing the same owner already confirmed for Seedance2).",
+      "intended_attachment_mechanism": "Compose the original pinned SKILL.md directly into Stage B's existing system prompt via hypogeum.prompt_loader.compose_system_prompt() (extending the existing _load_scene_prompts_prompt() call, appended after vpd_scene_prompts.txt, cinematic_prompt_architecture.md, veo_translation_skill.compact.md, seedance_translation_skill.compact.md, and the pinned Seedance2 SKILL.md) and reuse Stage B's existing run_agent() call. Only SKILL.md is composed at runtime, matching Seedance2's single-file composition; the 4 reference/ files are installed verbatim for provenance but not composed into the runtime prompt by this task. This supersedes the earlier 'SELECTIVE CAPABILITY RECONCILIATION' recommendation in docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.4 and docs/architecture/VIDEO_PROMPT_SKILLS_OWNERSHIP_AUDIT.md §6/§11/§12 — the project's established direct-attachment architecture (Humanizer, GPT-Image2, Seedance2) is the accepted pattern instead; the existing hypogeum/skills/veo_translation_skill.md and its compact variant remain unmodified and untouched by this decision.",
+      "wired_to": "hypogeum/agents/visual_package_director.py — Stage B. Implemented via direct attachment: PINNED_VEO_PROMPT_DIRECTOR_VERSION and _VEO_PROMPT_DIRECTOR_SKILL_PATH constants added to visual_package_director.py (same pattern as _SEEDANCE2_SKILL_PATH, script_engine.py, thumbnail_prompt_writer.py); _VEO_PROMPT_DIRECTOR_SKILL_PATH appended as a 6th argument to the existing compose_system_prompt() call inside _load_scene_prompts_prompt(), after vpd_scene_prompts.txt, cinematic_prompt_architecture.md, veo_translation_skill.compact.md, seedance_translation_skill.compact.md, and _SEEDANCE2_SKILL_PATH (composition order preserved and extended, not reordered). Stage B's existing single run_agent() call (SCENE_PROMPTS_PROMPT) is reused unchanged in count — no new stage, adapter, checkpoint, schema, provider invocation, or additional LLM call was added. A bridge section ('VEO PROMPT DIRECTOR SKILL USAGE') was appended to the end of hypogeum/prompts/vpd_scene_prompts.txt, after the existing 'SEEDANCE2 SKILL USAGE' bridge, to resolve the compatibility conflicts recorded below.",
+      "runtime_state": "Installed and wired. hypogeum/agents/visual_package_director.py Stage B composes the pinned SKILL.md verbatim into its system prompt on every call. No other Hypogeum module references third_party/skills/veo_prompt_director/.",
+      "compatibility_findings": "Two categories of conflict, both resolved by the 'VEO PROMPT DIRECTOR SKILL USAGE' bridge section appended to hypogeum/prompts/vpd_scene_prompts.txt: (1) SKILL.md's own frontmatter description frames it as an interactive assistant that 'collects user input' and 'guides users through' building a prompt, and references/advanced_workflows.md documents multi-step workflows naming specific external tools (Gemini 2.5 Flash Image, Veo 3.1 First/Last Frame, Ingredients to Video, 'Prompt Enhancement with Gemini') — none of this applies to Stage B's single-shot batched run_agent() call, which must emit only the strict JSON primary_prompt/fallback_prompt fields with no conversational turns, tool invocations, or file operations; the bridge disables all of it. (2) references/cinematography.md lists 'Static' as a valid camera movement and references/prompt_formula.md's Example 2 uses harsh fluorescent overhead lighting — both directly contradict CLAUDE.md's frozen rule ('no static camera verb') and vpd_scene_prompts.txt's own hard constraints (no fluorescent lighting); the bridge names both conflicts explicitly and states this prompt's existing requirements always win.",
+      "rollback_instructions": "1) In hypogeum/agents/visual_package_director.py: remove _VEO_PROMPT_DIRECTOR_SKILL_PATH from the compose_system_prompt() call inside _load_scene_prompts_prompt() (restoring the prior 5-argument call), remove _VEO_PROMPT_DIRECTOR_SKILL_PATH from _VPD_ALL_SKILL_PATHS, and remove the PINNED_VEO_PROMPT_DIRECTOR_VERSION / _VEO_PROMPT_DIRECTOR_SKILL_PATH constants (leave _THIRD_PARTY_ROOT, shared with Seedance2). 2) In hypogeum/prompts/vpd_scene_prompts.txt: remove the 'VEO PROMPT DIRECTOR SKILL USAGE' section (leave the 'SEEDANCE2 SKILL USAGE' section intact) and revert the # PROMPT_VERSION/# PURPOSE header lines. 3) Set this entry's state back to 'INSTALLED / NOT WIRED / NOT ACTIVE' and remove the wired_to field. 4) Optionally delete third_party/skills/veo_prompt_director/1.0.0/ entirely and remove this manifest entry if full uninstallation (not just unwiring) is desired. No other agent, prompt, schema, or pipeline file references this installation, so no other file requires any change to complete the rollback."
     }
   ]
 }

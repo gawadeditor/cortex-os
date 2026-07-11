@@ -48,12 +48,14 @@ Two-phase execution + Thumbnail Handoff Brief extraction:
     Checkpoints: vpd_prompts_batch_{i}_{episode_id}.json.
     System prompt composes vpd_scene_prompts.txt (including a bridge section)
     with cinematic_prompt_architecture.md, the internal Veo and Seedance
-    translation skills, and the pinned upstream Seedance2 skill
-    (third_party/skills/seedance2/<PINNED_SEEDANCE2_SHA>/SKILL.md, loaded
-    verbatim, never edited) — all via the existing compose_system_prompt()
-    call, inside this same single run_agent() invocation. No second call,
-    no new stage, no adapter. Provider routing and generation execution
-    remain entirely downstream, unaffected (provider_router.py, MUAPI).
+    translation skills, and the pinned upstream Seedance2 and Veo Prompt
+    Director skills (third_party/skills/seedance2/<PINNED_SEEDANCE2_SHA>/SKILL.md
+    and third_party/skills/veo_prompt_director/<PINNED_VEO_PROMPT_DIRECTOR_VERSION>/SKILL.md,
+    both loaded verbatim, never edited) — all via the existing
+    compose_system_prompt() call, inside this same single run_agent()
+    invocation. No second call, no new stage, no adapter. Provider routing
+    and generation execution remain entirely downstream, unaffected
+    (provider_router.py, MUAPI).
 
   Phase 2 — MUAPI execution:
     For each entity with lock_state == "final":
@@ -228,6 +230,23 @@ _SEEDANCE2_SKILL_PATH = (
     _THIRD_PARTY_ROOT / "skills" / "seedance2" / PINNED_SEEDANCE2_SHA / "SKILL.md"
 )
 
+# Pinned upstream Veo Prompt Director skill (docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.4,
+# docs/architecture/VIDEO_PROMPT_SKILLS_OWNERSHIP_AUDIT.md, config/upstream_skills_manifest.json)
+# — loaded verbatim, never edited. Attached alongside, never in place of, the existing internal
+# Veo/Seedance translation skills or the pinned Seedance2 skill above. Source is an authenticated
+# MCP Market package download, not a git repository, so there is no commit SHA to pin — the
+# package version ("1.0.0", from SKILL.md's own metadata.mcpmarket-version frontmatter field)
+# is used as the installation identifier instead, exactly as it appears in the installed
+# directory name. Only SKILL.md is composed into Stage B's prompt (matching Seedance2's
+# single-file composition); the package's reference/ files are installed verbatim alongside it
+# for provenance and are available for a future, separate composition if ever needed, but are
+# not loaded at runtime by this task.
+PINNED_VEO_PROMPT_DIRECTOR_VERSION = "1.0.0"
+_VEO_PROMPT_DIRECTOR_SKILL_PATH = (
+    _THIRD_PARTY_ROOT / "skills" / "veo_prompt_director"
+    / PINNED_VEO_PROMPT_DIRECTOR_VERSION / "SKILL.md"
+)
+
 # All skill paths used by VPD — used for diagnostic logging
 _VPD_ALL_SKILL_PATHS: list[Path] = [
     _CINEMATIC_SKILL_FILE,
@@ -235,6 +254,7 @@ _VPD_ALL_SKILL_PATHS: list[Path] = [
     _VEO_TRANSLATION_SKILL_FILE,
     _SEEDANCE_TRANSLATION_SKILL_FILE,
     _SEEDANCE2_SKILL_PATH,
+    _VEO_PROMPT_DIRECTOR_SKILL_PATH,
 ]
 
 # Stage A4 — Scene Presentation Planner
@@ -268,6 +288,7 @@ def _load_scene_prompts_prompt() -> str:
         _VEO_TRANSLATION_SKILL_FILE,
         _SEEDANCE_TRANSLATION_SKILL_FILE,
         _SEEDANCE2_SKILL_PATH,
+        _VEO_PROMPT_DIRECTOR_SKILL_PATH,
     )
 
 def _load_presentation_planner_prompt() -> str:

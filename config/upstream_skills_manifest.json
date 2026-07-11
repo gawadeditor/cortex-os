@@ -24,9 +24,9 @@
           "sha256": "4ac4810254ab36d45419141aeb8e69bf50652cfafe5b2dab947d06d44e5cbf96"
         }
       ],
-      "state": "INSTALLED / NOT WIRED / NOT ACTIVE",
-      "planned_target_later_task": "Humanization capability after hypogeum/agents/script_engine.py — not created by this task, per docs/architecture/SKILLS_CAPABILITY_AND_AGENT_DECISION_MATRIX.md §4",
-      "rollback_instructions": "Delete third_party/skills/humanizer/1b48564898e999219882660237fde01bf4843a0f/ and remove this entry from config/upstream_skills_manifest.json. No agent, prompt, schema, or pipeline file references this installation, so no other file requires any change to complete the rollback."
+      "state": "INSTALLED / WIRED / ACTIVE",
+      "wired_to": "hypogeum/agents/script_engine.py — composed into SYSTEM_PROMPT via hypogeum.prompt_loader.compose_system_prompt(script_engine.txt, SKILL.md). Applied inside Script Engine's single existing run_agent() call; not a separate pipeline stage, adapter, or checkpoint layer.",
+      "rollback_instructions": "In hypogeum/agents/script_engine.py, change _load_system_prompt() back to load_prompt(_PROMPT_FILE) (drop the _HUMANIZER_SKILL_PATH argument), then remove the HUMANIZATION section from hypogeum/prompts/script_engine.txt. Deleting third_party/skills/humanizer/1b48564898e999219882660237fde01bf4843a0f/ alone is not sufficient — script_engine.py's import would fail at startup unless the composition call is also reverted first."
     }
   ]
 }

@@ -44,7 +44,6 @@ Logging events emitted:
 
 from __future__ import annotations
 
-import copy
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -57,11 +56,6 @@ from hypogeum.agents.assembly_agent import run_assembly_agent
 from hypogeum.agents.audio_agent import run_audio_agent
 from hypogeum.agents.executive_producer import run_executive_producer
 from hypogeum.agents.archive_agent import run_archive_agent
-from hypogeum.agents.humanization_stage import (
-    HumanizationStageError,
-    run_humanization_stage,
-)
-from hypogeum.agents.humanizer_llm_adapter import HUMANIZER_LLM_MODEL_ID
 from hypogeum.agents.compliance_agent import run_compliance_agent
 from hypogeum.agents.finance_agent import run_budget_authorization, run_cost_ledger
 from hypogeum.agents.qa_agent import run_qa_agent
@@ -84,10 +78,6 @@ from hypogeum.db import (
     update_stage_execution_skipped,
 )
 from hypogeum.finance import clear_run_context, set_run_context, write_episode_rollup
-from hypogeum.humanization_checkpoint import (
-    load_reusable_humanization_checkpoint,
-    save_humanization_checkpoint,
-)
 from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_blocked, is_factory_blocked
 from hypogeum.post_run_intelligence import run_post_run_intelligence
 from hypogeum.production_metadata import write_analytics_pending, write_production_metadata
@@ -360,7 +350,6 @@ class PipelineResult:
     research_package: Optional[dict] = None
     narrative_package: Optional[dict] = None
     script_package: Optional[dict] = None
-    humanized_script_package: Optional[dict] = None
     finance_authorization: Optional[dict] = None
     visual_package: Optional[dict] = None
     thumbnail_package: Optional[dict] = None
@@ -611,49 +600,6 @@ def run_pipeline(
             raise PipelineCancelledError(episode_id=episode_id, stage_after="script_engine")
 
         # -----------------------------------------------------------------------
-        # 5b. Humanization Stage — SHADOW mode (hardcoded; mode name unchanged
-        # from the prior task — the schema/implementation don't yet support
-        # ACTIVE, per docs/architecture/HUMANIZER_SHADOW_RUNTIME_AUDIT.md).
-        # Produces humanized_script_package alongside script_package without
-        # mutating or replacing either. Runs the pinned upstream Humanizer
-        # LLM pass for real. Its VALIDATED output is now production-consumed:
-        # immediately below, effective_script_package merges every accepted
-        # beat (transformation_status not "reverted"/"failed") into a
-        # schema-valid script_package shape, which Finance authorization,
-        # VPD, Audio, and Assembly receive instead of the raw script_package.
-        # Reverted/failed beats keep their original narration in the merge.
-        # -----------------------------------------------------------------------
-        log.info("pipeline_stage_started", agent="humanization_stage")
-        _current_stage_id, _current_stage_t0 = _record_stage_start(
-            run_id, episode_id, "humanization_stage", log,
-            output_schema="humanized_script_package",
-            db_path=db_path,
-        )
-        humanized_script_package = _run_humanization_stage(
-            episode_id=episode_id,
-            script_package=script_package,
-            pipeline_run_id=run_id,
-            output_dir=output_dir,
-            config=config,
-            log=log,
-        )
-        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
-        _current_stage_id = None
-        log.info("pipeline_stage_completed", agent="humanization_stage")
-        if cancel_check is not None and cancel_check():
-            raise PipelineCancelledError(episode_id=episode_id, stage_after="humanization_stage")
-
-        # effective_script_package: the validated Humanizer-applied package,
-        # or a content-identical copy of the original when Humanization
-        # could not safely provide one (full fallback). script_package
-        # itself is never reassigned — it remains the original, unmutated
-        # Script Engine output, carried on PipelineResult for provenance,
-        # audit, comparison, and rollback.
-        effective_script_package = _build_effective_script_package(
-            script_package, humanized_script_package,
-        )
-
-        # -----------------------------------------------------------------------
         # 6. Finance Agent — budget authorization gate (pre-generation spend)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="finance_agent_authorization")
@@ -663,7 +609,7 @@ def run_pipeline(
             db_path=db_path,
         )
         finance_authorization = _run_budget_authorization(
-            script_package=effective_script_package,
+            script_package=script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
@@ -700,7 +646,7 @@ def run_pipeline(
             db_path=db_path,
         )
         visual_package = _run_visual_package_director(
-            script_package=effective_script_package,
+            script_package=script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
@@ -750,7 +696,7 @@ def run_pipeline(
             db_path=db_path,
         )
         narration_package = _run_audio_agent(
-            script_package=effective_script_package,
+            script_package=script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
@@ -778,7 +724,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
-            script_package=effective_script_package,
+            script_package=script_package,
             source_registry=research_package.get("source_registry", []),
             topic_brief=topic_brief,
         )
@@ -1101,7 +1047,6 @@ def run_pipeline(
             research_package=research_package,
             narrative_package=narrative_package,
             script_package=script_package,
-            humanized_script_package=humanized_script_package,
             finance_authorization=finance_authorization,
             visual_package=visual_package,
             thumbnail_package=thumbnail_package,
@@ -1443,160 +1388,6 @@ def _run_script_engine(
         episode_id=episode_id,
         output_dir=output_dir,
     )
-
-
-_HUMANIZATION_MODE = "SHADOW"
-
-
-def _run_humanization_stage(
-    *,
-    episode_id: str,
-    script_package: dict,
-    pipeline_run_id: str,
-    output_dir: Optional[Path],
-    config: Config,
-    log,
-) -> dict:
-    """
-    Humanization Stage (isolated capability — SHADOW mode only, hardcoded).
-
-    Runs immediately after Script Engine. Delegates to
-    hypogeum.agents.humanization_stage.run_humanization_stage(), which never
-    mutates script_package — it only reads it and returns a separate
-    humanized_script_package. No downstream stage consumes this package yet;
-    it is produced, validated, checkpointed, and carried forward on
-    PipelineResult only. SHADOW mode runs the pinned upstream Humanizer LLM
-    pass for real (via hypogeum.agents.humanizer_llm_adapter) so its output
-    can be reviewed and validated before any production dependency is ever
-    created on it — Finance/VPD/Audio/Assembly all continue reading the
-    original script_package, completely unaffected by this stage's result.
-
-    Mode is hardcoded to "SHADOW" here — no config, env var, or feature flag
-    governs it. Wiring a downstream consumer, or raising the mode further,
-    are separate, future, explicitly authorized changes. Per-beat LLM
-    failures never propagate out of run_humanization_stage() — they fall
-    back to the deterministic-pass result inside the stage itself (see
-    hypogeum/agents/humanization_stage.py::_build_shadow_beat()), so a model
-    outage here can never halt the pipeline or affect script_package.
-
-    Checkpoint: uses hypogeum.humanization_checkpoint's fingerprint-validated
-    reuse check (stricter than _load_package()'s plain existence check —
-    corruption raises rather than being treated as a cache miss). assets_root
-    mirrors the same output_dir override every other stage's checkpoint
-    honors for test isolation, falling back to the real .hypogeum-assets/
-    root otherwise. model_id is included in the reuse check so a change to
-    HUMANIZER_LLM_MODEL_ID correctly invalidates any prior SHADOW checkpoint.
-    """
-    assets_root = output_dir if output_dir is not None else _ASSETS_ROOT
-    mode = _HUMANIZATION_MODE
-    model_id = HUMANIZER_LLM_MODEL_ID if mode == "SHADOW" else None
-
-    reused = load_reusable_humanization_checkpoint(
-        assets_root=assets_root,
-        episode_id=episode_id,
-        script_package=script_package,
-        mode=mode,
-        model_id=model_id,
-    )
-    if reused is not None:
-        log.info(
-            "humanization_checkpoint_cache_hit",
-            episode_id=episode_id,
-            mode=mode,
-            input_hash_prefix=reused["humanization"]["input_hash"][:12],
-        )
-        return reused
-
-    log.info("humanization_checkpoint_cache_miss", episode_id=episode_id, mode=mode)
-
-    t0 = datetime.now(timezone.utc)
-    result = run_humanization_stage(
-        episode_id=episode_id,
-        script_package=script_package,
-        pipeline_run_id=pipeline_run_id,
-        mode=mode,
-        config=config,
-    )
-    elapsed_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000.0
-
-    log.info(
-        "humanization_validation_succeeded",
-        episode_id=episode_id,
-        mode=mode,
-        elapsed_ms=round(elapsed_ms, 1),
-    )
-
-    save_humanization_checkpoint(assets_root=assets_root, episode_id=episode_id, package=result)
-
-    return result
-
-
-def _build_effective_script_package(
-    script_package: dict,
-    humanized_script_package: Optional[dict],
-) -> dict:
-    """
-    Merge validated Humanizer narration into a schema-valid script_package
-    shape — the package Finance authorization, Visual Package Director,
-    Audio Agent, and Assembly Agent now receive instead of the raw,
-    pre-Humanization script_package.
-
-    Never mutates script_package — always returns a deep copy. Only
-    sections[].narration_beats[].text and shorts_scripts[].narration_beats[].text
-    are ever overwritten, and only for beats whose humanized_script_package
-    beat record is accepted: transformation_status is anything other than
-    "reverted" or "failed" (the only two statuses that mean the validated
-    result was rejected and the original was already retained). Every other
-    field — beat_id, section structure, timing data, visual directions,
-    shorts structure, episode_metadata — is untouched by construction,
-    since nothing but a matched beat's .text leaf is ever written.
-
-    If every beat is reverted/failed (a full-stage fallback), or
-    humanized_script_package is absent, the result is content-identical to
-    script_package — the safe, original-narration default.
-
-    Args:
-        script_package:            The original, Script-Engine-produced
-                                    package. Never mutated.
-        humanized_script_package:  The Humanization Stage's output, or
-                                    None (defensive — the pipeline always
-                                    produces one today).
-
-    Returns:
-        A new dict, schema-shape-compatible with script_package.
-    """
-    effective = copy.deepcopy(script_package)
-
-    if not humanized_script_package:
-        return effective
-
-    accepted_text_by_beat_id: dict = {}
-    for beat in humanized_script_package.get("beats", []) or []:
-        if not isinstance(beat, dict):
-            continue
-        beat_id = beat.get("beat_id")
-        if not beat_id or beat.get("transformation_status") in ("reverted", "failed"):
-            continue
-        accepted_text_by_beat_id[beat_id] = beat.get("humanized_narration")
-
-    def _apply_accepted_text(narration_beats) -> None:
-        if not isinstance(narration_beats, list):
-            return
-        for nb in narration_beats:
-            if not isinstance(nb, dict):
-                continue
-            accepted_text = accepted_text_by_beat_id.get(nb.get("beat_id"))
-            if isinstance(accepted_text, str) and accepted_text.strip():
-                nb["text"] = accepted_text
-
-    for section in effective.get("sections", []) or []:
-        if isinstance(section, dict):
-            _apply_accepted_text(section.get("narration_beats", []))
-    for short in effective.get("shorts_scripts", []) or []:
-        if isinstance(short, dict):
-            _apply_accepted_text(short.get("narration_beats", []))
-
-    return effective
 
 
 def _run_visual_package_director(

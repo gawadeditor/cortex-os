@@ -32,9 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hypogeum.agent import ResponseParseError
 from hypogeum.agents.script_engine import (
+    PINNED_HUMANIZER_SHA,
     SYSTEM_PROMPT,
     _AGENT_NAME,
     _CLAUDE_SONNET,
+    _HUMANIZER_SKILL_PATH,
     _PROMPT_FILE,
     _SE_MAX_TOKENS,
     run_script_engine,
@@ -750,9 +752,41 @@ class TestSystemPrompt:
         assert isinstance(SYSTEM_PROMPT, str)
         assert len(SYSTEM_PROMPT) > 0
 
-    def test_system_prompt_matches_file(self):
+    def test_system_prompt_contains_base_prompt_file(self):
         from hypogeum.prompt_loader import load_prompt
-        assert SYSTEM_PROMPT == load_prompt(_PROMPT_FILE)
+        assert load_prompt(_PROMPT_FILE) in SYSTEM_PROMPT
+
+    def test_system_prompt_composed_via_compose_system_prompt(self):
+        from hypogeum.prompt_loader import compose_system_prompt
+        assert SYSTEM_PROMPT == compose_system_prompt(_PROMPT_FILE, _HUMANIZER_SKILL_PATH)
+
+    def test_pinned_humanizer_skill_path_exists(self):
+        assert _HUMANIZER_SKILL_PATH.exists()
+        assert PINNED_HUMANIZER_SHA in str(_HUMANIZER_SKILL_PATH)
+
+    def test_pinned_humanizer_skill_loaded_verbatim(self):
+        """The composed system prompt must contain the pinned SKILL.md's
+        exact on-disk bytes — no paraphrase, no summarization, no rewrite."""
+        on_disk = _HUMANIZER_SKILL_PATH.read_text(encoding="utf-8")
+        assert on_disk in SYSTEM_PROMPT
+
+    def test_skill_not_duplicated_or_rewritten_in_base_prompt(self):
+        """A representative, distinctive upstream heading must not be
+        duplicated inside script_engine.txt's own authored content — it
+        must come from the composed skill file only."""
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        skill_text = _HUMANIZER_SKILL_PATH.read_text(encoding="utf-8")
+        assert "### 24. Excessive Hedging" not in base_only
+        assert "### 24. Excessive Hedging" in skill_text
+
+    def test_base_prompt_bridges_to_humanizer_skill(self):
+        """script_engine.txt's own content must reference the composed
+        skill and instruct single-pass application, not a rewrite step."""
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "Humanizer" in base_only
+        assert "AskUserQuestion" in base_only or "clarifying question" in base_only.lower()
 
     def test_prompt_mentions_cta_strategy(self):
         assert "CTA" in SYSTEM_PROMPT or "cta" in SYSTEM_PROMPT.lower()

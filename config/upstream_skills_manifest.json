@@ -70,6 +70,48 @@
       "runtime_state": "Wired and active. thumbnail_prompt_writer.py is the only runtime module referencing third_party/skills/gpt-image2/. skill_registry.py does not register this skill (that registry is for internal hypogeum/skills/ content only).",
       "compatibility_findings": "SKILL.md's canonical usage is a CLI/SDK wrapper (uv run generate.py / uvx gpt-image, both calling the official openai Python SDK directly against OPENAI_API_KEY) — incompatible with direct verbatim composition on its own. Resolved by SECTION 12B (\"GPT-IMAGE2 SKILL USAGE\") in hypogeum/prompts/thumbnail_director.txt, a small bridge section that restricts the composed skill to prompt-craft guidance for candidate.image_prompt only and explicitly disables CLI invocation, direct provider/API calls, OPENAI_API_KEY access, file writing, interactive questions, and the skill's own standalone output format. See docs/architecture/GPT_IMAGE2_THUMBNAIL_SKILL_ATTACHMENT_AUDIT.md for the original finding.",
       "rollback_instructions": "1. In hypogeum/agents/thumbnail_prompt_writer.py, remove _GPT_IMAGE2_SKILL_PATH from the compose_system_prompt() call in _load_system_prompt() (and from _TPW_ALL_SKILL_PATHS). 2. Remove SECTION 12B from hypogeum/prompts/thumbnail_director.txt. 3. Optionally delete third_party/skills/gpt-image2/74a665173a19e461fa08f84ae76d800f85d2dd1e/ and remove this manifest entry. Steps 1 and 2 alone fully de-activate the skill; step 3 completes the rollback."
+    },
+    {
+      "name": "seedance2",
+      "canonical_url": "https://github.com/dexhunter/seedance2-skill",
+      "owner": "dexhunter",
+      "repository": "seedance2-skill",
+      "pinned_commit_sha": "e06c7c63a766d623004a2807881c30685ce517af",
+      "upstream_version": null,
+      "verified_tag": null,
+      "tag_verification_note": "No tag exists upstream (GitHub tags API returned zero results, independently re-checked at installation time). The pinned commit is the repository's main HEAD, independently re-confirmed unchanged since the original 2026-07-10 verification pass (docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.3) — 'tag resolves to commit' verification is not applicable; the commit itself was directly confirmed to exist and to still be main HEAD via the GitHub API.",
+      "retrieval_date": "2026-07-11",
+      "license_identifier": "MIT",
+      "installation_method": "manual pinned copy — files fetched directly from the pinned commit via raw.githubusercontent.com; installed files independently re-fetched and diffed byte-identical, and separately cross-checked against GitHub's own recorded git blob SHA-1 for each file; no npx skills / plugin marketplace installer used",
+      "upstream_directory_path": "third_party/skills/seedance2/e06c7c63a766d623004a2807881c30685ce517af/",
+      "upstream_source_paths": {
+        "SKILL.md": "SKILL.md",
+        "LICENSE": "LICENSE"
+      },
+      "file_inventory": [
+        {
+          "path": "third_party/skills/seedance2/e06c7c63a766d623004a2807881c30685ce517af/SKILL.md",
+          "size_bytes": 15337,
+          "sha256": "107dd9fa5ef46f64d3d5183957244fd42f32a91df57e615ba63338c1344cf442"
+        },
+        {
+          "path": "third_party/skills/seedance2/e06c7c63a766d623004a2807881c30685ce517af/LICENSE",
+          "size_bytes": 1072,
+          "sha256": "56abf51bba5502dcc1cd014c9adea5787cd9eec67421858484b660ec97922978"
+        }
+      ],
+      "excluded_from_installation": [
+        "zh/SKILL.md (17,450 B) — Chinese-language variant; Hypogeum's pipeline and prompts operate in English throughout, so this file would have no consumer",
+        "README.md, README-zh.md — repository documentation, not skill content",
+        ".gitignore — repository scaffolding, not runtime content",
+        "SKILL.md itself references no other file in the repository (confirmed by direct inspection — no 'references/' directory, no relative-path links to any other document); it is fully self-contained and requires no additional file to remain complete or understandable"
+      ],
+      "state": "INSTALLED / NOT WIRED / NOT ACTIVE",
+      "intended_owning_agent": "hypogeum/agents/visual_package_director.py — Stage B (the SCENE_PROMPTS_PROMPT run_agent() call that writes ranked scene primary_prompt/fallback_prompt), per docs/architecture/VIDEO_PROMPT_SKILLS_OWNERSHIP_AUDIT.md.",
+      "intended_attachment_mechanism": "Compose the original pinned Seedance2 SKILL.md directly into Stage B's existing system prompt via hypogeum.prompt_loader.compose_system_prompt() (extending the existing _load_scene_prompts_prompt() call alongside vpd_scene_prompts.txt, cinematic_prompt_architecture.md, veo_translation_skill.compact.md, and seedance_translation_skill.compact.md) and reuse Stage B's existing run_agent() call. Not implemented by this installation task. This supersedes the reconciliation-into-existing-internal-skill recommendation in docs/architecture/VIDEO_PROMPT_SKILLS_OWNERSHIP_AUDIT.md §6/§11/§12 for Seedance2 specifically — the project's established direct-attachment architecture (Humanizer, GPT-Image2) is the accepted pattern instead; the existing hypogeum/skills/seedance_translation_skill.md and its compact variant remain unmodified and untouched by this decision.",
+      "runtime_state": "Installed only. Not wired, not active. No Hypogeum module references third_party/skills/seedance2/ yet. hypogeum/agents/visual_package_director.py is unmodified by this task.",
+      "compatibility_findings": "SKILL.md's final section ('Interaction Instructions') documents a conversational workflow — ask the user what they want to create, ask what materials they have, draft, explain choices, offer variations, remind about constraints — designed for an interactive session, not Stage B's single-shot batched run_agent() call, which must emit only the strict JSON primary_prompt/fallback_prompt fields with no conversational turns. A future direct-attachment task will require a small bridge section in Stage B's base prompt (hypogeum/prompts/vpd_scene_prompts.txt), of the same kind already proven for Humanizer (script_engine.txt HUMANIZATION section) and GPT-Image2 (thumbnail_director.txt SECTION 12B) — disabling the interactive workflow and confirming Stage B's existing JSON output contract and brand/composition/typography/zone/ranking requirements take precedence. Not implemented by this installation task.",
+      "rollback_instructions": "Delete third_party/skills/seedance2/e06c7c63a766d623004a2807881c30685ce517af/ and remove this entry from config/upstream_skills_manifest.json. No agent, prompt, schema, or pipeline file references this installation, so no other file requires any change to complete the rollback."
     }
   ]
 }

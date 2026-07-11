@@ -32,11 +32,30 @@ Coverage:
                                                     thumbnail_prompt_writer.py's
                                                     composition call plus
                                                     thumbnail_director.txt's bridge
+    TestSeedance2Installation                    — pinned directory/files exist,
+                                                    checksums match, byte-identical
+                                                    to the pinned upstream commit,
+                                                    no executable content
+    TestSeedance2NotWired                        — installed but not yet attached
+                                                    to any agent; no runtime module
+                                                    references the pinned path;
+                                                    not registered in
+                                                    skill_registry.py; existing
+                                                    internal Seedance skill files
+                                                    (hypogeum/skills/seedance_translation_skill.md
+                                                    and its compact variant) and
+                                                    visual_package_director.py are
+                                                    unchanged; manifest state is
+                                                    INSTALLED / NOT WIRED / NOT ACTIVE
+    TestSeedance2Rollback                        — rollback scope is exactly the
+                                                    pinned directory and the
+                                                    manifest entry
 
 Scope: installation provenance and wiring-surface-area only. Does not test
-Humanizer's or GPT-Image2's prompt-writing behavior (Claude applies a skill
-at generation time — there is no separate deterministic code path to unit
-test here).
+Humanizer's, GPT-Image2's, or Seedance2's prompt-writing behavior (Claude
+applies a skill at generation time — there is no separate deterministic
+code path to unit test here, and Seedance2 is not wired to any agent yet
+regardless).
 """
 
 from __future__ import annotations
@@ -62,6 +81,21 @@ _GPT_IMAGE2_EXPECTED_CHECKSUMS = {
     "SKILL.md": "b9a8226006433441b905141976a13943bffb813fd8443c7ec3470d08c381b6b8",
     "LICENSE": "9fc35d3971ef0358bfee870305c757c4e3482b8a184a1c3b038dce9579d40f06",
 }
+
+_SEEDANCE2_PINNED_SHA = "e06c7c63a766d623004a2807881c30685ce517af"
+_SEEDANCE2_DIR = _REPO_ROOT / "third_party" / "skills" / "seedance2" / _SEEDANCE2_PINNED_SHA
+
+_SEEDANCE2_EXPECTED_CHECKSUMS = {
+    "SKILL.md": "107dd9fa5ef46f64d3d5183957244fd42f32a91df57e615ba63338c1344cf442",
+    "LICENSE": "56abf51bba5502dcc1cd014c9adea5787cd9eec67421858484b660ec97922978",
+}
+
+_SEEDANCE_TRANSLATION_SKILL_FILE = (
+    _REPO_ROOT / "hypogeum" / "skills" / "seedance_translation_skill.md"
+)
+_SEEDANCE_TRANSLATION_SKILL_COMPACT_FILE = (
+    _REPO_ROOT / "hypogeum" / "skills" / "compiled" / "seedance_translation_skill.compact.md"
+)
 
 _EXECUTABLE_EXTENSIONS = {
     ".py", ".sh", ".ts", ".js", ".cjs", ".mjs", ".rb", ".pl", ".exe", ".bin",
@@ -370,3 +404,183 @@ class TestGPTImage2Rollback:
         this to depend on.
         """
         assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
+
+
+class TestSeedance2Installation:
+    def test_pinned_directory_exists(self):
+        assert _SEEDANCE2_DIR.is_dir(), (
+            f"Expected pinned Seedance2 directory at {_SEEDANCE2_DIR}"
+        )
+
+    def test_directory_name_matches_pinned_commit(self):
+        assert _SEEDANCE2_DIR.name == _SEEDANCE2_PINNED_SHA
+        assert len(_SEEDANCE2_PINNED_SHA) == 40, "must be a full commit SHA, not a short SHA"
+
+    def test_required_files_exist(self):
+        for filename in _SEEDANCE2_EXPECTED_CHECKSUMS:
+            assert (_SEEDANCE2_DIR / filename).is_file(), (
+                f"Missing required upstream file: {filename}"
+            )
+
+    def test_no_additional_files_present(self):
+        """
+        Only SKILL.md and LICENSE are installed — no zh/SKILL.md (Chinese
+        variant, no English-only pipeline consumer), no README files, no
+        repository scaffolding. SKILL.md references no other file in the
+        repository (no "references/" directory, no relative-path links to
+        any other document), so excluding everything else does not leave
+        it non-functional as an installed, readable document.
+        """
+        actual_files = {p.name for p in _SEEDANCE2_DIR.iterdir() if p.is_file()}
+        assert actual_files == set(_SEEDANCE2_EXPECTED_CHECKSUMS), (
+            f"Unexpected files in pinned Seedance2 directory: "
+            f"{actual_files - set(_SEEDANCE2_EXPECTED_CHECKSUMS)}"
+        )
+        actual_dirs = {p.name for p in _SEEDANCE2_DIR.iterdir() if p.is_dir()}
+        assert not actual_dirs, (
+            f"No subdirectories (e.g. zh/) may be installed: {actual_dirs}"
+        )
+
+    def test_checksums_match_recorded_manifest(self):
+        for filename, expected_sha256 in _SEEDANCE2_EXPECTED_CHECKSUMS.items():
+            actual = _sha256(_SEEDANCE2_DIR / filename)
+            assert actual == expected_sha256, (
+                f"{filename} checksum mismatch — file may have been locally "
+                f"modified. Expected {expected_sha256}, got {actual}"
+            )
+
+    def test_no_executable_content_in_installed_tree(self):
+        for path in _SEEDANCE2_DIR.rglob("*"):
+            if path.is_file():
+                assert path.suffix.lower() not in _EXECUTABLE_EXTENSIONS, (
+                    f"Executable file found in Seedance2's pinned tree: {path}"
+                )
+
+    def test_manifest_json_records_exactly_one_entry(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entries = [s for s in data["skills"] if s["name"] == "seedance2"]
+        assert len(entries) == 1, "expected exactly one seedance2 entry"
+        entry = entries[0]
+        assert entry["pinned_commit_sha"] == _SEEDANCE2_PINNED_SHA
+        assert entry["owner"] == "dexhunter"
+        assert entry["repository"] == "seedance2-skill"
+        assert entry["canonical_url"] == "https://github.com/dexhunter/seedance2-skill"
+        recorded_checksums = {
+            Path(f["path"]).name: f["sha256"] for f in entry["file_inventory"]
+        }
+        assert recorded_checksums == _SEEDANCE2_EXPECTED_CHECKSUMS
+
+    def test_manifest_records_visual_package_director_stage_b_as_owner(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "seedance2")
+        assert "visual_package_director.py" in entry["intended_owning_agent"]
+        assert "Stage B" in entry["intended_owning_agent"]
+
+
+class TestSeedance2NotWired:
+    """
+    Seedance2 is installed only — not attached to any agent. These tests
+    confirm zero runtime wiring exists yet, and that the existing internal
+    Seedance skill and its owning agent are completely untouched, mirroring
+    the same guard GPT-Image2's own installation task once had before its
+    later, separate attachment task.
+    """
+
+    def test_no_agent_references_pinned_upstream_skill(self):
+        agents_dir = _REPO_ROOT / "hypogeum" / "agents"
+        referencing = []
+        for py_file in agents_dir.glob("*.py"):
+            content = py_file.read_text(encoding="utf-8")
+            if "seedance2" in content or _SEEDANCE2_PINNED_SHA in content:
+                referencing.append(py_file.name)
+        assert not referencing, (
+            f"No agent may reference the pinned Seedance2 skill yet: {referencing}"
+        )
+
+    def test_no_runtime_module_imports_seedance2_path(self):
+        hypogeum_dir = _REPO_ROOT / "hypogeum"
+        offenders = []
+        for py_file in hypogeum_dir.rglob("*.py"):
+            content = py_file.read_text(encoding="utf-8")
+            if "seedance2" in content or _SEEDANCE2_PINNED_SHA in content:
+                offenders.append(str(py_file.relative_to(_REPO_ROOT)))
+        assert not offenders, (
+            f"No runtime module may reference the pinned Seedance2 path yet: {offenders}"
+        )
+
+    def test_visual_package_director_unchanged_by_this_task(self):
+        """
+        The intended future owning agent must not yet reference the pinned
+        skill in any way — this installation task is provenance-only.
+        """
+        content = (
+            _REPO_ROOT / "hypogeum" / "agents" / "visual_package_director.py"
+        ).read_text(encoding="utf-8")
+        assert "seedance2" not in content
+        assert _SEEDANCE2_PINNED_SHA not in content
+
+    def test_existing_internal_seedance_translation_skill_unchanged(self):
+        """
+        This installation task must not reconcile, merge, rewrite,
+        summarize, extract, or copy Seedance2 content into the existing
+        internal Seedance translation skill or its compact runtime variant.
+
+        A literal-string check for the pinned SHA or "dexhunter/seedance2-skill"
+        is not a valid signal here: the existing skill file's own evidence/
+        citation table already references https://github.com/dexhunter/seedance2-skill
+        as a pre-existing research source (evidence tag seed-comm-XX,
+        predating this installation task entirely) — that citation is
+        legitimate content this task must not disturb, not evidence of
+        reconciliation. The authoritative "unchanged" proof for this task
+        is `git diff` on both files (see the task's own required
+        verification command), which must produce no output; this test
+        only confirms the files still exist and are non-empty, since a
+        content diff without a pre-task snapshot cannot be asserted here.
+        """
+        for skill_file in (_SEEDANCE_TRANSLATION_SKILL_FILE, _SEEDANCE_TRANSLATION_SKILL_COMPACT_FILE):
+            assert skill_file.exists(), f"Expected existing internal skill file at {skill_file}"
+            assert skill_file.read_text(encoding="utf-8").strip(), (
+                f"Expected non-empty existing internal skill file at {skill_file}"
+            )
+
+    def test_skill_registry_does_not_register_seedance2(self):
+        """
+        hypogeum/skill_registry.py is the registry for internal skills under
+        hypogeum/skills/ only — a pinned third-party skill under
+        third_party/skills/ is a deliberately different, simpler pattern
+        (a direct path constant in the owning agent), not a registry entry.
+        The registry's own existing seedance_translation_skill entry
+        (an internal skill) is unaffected by this assertion.
+        """
+        registry_content = (_REPO_ROOT / "hypogeum" / "skill_registry.py").read_text(
+            encoding="utf-8"
+        )
+        assert "seedance2" not in registry_content.lower()
+        assert _SEEDANCE2_PINNED_SHA not in registry_content
+
+    def test_manifest_state_is_installed_not_wired_not_active(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "seedance2")
+        assert entry["state"] == "INSTALLED / NOT WIRED / NOT ACTIVE"
+
+    def test_no_new_stage_adapter_checkpoint_or_provider_module_exists(self):
+        assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "seedance2_stage.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "seedance2_adapter.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "seedance2_checkpoint.py").exists()
+
+    def test_no_seedance2_schema_exists(self):
+        from hypogeum.schemas import SCHEMA_NAMES
+        assert not any("seedance2" in name.lower() for name in SCHEMA_NAMES)
+
+
+class TestSeedance2Rollback:
+    def test_rollback_scope_is_isolated_to_pinned_directory(self):
+        """
+        Deleting third_party/skills/seedance2/<sha>/ and removing its
+        config/upstream_skills_manifest.json entry must be sufficient to
+        fully roll back this installation — no other file depends on the
+        pinned directory's contents while the skill is unwired.
+        """
+        assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "seedance2_stage.py").exists()

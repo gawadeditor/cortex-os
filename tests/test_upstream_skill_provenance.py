@@ -477,65 +477,73 @@ class TestSeedance2Installation:
         assert "Stage B" in entry["intended_owning_agent"]
 
 
-class TestSeedance2NotWired:
+class TestSeedance2WiredIntoVisualPackageDirector:
     """
-    Seedance2 is installed only — not attached to any agent. These tests
-    confirm zero runtime wiring exists yet, and that the existing internal
-    Seedance skill and its owning agent are completely untouched, mirroring
-    the same guard GPT-Image2's own installation task once had before its
-    later, separate attachment task.
+    Seedance2 is a skill attached directly to Visual Package Director Stage B's
+    own existing LLM invocation (SCENE_PROMPTS_PROMPT / run_agent()) — not a
+    separate agent, pipeline stage, adapter, or checkpoint layer. These tests
+    confirm the wiring surface area is exactly visual_package_director.py and
+    nothing else, mirroring TestHumanizerWiredIntoScriptEngine and
+    TestGPTImage2WiredIntoThumbnailPromptWriter above.
+
+    Checks specifically for the third_party/skills/seedance2 path or the
+    pinned Seedance2 commit SHA, never the generic word "third_party" —
+    visual_package_director.py now legitimately references third_party/
+    (for Seedance2), exactly as thumbnail_prompt_writer.py already does (for
+    GPT-Image2) and script_engine.py already does (for Humanizer). A generic
+    "third_party" substring check would false-positive across all three.
     """
 
-    def test_no_agent_references_pinned_upstream_skill(self):
+    def test_exactly_one_agent_references_pinned_upstream_skill(self):
         agents_dir = _REPO_ROOT / "hypogeum" / "agents"
         referencing = []
         for py_file in agents_dir.glob("*.py"):
             content = py_file.read_text(encoding="utf-8")
-            if "seedance2" in content or _SEEDANCE2_PINNED_SHA in content:
+            if "skills/seedance2" in content or _SEEDANCE2_PINNED_SHA in content:
                 referencing.append(py_file.name)
-        assert not referencing, (
-            f"No agent may reference the pinned Seedance2 skill yet: {referencing}"
+        assert referencing == ["visual_package_director.py"], (
+            f"Expected only visual_package_director.py to reference the pinned "
+            f"Seedance2 skill, got: {referencing}"
         )
 
-    def test_no_runtime_module_imports_seedance2_path(self):
+    def test_no_other_runtime_module_imports_seedance2_path(self):
         hypogeum_dir = _REPO_ROOT / "hypogeum"
         offenders = []
         for py_file in hypogeum_dir.rglob("*.py"):
+            if py_file.name == "visual_package_director.py":
+                continue
             content = py_file.read_text(encoding="utf-8")
-            if "seedance2" in content or _SEEDANCE2_PINNED_SHA in content:
+            if "skills/seedance2" in content or _SEEDANCE2_PINNED_SHA in content:
                 offenders.append(str(py_file.relative_to(_REPO_ROOT)))
         assert not offenders, (
-            f"No runtime module may reference the pinned Seedance2 path yet: {offenders}"
+            f"No runtime module besides visual_package_director.py may reference "
+            f"the pinned Seedance2 path: {offenders}"
         )
 
-    def test_visual_package_director_unchanged_by_this_task(self):
-        """
-        The intended future owning agent must not yet reference the pinned
-        skill in any way — this installation task is provenance-only.
-        """
+    def test_visual_package_director_composes_pinned_skill_path(self):
         content = (
             _REPO_ROOT / "hypogeum" / "agents" / "visual_package_director.py"
         ).read_text(encoding="utf-8")
-        assert "seedance2" not in content
-        assert _SEEDANCE2_PINNED_SHA not in content
+        assert _SEEDANCE2_PINNED_SHA in content
+        assert "compose_system_prompt" in content
 
     def test_existing_internal_seedance_translation_skill_unchanged(self):
         """
-        This installation task must not reconcile, merge, rewrite,
-        summarize, extract, or copy Seedance2 content into the existing
-        internal Seedance translation skill or its compact runtime variant.
+        This attachment task must not reconcile, merge, rewrite, summarize,
+        extract, or copy Seedance2 content into the existing internal
+        Seedance translation skill or its compact runtime variant.
 
         A literal-string check for the pinned SHA or "dexhunter/seedance2-skill"
         is not a valid signal here: the existing skill file's own evidence/
         citation table already references https://github.com/dexhunter/seedance2-skill
         as a pre-existing research source (evidence tag seed-comm-XX,
-        predating this installation task entirely) — that citation is
-        legitimate content this task must not disturb, not evidence of
-        reconciliation. The authoritative "unchanged" proof for this task
-        is `git diff` on both files (see the task's own required
-        verification command), which must produce no output; this test
-        only confirms the files still exist and are non-empty, since a
-        content diff without a pre-task snapshot cannot be asserted here.
+        predating this entire body of work) — that citation is legitimate
+        content this task must not disturb, not evidence of reconciliation.
+        The authoritative "unchanged" proof for this task is `git diff` on
+        both files (see the task's own required verification command),
+        which must produce no output; this test only confirms the files
+        still exist and are non-empty, since a content diff without a
+        pre-task snapshot cannot be asserted here.
         """
         for skill_file in (_SEEDANCE_TRANSLATION_SKILL_FILE, _SEEDANCE_TRANSLATION_SKILL_COMPACT_FILE):
             assert skill_file.exists(), f"Expected existing internal skill file at {skill_file}"
@@ -558,10 +566,18 @@ class TestSeedance2NotWired:
         assert "seedance2" not in registry_content.lower()
         assert _SEEDANCE2_PINNED_SHA not in registry_content
 
-    def test_manifest_state_is_installed_not_wired_not_active(self):
+    def test_manifest_state_is_installed_wired_active(self):
         data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
         entry = next(s for s in data["skills"] if s["name"] == "seedance2")
-        assert entry["state"] == "INSTALLED / NOT WIRED / NOT ACTIVE"
+        assert entry["state"] == "INSTALLED / WIRED / ACTIVE"
+
+    def test_manifest_records_wired_to_visual_package_director_stage_b(self):
+        data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
+        entry = next(s for s in data["skills"] if s["name"] == "seedance2")
+        assert "visual_package_director.py" in entry["wired_to"]
+        assert "Stage B" in entry["wired_to"]
+        assert "compose_system_prompt" in entry["wired_to"]
+        assert "run_agent" in entry["wired_to"]
 
     def test_no_new_stage_adapter_checkpoint_or_provider_module_exists(self):
         assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
@@ -575,12 +591,17 @@ class TestSeedance2NotWired:
 
 
 class TestSeedance2Rollback:
-    def test_rollback_scope_is_isolated_to_pinned_directory(self):
+    def test_rollback_scope_is_vpd_composition_bridge_and_manifest(self):
         """
-        Deleting third_party/skills/seedance2/<sha>/ and removing its
-        config/upstream_skills_manifest.json entry must be sufficient to
-        fully roll back this installation — no other file depends on the
-        pinned directory's contents while the skill is unwired.
+        Rollback requires reverting exactly three things: the
+        _SEEDANCE2_SKILL_PATH argument in visual_package_director.py's
+        compose_system_prompt() call (and its supporting constants), the
+        'SEEDANCE2 SKILL USAGE' bridge section in
+        hypogeum/prompts/vpd_scene_prompts.txt, and this manifest entry's
+        state; deleting the pinned directory entirely is optional beyond
+        that. No adapter, checkpoint, or stage directory exists for this to
+        depend on — Seedance2's only wiring surface is the single agent it
+        is attached to.
         """
         assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
         assert not (_REPO_ROOT / "hypogeum" / "agents" / "seedance2_stage.py").exists()

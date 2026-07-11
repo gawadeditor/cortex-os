@@ -46,6 +46,14 @@ Two-phase execution + Thumbnail Handoff Brief extraction:
     Claude writes primary_prompt + fallback_prompt for each scene. Batched at
     _SCENE_PROMPT_BATCH_SIZE scenes per call. Max tokens: 8,192 per batch.
     Checkpoints: vpd_prompts_batch_{i}_{episode_id}.json.
+    System prompt composes vpd_scene_prompts.txt (including a bridge section)
+    with cinematic_prompt_architecture.md, the internal Veo and Seedance
+    translation skills, and the pinned upstream Seedance2 skill
+    (third_party/skills/seedance2/<PINNED_SEEDANCE2_SHA>/SKILL.md, loaded
+    verbatim, never edited) — all via the existing compose_system_prompt()
+    call, inside this same single run_agent() invocation. No second call,
+    no new stage, no adapter. Provider routing and generation execution
+    remain entirely downstream, unaffected (provider_router.py, MUAPI).
 
   Phase 2 — MUAPI execution:
     For each entity with lock_state == "final":
@@ -210,12 +218,23 @@ _COMPILED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "comp
 _VEO_TRANSLATION_SKILL_FILE      = _COMPILED_SKILLS_DIR / "veo_translation_skill.compact.md"
 _SEEDANCE_TRANSLATION_SKILL_FILE = _COMPILED_SKILLS_DIR / "seedance_translation_skill.compact.md"
 
+# Pinned upstream Seedance2 skill (docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.3,
+# docs/architecture/VIDEO_PROMPT_SKILLS_OWNERSHIP_AUDIT.md,
+# config/upstream_skills_manifest.json) — loaded verbatim, never edited. Attached
+# alongside, never in place of, the existing internal Veo/Seedance translation skills.
+PINNED_SEEDANCE2_SHA = "e06c7c63a766d623004a2807881c30685ce517af"
+_THIRD_PARTY_ROOT = Path(__file__).resolve().parent.parent.parent / "third_party"
+_SEEDANCE2_SKILL_PATH = (
+    _THIRD_PARTY_ROOT / "skills" / "seedance2" / PINNED_SEEDANCE2_SHA / "SKILL.md"
+)
+
 # All skill paths used by VPD — used for diagnostic logging
 _VPD_ALL_SKILL_PATHS: list[Path] = [
     _CINEMATIC_SKILL_FILE,
     _VLE_SKILL_FILE,
     _VEO_TRANSLATION_SKILL_FILE,
     _SEEDANCE_TRANSLATION_SKILL_FILE,
+    _SEEDANCE2_SKILL_PATH,
 ]
 
 # Stage A4 — Scene Presentation Planner
@@ -248,6 +267,7 @@ def _load_scene_prompts_prompt() -> str:
         _CINEMATIC_SKILL_FILE,
         _VEO_TRANSLATION_SKILL_FILE,
         _SEEDANCE_TRANSLATION_SKILL_FILE,
+        _SEEDANCE2_SKILL_PATH,
     )
 
 def _load_presentation_planner_prompt() -> str:

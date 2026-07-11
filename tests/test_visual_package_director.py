@@ -1845,3 +1845,212 @@ class TestComposeSystemPrompt:
         assert "requests" not in src
         assert "urllib" not in src
         assert "call_claude" not in src
+
+
+# ---------------------------------------------------------------------------
+# TestSeedance2StageBAttachment
+# ---------------------------------------------------------------------------
+
+class TestSeedance2StageBAttachment:
+    """Verify the pinned upstream Seedance2 skill is attached directly to Stage B's
+    existing system prompt (compose_system_prompt), that the pre-existing internal
+    Veo/Seedance translation skills and cinematic skill are preserved and precede it,
+    that the bridge in vpd_scene_prompts.txt disables Seedance2's interactive/CLI
+    assumptions while preserving the existing JSON contract, and that no new
+    run_agent() call or external call surface was introduced.
+    """
+
+    # -- pinned installation -------------------------------------------------
+
+    def test_pinned_skill_path_exists(self):
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd._SEEDANCE2_SKILL_PATH.exists(), (
+            f"Pinned Seedance2 SKILL.md not found at {vpd._SEEDANCE2_SKILL_PATH}"
+        )
+
+    def test_pinned_sha_is_full_length(self):
+        import hypogeum.agents.visual_package_director as vpd
+        assert len(vpd.PINNED_SEEDANCE2_SHA) == 40, (
+            "PINNED_SEEDANCE2_SHA must be a full 40-character commit SHA, not a short SHA"
+        )
+        assert vpd.PINNED_SEEDANCE2_SHA == "e06c7c63a766d623004a2807881c30685ce517af"
+
+    def test_pinned_skill_path_uses_sha_constant(self):
+        """The path must be built from PINNED_SEEDANCE2_SHA, not a hardcoded duplicate."""
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd.PINNED_SEEDANCE2_SHA in str(vpd._SEEDANCE2_SKILL_PATH)
+
+    # -- verbatim composition --------------------------------------------------
+
+    def test_pinned_skill_verbatim_in_stage_b_prompt(self):
+        """The pinned SKILL.md content must appear byte-for-byte in SCENE_PROMPTS_PROMPT."""
+        import hypogeum.agents.visual_package_director as vpd
+        pinned_content = vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8")
+        assert pinned_content in vpd.SCENE_PROMPTS_PROMPT, (
+            "Pinned Seedance2 SKILL.md must be composed verbatim into SCENE_PROMPTS_PROMPT"
+        )
+
+    def test_stage_b_prompt_equals_compose_system_prompt_with_expected_order(self):
+        """SCENE_PROMPTS_PROMPT must equal compose_system_prompt() called with the
+        base prompt, cinematic skill, internal Veo skill, internal Seedance skill,
+        and the pinned Seedance2 skill — in exactly that order."""
+        import hypogeum.agents.visual_package_director as vpd
+        from hypogeum.prompt_loader import compose_system_prompt
+
+        expected = compose_system_prompt(
+            vpd._SCENE_PROMPTS_PROMPT_FILE,
+            vpd._CINEMATIC_SKILL_FILE,
+            vpd._VEO_TRANSLATION_SKILL_FILE,
+            vpd._SEEDANCE_TRANSLATION_SKILL_FILE,
+            vpd._SEEDANCE2_SKILL_PATH,
+        )
+        assert vpd.SCENE_PROMPTS_PROMPT == expected
+
+    def test_internal_veo_skill_preserved(self):
+        import hypogeum.agents.visual_package_director as vpd
+        veo_content = vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
+        assert veo_content in vpd.SCENE_PROMPTS_PROMPT
+
+    def test_internal_seedance_skill_preserved(self):
+        import hypogeum.agents.visual_package_director as vpd
+        seedance_content = vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
+        assert seedance_content in vpd.SCENE_PROMPTS_PROMPT
+
+    def test_pinned_seedance2_appears_after_both_internal_provider_skills(self):
+        import hypogeum.agents.visual_package_director as vpd
+        prompt = vpd.SCENE_PROMPTS_PROMPT
+        veo_pos = prompt.find(vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8"))
+        seedance_pos = prompt.find(vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8"))
+        seedance2_pos = prompt.find(vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8"))
+        assert veo_pos != -1 and seedance_pos != -1 and seedance2_pos != -1
+        assert veo_pos < seedance2_pos, "Pinned Seedance2 must appear after the internal Veo skill"
+        assert seedance_pos < seedance2_pos, "Pinned Seedance2 must appear after the internal Seedance skill"
+
+    # -- bridge section in vpd_scene_prompts.txt -------------------------------
+
+    def test_bridge_section_exists(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "SEEDANCE2 SKILL USAGE" in base_content
+
+    def test_bridge_disables_interactive_questions(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not ask the user what they want to create" in base_content
+        assert "Do not ask what source materials" in base_content
+
+    def test_bridge_disables_conversational_explanation_and_approval(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not explain your choices conversationally" in base_content
+        assert "Do not request approval" in base_content
+        assert "Do not create a multi-turn workflow" in base_content
+
+    def test_bridge_disables_markdown_and_standalone_output(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not emit markdown" in base_content
+        assert "Do not emit Seedance2's own standalone output" in base_content
+
+    def test_bridge_disables_cli_api_sdk_provider_and_file_writing(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Do not invoke any CLI, API, SDK, provider, or model" in base_content
+        assert "Do not perform any file-writing operation" in base_content
+
+    def test_bridge_preserves_existing_json_contract(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Write only primary_prompt and fallback_prompt" in base_content
+        assert "Preserve scene_id and input scene order exactly" in base_content
+        assert "Preserve presentation_method" in base_content
+        assert "provider-tier routing fields unchanged" in base_content
+
+    def test_bridge_limits_seedance2_to_prompt_writing_guidance(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "Use Seedance2 only as prompt-writing guidance" in base_content
+
+    def test_bridge_states_existing_vpd_requirements_take_precedence(self):
+        import hypogeum.agents.visual_package_director as vpd
+        base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        assert "takes precedence over anything Seedance2 suggests" in base_content
+        assert "does not generate video and does not control provider routing" in base_content
+
+    # -- call-site integrity (AST-based) ---------------------------------------
+
+    def test_stage_b_has_exactly_one_run_agent_call(self):
+        """Within run_visual_package_director (the function containing the Stage B
+        batch loop), there must be exactly one run_agent() call whose system_prompt
+        argument is SCENE_PROMPTS_PROMPT. Uses AST, not string counting, to avoid
+        matching comments/docstrings that mention run_agent()."""
+        import ast
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+
+        src = inspect.getsource(vpd.run_visual_package_director)
+        tree = ast.parse(src)
+
+        matches = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "run_agent":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "system_prompt" and isinstance(kw.value, ast.Name):
+                    if kw.value.id == "SCENE_PROMPTS_PROMPT":
+                        matches.append(node)
+
+        assert len(matches) == 1, (
+            f"Expected exactly one Stage B run_agent() call using SCENE_PROMPTS_PROMPT "
+            f"inside run_visual_package_director, found {len(matches)}"
+        )
+
+    def test_no_new_run_agent_call_sites_added_to_module(self):
+        """Total run_agent() call sites across the module must match the pre-attachment
+        baseline (6): Stage A1, Stage A2, Presentation Planner, Stage B, Visual Intent
+        QA batch, and the QA-rejection retry (which reuses SCENE_PROMPTS_PROMPT but is
+        not a new call added by this task). Attaching the Seedance2 skill must add zero
+        new LLM invocations."""
+        import ast
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+
+        src = inspect.getsource(vpd)
+        tree = ast.parse(src)
+
+        call_count = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "run_agent":
+                call_count += 1
+
+        assert call_count == 6, (
+            f"Expected 6 total run_agent() call sites in visual_package_director.py "
+            f"(unchanged by Seedance2 attachment), found {call_count}"
+        )
+
+    def test_no_new_external_call_surface_in_vpd_module(self):
+        """Attaching a skill must not introduce any new direct provider/SDK/HTTP call
+        surface into visual_package_director.py."""
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+        src = inspect.getsource(vpd)
+        assert "OpenAI(" not in src
+        assert "requests." not in src
+        assert "httpx." not in src
+        assert "subprocess." not in src
+
+    def test_seedance2_content_not_reconciled_into_internal_skills(self):
+        """The internal seedance_translation_skill compact file must not contain the
+        pinned Seedance2 SKILL.md content — attachment is composition, not merging."""
+        import hypogeum.agents.visual_package_director as vpd
+        pinned_content = vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8")
+        internal_content = vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
+        assert pinned_content not in internal_content

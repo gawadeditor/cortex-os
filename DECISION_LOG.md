@@ -47,3 +47,11 @@ Model evaluation framework becomes part of the factory.
 
 Reason:
 The system must continuously discover and upgrade the best models automatically.
+
+-------------------------
+
+Decision:
+Humanizer is attached as a Script Engine skill, not a separate pipeline stage.
+
+Reason:
+Skills extend the owning agent's existing single LLM call instead of becoming a new stage, adapter, or checkpoint layer — this is now the standard for all future skills (GPT Image, Seedance, Veo Prompt Director).

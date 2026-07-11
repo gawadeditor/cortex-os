@@ -44,6 +44,7 @@ Logging events emitted:
 
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -610,11 +611,17 @@ def run_pipeline(
             raise PipelineCancelledError(episode_id=episode_id, stage_after="script_engine")
 
         # -----------------------------------------------------------------------
-        # 5b. Humanization Stage — SHADOW mode only (hardcoded). Isolated
-        # capability: produces humanized_script_package alongside
-        # script_package without mutating or replacing it. Runs the pinned
-        # upstream Humanizer LLM pass for real, but no downstream stage
-        # consumes this package yet — see _run_humanization_stage() below.
+        # 5b. Humanization Stage — SHADOW mode (hardcoded; mode name unchanged
+        # from the prior task — the schema/implementation don't yet support
+        # ACTIVE, per docs/architecture/HUMANIZER_SHADOW_RUNTIME_AUDIT.md).
+        # Produces humanized_script_package alongside script_package without
+        # mutating or replacing either. Runs the pinned upstream Humanizer
+        # LLM pass for real. Its VALIDATED output is now production-consumed:
+        # immediately below, effective_script_package merges every accepted
+        # beat (transformation_status not "reverted"/"failed") into a
+        # schema-valid script_package shape, which Finance authorization,
+        # VPD, Audio, and Assembly receive instead of the raw script_package.
+        # Reverted/failed beats keep their original narration in the merge.
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="humanization_stage")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
@@ -636,6 +643,16 @@ def run_pipeline(
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="humanization_stage")
 
+        # effective_script_package: the validated Humanizer-applied package,
+        # or a content-identical copy of the original when Humanization
+        # could not safely provide one (full fallback). script_package
+        # itself is never reassigned — it remains the original, unmutated
+        # Script Engine output, carried on PipelineResult for provenance,
+        # audit, comparison, and rollback.
+        effective_script_package = _build_effective_script_package(
+            script_package, humanized_script_package,
+        )
+
         # -----------------------------------------------------------------------
         # 6. Finance Agent — budget authorization gate (pre-generation spend)
         # -----------------------------------------------------------------------
@@ -646,7 +663,7 @@ def run_pipeline(
             db_path=db_path,
         )
         finance_authorization = _run_budget_authorization(
-            script_package=script_package,
+            script_package=effective_script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
@@ -683,7 +700,7 @@ def run_pipeline(
             db_path=db_path,
         )
         visual_package = _run_visual_package_director(
-            script_package=script_package,
+            script_package=effective_script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
@@ -733,7 +750,7 @@ def run_pipeline(
             db_path=db_path,
         )
         narration_package = _run_audio_agent(
-            script_package=script_package,
+            script_package=effective_script_package,
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
@@ -761,7 +778,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
-            script_package=script_package,
+            script_package=effective_script_package,
             source_registry=research_package.get("source_registry", []),
             topic_brief=topic_brief,
         )
@@ -1512,6 +1529,74 @@ def _run_humanization_stage(
     save_humanization_checkpoint(assets_root=assets_root, episode_id=episode_id, package=result)
 
     return result
+
+
+def _build_effective_script_package(
+    script_package: dict,
+    humanized_script_package: Optional[dict],
+) -> dict:
+    """
+    Merge validated Humanizer narration into a schema-valid script_package
+    shape — the package Finance authorization, Visual Package Director,
+    Audio Agent, and Assembly Agent now receive instead of the raw,
+    pre-Humanization script_package.
+
+    Never mutates script_package — always returns a deep copy. Only
+    sections[].narration_beats[].text and shorts_scripts[].narration_beats[].text
+    are ever overwritten, and only for beats whose humanized_script_package
+    beat record is accepted: transformation_status is anything other than
+    "reverted" or "failed" (the only two statuses that mean the validated
+    result was rejected and the original was already retained). Every other
+    field — beat_id, section structure, timing data, visual directions,
+    shorts structure, episode_metadata — is untouched by construction,
+    since nothing but a matched beat's .text leaf is ever written.
+
+    If every beat is reverted/failed (a full-stage fallback), or
+    humanized_script_package is absent, the result is content-identical to
+    script_package — the safe, original-narration default.
+
+    Args:
+        script_package:            The original, Script-Engine-produced
+                                    package. Never mutated.
+        humanized_script_package:  The Humanization Stage's output, or
+                                    None (defensive — the pipeline always
+                                    produces one today).
+
+    Returns:
+        A new dict, schema-shape-compatible with script_package.
+    """
+    effective = copy.deepcopy(script_package)
+
+    if not humanized_script_package:
+        return effective
+
+    accepted_text_by_beat_id: dict = {}
+    for beat in humanized_script_package.get("beats", []) or []:
+        if not isinstance(beat, dict):
+            continue
+        beat_id = beat.get("beat_id")
+        if not beat_id or beat.get("transformation_status") in ("reverted", "failed"):
+            continue
+        accepted_text_by_beat_id[beat_id] = beat.get("humanized_narration")
+
+    def _apply_accepted_text(narration_beats) -> None:
+        if not isinstance(narration_beats, list):
+            return
+        for nb in narration_beats:
+            if not isinstance(nb, dict):
+                continue
+            accepted_text = accepted_text_by_beat_id.get(nb.get("beat_id"))
+            if isinstance(accepted_text, str) and accepted_text.strip():
+                nb["text"] = accepted_text
+
+    for section in effective.get("sections", []) or []:
+        if isinstance(section, dict):
+            _apply_accepted_text(section.get("narration_beats", []))
+    for short in effective.get("shorts_scripts", []) or []:
+        if isinstance(short, dict):
+            _apply_accepted_text(short.get("narration_beats", []))
+
+    return effective
 
 
 def _run_visual_package_director(

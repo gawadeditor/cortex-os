@@ -37,9 +37,11 @@ from hypogeum.pipeline import (
     PipelineError,
     PipelineRejectedError,
     PipelineResult,
+    _build_effective_script_package,
     _run_assembly_agent,
     _run_audio_agent,
     _run_executive_producer,
+    _run_humanization_stage,
     _run_narrative_architect,
     _run_publishing_agent,
     _run_research_director,
@@ -831,10 +833,17 @@ class TestAgentInputHandoff:
         assert received is MINIMAL_RESEARCH_PACKAGE
 
     def test_audio_receives_script_package(self):
+        """
+        Audio receives effective_script_package — a merge of the
+        Script-Engine-produced script_package with any accepted Humanizer
+        narration — not the original object by identity. With the default
+        (empty-beats) humanized_script_package fixture, the merge changes
+        nothing, so content must still match exactly.
+        """
         _, mocks = run_full()
         args, kwargs = mocks["audio"].call_args
         received = kwargs.get("script_package") or (args[0] if args else None)
-        assert received is MINIMAL_SCRIPT_PACKAGE
+        assert received == MINIMAL_SCRIPT_PACKAGE
 
     def test_assembly_receives_visual_narration_thumbnail(self):
         _, mocks = run_full()
@@ -1295,11 +1304,17 @@ class TestEndToEndWiring:
         assert mocks["audio"].call_count == 1
 
     def test_vpd_called_with_script_package(self):
-        """VPD must receive the script_package produced by the Script Engine."""
+        """
+        VPD must receive effective_script_package, content-derived from the
+        script_package the Script Engine produced (merged with any accepted
+        Humanizer narration — none, with the default empty-beats fixture,
+        so content matches exactly; the object itself is a distinct merge
+        result, not the original by identity).
+        """
         _, mocks = run_full(script_package=MINIMAL_SCRIPT_PACKAGE)
         args, kwargs = mocks["vpd"].call_args
         received = kwargs.get("script_package") or (args[0] if args else None)
-        assert received is MINIMAL_SCRIPT_PACKAGE
+        assert received == MINIMAL_SCRIPT_PACKAGE
 
     def test_td_called_with_visual_package(self):
         """TD pipeline stub must receive the visual_package from VPD."""
@@ -1309,11 +1324,16 @@ class TestEndToEndWiring:
         assert received is MINIMAL_VISUAL_PACKAGE
 
     def test_audio_called_with_script_package(self):
-        """Audio Agent must receive the script_package from the Script Engine."""
+        """
+        Audio Agent must receive effective_script_package, content-derived
+        from the script_package the Script Engine produced (see
+        test_vpd_called_with_script_package's docstring for why this is a
+        content check, not an identity check).
+        """
         _, mocks = run_full(script_package=MINIMAL_SCRIPT_PACKAGE)
         args, kwargs = mocks["audio"].call_args
         received = kwargs.get("script_package") or (args[0] if args else None)
-        assert received is MINIMAL_SCRIPT_PACKAGE
+        assert received == MINIMAL_SCRIPT_PACKAGE
 
     def test_assembly_receives_all_three_packages(self):
         """Assembly must receive visual_package, narration_package, and thumbnail_package."""
@@ -1378,26 +1398,57 @@ class TestEndToEndWiring:
 # ---------------------------------------------------------------------------
 
 class TestHumanizationDownstreamIsolation:
-    def test_no_downstream_consumer_receives_humanized_script_package(self):
-        """Finance/VPD/Audio/Assembly must never receive the sentinel
-        humanized_script_package object — only the original script_package."""
-        sentinel_humanized = {"episode_id": "ep_001", "sentinel": "humanized-not-for-consumption"}
+    def test_no_downstream_consumer_receives_humanized_script_package_object(self):
+        """
+        Finance/VPD/Audio/Assembly must never receive the humanized_script_package
+        object itself — they receive effective_script_package, a merged,
+        schema-shape-compatible script_package built from it, never the raw
+        humanized_script_package (which has a different shape entirely —
+        "beats"/"humanization"/"provenance" keys, not "sections"/"shorts_scripts").
+        """
+        sentinel_humanized = {
+            "episode_id": "ep_001",
+            "source_script_package": MINIMAL_SCRIPT_PACKAGE,
+            "humanization": {"mode": "SHADOW", "status": "not_run"},
+            "beats": [],
+            "provenance": {},
+        }
         result, mocks = run_full(humanized_script_package=sentinel_humanized)
 
         for name in ("fa", "vpd", "audio", "asm"):
             args, kwargs = mocks[name].call_args
             all_values = list(args) + list(kwargs.values())
             assert sentinel_humanized not in all_values, (
-                f"{name} must never receive the humanized_script_package sentinel"
+                f"{name} must never receive the raw humanized_script_package object"
             )
+            received = kwargs.get("script_package")
+            assert received is not None
+            assert "beats" not in received, f"{name} received a humanized_script_package-shaped dict"
+            assert "sections" in received, f"{name} must receive a script_package-shaped dict"
 
-        # script_package (by identity) must still be what every consumer got.
-        assert mocks["vpd"].call_args[1].get("script_package") is MINIMAL_SCRIPT_PACKAGE
-        assert mocks["audio"].call_args[1].get("script_package") is MINIMAL_SCRIPT_PACKAGE
-        assert mocks["fa"].call_args[1].get("script_package") is MINIMAL_SCRIPT_PACKAGE
+    def test_downstream_consumers_receive_effective_not_original_object(self):
+        """
+        With no accepted beats (empty "beats" list), effective_script_package
+        is content-identical to the original script_package but is a
+        distinct, freshly-built object — VPD/Audio/Finance must receive
+        that merged object, not the original MINIMAL_SCRIPT_PACKAGE by
+        identity, proving the pipeline now routes through the merge step
+        rather than accidentally still forwarding the raw original.
+        """
+        result, mocks = run_full()
+        for name in ("fa", "vpd", "audio", "asm"):
+            received = mocks[name].call_args[1].get("script_package")
+            assert received is not MINIMAL_SCRIPT_PACKAGE
+            assert received == MINIMAL_SCRIPT_PACKAGE
 
     def test_humanized_script_package_only_reachable_via_pipeline_result(self):
-        sentinel_humanized = {"episode_id": "ep_001", "sentinel": "humanized-not-for-consumption"}
+        sentinel_humanized = {
+            "episode_id": "ep_001",
+            "source_script_package": MINIMAL_SCRIPT_PACKAGE,
+            "humanization": {"mode": "SHADOW", "status": "not_run"},
+            "beats": [],
+            "provenance": {},
+        }
         result, mocks = run_full(humanized_script_package=sentinel_humanized)
         assert result.humanized_script_package is sentinel_humanized
         assert result.script_package is MINIMAL_SCRIPT_PACKAGE
@@ -1421,6 +1472,276 @@ class TestHumanizationDownstreamIsolation:
         assert "hypogeum.agents.humanization_stage" not in imported_modules
         assert "hypogeum.agents.humanizer_llm_adapter" not in imported_modules
         assert "hypogeum.humanization_checkpoint" not in imported_modules
+
+
+# ---------------------------------------------------------------------------
+# TestBuildEffectiveScriptPackage
+#
+# Direct unit tests of hypogeum.pipeline._build_effective_script_package() —
+# the pure merge function that produces effective_script_package. No
+# pipeline run, no mocks needed beyond fixture dicts.
+# ---------------------------------------------------------------------------
+
+def _mixed_humanized_script_package():
+    """
+    A humanized_script_package fixture with one accepted, changed beat
+    ("b_001"), one reverted beat ("b_s01"), one accepted-but-unchanged beat
+    ("b_s02"), and "b_s03" entirely absent from beats (simulating a beat
+    the stage could not extract) — exercising every merge branch.
+    """
+    return {
+        "episode_id": "ep_001",
+        "source_script_package": MINIMAL_SCRIPT_PACKAGE,
+        "humanization": {"mode": "SHADOW", "status": "transformed"},
+        "beats": [
+            {
+                "beat_id": "b_001",
+                "original_narration": "Narration.",
+                "humanized_narration": "A rewritten narration line.",
+                "transformation_status": "llm",
+                "llm_pass_applied": True,
+            },
+            {
+                "beat_id": "b_s01",
+                "original_narration": "Short narration.",
+                "humanized_narration": "Short narration.",
+                "transformation_status": "reverted",
+                "llm_pass_applied": False,
+            },
+            {
+                "beat_id": "b_s02",
+                "original_narration": "Short narration.",
+                "humanized_narration": "Short narration.",
+                "transformation_status": "unchanged",
+                "llm_pass_applied": True,
+            },
+        ],
+        "provenance": {},
+    }
+
+
+class TestBuildEffectiveScriptPackage:
+    def test_accepted_beat_text_is_replaced(self):
+        effective = _build_effective_script_package(
+            MINIMAL_SCRIPT_PACKAGE, _mixed_humanized_script_package(),
+        )
+        beat = effective["sections"][0]["narration_beats"][0]
+        assert beat["beat_id"] == "b_001"
+        assert beat["text"] == "A rewritten narration line."
+
+    def test_reverted_beat_keeps_original_text(self):
+        effective = _build_effective_script_package(
+            MINIMAL_SCRIPT_PACKAGE, _mixed_humanized_script_package(),
+        )
+        beat = next(
+            nb for nb in effective["shorts_scripts"][0]["narration_beats"]
+            if nb["beat_id"] == "b_s01"
+        )
+        assert beat["text"] == "Short narration."
+
+    def test_beat_absent_from_humanized_output_keeps_original_text(self):
+        """b_s03 has no corresponding entry in humanized "beats" at all —
+        must keep its original text, not error or drop the field."""
+        effective = _build_effective_script_package(
+            MINIMAL_SCRIPT_PACKAGE, _mixed_humanized_script_package(),
+        )
+        beat = next(
+            nb for nb in effective["shorts_scripts"][2]["narration_beats"]
+            if nb["beat_id"] == "b_s03"
+        )
+        assert beat["text"] == "Short narration."
+
+    def test_mixed_accepted_and_reverted_produces_correct_merge(self):
+        effective = _build_effective_script_package(
+            MINIMAL_SCRIPT_PACKAGE, _mixed_humanized_script_package(),
+        )
+        main_texts = {nb["beat_id"]: nb["text"] for nb in effective["sections"][0]["narration_beats"]}
+        short_texts = {
+            nb["beat_id"]: nb["text"]
+            for short in effective["shorts_scripts"]
+            for nb in short["narration_beats"]
+        }
+        assert main_texts == {"b_001": "A rewritten narration line."}
+        assert short_texts == {
+            "b_s01": "Short narration.",
+            "b_s02": "Short narration.",
+            "b_s03": "Short narration.",
+        }
+
+    def test_original_input_not_mutated(self):
+        import copy as _copy
+        original_snapshot = _copy.deepcopy(MINIMAL_SCRIPT_PACKAGE)
+        _build_effective_script_package(MINIMAL_SCRIPT_PACKAGE, _mixed_humanized_script_package())
+        assert MINIMAL_SCRIPT_PACKAGE == original_snapshot
+
+    def test_non_narration_fields_logically_identical(self):
+        effective = _build_effective_script_package(
+            MINIMAL_SCRIPT_PACKAGE, _mixed_humanized_script_package(),
+        )
+        assert effective["episode_metadata"] == MINIMAL_SCRIPT_PACKAGE["episode_metadata"]
+        assert effective["traceability_manifest"] == MINIMAL_SCRIPT_PACKAGE["traceability_manifest"]
+        assert effective["script_integrity"] == MINIMAL_SCRIPT_PACKAGE["script_integrity"]
+        assert effective["sections"][0]["section_id"] == "s_001"
+        assert effective["sections"][0]["title"] == "Introduction"
+        for i, short in enumerate(effective["shorts_scripts"]):
+            original_short = MINIMAL_SCRIPT_PACKAGE["shorts_scripts"][i]
+            assert short["short_id"] == original_short["short_id"]
+            assert short["text_overlays"] == original_short["text_overlays"]
+        # Beat IDs preserved in order for every section/short.
+        assert [nb["beat_id"] for nb in effective["sections"][0]["narration_beats"]] == \
+               [nb["beat_id"] for nb in MINIMAL_SCRIPT_PACKAGE["sections"][0]["narration_beats"]]
+
+    def test_result_is_schema_valid_script_package(self):
+        from hypogeum.schemas import validate
+        effective = _build_effective_script_package(
+            MINIMAL_SCRIPT_PACKAGE, _mixed_humanized_script_package(),
+        )
+        validate("script_package", effective)
+
+    def test_full_fallback_uses_original_script_package(self):
+        """Every beat reverted — a full-stage fallback. The merged result
+        must be content-identical to the original script_package."""
+        fully_reverted = {
+            "episode_id": "ep_001",
+            "source_script_package": MINIMAL_SCRIPT_PACKAGE,
+            "humanization": {"mode": "SHADOW", "status": "fallback"},
+            "beats": [
+                {"beat_id": "b_001", "original_narration": "Narration.",
+                 "humanized_narration": "Narration.", "transformation_status": "reverted",
+                 "llm_pass_applied": False},
+                {"beat_id": "b_s01", "original_narration": "Short narration.",
+                 "humanized_narration": "Short narration.", "transformation_status": "reverted",
+                 "llm_pass_applied": False},
+                {"beat_id": "b_s02", "original_narration": "Short narration.",
+                 "humanized_narration": "Short narration.", "transformation_status": "reverted",
+                 "llm_pass_applied": False},
+                {"beat_id": "b_s03", "original_narration": "Short narration.",
+                 "humanized_narration": "Short narration.", "transformation_status": "reverted",
+                 "llm_pass_applied": False},
+            ],
+            "provenance": {},
+        }
+        effective = _build_effective_script_package(MINIMAL_SCRIPT_PACKAGE, fully_reverted)
+        assert effective == MINIMAL_SCRIPT_PACKAGE
+        assert effective is not MINIMAL_SCRIPT_PACKAGE
+
+    def test_humanized_script_package_none_returns_original_copy(self):
+        effective = _build_effective_script_package(MINIMAL_SCRIPT_PACKAGE, None)
+        assert effective == MINIMAL_SCRIPT_PACKAGE
+        assert effective is not MINIMAL_SCRIPT_PACKAGE
+
+    def test_empty_or_missing_accepted_text_does_not_blank_out_original(self):
+        """Defensive guard: an accepted beat record with an empty/missing
+        humanized_narration must never blank out the original text."""
+        pkg = {
+            "episode_id": "ep_001",
+            "source_script_package": MINIMAL_SCRIPT_PACKAGE,
+            "humanization": {"mode": "SHADOW", "status": "transformed"},
+            "beats": [
+                {"beat_id": "b_001", "original_narration": "Narration.",
+                 "humanized_narration": "", "transformation_status": "llm",
+                 "llm_pass_applied": True},
+            ],
+            "provenance": {},
+        }
+        effective = _build_effective_script_package(MINIMAL_SCRIPT_PACKAGE, pkg)
+        assert effective["sections"][0]["narration_beats"][0]["text"] == "Narration."
+
+
+# ---------------------------------------------------------------------------
+# TestEffectiveScriptPackageWiring
+#
+# Pipeline-integration tests: confirm effective_script_package (not
+# humanized_script_package, not the raw original when narration was
+# accepted) is what Finance/VPD/Audio/Assembly actually receive.
+# ---------------------------------------------------------------------------
+
+class TestEffectiveScriptPackageWiring:
+    def test_accepted_humanized_narration_reaches_audio(self):
+        _, mocks = run_full(humanized_script_package=_mixed_humanized_script_package())
+        received = mocks["audio"].call_args[1]["script_package"]
+        assert received["sections"][0]["narration_beats"][0]["text"] == "A rewritten narration line."
+
+    def test_accepted_humanized_narration_reaches_vpd(self):
+        _, mocks = run_full(humanized_script_package=_mixed_humanized_script_package())
+        received = mocks["vpd"].call_args[1]["script_package"]
+        assert received["sections"][0]["narration_beats"][0]["text"] == "A rewritten narration line."
+
+    def test_accepted_humanized_narration_reaches_finance_and_assembly(self):
+        _, mocks = run_full(humanized_script_package=_mixed_humanized_script_package())
+        for name in ("fa", "asm"):
+            received = mocks[name].call_args[1]["script_package"]
+            assert received["sections"][0]["narration_beats"][0]["text"] == "A rewritten narration line."
+
+    def test_reverted_beat_narration_stays_original_downstream(self):
+        _, mocks = run_full(humanized_script_package=_mixed_humanized_script_package())
+        for name in ("fa", "vpd", "audio", "asm"):
+            received = mocks[name].call_args[1]["script_package"]
+            beat = next(
+                nb for nb in received["shorts_scripts"][0]["narration_beats"]
+                if nb["beat_id"] == "b_s01"
+            )
+            assert beat["text"] == "Short narration."
+
+    def test_all_downstream_consumers_receive_schema_valid_script_package(self):
+        from hypogeum.schemas import validate
+        _, mocks = run_full(humanized_script_package=_mixed_humanized_script_package())
+        for name in ("fa", "vpd", "audio", "asm"):
+            validate("script_package", mocks[name].call_args[1]["script_package"])
+
+    def test_no_additional_llm_calls_from_merge(self):
+        """_build_effective_script_package() is pure Python — it must not
+        reference any LLM-call surface."""
+        import inspect
+        source = inspect.getsource(_build_effective_script_package)
+        for forbidden in ("call_humanizer_llm", "call_claude", "run_agent"):
+            assert forbidden not in source
+
+    def test_humanization_stage_invoked_exactly_once_per_run(self):
+        """The merge happens after a single Humanization Stage invocation —
+        no extra Humanizer call is added by this feature."""
+        _, mocks = run_full(humanized_script_package=_mixed_humanized_script_package())
+        assert mocks["hs"].call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# TestHumanizationCheckpointReusePreventsRepeatedCalls
+#
+# Pipeline-level (not just checkpoint-module-level) proof that a second
+# _run_humanization_stage() invocation for the same episode/input reuses
+# the on-disk checkpoint and makes zero further Humanizer LLM calls.
+# ---------------------------------------------------------------------------
+
+class TestHumanizationCheckpointReusePreventsRepeatedCalls:
+    def test_second_invocation_reuses_checkpoint_zero_new_calls(self, tmp_path):
+        from hypogeum.agents.humanizer_llm_adapter import HumanizerLLMResult
+
+        cfg = make_config()
+        log = MagicMock()
+        llm_result = HumanizerLLMResult(
+            humanized_text="Rewritten.", model_id="anthropic/claude-sonnet-4.6",
+            provider="openrouter", input_tokens=10, output_tokens=5, total_tokens=15,
+            latency_ms=100, via_fallback=False, estimated_cost_usd=0.001,
+        )
+        with patch(
+            "hypogeum.agents.humanization_stage.call_humanizer_llm",
+            return_value=llm_result,
+        ) as mock_llm:
+            first = _run_humanization_stage(
+                episode_id="ep_ck", script_package=MINIMAL_SCRIPT_PACKAGE,
+                pipeline_run_id="run_1", output_dir=tmp_path, config=cfg, log=log,
+            )
+            calls_after_first = mock_llm.call_count
+            assert calls_after_first > 0
+
+            second = _run_humanization_stage(
+                episode_id="ep_ck", script_package=MINIMAL_SCRIPT_PACKAGE,
+                pipeline_run_id="run_2", output_dir=tmp_path, config=cfg, log=log,
+            )
+            assert mock_llm.call_count == calls_after_first, (
+                "second invocation must reuse the checkpoint and make zero new LLM calls"
+            )
+        assert first["humanization"]["input_hash"] == second["humanization"]["input_hash"]
 
 
 # ---------------------------------------------------------------------------

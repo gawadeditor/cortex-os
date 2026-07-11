@@ -3,7 +3,9 @@ hypogeum/agents/humanization_stage.py — Isolated Humanization Stage (0.1.0)
 
 Wired into hypogeum/pipeline.py (OFF and SHADOW modes only, as of the
 current pipeline wiring — see hypogeum/pipeline.py's own Humanization Stage
-block). This module itself remains otherwise isolated:
+block). SHADOW mode's validated output is production-consumed via
+pipeline.py's effective_script_package merge (see the SHADOW entry below).
+This module itself remains otherwise isolated:
 
   - No checkpoint, no database access, no file writes of any kind — the
     checkpoint layer (hypogeum/humanization_checkpoint.py) is a separate
@@ -29,11 +31,21 @@ Supported modes (docs/architecture/HUMANIZATION_STAGE_DESIGN.md §13):
   SHADOW              — deterministic pass, then the pinned upstream
                          Humanizer LLM pass (via humanizer_llm_adapter),
                          full preservation validation, checkpointed and
-                         logged — but never consumed by any downstream
-                         pipeline stage (Finance/VPD/Audio/Assembly all
-                         continue reading the original script_package
-                         directly; wiring that consumption is a separate,
-                         future, explicitly authorized task)
+                         logged. As of the pipeline's effective_script_package
+                         merge (see hypogeum/pipeline.py::_build_effective_script_package()),
+                         every beat this stage marks as accepted (any
+                         transformation_status other than "reverted"/"failed")
+                         IS production-consumed — despite the "SHADOW" mode
+                         name, its validated output now reaches Finance/
+                         VPD/Audio/Assembly through the merged package, not
+                         the humanized_script_package object this function
+                         returns directly. This module itself is unchanged:
+                         it still only ever returns humanized_script_package,
+                         and still never mutates or replaces script_package
+                         itself — the merge happens one layer up, in
+                         pipeline.py, after this function returns. Reverted
+                         and failed beats are excluded from that merge and
+                         keep their original narration, exactly as before.
 
 LLM_CANARY / ACTIVE / ROLLBACK are valid humanized_script_package schema
 values but are not implemented by this stage yet — requesting them raises

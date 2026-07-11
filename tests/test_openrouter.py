@@ -53,6 +53,8 @@ from hypogeum.openrouter import (
     FallbackFailed,
     HardFailure,
     TruncatedResponse,
+    _apply_system_prompt_caching,
+    _cache_control_supported,
     _estimate_cost,
     _retry_delay,
     _translate_slug_to_anthropic_id,
@@ -68,6 +70,10 @@ from hypogeum.openrouter import (
 
 SONNET = "anthropic/claude-sonnet-4.6"
 OPUS   = "anthropic/claude-opus-4.6"
+# Real default model_slug used by config.TD_PLANNING_MODEL (Thumbnail Prompt
+# Writer) — a live, non-Anthropic example already present in this codebase,
+# not a hypothetical, for verifying unsupported-model behavior.
+NON_ANTHROPIC_MODEL = "openai/gpt-5.5-pro"
 
 MINIMAL_MESSAGES = [
     {"role": "system", "content": "You are a helpful pipeline agent."},
@@ -648,12 +654,23 @@ class TestAnthropicFallback:
         assert body["model"] == "claude-opus-4-6"
 
     def test_fallback_extracts_system_message(self):
-        """System message must be hoisted to top-level 'system' field."""
+        """
+        System message must be hoisted to top-level 'system' field. For an
+        Anthropic model slug (SONNET), the caching transform converts it to a
+        single-block cache_control array — the underlying text is unchanged,
+        only the envelope shape changes (see TestSystemPromptCaching).
+        """
         cfg = make_config()
         with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         body = mock_post.call_args_list[1].kwargs["json"]
-        assert body["system"] == "You are a helpful pipeline agent."
+        assert body["system"] == [
+            {
+                "type": "text",
+                "text": "You are a helpful pipeline agent.",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
 
     def test_fallback_user_messages_only_in_messages(self):
         """After system extraction, messages[] should contain only non-system turns."""
@@ -988,3 +1005,225 @@ class TestSlugTranslation:
         # Multi-slash slug — strip only up to first slash
         result = _translate_slug_to_anthropic_id("org/model/variant")
         assert result == "model/variant".replace(".", "-")
+
+
+# ---------------------------------------------------------------------------
+# TestSystemPromptCaching
+#
+# Verifies the shared prompt-caching implementation added to openrouter.py:
+# Anthropic ephemeral cache_control applied to the system message's content,
+# for Anthropic-slug models only, applied centrally (not per-agent), with no
+# change to system/user prompt text, headers, other body fields, or call count.
+# ---------------------------------------------------------------------------
+
+class TestSystemPromptCaching:
+
+    # -- unit tests on the pure helper -----------------------------------
+
+    def test_cache_control_supported_for_anthropic_slug(self):
+        assert _cache_control_supported(SONNET) is True
+        assert _cache_control_supported(OPUS) is True
+
+    def test_cache_control_not_supported_for_non_anthropic_slug(self):
+        assert _cache_control_supported(NON_ANTHROPIC_MODEL) is False
+
+    def test_apply_caching_converts_system_content_to_block_array(self):
+        result = _apply_system_prompt_caching(MINIMAL_MESSAGES, SONNET)
+        system_msg = next(m for m in result if m["role"] == "system")
+        assert system_msg["content"] == [
+            {
+                "type": "text",
+                "text": "You are a helpful pipeline agent.",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+    def test_apply_caching_leaves_user_message_untouched(self):
+        result = _apply_system_prompt_caching(MINIMAL_MESSAGES, SONNET)
+        user_msg = next(m for m in result if m["role"] == "user")
+        assert user_msg == {"role": "user", "content": "Respond with: OK"}
+
+    def test_apply_caching_unsupported_model_returns_unchanged_shape(self):
+        result = _apply_system_prompt_caching(MINIMAL_MESSAGES, NON_ANTHROPIC_MODEL)
+        assert result == MINIMAL_MESSAGES
+
+    def test_apply_caching_does_not_mutate_input_list(self):
+        """The original messages list/dicts must never be mutated in place —
+        agent.py callers and shared test fixtures like MINIMAL_MESSAGES must
+        be unaffected by a caching call for one model_slug."""
+        original = [dict(m) for m in MINIMAL_MESSAGES]
+        _apply_system_prompt_caching(MINIMAL_MESSAGES, SONNET)
+        assert MINIMAL_MESSAGES == original
+
+    # -- 1. Supported Anthropic/OpenRouter model receives cache metadata ---
+
+    def test_supported_model_receives_cache_control_via_openrouter_path(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        system_msg = next(m for m in body["messages"] if m["role"] == "system")
+        assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_supported_model_receives_cache_control_via_anthropic_fallback(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args_list[1].kwargs["json"]
+        assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+    # -- 2. Exact system prompt text remains byte-identical ----------------
+
+    def test_system_prompt_text_byte_identical_via_openrouter(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        system_msg = next(m for m in body["messages"] if m["role"] == "system")
+        assert system_msg["content"][0]["text"] == "You are a helpful pipeline agent."
+
+    def test_system_prompt_text_byte_identical_via_anthropic_fallback(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args_list[1].kwargs["json"]
+        assert body["system"][0]["text"] == "You are a helpful pipeline agent."
+
+    # -- 3. User prompt remains unchanged -----------------------------------
+
+    def test_user_prompt_unchanged_via_openrouter(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        user_msg = next(m for m in body["messages"] if m["role"] == "user")
+        assert user_msg["content"] == "Respond with: OK"
+
+    def test_user_prompt_unchanged_via_anthropic_fallback(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args_list[1].kwargs["json"]
+        assert body["messages"] == [{"role": "user", "content": "Respond with: OK"}]
+
+    # -- 4. Unsupported/non-Anthropic models retain the previous request shape
+
+    def test_unsupported_model_keeps_plain_string_system_via_openrouter(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(NON_ANTHROPIC_MODEL, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        system_msg = next(m for m in body["messages"] if m["role"] == "system")
+        assert system_msg["content"] == "You are a helpful pipeline agent."
+
+    def test_unsupported_model_keeps_plain_string_system_via_anthropic_fallback(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+            call_claude(NON_ANTHROPIC_MODEL, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args_list[1].kwargs["json"]
+        assert body["system"] == "You are a helpful pipeline agent."
+
+    # -- 5. Existing schema/body fields remain unchanged ---------------------
+
+    def test_max_tokens_and_temperature_unaffected_by_caching(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 777, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        assert body["max_tokens"] == 777
+        assert body["temperature"] == 0
+
+    def test_model_field_unaffected_by_caching(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        assert body["model"] == SONNET
+
+    # -- 6. Existing headers and authentication remain unchanged ------------
+
+    def test_openrouter_auth_header_unaffected_by_caching(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        headers = mock_post.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer sk-or-test"
+
+    def test_anthropic_fallback_headers_unaffected_by_caching(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        headers = mock_post.call_args_list[1].kwargs["headers"]
+        assert headers["x-api-key"] == "sk-ant-test"
+        assert headers["anthropic-version"] == "2023-06-01"
+
+    # -- 7. Retry calls use the same caching behavior ------------------------
+
+    def test_retry_then_success_both_carry_cache_control(self):
+        """A 429-then-200 retry must send the identical cached system content
+        on both the failed and the succeeded attempt."""
+        cfg = make_config()
+        responses = [http_error(429), openrouter_200("ok")]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 2
+        for call_obj in mock_post.call_args_list:
+            body = call_obj.kwargs["json"]
+            system_msg = next(m for m in body["messages"] if m["role"] == "system")
+            assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_retry_exhaustion_fallback_carries_cache_control(self):
+        """Retry-exhausted requests that fall back to Anthropic direct must
+        still carry the same cache_control block."""
+        cfg = make_config()
+        or_responses = [http_error(500), http_error(500)]
+        ant_response = anthropic_200()
+        with patch("hypogeum.openrouter.requests.post", side_effect=or_responses + [ant_response]) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.via_fallback is True
+        body = mock_post.call_args_list[-1].kwargs["json"]
+        assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+    # -- 8. No agent-level caching code is introduced ------------------------
+
+    def test_no_agent_file_references_cache_control(self):
+        """Caching must be applied centrally in openrouter.py only — no owning
+        agent file may implement its own cache_control logic."""
+        import inspect
+        from hypogeum.agents import (
+            script_engine,
+            thumbnail_prompt_writer,
+            visual_package_director,
+            shot_diversity_planner,
+        )
+        for module in (script_engine, thumbnail_prompt_writer, visual_package_director, shot_diversity_planner):
+            src = inspect.getsource(module)
+            assert "cache_control" not in src, f"{module.__name__} must not reference cache_control"
+
+    def test_no_agent_runner_references_cache_control(self):
+        import inspect
+        from hypogeum import agent as agent_mod
+        assert "cache_control" not in inspect.getsource(agent_mod)
+
+    # -- 9. No new run_agent() call is introduced ----------------------------
+
+    def test_run_agent_call_count_in_vpd_unchanged(self):
+        """Regression guard matching the count already established by the
+        Seedance2/Veo Prompt Director attachment tasks — must remain 6."""
+        import ast
+        import inspect
+        from hypogeum.agents import visual_package_director as vpd
+
+        src = inspect.getsource(vpd)
+        tree = ast.parse(src)
+        call_count = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "run_agent":
+                call_count += 1
+        assert call_count == 6

@@ -51,6 +51,14 @@ REQUEST_TIMEOUT        = 120    # seconds — generous for long Opus calls
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503}
 
+# Prefix used by every Anthropic-hosted model slug this codebase passes to
+# OpenRouter (e.g. "anthropic/claude-sonnet-4.6"). Only slugs with this
+# prefix receive the Anthropic prompt-caching content-block format below —
+# other providers routed through OpenRouter (e.g. "openai/gpt-5.5-pro", used
+# by default for TD_PLANNING_MODEL) do not support this exact format and must
+# keep the plain-string system message they already receive today.
+_ANTHROPIC_SLUG_PREFIX = "anthropic/"
+
 # Approximate per-token USD cost for estimation only (not billing).
 # Prompt (input) and completion (output) rates per token.
 _COST_TABLE: dict[str, dict[str, float]] = {
@@ -184,6 +192,66 @@ class _AuthError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Prompt caching — Anthropic ephemeral cache_control on the system message
+# ---------------------------------------------------------------------------
+#
+# Verified against primary sources (platform.claude.com/docs/en/build-with-claude/
+# prompt-caching and openrouter.ai/docs/features/prompt-caching):
+#   - Anthropic's native Messages API and OpenRouter's Anthropic-model proxy both
+#     require the system message's content to be an array of typed content
+#     blocks — not a plain string — for cache_control to apply. The exact block
+#     shape is identical for both: {"type": "text", "text": "...",
+#     "cache_control": {"type": "ephemeral"}}.
+#   - Caching is not automatic; it is opt-in per content block.
+#   - No special headers are required (prompt caching is generally available,
+#     not a beta feature, on Anthropic's API as of this verification).
+#   - Below-minimum-length prompts are silently processed without caching by
+#     Anthropic's backend — no error is raised — so this transform never needs
+#     its own length check to stay safe.
+#   - This format is Anthropic-specific. Other providers proxied through
+#     OpenRouter are not known to support this exact block shape, so this
+#     module only applies it when model_slug identifies an Anthropic model.
+
+def _cache_control_supported(model_slug: str) -> bool:
+    """True when model_slug is an Anthropic-hosted model that supports the
+    verified cache_control content-block format. See module note above."""
+    return model_slug.startswith(_ANTHROPIC_SLUG_PREFIX)
+
+
+def _apply_system_prompt_caching(
+    messages: list[dict[str, Any]], model_slug: str
+) -> list[dict[str, Any]]:
+    """
+    Return a new messages list with the system-role message's content
+    converted to a single-block content array carrying an ephemeral
+    cache_control breakpoint, for models that support it (see module note
+    above). The system prompt text itself is never altered — only its JSON
+    envelope shape, and only for supported models. Non-system messages and
+    unsupported models are returned unchanged. The input list is never
+    mutated in place.
+    """
+    if not _cache_control_supported(model_slug):
+        return list(messages)
+
+    transformed: list[dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") == "system" and isinstance(m.get("content"), str):
+            transformed.append({
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": m["content"],
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            })
+        else:
+            transformed.append(m)
+    return transformed
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -239,12 +307,19 @@ def call_claude(
 
     start_ms = _now_ms()
 
+    # Apply the Anthropic prompt-caching content-block format to the system
+    # message for supported models only (see module note above). Computed once
+    # and reused for every dispatch below — including retries and fallback —
+    # so caching behavior is identical across all of them. Unsupported models
+    # get back the exact same messages list, unchanged.
+    cached_messages = _apply_system_prompt_caching(messages, model_slug)
+
     # If the health check already marked OpenRouter unavailable for this run,
     # skip straight to Anthropic direct.
     if _use_anthropic_for_run:
         return _call_anthropic_direct(
             model_slug=model_slug,
-            messages=messages,
+            messages=cached_messages,
             max_tokens=max_tokens,
             config=config,
             log=log,
@@ -257,7 +332,7 @@ def call_claude(
         try:
             return _call_openrouter(
                 model_slug=model_slug,
-                messages=messages,
+                messages=cached_messages,
                 max_tokens=max_tokens,
                 config=config,
                 log=log,
@@ -273,7 +348,7 @@ def call_claude(
             _use_anthropic_for_run = True
             return _call_anthropic_direct(
                 model_slug=model_slug,
-                messages=messages,
+                messages=cached_messages,
                 max_tokens=max_tokens,
                 config=config,
                 log=log,
@@ -291,7 +366,7 @@ def call_claude(
                 _use_anthropic_for_run = True
                 return _call_anthropic_direct(
                     model_slug=model_slug,
-                    messages=messages,
+                    messages=cached_messages,
                     max_tokens=max_tokens,
                     config=config,
                     log=log,
@@ -383,7 +458,7 @@ def check_health(
 
 def _call_openrouter(
     model_slug: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     max_tokens: int,
     config: Config,
     log: Logger,
@@ -544,7 +619,7 @@ def _parse_openrouter_response(
 
 def _call_anthropic_direct(
     model_slug: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     max_tokens: int,
     config: Config,
     log: Logger,
@@ -565,7 +640,10 @@ def _call_anthropic_direct(
 
     # Translate OpenAI-format messages → Anthropic Messages API format.
     # System message is a top-level field; user/assistant turns stay in messages[].
-    system_content = ""
+    # system_content may be a plain string (unsupported models — unchanged
+    # behavior) or a cache_control content-block array (see
+    # _apply_system_prompt_caching()); either shape is valid for body["system"].
+    system_content: Any = ""
     user_messages: list[dict[str, str]] = []
     for m in messages:
         if m.get("role") == "system":

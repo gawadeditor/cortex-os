@@ -33,7 +33,14 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hypogeum.agents.thumbnail_prompt_writer import write_thumbnail_prompts
+from hypogeum.agents.thumbnail_prompt_writer import (
+    PINNED_GPT_IMAGE2_SHA,
+    SYSTEM_PROMPT,
+    _GPT_IMAGE2_SKILL_PATH,
+    _PROMPT_FILE,
+    _THUMBNAIL_INTELLIGENCE_SKILL_FILE,
+    write_thumbnail_prompts,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -307,3 +314,138 @@ class TestWriteThumbnailPrompts:
             c for c in log.info.call_args_list if c[0][0] == "td_planning_completed"
         )
         assert completed_call[1]["shorts_count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# TestSystemPrompt — GPT-Image2 skill composition
+#
+# Mirrors tests/test_script_engine.py::TestSystemPrompt, the equivalent
+# coverage already proven for the Humanizer/Script Engine attachment.
+# ---------------------------------------------------------------------------
+
+class TestSystemPrompt:
+    def test_system_prompt_contains_base_prompt_file(self):
+        from hypogeum.prompt_loader import load_prompt
+        assert load_prompt(_PROMPT_FILE) in SYSTEM_PROMPT
+
+    def test_system_prompt_contains_internal_thumbnail_intelligence_skill(self):
+        from hypogeum.prompt_loader import load_skill
+        internal_skill = load_skill(_THUMBNAIL_INTELLIGENCE_SKILL_FILE)
+        assert internal_skill
+        assert internal_skill in SYSTEM_PROMPT
+
+    def test_pinned_gpt_image2_skill_path_exists(self):
+        assert _GPT_IMAGE2_SKILL_PATH.exists()
+        assert PINNED_GPT_IMAGE2_SHA in str(_GPT_IMAGE2_SKILL_PATH)
+        assert len(PINNED_GPT_IMAGE2_SHA) == 40
+
+    def test_pinned_gpt_image2_skill_loaded_verbatim(self):
+        """The composed system prompt must contain the pinned SKILL.md's
+        exact on-disk bytes — no paraphrase, no summarization, no rewrite."""
+        on_disk = _GPT_IMAGE2_SKILL_PATH.read_text(encoding="utf-8")
+        assert on_disk in SYSTEM_PROMPT
+
+    def test_system_prompt_composed_via_compose_system_prompt(self):
+        from hypogeum.prompt_loader import compose_system_prompt
+        assert SYSTEM_PROMPT == compose_system_prompt(
+            _PROMPT_FILE, _THUMBNAIL_INTELLIGENCE_SKILL_FILE, _GPT_IMAGE2_SKILL_PATH,
+        )
+
+    def test_composition_order_is_base_then_internal_then_gpt_image2(self):
+        from hypogeum.prompt_loader import load_prompt, load_skill
+        base = load_prompt(_PROMPT_FILE)
+        internal_skill = load_skill(_THUMBNAIL_INTELLIGENCE_SKILL_FILE)
+        gpt_image2_skill = _GPT_IMAGE2_SKILL_PATH.read_text(encoding="utf-8")
+
+        idx_base = SYSTEM_PROMPT.find(base)
+        idx_internal = SYSTEM_PROMPT.find(internal_skill)
+        idx_gpt_image2 = SYSTEM_PROMPT.find(gpt_image2_skill)
+
+        assert idx_base == 0
+        assert idx_base < idx_internal < idx_gpt_image2
+
+    def test_base_prompt_does_not_duplicate_gpt_image2_distinctive_heading(self):
+        """A representative, distinctive upstream heading must not be
+        duplicated inside thumbnail_director.txt's own authored content —
+        it must come from the composed skill file only."""
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        skill_text = _GPT_IMAGE2_SKILL_PATH.read_text(encoding="utf-8")
+        assert "## Scale references" not in base_only
+        assert "## Scale references" in skill_text
+
+    def test_bridge_section_present_in_base_prompt(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "SECTION 12B" in base_only
+        assert "GPT-IMAGE2" in base_only.upper()
+
+    def test_bridge_disables_cli_execution(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "generate.py" in base_only
+        assert "uvx gpt-image" in base_only or "gpt-image" in base_only
+
+    def test_bridge_disables_direct_provider_api_calls(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "OpenAI" in base_only
+        assert "do not call" in base_only.lower()
+
+    def test_bridge_disables_env_key_access_and_file_writing(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "OPENAI_API_KEY" in base_only
+        assert "write or download files" in base_only.lower()
+
+    def test_bridge_disables_interactive_questions_and_upstream_output_format(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "ask the user questions" in base_only.lower()
+        assert "standalone response format" in base_only.lower()
+
+    def test_bridge_preserves_existing_json_contract(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "SECTION 13" in base_only
+        assert "thumbnail JSON contract" in base_only
+
+    def test_bridge_limits_effect_to_image_prompt_field(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "image_prompt" in base_only
+        assert "does not generate the image" in base_only
+        assert "does not control provider routing" in base_only
+
+    def test_bridge_states_existing_requirements_take_precedence(self):
+        from hypogeum.prompt_loader import load_prompt
+        base_only = load_prompt(_PROMPT_FILE)
+        assert "takes precedence" in base_only
+
+    def test_module_contains_exactly_one_run_agent_call(self):
+        import ast
+        import inspect
+
+        import hypogeum.agents.thumbnail_prompt_writer as mod
+        tree = ast.parse(inspect.getsource(mod))
+        call_names = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert call_names.count("run_agent") == 1
+
+    def test_module_has_no_new_external_call_surface(self):
+        import inspect
+
+        import hypogeum.agents.thumbnail_prompt_writer as mod
+        source = inspect.getsource(mod)
+        for forbidden in ("OpenAI(", "requests.", "httpx.", "subprocess.", "call_claude("):
+            assert forbidden not in source, f"found forbidden call surface: {forbidden}"
+
+    def test_system_prompt_passed_to_run_agent(self):
+        with patch(_PATCH, return_value=_make_generation_plan()) as mock_ra:
+            write_thumbnail_prompts(
+                _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), _make_log(),
+            )
+        assert mock_ra.call_args[1]["system_prompt"] == SYSTEM_PROMPT

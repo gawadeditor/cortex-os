@@ -14,22 +14,29 @@ Coverage:
     TestHumanizerRollback              — rollback scope is exactly the pinned
                                           directory, the manifest entry, and
                                           script_engine.py's composition call
-    TestGPTImage2Installation          — pinned directory/files exist, checksums
-                                          match, byte-identical to the pinned
-                                          upstream commit, no executable content
-    TestGPTImage2NotWired              — installed but not yet attached to any
-                                          agent; no runtime module references
-                                          the pinned path; not registered in
-                                          skill_registry.py; manifest state is
-                                          INSTALLED / NOT WIRED / NOT ACTIVE
-    TestGPTImage2Rollback              — rollback scope is exactly the pinned
-                                          directory and the manifest entry
+    TestGPTImage2Installation                    — pinned directory/files exist,
+                                                    checksums match, byte-identical
+                                                    to the pinned upstream commit,
+                                                    no executable content
+    TestGPTImage2WiredIntoThumbnailPromptWriter  — exactly one agent
+                                                    (thumbnail_prompt_writer.py)
+                                                    references the pinned upstream
+                                                    skill; composed into the system
+                                                    prompt, not registered in
+                                                    skill_registry.py; manifest
+                                                    state is ACTIVE; no new stage/
+                                                    adapter/checkpoint/schema exists
+    TestGPTImage2Rollback                        — rollback scope is exactly the
+                                                    pinned directory, the manifest
+                                                    entry, and
+                                                    thumbnail_prompt_writer.py's
+                                                    composition call plus
+                                                    thumbnail_director.txt's bridge
 
 Scope: installation provenance and wiring-surface-area only. Does not test
-Humanizer's prose-rewriting behavior or GPT-Image2's prompt-writing behavior
-(Claude applies a skill at generation time — there is no separate
-deterministic code path to unit test here, and GPT-Image2 is not wired to
-any agent yet regardless).
+Humanizer's or GPT-Image2's prompt-writing behavior (Claude applies a skill
+at generation time — there is no separate deterministic code path to unit
+test here).
 """
 
 from __future__ import annotations
@@ -128,36 +135,40 @@ class TestHumanizerWiredIntoScriptEngine:
 
     def test_exactly_one_agent_references_pinned_upstream_skill(self):
         """
-        Checks specifically for the third_party/skills/humanizer path, not
-        the generic word "humanizer" — hypogeum/agents/script_engine.py
+        Checks specifically for the third_party/skills/humanizer path or the
+        pinned Humanizer commit SHA, not the generic word "humanizer" or the
+        generic word "third_party" — hypogeum/agents/script_engine.py
         already imports the pre-existing, unrelated hypogeum/humanizer.py
         module (a deterministic regex utility explicitly documented as "a
         subset of humanizer v2.7.0", predating and independent of this
-        upstream skill entirely). That existing reference is legitimate,
-        separate production code and out of scope here.
+        upstream skill entirely), and other agents (e.g. thumbnail_prompt_writer.py)
+        legitimately reference a different pinned skill under third_party/
+        of their own. A generic "third_party" substring check would
+        false-positive on both.
         """
         agents_dir = _REPO_ROOT / "hypogeum" / "agents"
         referencing = []
         for py_file in agents_dir.glob("*.py"):
             content = py_file.read_text(encoding="utf-8")
-            if "third_party" in content:
+            if "skills/humanizer" in content or _HUMANIZER_PINNED_SHA in content:
                 referencing.append(py_file.name)
         assert referencing == ["script_engine.py"], (
-            f"Expected only script_engine.py to reference the pinned upstream "
+            f"Expected only script_engine.py to reference the pinned Humanizer "
             f"skill, got: {referencing}"
         )
 
-    def test_no_other_runtime_module_imports_third_party(self):
+    def test_no_other_runtime_module_imports_humanizer_path(self):
         hypogeum_dir = _REPO_ROOT / "hypogeum"
         offenders = []
         for py_file in hypogeum_dir.rglob("*.py"):
             if py_file.name == "script_engine.py":
                 continue
-            if "third_party" in py_file.read_text(encoding="utf-8"):
+            content = py_file.read_text(encoding="utf-8")
+            if "skills/humanizer" in content or _HUMANIZER_PINNED_SHA in content:
                 offenders.append(str(py_file.relative_to(_REPO_ROOT)))
         assert not offenders, (
-            f"No runtime module besides script_engine.py may reference "
-            f"third_party/: {offenders}"
+            f"No runtime module besides script_engine.py may reference the "
+            f"pinned Humanizer path: {offenders}"
         )
 
     def test_skill_registry_does_not_register_humanizer(self):
@@ -269,54 +280,55 @@ class TestGPTImage2Installation:
         }
         assert recorded_checksums == _GPT_IMAGE2_EXPECTED_CHECKSUMS
 
-    def test_manifest_records_intended_owning_agent(self):
+    def test_manifest_records_owning_agent(self):
         data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
         entry = next(s for s in data["skills"] if s["name"] == "gpt-image2")
         assert "thumbnail_prompt_writer.py" in entry["intended_owning_agent"]
-        assert "compose_system_prompt" in entry["intended_attachment_mechanism"]
+        assert "compose_system_prompt" in entry["attachment_mechanism"]
+        assert "thumbnail_prompt_writer.py" in entry["wired_to"]
 
 
-class TestGPTImage2NotWired:
+class TestGPTImage2WiredIntoThumbnailPromptWriter:
     """
-    GPT-Image2 is installed only — not attached to any agent. These tests
-    confirm zero runtime wiring exists yet, mirroring the same guard
-    Humanizer's own installation task once had before its later, separate
-    attachment task.
+    GPT-Image2 is a skill attached directly to thumbnail_prompt_writer.py's
+    own single LLM invocation — not a separate agent, pipeline stage,
+    adapter, or checkpoint layer. These tests confirm the wiring surface
+    area is exactly thumbnail_prompt_writer.py and nothing else, mirroring
+    TestHumanizerWiredIntoScriptEngine above.
     """
 
-    def test_no_agent_references_pinned_upstream_skill(self):
+    def test_exactly_one_agent_references_pinned_upstream_skill(self):
         agents_dir = _REPO_ROOT / "hypogeum" / "agents"
         referencing = []
         for py_file in agents_dir.glob("*.py"):
             content = py_file.read_text(encoding="utf-8")
             if "gpt-image2" in content or _GPT_IMAGE2_PINNED_SHA in content:
                 referencing.append(py_file.name)
-        assert not referencing, (
-            f"No agent may reference the pinned GPT-Image2 skill yet: {referencing}"
+        assert referencing == ["thumbnail_prompt_writer.py"], (
+            f"Expected only thumbnail_prompt_writer.py to reference the pinned "
+            f"GPT-Image2 skill, got: {referencing}"
         )
 
-    def test_no_runtime_module_imports_gpt_image2_path(self):
+    def test_no_other_runtime_module_imports_gpt_image2_path(self):
         hypogeum_dir = _REPO_ROOT / "hypogeum"
         offenders = []
         for py_file in hypogeum_dir.rglob("*.py"):
+            if py_file.name == "thumbnail_prompt_writer.py":
+                continue
             content = py_file.read_text(encoding="utf-8")
             if "gpt-image2" in content or _GPT_IMAGE2_PINNED_SHA in content:
                 offenders.append(str(py_file.relative_to(_REPO_ROOT)))
         assert not offenders, (
-            f"No runtime module may reference the pinned GPT-Image2 path yet: {offenders}"
+            f"No runtime module besides thumbnail_prompt_writer.py may reference "
+            f"the pinned GPT-Image2 path: {offenders}"
         )
 
-    def test_thumbnail_prompt_writer_unchanged_by_this_task(self):
-        """
-        The intended future owning agent must not yet reference the pinned
-        skill in any way — this installation task is provenance-only.
-        """
+    def test_thumbnail_prompt_writer_composes_pinned_skill_path(self):
         content = (
             _REPO_ROOT / "hypogeum" / "agents" / "thumbnail_prompt_writer.py"
         ).read_text(encoding="utf-8")
-        assert "gpt-image2" not in content
-        assert "gpt_image2" not in content.lower().replace("-", "_")
-        assert _GPT_IMAGE2_PINNED_SHA not in content
+        assert _GPT_IMAGE2_PINNED_SHA in content
+        assert "compose_system_prompt" in content
 
     def test_skill_registry_does_not_register_gpt_image2(self):
         """
@@ -331,18 +343,30 @@ class TestGPTImage2NotWired:
         assert "gpt-image2" not in registry_content.lower()
         assert "gpt_image2" not in registry_content.lower()
 
-    def test_manifest_state_is_installed_not_wired_not_active(self):
+    def test_manifest_state_is_installed_wired_active(self):
         data = json.loads(_MANIFEST_JSON.read_text(encoding="utf-8"))
         entry = next(s for s in data["skills"] if s["name"] == "gpt-image2")
-        assert entry["state"] == "INSTALLED / NOT WIRED / NOT ACTIVE"
+        assert entry["state"] == "INSTALLED / WIRED / ACTIVE"
+
+    def test_no_new_stage_adapter_checkpoint_or_provider_module_exists(self):
+        assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "gpt_image2_stage.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "agents" / "gpt_image2_adapter.py").exists()
+        assert not (_REPO_ROOT / "hypogeum" / "gpt_image2_checkpoint.py").exists()
+
+    def test_no_gpt_image2_schema_exists(self):
+        from hypogeum.schemas import SCHEMA_NAMES
+        assert not any("gpt_image" in name.lower() for name in SCHEMA_NAMES)
 
 
 class TestGPTImage2Rollback:
     def test_rollback_scope_is_isolated_to_pinned_directory(self):
         """
-        Deleting third_party/skills/gpt-image2/<sha>/ and removing its
-        config/upstream_skills_manifest.json entry must be sufficient to
-        fully roll back this installation — no other file depends on the
-        pinned directory's contents while the skill is unwired.
+        Rollback requires reverting exactly two things:
+        thumbnail_prompt_writer.py's composition call (drop
+        _GPT_IMAGE2_SKILL_PATH) and thumbnail_director.txt's SECTION 12B
+        bridge; deleting the pinned directory + manifest entry is optional
+        beyond that. No adapter, checkpoint, or stage directory exists for
+        this to depend on.
         """
         assert not (_REPO_ROOT / "hypogeum" / "skill_adapters").exists()

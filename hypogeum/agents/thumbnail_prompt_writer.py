@@ -22,6 +22,25 @@ Concept-driven mode:
     thumbnail_composition_planner and thumbnail_typography_planner modules.
     This is authoritative — Claude's own plan fields (if any) are overwritten.
 
+GPT-Image2 skill: SYSTEM_PROMPT composes thumbnail_director.txt (this
+agent's own instructions, including a SECTION 12B bridge) with two skills —
+the existing internal thumbnail_intelligence_pipeline skill, then the
+pinned upstream GPT-Image2 skill
+(third_party/skills/gpt-image2/<PINNED_GPT_IMAGE2_SHA>/SKILL.md) — via
+hypogeum.prompt_loader.compose_system_prompt(), the same base+skills
+composition pattern already used here for the internal skill and for
+Humanizer's Script Engine attachment. This happens inside the single
+existing run_agent() call below — no second LLM call, no separate stage,
+adapter, checkpoint, schema, or provider module. The pinned skill file is
+never edited, paraphrased, or copied into this prompt file; it is composed
+alongside it, unmodified, matching every other agent's skill injection.
+GPT-Image2's own canonical usage is a CLI/OpenAI-SDK wrapper — SECTION 12B
+of thumbnail_director.txt exists specifically to establish that this
+composed skill contributes prompt-craft guidance only, and disables its
+incompatible runtime assumptions (CLI invocation, direct OpenAI calls,
+OPENAI_API_KEY access, file writing, interactive questions, its own
+standalone output format).
+
 Model: config.TD_PLANNING_MODEL (default: openai/gpt-5.5-pro)
 Max tokens: config.TD_PLANNING_MAX_TOKENS (default: 8192)
 
@@ -61,11 +80,22 @@ _PROMPT_FILE = _PROMPTS_DIR / "thumbnail_director.txt"
 _COMPILED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills" / "compiled"
 _THUMBNAIL_INTELLIGENCE_SKILL_FILE = _COMPILED_SKILLS_DIR / "thumbnail_intelligence_pipeline.compact.md"
 
-_TPW_ALL_SKILL_PATHS: list[Path] = [_THUMBNAIL_INTELLIGENCE_SKILL_FILE]
+# Pinned upstream GPT-Image2 skill (docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.6,
+# docs/architecture/GPT_IMAGE2_THUMBNAIL_SKILL_ATTACHMENT_AUDIT.md,
+# config/upstream_skills_manifest.json) — loaded verbatim, never edited.
+PINNED_GPT_IMAGE2_SHA = "74a665173a19e461fa08f84ae76d800f85d2dd1e"
+_THIRD_PARTY_ROOT = Path(__file__).resolve().parent.parent.parent / "third_party"
+_GPT_IMAGE2_SKILL_PATH = (
+    _THIRD_PARTY_ROOT / "skills" / "gpt-image2" / PINNED_GPT_IMAGE2_SHA / "SKILL.md"
+)
+
+_TPW_ALL_SKILL_PATHS: list[Path] = [_THUMBNAIL_INTELLIGENCE_SKILL_FILE, _GPT_IMAGE2_SKILL_PATH]
 
 
 def _load_system_prompt() -> str:
-    return compose_system_prompt(_PROMPT_FILE, _THUMBNAIL_INTELLIGENCE_SKILL_FILE)
+    return compose_system_prompt(
+        _PROMPT_FILE, _THUMBNAIL_INTELLIGENCE_SKILL_FILE, _GPT_IMAGE2_SKILL_PATH,
+    )
 
 
 SYSTEM_PROMPT: str = _load_system_prompt()

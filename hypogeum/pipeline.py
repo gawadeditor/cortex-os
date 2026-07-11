@@ -60,6 +60,7 @@ from hypogeum.agents.humanization_stage import (
     HumanizationStageError,
     run_humanization_stage,
 )
+from hypogeum.agents.humanizer_llm_adapter import HUMANIZER_LLM_MODEL_ID
 from hypogeum.agents.compliance_agent import run_compliance_agent
 from hypogeum.agents.finance_agent import run_budget_authorization, run_cost_ledger
 from hypogeum.agents.qa_agent import run_qa_agent
@@ -609,9 +610,11 @@ def run_pipeline(
             raise PipelineCancelledError(episode_id=episode_id, stage_after="script_engine")
 
         # -----------------------------------------------------------------------
-        # 5b. Humanization Stage — OFF mode only (hardcoded). Isolated capability:
-        # produces humanized_script_package alongside script_package without
-        # mutating or replacing it. No downstream stage consumes this package yet.
+        # 5b. Humanization Stage — SHADOW mode only (hardcoded). Isolated
+        # capability: produces humanized_script_package alongside
+        # script_package without mutating or replacing it. Runs the pinned
+        # upstream Humanizer LLM pass for real, but no downstream stage
+        # consumes this package yet — see _run_humanization_stage() below.
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="humanization_stage")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
@@ -624,6 +627,7 @@ def run_pipeline(
             script_package=script_package,
             pipeline_run_id=run_id,
             output_dir=output_dir,
+            config=config,
             log=log,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
@@ -1424,67 +1428,84 @@ def _run_script_engine(
     )
 
 
+_HUMANIZATION_MODE = "SHADOW"
+
+
 def _run_humanization_stage(
     *,
     episode_id: str,
     script_package: dict,
     pipeline_run_id: str,
     output_dir: Optional[Path],
+    config: Config,
     log,
 ) -> dict:
     """
-    Humanization Stage (isolated capability — OFF mode only, hardcoded).
+    Humanization Stage (isolated capability — SHADOW mode only, hardcoded).
 
     Runs immediately after Script Engine. Delegates to
     hypogeum.agents.humanization_stage.run_humanization_stage(), which never
     mutates script_package — it only reads it and returns a separate
     humanized_script_package. No downstream stage consumes this package yet;
     it is produced, validated, checkpointed, and carried forward on
-    PipelineResult only.
+    PipelineResult only. SHADOW mode runs the pinned upstream Humanizer LLM
+    pass for real (via hypogeum.agents.humanizer_llm_adapter) so its output
+    can be reviewed and validated before any production dependency is ever
+    created on it — Finance/VPD/Audio/Assembly all continue reading the
+    original script_package, completely unaffected by this stage's result.
 
-    Mode is hardcoded to "OFF" here — no config, env var, or feature flag
-    governs it. Raising the mode or wiring a downstream consumer are
-    separate, future, explicitly authorized changes.
+    Mode is hardcoded to "SHADOW" here — no config, env var, or feature flag
+    governs it. Wiring a downstream consumer, or raising the mode further,
+    are separate, future, explicitly authorized changes. Per-beat LLM
+    failures never propagate out of run_humanization_stage() — they fall
+    back to the deterministic-pass result inside the stage itself (see
+    hypogeum/agents/humanization_stage.py::_build_shadow_beat()), so a model
+    outage here can never halt the pipeline or affect script_package.
 
     Checkpoint: uses hypogeum.humanization_checkpoint's fingerprint-validated
     reuse check (stricter than _load_package()'s plain existence check —
     corruption raises rather than being treated as a cache miss). assets_root
     mirrors the same output_dir override every other stage's checkpoint
     honors for test isolation, falling back to the real .hypogeum-assets/
-    root otherwise.
+    root otherwise. model_id is included in the reuse check so a change to
+    HUMANIZER_LLM_MODEL_ID correctly invalidates any prior SHADOW checkpoint.
     """
     assets_root = output_dir if output_dir is not None else _ASSETS_ROOT
+    mode = _HUMANIZATION_MODE
+    model_id = HUMANIZER_LLM_MODEL_ID if mode == "SHADOW" else None
 
     reused = load_reusable_humanization_checkpoint(
         assets_root=assets_root,
         episode_id=episode_id,
         script_package=script_package,
-        mode="OFF",
+        mode=mode,
+        model_id=model_id,
     )
     if reused is not None:
         log.info(
             "humanization_checkpoint_cache_hit",
             episode_id=episode_id,
-            mode="OFF",
+            mode=mode,
             input_hash_prefix=reused["humanization"]["input_hash"][:12],
         )
         return reused
 
-    log.info("humanization_checkpoint_cache_miss", episode_id=episode_id, mode="OFF")
+    log.info("humanization_checkpoint_cache_miss", episode_id=episode_id, mode=mode)
 
     t0 = datetime.now(timezone.utc)
     result = run_humanization_stage(
         episode_id=episode_id,
         script_package=script_package,
         pipeline_run_id=pipeline_run_id,
-        mode="OFF",
+        mode=mode,
+        config=config,
     )
     elapsed_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000.0
 
     log.info(
         "humanization_validation_succeeded",
         episode_id=episode_id,
-        mode="OFF",
+        mode=mode,
         elapsed_ms=round(elapsed_ms, 1),
     )
 

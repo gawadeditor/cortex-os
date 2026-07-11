@@ -1,29 +1,43 @@
 """
 hypogeum/agents/humanization_stage.py — Isolated Humanization Stage (0.1.0)
 
-Read-only-input, in-memory-only implementation of the Humanization Stage
-designed in docs/architecture/HUMANIZATION_STAGE_DESIGN.md. This module is
-intentionally isolated:
+Wired into hypogeum/pipeline.py (OFF and SHADOW modes only, as of the
+current pipeline wiring — see hypogeum/pipeline.py's own Humanization Stage
+block). This module itself remains otherwise isolated:
 
-  - Not imported by hypogeum/pipeline.py or any production agent.
-  - No checkpoint, no database access, no file writes of any kind.
-  - No LLM call, no network call, no external process.
+  - No checkpoint, no database access, no file writes of any kind — the
+    checkpoint layer (hypogeum/humanization_checkpoint.py) is a separate
+    module the pipeline wires around this one.
   - hypogeum/humanizer.py is used unchanged, never edited or duplicated.
+  - The only network/LLM call surface this module can reach is
+    hypogeum.agents.humanizer_llm_adapter.call_humanizer_llm(), used only
+    when mode="SHADOW" — OFF and DETERMINISTIC_ONLY never call it and
+    remain fully in-memory, zero-I/O code paths exactly as before.
 
-Deliberate omission: hypogeum.logger.get_logger() is not used here, even
-though it is a normal dependency for every other agent module. Its default
-behavior appends to .hypogeum-assets/pipeline.log on disk, which would be a
-file write — explicitly out of scope for this isolated module. Structured
-observability (per HUMANIZATION_STAGE_DESIGN.md §12) is a pipeline-wiring
-concern for a later, separate task.
+Deliberate omission for OFF/DETERMINISTIC_ONLY: hypogeum.logger.get_logger()
+is not constructed for those two modes, even though it is a normal
+dependency for every other agent module. Its default behavior appends to
+.hypogeum-assets/pipeline.log on disk, which would be a file write —
+explicitly out of scope for those two zero-I/O modes. SHADOW mode does
+construct a logger (per HUMANIZATION_STAGE_DESIGN.md §12's `hs_*` event
+namespace) because it genuinely performs I/O (an LLM call) that must be
+observable and because a failure must be logged clearly, never swallowed.
 
 Supported modes (docs/architecture/HUMANIZATION_STAGE_DESIGN.md §13):
   OFF                 — pass-through only, no transformation attempted
   DETERMINISTIC_ONLY  — hypogeum.humanizer.humanize_field() only, no LLM
+  SHADOW              — deterministic pass, then the pinned upstream
+                         Humanizer LLM pass (via humanizer_llm_adapter),
+                         full preservation validation, checkpointed and
+                         logged — but never consumed by any downstream
+                         pipeline stage (Finance/VPD/Audio/Assembly all
+                         continue reading the original script_package
+                         directly; wiring that consumption is a separate,
+                         future, explicitly authorized task)
 
-SHADOW / LLM_CANARY / ACTIVE / ROLLBACK are valid humanized_script_package
-schema values but are not implemented by this stage yet — requesting them
-raises UnsupportedHumanizationModeError.
+LLM_CANARY / ACTIVE / ROLLBACK are valid humanized_script_package schema
+values but are not implemented by this stage yet — requesting them raises
+UnsupportedHumanizationModeError.
 
 P24 safety (docs/architecture/HUMANIZER_RUNTIME_MIGRATION_AUDIT.md §2/§3):
 hypogeum/humanizer.py exposes no parameter to disable its P24 hedging-clause
@@ -40,10 +54,11 @@ reason.
 
 Public API:
     run_humanization_stage(*, episode_id, script_package, pipeline_run_id,
-                            mode="OFF") -> dict
+                            mode="OFF", config=None) -> dict
         Returns a schema-validated humanized_script_package dict, or raises
         HumanizationStageError if the assembled result cannot pass
         hypogeum.schemas.validate("humanized_script_package", ...).
+        config is required (and used) only when mode="SHADOW".
 """
 
 from __future__ import annotations
@@ -55,6 +70,12 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from hypogeum.agents.humanizer_llm_adapter import (
+    HUMANIZER_LLM_MODEL_ID,
+    HumanizerLLMAdapterError,
+    call_humanizer_llm,
+)
+from hypogeum.config import Config
 from hypogeum.humanization_fingerprint import (
     PINNED_HUMANIZER_SHA,
     STAGE_VERSION,
@@ -62,6 +83,7 @@ from hypogeum.humanization_fingerprint import (
     build_humanization_fingerprint,
 )
 from hypogeum.humanizer import humanize_field
+from hypogeum.logger import get_logger
 from hypogeum.schemas import SchemaError, validate
 
 # ---------------------------------------------------------------------------
@@ -81,7 +103,7 @@ _SOURCE_STAGE = "script_engine"
 _SOURCE_SCHEMA = "script_package"
 _SOURCE_SCHEMA_VERSION = "v1"  # script_package carries no explicit version field today
 
-_SUPPORTED_MODES = ("OFF", "DETERMINISTIC_ONLY")
+_SUPPORTED_MODES = ("OFF", "DETERMINISTIC_ONLY", "SHADOW")
 
 _DETERMINISTIC_RULE_MARKER = "legacy_deterministic_humanizer"
 
@@ -136,12 +158,16 @@ def run_humanization_stage(
     script_package: dict,
     pipeline_run_id: str,
     mode: str = "OFF",
+    config: Optional[Config] = None,
 ) -> dict:
     """
     Produce a schema-validated humanized_script_package from a script_package.
 
-    Never mutates script_package. Makes no LLM call, no network call, no
-    file write, no database access. Not wired into any pipeline stage.
+    Never mutates script_package. OFF and DETERMINISTIC_ONLY make no LLM
+    call, no network call, no file write, no database access. SHADOW makes
+    one LLM call per non-empty narration beat via
+    hypogeum.agents.humanizer_llm_adapter — the only network call surface
+    this module ever reaches, and only when mode="SHADOW".
 
     Args:
         episode_id:      Episode identifier. Injected into the copied source
@@ -149,19 +175,26 @@ def run_humanization_stage(
                           the caller's original script_package.
         script_package:  A schema-valid script_package dict (not modified).
         pipeline_run_id: Opaque run identifier, carried into provenance only.
-        mode:            "OFF" or "DETERMINISTIC_ONLY".
+        mode:            "OFF", "DETERMINISTIC_ONLY", or "SHADOW".
+        config:          Required when mode="SHADOW" (provides API keys for
+                          the LLM call). Ignored for OFF/DETERMINISTIC_ONLY.
 
     Returns:
         A dict that passes hypogeum.schemas.validate("humanized_script_package", ...).
 
     Raises:
         UnsupportedHumanizationModeError: mode is not currently supported.
+        ValueError: mode="SHADOW" but config was not provided.
         HumanizationStageError: the assembled result failed schema validation.
     """
     if mode not in _SUPPORTED_MODES:
         raise UnsupportedHumanizationModeError(
             f"mode must be one of {_SUPPORTED_MODES}, got {mode!r}"
         )
+    if mode == "SHADOW" and config is None:
+        raise ValueError("config is required when mode='SHADOW'")
+
+    _fingerprint_model_id = HUMANIZER_LLM_MODEL_ID if mode == "SHADOW" else None
 
     # Fingerprint the caller-provided script_package first — before any
     # copying or mutation — using the same canonical formula
@@ -174,7 +207,7 @@ def run_humanization_stage(
         stage_version=_STAGE_VERSION,
         wrapper_version=_WRAPPER_VERSION,
         skill_commit_sha=_PINNED_SKILL_SHA,
-        model_id=None,
+        model_id=_fingerprint_model_id,
     )
 
     # 1/2 — never mutate the caller's script_package; work on a deep copy.
@@ -192,15 +225,35 @@ def run_humanization_stage(
     # matching hypogeum/agents/script_engine.py's own iteration order.
     input_beats, extraction_warnings = _extract_beats(script_package)
 
+    # SHADOW is the only mode that performs I/O — the logger is constructed
+    # only in that case, preserving OFF/DETERMINISTIC_ONLY's zero-I/O contract.
+    shadow_log = get_logger(episode_id=episode_id, agent="humanization_stage") if mode == "SHADOW" else None
+
     beat_records = []
     package_fallback_used = False
+    shadow_usage_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    shadow_latency_total = 0
     for beat_id, original_text in input_beats:
         if mode == "OFF":
             beat_record = _build_off_beat(beat_id, original_text)
-        else:
+        elif mode == "DETERMINISTIC_ONLY":
             beat_record = _build_deterministic_beat(beat_id, original_text)
             if beat_record["transformation_status"] == "reverted":
                 package_fallback_used = True
+        else:  # SHADOW
+            beat_record, beat_fallback, usage = _build_shadow_beat(
+                beat_id, original_text,
+                episode_id=episode_id, config=config, log=shadow_log,
+            )
+            if beat_fallback:
+                package_fallback_used = True
+            if usage is not None:
+                shadow_llm_attempted = True
+                shadow_usage_totals["input_tokens"] += usage["input_tokens"]
+                shadow_usage_totals["output_tokens"] += usage["output_tokens"]
+                shadow_usage_totals["total_tokens"] += usage["total_tokens"]
+                shadow_latency_total += usage["latency_ms"]
+
         beat_records.append(beat_record)
 
     output_hash = _hash_texts([b["humanized_narration"] for b in beat_records])
@@ -214,12 +267,12 @@ def run_humanization_stage(
         "output_hash": output_hash,
         "skill_commit_sha": _PINNED_SKILL_SHA,
         "wrapper_version": _WRAPPER_VERSION,
-        "model_id": None,
-        "provider": None,
+        "model_id": HUMANIZER_LLM_MODEL_ID if mode == "SHADOW" else None,
+        "provider": "openrouter" if mode == "SHADOW" else None,
         "fallback_used": package_fallback_used,
         "warnings": list(extraction_warnings),
-        "latency_ms": 0,
-        "token_usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "latency_ms": shadow_latency_total if mode == "SHADOW" else 0,
+        "token_usage": shadow_usage_totals if mode == "SHADOW" else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         "preservation_validation": _package_preservation_validation(beat_records),
     }
 
@@ -233,7 +286,7 @@ def run_humanization_stage(
         "skill_source": _SKILL_SOURCE,
         "skill_commit_sha": _PINNED_SKILL_SHA,
         "wrapper_version": _WRAPPER_VERSION,
-        "model_id": None,
+        "model_id": HUMANIZER_LLM_MODEL_ID if mode == "SHADOW" else None,
         "created_at": _utc_now_iso(),
     }
 
@@ -402,6 +455,115 @@ def _reverted_beat(beat_id: str, original_text: str, warning: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# SHADOW-mode beat builder — deterministic pre-pass, then the pinned
+# upstream Humanizer LLM pass, then preservation validation against the
+# true original (docs/architecture/HUMANIZATION_STAGE_DESIGN.md §7.2/§8/§11)
+# ---------------------------------------------------------------------------
+
+def _build_shadow_beat(
+    beat_id: str,
+    original_text: str,
+    *,
+    episode_id: str,
+    config: Config,
+    log,
+) -> tuple:
+    """
+    Return (beat_record, beat_used_fallback, llm_usage_or_None).
+
+    llm_usage_or_None carries token/latency figures whenever the LLM call
+    actually returned a result — even if that result was subsequently
+    reverted for a preservation failure, since real spend was incurred
+    either way (hypogeum.finance.record_cost() already fired inside
+    call_humanizer_llm() regardless of what this function does with the
+    result afterward).
+
+    Every failure mode (missing skill, provider failure, malformed output,
+    a per-beat hard preservation failure) falls back to the deterministic
+    pass's own result — never to a raw, unvalidated LLM rewrite, and never
+    silently: each fallback is logged via hs_fallback_used or
+    hs_preservation_validation_failed before returning.
+    """
+    det_beat = _build_deterministic_beat(beat_id, original_text)
+
+    if not original_text.strip():
+        # Empty narration — no-op pass-through, no LLM call (§11).
+        return det_beat, False, None
+
+    det_text = det_beat["humanized_narration"]
+    det_changed = det_beat["transformation_status"] == "deterministic"
+
+    try:
+        llm_result = call_humanizer_llm(
+            beat_id=beat_id, original_text=det_text, episode_id=episode_id, config=config,
+        )
+    except HumanizerLLMAdapterError as exc:
+        log.warn(
+            "hs_fallback_used",
+            episode_id=episode_id, beat_id=beat_id, reason=str(exc)[:200],
+        )
+        fallback_beat = dict(det_beat)
+        fallback_beat["warnings"] = list(det_beat["warnings"]) + [
+            f"LLM pass unavailable, using deterministic-only result: {exc}"
+        ]
+        return fallback_beat, True, None
+
+    usage = {
+        "input_tokens": llm_result.input_tokens,
+        "output_tokens": llm_result.output_tokens,
+        "total_tokens": llm_result.total_tokens,
+        "latency_ms": llm_result.latency_ms,
+    }
+
+    # Preservation is checked against the TRUE original, not the
+    # deterministic-pass intermediate — this catches drift introduced by
+    # either pass, chained.
+    hard_failures = _beat_preservation_checks(original_text, llm_result.humanized_text)
+    if hard_failures:
+        log.warn(
+            "hs_preservation_validation_failed",
+            episode_id=episode_id, beat_id=beat_id, failure_count=len(hard_failures),
+        )
+        fallback_beat = dict(det_beat)
+        fallback_beat["warnings"] = list(det_beat["warnings"]) + [
+            "LLM pass reverted: preservation check failed after LLM transform: "
+            + "; ".join(hard_failures)
+        ]
+        fallback_beat["transformation_status"] = "reverted"
+        return fallback_beat, True, usage
+
+    llm_changed = llm_result.humanized_text != det_text
+    final_text = llm_result.humanized_text
+
+    if det_changed and llm_changed:
+        status = "deterministic_and_llm"
+    elif llm_changed:
+        status = "llm"
+    elif det_changed:
+        status = "deterministic"
+    else:
+        status = "unchanged"
+
+    differences = (
+        [{"type": "text_change", "before": original_text, "after": final_text}]
+        if final_text != original_text else []
+    )
+
+    beat_record = {
+        "beat_id": beat_id,
+        "original_narration": original_text,
+        "humanized_narration": final_text,
+        "transformation_status": status,
+        "deterministic_rules_applied": list(det_beat["deterministic_rules_applied"]),
+        "llm_pass_applied": True,
+        "differences": differences,
+        "warnings": [],
+        "preservation_validation": _empty_preservation_validation(),
+    }
+    return beat_record, False, usage
+
+
+# ---------------------------------------------------------------------------
 # Beat-level preservation checks (conservative, regex/heuristic-based —
 # see docs/architecture/HUMANIZATION_STAGE_DESIGN.md §8)
 # ---------------------------------------------------------------------------
@@ -474,12 +636,15 @@ def _beat_preservation_checks(original: str, humanized: str) -> list[str]:
 # Package-level assembly helpers
 # ---------------------------------------------------------------------------
 
+_TRANSFORMED_STATUSES = ("deterministic", "llm", "deterministic_and_llm")
+
+
 def _package_status(mode: str, beat_records: list, fallback_used: bool) -> str:
     if mode == "OFF":
         return "not_run"
     if fallback_used:
         return "fallback"
-    if any(b["transformation_status"] == "deterministic" for b in beat_records):
+    if any(b["transformation_status"] in _TRANSFORMED_STATUSES for b in beat_records):
         return "transformed"
     return "unchanged"
 

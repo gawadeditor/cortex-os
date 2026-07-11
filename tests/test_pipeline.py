@@ -350,6 +350,14 @@ MINIMAL_FINANCE_RECORD = {
     "cost_breakdown": {},
 }
 
+MINIMAL_HUMANIZED_SCRIPT_PACKAGE = {
+    "episode_id": "ep_001",
+    "source_script_package": MINIMAL_SCRIPT_PACKAGE,
+    "humanization": {"mode": "SHADOW", "status": "not_run"},
+    "beats": [],
+    "provenance": {},
+}
+
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -406,6 +414,7 @@ def _all_stubs_context(
     pdr=None,
     narrative_package=None,
     script_package=None,
+    humanized_script_package=None,
     finance_authorization=None,
     visual_package=None,
     thumbnail_package=None,
@@ -433,6 +442,8 @@ def _all_stubs_context(
                    return_value=narrative_package or MINIMAL_NARRATIVE_PACKAGE) as na, \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=script_package or MINIMAL_SCRIPT_PACKAGE) as se, \
+             patch("hypogeum.pipeline._run_humanization_stage",
+                   return_value=humanized_script_package or MINIMAL_HUMANIZED_SCRIPT_PACKAGE) as hs, \
              patch("hypogeum.pipeline._run_budget_authorization",
                    return_value=finance_authorization or MINIMAL_FINANCE_AUTHORIZATION) as fa, \
              patch("hypogeum.pipeline._run_visual_package_director",
@@ -448,7 +459,7 @@ def _all_stubs_context(
              patch("hypogeum.pipeline._run_cost_ledger",
                    return_value=finance_record or MINIMAL_FINANCE_RECORD) as fl:
             yield {
-                "ep": ep, "rd": rd, "na": na, "se": se, "fa": fa, "vpd": vpd,
+                "ep": ep, "rd": rd, "na": na, "se": se, "hs": hs, "fa": fa, "vpd": vpd,
                 "td": td, "audio": audio, "asm": asm, "pub": pub, "fl": fl,
             }
 
@@ -733,6 +744,8 @@ class TestAgentCallOrder:
                        side_effect=make_recorder("na", MINIMAL_NARRATIVE_PACKAGE)), \
                  patch("hypogeum.pipeline._run_script_engine",
                        side_effect=make_recorder("se", MINIMAL_SCRIPT_PACKAGE)), \
+                 patch("hypogeum.pipeline._run_humanization_stage",
+                       side_effect=make_recorder("hs", MINIMAL_HUMANIZED_SCRIPT_PACKAGE)), \
                  patch("hypogeum.pipeline._run_visual_package_director",
                        side_effect=make_recorder("vpd", MINIMAL_VISUAL_PACKAGE)), \
                  patch("hypogeum.pipeline._run_thumbnail_director",
@@ -745,7 +758,7 @@ class TestAgentCallOrder:
                        side_effect=make_recorder("pub", MINIMAL_PUBLISHING_RECORD)):
                 run_pipeline(topic_input="Test", episode_id="ep_001", config=cfg)
 
-        assert call_order == ["ep", "rd", "na", "se", "vpd", "td", "audio", "asm", "pub"]
+        assert call_order == ["ep", "rd", "na", "se", "hs", "vpd", "td", "audio", "asm", "pub"]
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +781,8 @@ class TestAgentInputHandoff:
                            return_value=MINIMAL_NARRATIVE_PACKAGE), \
                      patch("hypogeum.pipeline._run_script_engine",
                            return_value=MINIMAL_SCRIPT_PACKAGE), \
+                     patch("hypogeum.pipeline._run_humanization_stage",
+                           return_value=MINIMAL_HUMANIZED_SCRIPT_PACKAGE), \
                      patch("hypogeum.pipeline._run_visual_package_director",
                            return_value=MINIMAL_VISUAL_PACKAGE), \
                      patch("hypogeum.pipeline._run_thumbnail_director",
@@ -797,6 +812,8 @@ class TestAgentInputHandoff:
                        return_value=MINIMAL_NARRATIVE_PACKAGE) as mock_na, \
                  patch("hypogeum.pipeline._run_script_engine",
                        return_value=MINIMAL_SCRIPT_PACKAGE), \
+                 patch("hypogeum.pipeline._run_humanization_stage",
+                       return_value=MINIMAL_HUMANIZED_SCRIPT_PACKAGE), \
                  patch("hypogeum.pipeline._run_visual_package_director",
                        return_value=MINIMAL_VISUAL_PACKAGE), \
                  patch("hypogeum.pipeline._run_thumbnail_director",
@@ -1351,6 +1368,62 @@ class TestEndToEndWiring:
 
 
 # ---------------------------------------------------------------------------
+# TestHumanizationDownstreamIsolation
+#
+# SHADOW mode's entire purpose is to run for real without creating any
+# production dependency. These tests confirm the humanized_script_package
+# a mocked Humanization Stage produces is never passed to any downstream
+# consumer — every consumer keeps receiving the original script_package
+# object, by identity, not just by equal content.
+# ---------------------------------------------------------------------------
+
+class TestHumanizationDownstreamIsolation:
+    def test_no_downstream_consumer_receives_humanized_script_package(self):
+        """Finance/VPD/Audio/Assembly must never receive the sentinel
+        humanized_script_package object — only the original script_package."""
+        sentinel_humanized = {"episode_id": "ep_001", "sentinel": "humanized-not-for-consumption"}
+        result, mocks = run_full(humanized_script_package=sentinel_humanized)
+
+        for name in ("fa", "vpd", "audio", "asm"):
+            args, kwargs = mocks[name].call_args
+            all_values = list(args) + list(kwargs.values())
+            assert sentinel_humanized not in all_values, (
+                f"{name} must never receive the humanized_script_package sentinel"
+            )
+
+        # script_package (by identity) must still be what every consumer got.
+        assert mocks["vpd"].call_args[1].get("script_package") is MINIMAL_SCRIPT_PACKAGE
+        assert mocks["audio"].call_args[1].get("script_package") is MINIMAL_SCRIPT_PACKAGE
+        assert mocks["fa"].call_args[1].get("script_package") is MINIMAL_SCRIPT_PACKAGE
+
+    def test_humanized_script_package_only_reachable_via_pipeline_result(self):
+        sentinel_humanized = {"episode_id": "ep_001", "sentinel": "humanized-not-for-consumption"}
+        result, mocks = run_full(humanized_script_package=sentinel_humanized)
+        assert result.humanized_script_package is sentinel_humanized
+        assert result.script_package is MINIMAL_SCRIPT_PACKAGE
+        assert result.script_package is not result.humanized_script_package
+
+    def test_publishing_metadata_module_has_no_humanization_coupling(self):
+        """
+        hypogeum/publishing/metadata.py must remain unaffected by this
+        migration (docs/architecture/HUMANIZATION_STAGE_DESIGN.md §15) — it
+        must not import anything from the new Humanization Stage/adapter
+        modules, guarding against accidental future coupling.
+        """
+        import ast
+        import inspect
+
+        import hypogeum.publishing.metadata as mod
+        tree = ast.parse(inspect.getsource(mod))
+        imported_modules = {
+            node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        }
+        assert "hypogeum.agents.humanization_stage" not in imported_modules
+        assert "hypogeum.agents.humanizer_llm_adapter" not in imported_modules
+        assert "hypogeum.humanization_checkpoint" not in imported_modules
+
+
+# ---------------------------------------------------------------------------
 # TestCheckpointLoading
 # ---------------------------------------------------------------------------
 
@@ -1510,6 +1583,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_humanization_stage",
+                   return_value=MINIMAL_HUMANIZED_SCRIPT_PACKAGE), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -1539,6 +1614,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_humanization_stage",
+                   return_value=MINIMAL_HUMANIZED_SCRIPT_PACKAGE), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -1568,6 +1645,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_humanization_stage",
+                   return_value=MINIMAL_HUMANIZED_SCRIPT_PACKAGE), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -1605,6 +1684,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_humanization_stage",
+                   return_value=MINIMAL_HUMANIZED_SCRIPT_PACKAGE), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",

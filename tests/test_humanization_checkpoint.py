@@ -22,10 +22,13 @@ from __future__ import annotations
 import copy
 import json
 import os
+from unittest.mock import patch
 
 import pytest
 
 from hypogeum.agents.humanization_stage import run_humanization_stage
+from hypogeum.agents.humanizer_llm_adapter import HumanizerLLMResult
+from hypogeum.config import Config
 from hypogeum.humanization_checkpoint import (
     HumanizationCheckpointError,
     build_humanization_fingerprint,
@@ -35,6 +38,33 @@ from hypogeum.humanization_checkpoint import (
     save_humanization_checkpoint,
 )
 from hypogeum.schemas import validate
+
+
+def _make_config() -> Config:
+    pipeline_vars = [
+        "OPENROUTER_API_KEY", "OPENROUTER_SONNET_MODEL_ID", "OPENROUTER_OPUS_MODEL_ID",
+        "OPENROUTER_APP_NAME", "OPENROUTER_APP_URL", "OPENROUTER_FALLBACK_MODEL",
+        "ANTHROPIC_API_KEY",
+        "PERPLEXITY_API_KEY", "PERPLEXITY_MODEL", "PERPLEXITY_MAX_TOKENS",
+        "MUAPI_API_KEY", "MUAPI_DEFAULT_TIER", "MUAPI_TIMEOUT_SECONDS", "MUAPI_WEBHOOK_URL",
+        "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID",
+        "ELEVENLABS_STABILITY", "ELEVENLABS_SIMILARITY_BOOST",
+        "ELEVENLABS_MUSIC_MODEL_ID", "ELEVENLABS_MUSIC_DEFAULT_DURATION",
+        "OPENAI_API_KEY", "WHISPER_MODEL",
+    ]
+    original = {k: os.environ.get(k) for k in pipeline_vars}
+    for k in pipeline_vars:
+        os.environ.pop(k, None)
+    os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+    try:
+        return Config()
+    finally:
+        for k in pipeline_vars:
+            os.environ.pop(k, None)
+        for k, v in original.items():
+            if v is not None:
+                os.environ[k] = v
 
 
 def _script_package(text: str = "In 1901, divers found something extraordinary.") -> dict:
@@ -390,6 +420,80 @@ class TestReuseBehavior:
         assert before == after
 
 
+class TestShadowCheckpoint:
+    """
+    End-to-end SHADOW checkpoint hit/miss, using a real run_humanization_stage(
+    mode="SHADOW") call with the LLM adapter mocked (no real network access) —
+    distinct from TestReuseBehavior's override-based simulations above, which
+    exercise the same reuse conditions without actually invoking SHADOW mode.
+    """
+
+    def _shadow_result(self, script_package, config, episode_id="ep_001", humanized_text="Rewritten text."):
+        with patch(
+            "hypogeum.agents.humanization_stage.call_humanizer_llm",
+            return_value=HumanizerLLMResult(
+                humanized_text=humanized_text,
+                model_id="anthropic/claude-sonnet-4.6",
+                provider="openrouter",
+                input_tokens=50,
+                output_tokens=10,
+                total_tokens=60,
+                latency_ms=200,
+                via_fallback=False,
+                estimated_cost_usd=0.001,
+            ),
+        ):
+            return run_humanization_stage(
+                episode_id=episode_id, script_package=script_package,
+                pipeline_run_id="run_1", mode="SHADOW", config=config,
+            )
+
+    def test_shadow_checkpoint_cache_miss_then_hit(self, tmp_path, monkeypatch):
+        cfg = _make_config()
+        pkg = _script_package()
+        result = self._shadow_result(pkg, cfg)
+
+        # No checkpoint exists yet — reuse must miss.
+        reused_before = load_reusable_humanization_checkpoint(
+            assets_root=tmp_path, episode_id="ep_001", script_package=pkg,
+            mode="SHADOW", model_id="anthropic/claude-sonnet-4.6",
+        )
+        assert reused_before is None
+
+        save_humanization_checkpoint(assets_root=tmp_path, episode_id="ep_001", package=result)
+
+        # Same inputs, same mode, same model_id — reuse must hit.
+        reused_after = load_reusable_humanization_checkpoint(
+            assets_root=tmp_path, episode_id="ep_001", script_package=pkg,
+            mode="SHADOW", model_id="anthropic/claude-sonnet-4.6",
+        )
+        assert reused_after is not None
+        assert reused_after["humanization"]["input_hash"] == result["humanization"]["input_hash"]
+
+    def test_shadow_checkpoint_not_reused_for_off_mode_request(self, tmp_path):
+        cfg = _make_config()
+        pkg = _script_package()
+        result = self._shadow_result(pkg, cfg)
+        save_humanization_checkpoint(assets_root=tmp_path, episode_id="ep_001", package=result)
+
+        reused = load_reusable_humanization_checkpoint(
+            assets_root=tmp_path, episode_id="ep_001", script_package=pkg, mode="OFF",
+        )
+        assert reused is None
+
+    def test_shadow_checkpoint_invalidated_by_model_id_change(self, tmp_path):
+        cfg = _make_config()
+        pkg = _script_package()
+        result = self._shadow_result(pkg, cfg)
+        save_humanization_checkpoint(assets_root=tmp_path, episode_id="ep_001", package=result)
+
+        reused = load_reusable_humanization_checkpoint(
+            assets_root=tmp_path, episode_id="ep_001", script_package=pkg,
+            mode="SHADOW", model_id="anthropic/claude-opus-4.6",
+        )
+        assert reused is None
+
+
 class TestLanguageAndContent:
     def test_arabic_narration_round_trips(self, tmp_path):
         pkg = _script_package("في عام 1901، عثر الغواصون على شيء استثنائي.")
@@ -455,15 +559,15 @@ class TestIsolation:
         assert "run_agent" not in called_or_imported_names
         assert "run_humanization_stage" not in called_or_imported_names
 
-    def test_referenced_by_pipeline_in_off_mode_only(self):
-        # Pipeline wiring is authorized for OFF mode only. Guard against
-        # silent escalation to DETERMINISTIC_ONLY or LLM activation without
-        # an explicit future task.
+    def test_referenced_by_pipeline_in_shadow_mode_only(self):
+        # Pipeline wiring is authorized for SHADOW mode only. Guard against
+        # silent escalation to ACTIVE/LLM_CANARY or a downstream consumer
+        # switch without an explicit future task.
         pipeline_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hypogeum", "pipeline.py"
         )
         content = open(pipeline_path, encoding="utf-8").read()
         assert "humanization_checkpoint" in content
         assert "humanization_stage" in content
-        assert 'mode="OFF"' in content
-        assert "DETERMINISTIC_ONLY" not in content
+        assert '_HUMANIZATION_MODE = "SHADOW"' in content
+        assert "LLM_CANARY" not in content

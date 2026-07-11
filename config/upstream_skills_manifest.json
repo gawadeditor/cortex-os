@@ -27,6 +27,48 @@
       "state": "INSTALLED / WIRED / ACTIVE",
       "wired_to": "hypogeum/agents/script_engine.py — composed into SYSTEM_PROMPT via hypogeum.prompt_loader.compose_system_prompt(script_engine.txt, SKILL.md). Applied inside Script Engine's single existing run_agent() call; not a separate pipeline stage, adapter, or checkpoint layer.",
       "rollback_instructions": "In hypogeum/agents/script_engine.py, change _load_system_prompt() back to load_prompt(_PROMPT_FILE) (drop the _HUMANIZER_SKILL_PATH argument), then remove the HUMANIZATION section from hypogeum/prompts/script_engine.txt. Deleting third_party/skills/humanizer/1b48564898e999219882660237fde01bf4843a0f/ alone is not sufficient — script_engine.py's import would fail at startup unless the composition call is also reverted first."
+    },
+    {
+      "name": "gpt-image2",
+      "canonical_url": "https://github.com/wuyoscar/GPT-Image2-Skill",
+      "owner": "wuyoscar",
+      "repository": "GPT-Image2-Skill",
+      "pinned_commit_sha": "74a665173a19e461fa08f84ae76d800f85d2dd1e",
+      "upstream_version": "v0.2.0",
+      "retrieval_date": "2026-07-11",
+      "license_identifier": "CC BY 4.0",
+      "license_note": "Correction relative to docs/architecture/UPSTREAM_SKILL_MANIFEST.md §3.6, which recorded 'MIT' from a read-only verification pass that did not fetch the actual LICENSE file. The LICENSE file fetched and installed under this entry is Creative Commons Attribution 4.0 International (CC BY 4.0), not MIT. SKILL.md's own Attribution section independently states 'License: CC BY 4.0 for prompt patterns and gallery documentation', consistent with the fetched LICENSE file.",
+      "installation_method": "manual pinned copy — files fetched directly from the pinned commit via raw.githubusercontent.com; tag v0.2.0 verified via GitHub API to dereference to this exact commit SHA before fetch; installed files independently re-fetched and diffed byte-identical, and separately cross-checked against GitHub's own recorded git blob SHA-1 for each file; no npx skills / plugin marketplace installer used",
+      "upstream_directory_path": "third_party/skills/gpt-image2/74a665173a19e461fa08f84ae76d800f85d2dd1e/",
+      "upstream_source_paths": {
+        "SKILL.md": "skills/gpt-image/SKILL.md",
+        "LICENSE": "LICENSE"
+      },
+      "file_inventory": [
+        {
+          "path": "third_party/skills/gpt-image2/74a665173a19e461fa08f84ae76d800f85d2dd1e/SKILL.md",
+          "size_bytes": 11580,
+          "sha256": "b9a8226006433441b905141976a13943bffb813fd8443c7ec3470d08c381b6b8"
+        },
+        {
+          "path": "third_party/skills/gpt-image2/74a665173a19e461fa08f84ae76d800f85d2dd1e/LICENSE",
+          "size_bytes": 1079,
+          "sha256": "9fc35d3971ef0358bfee870305c757c4e3482b8a184a1c3b038dce9579d40f06"
+        }
+      ],
+      "excluded_from_installation": [
+        "skills/gpt-image/references/ — the 162-prompt Reference Gallery Atlas + craft.md + openai-cookbook.md; SKILL.md's own 'Scale references' section describes these as optional, load-on-demand reference material, not a hard dependency SKILL.md requires to be read or understood on its own",
+        "skills/gpt-image/scripts/ — generate.py, the CLI launcher that imports the openai SDK directly and reads OPENAI_API_KEY from the environment",
+        "skills/gpt-image/agents/ — not inspected; excluded per the same executable/CLI-surface exclusion policy applied to scripts/",
+        "src/ — the installable gpt_image_cli Python package (direct OpenAI SDK client)",
+        ".claude-plugin/, .github/, docs/, pyproject.toml, CHANGELOG.md, CODE_OF_CONDUCT.md, CONTRIBUTING.md, README.md, README.zh.md, SECURITY.md, SUPPORT.md, .gitignore — plugin/repo scaffolding, not runtime content"
+      ],
+      "state": "INSTALLED / NOT WIRED / NOT ACTIVE",
+      "intended_owning_agent": "hypogeum/agents/thumbnail_prompt_writer.py — per docs/architecture/GPT_IMAGE2_THUMBNAIL_SKILL_ATTACHMENT_AUDIT.md, the sole existing writer of the thumbnail_generation_plan.ranked_candidates[].image_prompt field, already composing one internal skill (thumbnail_intelligence_pipeline) into its own SYSTEM_PROMPT via compose_system_prompt() inside its single existing run_agent() call.",
+      "intended_attachment_mechanism": "compose_system_prompt() — extending thumbnail_prompt_writer.py's existing _load_system_prompt() call with this pinned SKILL.md path as an additional skill argument. Not implemented by this installation task.",
+      "runtime_state": "Not wired, not active. No Hypogeum module references third_party/skills/gpt-image2/ yet. thumbnail_prompt_writer.py is unmodified by this task.",
+      "compatibility_findings": "SKILL.md's canonical usage is a CLI/SDK wrapper (uv run generate.py / uvx gpt-image, both calling the official openai Python SDK directly against OPENAI_API_KEY) — structurally incompatible with direct verbatim composition without an explicit bridging instruction telling Claude to use only the prompt-craft knowledge, never the CLI invocation examples, at the next attachment task. See docs/architecture/GPT_IMAGE2_THUMBNAIL_SKILL_ATTACHMENT_AUDIT.md for the full finding; not resolved or implemented by this installation task.",
+      "rollback_instructions": "Delete third_party/skills/gpt-image2/74a665173a19e461fa08f84ae76d800f85d2dd1e/ and remove this entry from config/upstream_skills_manifest.json. No agent, prompt, schema, or pipeline file references this installation, so no other file requires any change to complete the rollback."
     }
   ]
 }

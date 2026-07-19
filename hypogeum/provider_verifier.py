@@ -86,6 +86,15 @@ _VERIFY_VIA: dict[str, str] = {
 # freepik removed — now has a real probe (Phase 1J)
 _NOT_VERIFIABLE: frozenset = frozenset()
 
+# When a provider has more than one active SecretProfile, prefer the one
+# with this label over "first created" — keeps verify_provider() agreeing
+# with hypogeum.agents.publishing_agent's own SecretProfile-first
+# resolution (which filters on this exact label) instead of picking
+# whichever active row happens to be oldest.
+_AUTHORITATIVE_SECRET_LABEL: dict[str, str] = {
+    "youtube": "youtube-oauth-refresh",
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -436,6 +445,11 @@ def verify_provider(
     try:
         profiles = list_secret_profiles(provider=provider, db_path=db)
         active = [p for p in profiles if p.status == "active"]
+        preferred_label = _AUTHORITATIVE_SECRET_LABEL.get(provider)
+        if preferred_label:
+            labeled = [p for p in active if p.label == preferred_label]
+            if labeled:
+                active = labeled
         if active:
             credential = active[0].credential_data
             source = "secret_profile"

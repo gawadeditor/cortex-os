@@ -495,6 +495,152 @@ class TestProbeYoutubeReal:
 
 
 # ---------------------------------------------------------------------------
+# TestYoutubeSecretProfilePrecedence — when more than one active
+# provider='youtube' SecretProfile exists (e.g. a stale imported
+# 'youtube-env' row alongside the dashboard-managed 'youtube-oauth-refresh'
+# row), verify_provider() must probe the same credential publishing_agent
+# would actually use, not just whichever row is oldest.
+# ---------------------------------------------------------------------------
+
+class TestYoutubeSecretProfilePrecedence:
+
+    def _mock_oauth_response(self, status_code, json_data):
+        resp = MagicMock()
+        resp.ok = status_code < 400
+        resp.status_code = status_code
+        resp.json.return_value = json_data
+        resp.headers = {}
+        return resp
+
+    def test_prefers_oauth_refresh_label_over_older_env_profile(self, db, monkeypatch):
+        from hypogeum.credential_manager import create_secret_profile
+
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+
+        # Older, stale row -- created first so it would win a naive "first
+        # active row" selection.
+        create_secret_profile(
+            provider="youtube", label="youtube-env",
+            credential_type="oauth2_token", credential_data="1//stale-env-token",
+            db_path=db,
+        )
+        # Newer, authoritative row -- what publishing_agent.py actually uses.
+        create_secret_profile(
+            provider="youtube", label="youtube-oauth-refresh",
+            credential_type="oauth2_token", credential_data="1//authoritative-token",
+            db_path=db,
+        )
+
+        mock_resp = self._mock_oauth_response(200, {"access_token": "ya29.x"})
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = verify_provider("youtube", db_path=db)
+
+        assert result["status"] == STATUS_VERIFIED
+        assert mock_post.call_args[1]["data"]["refresh_token"] == "1//authoritative-token"
+
+    def test_stale_older_row_cannot_override_authoritative_profile(self, db, monkeypatch):
+        """The stale row's credential must never reach the probe once an
+        authoritative labeled row exists, even if the stale one is 'valid'
+        and the authoritative one would fail -- the point is which
+        credential gets tested, not which one happens to succeed."""
+        from hypogeum.credential_manager import create_secret_profile
+
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+
+        create_secret_profile(
+            provider="youtube", label="youtube-env",
+            credential_type="oauth2_token", credential_data="1//stale-env-token",
+            db_path=db,
+        )
+        create_secret_profile(
+            provider="youtube", label="youtube-oauth-refresh",
+            credential_type="oauth2_token", credential_data="1//authoritative-token",
+            db_path=db,
+        )
+
+        mock_resp = self._mock_oauth_response(400, {"error": "invalid_grant"})
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = verify_provider("youtube", db_path=db)
+
+        assert result["status"] == STATUS_FAILED
+        assert mock_post.call_args[1]["data"]["refresh_token"] == "1//authoritative-token"
+        assert mock_post.call_args[1]["data"]["refresh_token"] != "1//stale-env-token"
+
+    def test_falls_back_to_active_profile_when_no_oauth_refresh_label(self, db, monkeypatch):
+        """If no 'youtube-oauth-refresh' row exists yet, verify_provider()
+        must still fall back to whatever active YouTube profile it can
+        find -- the label preference is additive, not a hard requirement."""
+        from hypogeum.credential_manager import create_secret_profile
+
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+
+        create_secret_profile(
+            provider="youtube", label="youtube-env",
+            credential_type="oauth2_token", credential_data="1//only-token",
+            db_path=db,
+        )
+
+        mock_resp = self._mock_oauth_response(200, {"access_token": "ya29.x"})
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = verify_provider("youtube", db_path=db)
+
+        assert result["status"] == STATUS_VERIFIED
+        assert mock_post.call_args[1]["data"]["refresh_token"] == "1//only-token"
+
+    def test_other_provider_secret_profile_precedence_unaffected(self, db, monkeypatch):
+        """Only youtube gets a label preference. A provider with two active
+        SecretProfiles (e.g. elevenlabs) must keep the pre-existing
+        first-active-row behavior."""
+        from hypogeum.credential_manager import create_secret_profile
+
+        create_secret_profile(
+            provider="elevenlabs", label="first",
+            credential_type="api_key", credential_data="el-first-key",
+            db_path=db,
+        )
+        create_secret_profile(
+            provider="elevenlabs", label="second",
+            credential_type="api_key", credential_data="el-second-key",
+            db_path=db,
+        )
+
+        mock = MagicMock(return_value=(True, None, 50))
+        with patch.dict("hypogeum.provider_verifier._PROBES", {"elevenlabs": mock}):
+            verify_provider("elevenlabs", db_path=db)
+
+        mock.assert_called_once_with("el-first-key")
+
+    def test_no_second_google_request_introduced(self, db, monkeypatch):
+        """The precedence fix must not add any extra network call -- exactly
+        one OAuth exchange per verify_provider() call, regardless of how
+        many active SecretProfiles exist."""
+        from hypogeum.credential_manager import create_secret_profile
+
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+
+        create_secret_profile(
+            provider="youtube", label="youtube-env",
+            credential_type="oauth2_token", credential_data="1//stale-env-token",
+            db_path=db,
+        )
+        create_secret_profile(
+            provider="youtube", label="youtube-oauth-refresh",
+            credential_type="oauth2_token", credential_data="1//authoritative-token",
+            db_path=db,
+        )
+
+        mock_resp = self._mock_oauth_response(200, {"access_token": "ya29.x"})
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            verify_provider("youtube", db_path=db)
+
+        mock_post.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # TestRecordProviderVerification — the shared persistence entry point for
 # callers (e.g. publishing_agent) that already performed the real check
 # themselves and must not repeat the underlying network request.

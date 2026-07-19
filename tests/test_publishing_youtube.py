@@ -116,6 +116,160 @@ class TestRefreshYoutubeToken:
             with pytest.raises(HardFailureError):
                 yt.refresh_youtube_token(config)
 
+    def test_delegates_to_exchange_refresh_token_with_correct_fields(self):
+        """refresh_youtube_token() must be a thin wrapper around
+        exchange_refresh_token() -- the sole shared OAuth exchange
+        primitive -- not a second, independent implementation."""
+        config = _make_config()
+        with patch("hypogeum.publishing.youtube.exchange_refresh_token",
+                   return_value="ya29.delegated") as mock_exchange:
+            token = yt.refresh_youtube_token(config)
+
+        assert token == "ya29.delegated"
+        mock_exchange.assert_called_once_with(
+            refresh_token="refresh_token_123",
+            client_id="client_id_123",
+            client_secret="client_secret_123",
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestExchangeRefreshToken (the shared OAuth exchange primitive)
+# ---------------------------------------------------------------------------
+
+class TestExchangeRefreshToken:
+
+    def test_success_returns_access_token(self):
+        mock_resp = _make_response(200, json_data={"access_token": "ya29.abc"})
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            token = yt.exchange_refresh_token(
+                refresh_token="rt", client_id="cid", client_secret="csecret",
+            )
+        assert token == "ya29.abc"
+        assert mock_post.call_args[0][0] == yt._OAUTH_TOKEN_URL
+        assert mock_post.call_args[1]["data"] == {
+            "grant_type": "refresh_token",
+            "client_id": "cid",
+            "client_secret": "csecret",
+            "refresh_token": "rt",
+        }
+
+    def test_invalid_grant_is_a_hard_failure_with_error_code(self):
+        """The one case that matters most: an expired/revoked refresh token
+        must be distinguishable from every other failure mode, since it is
+        the one that means 'the user must reauthorize'."""
+        mock_resp = _make_response(
+            400,
+            json_data={"error": "invalid_grant", "error_description": "Token has been expired or revoked."},
+        )
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(HardFailureError) as exc_info:
+                yt.exchange_refresh_token(refresh_token="rt", client_id="cid", client_secret="cs")
+        assert exc_info.value.error_code == "invalid_grant"
+        assert exc_info.value.status_code == 400
+
+    def test_invalid_client_is_distinguishable_from_invalid_grant(self):
+        """A client_id/secret misconfiguration is NOT the same problem as an
+        expired user token and must not be presented as one."""
+        mock_resp = _make_response(
+            401,
+            json_data={"error": "invalid_client", "error_description": "The OAuth client was not found."},
+        )
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(HardFailureError) as exc_info:
+                yt.exchange_refresh_token(refresh_token="rt", client_id="bad_cid", client_secret="cs")
+        assert exc_info.value.error_code == "invalid_client"
+        assert exc_info.value.error_code != "invalid_grant"
+
+    def test_unauthorized_client_is_preserved_as_its_own_error_code(self):
+        mock_resp = _make_response(
+            400,
+            json_data={"error": "unauthorized_client"},
+        )
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(HardFailureError) as exc_info:
+                yt.exchange_refresh_token(refresh_token="rt", client_id="cid", client_secret="cs")
+        assert exc_info.value.error_code == "unauthorized_client"
+
+    def test_missing_refresh_token_fails_fast_without_a_network_call(self):
+        with patch("requests.post") as mock_post:
+            with pytest.raises(HardFailureError) as exc_info:
+                yt.exchange_refresh_token(refresh_token="", client_id="cid", client_secret="cs")
+        assert exc_info.value.error_code == "missing_refresh_token"
+        mock_post.assert_not_called()
+
+    def test_timeout_is_a_soft_failure_not_a_credential_problem(self):
+        with patch("requests.post", side_effect=requests.Timeout("timed out")):
+            with pytest.raises(SoftFailureError):
+                yt.exchange_refresh_token(refresh_token="rt", client_id="cid", client_secret="cs")
+
+    def test_network_error_is_a_soft_failure(self):
+        with patch("requests.post", side_effect=requests.ConnectionError("no route")):
+            with pytest.raises(SoftFailureError):
+                yt.exchange_refresh_token(refresh_token="rt", client_id="cid", client_secret="cs")
+
+    def test_temporary_upstream_google_failure_is_soft_not_hard(self):
+        """503 from Google must be retry-eligible, never treated the same
+        as a real credential rejection."""
+        mock_resp = _make_response(503, json_data={"error": "temporarily_unavailable"})
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(SoftFailureError):
+                yt.exchange_refresh_token(refresh_token="rt", client_id="cid", client_secret="cs")
+
+    def test_unexpected_response_shape_is_a_hard_failure(self):
+        """2xx status but no access_token in the body -- must not be
+        silently treated as success."""
+        mock_resp = _make_response(200, json_data={"unexpected": "shape"})
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(HardFailureError):
+                yt.exchange_refresh_token(refresh_token="rt", client_id="cid", client_secret="cs")
+
+    def test_error_body_without_error_field_still_raises_hard_failure(self):
+        """A non-2xx response whose body has no 'error' key at all (e.g. an
+        HTML error page, or a code outside the known hard/soft sets) must
+        still fail closed, not silently succeed."""
+        mock_resp = _make_response(418, json_data={})
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(HardFailureError) as exc_info:
+                yt.exchange_refresh_token(refresh_token="rt", client_id="cid", client_secret="cs")
+        assert exc_info.value.status_code == 418
+
+    def test_never_logs_refresh_token_client_secret_or_access_token(self):
+        """Secrets must never appear in any log call's positional args or
+        kwargs, success or failure."""
+        mock_resp = _make_response(200, json_data={"access_token": "ya29.super-secret-token"})
+        with patch("requests.post", return_value=mock_resp), \
+             patch("hypogeum.publishing.youtube.get_logger") as mock_get_logger:
+            mock_log = MagicMock()
+            mock_get_logger.return_value = mock_log
+            yt.exchange_refresh_token(
+                refresh_token="secret-refresh-token-value",
+                client_id="cid",
+                client_secret="super-secret-client-secret",
+            )
+        for call_obj in mock_log.info.call_args_list + mock_log.warn.call_args_list:
+            call_text = str(call_obj)
+            assert "secret-refresh-token-value" not in call_text
+            assert "super-secret-client-secret" not in call_text
+            assert "ya29.super-secret-token" not in call_text
+
+    def test_never_logs_secrets_on_failure_either(self):
+        mock_resp = _make_response(400, json_data={"error": "invalid_grant"})
+        with patch("requests.post", return_value=mock_resp), \
+             patch("hypogeum.publishing.youtube.get_logger") as mock_get_logger:
+            mock_log = MagicMock()
+            mock_get_logger.return_value = mock_log
+            with pytest.raises(HardFailureError):
+                yt.exchange_refresh_token(
+                    refresh_token="secret-refresh-token-value",
+                    client_id="cid",
+                    client_secret="super-secret-client-secret",
+                )
+        for call_obj in mock_log.info.call_args_list + mock_log.warn.call_args_list + mock_log.error.call_args_list:
+            call_text = str(call_obj)
+            assert "secret-refresh-token-value" not in call_text
+            assert "super-secret-client-secret" not in call_text
+
 
 # ---------------------------------------------------------------------------
 # TestUploadVideo

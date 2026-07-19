@@ -301,6 +301,154 @@ class TestYouTubeAuthFailure:
 
 
 # ---------------------------------------------------------------------------
+# TestYouTubeProviderVerificationRecording — publishing_agent must record
+# its own already-known OAuth result into the shared provider-verification
+# state (so /platforms and /attention become accurate) without making a
+# second request to Google.
+# ---------------------------------------------------------------------------
+
+class TestYouTubeProviderVerificationRecording:
+
+    def test_success_records_shared_provider_health(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_001", tmp_path)
+
+        with _patch_platforms(), \
+             patch("hypogeum.provider_verifier.record_provider_verification") as mock_record:
+            _run(pkg, config, "ep_ytrecord_001", tmp_path)
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["provider"] == "youtube"
+        assert mock_record.call_args.kwargs["ok"] is True
+        assert mock_record.call_args.kwargs["source"] == "env"
+
+    def test_failure_records_shared_provider_failure_with_error_code(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_002", tmp_path)
+
+        exc = HardFailureError(
+            "YouTube OAuth exchange failed: invalid_grant", status_code=400, error_code="invalid_grant",
+        )
+        with _patch_platforms(yt_refresh_exc=exc), \
+             patch("hypogeum.provider_verifier.record_provider_verification") as mock_record:
+            _run(pkg, config, "ep_ytrecord_003", tmp_path)
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["provider"] == "youtube"
+        assert mock_record.call_args.kwargs["ok"] is False
+        assert mock_record.call_args.kwargs["error"] == "invalid_grant"
+
+    def test_failure_without_error_code_falls_back_to_message(self, tmp_path):
+        """SoftFailureError (e.g. network/timeout) has no error_code attribute
+        at all -- the recorded error must fall back to the exception message
+        rather than crash or record nothing."""
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_004", tmp_path)
+
+        exc = SoftFailureError("YouTube OAuth exchange network error: timed out")
+        with _patch_platforms(yt_refresh_exc=exc), \
+             patch("hypogeum.provider_verifier.record_provider_verification") as mock_record:
+            _run(pkg, config, "ep_ytrecord_004", tmp_path)
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["ok"] is False
+        assert "timed out" in mock_record.call_args.kwargs["error"]
+
+    def test_does_not_make_a_second_oauth_request_via_verify_provider(self, tmp_path):
+        """The whole point of record_provider_verification(): publishing
+        must reuse the OAuth result it already obtained, never call
+        verify_provider() (which would re-probe Google) to record it."""
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_005", tmp_path)
+
+        with _patch_platforms(), \
+             patch("hypogeum.provider_verifier.verify_provider") as mock_verify, \
+             patch("hypogeum.provider_verifier.record_provider_verification") as mock_record:
+            _run(pkg, config, "ep_ytrecord_005", tmp_path)
+
+        mock_verify.assert_not_called()
+        mock_record.assert_called_once()
+
+    def test_existing_pdr_and_failure_behavior_unchanged(self, tmp_path):
+        """The provider-verification recording is additive -- the existing
+        PDR / failures-list behavior from TestYouTubeAuthFailure must be
+        byte-for-byte unchanged."""
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_006", tmp_path)
+
+        with _patch_platforms(yt_refresh_exc=HardFailureError("401 Unauthorized", status_code=401)):
+            result = _run(pkg, config, "ep_ytrecord_006", tmp_path)
+
+        assert len(result.get("failures", [])) > 0
+        yt_results = [r for r in result["platform_results"] if r["platform"] == "youtube"]
+        assert all(r["status"] == "failed" for r in yt_results)
+
+    def test_hard_failure_records_transient_false(self, tmp_path):
+        """A definitive OAuth rejection (HardFailureError) must be recorded
+        as transient=False -- eligible to persist as STATUS_FAILED."""
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_008", tmp_path)
+
+        exc = HardFailureError(
+            "invalid_grant", status_code=400, error_code="invalid_grant",
+        )
+        with _patch_platforms(yt_refresh_exc=exc), \
+             patch("hypogeum.provider_verifier.record_provider_verification") as mock_record:
+            _run(pkg, config, "ep_ytrecord_008", tmp_path)
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["transient"] is False
+
+    def test_soft_failure_records_transient_true(self, tmp_path):
+        """A transient operational failure (SoftFailureError: timeout,
+        network error, 429, upstream 5xx) must be recorded as
+        transient=True -- must never overwrite a prior definitive
+        verified/failed result with STATUS_FAILED."""
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_009", tmp_path)
+
+        exc = SoftFailureError("YouTube OAuth exchange network error: timed out")
+        with _patch_platforms(yt_refresh_exc=exc), \
+             patch("hypogeum.provider_verifier.record_provider_verification") as mock_record:
+            _run(pkg, config, "ep_ytrecord_009", tmp_path)
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["transient"] is True
+
+    def test_transient_failure_still_produces_pdr_and_failure(self, tmp_path):
+        """A transient failure must not be swallowed -- publishing still
+        fails/skips YouTube and issues a PDR exactly as before. Only the
+        shared provider-verification record's status persistence differs."""
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_010", tmp_path)
+
+        exc = SoftFailureError("YouTube OAuth exchange network error: timed out")
+        with _patch_platforms(yt_refresh_exc=exc):
+            result = _run(pkg, config, "ep_ytrecord_010", tmp_path)
+
+        assert len(result.get("failures", [])) > 0
+        yt_results = [r for r in result["platform_results"] if r["platform"] == "youtube"]
+        assert all(r["status"] == "failed" for r in yt_results)
+
+    def test_recording_failure_never_blocks_publishing(self, tmp_path):
+        """record_provider_verification() itself raising must not break
+        publishing -- it is visibility only."""
+        config = _make_config(has_youtube=True, has_meta=True)
+        pkg = _make_final_render_package("ep_ytrecord_007", tmp_path)
+
+        with _patch_platforms(), \
+             patch("hypogeum.provider_verifier.record_provider_verification",
+                   side_effect=RuntimeError("db unavailable")):
+            result = _run(pkg, config, "ep_ytrecord_007", tmp_path)
+
+        # YouTube auth itself succeeded (no yt_refresh_exc) -- a broken
+        # recording call must not turn that into a publishing failure.
+        yt_results = [r for r in result["platform_results"] if r["platform"] == "youtube"]
+        assert len(yt_results) > 0
+        assert all(r["status"] != "failed" for r in yt_results)
+
+
+# ---------------------------------------------------------------------------
 # TestQuotaExceeded
 # ---------------------------------------------------------------------------
 

@@ -2,6 +2,11 @@
 hypogeum/publishing/youtube.py — YouTube Data API v3 client
 
 Public API:
+    exchange_refresh_token(refresh_token, client_id, client_secret) -> str
+        Sole OAuth2 token-endpoint primitive — shared by refresh_youtube_token()
+        and by provider verification (hypogeum.provider_verifier,
+        hypogeum.credential_manager), so real publish-time refresh and
+        dashboard "is YouTube connected" status can never disagree.
     refresh_youtube_token(config) -> str
     upload_video(config, access_token, video_path, metadata) -> str
     upload_thumbnail(config, access_token, video_id, thumb_path) -> bool
@@ -120,9 +125,117 @@ def _raise_for_status(response: requests.Response, context: str = "") -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def exchange_refresh_token(
+    refresh_token: str,
+    client_id: str,
+    client_secret: str,
+) -> str:
+    """
+    Exchange a refresh token for a fresh access token via Google's OAuth2
+    token endpoint (https://oauth2.googleapis.com/token).
+
+    This is the sole network primitive for YouTube token refresh in the
+    codebase — refresh_youtube_token() (real publish-time refresh) and
+    provider verification (hypogeum.provider_verifier._probe_youtube(),
+    hypogeum.credential_manager._test_youtube()) all call this, so there is
+    exactly one place that talks to Google's token endpoint and exactly one
+    definition of what "the token is valid" means.
+
+    Args:
+        refresh_token: The OAuth refresh token to exchange.
+        client_id:     OAuth client ID.
+        client_secret: OAuth client secret.
+
+    Returns:
+        Fresh access_token string on success.
+
+    Raises:
+        HardFailureError — Google rejected the request (400/401/403), or the
+            response body was missing an access_token despite a 2xx status.
+            error_code carries Google's OAuth "error" field when the
+            response body includes one (e.g. "invalid_grant" — the refresh
+            token itself is expired/revoked and the user must reauthorize;
+            "invalid_client"/"unauthorized_client" — a client_id/secret
+            configuration problem, not an expired user token). error_code
+            is "missing_refresh_token" (synthetic, not from Google) when no
+            refresh_token was supplied at all — Google is never called in
+            that case. error_code may be None when Google returns a hard
+            status with no parseable error body.
+        SoftFailureError — 429/500/503 (retry-eligible / transient upstream
+            Google issue) or a network/timeout failure with no HTTP
+            response at all. Callers must not treat this as credential
+            revocation — it says nothing about whether the token itself is
+            valid.
+
+    Never logs refresh_token, client_secret, or the returned access_token.
+    """
+    log = get_logger(agent="youtube")
+
+    if not refresh_token:
+        raise HardFailureError(
+            "YouTube OAuth exchange: no refresh token configured",
+            error_code="missing_refresh_token",
+        )
+
+    log.info("youtube_oauth_exchange_start")
+
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+    }
+
+    try:
+        response = requests.post(_OAUTH_TOKEN_URL, data=payload, timeout=30)
+    except requests.RequestException as exc:
+        log.warn("youtube_oauth_exchange_network_error", error=str(exc)[:200])
+        raise SoftFailureError(f"YouTube OAuth exchange network error: {exc}") from exc
+
+    if not response.ok:
+        # Google's OAuth2 token endpoint returns {"error": "...", "error_description": "..."}
+        # on failure — a different, flatter shape than the YouTube Data API's
+        # {"error": {"errors": [{"reason": ...}]}} used elsewhere in this file.
+        error_code = None
+        try:
+            error_code = response.json().get("error")
+        except ValueError:
+            pass
+        log.warn(
+            "youtube_oauth_exchange_failed",
+            status_code=response.status_code,
+            error_code=error_code,
+        )
+        retry_after = _parse_retry_after(response)
+        classify_http_status(response.status_code, error_code=error_code, retry_after=retry_after)
+        # classify_http_status only raises for the known hard/soft code
+        # sets; any other non-2xx status must still not be treated as
+        # success.
+        raise HardFailureError(
+            f"YouTube OAuth exchange failed: HTTP {response.status_code}",
+            status_code=response.status_code,
+            error_code=error_code,
+        )
+
+    data = response.json()
+    access_token = data.get("access_token", "")
+    if not access_token:
+        log.warn("youtube_oauth_exchange_missing_access_token", status_code=response.status_code)
+        raise HardFailureError(
+            "YouTube OAuth exchange: response missing access_token",
+            status_code=response.status_code,
+        )
+
+    log.info("youtube_oauth_exchange_complete")
+    return access_token
+
+
 def refresh_youtube_token(config: Config) -> str:
     """
-    Exchange YouTube refresh token for a fresh access token.
+    Exchange the configured YouTube refresh token for a fresh access token.
+
+    Thin wrapper around exchange_refresh_token() — see that function for the
+    full failure-mode contract.
 
     Args:
         config: Config instance with YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET,
@@ -130,42 +243,12 @@ def refresh_youtube_token(config: Config) -> str:
 
     Returns:
         Fresh access_token string.
-
-    Raises:
-        HardFailureError — on 401 or any non-2xx response.
     """
-    log = get_logger(agent="youtube")
-
-    log.info("youtube_token_refresh_start")
-
-    payload = {
-        "grant_type": "refresh_token",
-        "client_id": config.YOUTUBE_CLIENT_ID,
-        "client_secret": config.YOUTUBE_CLIENT_SECRET,
-        "refresh_token": config.YOUTUBE_REFRESH_TOKEN,
-    }
-
-    try:
-        response = requests.post(_OAUTH_TOKEN_URL, data=payload, timeout=30)
-    except requests.RequestException as exc:
-        raise SoftFailureError(f"YouTube token refresh network error: {exc}") from exc
-
-    if not response.ok:
-        raise HardFailureError(
-            f"YouTube token refresh failed: HTTP {response.status_code}",
-            status_code=response.status_code,
-        )
-
-    data = response.json()
-    access_token = data.get("access_token", "")
-    if not access_token:
-        raise HardFailureError(
-            "YouTube token refresh: response missing access_token",
-            status_code=response.status_code,
-        )
-
-    log.info("youtube_token_refresh_complete")
-    return access_token
+    return exchange_refresh_token(
+        refresh_token=config.YOUTUBE_REFRESH_TOKEN,
+        client_id=config.YOUTUBE_CLIENT_ID,
+        client_secret=config.YOUTUBE_CLIENT_SECRET,
+    )
 
 
 def upload_video(

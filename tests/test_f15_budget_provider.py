@@ -326,6 +326,335 @@ class TestVerifyProvider:
         assert result.get("checked_at")
 
 
+# ---------------------------------------------------------------------------
+# TestProbeYoutubeReal — the actual _probe_youtube() implementation, not a
+# substituted mock. This is the exact false-positive fix: previously
+# _probe_youtube() was a token-length check and none of the tests above
+# exercised its real body for "youtube" at all.
+# ---------------------------------------------------------------------------
+
+class TestProbeYoutubeReal:
+
+    def _mock_oauth_response(self, status_code, json_data):
+        resp = MagicMock()
+        resp.ok = status_code < 400
+        resp.status_code = status_code
+        resp.json.return_value = json_data
+        resp.headers = {}
+        return resp
+
+    def test_probe_youtube_success_makes_real_oauth_call(self, monkeypatch):
+        from hypogeum.provider_verifier import _probe_youtube
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid-real")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "csecret-real")
+        mock_resp = self._mock_oauth_response(200, {"access_token": "ya29.real"})
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            success, error, latency_ms = _probe_youtube("some-refresh-token")
+        assert success is True
+        assert error is None
+        mock_post.assert_called_once()
+        assert mock_post.call_args[1]["data"]["client_id"] == "cid-real"
+        assert mock_post.call_args[1]["data"]["client_secret"] == "csecret-real"
+        assert mock_post.call_args[1]["data"]["refresh_token"] == "some-refresh-token"
+
+    def test_probe_youtube_invalid_grant_fails(self, monkeypatch):
+        """The exact regression this fix targets: a fake/expired/revoked
+        token that is >10 characters (would have passed the old length
+        check) must now genuinely fail."""
+        from hypogeum.provider_verifier import _probe_youtube
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+        mock_resp = self._mock_oauth_response(400, {"error": "invalid_grant"})
+        with patch("requests.post", return_value=mock_resp):
+            success, error, latency_ms = _probe_youtube("1//fake-but-long-enough-token")
+        assert success is False
+        assert error == "invalid_grant"
+
+    def test_verify_provider_youtube_end_to_end_success(self, db, monkeypatch):
+        """verify_provider('youtube') exercises real credential resolution
+        (env fallback) through to the real probe and real persistence."""
+        monkeypatch.setenv("YOUTUBE_REFRESH_TOKEN", "1//env-refresh-token")
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+        mock_resp = self._mock_oauth_response(200, {"access_token": "ya29.x"})
+        with patch("requests.post", return_value=mock_resp):
+            result = verify_provider("youtube", db_path=db)
+        assert result["status"] == STATUS_VERIFIED
+
+    def test_verify_provider_youtube_end_to_end_invalid_grant(self, db, monkeypatch):
+        monkeypatch.setenv("YOUTUBE_REFRESH_TOKEN", "1//env-refresh-token")
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+        mock_resp = self._mock_oauth_response(400, {"error": "invalid_grant"})
+        with patch("requests.post", return_value=mock_resp):
+            result = verify_provider("youtube", db_path=db)
+        assert result["status"] == STATUS_FAILED
+        assert result["error"] == "invalid_grant"
+
+        conn = get_connection(db)
+        try:
+            row = get_provider_verification(conn, "youtube")
+        finally:
+            conn.close()
+        assert row["status"] == STATUS_FAILED
+        assert row["error_message"] == "invalid_grant"
+
+    def test_probe_youtube_invalid_client_fails(self, monkeypatch):
+        """invalid_client (bad client_id/client_secret app config) must be
+        distinguishable from invalid_grant (expired/revoked user token) --
+        both are definitive hard OAuth rejections."""
+        from hypogeum.provider_verifier import _probe_youtube
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "bad-cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "bad-cs")
+        mock_resp = self._mock_oauth_response(401, {"error": "invalid_client"})
+        with patch("requests.post", return_value=mock_resp):
+            success, error, latency_ms = _probe_youtube("1//some-token")
+        assert success is False
+        assert error == "invalid_client"
+
+    def test_verify_provider_youtube_transient_timeout_preserves_prior_verified(self, db, monkeypatch):
+        """A timeout on a subsequent manual /api/providers/verify/youtube
+        check must not downgrade a prior real 'verified' result to
+        'failed' -- it is a transient operational failure, not a
+        definitive credential rejection."""
+        import requests
+        monkeypatch.setenv("YOUTUBE_REFRESH_TOKEN", "1//env-refresh-token")
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+
+        mock_ok = self._mock_oauth_response(200, {"access_token": "ya29.x"})
+        with patch("requests.post", return_value=mock_ok):
+            first = verify_provider("youtube", db_path=db)
+        assert first["status"] == STATUS_VERIFIED
+
+        with patch("requests.post", side_effect=requests.exceptions.Timeout("timed out")):
+            second = verify_provider("youtube", db_path=db)
+        assert second["status"] == STATUS_VERIFIED
+
+        conn = get_connection(db)
+        try:
+            row = get_provider_verification(conn, "youtube")
+        finally:
+            conn.close()
+        assert row["status"] == STATUS_VERIFIED
+
+    def test_verify_provider_youtube_transient_503_preserves_prior_verified(self, db, monkeypatch):
+        monkeypatch.setenv("YOUTUBE_REFRESH_TOKEN", "1//env-refresh-token")
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+
+        mock_ok = self._mock_oauth_response(200, {"access_token": "ya29.x"})
+        with patch("requests.post", return_value=mock_ok):
+            first = verify_provider("youtube", db_path=db)
+        assert first["status"] == STATUS_VERIFIED
+
+        mock_503 = self._mock_oauth_response(503, {"error": "temporarily_unavailable"})
+        with patch("requests.post", return_value=mock_503):
+            second = verify_provider("youtube", db_path=db)
+        assert second["status"] == STATUS_VERIFIED
+
+        conn = get_connection(db)
+        try:
+            row = get_provider_verification(conn, "youtube")
+        finally:
+            conn.close()
+        assert row["status"] == STATUS_VERIFIED
+
+    def test_verify_provider_youtube_recovers_after_transient_then_success(self, db, monkeypatch):
+        """The dashboard-visible definitive state must recover normally:
+        verified -> transient failure (preserved as verified) -> a later
+        real success still lands as verified."""
+        monkeypatch.setenv("YOUTUBE_REFRESH_TOKEN", "1//env-refresh-token")
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "cid")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "cs")
+
+        mock_ok = self._mock_oauth_response(200, {"access_token": "ya29.x"})
+        with patch("requests.post", return_value=mock_ok):
+            verify_provider("youtube", db_path=db)
+
+        mock_503 = self._mock_oauth_response(503, {"error": "temporarily_unavailable"})
+        with patch("requests.post", return_value=mock_503):
+            verify_provider("youtube", db_path=db)
+
+        with patch("requests.post", return_value=mock_ok):
+            final = verify_provider("youtube", db_path=db)
+        assert final["status"] == STATUS_VERIFIED
+
+    def test_other_provider_probes_unaffected(self, db, monkeypatch):
+        """Sanity check: fixing YouTube's probe must not change any other
+        provider's real behavior (all others already made real HTTP calls
+        before this change; only the mocked-_PROBES tests exercise them
+        above, this confirms verify_provider()'s dispatch/orchestration
+        logic itself -- shared by every provider -- is unaffected)."""
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "el-key")
+        mock = MagicMock(return_value=(True, None, 50))
+        with patch.dict("hypogeum.provider_verifier._PROBES", {"elevenlabs": mock}):
+            result = verify_provider("elevenlabs", db_path=db)
+        assert result["status"] == STATUS_VERIFIED
+        mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestRecordProviderVerification — the shared persistence entry point for
+# callers (e.g. publishing_agent) that already performed the real check
+# themselves and must not repeat the underlying network request.
+# ---------------------------------------------------------------------------
+
+class TestRecordProviderVerification:
+
+    def test_records_success_without_any_network_call(self, db):
+        from hypogeum.provider_verifier import record_provider_verification
+        with patch("requests.post") as mock_post, patch("requests.get") as mock_get:
+            result = record_provider_verification(
+                provider="youtube", ok=True, latency_ms=250,
+                source="secret_profile", db_path=db,
+            )
+        mock_post.assert_not_called()
+        mock_get.assert_not_called()
+        assert result["status"] == STATUS_VERIFIED
+
+        conn = get_connection(db)
+        try:
+            row = get_provider_verification(conn, "youtube")
+        finally:
+            conn.close()
+        assert row["status"] == STATUS_VERIFIED
+        assert row["source"] == "secret_profile"
+
+    def test_records_failure_without_any_network_call(self, db):
+        from hypogeum.provider_verifier import record_provider_verification
+        with patch("requests.post") as mock_post:
+            result = record_provider_verification(
+                provider="youtube", ok=False, error="invalid_grant",
+                latency_ms=180, source="secret_profile", db_path=db,
+            )
+        mock_post.assert_not_called()
+        assert result["status"] == STATUS_FAILED
+        assert result["error"] == "invalid_grant"
+
+        conn = get_connection(db)
+        try:
+            row = get_provider_verification(conn, "youtube")
+        finally:
+            conn.close()
+        assert row["status"] == STATUS_FAILED
+        assert row["error_message"] == "invalid_grant"
+
+    def test_verify_provider_uses_record_provider_verification_internally(self, db, monkeypatch):
+        """verify_provider() must not have its own separate persistence
+        implementation -- it delegates to record_provider_verification()
+        so there is exactly one place that writes a verification result."""
+        monkeypatch.setenv("MUAPI_API_KEY", "mu-key")
+        mock_probe = MagicMock(return_value=(True, None, 100))
+        with patch.dict("hypogeum.provider_verifier._PROBES", {"muapi": mock_probe}), \
+             patch("hypogeum.provider_verifier.record_provider_verification",
+                   wraps=__import__("hypogeum.provider_verifier", fromlist=["record_provider_verification"]).record_provider_verification) as mock_record:
+            verify_provider("muapi", db_path=db)
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["provider"] == "muapi"
+        assert mock_record.call_args.kwargs["ok"] is True
+
+    def test_does_not_revoke_secret_profile_on_failure(self, db):
+        """A failure must never flip secret_profiles.status -- revocation
+        is a permission-gated, human-triggered action, not something an
+        automated background record call performs."""
+        from hypogeum.credential_manager import create_secret_profile, get_secret_profile
+        from hypogeum.provider_verifier import record_provider_verification
+
+        sp = create_secret_profile(
+            provider="youtube", label="youtube-oauth-refresh",
+            credential_type="oauth2_token", credential_data="1//tok",
+            db_path=db,
+        )
+        record_provider_verification(
+            provider="youtube", ok=False, error="invalid_grant",
+            source="secret_profile", db_path=db,
+        )
+        refreshed = get_secret_profile(sp.secret_profile_id, db_path=db)
+        assert refreshed.status == "active"
+
+    def test_updates_last_tested_at_on_success_when_secret_profile_source(self, db):
+        from hypogeum.credential_manager import create_secret_profile, get_secret_profile
+        from hypogeum.provider_verifier import record_provider_verification
+
+        sp = create_secret_profile(
+            provider="youtube", label="youtube-oauth-refresh",
+            credential_type="oauth2_token", credential_data="1//tok",
+            db_path=db,
+        )
+        assert sp.last_tested_at is None
+        record_provider_verification(
+            provider="youtube", ok=True, source="secret_profile", db_path=db,
+        )
+        refreshed = get_secret_profile(sp.secret_profile_id, db_path=db)
+        assert refreshed.last_tested_at is not None
+
+    def test_transient_timeout_does_not_overwrite_prior_verified(self, db):
+        """Direct unit test of record_provider_verification()'s transient=
+        contract: provider_verifications has no transient/unreachable
+        status, so a timeout must preserve the prior 'verified' status
+        rather than downgrade it to 'failed'."""
+        from hypogeum.provider_verifier import record_provider_verification
+
+        record_provider_verification(provider="youtube", ok=True, source="env", db_path=db)
+        result = record_provider_verification(
+            provider="youtube", ok=False, error="transient: timed out",
+            source="env", db_path=db, transient=True,
+        )
+        assert result["status"] == STATUS_VERIFIED
+
+        conn = get_connection(db)
+        try:
+            row = get_provider_verification(conn, "youtube")
+        finally:
+            conn.close()
+        assert row["status"] == STATUS_VERIFIED
+
+    def test_transient_503_does_not_overwrite_prior_verified(self, db):
+        from hypogeum.provider_verifier import record_provider_verification
+
+        record_provider_verification(provider="youtube", ok=True, source="env", db_path=db)
+        result = record_provider_verification(
+            provider="youtube", ok=False,
+            error="transient: YouTube OAuth exchange failed: HTTP 503",
+            source="env", db_path=db, transient=True,
+        )
+        assert result["status"] == STATUS_VERIFIED
+
+        conn = get_connection(db)
+        try:
+            row = get_provider_verification(conn, "youtube")
+        finally:
+            conn.close()
+        assert row["status"] == STATUS_VERIFIED
+
+    def test_transient_failure_with_no_prior_row_persists_pending_not_failed(self, db):
+        """When there is no prior definitive result at all, a transient
+        failure must still never be recorded as STATUS_FAILED -- it falls
+        back to the existing STATUS_PENDING value (schema default meaning
+        'no definitive result yet'), not a new status."""
+        from hypogeum.provider_verifier import record_provider_verification, STATUS_PENDING
+
+        result = record_provider_verification(
+            provider="youtube", ok=False, error="transient: timed out",
+            source="env", db_path=db, transient=True,
+        )
+        assert result["status"] == STATUS_PENDING
+        assert result["status"] != STATUS_FAILED
+
+    def test_hard_failure_after_prior_verified_does_overwrite_as_failed(self, db):
+        """Contrast case: a definitive rejection (transient=False, the
+        default) must still correctly downgrade a prior verified result --
+        only transient failures are protected."""
+        from hypogeum.provider_verifier import record_provider_verification
+
+        record_provider_verification(provider="youtube", ok=True, source="env", db_path=db)
+        result = record_provider_verification(
+            provider="youtube", ok=False, error="invalid_grant", source="env", db_path=db,
+        )
+        assert result["status"] == STATUS_FAILED
+
+
 class TestGetAllProviderStatuses:
 
     def test_returns_dict_with_known_providers(self, db, monkeypatch):

@@ -15,12 +15,22 @@ openai is a direct provider using OPENAI_API_KEY (image generation + Whisper).
 
 Public API:
     verify_provider(provider, db_path=None) -> dict
+    record_provider_verification(provider, ok, error=None, latency_ms=None,
+        source="env", db_path=None, transient=False) -> dict
+        Persists an already-known verification result (e.g. from
+        hypogeum.agents.publishing_agent's own real check) using the same
+        persistence verify_provider() uses internally — for callers that
+        must not repeat the underlying network request. transient=True
+        (timeout/network/429/5xx) never overwrites a prior definitive
+        verified/failed status with "failed" — only diagnostic fields are
+        updated, since provider_verifications has no transient status value.
     get_all_provider_statuses(db_path=None) -> dict  # {provider: status_dict}
     STATUS_MISSING        = "missing"
     STATUS_SAVED          = "saved"
     STATUS_VERIFIED       = "verified"
     STATUS_FAILED         = "failed"
     STATUS_NOT_VERIFIABLE = "not_verifiable"
+    STATUS_PENDING        = "pending"
 """
 
 from __future__ import annotations
@@ -39,6 +49,7 @@ STATUS_SAVED          = "saved"         # credential stored, never tested
 STATUS_VERIFIED       = "verified"
 STATUS_FAILED         = "failed"
 STATUS_NOT_VERIFIABLE = "not_verifiable"
+STATUS_PENDING        = "pending"       # schema default; "no definitive result yet"
 
 # Env var name for each provider's credential
 _PROVIDER_ENV_VAR: dict[str, str] = {
@@ -209,11 +220,30 @@ def _probe_muapi_models(key: str, t0: float) -> tuple[bool, Optional[str], int]:
 
 
 def _probe_youtube(key: str) -> tuple[bool, Optional[str], int]:
-    """Check that a YouTube refresh token is non-empty."""
+    """
+    Validate a YouTube refresh token via a real Google OAuth2 token
+    exchange — the same shared primitive real publishing uses
+    (hypogeum.publishing.youtube.exchange_refresh_token()), so provider
+    verification and the real publish-time refresh can never disagree
+    about what "valid" means. Client ID/secret are read from env — they
+    are static app configuration, not something that varies by credential
+    source the way the refresh token itself does.
+    """
+    from hypogeum.publishing.youtube import exchange_refresh_token
+    from hypogeum.publishing.retry import HardFailureError, SoftFailureError
+
     t0 = time.monotonic()
-    if key and len(key) > 10:
+    client_id = os.environ.get("YOUTUBE_CLIENT_ID", "")
+    client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+
+    try:
+        exchange_refresh_token(refresh_token=key, client_id=client_id, client_secret=client_secret)
         return True, None, int((time.monotonic() - t0) * 1000)
-    return False, "Token appears empty or too short", int((time.monotonic() - t0) * 1000)
+    except HardFailureError as exc:
+        detail = exc.error_code or (f"http_{exc.status_code}" if exc.status_code else "unexpected_response")
+        return False, detail, int((time.monotonic() - t0) * 1000)
+    except SoftFailureError as exc:
+        return False, f"transient: {exc}", int((time.monotonic() - t0) * 1000)
 
 
 def _probe_byteplus_ark(key: str) -> tuple[bool, Optional[str], int]:
@@ -444,17 +474,111 @@ def verify_provider(
         }
 
     success, error, latency_ms = probe(credential)
-    status = STATUS_VERIFIED if success else STATUS_FAILED
+    # "transient: " is the convention _probe_youtube() uses for
+    # SoftFailureError (timeout/network/429/5xx) — the only probe today that
+    # distinguishes transient from definitive failures. No other probe emits
+    # this prefix, so this is a no-op for every other provider.
+    transient = (not success) and bool(error) and str(error).startswith("transient: ")
+    return record_provider_verification(
+        provider=provider, ok=success, error=error, latency_ms=latency_ms,
+        source=source, db_path=db, transient=transient,
+    )
+
+
+def record_provider_verification(
+    provider: str,
+    ok: bool,
+    error: Optional[str] = None,
+    latency_ms: Optional[int] = None,
+    source: str = "env",
+    db_path: Optional[Path] = None,
+    transient: bool = False,
+) -> dict:
+    """
+    Persist an already-known verification result for `provider`, using the
+    exact same persistence verify_provider() itself uses (this function IS
+    that persistence tail, extracted so it has exactly one implementation).
+
+    For callers that already performed the real check themselves and must
+    not repeat it — e.g. hypogeum.agents.publishing_agent records the
+    outcome of its own real YouTube OAuth refresh here instead of calling
+    verify_provider("youtube") again, which would make a second, redundant
+    request to Google.
+
+    Args:
+        provider:   Provider id (e.g. "youtube").
+        ok:         Whether the already-performed check succeeded.
+        error:      Error detail string when ok=False (e.g. Google's OAuth
+                    error code such as "invalid_grant"). Never a token,
+                    refresh token, or client secret.
+        latency_ms: Optional latency of the already-performed check.
+        source:     "secret_profile" or "env" — which credential source was
+                    actually used for the check being recorded.
+        db_path:    Override DB path (tests).
+        transient:  True when ok=False represents a transient operational
+                    failure (timeout, network error, HTTP 429, upstream
+                    5xx) rather than a definitive credential rejection.
+                    provider_verifications has no transient/unreachable
+                    status value, so a transient failure never overwrites
+                    a prior "verified" or "failed" result — only the
+                    diagnostic fields (checked_at, latency_ms, error) are
+                    updated, preserving the last definitive status. Ignored
+                    when ok=True.
+
+    Returns:
+        {provider, status, error, latency_ms, source, checked_at} — same
+        shape as verify_provider()'s return value.
+    """
+    from hypogeum.db import get_connection, initialize_schema
+    from hypogeum.credential_manager import list_secret_profiles
+
+    db = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    initialize_schema(db)
+    now = _now_iso()
+
+    if not ok and transient:
+        status = _persist_transient(db, provider, now, latency_ms, error, source)
+        return {
+            "provider":   provider,
+            "status":     status,
+            "error":      error,
+            "latency_ms": latency_ms,
+            "source":     source,
+            "checked_at": now,
+            "transient":  True,
+        }
+
+    status = STATUS_VERIFIED if ok else STATUS_FAILED
+
     _persist(db, provider, status, now, latency_ms, error, source)
 
-    # On success, also update last_tested_at on the SecretProfile if used
-    if success and source == "secret_profile":
+    # On success, also update last_tested_at on the SecretProfile if used.
+    # hypogeum.credential_manager.update_secret_profile() only writes
+    # credential_data/expires_at/label (last_tested_at is not one of its
+    # mutable fields — calling it here would silently no-op), so this
+    # reuses the same raw UPDATE hypogeum.credential_manager.test_secret_
+    # profile() already uses for the identical field, rather than adding a
+    # second persistence path for the same column. Never touches
+    # secret_profiles.status on failure: revoking a credential is a
+    # permission-gated, human-triggered action
+    # (hypogeum.credential_manager.revoke_secret_profile()), not something
+    # an automated background pipeline run should do — a transient or
+    # client-config failure must not silently lock out the real credential.
+    if ok and source == "secret_profile":
         try:
             profiles = list_secret_profiles(provider=provider, db_path=db)
             active = [p for p in profiles if p.status == "active"]
             if active:
-                from hypogeum.credential_manager import update_secret_profile
-                update_secret_profile(active[0].secret_profile_id, db_path=db)
+                conn = get_connection(db)
+                try:
+                    conn.execute(
+                        "UPDATE secret_profiles SET last_tested_at = ?, updated_at = ? "
+                        "WHERE secret_profile_id = ?",
+                        (now, now, active[0].secret_profile_id),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
         except Exception:
             pass
 
@@ -551,3 +675,41 @@ def _persist(
             conn.close()
     except Exception:
         pass
+
+
+def _persist_transient(
+    db: Path,
+    provider: str,
+    checked_at: str,
+    latency_ms: Optional[int],
+    error_message: Optional[str],
+    source: str,
+) -> str:
+    """
+    Record a transient probe outcome's diagnostic fields (checked_at,
+    latency_ms, error_message) without downgrading a prior definitive
+    verified/failed status. Reuses the existing provider_verifications row
+    and upsert_provider_verification() helper — the only difference from a
+    normal persist is that `status` is read back from the current row (or
+    STATUS_PENDING, the existing "no definitive result yet" value, if no
+    row exists) instead of being set to STATUS_FAILED. No new table, column,
+    or status value.
+
+    Returns the (preserved) status that was written.
+    """
+    from hypogeum.db import get_connection, get_provider_verification, upsert_provider_verification
+    try:
+        conn = get_connection(db)
+        try:
+            existing = get_provider_verification(conn, provider)
+            preserved_status = existing["status"] if existing else STATUS_PENDING
+            upsert_provider_verification(
+                conn, provider, preserved_status, checked_at,
+                latency_ms, error_message, source,
+            )
+            conn.commit()
+            return preserved_status
+        finally:
+            conn.close()
+    except Exception:
+        return STATUS_PENDING

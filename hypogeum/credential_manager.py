@@ -540,13 +540,31 @@ def _test_elevenlabs(credential_data: str) -> CredentialTestResult:
 
 
 def _test_youtube(credential_data: str) -> CredentialTestResult:
-    """Validate a YouTube OAuth refresh token by checking it is non-empty."""
+    """
+    Validate a YouTube OAuth refresh token via the real Google OAuth2 token
+    exchange — the same shared primitive real publishing uses
+    (hypogeum.publishing.youtube.exchange_refresh_token()) and
+    hypogeum.provider_verifier._probe_youtube() calls, so the credential
+    test path and provider verification path can never disagree about
+    what "valid" means.
+    """
+    import os
+    from hypogeum.publishing.youtube import exchange_refresh_token
+    from hypogeum.publishing.retry import HardFailureError, SoftFailureError
+
     t0 = time.monotonic()
-    if credential_data and len(credential_data) > 10:
-        return CredentialTestResult(success=True, latency_ms=int((time.monotonic() - t0) * 1000),
-                          error=None)
-    return CredentialTestResult(success=False, latency_ms=int((time.monotonic() - t0) * 1000),
-                      error="Token appears empty or too short")
+    client_id = os.environ.get("YOUTUBE_CLIENT_ID", "")
+    client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+
+    try:
+        exchange_refresh_token(refresh_token=credential_data, client_id=client_id, client_secret=client_secret)
+        return CredentialTestResult(success=True, latency_ms=int((time.monotonic() - t0) * 1000), error=None)
+    except HardFailureError as exc:
+        detail = exc.error_code or (f"http_{exc.status_code}" if exc.status_code else "unexpected_response")
+        return CredentialTestResult(success=False, latency_ms=int((time.monotonic() - t0) * 1000), error=detail)
+    except SoftFailureError as exc:
+        return CredentialTestResult(success=False, latency_ms=int((time.monotonic() - t0) * 1000),
+                          error=f"transient: {exc}")
 
 
 _PROVIDER_TESTERS = {

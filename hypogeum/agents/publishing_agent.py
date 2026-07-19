@@ -364,7 +364,9 @@ def run_publishing_agent(
     # Mirrors sync_youtube_analytics() so publishing and analytics always target
     # the same channel.
     import copy as _copy
+    import time as _time
     config = _copy.copy(config)
+    _youtube_cred_source = "env"
     try:
         from hypogeum.credential_manager import list_secret_profiles as _lsp
         _db_for_creds = assets_root / "hypogeum.db"
@@ -375,6 +377,7 @@ def run_publishing_agent(
         ]
         if _stored:
             config.YOUTUBE_REFRESH_TOKEN = _stored[0].credential_data
+            _youtube_cred_source = "secret_profile"
             log.info("publishing_youtube_token_from_secret_profile", episode_id=episode_id)
     except Exception:
         pass  # fall back to env token
@@ -384,10 +387,27 @@ def run_publishing_agent(
         and config.YOUTUBE_CLIENT_SECRET
         and config.YOUTUBE_REFRESH_TOKEN
     ):
+        _yt_auth_t0 = _time.monotonic()
         try:
             youtube_token = yt_client.refresh_youtube_token(config)
             youtube_available = True
             log.info("publishing_youtube_auth_ok", episode_id=episode_id)
+            # Record the already-known result against the shared
+            # provider-verification state (hypogeum.provider_verifier) so
+            # /platforms and /attention reflect this real check without a
+            # second OAuth request to Google. Visibility only — never
+            # allowed to block publishing.
+            try:
+                from hypogeum.provider_verifier import record_provider_verification
+                record_provider_verification(
+                    provider="youtube",
+                    ok=True,
+                    latency_ms=int((_time.monotonic() - _yt_auth_t0) * 1000),
+                    source=_youtube_cred_source,
+                    db_path=assets_root / "hypogeum.db",
+                )
+            except Exception:
+                pass
         except (HardFailureError, SoftFailureError) as exc:
             log.error(
                 "publishing_youtube_auth_failed",
@@ -401,6 +421,29 @@ def run_publishing_agent(
                 item_id="di_youtube_auth",
             )
             youtube_available = False
+            # Same shared state, same no-second-request rule. error_code
+            # (e.g. "invalid_grant") is preserved when available so the
+            # dashboard can distinguish an expired/revoked token from a
+            # transient or client-config problem — never just "disconnected".
+            # SoftFailureError (timeout/network/429/5xx upstream) is a
+            # transient operational failure, not a definitive credential
+            # rejection — it must never overwrite a prior verified/failed
+            # result with "failed" (see record_provider_verification's
+            # transient= param).
+            try:
+                from hypogeum.provider_verifier import record_provider_verification
+                _yt_error_detail = getattr(exc, "error_code", None) or str(exc)
+                record_provider_verification(
+                    provider="youtube",
+                    ok=False,
+                    error=_yt_error_detail,
+                    latency_ms=int((_time.monotonic() - _yt_auth_t0) * 1000),
+                    source=_youtube_cred_source,
+                    db_path=assets_root / "hypogeum.db",
+                    transient=isinstance(exc, SoftFailureError),
+                )
+            except Exception:
+                pass
     else:
         log.warn("publishing_youtube_credentials_missing", episode_id=episode_id)
         youtube_available = False

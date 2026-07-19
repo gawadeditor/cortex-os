@@ -315,7 +315,9 @@ class TestTestSecretProfile:
             result = credential_manager.test_secret_profile(sp.secret_profile_id, db_path=db_path)
         assert result.success is True
 
-    def test_test_youtube_credential(self, db_path):
+    def test_test_youtube_credential_success(self, db_path):
+        """A real OAuth2 exchange is made (POST, not a length check) and a
+        successful token response is reported as success."""
         sp = create_secret_profile(
             provider="youtube",
             label="yt",
@@ -323,8 +325,35 @@ class TestTestSecretProfile:
             credential_data="1//refresh-token-value",
             db_path=db_path,
         )
-        result = credential_manager.test_secret_profile(sp.secret_profile_id, db_path=db_path)
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"access_token": "ya29.fake"}
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = credential_manager.test_secret_profile(sp.secret_profile_id, db_path=db_path)
         assert result.success is True
+        assert result.error is None
+        mock_post.assert_called_once()
+        assert "oauth2.googleapis.com/token" in mock_post.call_args[0][0]
+
+    def test_test_youtube_credential_invalid_grant(self, db_path):
+        """A fake/expired/revoked refresh token is now genuinely detected --
+        this is the exact false-positive the length-only check used to miss."""
+        sp = create_secret_profile(
+            provider="youtube",
+            label="yt",
+            credential_type="oauth2_token",
+            credential_data="1//refresh-token-value",
+            db_path=db_path,
+        )
+        mock_resp = MagicMock()
+        mock_resp.ok = False
+        mock_resp.status_code = 400
+        mock_resp.json.return_value = {"error": "invalid_grant", "error_description": "Token has been expired or revoked."}
+        with patch("requests.post", return_value=mock_resp):
+            result = credential_manager.test_secret_profile(sp.secret_profile_id, db_path=db_path)
+        assert result.success is False
+        assert result.error == "invalid_grant"
 
     def test_test_openrouter_failed_response(self, db_path):
         sp = _make_profile(db_path, provider="openrouter", credential_data="bad-key")

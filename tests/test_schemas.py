@@ -1537,3 +1537,53 @@ class TestPublishingRecord:
             p = copy.deepcopy(_publishing_record())
             p["platform_results"][0]["status"] = status
             validate(self.S, p)
+
+    def test_old_record_without_visibility_field_still_valid(self):
+        """Backward compat: the fixture has no visibility key at all."""
+        p = _publishing_record()
+        assert "visibility" not in p["platform_results"][0]
+        validate(self.S, p)
+
+    def test_visibility_none_is_valid(self):
+        p = copy.deepcopy(_publishing_record())
+        p["platform_results"][0]["visibility"] = None
+        validate(self.S, p)
+
+    def test_visibility_valid_string_values(self):
+        for value in ("private", "unpublished", "self_only", "container_only"):
+            p = copy.deepcopy(_publishing_record())
+            p["platform_results"][0]["visibility"] = value
+            validate(self.S, p)
+
+    def test_visibility_non_string_rejected(self):
+        p = copy.deepcopy(_publishing_record())
+        p["platform_results"][0]["visibility"] = 123
+        with pytest.raises(SchemaError):
+            validate(self.S, p)
+
+    def test_facebook_published_with_unpublished_visibility(self):
+        p = copy.deepcopy(_publishing_record())
+        p["platform_results"][0]["platform"] = "facebook"
+        p["platform_results"][0]["status"] = "published"
+        p["platform_results"][0]["visibility"] = "unpublished"
+        validate(self.S, p)
+
+    def test_tiktok_published_with_self_only_visibility(self):
+        p = copy.deepcopy(_publishing_record())
+        p["platform_results"][0]["platform"] = "tiktok"
+        p["platform_results"][0]["status"] = "published"
+        p["platform_results"][0]["visibility"] = "self_only"
+        validate(self.S, p)
+
+    def test_youtube_published_with_private_visibility(self):
+        p = copy.deepcopy(_publishing_record())
+        p["platform_results"][0]["visibility"] = "private"
+        validate(self.S, p)
+
+    def test_instagram_skipped_with_container_only_visibility(self):
+        p = copy.deepcopy(_publishing_record())
+        p["platform_results"][0]["platform"] = "instagram"
+        p["platform_results"][0]["status"] = "skipped"
+        p["platform_results"][0]["visibility"] = "container_only"
+        p["platform_results"][0]["skipped_reason"] = "instagram_container_validated: creation_id=x, terminal_status=FINISHED"
+        validate(self.S, p)

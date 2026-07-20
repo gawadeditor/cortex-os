@@ -208,6 +208,76 @@ class TestInitTiktokUpload:
         body = call_kwargs.kwargs.get("json", {})
         assert len(body["post_info"]["title"]) == 150
 
+    def test_default_privacy_level_is_public_to_everyone(self, tmp_path):
+        """Default (no override) must preserve existing production behavior."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_1", "upload_url": "https://upload.tiktokapis.com/1"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_upload(config=config, video_path=video_path, title="T")
+
+        body = mock_post.call_args.kwargs.get("json", {})
+        assert body["post_info"]["privacy_level"] == "PUBLIC_TO_EVERYONE"
+
+    def test_explicit_self_only_privacy_level_is_sent(self, tmp_path):
+        """Smoke-test path: explicit override must reach the request body."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_2", "upload_url": "https://upload.tiktokapis.com/2"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_upload(
+                config=config, video_path=video_path, title="T",
+                privacy_level="SELF_ONLY",
+            )
+
+        body = mock_post.call_args.kwargs.get("json", {})
+        assert body["post_info"]["privacy_level"] == "SELF_ONLY"
+
+    def test_self_only_does_not_change_other_post_info_fields(self, tmp_path):
+        """Overriding privacy_level must not disturb the other post_info flags."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_3", "upload_url": "https://upload.tiktokapis.com/3"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_upload(
+                config=config, video_path=video_path, title="My Short",
+                privacy_level="SELF_ONLY",
+            )
+
+        post_info = mock_post.call_args.kwargs.get("json", {})["post_info"]
+        assert post_info["disable_duet"] is False
+        assert post_info["disable_comment"] is False
+        assert post_info["disable_stitch"] is False
+        assert post_info["title"] == "My Short"
+
+    def test_only_one_init_request_regardless_of_privacy_level(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_4", "upload_url": "https://upload.tiktokapis.com/4"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_upload(
+                config=config, video_path=video_path, title="T",
+                privacy_level="SELF_ONLY",
+            )
+
+        mock_post.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # TestUploadTiktokChunks

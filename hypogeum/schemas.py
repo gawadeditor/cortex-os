@@ -703,6 +703,14 @@ def _validate_publishing_record(p: dict) -> None:
         _req_str(res, s, "result_id", path=path)
         _req_str(res, s, "platform", path=path)
         _req_in(res, s, "status", ("published", "failed", "skipped"), path=path)
+        # Optional — the actual delivery visibility/state on the platform
+        # (e.g. "private", "unpublished", "self_only", "container_only"),
+        # distinct from `status` (whether the operation itself succeeded).
+        # Absent/None on older records; not enum-constrained since visibility
+        # vocabulary is platform-specific.
+        if "visibility" in res and res["visibility"] is not None:
+            if not isinstance(res["visibility"], str):
+                raise SchemaError(s, path, "visibility must be a string or null when present")
         applied = _req_dict(res, s, "metadata_applied", path=path)
         _req(applied, s, "ai_disclosure_included", bool,
              path=f"{path}.metadata_applied")

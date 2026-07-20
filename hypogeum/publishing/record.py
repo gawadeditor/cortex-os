@@ -287,6 +287,7 @@ def make_result_entry(
     captions_skipped_reason: Optional[str] = None,
     ai_disclosure_included: bool = True,
     end_screen_applied: Optional[bool] = None,
+    visibility: Optional[str] = None,
 ) -> dict:
     """
     Build a platform_results[] entry dict conforming to the publishing_record schema.
@@ -294,7 +295,9 @@ def make_result_entry(
     Args:
         platform:                  "youtube" | "facebook" | "instagram" | "tiktok"
         deliverable_type:          "main_episode" | "short"
-        status:                    "published" | "failed" | "skipped"
+        status:                    "published" | "failed" | "skipped" — whether the
+                                    platform operation itself succeeded, failed, or
+                                    was skipped.
         short_id:                  Short identifier (for short deliverables)
         platform_video_id:         Platform-assigned video ID
         published_url:             Public URL of published content
@@ -309,6 +312,11 @@ def make_result_entry(
         captions_skipped_reason:   Reason captions were skipped (if applicable)
         ai_disclosure_included:    Whether ai_disclosure_text was included
         end_screen_applied:        Whether end screen was applied (YouTube only)
+        visibility:                Optional. The actual delivery visibility/state on
+                                    the platform (e.g. "private", "unpublished",
+                                    "self_only", "container_only") — distinct from
+                                    `status`. None/omitted for existing production
+                                    callers that don't track this.
 
     Returns:
         platform_results[] entry dict.
@@ -324,6 +332,7 @@ def make_result_entry(
         "published_url": published_url,
         "published_at": published_at,
         "attempts": attempts,
+        "visibility": visibility,
         "metadata_applied": {
             "title": title,
             "description_length_chars": description_length_chars,

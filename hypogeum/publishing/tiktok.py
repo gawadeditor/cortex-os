@@ -160,15 +160,21 @@ def init_tiktok_upload(
     video_path: Path,
     title: str,
     episode_id: Optional[str] = None,
+    privacy_level: str = "PUBLIC_TO_EVERYONE",
 ) -> tuple[str, str]:
     """
     Initialize a TikTok chunked video upload session.
 
     Args:
-        config:      Config instance with TIKTOK_ACCESS_TOKEN.
-        video_path:  Path to the video file.
-        title:       Video title (max 150 chars for TikTok).
-        episode_id:  For log correlation.
+        config:        Config instance with TIKTOK_ACCESS_TOKEN.
+        video_path:    Path to the video file.
+        title:         Video title (max 150 chars for TikTok).
+        episode_id:    For log correlation.
+        privacy_level: TikTok post_info.privacy_level value. Defaults to the
+                        existing production value (PUBLIC_TO_EVERYONE) so
+                        production behavior is unchanged unless a caller
+                        explicitly overrides it — e.g. "SELF_ONLY" for the
+                        publishing smoke test.
 
     Returns:
         Tuple of (publish_id, upload_url).
@@ -186,7 +192,7 @@ def init_tiktok_upload(
     body = {
         "post_info": {
             "title": title[:150],
-            "privacy_level": "PUBLIC_TO_EVERYONE",
+            "privacy_level": privacy_level,
             "disable_duet": False,
             "disable_comment": False,
             "disable_stitch": False,

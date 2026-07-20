@@ -150,6 +150,7 @@ def upload_facebook_video(
     video_path: Path,
     metadata: dict,
     episode_id: Optional[str] = None,
+    published: bool = True,
 ) -> str:
     """
     Upload a video to Facebook using the three-phase chunked upload protocol.
@@ -165,6 +166,12 @@ def upload_facebook_video(
         video_path:   Path to the video file.
         metadata:     Dict with: title, description.
         episode_id:   For log correlation.
+        published:    Graph API `published` value on the finish call. Defaults
+                       to True (existing production behavior, immediately
+                       visible in the Page feed). Pass False for an
+                       unpublished/dark Page video — used by the publishing
+                       smoke test to validate the real upload path without
+                       appearing publicly.
 
     Returns:
         Facebook video_id string.
@@ -190,6 +197,7 @@ def upload_facebook_video(
             metadata=metadata,
             episode_id=episode_id,
             log=log,
+            published=published,
         )
 
     video_id = retry_video_upload(
@@ -214,6 +222,7 @@ def _facebook_chunked_upload(
     metadata: dict,
     episode_id: Optional[str],
     log,
+    published: bool = True,
 ) -> str:
     """Execute the three-phase Facebook Video chunked upload."""
     # Phase 1: Start
@@ -293,6 +302,7 @@ def _facebook_chunked_upload(
         "upload_session_id": upload_session_id,
         "title": metadata.get("title", ""),
         "description": metadata.get("description", ""),
+        "published": "true" if published else "false",
     }
 
     try:

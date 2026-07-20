@@ -206,6 +206,79 @@ class TestUploadFacebookVideo:
 
         assert video_id == "fb_vid_via_id"
 
+    def test_default_published_true_preserves_existing_behavior(self, tmp_path):
+        """No override -> existing production behavior (public) is unchanged."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 150)
+
+        start_resp = _make_response(200, json_data={
+            "upload_session_id": "sess_pub", "start_offset": 0, "end_offset": 150,
+        })
+        transfer_resp = _make_response(200, json_data={"start_offset": 150, "end_offset": 150})
+        finish_resp = _make_response(200, json_data={"video_id": "fb_vid_pub"})
+        call_seq = iter([start_resp, transfer_resp, finish_resp])
+
+        with patch("requests.post", side_effect=lambda *a, **k: next(call_seq)) as mock_post:
+            upload_facebook_video(
+                config=config,
+                access_token="EAA_token",
+                video_path=video_path,
+                metadata={"title": "T", "description": "D"},
+            )
+
+        finish_call = mock_post.call_args_list[-1]
+        assert finish_call.kwargs["params"]["published"] == "true"
+
+    def test_explicit_published_false_is_sent_on_finish_call(self, tmp_path):
+        """Smoke-test path: published=False must reach the Graph API finish call."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 150)
+
+        start_resp = _make_response(200, json_data={
+            "upload_session_id": "sess_dark", "start_offset": 0, "end_offset": 150,
+        })
+        transfer_resp = _make_response(200, json_data={"start_offset": 150, "end_offset": 150})
+        finish_resp = _make_response(200, json_data={"video_id": "fb_vid_dark"})
+        call_seq = iter([start_resp, transfer_resp, finish_resp])
+
+        with patch("requests.post", side_effect=lambda *a, **k: next(call_seq)) as mock_post:
+            video_id = upload_facebook_video(
+                config=config,
+                access_token="EAA_token",
+                video_path=video_path,
+                metadata={"title": "T", "description": "D"},
+                published=False,
+            )
+
+        finish_call = mock_post.call_args_list[-1]
+        assert finish_call.kwargs["params"]["published"] == "false"
+        # Real video ID is still returned/persisted even though unpublished.
+        assert video_id == "fb_vid_dark"
+
+    def test_published_false_does_not_alter_title_or_description(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 150)
+
+        start_resp = _make_response(200, json_data={
+            "upload_session_id": "sess_td", "start_offset": 0, "end_offset": 150,
+        })
+        transfer_resp = _make_response(200, json_data={"start_offset": 150, "end_offset": 150})
+        finish_resp = _make_response(200, json_data={"video_id": "fb_vid_td"})
+        call_seq = iter([start_resp, transfer_resp, finish_resp])
+
+        with patch("requests.post", side_effect=lambda *a, **k: next(call_seq)) as mock_post:
+            upload_facebook_video(
+                config=config,
+                access_token="EAA_token",
+                video_path=video_path,
+                metadata={"title": "Unchanged Title", "description": "Unchanged Desc"},
+                published=False,
+            )
+
+        finish_call = mock_post.call_args_list[-1]
+        assert finish_call.kwargs["params"]["title"] == "Unchanged Title"
+        assert finish_call.kwargs["params"]["description"] == "Unchanged Desc"
+
 
 # ---------------------------------------------------------------------------
 # TestCreateInstagramContainer

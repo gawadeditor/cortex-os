@@ -352,6 +352,60 @@ class TestMakeResultEntry:
         entry2 = make_result_entry(platform="youtube", deliverable_type="main_episode", status="published")
         assert entry1["result_id"] != entry2["result_id"]
 
+    def test_visibility_defaults_to_none(self):
+        """Existing production callers never pass visibility -- must not break."""
+        entry = make_result_entry(platform="youtube", deliverable_type="main_episode", status="published")
+        assert entry["visibility"] is None
+
+    def test_facebook_unpublished_representation(self):
+        entry = make_result_entry(
+            platform="facebook",
+            deliverable_type="main_episode",
+            status="published",
+            platform_video_id="fb_vid_dark",
+            visibility="unpublished",
+        )
+        assert entry["status"] == "published"
+        assert entry["visibility"] == "unpublished"
+        assert entry["platform_video_id"] == "fb_vid_dark"
+
+    def test_tiktok_self_only_representation(self):
+        entry = make_result_entry(
+            platform="tiktok",
+            deliverable_type="short",
+            status="published",
+            short_id="short_001",
+            platform_video_id="tiktok_post_123",
+            visibility="self_only",
+        )
+        assert entry["status"] == "published"
+        assert entry["visibility"] == "self_only"
+
+    def test_youtube_private_representation(self):
+        entry = make_result_entry(
+            platform="youtube",
+            deliverable_type="main_episode",
+            status="published",
+            platform_video_id="yt_vid_priv",
+            visibility="private",
+        )
+        assert entry["status"] == "published"
+        assert entry["visibility"] == "private"
+
+    def test_instagram_container_validated_representation(self):
+        entry = make_result_entry(
+            platform="instagram",
+            deliverable_type="short",
+            status="skipped",
+            short_id="short_001",
+            skipped_reason="instagram_container_validated: creation_id=abc, terminal_status=FINISHED",
+            visibility="container_only",
+        )
+        assert entry["status"] == "skipped"
+        assert entry["visibility"] == "container_only"
+        assert entry["platform_video_id"] is None
+        assert "container_validated" in entry["skipped_reason"]
+
     def test_incremental_write_after_each_append(self, tmp_path):
         """Verify disk state reflects each individual append."""
         record = PublishingRecord("ep_incr_001", output_dir=tmp_path)

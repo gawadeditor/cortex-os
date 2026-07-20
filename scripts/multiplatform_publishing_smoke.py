@@ -89,6 +89,7 @@ import argparse
 import json
 import shutil
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -285,6 +286,59 @@ def _resolve_meta_token(config: Config, db_path: Path, episode_id: str) -> str:
         raise RuntimeError("meta credentials not available (app id/secret/access token)")
 
     return meta_client.refresh_meta_token(config, episode_id=episode_id)
+
+
+# ---------------------------------------------------------------------------
+# Provider-verification / PDR recording — reuses the existing shared
+# hypogeum.provider_verifier state and PDR shape (no new architecture).
+#
+# Credential/auth failures (401/403, or a resolution-time failure such as a
+# missing/rejected refresh token) mark the provider as failed. A content or
+# request-validation rejection — e.g. Facebook's HTTP 400 for a permission-
+# scope gap that has nothing to do with whether the token itself is valid —
+# must NOT overwrite a real "verified" credential status. That distinction
+# is made by HTTP status code: 401/403 (or a credential-resolution failure
+# before any HTTP call was even made) -> credential failure; anything else
+# (400, 429, 5xx, ...) -> operational error only, provider status untouched.
+# ---------------------------------------------------------------------------
+
+_CREDENTIAL_FAILURE_STATUS_CODES = frozenset({401, 403})
+
+
+def _record_provider_result(
+    platform: str,
+    ok: bool,
+    db_path: Path,
+    error: Optional[str] = None,
+    transient: bool = False,
+) -> None:
+    """Best-effort — never allowed to block or fail the smoke run."""
+    try:
+        from hypogeum.provider_verifier import record_provider_verification
+        record_provider_verification(
+            provider=platform, ok=ok, error=error, source="secret_profile",
+            db_path=db_path, transient=transient,
+        )
+    except Exception:
+        pass
+
+
+def _is_credential_failure(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    return status_code in _CREDENTIAL_FAILURE_STATUS_CODES
+
+
+def _build_step_pdr(step_id: str, reason: str) -> dict:
+    """Same PDR shape hypogeum.agents.publishing_agent._build_pdr() produces."""
+    return {
+        "report_id": f"pdr_smoke_{step_id}_{uuid.uuid4().hex[:6]}",
+        "issuing_agent": "multiplatform_publishing_smoke",
+        "target_package": "final_render_package",
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "severity": "BLOCKING",
+        "deficiency_items": [{"item_id": step_id, "description": reason}],
+        "routing_target": "executive_producer",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -744,33 +798,65 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
                 continue
 
             print(f"[RUNNING] {step_id} ({platform})...")
+
+            # --- Credential resolution (separate from the operation itself) ---
+            # A failure here is always a genuine credential/auth problem — the
+            # only thing happening in this phase is presenting the credential
+            # to a token endpoint.
+            cred_exc: Optional[Exception] = None
             try:
                 if platform == "youtube":
                     if youtube_token is None:
                         youtube_token = _resolve_youtube_token(config, db_path)
+                elif platform in ("facebook", "instagram"):
+                    if meta_token is None:
+                        meta_token = _resolve_meta_token(config, db_path, episode_id)
+                elif platform == "tiktok":
+                    _resolve_tiktok_credentials(config, db_path)
+                else:
+                    raise RuntimeError(f"unknown platform: {platform}")
+            except (HardFailureError, SoftFailureError, RuntimeError) as exc:
+                cred_exc = exc
+
+            if cred_exc is not None:
+                error_msg = str(cred_exc)[:500]
+                _record_provider_result(
+                    platform, ok=False, db_path=db_path, error=error_msg[:300],
+                    transient=isinstance(cred_exc, SoftFailureError),
+                )
+                ledger.record(step_id, "failed", error=error_msg)
+                record.append_result(make_result_entry(
+                    platform=platform,
+                    deliverable_type=step["deliverable_type"],
+                    status="failed",
+                    short_id=step.get("short_id"),
+                    title=get_episode_title(metadata_source) if step["deliverable_type"] == "main_episode" else "",
+                    ai_disclosure_included=False,
+                ))
+                record.add_failure(_build_step_pdr(step_id, f"credential resolution failed: {error_msg}"))
+                print(f"[FAIL]    {step_id} — credential resolution failed: {error_msg}", file=sys.stderr)
+                halted = True
+                break
+
+            # --- The operation itself ---
+            try:
+                if platform == "youtube":
                     if step["deliverable_type"] == "main_episode":
                         result = _run_youtube_main(config, youtube_token, assets_root, episode_id, final_render_package, step, ledger)
                     else:
                         result = _run_youtube_short(config, youtube_token, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "facebook":
-                    if meta_token is None:
-                        meta_token = _resolve_meta_token(config, db_path, episode_id)
                     result = _run_facebook_main(config, meta_token, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "tiktok":
-                    _resolve_tiktok_credentials(config, db_path)
                     result = _run_tiktok_short(config, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "instagram":
-                    if meta_token is None:
-                        meta_token = _resolve_meta_token(config, db_path, episode_id)
                     result = _run_instagram_short(config, meta_token, assets_root, episode_id, final_render_package, step, ledger)
 
-                else:
-                    raise RuntimeError(f"unknown platform: {platform}")
-
                 record.append_result(result["result_entry"])
+                _record_provider_result(platform, ok=True, db_path=db_path)
 
                 if result["outcome"] == "review_required":
                     ledger.record(
@@ -803,6 +889,16 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
 
             except (HardFailureError, SoftFailureError, PollTimeoutError, StagingError, RuntimeError, AssertionError) as exc:
                 error_msg = str(exc)[:500]
+
+                # Only a real 401/403 indicates the credential itself is bad.
+                # A content/request-validation rejection (e.g. HTTP 400) must
+                # NOT overwrite a real "verified" credential status.
+                if _is_credential_failure(exc):
+                    _record_provider_result(
+                        platform, ok=False, db_path=db_path, error=error_msg[:300],
+                        transient=isinstance(exc, SoftFailureError),
+                    )
+
                 ledger.record(step_id, "failed", error=error_msg)
                 record.append_result(make_result_entry(
                     platform=platform,
@@ -812,6 +908,7 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
                     title=get_episode_title(metadata_source) if step["deliverable_type"] == "main_episode" else "",
                     ai_disclosure_included=False,
                 ))
+                record.add_failure(_build_step_pdr(step_id, error_msg))
                 print(f"[FAIL]    {step_id} — {error_msg}", file=sys.stderr)
                 halted = True
                 break

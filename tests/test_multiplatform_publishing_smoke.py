@@ -441,3 +441,153 @@ def test_no_secret_values_printed(tmp_path, capsys):
     assert yt_secret not in captured.err
     assert meta_secret not in captured.out
     assert meta_secret not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: provider-verification truth — HTTP 400 content/request rejections
+# must not falsely mark OAuth credentials invalid; only 401/403 (or a
+# credential-resolution-phase failure) does. Successes record verified.
+# ---------------------------------------------------------------------------
+
+def test_content_validation_400_does_not_mark_credentials_failed(tmp_path):
+    """The real 2026-07-20 Facebook failure shape: a valid token, HTTP 400 on upload."""
+    _build_episode(tmp_path, num_shorts=0)
+    cfg = _make_config()
+
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch("hypogeum.provider_verifier.record_provider_verification") as m_record_pv, \
+         patch.object(smoke.yt_client, "refresh_youtube_token", return_value="yt_token"), \
+         patch.object(smoke.yt_client, "upload_video", return_value="yt_vid_1"), \
+         patch.object(smoke.yt_client, "upload_thumbnail", return_value=True), \
+         patch.object(smoke.yt_client, "upload_captions", return_value=True), \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(
+             smoke.meta_client, "upload_facebook_video",
+             side_effect=smoke.HardFailureError("HTTP 400 — hard failure (no retry) (message='x', type='OAuthException', code=200)", status_code=400),
+         ):
+        rc = smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke"],
+            project_root=tmp_path,
+        )
+
+    assert rc == 1  # halted on facebook failure
+    facebook_calls = [c for c in m_record_pv.call_args_list if c.kwargs.get("provider") == "facebook"]
+    assert all(c.kwargs.get("ok") is not False for c in facebook_calls), (
+        "an HTTP 400 content/request rejection must not record facebook credentials as failed"
+    )
+
+
+def test_credential_401_marks_provider_failed(tmp_path):
+    _build_episode(tmp_path, num_shorts=0)
+    cfg = _make_config()
+
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch("hypogeum.provider_verifier.record_provider_verification") as m_record_pv, \
+         patch.object(smoke.yt_client, "refresh_youtube_token", return_value="yt_token"), \
+         patch.object(smoke.yt_client, "upload_video", return_value="yt_vid_1"), \
+         patch.object(smoke.yt_client, "upload_thumbnail", return_value=True), \
+         patch.object(smoke.yt_client, "upload_captions", return_value=True), \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(
+             smoke.meta_client, "upload_facebook_video",
+             side_effect=smoke.HardFailureError("HTTP 401 — hard failure (no retry)", status_code=401),
+         ):
+        rc = smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke"],
+            project_root=tmp_path,
+        )
+
+    assert rc == 1
+    facebook_failed_calls = [
+        c for c in m_record_pv.call_args_list
+        if c.kwargs.get("provider") == "facebook" and c.kwargs.get("ok") is False
+    ]
+    assert facebook_failed_calls, "a real 401 must record the credential as failed"
+
+
+def test_credential_resolution_failure_records_provider_failed(tmp_path):
+    _build_episode(tmp_path, num_shorts=0)
+    cfg = _make_config()
+
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch("hypogeum.provider_verifier.record_provider_verification") as m_record_pv, \
+         patch.object(smoke.yt_client, "refresh_youtube_token", return_value="yt_token"), \
+         patch.object(smoke.yt_client, "upload_video", return_value="yt_vid_1"), \
+         patch.object(smoke.yt_client, "upload_thumbnail", return_value=True), \
+         patch.object(smoke.yt_client, "upload_captions", return_value=True), \
+         patch.object(
+             smoke.meta_client, "refresh_meta_token",
+             side_effect=smoke.HardFailureError("meta token refresh failed", status_code=401),
+         ):
+        rc = smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke"],
+            project_root=tmp_path,
+        )
+
+    assert rc == 1
+    facebook_failed_calls = [
+        c for c in m_record_pv.call_args_list
+        if c.kwargs.get("provider") == "facebook" and c.kwargs.get("ok") is False
+    ]
+    assert facebook_failed_calls, "a credential-resolution-phase failure is always a credential failure"
+
+
+def test_successful_checkpoint_records_provider_verified(tmp_path):
+    _build_episode(tmp_path, num_shorts=0)
+    cfg = _make_config()
+
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch("hypogeum.provider_verifier.record_provider_verification") as m_record_pv, \
+         patch.object(smoke.yt_client, "refresh_youtube_token", return_value="yt_token"), \
+         patch.object(smoke.yt_client, "upload_video", return_value="yt_vid_1"), \
+         patch.object(smoke.yt_client, "upload_thumbnail", return_value=True), \
+         patch.object(smoke.yt_client, "upload_captions", return_value=True), \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(smoke.meta_client, "upload_facebook_video", return_value="fb_vid_1"):
+        rc = smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke"],
+            project_root=tmp_path,
+        )
+
+    assert rc == 0
+    youtube_verified_calls = [
+        c for c in m_record_pv.call_args_list
+        if c.kwargs.get("provider") == "youtube" and c.kwargs.get("ok") is True
+    ]
+    facebook_verified_calls = [
+        c for c in m_record_pv.call_args_list
+        if c.kwargs.get("provider") == "facebook" and c.kwargs.get("ok") is True
+    ]
+    assert youtube_verified_calls, "a successful youtube checkpoint must record verified"
+    assert facebook_verified_calls, "a successful facebook checkpoint must record verified"
+
+
+def test_operation_failure_adds_pdr_to_publishing_record(tmp_path):
+    ep_dir, frp = _build_episode(tmp_path, num_shorts=0)
+    cfg = _make_config()
+
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch("hypogeum.provider_verifier.record_provider_verification"), \
+         patch.object(smoke.yt_client, "refresh_youtube_token", return_value="yt_token"), \
+         patch.object(smoke.yt_client, "upload_video", return_value="yt_vid_1"), \
+         patch.object(smoke.yt_client, "upload_thumbnail", return_value=True), \
+         patch.object(smoke.yt_client, "upload_captions", return_value=True), \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(
+             smoke.meta_client, "upload_facebook_video",
+             side_effect=smoke.HardFailureError("HTTP 400 — hard failure (no retry)", status_code=400),
+         ):
+        smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke"],
+            project_root=tmp_path,
+        )
+
+    record_path = ep_dir / "publishing_record_ep_test.json"
+    record = json.loads(record_path.read_text())
+    assert record["failures"], "an operational failure must add a PDR to the publishing record"
+    assert any("facebook_main" in f.get("deficiency_items", [{}])[0].get("item_id", "") for f in record["failures"])

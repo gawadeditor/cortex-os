@@ -393,6 +393,37 @@ def _build_steps(final_render_package: dict) -> list[dict]:
     return steps
 
 
+def _build_expected_deliverables(final_render_package: dict) -> list[dict]:
+    """
+    The smoke run's readiness contract — see PublishingRecord's
+    expected_deliverables docstring for the entry shape. Mirrors exactly
+    what _build_steps() above actually attempts: YouTube shorts count and
+    the tiktok/instagram-only-if-shorts-exist condition match 1:1.
+    """
+    shorts_renders = final_render_package.get("shorts_renders", [])
+    deliverables = [
+        {"platform": "youtube", "deliverable_type": "main_episode", "count": 1,
+         "status": "published", "visibility": "private"},
+        {"platform": "facebook", "deliverable_type": "main_episode", "count": 1,
+         "status": "published", "visibility": "unpublished"},
+    ]
+    if shorts_renders:
+        deliverables.append({
+            "platform": "youtube", "deliverable_type": "short", "count": len(shorts_renders),
+            "status": "published", "visibility": "private",
+        })
+        deliverables.append({
+            "platform": "tiktok", "deliverable_type": "short", "count": 1,
+            "status": "published", "visibility": "self_only",
+        })
+        deliverables.append({
+            "platform": "instagram", "deliverable_type": "short", "count": 1,
+            "status": "skipped", "visibility": "container_only",
+            "skipped_reason_prefix": "instagram_container_validated",
+        })
+    return deliverables
+
+
 # ---------------------------------------------------------------------------
 # Step executors
 #
@@ -777,8 +808,8 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
         covered_topics_path.read_text(encoding="utf-8") if covered_topics_path.exists() else None
     )
 
-    expected_platforms = sorted({step["platform"] for step in steps})
-    record = PublishingRecord(episode_id=episode_id, output_dir=episode_dir, expected_platforms=expected_platforms)
+    expected_deliverables = _build_expected_deliverables(final_render_package)
+    record = PublishingRecord(episode_id=episode_id, output_dir=episode_dir, expected_deliverables=expected_deliverables)
     record.initialize()
 
     youtube_token: Optional[str] = None

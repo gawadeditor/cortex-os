@@ -286,24 +286,64 @@ class TestPublishingRecordSeal:
 
 
 # ---------------------------------------------------------------------------
-# TestExpectedPlatformsProductionReady
+# TestExpectedDeliverablesProductionReady
 #
-# expected_platforms is an opt-in run-contract scope for production_ready.
-# Omitted entirely (the default), behavior is unchanged from before this
-# parameter existed — that's what "legacy records remain valid" verifies.
+# expected_deliverables is an opt-in run-contract for production_ready: a
+# list of {platform, deliverable_type, count, status, visibility[,
+# skipped_reason_prefix]} specs. Omitted entirely (the default), behavior is
+# unchanged from before this parameter existed — that's what "legacy records
+# remain valid" verifies. This replaces the earlier platform-name-only
+# expected_platforms mechanism, which could not express that a successful
+# Instagram container-only result is intentionally status="skipped".
 # ---------------------------------------------------------------------------
 
-class TestExpectedPlatformsProductionReady:
-    def test_all_expected_deliverables_succeed_is_ready(self, tmp_path):
+def _smoke_contract(num_shorts: int = 3) -> list[dict]:
+    """The exact approved smoke-test contract for one episode."""
+    return [
+        {"platform": "youtube", "deliverable_type": "main_episode", "count": 1,
+         "status": "published", "visibility": "private"},
+        {"platform": "youtube", "deliverable_type": "short", "count": num_shorts,
+         "status": "published", "visibility": "private"},
+        {"platform": "facebook", "deliverable_type": "main_episode", "count": 1,
+         "status": "published", "visibility": "unpublished"},
+        {"platform": "tiktok", "deliverable_type": "short", "count": 1,
+         "status": "published", "visibility": "self_only"},
+        {"platform": "instagram", "deliverable_type": "short", "count": 1,
+         "status": "skipped", "visibility": "container_only",
+         "skipped_reason_prefix": "instagram_container_validated"},
+    ]
+
+
+class TestExpectedDeliverablesProductionReady:
+    def test_full_smoke_contract_all_succeed_is_ready(self, tmp_path):
+        """Includes the Instagram container-only success: status=skipped,
+        visibility=container_only, skipped_reason starting with the prefix."""
         record = PublishingRecord(
-            "ep_scope_001", output_dir=tmp_path,
-            expected_platforms=["youtube", "facebook", "tiktok", "instagram"],
+            "ep_scope_001", output_dir=tmp_path, expected_deliverables=_smoke_contract(num_shorts=3),
         )
         record.initialize()
-        record.append_result(_published_result("youtube", "main_episode"))
-        record.append_result(_published_result("facebook", "main_episode"))
-        record.append_result(_published_result("tiktok", "short", short_id="short_001"))
-        record.append_result(_published_result("instagram", "short", short_id="short_001"))
+        record.append_result(make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            platform_video_id="yt_main", visibility="private",
+        ))
+        for i in range(1, 4):
+            record.append_result(make_result_entry(
+                platform="youtube", deliverable_type="short", status="published",
+                short_id=f"short_{i:03d}", platform_video_id=f"yt_short_{i}", visibility="private",
+            ))
+        record.append_result(make_result_entry(
+            platform="facebook", deliverable_type="main_episode", status="published",
+            platform_video_id="fb_vid", visibility="unpublished",
+        ))
+        record.append_result(make_result_entry(
+            platform="tiktok", deliverable_type="short", status="published",
+            short_id="short_001", platform_video_id="tt_post", visibility="self_only",
+        ))
+        record.append_result(make_result_entry(
+            platform="instagram", deliverable_type="short", status="skipped",
+            short_id="short_001", visibility="container_only",
+            skipped_reason="instagram_container_validated: creation_id=abc, terminal_status=FINISHED",
+        ))
         sealed = record.seal()
 
         assert sealed["package_integrity"]["production_ready"] is True
@@ -311,46 +351,86 @@ class TestExpectedPlatformsProductionReady:
     def test_expected_facebook_fails_is_not_ready(self, tmp_path):
         record = PublishingRecord(
             "ep_scope_002", output_dir=tmp_path,
-            expected_platforms=["youtube", "facebook"],
+            expected_deliverables=[
+                {"platform": "youtube", "deliverable_type": "main_episode", "count": 1,
+                 "status": "published", "visibility": "private"},
+                {"platform": "facebook", "deliverable_type": "main_episode", "count": 1,
+                 "status": "published", "visibility": "unpublished"},
+            ],
         )
         record.initialize()
-        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            platform_video_id="yt_main", visibility="private",
+        ))
         record.append_result(_failed_result("facebook", "main_episode"))
         sealed = record.seal()
 
         assert sealed["package_integrity"]["production_ready"] is False
 
-    def test_expected_platform_never_attempted_is_not_ready(self, tmp_path):
+    def test_expected_deliverable_never_attempted_is_not_ready(self, tmp_path):
         """TikTok/Instagram pending — the run halted before reaching them."""
         record = PublishingRecord(
-            "ep_scope_003", output_dir=tmp_path,
-            expected_platforms=["youtube", "facebook", "tiktok", "instagram"],
+            "ep_scope_003", output_dir=tmp_path, expected_deliverables=_smoke_contract(num_shorts=3),
         )
         record.initialize()
-        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            platform_video_id="yt_main", visibility="private",
+        ))
+        for i in range(1, 4):
+            record.append_result(make_result_entry(
+                platform="youtube", deliverable_type="short", status="published",
+                short_id=f"short_{i:03d}", platform_video_id=f"yt_short_{i}", visibility="private",
+            ))
         record.append_result(_failed_result("facebook", "main_episode"))
         # tiktok/instagram never attempted — no result entries appended at all.
         sealed = record.seal()
 
         assert sealed["package_integrity"]["production_ready"] is False
 
-    def test_disabled_non_required_platform_does_not_block_readiness(self, tmp_path):
-        """A platform outside expected_platforms never affects readiness,
-        whether it's absent, skipped, or failed."""
+    def test_wrong_visibility_does_not_satisfy_the_deliverable(self, tmp_path):
+        """A published Facebook video that is NOT unpublished doesn't count —
+        the contract requires visibility, not just status."""
         record = PublishingRecord(
-            "ep_scope_004", output_dir=tmp_path,
-            expected_platforms=["youtube"],
+            "ep_scope_004b", output_dir=tmp_path,
+            expected_deliverables=[
+                {"platform": "facebook", "deliverable_type": "main_episode", "count": 1,
+                 "status": "published", "visibility": "unpublished"},
+            ],
         )
         record.initialize()
-        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(make_result_entry(
+            platform="facebook", deliverable_type="main_episode", status="published",
+            platform_video_id="fb_vid", visibility="published",  # wrong — went public
+        ))
+        sealed = record.seal()
+
+        assert sealed["package_integrity"]["production_ready"] is False
+
+    def test_disabled_non_required_platform_does_not_block_readiness(self, tmp_path):
+        """A deliverable class outside expected_deliverables never affects
+        readiness, whether it's absent, skipped, or failed."""
+        record = PublishingRecord(
+            "ep_scope_004", output_dir=tmp_path,
+            expected_deliverables=[
+                {"platform": "youtube", "deliverable_type": "main_episode", "count": 1,
+                 "status": "published", "visibility": "private"},
+            ],
+        )
+        record.initialize()
+        record.append_result(make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            platform_video_id="yt_main", visibility="private",
+        ))
         record.append_result(_failed_result("facebook", "main_episode"))
         record.append_result(_skipped_result("tiktok"))
         sealed = record.seal()
 
         assert sealed["package_integrity"]["production_ready"] is True
 
-    def test_legacy_records_without_expected_platforms_unchanged(self, tmp_path):
-        """No expected_platforms passed at all — original youtube-main-only
+    def test_legacy_records_without_expected_deliverables_unchanged(self, tmp_path):
+        """No expected_deliverables passed at all — original youtube-main-only
         semantics, exactly as before this parameter existed."""
         record = PublishingRecord("ep_scope_005", output_dir=tmp_path)
         record.initialize()
@@ -360,6 +440,21 @@ class TestExpectedPlatformsProductionReady:
 
         assert sealed["package_integrity"]["production_ready"] is True
         assert sealed["package_metadata"]["overall_status"] == "published"
+
+    def test_contract_is_persisted_for_post_restart_audit(self, tmp_path):
+        """The contract must be readable from the sealed JSON itself, not
+        only held in the live Python object, so a later process (or a human
+        reading the file) can audit why production_ready came out as it did."""
+        contract = _smoke_contract(num_shorts=1)
+        record = PublishingRecord("ep_scope_006", output_dir=tmp_path, expected_deliverables=contract)
+        record.initialize()
+        sealed = record.seal()
+
+        assert sealed["package_metadata"]["expected_deliverables"] == contract
+
+        # Re-read from disk — a fresh process would only ever see this.
+        on_disk = json.loads((tmp_path / "publishing_record_ep_scope_006.json").read_text())
+        assert on_disk["package_metadata"]["expected_deliverables"] == contract
 
 
 # ---------------------------------------------------------------------------

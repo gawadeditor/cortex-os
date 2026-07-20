@@ -50,25 +50,45 @@ class PublishingRecord:
         record.seal()
         final = record.to_dict()
 
-    expected_platforms (optional): the run's platform scope contract — the
-    set of platforms this run is actually expected to publish to. Omitted
-    (None, the default), production_ready keeps its original meaning:
-    True iff the YouTube main episode published, exactly as before this
-    parameter existed — every existing caller that doesn't pass it is
-    unaffected. When provided, production_ready instead requires at least
-    one "published" result for every platform in expected_platforms — a
-    platform outside that set (disabled/not required for this run) never
-    affects readiness, whether it's absent, skipped, or failed.
+    expected_deliverables (optional): the run's readiness contract — a list
+    of dicts, each describing one required class of deliverable this run
+    must produce to be considered production_ready:
+
+        {
+            "platform": "youtube",
+            "deliverable_type": "main_episode" | "short",
+            "count": 1,               # minimum number of matching results required
+            "status": "published",   # required status
+            "visibility": "private", # required visibility (None to not constrain it)
+            "skipped_reason_prefix": "instagram_container_validated",  # optional
+        }
+
+    Omitted (None, the default), production_ready keeps its original
+    meaning: True iff the YouTube main episode published, exactly as before
+    this parameter existed — every existing caller that doesn't pass it
+    (including hypogeum.agents.publishing_agent) is unaffected. When
+    provided, production_ready instead requires that every entry's count is
+    met by platform_results matching its platform/deliverable_type/status/
+    visibility (and skipped_reason_prefix, when given) — a deliverable class
+    outside this list (disabled/not required for this run) never affects
+    readiness, whether it's absent, skipped, or failed.
+
+    The contract is persisted into package_metadata.expected_deliverables at
+    initialize() time (and re-read from there at seal() time, not kept only
+    as a transient constructor argument) so a sealed record on disk is
+    self-describing — an operator or auditor can see exactly what this run
+    required and verify production_ready against it without needing the
+    original Python call that created the record.
     """
 
     def __init__(
         self,
         episode_id: str,
         output_dir: Optional[Path] = None,
-        expected_platforms: Optional[list[str]] = None,
+        expected_deliverables: Optional[list[dict]] = None,
     ) -> None:
         self.episode_id = episode_id
-        self._expected_platforms = expected_platforms
+        self._expected_deliverables = expected_deliverables
         self._log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
 
         # Determine write path
@@ -99,6 +119,7 @@ class PublishingRecord:
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "sealed_at": None,
                 "publishing_agent_version": "1.0",
+                "expected_deliverables": self._expected_deliverables,
             },
             "platform_results": [],
             "failures": [],
@@ -233,22 +254,59 @@ class PublishingRecord:
 
     def _compute_production_ready(self, overall_status: str) -> bool:
         """
-        Legacy behavior (no expected_platforms given at construction):
+        Legacy behavior (no expected_deliverables given at construction):
         True iff overall_status == "published" — unchanged from before this
-        method existed.
+        parameter existed.
 
-        Scope-aware behavior (expected_platforms given): True iff every
-        platform in expected_platforms has at least one "published" result
-        in platform_results. A platform outside expected_platforms never
-        affects this — disabled/not-required platforms don't block
-        readiness whether they're absent, skipped, or failed.
+        Contract-aware behavior (expected_deliverables given, read back from
+        package_metadata rather than the constructor argument directly — see
+        the class docstring): True iff every entry's required count is met
+        by platform_results matching its platform, deliverable_type, status,
+        and visibility (and skipped_reason_prefix, when given). A required
+        count of N that is only partially met (failed, pending/absent, or
+        matching count < N) makes the whole run not ready. A deliverable
+        class absent from expected_deliverables never affects readiness —
+        disabled/not-required platforms don't block it whether they're
+        absent, skipped, or failed.
         """
-        if not self._expected_platforms:
+        expected_deliverables = self._record.get("package_metadata", {}).get("expected_deliverables")
+        if not expected_deliverables:
             return overall_status == "published"
 
         results = self._record.get("platform_results", [])
-        published_platforms = {r.get("platform") for r in results if r.get("status") == "published"}
-        return set(self._expected_platforms).issubset(published_platforms)
+        for spec in expected_deliverables:
+            if self._matching_deliverable_count(results, spec) < spec.get("count", 1):
+                return False
+        return True
+
+    @staticmethod
+    def _matching_deliverable_count(results: list[dict], spec: dict) -> int:
+        """Count distinct deliverables in `results` satisfying `spec` (see
+        the class docstring for the expected_deliverables entry shape)."""
+        main_matched = False
+        matching_short_ids: set = set()
+
+        for r in results:
+            if r.get("platform") != spec.get("platform"):
+                continue
+            if r.get("deliverable_type") != spec.get("deliverable_type"):
+                continue
+            if r.get("status") != spec.get("status"):
+                continue
+            if "visibility" in spec and r.get("visibility") != spec.get("visibility"):
+                continue
+            prefix = spec.get("skipped_reason_prefix")
+            if prefix and not (r.get("skipped_reason") or "").startswith(prefix):
+                continue
+
+            if spec.get("deliverable_type") == "main_episode":
+                main_matched = True
+            else:
+                matching_short_ids.add(r.get("short_id"))
+
+        if spec.get("deliverable_type") == "main_episode":
+            return 1 if main_matched else 0
+        return len(matching_short_ids)
 
     def _update_summary(self) -> None:
         """Recount summary fields from platform_results."""

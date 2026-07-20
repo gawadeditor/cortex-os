@@ -2543,6 +2543,7 @@ _META_AUTH_URL      = f"https://www.facebook.com/{_META_GRAPH_VERSION}/dialog/oa
 _META_TOKEN_URL_CB  = f"https://graph.facebook.com/{_META_GRAPH_VERSION}/oauth/access_token"
 _META_EXCHANGE_URL  = f"https://graph.facebook.com/{_META_GRAPH_VERSION}/oauth/access_token"
 _META_SCOPES        = (
+    "pages_manage_posts,"
     "pages_read_engagement,"
     "instagram_content_publish,"
     "instagram_basic"

@@ -49,14 +49,26 @@ class PublishingRecord:
         record.append_result({...})
         record.seal()
         final = record.to_dict()
+
+    expected_platforms (optional): the run's platform scope contract — the
+    set of platforms this run is actually expected to publish to. Omitted
+    (None, the default), production_ready keeps its original meaning:
+    True iff the YouTube main episode published, exactly as before this
+    parameter existed — every existing caller that doesn't pass it is
+    unaffected. When provided, production_ready instead requires at least
+    one "published" result for every platform in expected_platforms — a
+    platform outside that set (disabled/not required for this run) never
+    affects readiness, whether it's absent, skipped, or failed.
     """
 
     def __init__(
         self,
         episode_id: str,
         output_dir: Optional[Path] = None,
+        expected_platforms: Optional[list[str]] = None,
     ) -> None:
         self.episode_id = episode_id
+        self._expected_platforms = expected_platforms
         self._log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
 
         # Determine write path
@@ -164,7 +176,7 @@ class PublishingRecord:
             The sealed publishing record dict.
         """
         overall_status = self._compute_overall_status()
-        production_ready = overall_status == "published"
+        production_ready = self._compute_production_ready(overall_status)
 
         self._record["package_metadata"]["overall_status"] = overall_status
         self._record["package_metadata"]["sealed_at"] = datetime.now(timezone.utc).isoformat()
@@ -218,6 +230,25 @@ class PublishingRecord:
             return "partially_published"
 
         return "failed"
+
+    def _compute_production_ready(self, overall_status: str) -> bool:
+        """
+        Legacy behavior (no expected_platforms given at construction):
+        True iff overall_status == "published" — unchanged from before this
+        method existed.
+
+        Scope-aware behavior (expected_platforms given): True iff every
+        platform in expected_platforms has at least one "published" result
+        in platform_results. A platform outside expected_platforms never
+        affects this — disabled/not-required platforms don't block
+        readiness whether they're absent, skipped, or failed.
+        """
+        if not self._expected_platforms:
+            return overall_status == "published"
+
+        results = self._record.get("platform_results", [])
+        published_platforms = {r.get("platform") for r in results if r.get("status") == "published"}
+        return set(self._expected_platforms).issubset(published_platforms)
 
     def _update_summary(self) -> None:
         """Recount summary fields from platform_results."""

@@ -286,6 +286,83 @@ class TestPublishingRecordSeal:
 
 
 # ---------------------------------------------------------------------------
+# TestExpectedPlatformsProductionReady
+#
+# expected_platforms is an opt-in run-contract scope for production_ready.
+# Omitted entirely (the default), behavior is unchanged from before this
+# parameter existed — that's what "legacy records remain valid" verifies.
+# ---------------------------------------------------------------------------
+
+class TestExpectedPlatformsProductionReady:
+    def test_all_expected_deliverables_succeed_is_ready(self, tmp_path):
+        record = PublishingRecord(
+            "ep_scope_001", output_dir=tmp_path,
+            expected_platforms=["youtube", "facebook", "tiktok", "instagram"],
+        )
+        record.initialize()
+        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(_published_result("facebook", "main_episode"))
+        record.append_result(_published_result("tiktok", "short", short_id="short_001"))
+        record.append_result(_published_result("instagram", "short", short_id="short_001"))
+        sealed = record.seal()
+
+        assert sealed["package_integrity"]["production_ready"] is True
+
+    def test_expected_facebook_fails_is_not_ready(self, tmp_path):
+        record = PublishingRecord(
+            "ep_scope_002", output_dir=tmp_path,
+            expected_platforms=["youtube", "facebook"],
+        )
+        record.initialize()
+        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(_failed_result("facebook", "main_episode"))
+        sealed = record.seal()
+
+        assert sealed["package_integrity"]["production_ready"] is False
+
+    def test_expected_platform_never_attempted_is_not_ready(self, tmp_path):
+        """TikTok/Instagram pending — the run halted before reaching them."""
+        record = PublishingRecord(
+            "ep_scope_003", output_dir=tmp_path,
+            expected_platforms=["youtube", "facebook", "tiktok", "instagram"],
+        )
+        record.initialize()
+        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(_failed_result("facebook", "main_episode"))
+        # tiktok/instagram never attempted — no result entries appended at all.
+        sealed = record.seal()
+
+        assert sealed["package_integrity"]["production_ready"] is False
+
+    def test_disabled_non_required_platform_does_not_block_readiness(self, tmp_path):
+        """A platform outside expected_platforms never affects readiness,
+        whether it's absent, skipped, or failed."""
+        record = PublishingRecord(
+            "ep_scope_004", output_dir=tmp_path,
+            expected_platforms=["youtube"],
+        )
+        record.initialize()
+        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(_failed_result("facebook", "main_episode"))
+        record.append_result(_skipped_result("tiktok"))
+        sealed = record.seal()
+
+        assert sealed["package_integrity"]["production_ready"] is True
+
+    def test_legacy_records_without_expected_platforms_unchanged(self, tmp_path):
+        """No expected_platforms passed at all — original youtube-main-only
+        semantics, exactly as before this parameter existed."""
+        record = PublishingRecord("ep_scope_005", output_dir=tmp_path)
+        record.initialize()
+        record.append_result(_published_result("youtube", "main_episode"))
+        record.append_result(_failed_result("facebook", "main_episode"))
+        sealed = record.seal()
+
+        assert sealed["package_integrity"]["production_ready"] is True
+        assert sealed["package_metadata"]["overall_status"] == "published"
+
+
+# ---------------------------------------------------------------------------
 # TestMakeResultEntry
 # ---------------------------------------------------------------------------
 

@@ -777,7 +777,8 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
         covered_topics_path.read_text(encoding="utf-8") if covered_topics_path.exists() else None
     )
 
-    record = PublishingRecord(episode_id=episode_id, output_dir=episode_dir)
+    expected_platforms = sorted({step["platform"] for step in steps})
+    record = PublishingRecord(episode_id=episode_id, output_dir=episode_dir, expected_platforms=expected_platforms)
     record.initialize()
 
     youtube_token: Optional[str] = None

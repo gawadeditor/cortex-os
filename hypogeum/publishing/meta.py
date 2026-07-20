@@ -67,8 +67,43 @@ def _auth_params(access_token: str) -> dict:
     return {"access_token": access_token}
 
 
+def _graph_error_detail(response: requests.Response) -> str:
+    """
+    Build a safe diagnostic suffix from a Graph API error response body.
+
+    Includes only: error message, type, code, error_subcode (where present),
+    and fbtrace_id (where present) — the fields needed to diagnose a Graph
+    API rejection. Never includes the access token, request params, headers,
+    or any other part of the request/response.
+    """
+    try:
+        error = response.json().get("error", {})
+    except ValueError:
+        return ""
+    if not isinstance(error, dict) or not error:
+        return ""
+
+    parts = []
+    if error.get("message"):
+        parts.append(f"message={error['message']!r}")
+    if error.get("type"):
+        parts.append(f"type={error['type']}")
+    if error.get("code") is not None:
+        parts.append(f"code={error['code']}")
+    if error.get("error_subcode") is not None:
+        parts.append(f"subcode={error['error_subcode']}")
+    if error.get("fbtrace_id"):
+        parts.append(f"fbtrace_id={error['fbtrace_id']}")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def _raise_for_status(response: requests.Response, context: str = "") -> None:
-    """Raise HardFailureError or SoftFailureError based on HTTP status."""
+    """Raise HardFailureError or SoftFailureError based on HTTP status.
+
+    The raised exception's message is suffixed with safe Graph API diagnostic
+    fields (see _graph_error_detail) so operators can see *why* a request was
+    rejected without the low-level client discarding that detail.
+    """
     if response.ok:
         return
 
@@ -88,11 +123,22 @@ def _raise_for_status(response: requests.Response, context: str = "") -> None:
     except (ValueError, KeyError):
         error_code = None
 
-    classify_http_status(
-        response.status_code,
-        error_code=error_code,
-        retry_after=retry_after,
-    )
+    detail = _graph_error_detail(response)
+
+    try:
+        classify_http_status(
+            response.status_code,
+            error_code=error_code,
+            retry_after=retry_after,
+        )
+    except HardFailureError as exc:
+        raise HardFailureError(
+            f"{exc}{detail}", status_code=exc.status_code, error_code=exc.error_code,
+        ) from exc
+    except SoftFailureError as exc:
+        raise SoftFailureError(
+            f"{exc}{detail}", status_code=exc.status_code, retry_after=exc.retry_after,
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

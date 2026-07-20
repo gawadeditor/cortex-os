@@ -25,6 +25,7 @@ import pytest
 import requests
 
 from hypogeum.publishing.meta import (
+    _raise_for_status,
     create_instagram_container,
     poll_instagram_container,
     publish_instagram_container,
@@ -72,6 +73,70 @@ def _fake_video(tmp_path: Path, size_bytes: int = 100) -> Path:
     p = tmp_path / "episode.mp4"
     p.write_bytes(b"x" * size_bytes)
     return p
+
+
+# ---------------------------------------------------------------------------
+# TestRaiseForStatusGraphDiagnostics
+# ---------------------------------------------------------------------------
+
+class TestRaiseForStatusGraphDiagnostics:
+    """_raise_for_status must surface safe Graph API diagnostics, never secrets."""
+
+    def test_graph_error_message_and_code_preserved_in_raised_exception(self):
+        resp = _make_response(400, json_data={
+            "error": {
+                "message": "Invalid parameter",
+                "type": "OAuthException",
+                "code": 100,
+                "error_subcode": 33,
+                "fbtrace_id": "AbCdEf123456",
+            },
+        })
+        with pytest.raises(HardFailureError) as exc_info:
+            _raise_for_status(resp, context="test")
+
+        message = str(exc_info.value)
+        assert "Invalid parameter" in message
+        assert "OAuthException" in message
+        assert "code=100" in message
+        assert "subcode=33" in message
+        assert "fbtrace_id=AbCdEf123456" in message
+
+    def test_no_token_or_authorization_material_included(self):
+        resp = _make_response(400, json_data={
+            "error": {"message": "Invalid parameter", "type": "OAuthException", "code": 100},
+        })
+        resp.headers = {"Authorization": "Bearer super-secret-token-abc123"}
+
+        with pytest.raises(HardFailureError) as exc_info:
+            _raise_for_status(resp, context="test")
+
+        message = str(exc_info.value)
+        assert "super-secret-token-abc123" not in message
+        assert "Authorization" not in message
+        assert "Bearer" not in message
+
+    def test_existing_hard_soft_classification_unchanged(self):
+        for code in (400, 401, 403):
+            resp = _make_response(code, json_data={"error": {"message": "x", "code": code}})
+            with pytest.raises(HardFailureError):
+                _raise_for_status(resp)
+
+        for code in (429, 500, 503):
+            resp = _make_response(code, json_data={"error": {"message": "x", "code": code}})
+            with pytest.raises(SoftFailureError):
+                _raise_for_status(resp)
+
+    def test_successful_response_unchanged(self):
+        resp = _make_response(200, json_data={"id": "vid_123"})
+        _raise_for_status(resp)  # must not raise
+
+    def test_missing_error_body_does_not_crash(self):
+        """No JSON body at all — must still classify by status code alone."""
+        resp = _make_response(400, text="not json")
+        with pytest.raises(HardFailureError) as exc_info:
+            _raise_for_status(resp)
+        assert "HTTP 400" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

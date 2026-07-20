@@ -223,7 +223,25 @@ def init_tiktok_upload(
 
     _raise_for_status(response, context="tiktok_init")
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        # HTTP status was "ok" (checked above) but the body isn't valid JSON —
+        # never assume this means success. Diagnostics are response-side only
+        # (status, content-type, body length/prefix) — never the request's
+        # Authorization header, access token, or upload URL.
+        body_text = response.text or ""
+        detail = (
+            f"content_type={response.headers.get('Content-Type', 'unknown')!r}, "
+            f"body_length={len(body_text)}"
+        )
+        if body_text:
+            detail += f", body_prefix={body_text[:200]!r}"
+        raise SoftFailureError(
+            f"TikTok init upload: HTTP {response.status_code} but response body is not "
+            f"valid JSON ({detail})"
+        ) from exc
+
     publish_id = (
         data.get("data", {}).get("publish_id", "")
         or data.get("publish_id", "")

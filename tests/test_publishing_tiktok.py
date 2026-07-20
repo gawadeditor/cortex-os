@@ -181,6 +181,56 @@ class TestInitTiktokUpload:
             with pytest.raises(SoftFailureError):
                 init_tiktok_upload(config=config, video_path=video_path, title="T")
 
+    def test_http_success_empty_body_raises_controlled_soft_failure(self, tmp_path):
+        """Real 2026-07-20 shape: HTTP status was ok but the body was empty —
+        must never crash with an unhandled JSONDecodeError."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data=None, text="", headers={"Content-Type": "text/plain"})
+
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(SoftFailureError) as exc_info:
+                init_tiktok_upload(config=config, video_path=video_path, title="T")
+
+        message = str(exc_info.value)
+        assert "200" in message
+        assert "body_length=0" in message
+        assert "text/plain" in message
+
+    def test_http_success_invalid_json_raises_controlled_soft_failure(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(
+            200, json_data=None, text="<html>not json</html>",
+            headers={"Content-Type": "text/html"},
+        )
+
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(SoftFailureError) as exc_info:
+                init_tiktok_upload(config=config, video_path=video_path, title="T")
+
+        message = str(exc_info.value)
+        assert "text/html" in message
+        assert "<html>not json</html>" in message  # safe response-body prefix, not a secret
+
+    def test_invalid_json_failure_never_leaks_secrets(self, tmp_path):
+        config = _make_config()
+        config.TIKTOK_ACCESS_TOKEN = "SUPER-SECRET-TIKTOK-TOKEN-xyz789"
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data=None, text="not json at all")
+
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(SoftFailureError) as exc_info:
+                init_tiktok_upload(config=config, video_path=video_path, title="T")
+
+        message = str(exc_info.value)
+        assert "SUPER-SECRET-TIKTOK-TOKEN-xyz789" not in message
+        assert "Authorization" not in message
+        assert "Bearer" not in message
+
     def test_network_error_raises_soft_failure(self, tmp_path):
         config = _make_config()
         video_path = _fake_video(tmp_path, 100)

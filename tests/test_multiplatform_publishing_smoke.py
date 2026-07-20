@@ -837,3 +837,39 @@ def test_scoped_run_crash_leaves_active_full_record_untouched(tmp_path):
             pass
 
     assert active_record_path.read_text() == original_content
+
+# ---------------------------------------------------------------------------
+# TikTok init failures (now controlled SoftFailureError, not an unhandled
+# crash) must be recorded as a normal failed checkpoint, and must halt the
+# run before Instagram is ever attempted.
+# ---------------------------------------------------------------------------
+
+def test_tiktok_controlled_failure_is_recorded_as_failed_not_a_crash(tmp_path):
+    ep_dir, frp = _build_episode(tmp_path, num_shorts=1)
+    cfg = _make_config()
+
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(
+             smoke.tt_client, "init_tiktok_upload",
+             side_effect=smoke.SoftFailureError(
+                 "TikTok init upload: HTTP 200 but response body is not valid JSON "
+                 "(content_type='text/plain', body_length=0)"
+             ),
+         ), \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(smoke.meta_client, "create_instagram_container") as m_ig_create:
+        rc = smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke", "--platforms", "tiktok,instagram"],
+            project_root=tmp_path,
+        )
+
+    assert rc == 1  # halted, but no unhandled exception/traceback — main() returned cleanly
+
+    ledger = json.loads((ep_dir / "smoke_publishing_checkpoints_ep_test.json").read_text())
+    assert ledger["steps"]["tiktok_short_first"]["status"] == "failed"
+    assert "not valid JSON" in ledger["steps"]["tiktok_short_first"]["error"]
+
+    m_ig_create.assert_not_called()
+    assert "instagram_short_first" not in ledger["steps"]

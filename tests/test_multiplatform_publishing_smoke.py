@@ -729,7 +729,12 @@ def test_platforms_filter_excludes_youtube_and_facebook_steps(tmp_path):
     m_ig_publish.assert_not_called()
     assert m_tt_init.call_args.kwargs["privacy_level"] == "SELF_ONLY"
 
-    record = json.loads((ep_dir / "publishing_record_ep_test.json").read_text())
+    # A scoped run must never write to the canonical active record path.
+    active_record_path = ep_dir / "publishing_record_ep_test.json"
+    assert not active_record_path.exists(), "scoped run must never create/touch the active record"
+
+    scoped_record_path = ep_dir / "smoke_scoped_instagram-tiktok" / "publishing_record_ep_test.json"
+    record = json.loads(scoped_record_path.read_text())
     platforms_in_record = {r["platform"] for r in record["platform_results"]}
     assert platforms_in_record == {"tiktok", "instagram"}
     assert {d["platform"] for d in record["package_metadata"]["expected_deliverables"]} == {"tiktok", "instagram"}
@@ -773,3 +778,62 @@ def test_platforms_filter_rejects_unknown_platform(tmp_path):
             project_root=tmp_path,
         )
     assert rc == 2
+
+
+def test_scoped_run_never_modifies_pre_existing_active_full_record(tmp_path):
+    """The exact real scenario: a full-scope active record already exists;
+    a --platforms scoped run must leave it byte-for-byte untouched."""
+    ep_dir, frp = _build_episode(tmp_path, num_shorts=1)
+    active_record_path = ep_dir / "publishing_record_ep_test.json"
+    original_content = json.dumps({
+        "package_metadata": {"publishing_record_id": "pub_original", "episode_id": "ep_test",
+                              "overall_status": "published", "started_at": "t", "sealed_at": "t",
+                              "publishing_agent_version": "1.0"},
+        "platform_results": [{"platform": "youtube", "status": "published"}],
+        "failures": [], "summary": {"youtube_main_published": True, "total_deliverables_attempted": 1,
+                                     "total_published": 1, "total_failed": 0, "total_skipped": 0},
+        "package_integrity": {"production_ready": True},
+    }, indent=2)
+    active_record_path.write_text(original_content)
+
+    cfg = _make_config()
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")), \
+         patch.object(smoke.tt_client, "upload_tiktok_chunks"), \
+         patch.object(smoke.tt_client, "poll_tiktok_publish", return_value="post_1"), \
+         patch.object(smoke, "get_staging_provider") as m_staging, \
+         patch.object(smoke.meta_client, "create_instagram_container", return_value="creation_1"), \
+         patch.object(smoke.meta_client, "poll_instagram_container", return_value="FINISHED"):
+        m_staging.return_value.stage_file.return_value = "https://staged.example.com/video.mp4"
+        smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke", "--platforms", "tiktok,instagram"],
+            project_root=tmp_path,
+        )
+
+    assert active_record_path.read_text() == original_content
+
+
+def test_scoped_run_crash_leaves_active_full_record_untouched(tmp_path):
+    """Even if the scoped run crashes mid-step, the active full record (if any) is never touched."""
+    ep_dir, frp = _build_episode(tmp_path, num_shorts=1)
+    active_record_path = ep_dir / "publishing_record_ep_test.json"
+    original_content = json.dumps({"package_metadata": {"episode_id": "ep_test"}, "marker": "original"})
+    active_record_path.write_text(original_content)
+
+    cfg = _make_config()
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "init_tiktok_upload", side_effect=RuntimeError("simulated crash")):
+        try:
+            smoke.main(
+                ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke", "--platforms", "tiktok"],
+                project_root=tmp_path,
+            )
+        except RuntimeError:
+            pass
+
+    assert active_record_path.read_text() == original_content

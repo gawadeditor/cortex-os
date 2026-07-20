@@ -818,13 +818,27 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
 
     # ------------------------------------------------------------------
     # EXECUTE mode
+    #
+    # A --platforms scoped run must never touch the canonical active record
+    # (publishing_record_{episode_id}.json) — that file is the full-scope
+    # run's truth and other runs/tooling may read it as such. Scoped runs
+    # get their own record directory instead, so PublishingRecord (unchanged,
+    # no production architecture touched) writes a sibling file that can
+    # never collide with or replace the canonical one.
     # ------------------------------------------------------------------
-    record_path = episode_dir / f"publishing_record_{episode_id}.json"
+    if selected_platforms is not None:
+        platforms_slug = "-".join(sorted(selected_platforms))
+        record_output_dir = episode_dir / f"smoke_scoped_{platforms_slug}"
+    else:
+        record_output_dir = episode_dir
+    record_path = record_output_dir / f"publishing_record_{episode_id}.json"
+
     if record_path.exists():
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup_path = record_path.with_name(f"publishing_record_{episode_id}.pre_smoke_backup_{ts}.json")
         shutil.copy2(record_path, backup_path)
-        print(f"backed up existing publishing record -> {backup_path.name}")
+        print(f"backed up existing {'scoped ' if selected_platforms is not None else ''}"
+              f"publishing record -> {backup_path}")
 
     covered_topics_path = root / "memory" / "covered-topics.md"
     _original_covered_topics = (
@@ -834,7 +848,7 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
     expected_deliverables = _build_expected_deliverables(final_render_package)
     if selected_platforms is not None:
         expected_deliverables = [d for d in expected_deliverables if d["platform"] in selected_platforms]
-    record = PublishingRecord(episode_id=episode_id, output_dir=episode_dir, expected_deliverables=expected_deliverables)
+    record = PublishingRecord(episode_id=episode_id, output_dir=record_output_dir, expected_deliverables=expected_deliverables)
     record.initialize()
 
     youtube_token: Optional[str] = None

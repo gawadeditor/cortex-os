@@ -11,15 +11,20 @@ Coverage:
     TestRequiresCanonicalChannel — missing canonical channel_id
     TestUpdate                   — partial update, unknown field rejection
     TestValidation                — every hard-validation rule
+    TestPersistenceFailsClosed   — INSERT/UPDATE/read failures raise RuntimeError,
+                                    never masquerade as success
     TestHypogeumSeed              — exact required initial values, idempotent
+    TestBootstrapFailsClosed     — bootstrap script surfaces persistence failure
     TestPublishingProfileUnaffected — sibling profile untouched
 """
 
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -96,6 +101,43 @@ def _valid_kwargs(**overrides) -> dict:
     }
     kwargs.update(overrides)
     return kwargs
+
+
+class _FlakyConnection:
+    """
+    Delegates everything to a real sqlite3.Connection except .execute(),
+    which raises sqlite3.OperationalError when the SQL contains a given
+    substring. sqlite3.Connection.execute is a read-only C attribute, so it
+    can't be monkeypatched directly on the object — this wrapper is the
+    substitute.
+    """
+    def __init__(self, real_conn, fail_when_sql_contains: str):
+        self._real_conn = real_conn
+        self._fail_when_sql_contains = fail_when_sql_contains
+
+    def execute(self, sql, *args, **kwargs):
+        if self._fail_when_sql_contains in sql:
+            raise sqlite3.OperationalError("simulated disk I/O error")
+        return self._real_conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real_conn, name)
+
+
+def _flaky_get_connection(db_path, fail_when_sql_contains: str):
+    """
+    A side_effect for patching hypogeum.channel_config.get_connection that
+    returns a REAL connection to db_path, but makes any .execute() call whose
+    SQL contains `fail_when_sql_contains` raise sqlite3.OperationalError.
+
+    This lets a test simulate "the UPDATE/INSERT statement itself failed"
+    without breaking the unrelated reads (e.g. the existence check a create/
+    update call performs first) that happen over the same connection factory.
+    """
+    def factory(path):
+        return _FlakyConnection(get_connection(path), fail_when_sql_contains)
+
+    return factory
 
 
 # ===========================================================================
@@ -297,6 +339,80 @@ class TestValidation:
 
 
 # ===========================================================================
+# TestPersistenceFailsClosed — a bounded unattended-runtime reliability fix.
+#
+# create/get/update must never report success (or silently return None/
+# False) when the underlying database operation actually failed — a caller
+# relying on this profile to gate autonomous execution must be able to trust
+# a returned value.
+# ===========================================================================
+
+class TestPersistenceFailsClosed:
+    def test_create_raises_runtime_error_when_insert_fails(self, db_path, canonical_channel):
+        with patch(
+            "hypogeum.channel_config.get_connection",
+            side_effect=_flaky_get_connection(db_path, "INSERT INTO channel_operations_profiles"),
+        ):
+            with pytest.raises(RuntimeError, match="INSERT failed"):
+                create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+
+    def test_create_never_returns_success_after_persistence_failure(self, db_path, canonical_channel):
+        """No row must exist after a failed create — no in-memory-only "success"."""
+        with patch(
+            "hypogeum.channel_config.get_connection",
+            side_effect=_flaky_get_connection(db_path, "INSERT INTO channel_operations_profiles"),
+        ):
+            with pytest.raises(RuntimeError):
+                create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+
+        assert get_channel_operations_profile("hypogeum", db_path=db_path) is None
+
+    def test_create_returns_the_persisted_readback_profile(self, db_path, canonical_channel):
+        returned = create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+        independently_fetched = get_channel_operations_profile("hypogeum", db_path=db_path)
+        assert returned == independently_fetched
+
+    def test_get_returns_none_only_for_genuinely_missing_row(self, db_path, canonical_channel):
+        create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+        assert get_channel_operations_profile("hypogeum", db_path=db_path) is not None
+        assert get_channel_operations_profile("some_other_channel", db_path=db_path) is None
+
+    def test_get_raises_runtime_error_on_database_failure(self, db_path, canonical_channel):
+        create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+        with patch(
+            "hypogeum.channel_config.get_connection",
+            side_effect=_flaky_get_connection(db_path, "SELECT * FROM channel_operations_profiles"),
+        ):
+            with pytest.raises(RuntimeError, match="read failed"):
+                get_channel_operations_profile("hypogeum", db_path=db_path)
+
+    def test_update_raises_runtime_error_on_database_failure(self, db_path, canonical_channel):
+        create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+        with patch(
+            "hypogeum.channel_config.get_connection",
+            side_effect=_flaky_get_connection(db_path, "UPDATE channel_operations_profiles"),
+        ):
+            with pytest.raises(RuntimeError, match="UPDATE failed"):
+                update_channel_operations_profile(
+                    "hypogeum", db_path=db_path, max_concurrent_episodes=5,
+                )
+        # The field must not appear changed — the failed UPDATE never committed.
+        assert get_channel_operations_profile("hypogeum", db_path=db_path).max_concurrent_episodes == 1
+
+    def test_update_verifies_persisted_field_values(self, db_path, canonical_channel):
+        create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+        ok = update_channel_operations_profile(
+            "hypogeum", db_path=db_path,
+            max_concurrent_episodes=2, default_privacy_state="unlisted",
+        )
+        assert ok is True
+
+        fetched = get_channel_operations_profile("hypogeum", db_path=db_path)
+        assert fetched.max_concurrent_episodes == 2
+        assert fetched.default_privacy_state == "unlisted"
+
+
+# ===========================================================================
 # TestHypogeumSeed — exact required initial values, idempotent bootstrap
 # ===========================================================================
 
@@ -357,6 +473,50 @@ class TestHypogeumSeed:
             if get_channel_operations_profile("hypogeum", db_path=db_path) is None:
                 create_channel_operations_profile(db_path=db_path, **d)
 
+        conn = get_connection(db_path)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM channel_operations_profiles WHERE channel_id='hypogeum'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 1
+
+
+# ===========================================================================
+# TestBootstrapFailsClosed
+#
+# _run_operations_profile_bootstrap() has no db_path parameter (matching
+# every other function in scripts/bootstrap_channel.py — it always targets
+# the real default DB). To exercise it against a temp DB without touching
+# .hypogeum-assets/hypogeum.db, patch channel_config's module-level
+# _DEFAULT_DB_PATH for the duration of the test — every function in that
+# module resolves it at call time, so this safely redirects all of
+# _run_operations_profile_bootstrap()'s internal (db_path=None) calls.
+# ===========================================================================
+
+class TestBootstrapFailsClosed:
+    def test_bootstrap_fails_when_persistence_fails(self, db_path, canonical_channel):
+        with patch("hypogeum.channel_config._DEFAULT_DB_PATH", db_path), \
+             patch(
+                 "hypogeum.channel_config.get_connection",
+                 side_effect=_flaky_get_connection(db_path, "INSERT INTO channel_operations_profiles"),
+             ):
+            ok = bootstrap_channel_script._run_operations_profile_bootstrap()
+
+        assert ok is False
+        assert get_channel_operations_profile("hypogeum", db_path=db_path) is None
+
+    def test_idempotent_bootstrap_succeeds_for_existing_row(self, db_path, canonical_channel):
+        create_channel_operations_profile(
+            db_path=db_path, **bootstrap_channel_script._build_operations_profile_dict()
+        )
+
+        with patch("hypogeum.channel_config._DEFAULT_DB_PATH", db_path):
+            ok = bootstrap_channel_script._run_operations_profile_bootstrap()
+
+        assert ok is True
+        # Still exactly one row — idempotent, no duplicate insert attempted.
         conn = get_connection(db_path)
         try:
             count = conn.execute(

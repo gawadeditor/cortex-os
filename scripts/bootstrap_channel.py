@@ -189,9 +189,17 @@ def _run_operations_profile_bootstrap() -> bool:
     """
     P-COP-01: Idempotently seed the ChannelOperationsProfile for Hypogeum.
 
-    Returns True on success (including "already exists").
+    Returns True on success (including "already exists"). Returns False and
+    prints a clear error if the existence check, creation, or the explicit
+    post-creation read-back verification fails — never reports success
+    without confirmed persistence.
     """
-    existing = get_channel_operations_profile(CHANNEL_ID)
+    try:
+        existing = get_channel_operations_profile(CHANNEL_ID)
+    except RuntimeError as exc:
+        print(f"  ERROR checking for existing ChannelOperationsProfile: {exc}")
+        return False
+
     if existing:
         print(
             f"  ChannelOperationsProfile already exists for {CHANNEL_ID!r} "
@@ -201,13 +209,30 @@ def _run_operations_profile_bootstrap() -> bool:
 
     try:
         profile = create_channel_operations_profile(**_build_operations_profile_dict())
-        print(f"  Created ChannelOperationsProfile for channel_id={profile.channel_id!r}")
-        print(f"  enabled_platforms={profile.enabled_platforms!r}")
-        print(f"  blocked_platform_reasons={profile.blocked_platform_reasons!r}")
-        return True
-    except Exception as exc:
+    except (ValueError, RuntimeError) as exc:
         print(f"  ERROR bootstrapping ChannelOperationsProfile: {exc}")
         return False
+
+    # Explicit post-creation verification, independent of create()'s own
+    # internal read-back — bootstrap must never report success without
+    # confirming the row is actually there.
+    try:
+        verified = get_channel_operations_profile(CHANNEL_ID)
+    except RuntimeError as exc:
+        print(f"  ERROR verifying ChannelOperationsProfile after creation: {exc}")
+        return False
+
+    if verified is None or verified.channel_id != CHANNEL_ID:
+        print(
+            f"  ERROR: ChannelOperationsProfile not found after creation "
+            f"for channel_id={CHANNEL_ID!r}"
+        )
+        return False
+
+    print(f"  Created ChannelOperationsProfile for channel_id={profile.channel_id!r}")
+    print(f"  enabled_platforms={profile.enabled_platforms!r}")
+    print(f"  blocked_platform_reasons={profile.blocked_platform_reasons!r}")
+    return True
 
 
 def _run_factory_bootstrap() -> bool:
@@ -320,15 +345,21 @@ def _run_verification() -> bool:
         print(f"  PASS  load_channel_config — full ChannelConfig resolved")
 
     # 5b. channel_operations_profiles
-    ops = get_channel_operations_profile(CHANNEL_ID)
-    if ops is None:
-        print(f"  FAIL  channel_operations_profiles — no row for channel_id={CHANNEL_ID!r}")
+    try:
+        ops = get_channel_operations_profile(CHANNEL_ID)
+    except RuntimeError as exc:
+        print(f"  FAIL  channel_operations_profiles — read failed: {exc}")
+        ops = None
         ok = False
     else:
-        print(
-            f"  PASS  channel_operations_profiles — operator_enabled={ops.operator_enabled!r}  "
-            f"enabled_platforms={ops.enabled_platforms!r}"
-        )
+        if ops is None:
+            print(f"  FAIL  channel_operations_profiles — no row for channel_id={CHANNEL_ID!r}")
+            ok = False
+        else:
+            print(
+                f"  PASS  channel_operations_profiles — operator_enabled={ops.operator_enabled!r}  "
+                f"enabled_platforms={ops.enabled_platforms!r}"
+            )
 
     # 6. list_channel_profiles
     all_channels = list_channel_profiles()

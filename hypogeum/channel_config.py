@@ -1182,6 +1182,12 @@ def create_channel_operations_profile(
     cost_ceiling_usd_per_episode, default_privacy_state, and
     production_cadence.videos_per_week / publishing_schedule.time_of_day
     when present.
+
+    Fails closed on persistence: any INSERT/read-back failure raises
+    RuntimeError (never silently swallowed). Returns the row actually read
+    back from the database — not the in-memory object — and only after
+    confirming it matches the intended channel_id and field values. A
+    caller can trust that a returned profile really was persisted.
     """
     if get_channel_profile(channel_id, db_path=db_path) is None:
         raise ValueError(
@@ -1257,15 +1263,49 @@ def create_channel_operations_profile(
             conn.commit()
         finally:
             conn.close()
-    except Exception:
-        pass
-    return profile
+    except Exception as exc:
+        raise RuntimeError(
+            f"create_channel_operations_profile: INSERT failed for "
+            f"channel_id={channel_id!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    # Read back through a fresh connection — proves the write is actually
+    # durable, not merely consistent within the same transaction/session.
+    try:
+        persisted = get_channel_operations_profile(channel_id, db_path=db_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"create_channel_operations_profile: read-back failed for "
+            f"channel_id={channel_id!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if persisted is None:
+        raise RuntimeError(
+            f"create_channel_operations_profile: row not found after commit "
+            f"for channel_id={channel_id!r} (INSERT reported success but the "
+            f"row is not readable)"
+        )
+
+    if persisted != profile:
+        raise RuntimeError(
+            f"create_channel_operations_profile: persisted row does not match "
+            f"intended values for channel_id={channel_id!r} "
+            f"(expected={profile!r}, got={persisted!r})"
+        )
+
+    return persisted
 
 
 def get_channel_operations_profile(
     channel_id: str,
     db_path: Optional[Path] = None,
 ) -> Optional[ChannelOperationsProfile]:
+    """
+    Returns None only when no row exists for channel_id. Any other failure
+    (connection, schema, corrupt row) raises RuntimeError — never silently
+    converted to None, since a caller must be able to tell "no profile"
+    apart from "couldn't read the profile."
+    """
     try:
         conn = get_connection(_resolve_db_path(db_path))
         try:
@@ -1276,9 +1316,22 @@ def get_channel_operations_profile(
             ).fetchone()
         finally:
             conn.close()
-        return _row_to_operations(row) if row else None
-    except Exception:
+    except Exception as exc:
+        raise RuntimeError(
+            f"get_channel_operations_profile: read failed for "
+            f"channel_id={channel_id!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if row is None:
         return None
+
+    try:
+        return _row_to_operations(row)
+    except Exception as exc:
+        raise RuntimeError(
+            f"get_channel_operations_profile: corrupt row for "
+            f"channel_id={channel_id!r}: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def update_channel_operations_profile(
@@ -1292,6 +1345,11 @@ def update_channel_operations_profile(
     than silently ignored, and the merged result is re-validated the same
     way create_channel_operations_profile() is — this profile requires hard
     validation throughout, not just at creation.
+
+    Fails closed on persistence: database errors raise RuntimeError (never
+    silently return False). After commit, the row is read back and every
+    requested field is verified against what was actually persisted —
+    returns True only once that verification passes.
     """
     unknown = set(kwargs) - set(_OPERATIONS_FIELD_MAP)
     if unknown:
@@ -1349,9 +1407,35 @@ def update_channel_operations_profile(
             conn.commit()
         finally:
             conn.close()
-        return True
-    except Exception:
-        return False
+    except Exception as exc:
+        raise RuntimeError(
+            f"update_channel_operations_profile: UPDATE failed for "
+            f"channel_id={channel_id!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    try:
+        after = get_channel_operations_profile(channel_id, db_path=db_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"update_channel_operations_profile: read-back failed for "
+            f"channel_id={channel_id!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if after is None:
+        raise RuntimeError(
+            f"update_channel_operations_profile: row disappeared after update "
+            f"for channel_id={channel_id!r}"
+        )
+
+    for k, v in kwargs.items():
+        if getattr(after, k) != v:
+            raise RuntimeError(
+                f"update_channel_operations_profile: field {k!r} did not persist "
+                f"as expected for channel_id={channel_id!r} "
+                f"(expected={v!r}, got={getattr(after, k)!r})"
+            )
+
+    return True
 
 
 # ===========================================================================

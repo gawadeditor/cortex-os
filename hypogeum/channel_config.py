@@ -42,6 +42,10 @@ Public API:
     bootstrap_channel(config_dict, db_path=None) -> ChannelProfile
     load_channel_config(channel_id, db_path=None) -> Optional[ChannelConfig]
 
+    create_channel_operations_profile(...) -> ChannelOperationsProfile
+    get_channel_operations_profile(channel_id)      -> Optional[ChannelOperationsProfile]
+    update_channel_operations_profile(channel_id,**) -> bool
+
     CHANNEL_CONFIG_SCHEMA        — JSON Schema dict for full channel config
 
 Channel config dict shape (for bootstrap_channel):
@@ -254,6 +258,48 @@ class ChannelConfig:
     models:      Optional[ModelProfile]       = None
 
 
+@dataclass
+class ChannelOperationsProfile:
+    """
+    Runtime operational settings for one channel — a sibling profile to
+    Brand/Publishing/Model, layered over an existing ChannelProfile.
+
+    operator_enabled represents operator INTENT ("I want this channel to
+    run autonomously"). It is distinct from hypogeum.calog's channel state
+    machine, which remains the sole gate-enforcement authority (credentials,
+    budget, OIS-clear, profile-complete). Future autonomous execution
+    requires BOTH operator_enabled == True AND calog reporting the channel
+    runnable — this profile does not replace or duplicate that check.
+    """
+    channel_id:                   str
+    channel_name:                 str
+    timezone:                     str
+    operator_enabled:             bool
+
+    production_cadence:           dict
+    publishing_schedule:          dict
+
+    enabled_platforms:            dict
+    blocked_platform_reasons:     dict
+
+    discovery_enabled:            bool
+    production_enabled:           bool
+    publishing_enabled:           bool
+    analytics_sync_enabled:       bool
+    unattended_operation_enabled: bool
+
+    max_concurrent_episodes:      int
+    retry_policy:                 dict
+    failure_halt_policy:          dict
+
+    cost_ceiling_usd_per_episode: Optional[float]
+    default_privacy_state:        str
+
+    created_at:                   str
+    updated_at:                   str
+    metadata_version:             str = METADATA_VERSION
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -342,6 +388,33 @@ def _ensure_tables(conn) -> None:
             ON channel_profiles(status);
         CREATE INDEX IF NOT EXISTS idx_channel_profiles_brand
             ON channel_profiles(brand_profile_id);
+
+        CREATE TABLE IF NOT EXISTS channel_operations_profiles (
+            channel_id                    TEXT    NOT NULL PRIMARY KEY,
+            channel_name                  TEXT    NOT NULL,
+            timezone                      TEXT    NOT NULL DEFAULT 'UTC',
+            operator_enabled               INTEGER NOT NULL DEFAULT 1,
+            production_cadence_json       TEXT    NOT NULL DEFAULT '{}',
+            publishing_schedule_json      TEXT    NOT NULL DEFAULT '{}',
+            enabled_platforms_json        TEXT    NOT NULL DEFAULT '{}',
+            blocked_platform_reasons_json TEXT    NOT NULL DEFAULT '{}',
+            discovery_enabled              INTEGER NOT NULL DEFAULT 1,
+            production_enabled             INTEGER NOT NULL DEFAULT 1,
+            publishing_enabled             INTEGER NOT NULL DEFAULT 1,
+            analytics_sync_enabled         INTEGER NOT NULL DEFAULT 1,
+            unattended_operation_enabled   INTEGER NOT NULL DEFAULT 0,
+            max_concurrent_episodes        INTEGER NOT NULL DEFAULT 1,
+            retry_policy_json              TEXT    NOT NULL DEFAULT '{}',
+            failure_halt_policy_json       TEXT    NOT NULL DEFAULT '{}',
+            cost_ceiling_usd_per_episode   REAL,
+            default_privacy_state          TEXT    NOT NULL DEFAULT 'private',
+            created_at                     TEXT    NOT NULL,
+            updated_at                     TEXT    NOT NULL,
+            metadata_version                TEXT   NOT NULL DEFAULT 'v1'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_channel_operations_profiles_enabled
+            ON channel_operations_profiles(operator_enabled);
     """)
     conn.commit()
 
@@ -412,6 +485,32 @@ def _row_to_channel(row) -> ChannelProfile:
         status                = row["status"],
         created_at            = row["created_at"],
         metadata_version      = row["metadata_version"],
+    )
+
+
+def _row_to_operations(row) -> ChannelOperationsProfile:
+    return ChannelOperationsProfile(
+        channel_id                   = row["channel_id"],
+        channel_name                 = row["channel_name"],
+        timezone                     = row["timezone"],
+        operator_enabled              = bool(row["operator_enabled"]),
+        production_cadence           = _uj(row["production_cadence_json"], {}),
+        publishing_schedule          = _uj(row["publishing_schedule_json"], {}),
+        enabled_platforms            = _uj(row["enabled_platforms_json"], {}),
+        blocked_platform_reasons     = _uj(row["blocked_platform_reasons_json"], {}),
+        discovery_enabled            = bool(row["discovery_enabled"]),
+        production_enabled           = bool(row["production_enabled"]),
+        publishing_enabled           = bool(row["publishing_enabled"]),
+        analytics_sync_enabled       = bool(row["analytics_sync_enabled"]),
+        unattended_operation_enabled = bool(row["unattended_operation_enabled"]),
+        max_concurrent_episodes      = row["max_concurrent_episodes"],
+        retry_policy                 = _uj(row["retry_policy_json"], {}),
+        failure_halt_policy          = _uj(row["failure_halt_policy_json"], {}),
+        cost_ceiling_usd_per_episode = row["cost_ceiling_usd_per_episode"],
+        default_privacy_state        = row["default_privacy_state"],
+        created_at                   = row["created_at"],
+        updated_at                   = row["updated_at"],
+        metadata_version             = row["metadata_version"],
     )
 
 
@@ -942,6 +1041,317 @@ def deactivate_channel(
     db_path: Optional[Path] = None,
 ) -> bool:
     return update_channel_profile(channel_id, db_path=db_path, status="archived")
+
+
+# ===========================================================================
+# ChannelOperationsProfile CRUD
+#
+# Unlike the sibling profile types above, this one hard-validates (raises
+# ValueError) rather than silently ignoring bad input — operational settings
+# that gate autonomous execution must not fail open.
+# ===========================================================================
+
+_SUPPORTED_PRIVACY_STATES = ("private", "unlisted", "public")
+
+_OPERATIONS_FIELD_MAP: dict[str, Any] = {
+    "channel_name":                 "channel_name",
+    "timezone":                     "timezone",
+    "operator_enabled":             ("operator_enabled", int),
+    "production_cadence":          ("production_cadence_json", _j),
+    "publishing_schedule":         ("publishing_schedule_json", _j),
+    "enabled_platforms":           ("enabled_platforms_json", _j),
+    "blocked_platform_reasons":    ("blocked_platform_reasons_json", _j),
+    "discovery_enabled":           ("discovery_enabled", int),
+    "production_enabled":          ("production_enabled", int),
+    "publishing_enabled":          ("publishing_enabled", int),
+    "analytics_sync_enabled":      ("analytics_sync_enabled", int),
+    "unattended_operation_enabled": ("unattended_operation_enabled", int),
+    "max_concurrent_episodes":     "max_concurrent_episodes",
+    "retry_policy":                ("retry_policy_json", _j),
+    "failure_halt_policy":         ("failure_halt_policy_json", _j),
+    "cost_ceiling_usd_per_episode": "cost_ceiling_usd_per_episode",
+    "default_privacy_state":       "default_privacy_state",
+}
+
+
+def _validate_timezone_name(tz: str) -> None:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError, KeyError) as exc:
+        raise ValueError(f"invalid timezone: {tz!r}") from exc
+
+
+def _validate_hhmm(value: str, field_name: str) -> None:
+    import re
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(value)):
+        raise ValueError(f"{field_name} must match HH:MM (24h), got {value!r}")
+
+
+def _validate_operations_fields(
+    timezone_: str,
+    enabled_platforms: dict,
+    blocked_platform_reasons: dict,
+    max_concurrent_episodes: int,
+    cost_ceiling_usd_per_episode: Optional[float],
+    default_privacy_state: str,
+    production_cadence: dict,
+    publishing_schedule: dict,
+) -> None:
+    """Hard validation for ChannelOperationsProfile — raises ValueError, never warns."""
+    _validate_timezone_name(timezone_)
+
+    bad = [p for p in enabled_platforms if p not in SUPPORTED_PLATFORMS]
+    if bad:
+        raise ValueError(f"enabled_platforms has unsupported platform(s): {bad}")
+
+    bad = [p for p in blocked_platform_reasons if p not in SUPPORTED_PLATFORMS]
+    if bad:
+        raise ValueError(f"blocked_platform_reasons has unsupported platform(s): {bad}")
+
+    # A platform enabled=True and a platform appearing in blocked_platform_reasons
+    # are mutually exclusive by construction — checking from either direction
+    # (blocked-implies-not-enabled, enabled-implies-not-blocked) is the same
+    # constraint, so one pass over blocked_platform_reasons covers both.
+    for platform, reason in blocked_platform_reasons.items():
+        if enabled_platforms.get(platform, False):
+            raise ValueError(
+                f"platform {platform!r} cannot be both enabled and blocked"
+            )
+        if not str(reason or "").strip():
+            raise ValueError(f"blocked_platform_reasons[{platform!r}] must be non-empty")
+
+    if max_concurrent_episodes < 1:
+        raise ValueError(
+            f"max_concurrent_episodes must be >= 1, got {max_concurrent_episodes}"
+        )
+
+    if cost_ceiling_usd_per_episode is not None and cost_ceiling_usd_per_episode <= 0:
+        raise ValueError(
+            "cost_ceiling_usd_per_episode must be null (inherit factory/env policy) "
+            f"or > 0, got {cost_ceiling_usd_per_episode}"
+        )
+
+    if default_privacy_state not in _SUPPORTED_PRIVACY_STATES:
+        raise ValueError(
+            f"default_privacy_state must be one of {_SUPPORTED_PRIVACY_STATES}, "
+            f"got {default_privacy_state!r}"
+        )
+
+    videos_per_week = production_cadence.get("videos_per_week")
+    if videos_per_week is not None and videos_per_week < 1:
+        raise ValueError(
+            f"production_cadence.videos_per_week must be >= 1, got {videos_per_week}"
+        )
+
+    time_of_day = publishing_schedule.get("time_of_day")
+    if time_of_day is not None:
+        _validate_hhmm(time_of_day, "publishing_schedule.time_of_day")
+
+
+def create_channel_operations_profile(
+    channel_id:                   str,
+    channel_name:                 str,
+    timezone:                     str            = "UTC",
+    operator_enabled:             bool           = True,
+    production_cadence:           Optional[dict] = None,
+    publishing_schedule:          Optional[dict] = None,
+    enabled_platforms:            Optional[dict] = None,
+    blocked_platform_reasons:     Optional[dict] = None,
+    discovery_enabled:            bool           = True,
+    production_enabled:           bool           = True,
+    publishing_enabled:           bool           = True,
+    analytics_sync_enabled:       bool           = True,
+    unattended_operation_enabled: bool           = False,
+    max_concurrent_episodes:      int            = 1,
+    retry_policy:                 Optional[dict] = None,
+    failure_halt_policy:          Optional[dict] = None,
+    cost_ceiling_usd_per_episode: Optional[float] = None,
+    default_privacy_state:        str            = "private",
+    db_path:                      Optional[Path] = None,
+) -> ChannelOperationsProfile:
+    """
+    Create and persist a ChannelOperationsProfile.
+
+    Requires channel_id to already exist in channel_profiles (raises
+    ValueError otherwise) — operational settings only make sense layered
+    over an existing canonical channel, never freestanding.
+
+    Hard-validates (raises ValueError; never silently warns) timezone,
+    enabled/blocked platform consistency, max_concurrent_episodes,
+    cost_ceiling_usd_per_episode, default_privacy_state, and
+    production_cadence.videos_per_week / publishing_schedule.time_of_day
+    when present.
+    """
+    if get_channel_profile(channel_id, db_path=db_path) is None:
+        raise ValueError(
+            f"channel_id {channel_id!r} does not exist in channel_profiles — "
+            f"create the canonical ChannelProfile first"
+        )
+
+    enabled_platforms = enabled_platforms or {}
+    blocked_platform_reasons = blocked_platform_reasons or {}
+    production_cadence = production_cadence or {}
+    publishing_schedule = publishing_schedule or {}
+    retry_policy = retry_policy or {}
+    failure_halt_policy = failure_halt_policy or {}
+
+    _validate_operations_fields(
+        timezone_=timezone,
+        enabled_platforms=enabled_platforms,
+        blocked_platform_reasons=blocked_platform_reasons,
+        max_concurrent_episodes=max_concurrent_episodes,
+        cost_ceiling_usd_per_episode=cost_ceiling_usd_per_episode,
+        default_privacy_state=default_privacy_state,
+        production_cadence=production_cadence,
+        publishing_schedule=publishing_schedule,
+    )
+
+    now = _now_iso()
+    profile = ChannelOperationsProfile(
+        channel_id=channel_id,
+        channel_name=channel_name,
+        timezone=timezone,
+        operator_enabled=operator_enabled,
+        production_cadence=production_cadence,
+        publishing_schedule=publishing_schedule,
+        enabled_platforms=enabled_platforms,
+        blocked_platform_reasons=blocked_platform_reasons,
+        discovery_enabled=discovery_enabled,
+        production_enabled=production_enabled,
+        publishing_enabled=publishing_enabled,
+        analytics_sync_enabled=analytics_sync_enabled,
+        unattended_operation_enabled=unattended_operation_enabled,
+        max_concurrent_episodes=max_concurrent_episodes,
+        retry_policy=retry_policy,
+        failure_halt_policy=failure_halt_policy,
+        cost_ceiling_usd_per_episode=cost_ceiling_usd_per_episode,
+        default_privacy_state=default_privacy_state,
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            _ensure_tables(conn)
+            conn.execute(
+                """INSERT INTO channel_operations_profiles
+                   (channel_id, channel_name, timezone, operator_enabled,
+                    production_cadence_json, publishing_schedule_json,
+                    enabled_platforms_json, blocked_platform_reasons_json,
+                    discovery_enabled, production_enabled, publishing_enabled,
+                    analytics_sync_enabled, unattended_operation_enabled,
+                    max_concurrent_episodes, retry_policy_json, failure_halt_policy_json,
+                    cost_ceiling_usd_per_episode, default_privacy_state,
+                    created_at, updated_at, metadata_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (channel_id, channel_name, timezone, int(operator_enabled),
+                 _j(production_cadence), _j(publishing_schedule),
+                 _j(enabled_platforms), _j(blocked_platform_reasons),
+                 int(discovery_enabled), int(production_enabled), int(publishing_enabled),
+                 int(analytics_sync_enabled), int(unattended_operation_enabled),
+                 max_concurrent_episodes, _j(retry_policy), _j(failure_halt_policy),
+                 cost_ceiling_usd_per_episode, default_privacy_state,
+                 now, now, profile.metadata_version),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return profile
+
+
+def get_channel_operations_profile(
+    channel_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[ChannelOperationsProfile]:
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            _ensure_tables(conn)
+            row = conn.execute(
+                "SELECT * FROM channel_operations_profiles WHERE channel_id=?",
+                [channel_id],
+            ).fetchone()
+        finally:
+            conn.close()
+        return _row_to_operations(row) if row else None
+    except Exception:
+        return None
+
+
+def update_channel_operations_profile(
+    channel_id: str,
+    db_path: Optional[Path] = None,
+    **kwargs,
+) -> bool:
+    """
+    Update individual fields. Unlike the sibling *_profile update functions
+    in this module, unknown fields are REJECTED (raises ValueError) rather
+    than silently ignored, and the merged result is re-validated the same
+    way create_channel_operations_profile() is — this profile requires hard
+    validation throughout, not just at creation.
+    """
+    unknown = set(kwargs) - set(_OPERATIONS_FIELD_MAP)
+    if unknown:
+        raise ValueError(f"unknown ChannelOperationsProfile field(s): {sorted(unknown)}")
+
+    if not kwargs:
+        return True
+
+    current = get_channel_operations_profile(channel_id, db_path=db_path)
+    if current is None:
+        raise ValueError(f"no ChannelOperationsProfile exists for channel_id={channel_id!r}")
+
+    _validate_operations_fields(
+        timezone_=kwargs.get("timezone", current.timezone),
+        enabled_platforms=kwargs.get("enabled_platforms", current.enabled_platforms),
+        blocked_platform_reasons=kwargs.get(
+            "blocked_platform_reasons", current.blocked_platform_reasons
+        ),
+        max_concurrent_episodes=kwargs.get(
+            "max_concurrent_episodes", current.max_concurrent_episodes
+        ),
+        cost_ceiling_usd_per_episode=kwargs.get(
+            "cost_ceiling_usd_per_episode", current.cost_ceiling_usd_per_episode
+        ),
+        default_privacy_state=kwargs.get(
+            "default_privacy_state", current.default_privacy_state
+        ),
+        production_cadence=kwargs.get("production_cadence", current.production_cadence),
+        publishing_schedule=kwargs.get("publishing_schedule", current.publishing_schedule),
+    )
+
+    assignments, params = [], []
+    for k, v in kwargs.items():
+        mapping = _OPERATIONS_FIELD_MAP[k]
+        if isinstance(mapping, tuple):
+            col, fn = mapping
+            assignments.append(f"{col}=?")
+            params.append(fn(v))
+        else:
+            assignments.append(f"{mapping}=?")
+            params.append(v)
+    assignments.append("updated_at=?")
+    params.append(_now_iso())
+    params.append(channel_id)
+
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            _ensure_tables(conn)
+            conn.execute(
+                f"UPDATE channel_operations_profiles SET {', '.join(assignments)} "
+                f"WHERE channel_id=?",
+                params,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception:
+        return False
 
 
 # ===========================================================================

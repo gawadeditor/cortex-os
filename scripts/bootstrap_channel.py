@@ -2,9 +2,10 @@
 """
 scripts/bootstrap_channel.py — P1-01: Bootstrap Hypogeum channel into live DB.
 
-Populates brand_profiles, publishing_profiles, model_profiles, and
-channel_profiles with the Hypogeum Chronicles configuration. Safe to
-run repeatedly — bootstrap_channel() is idempotent on channel_id.
+Populates brand_profiles, publishing_profiles, model_profiles,
+channel_profiles, and channel_operations_profiles with the Hypogeum
+Chronicles configuration. Safe to run repeatedly — bootstrap_channel() and
+the operations-profile seed are both idempotent on channel_id.
 
 Model slugs are read from .env (via Config) so the DB record always
 reflects the currently active model assignments.
@@ -29,10 +30,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hypogeum.channel_config import (
     bootstrap_channel,
+    create_channel_operations_profile,
     get_channel_profile,
     get_brand_profile,
     get_publishing_profile,
     get_model_profile,
+    get_channel_operations_profile,
     load_channel_config,
     list_channel_profiles,
 )
@@ -137,6 +140,76 @@ def _build_config_dict(config: Config) -> dict:
     }
 
 
+def _build_operations_profile_dict() -> dict:
+    """
+    Exact required initial Channel Operations Profile values for Hypogeum.
+
+    facebook/tiktok/instagram are recorded disabled with the exact blocked
+    reasons established during the 2026-07-20/21 Publishing Stabilization
+    sprint — they must not stop autonomous runtime, only be represented as
+    blocked capabilities.
+    """
+    return {
+        "channel_id": CHANNEL_ID,
+        "channel_name": "The Hypogeum",
+        "timezone": "Asia/Dubai",
+        "operator_enabled": True,
+        "production_cadence": {"videos_per_week": 1},
+        "publishing_schedule": {"day_of_week": "thursday", "time_of_day": "18:00"},
+        "enabled_platforms": {
+            "youtube": True,
+            "facebook": False,
+            "tiktok": False,
+            "instagram": False,
+        },
+        "blocked_platform_reasons": {
+            "facebook": "Meta app permission/configuration",
+            "tiktok": "upload-init endpoint HTTP 404",
+            "instagram": "public staging URL not configured",
+        },
+        "discovery_enabled": True,
+        "production_enabled": True,
+        "publishing_enabled": True,
+        "analytics_sync_enabled": True,
+        "unattended_operation_enabled": False,
+        "max_concurrent_episodes": 1,
+        "retry_policy": {"max_retries_per_stage": 1, "backoff_seconds": 60},
+        "failure_halt_policy": {
+            "halt_on_production_failure": True,
+            "halt_on_validation_failure": True,
+            "halt_on_enabled_platform_publish_failure": True,
+            "blocked_or_disabled_platforms_do_not_halt": True,
+        },
+        "cost_ceiling_usd_per_episode": None,
+        "default_privacy_state": "private",
+    }
+
+
+def _run_operations_profile_bootstrap() -> bool:
+    """
+    P-COP-01: Idempotently seed the ChannelOperationsProfile for Hypogeum.
+
+    Returns True on success (including "already exists").
+    """
+    existing = get_channel_operations_profile(CHANNEL_ID)
+    if existing:
+        print(
+            f"  ChannelOperationsProfile already exists for {CHANNEL_ID!r} "
+            f"(operator_enabled={existing.operator_enabled!r}) — skipping insert."
+        )
+        return True
+
+    try:
+        profile = create_channel_operations_profile(**_build_operations_profile_dict())
+        print(f"  Created ChannelOperationsProfile for channel_id={profile.channel_id!r}")
+        print(f"  enabled_platforms={profile.enabled_platforms!r}")
+        print(f"  blocked_platform_reasons={profile.blocked_platform_reasons!r}")
+        return True
+    except Exception as exc:
+        print(f"  ERROR bootstrapping ChannelOperationsProfile: {exc}")
+        return False
+
+
 def _run_factory_bootstrap() -> bool:
     """
     P3-02: Bootstrap the factory record. Returns True on success.
@@ -184,14 +257,18 @@ def _run_bootstrap(config: Config) -> bool:
     existing = get_channel_profile(CHANNEL_ID)
     if existing:
         print(f"  Channel already exists (status={existing.status!r}) — skipping insert.")
-        return True
+    else:
+        channel = bootstrap_channel(config_dict)
+        print(f"  Created channel_id={channel.channel_id!r}")
+        print(f"  brand_profile_id={channel.brand_profile_id!r}")
+        print(f"  publishing_profile_id={channel.publishing_profile_id!r}")
+        print(f"  model_profile_id={channel.model_profile_id!r}")
+        print(f"  status={channel.status!r}")
 
-    channel = bootstrap_channel(config_dict)
-    print(f"  Created channel_id={channel.channel_id!r}")
-    print(f"  brand_profile_id={channel.brand_profile_id!r}")
-    print(f"  publishing_profile_id={channel.publishing_profile_id!r}")
-    print(f"  model_profile_id={channel.model_profile_id!r}")
-    print(f"  status={channel.status!r}")
+    print(f"Bootstrapping ChannelOperationsProfile: {CHANNEL_ID!r}")
+    if not _run_operations_profile_bootstrap():
+        return False
+
     return True
 
 
@@ -241,6 +318,17 @@ def _run_verification() -> bool:
         ok = False
     else:
         print(f"  PASS  load_channel_config — full ChannelConfig resolved")
+
+    # 5b. channel_operations_profiles
+    ops = get_channel_operations_profile(CHANNEL_ID)
+    if ops is None:
+        print(f"  FAIL  channel_operations_profiles — no row for channel_id={CHANNEL_ID!r}")
+        ok = False
+    else:
+        print(
+            f"  PASS  channel_operations_profiles — operator_enabled={ops.operator_enabled!r}  "
+            f"enabled_platforms={ops.enabled_platforms!r}"
+        )
 
     # 6. list_channel_profiles
     all_channels = list_channel_profiles()

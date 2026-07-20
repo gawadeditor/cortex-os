@@ -129,6 +129,8 @@ _SAFE_FB_PUBLISHED = False
 _SAFE_TIKTOK_PRIVACY = "SELF_ONLY"
 _SAFE_IG_VISIBILITY = "container_only"
 
+_VALID_PLATFORMS = frozenset({"youtube", "facebook", "tiktok", "instagram"})
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -739,7 +741,25 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
         help="Required alongside --execute. Confirms operator understands this performs "
              "real, non-public uploads to every platform.",
     )
+    parser.add_argument(
+        "--platforms", default=None,
+        help="Comma-separated platform filter for THIS run only (e.g. tiktok,instagram). "
+             "Omit to run the full scope (youtube, facebook, tiktok, instagram). Excluded "
+             "platforms' steps are not attempted or replayed this run — their existing "
+             "ledger entries (success or failed) are left completely untouched. The "
+             "expected_deliverables contract is built only from the selected platforms.",
+    )
     args = parser.parse_args(argv)
+
+    if args.platforms:
+        selected_platforms = {p.strip() for p in args.platforms.split(",") if p.strip()}
+        unknown = selected_platforms - _VALID_PLATFORMS
+        if unknown:
+            print(f"refusing: unknown platform(s) in --platforms: {sorted(unknown)} "
+                  f"(valid: {sorted(_VALID_PLATFORMS)})", file=sys.stderr)
+            return 2
+    else:
+        selected_platforms = None
 
     root = project_root if project_root is not None else _PROJECT_ROOT
     episode_id = args.episode_id
@@ -780,10 +800,13 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
         return 1
 
     steps = _build_steps(final_render_package)
+    if selected_platforms is not None:
+        steps = [s for s in steps if s["platform"] in selected_platforms]
     ledger_path = episode_dir / f"smoke_publishing_checkpoints_{episode_id}.json"
     ledger = CheckpointLedger(ledger_path, episode_id)
 
     print(f"episode_id={episode_id}  mode={'EXECUTE' if execute else 'PLAN-ONLY'}  "
+          f"platforms={sorted(selected_platforms) if selected_platforms else 'all'}  "
           f"YOUTUBE_DRY_RUN(resolved)={config.YOUTUBE_DRY_RUN}")
     _print_ledger(steps, ledger)
 
@@ -809,6 +832,8 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
     )
 
     expected_deliverables = _build_expected_deliverables(final_render_package)
+    if selected_platforms is not None:
+        expected_deliverables = [d for d in expected_deliverables if d["platform"] in selected_platforms]
     record = PublishingRecord(episode_id=episode_id, output_dir=episode_dir, expected_deliverables=expected_deliverables)
     record.initialize()
 

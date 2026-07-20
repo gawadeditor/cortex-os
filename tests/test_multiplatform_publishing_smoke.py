@@ -689,3 +689,87 @@ def test_failed_checkpoint_replay_never_marks_provider_verified(tmp_path):
         if c.kwargs.get("provider") == "facebook" and c.kwargs.get("ok") is True
     ]
     assert not facebook_verified_calls, "a stale failed checkpoint must never be replayed as verified"
+
+
+# ---------------------------------------------------------------------------
+# --platforms filter — a continuation run restricted to a subset of platforms.
+# Excluded platforms' steps are not attempted or replayed; their existing
+# ledger entries (success or failed) are left completely untouched. The
+# expected_deliverables contract is built only from the selected platforms.
+# ---------------------------------------------------------------------------
+
+def test_platforms_filter_excludes_youtube_and_facebook_steps(tmp_path):
+    ep_dir, frp = _build_episode(tmp_path, num_shorts=1)
+    cfg = _make_config()
+
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch.object(smoke.yt_client, "refresh_youtube_token") as m_yt_token, \
+         patch.object(smoke.yt_client, "upload_video") as m_yt_upload, \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(smoke.meta_client, "upload_facebook_video") as m_fb, \
+         patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")) as m_tt_init, \
+         patch.object(smoke.tt_client, "upload_tiktok_chunks"), \
+         patch.object(smoke.tt_client, "poll_tiktok_publish", return_value="post_1"), \
+         patch.object(smoke, "get_staging_provider") as m_staging, \
+         patch.object(smoke.meta_client, "create_instagram_container", return_value="creation_1"), \
+         patch.object(smoke.meta_client, "poll_instagram_container", return_value="FINISHED"), \
+         patch.object(smoke.meta_client, "publish_instagram_container") as m_ig_publish:
+        m_staging.return_value.stage_file.return_value = "https://staged.example.com/video.mp4"
+        rc = smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke", "--platforms", "tiktok,instagram"],
+            project_root=tmp_path,
+        )
+
+    assert rc == 0
+    m_yt_token.assert_not_called()
+    m_yt_upload.assert_not_called()
+    m_fb.assert_not_called()
+    m_ig_publish.assert_not_called()
+    assert m_tt_init.call_args.kwargs["privacy_level"] == "SELF_ONLY"
+
+    record = json.loads((ep_dir / "publishing_record_ep_test.json").read_text())
+    platforms_in_record = {r["platform"] for r in record["platform_results"]}
+    assert platforms_in_record == {"tiktok", "instagram"}
+    assert {d["platform"] for d in record["package_metadata"]["expected_deliverables"]} == {"tiktok", "instagram"}
+
+
+def test_platforms_filter_leaves_excluded_ledger_entries_untouched(tmp_path):
+    ep_dir, frp = _build_episode(tmp_path, num_shorts=1)
+    _seed_ledger(ep_dir, "ep_test", "youtube_main", "success",
+                 video_id="jzRhnPapGNo", platform_video_id="jzRhnPapGNo", visibility="private")
+    _seed_ledger(ep_dir, "ep_test", "facebook_main", "failed", error="HTTP 400 — hard failure (no retry)")
+    ledger_path = ep_dir / "smoke_publishing_checkpoints_ep_test.json"
+    before = json.loads(ledger_path.read_text())
+
+    cfg = _make_config()
+    with _CREDMGR_PATCH, \
+         patch.object(smoke, "Config", return_value=cfg), \
+         patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
+         patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")), \
+         patch.object(smoke.tt_client, "upload_tiktok_chunks"), \
+         patch.object(smoke.tt_client, "poll_tiktok_publish", return_value="post_1"), \
+         patch.object(smoke, "get_staging_provider") as m_staging, \
+         patch.object(smoke.meta_client, "create_instagram_container", return_value="creation_1"), \
+         patch.object(smoke.meta_client, "poll_instagram_container", return_value="FINISHED"):
+        m_staging.return_value.stage_file.return_value = "https://staged.example.com/video.mp4"
+        smoke.main(
+            ["--episode-id", "ep_test", "--execute", "--confirm-nonpublic-smoke", "--platforms", "tiktok,instagram"],
+            project_root=tmp_path,
+        )
+
+    after = json.loads(ledger_path.read_text())
+    assert after["steps"]["youtube_main"] == before["steps"]["youtube_main"]
+    assert after["steps"]["facebook_main"] == before["steps"]["facebook_main"]
+
+
+def test_platforms_filter_rejects_unknown_platform(tmp_path):
+    _build_episode(tmp_path, num_shorts=0)
+    with patch.object(smoke, "Config", return_value=_make_config()):
+        rc = smoke.main(
+            ["--episode-id", "ep_test", "--platforms", "myspace"],
+            project_root=tmp_path,
+        )
+    assert rc == 2

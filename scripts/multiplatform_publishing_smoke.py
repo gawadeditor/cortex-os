@@ -825,6 +825,11 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
                 stored = ledger.entry(step_id)
                 if stored.get("result_entry"):
                     record.append_result(stored["result_entry"])
+                # Replaying stored evidence of a real past success — not a new
+                # API call, but the provider genuinely was verified by that
+                # past success, so the shared provider-verification state
+                # should reflect it even if it predates this recording logic.
+                _record_provider_result(platform, ok=True, db_path=db_path)
                 print(f"[SKIP]    {step_id} — already succeeded, not retrying "
                       f"(video_id={stored.get('video_id') or stored.get('platform_video_id')})")
                 continue

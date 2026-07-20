@@ -7,9 +7,25 @@ low-level platform publishing functions — never run_publishing_agent() —
 against every platform in a forced non-public visibility mode, to prove the
 real upload path works end-to-end without anything going live.
 
-Scope is deliberately narrow: only the upload/container calls themselves.
-Captions, thumbnails, and end-screen application (which mutate *other*
-already-public videos) are out of scope for a smoke test and are not called.
+The YouTube main-video checkpoint validates the complete required path: real
+video upload, metadata, custom thumbnail, and English captions. It is not
+"success" until video upload AND thumbnail application succeed. Caption
+submission is attempted and its true result is always recorded, but a
+caption failure (e.g. a documented API/account limitation) does not itself
+fail the checkpoint — it halts the run in a distinct "review_required" state
+so a human decides before any other platform is touched, rather than the
+script silently continuing.
+
+YouTube Shorts get thumbnail application (the production path applies short
+thumbnails too) but not captions (the production path never applies captions
+to Shorts either).
+
+End-screen application (`apply_end_screen`) is deliberately excluded: it
+mutates OTHER, already-public prior videos (adds "watch next" panels
+pointing at this one). It has no bearing on validating THIS episode's
+OAuth / upload / metadata / thumbnail / captions path, and running it here
+would create a real side effect on unrelated public content outside this
+smoke test's scope.
 
 Safe modes (hardcoded constants, never derived from CLI input or config):
     YouTube main   -> privacyStatus = "private"
@@ -19,9 +35,22 @@ Safe modes (hardcoded constants, never derived from CLI input or config):
     Instagram      -> container create + poll only. publish_instagram_container
                        is never imported or called. Visibility = "container_only".
 
+Dry-run note: `hypogeum/publishing/youtube.py::upload_video()` (the low-level
+function this script calls) never reads YOUTUBE_DRY_RUN — that flag is only
+honored by hypogeum/agents/publishing_agent.py, which this script never
+calls. So `--execute` always performs a real upload regardless of the
+YOUTUBE_DRY_RUN value in .env. Because .env may have YOUTUBE_DRY_RUN=true
+(a reasonable global default for the pipeline), this script explicitly reads
+the resolved Config().YOUTUBE_DRY_RUN and REFUSES --execute unless it is
+False — the operator must pass a process-only override to prove they know
+real calls are about to happen:
+
+    YOUTUBE_DRY_RUN=false python3 scripts/multiplatform_publishing_smoke.py \\
+        --episode-id ep_1f827369 --execute --confirm-nonpublic-smoke
+
 Expected real operations for one episode:
-    1 YouTube long-form upload (private)
-    N YouTube Shorts uploads (private) — one per shorts_renders[] entry
+    1 YouTube long-form upload (private) + thumbnail + captions
+    N YouTube Shorts uploads (private) + thumbnail — one per shorts_renders[] entry
     1 Facebook main video (published=false)
     1 TikTok short (SELF_ONLY) — first shorts_renders[] entry only
     1 Instagram Reel container (create + poll only, never published)
@@ -31,17 +60,23 @@ Usage:
     python3 scripts/multiplatform_publishing_smoke.py --episode-id ep_1f827369
 
     # Real API operations (still all non-public per the safe modes above).
-    python3 scripts/multiplatform_publishing_smoke.py --episode-id ep_1f827369 \\
-        --execute --confirm-nonpublic-smoke
+    YOUTUBE_DRY_RUN=false python3 scripts/multiplatform_publishing_smoke.py \\
+        --episode-id ep_1f827369 --execute --confirm-nonpublic-smoke
 
 Checkpointing:
     Progress is persisted to
     .hypogeum-assets/episodes/{episode_id}/smoke_publishing_checkpoints_{episode_id}.json
-    A step already marked "success" is never retried on a later run. Any step
-    failure halts the run immediately — later steps are not attempted.
+    A step already marked "success" is never retried on a later run — its
+    previously recorded result is replayed into the new publishing record
+    instead. The YouTube main step checkpoints its video upload, thumbnail
+    application, and caption submission separately, so a resumed run never
+    re-uploads a video that already succeeded. Any step failure (or the
+    YouTube main "review_required" state) halts the run immediately — later
+    steps are not attempted.
 
 Safety:
     - Refuses to run --execute without --confirm-nonpublic-smoke.
+    - Refuses to run --execute unless the resolved YOUTUBE_DRY_RUN is False.
     - Backs up any existing publishing_record_{episode_id}.json before writing.
     - Restores memory/covered-topics.md to its pre-run content in `finally`.
     - Never imports or calls publish_instagram_container().
@@ -54,7 +89,6 @@ import argparse
 import json
 import shutil
 import sys
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -157,6 +191,24 @@ def _find_thumbnail_path(assets_root: Path, thumb_id: str) -> Optional[Path]:
         if p.exists():
             return p
     return None
+
+
+def _find_main_thumbnail_ref(thumbnail_refs: list) -> Optional[dict]:
+    return next(
+        (tr for tr in thumbnail_refs
+         if tr.get("format") == "16:9" and not tr.get("short_id")
+         and tr.get("thumbnail_asset_id") != "placeholder"),
+        None,
+    )
+
+
+def _find_short_thumbnail_ref(thumbnail_refs: list, short_id: str) -> Optional[dict]:
+    return next(
+        (tr for tr in thumbnail_refs
+         if tr.get("short_id") == short_id
+         and tr.get("thumbnail_asset_id") != "placeholder"),
+        None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,73 +340,187 @@ def _build_steps(final_render_package: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Step executors — each returns {"platform_video_id": ..., "visibility": ...}
+# Step executors
+#
+# Each returns a dict with at least: {"outcome": "success"|"review_required",
+# "visibility": ..., "result_entry": <make_result_entry(...) dict>}.
+# Only youtube_main can return "review_required". All others return "success"
+# or raise (HardFailureError/SoftFailureError/PollTimeoutError/StagingError/
+# RuntimeError/AssertionError), which the main loop treats as a failed
+# checkpoint and halts the run.
 # ---------------------------------------------------------------------------
 
-def _run_youtube_main(config, token, assets_root, episode_id, final_render_package, step) -> dict:
+def _run_youtube_main(config, token, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
+    step_id = step["step_id"]
+    existing = ledger.entry(step_id)
     metadata_source = final_render_package.get("metadata_source", {})
-    video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
-    if not (video_path and video_path.exists()):
-        raise RuntimeError(f"video asset missing: {step['video_asset_id']}")
+    thumbnail_refs = final_render_package.get("thumbnail_references", [])
 
     title = get_episode_title(metadata_source)
     description = build_youtube_description(metadata_source, episode_id=episode_id)
-    video_metadata = {
-        "title": title,
-        "description": description,
-        "tags": [],
-        "categoryId": str(config.YOUTUBE_DEFAULT_CATEGORY_ID),
-        "privacyStatus": _SAFE_YT_PRIVACY,
-        "madeForKids": False,
-    }
-    assert video_metadata["privacyStatus"] == "private", "refusing: youtube main privacyStatus is not private"
 
-    video_id = yt_client.upload_video(
-        config=config, access_token=token, video_path=video_path,
-        metadata=video_metadata, episode_id=episode_id,
+    # --- Video upload (required; resumable — never re-uploads once obtained) ---
+    video_id = existing.get("video_id")
+    if video_id is None:
+        video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
+        if not (video_path and video_path.exists()):
+            raise RuntimeError(f"video asset missing: {step['video_asset_id']}")
+
+        video_metadata = {
+            "title": title,
+            "description": description,
+            "tags": [],
+            "categoryId": str(config.YOUTUBE_DEFAULT_CATEGORY_ID),
+            "privacyStatus": _SAFE_YT_PRIVACY,
+            "madeForKids": False,
+        }
+        assert video_metadata["privacyStatus"] == "private", "refusing: youtube main privacyStatus is not private"
+
+        video_id = yt_client.upload_video(
+            config=config, access_token=token, video_path=video_path,
+            metadata=video_metadata, episode_id=episode_id,
+        )
+        ledger.record(step_id, "in_progress", video_id=video_id)
+    else:
+        print(f"          youtube_main: reusing already-uploaded video_id={video_id} (not re-uploading)")
+
+    # --- Thumbnail (required — checkpoint is not "success" until this succeeds) ---
+    thumbnail_applied = existing.get("thumbnail_applied", False)
+    if not thumbnail_applied:
+        main_thumb_ref = _find_main_thumbnail_ref(thumbnail_refs)
+        if not main_thumb_ref:
+            raise RuntimeError("required main thumbnail reference not found in final_render_package")
+        thumb_path = _find_thumbnail_path(assets_root, main_thumb_ref["thumbnail_asset_id"])
+        if not thumb_path:
+            raise RuntimeError(f"required thumbnail asset missing: {main_thumb_ref['thumbnail_asset_id']}")
+
+        thumbnail_applied = yt_client.upload_thumbnail(
+            config=config, access_token=token, video_id=video_id,
+            thumb_path=thumb_path, episode_id=episode_id,
+        )
+        ledger.record(step_id, "in_progress", video_id=video_id, thumbnail_applied=thumbnail_applied)
+        if not thumbnail_applied:
+            raise RuntimeError(
+                f"required thumbnail application failed (video_id={video_id} preserved for resume)"
+            )
+
+    # --- Captions (attempted; true result always recorded; failure halts for
+    #     review rather than failing the checkpoint outright) ---
+    captions_submitted = existing.get("captions_submitted", False)
+    captions_skipped_reason = existing.get("captions_skipped_reason")
+    if not captions_submitted:
+        caption_asset_id = final_render_package.get("episode_render", {}).get("caption_asset_id", "")
+        srt_path = _asset_path(assets_root, caption_asset_id, ".srt")
+        if srt_path and srt_path.exists():
+            captions_submitted = yt_client.upload_captions(
+                config=config, access_token=token, video_id=video_id,
+                srt_path=srt_path, episode_id=episode_id,
+            )
+            captions_skipped_reason = None if captions_submitted else "captions_api_rejected"
+        else:
+            captions_submitted = False
+            captions_skipped_reason = "srt_file_not_found"
+        ledger.record(
+            step_id, "in_progress", video_id=video_id, thumbnail_applied=True,
+            captions_submitted=captions_submitted, captions_skipped_reason=captions_skipped_reason,
+        )
+
+    result_entry = make_result_entry(
+        platform="youtube", deliverable_type="main_episode", status="published",
+        platform_video_id=video_id,
+        published_url=f"https://www.youtube.com/watch?v={video_id}",
+        published_at=datetime.now(timezone.utc).isoformat(),
+        title=title,
+        description_length_chars=len(description),
+        thumbnail_applied=True,
+        captions_submitted=captions_submitted,
+        captions_skipped_reason=captions_skipped_reason,
+        ai_disclosure_included=True,
+        visibility="private",
     )
+
     return {
-        "platform_video_id": video_id,
-        "published_url": f"https://www.youtube.com/watch?v={video_id}",
-        "title": title,
-        "description_length_chars": len(description),
+        "outcome": "success" if captions_submitted else "review_required",
+        "video_id": video_id,
+        "thumbnail_applied": True,
+        "captions_submitted": captions_submitted,
+        "captions_skipped_reason": captions_skipped_reason,
         "visibility": "private",
+        "result_entry": result_entry,
     }
 
 
-def _run_youtube_short(config, token, assets_root, episode_id, final_render_package, step) -> dict:
+def _run_youtube_short(config, token, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
+    step_id = step["step_id"]
+    existing = ledger.entry(step_id)
     metadata_source = final_render_package.get("metadata_source", {})
+    thumbnail_refs = final_render_package.get("thumbnail_references", [])
     short_id = step["short_id"]
-    video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
-    if not (video_path and video_path.exists()):
-        raise RuntimeError(f"video asset missing: {step['video_asset_id']}")
 
     title = get_short_title(metadata_source, short_id) or get_episode_title(metadata_source)
     description = build_youtube_short_description(metadata_source, short_id=short_id, episode_id=episode_id)
-    short_metadata = {
-        "title": title,
-        "description": description,
-        "tags": [],
-        "categoryId": str(config.YOUTUBE_DEFAULT_CATEGORY_ID),
-        "privacyStatus": _SAFE_YT_PRIVACY,
-        "madeForKids": False,
-    }
-    assert short_metadata["privacyStatus"] == "private", "refusing: youtube short privacyStatus is not private"
 
-    video_id = yt_client.upload_video(
-        config=config, access_token=token, video_path=video_path,
-        metadata=short_metadata, episode_id=episode_id,
+    video_id = existing.get("video_id")
+    if video_id is None:
+        video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
+        if not (video_path and video_path.exists()):
+            raise RuntimeError(f"video asset missing: {step['video_asset_id']}")
+
+        short_metadata = {
+            "title": title,
+            "description": description,
+            "tags": [],
+            "categoryId": str(config.YOUTUBE_DEFAULT_CATEGORY_ID),
+            "privacyStatus": _SAFE_YT_PRIVACY,
+            "madeForKids": False,
+        }
+        assert short_metadata["privacyStatus"] == "private", "refusing: youtube short privacyStatus is not private"
+
+        video_id = yt_client.upload_video(
+            config=config, access_token=token, video_path=video_path,
+            metadata=short_metadata, episode_id=episode_id,
+        )
+        ledger.record(step_id, "in_progress", video_id=video_id)
+    else:
+        print(f"          {step_id}: reusing already-uploaded video_id={video_id} (not re-uploading)")
+
+    # Thumbnail — production applies short thumbnails too; best-effort here
+    # (not required to gate the checkpoint, matching production's non-blocking
+    # thumbnail_applied bool for shorts).
+    thumbnail_applied = existing.get("thumbnail_applied", False)
+    if not thumbnail_applied:
+        short_thumb_ref = _find_short_thumbnail_ref(thumbnail_refs, short_id)
+        if short_thumb_ref:
+            thumb_path = _find_thumbnail_path(assets_root, short_thumb_ref["thumbnail_asset_id"])
+            if thumb_path:
+                thumbnail_applied = yt_client.upload_thumbnail(
+                    config=config, access_token=token, video_id=video_id,
+                    thumb_path=thumb_path, episode_id=episode_id,
+                )
+        ledger.record(step_id, "in_progress", video_id=video_id, thumbnail_applied=thumbnail_applied)
+
+    result_entry = make_result_entry(
+        platform="youtube", deliverable_type="short", status="published",
+        short_id=short_id,
+        platform_video_id=video_id,
+        published_url=f"https://www.youtube.com/shorts/{video_id}",
+        published_at=datetime.now(timezone.utc).isoformat(),
+        title=title,
+        description_length_chars=len(description),
+        thumbnail_applied=thumbnail_applied,
+        ai_disclosure_included=True,
+        visibility="private",
     )
     return {
-        "platform_video_id": video_id,
-        "published_url": f"https://www.youtube.com/shorts/{video_id}",
-        "title": title,
-        "description_length_chars": len(description),
+        "outcome": "success",
+        "video_id": video_id,
+        "thumbnail_applied": thumbnail_applied,
         "visibility": "private",
+        "result_entry": result_entry,
     }
 
 
-def _run_facebook_main(config, token, assets_root, episode_id, final_render_package, step) -> dict:
+def _run_facebook_main(config, token, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
     metadata_source = final_render_package.get("metadata_source", {})
     video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
     if not (video_path and video_path.exists()):
@@ -370,15 +536,19 @@ def _run_facebook_main(config, token, assets_root, episode_id, final_render_pack
         episode_id=episode_id,
         published=_SAFE_FB_PUBLISHED,
     )
-    return {
-        "platform_video_id": video_id,
-        "title": title,
-        "description_length_chars": len(description),
-        "visibility": "unpublished",
-    }
+    result_entry = make_result_entry(
+        platform="facebook", deliverable_type="main_episode", status="published",
+        platform_video_id=video_id,
+        published_at=datetime.now(timezone.utc).isoformat(),
+        title=title,
+        description_length_chars=len(description),
+        ai_disclosure_included=True,
+        visibility="unpublished",
+    )
+    return {"outcome": "success", "visibility": "unpublished", "result_entry": result_entry}
 
 
-def _run_tiktok_short(config, assets_root, episode_id, final_render_package, step) -> dict:
+def _run_tiktok_short(config, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
     metadata_source = final_render_package.get("metadata_source", {})
     short_id = step["short_id"]
     video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
@@ -396,14 +566,19 @@ def _run_tiktok_short(config, assets_root, episode_id, final_render_package, ste
         config=config, upload_url=upload_url, video_path=video_path, episode_id=episode_id,
     )
     post_id = tt_client.poll_tiktok_publish(config=config, publish_id=publish_id, episode_id=episode_id)
-    return {
-        "platform_video_id": post_id,
-        "title": title,
-        "visibility": "self_only",
-    }
+    result_entry = make_result_entry(
+        platform="tiktok", deliverable_type="short", status="published",
+        short_id=short_id,
+        platform_video_id=post_id,
+        published_at=datetime.now(timezone.utc).isoformat(),
+        title=title,
+        ai_disclosure_included=False,
+        visibility="self_only",
+    )
+    return {"outcome": "success", "visibility": "self_only", "result_entry": result_entry}
 
 
-def _run_instagram_short(config, token, assets_root, episode_id, final_render_package, step) -> dict:
+def _run_instagram_short(config, token, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
     metadata_source = final_render_package.get("metadata_source", {})
     short_id = step["short_id"]
     video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
@@ -430,12 +605,15 @@ def _run_instagram_short(config, token, assets_root, episode_id, final_render_pa
             config=config, access_token=token, creation_id=creation_id, episode_id=episode_id,
         )
         # Container-only: publish_instagram_container is deliberately never called.
-        return {
-            "platform_video_id": None,
-            "skipped_reason": f"instagram_container_validated: creation_id={creation_id}, terminal_status={status}",
-            "title": get_short_title(metadata_source, short_id),
-            "visibility": _SAFE_IG_VISIBILITY,
-        }
+        result_entry = make_result_entry(
+            platform="instagram", deliverable_type="short", status="skipped",
+            short_id=short_id,
+            skipped_reason=f"instagram_container_validated: creation_id={creation_id}, terminal_status={status}",
+            title=get_short_title(metadata_source, short_id),
+            ai_disclosure_included=True,
+            visibility=_SAFE_IG_VISIBILITY,
+        )
+        return {"outcome": "success", "visibility": _SAFE_IG_VISIBILITY, "result_entry": result_entry}
     finally:
         for url in staged_urls:
             try:
@@ -449,21 +627,25 @@ def _run_instagram_short(config, token, assets_root, episode_id, final_render_pa
 # ---------------------------------------------------------------------------
 
 def _print_ledger(steps: list[dict], ledger: CheckpointLedger) -> None:
-    print(f"\n{'step_id':<26}{'platform':<12}{'status':<10}detail")
-    print("-" * 78)
+    print(f"\n{'step_id':<26}{'platform':<12}{'status':<18}detail")
+    print("-" * 86)
     for step in steps:
         entry = ledger.entry(step["step_id"])
         status = entry.get("status", "pending")
         detail = ""
-        if status == "success":
-            detail = f"platform_video_id={entry.get('platform_video_id')} visibility={entry.get('visibility')}"
+        if status in ("success", "review_required"):
+            detail = f"video_id={entry.get('video_id') or entry.get('platform_video_id')} visibility={entry.get('visibility')}"
+            if entry.get("captions_submitted") is False:
+                detail += f" captions_skipped_reason={entry.get('captions_skipped_reason')}"
         elif status == "failed":
             detail = f"error={str(entry.get('error', ''))[:60]}"
-        print(f"{step['step_id']:<26}{step['platform']:<12}{status:<10}{detail}")
+        elif status == "in_progress":
+            detail = f"video_id={entry.get('video_id')} (resumable)"
+        print(f"{step['step_id']:<26}{step['platform']:<12}{status:<18}{detail}")
     print()
 
 
-def main() -> int:
+def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--episode-id", required=True, help="Episode ID to smoke test (e.g. ep_1f827369).")
     parser.add_argument("--execute", action="store_true", help="Perform real API operations (default: plan-only).")
@@ -472,17 +654,34 @@ def main() -> int:
         help="Required alongside --execute. Confirms operator understands this performs "
              "real, non-public uploads to every platform.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
+    root = project_root if project_root is not None else _PROJECT_ROOT
     episode_id = args.episode_id
-    execute = args.execute and args.confirm_nonpublic_smoke
 
     if args.execute and not args.confirm_nonpublic_smoke:
         print("refusing: --execute requires --confirm-nonpublic-smoke", file=sys.stderr)
         return 2
 
     config = Config()
-    assets_root = _PROJECT_ROOT / ".hypogeum-assets"
+
+    if args.execute:
+        if config.YOUTUBE_DRY_RUN:
+            print(
+                "refusing: --execute requires the resolved YOUTUBE_DRY_RUN to be False.\n"
+                "hypogeum/publishing/youtube.py::upload_video() (the low-level function this\n"
+                "script calls) does not honor YOUTUBE_DRY_RUN — that flag is only checked by\n"
+                "hypogeum/agents/publishing_agent.py, which this script never calls — so a real\n"
+                "upload would happen regardless. Re-run with an explicit process override:\n\n"
+                "  YOUTUBE_DRY_RUN=false python3 scripts/multiplatform_publishing_smoke.py "
+                "--episode-id " + episode_id + " --execute --confirm-nonpublic-smoke\n",
+                file=sys.stderr,
+            )
+            return 3
+
+    execute = args.execute and args.confirm_nonpublic_smoke
+
+    assets_root = root / ".hypogeum-assets"
     episode_dir = assets_root / "episodes" / episode_id
     db_path = assets_root / "hypogeum.db"
 
@@ -499,12 +698,14 @@ def main() -> int:
     ledger_path = episode_dir / f"smoke_publishing_checkpoints_{episode_id}.json"
     ledger = CheckpointLedger(ledger_path, episode_id)
 
-    print(f"episode_id={episode_id}  mode={'EXECUTE' if execute else 'PLAN-ONLY'}")
+    print(f"episode_id={episode_id}  mode={'EXECUTE' if execute else 'PLAN-ONLY'}  "
+          f"YOUTUBE_DRY_RUN(resolved)={config.YOUTUBE_DRY_RUN}")
     _print_ledger(steps, ledger)
 
     if not execute:
         print("Plan-only mode: no network calls performed. Re-run with --execute "
-              "--confirm-nonpublic-smoke to perform the real (non-public) uploads.")
+              "--confirm-nonpublic-smoke (and YOUTUBE_DRY_RUN=false) to perform the "
+              "real (non-public) uploads.")
         return 0
 
     # ------------------------------------------------------------------
@@ -517,7 +718,7 @@ def main() -> int:
         shutil.copy2(record_path, backup_path)
         print(f"backed up existing publishing record -> {backup_path.name}")
 
-    covered_topics_path = _PROJECT_ROOT / "memory" / "covered-topics.md"
+    covered_topics_path = root / "memory" / "covered-topics.md"
     _original_covered_topics = (
         covered_topics_path.read_text(encoding="utf-8") if covered_topics_path.exists() else None
     )
@@ -535,7 +736,11 @@ def main() -> int:
             platform = step["platform"]
 
             if ledger.status(step_id) == "success":
-                print(f"[SKIP]    {step_id} — already succeeded, not retrying")
+                stored = ledger.entry(step_id)
+                if stored.get("result_entry"):
+                    record.append_result(stored["result_entry"])
+                print(f"[SKIP]    {step_id} — already succeeded, not retrying "
+                      f"(video_id={stored.get('video_id') or stored.get('platform_video_id')})")
                 continue
 
             print(f"[RUNNING] {step_id} ({platform})...")
@@ -544,79 +749,55 @@ def main() -> int:
                     if youtube_token is None:
                         youtube_token = _resolve_youtube_token(config, db_path)
                     if step["deliverable_type"] == "main_episode":
-                        result = _run_youtube_main(config, youtube_token, assets_root, episode_id, final_render_package, step)
-                        entry = make_result_entry(
-                            platform="youtube", deliverable_type="main_episode", status="published",
-                            platform_video_id=result["platform_video_id"],
-                            published_url=result["published_url"],
-                            published_at=datetime.now(timezone.utc).isoformat(),
-                            title=result["title"],
-                            description_length_chars=result["description_length_chars"],
-                            ai_disclosure_included=True,
-                            visibility=result["visibility"],
-                        )
+                        result = _run_youtube_main(config, youtube_token, assets_root, episode_id, final_render_package, step, ledger)
                     else:
-                        result = _run_youtube_short(config, youtube_token, assets_root, episode_id, final_render_package, step)
-                        entry = make_result_entry(
-                            platform="youtube", deliverable_type="short", status="published",
-                            short_id=step["short_id"],
-                            platform_video_id=result["platform_video_id"],
-                            published_url=result["published_url"],
-                            published_at=datetime.now(timezone.utc).isoformat(),
-                            title=result["title"],
-                            description_length_chars=result["description_length_chars"],
-                            ai_disclosure_included=True,
-                            visibility=result["visibility"],
-                        )
+                        result = _run_youtube_short(config, youtube_token, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "facebook":
                     if meta_token is None:
                         meta_token = _resolve_meta_token(config, db_path, episode_id)
-                    result = _run_facebook_main(config, meta_token, assets_root, episode_id, final_render_package, step)
-                    entry = make_result_entry(
-                        platform="facebook", deliverable_type="main_episode", status="published",
-                        platform_video_id=result["platform_video_id"],
-                        published_at=datetime.now(timezone.utc).isoformat(),
-                        title=result["title"],
-                        description_length_chars=result["description_length_chars"],
-                        ai_disclosure_included=True,
-                        visibility=result["visibility"],
-                    )
+                    result = _run_facebook_main(config, meta_token, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "tiktok":
                     _resolve_tiktok_credentials(config, db_path)
-                    result = _run_tiktok_short(config, assets_root, episode_id, final_render_package, step)
-                    entry = make_result_entry(
-                        platform="tiktok", deliverable_type="short", status="published",
-                        short_id=step["short_id"],
-                        platform_video_id=result["platform_video_id"],
-                        published_at=datetime.now(timezone.utc).isoformat(),
-                        title=result["title"],
-                        ai_disclosure_included=False,
-                        visibility=result["visibility"],
-                    )
+                    result = _run_tiktok_short(config, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "instagram":
                     if meta_token is None:
                         meta_token = _resolve_meta_token(config, db_path, episode_id)
-                    result = _run_instagram_short(config, meta_token, assets_root, episode_id, final_render_package, step)
-                    entry = make_result_entry(
-                        platform="instagram", deliverable_type="short", status="skipped",
-                        short_id=step["short_id"],
-                        skipped_reason=result["skipped_reason"],
-                        title=result["title"],
-                        ai_disclosure_included=True,
-                        visibility=result["visibility"],
-                    )
+                    result = _run_instagram_short(config, meta_token, assets_root, episode_id, final_render_package, step, ledger)
 
                 else:
                     raise RuntimeError(f"unknown platform: {platform}")
 
-                record.append_result(entry)
+                record.append_result(result["result_entry"])
+
+                if result["outcome"] == "review_required":
+                    ledger.record(
+                        step_id, "review_required",
+                        video_id=result.get("video_id"),
+                        thumbnail_applied=result.get("thumbnail_applied"),
+                        captions_submitted=result.get("captions_submitted"),
+                        captions_skipped_reason=result.get("captions_skipped_reason"),
+                        visibility=result.get("visibility"),
+                        result_entry=result["result_entry"],
+                    )
+                    print(
+                        f"[REVIEW]  {step_id} — video + thumbnail succeeded but captions did not "
+                        f"(reason={result.get('captions_skipped_reason')}). Halting for human review "
+                        f"before touching any other platform. video_id={result.get('video_id')} is "
+                        f"preserved; re-running will resume from captions only."
+                    )
+                    halted = True
+                    break
+
                 ledger.record(
                     step_id, "success",
-                    platform_video_id=result.get("platform_video_id"),
+                    video_id=result.get("video_id"),
+                    platform_video_id=result["result_entry"].get("platform_video_id"),
+                    thumbnail_applied=result.get("thumbnail_applied"),
                     visibility=result.get("visibility"),
+                    result_entry=result["result_entry"],
                 )
                 print(f"[OK]      {step_id} — visibility={result.get('visibility')}")
 

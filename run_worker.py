@@ -11,9 +11,22 @@ Each iteration:
        claimed when the factory is cleared (no OIS blocking signal, factory
        active, active credentials, monthly budget ceiling not exceeded).
        Single source of truth — never reimplemented here, only consulted.
-  3. queue.poll(max_iterations=1)      — claim one queued item; run pipeline or dry-run it
-     (skipped when the operator has paused the queue, or when step 2.5
-     is not cleared)
+  3. queue.poll(max_iterations=1, pipeline_executor=<gated executor>) —
+     claim one queued item; run pipeline or dry-run it (skipped when the
+     operator has paused the queue, or when step 2.5 is not cleared)
+
+Every real, queue-claimed pipeline run — autonomous or manual — passes
+through the SAME executor built by
+hypogeum.worker_integration.build_gated_pipeline_executor(), wired into the
+existing queue.poll()/process_next() call via the pipeline_executor
+parameter (hypogeum/queue.py). There is no second, queue-agnostic execution
+path: claim, topic resolution, complete/fail/release, and the
+hypogeum.pipeline.run_pipeline() call itself all remain exactly where they
+already were, in hypogeum/queue.py. The executor only decides, per claimed
+item, whether that one call is authorized (ChannelOperationsProfile +
+BackwardPlan gates, concurrency, publishing platform filtering) and records
+what happened — see hypogeum/worker_integration.py's module docstring for
+the full gate order.
 
 Usage:
     python run_worker.py                     # live mode, 60s interval
@@ -22,26 +35,18 @@ Usage:
     python run_worker.py --interval 30       # 30s between iterations
     python run_worker.py --channel-id foo    # restrict pipeline runs to channel 'foo'
 
-Gated single-episode invocation (Channel Operations Profile + Backward Plan):
+Manual supervised invocation (same gated executor, same queue lifecycle —
+not a second implementation): enqueues one run_queue item for the given
+channel/episode, then runs exactly one gated poll() iteration.
     python run_worker.py --gated-episode-id ep_001 --channel-id foo \
-        --topic "The Antikythera Mechanism" --invocation-mode manual
-    python run_worker.py --gated-episode-id ep_001 --channel-id foo \
-        --invocation-mode scheduled --target-publish-at 2026-09-03T18:00:00+04:00
-
-    This is a separate, additive entry point — run_gated_episode() below —
-    queue-agnostic and independent of the scheduler/queue loop above. It
-    wraps the existing hypogeum.pipeline.run_pipeline() call with
-    ChannelOperationsProfile gates and a hypogeum.backward_planner.BackwardPlan
-    (loaded from its existing artifact or built from --target-publish-at).
-    Intended today for manual/supervised runs and, later, for the Scheduler's
-    scheduled/unattended invocations (Scheduler integration is a separate,
-    not-yet-implemented task — this flag does not implement or replace it).
-    Prints a JSON WorkerRunResult and exits; does not enter the daemon loop.
+        --topic "The Antikythera Mechanism"
 
 Exit codes:
-    0 — clean shutdown (SIGINT, SIGTERM, or --once), or a gated run completed
-        (successfully or blocked — check the printed result's "success" field)
-    1 — startup failure (config, DB, or import error)
+    0 — clean shutdown (SIGINT, SIGTERM, or --once), or a gated invocation's
+        claimed item completed successfully
+    1 — startup failure (config, DB, or import error), or a gated
+        invocation was blocked/refused/deferred/failed (see the printed
+        JSON attempt/ProcessResult for blocked_reason)
 """
 
 from __future__ import annotations
@@ -393,6 +398,8 @@ def run_iteration(
         proc = None
     else:
         _wc_set("worker_status", "claiming", db_path)
+        from hypogeum.worker_integration import build_gated_pipeline_executor
+        gated_executor = build_gated_pipeline_executor(db_path=db_path)
         poll_result = poll(
             worker_id=worker_id,
             db_path=db_path,
@@ -400,6 +407,7 @@ def run_iteration(
             max_iterations=1,
             sleep_interval=0.0,
             config=config,
+            pipeline_executor=gated_executor,
         )
 
         proc = next((r for r in poll_result.results if r.status != "empty"), None)
@@ -438,215 +446,6 @@ def run_iteration(
         "clearance_reason":       clearance.reason,
         "validation_exemption":   clearance.validation_exemption,
     }
-
-
-# ---------------------------------------------------------------------------
-# Gated single-episode invocation — Channel Operations Profile + Backward Plan
-#
-# Queue-agnostic: does not call claim_next()/complete()/fail()/release() and
-# does not touch run_queue. Reuses the exact same hypogeum.pipeline.run_pipeline()
-# entry point the queue-driven daemon loop above calls, so every existing
-# checkpoint/resume/publishing-idempotency guarantee inside pipeline.py
-# applies unchanged. This is the integration point for:
-#   - manual/supervised invocation today (operator- or dashboard-triggered);
-#   - scheduled/unattended invocation later, once the Scheduler (a separate,
-#     not-yet-implemented roadmap step) is built to call this function.
-# ---------------------------------------------------------------------------
-
-def run_gated_episode(
-    channel_id: str,
-    episode_id: str,
-    invocation_mode,
-    config,
-    db_path: Path,
-    topic_input: str | None = None,
-    target_publish_at: datetime | None = None,
-    generated_at: datetime | None = None,
-    workload: dict | None = None,
-    youtube_privacy: str = "private",
-    worker_id: str | None = None,
-    project_root: Path | None = None,
-):
-    """
-    Execute one episode end-to-end under ChannelOperationsProfile and
-    BackwardPlan gating. Returns a hypogeum.worker_integration.WorkerRunResult.
-
-    Never claims from run_queue, never implements Scheduler behavior, never
-    invents a publishing target from cadence — target_publish_at must be
-    supplied explicitly by the caller (or an existing plan artifact must
-    already exist for episode_id).
-
-    Gate order (first failure wins — never proceeds past a blocked gate):
-      1. invocation_mode must parse to a known InvocationMode (fail closed).
-      2. A ChannelOperationsProfile must exist for channel_id (fail closed).
-      3. operator_enabled / production_enabled always required;
-         unattended_operation_enabled additionally required for "scheduled".
-      4. The backward plan must load/build cleanly and be neither "refused"
-         nor "infeasible" (unless mode is "manual" with no plan/target at
-         all — the pre-existing unscheduled supervised flow).
-
-    On any blocked gate, the pipeline is never invoked and the returned
-    result has success=False and blocked_reason set. WorkerRunResult is
-    persisted (fail-closed — a persistence failure raises
-    hypogeum.worker_integration.WorkerPersistenceError) at every exit point
-    so state is truthful even if this process is interrupted.
-
-    project_root overrides where the backward-plan and worker-run JSON
-    artifacts are written/read (tests use tmp_path); defaults to the real
-    project root when None.
-    """
-    from hypogeum import worker_integration as wi
-
-    worker_run_id = worker_id or str(uuid.uuid4())
-    started_at = _now_utc().isoformat()
-
-    result = wi.WorkerRunResult(
-        worker_run_id=worker_run_id,
-        channel_id=channel_id,
-        episode_id=episode_id,
-        invocation_mode=str(invocation_mode),
-        plan_id=None,
-        plan_status=None,
-        target_publish_at=None,
-        current_stage=None,
-        completed_stages=[],
-        skipped_stages=[],
-        failed_stage=None,
-        blocked_reason=None,
-        schedule_status="unknown",
-        started_at=started_at,
-        finished_at=None,
-        checkpoint_status="not_applicable",
-        eligible_platforms=[],
-        excluded_platforms={},
-    )
-
-    def _blocked(reason: str):
-        result.blocked_reason = reason
-        result.finished_at = _now_utc().isoformat()
-        wi.save_worker_run_result(result, project_root=project_root)
-        return result
-
-    # 1. invocation mode — fail closed on unknown values
-    try:
-        mode = wi.InvocationMode.parse(invocation_mode)
-    except ValueError as exc:
-        return _blocked(str(exc))
-    result.invocation_mode = mode.value
-
-    # 2. operations profile — fail closed if missing (or corrupted; that
-    # already raises RuntimeError from get_channel_operations_profile itself)
-    try:
-        profile = wi.load_operations_profile_or_fail(channel_id, db_path=db_path)
-    except wi.OperationsProfileMissingError as exc:
-        return _blocked(str(exc))
-
-    # 3. eligible/excluded publishing platforms — always computed, regardless
-    # of gate outcome, so the result is informative even when blocked.
-    result.eligible_platforms, result.excluded_platforms = wi.resolve_publishing_platforms(profile)
-    if not profile.publishing_enabled:
-        result.excluded_platforms = {
-            p: "publishing_enabled is False for this channel" for p in result.eligible_platforms
-        }
-        result.eligible_platforms = []
-
-    # 4. operational gates
-    gate_reason = wi.check_invocation_gates(profile, mode)
-    if gate_reason is not None:
-        return _blocked(gate_reason)
-
-    # 5. backward plan — load existing artifact, build from target_publish_at,
-    # or none at all (manual mode only — the pre-existing unscheduled flow).
-    # Never rebuilds when an artifact already exists, so plan_id is preserved
-    # across resumes.
-    try:
-        plan, plan_blocked_reason = wi.resolve_backward_plan(
-            channel_id=channel_id, episode_id=episode_id, invocation_mode=mode,
-            profile=profile, target_publish_at=target_publish_at,
-            generated_at=generated_at, workload=workload,
-            project_root=project_root,
-        )
-    except wi.BackwardPlanArtifactError as exc:
-        return _blocked(str(exc))
-
-    if plan is not None:
-        result.plan_id = plan.plan_id
-        result.plan_status = plan.plan_status
-        result.target_publish_at = plan.target_publish_at
-        result.required_lead_time_seconds = plan.required_lead_time_seconds
-        result.available_lead_time_seconds = plan.available_lead_time_seconds
-        result.earliest_feasible_publish_at = plan.earliest_feasible_publish_at
-
-    if plan_blocked_reason is not None:
-        return _blocked(plan_blocked_reason)
-
-    # 6. checkpoint/resume status — truthful signal from stage_executions
-    # itself (not from our own artifact), computed before touching the
-    # pipeline so a crash mid-run still leaves an honest "resumed" marker.
-    pre_existing_rows = wi.get_latest_stage_rows(episode_id, db_path=db_path)
-    result.checkpoint_status = "resumed" if pre_existing_rows else "fresh"
-    wi.save_worker_run_result(result, project_root=project_root)
-
-    # 7. topic resolution — explicit topic_input wins; otherwise resolve from
-    # the existing topic backlog exactly as queue.process_next() does,
-    # reusing the same functions (never a second implementation of this).
-    topic_id = None
-    using_backlog = False
-    if topic_input is None:
-        from hypogeum.topics import claim_next_topic
-        topic_row = claim_next_topic(channel_id, db_path=db_path)
-        if topic_row is None:
-            return _blocked(f"no queued topic available for channel_id={channel_id!r}")
-        topic_input = topic_row["topic_text"]
-        topic_id = topic_row["topic_id"]
-        using_backlog = True
-
-    # 8. execute the existing, unmodified pipeline entry point. Every
-    # checkpoint-skip, resume, and publishing-idempotency guarantee here
-    # belongs to hypogeum/pipeline.py and is untouched by this integration.
-    try:
-        from hypogeum.pipeline import run_pipeline, PipelineRejectedError
-        run_pipeline(
-            topic_input=topic_input,
-            episode_id=episode_id,
-            config=config,
-            channel_id=channel_id,
-            db_path=db_path,
-            youtube_privacy=youtube_privacy,
-        )
-        if using_backlog:
-            from hypogeum.topics import consume_topic
-            consume_topic(topic_id, db_path=db_path)
-        result.success = True
-    except Exception as exc:
-        if using_backlog and topic_id is not None:
-            try:
-                if isinstance(exc, PipelineRejectedError):
-                    from hypogeum.topics import skip_topic
-                    skip_topic(topic_id, reason="ep_rejected", db_path=db_path)
-                else:
-                    from hypogeum.topics import release_topic
-                    release_topic(topic_id, db_path=db_path)
-            except Exception:
-                pass  # never let cleanup block truthful result reporting
-        result.blocked_reason = f"pipeline execution failed: {type(exc).__name__}: {exc}"
-        result.success = False
-
-    # 9. truthful stage/schedule-risk reporting — read stage_executions and
-    # the plan; never invent progress beyond what's actually recorded.
-    progress = wi.summarize_stage_progress(
-        plan, episode_id, db_path=db_path, topic_selected=True,
-    )
-    result.completed_stages = progress["completed_stages"]
-    result.skipped_stages = progress["skipped_stages"]
-    result.failed_stage = progress["failed_stage"]
-    result.current_stage = progress["current_stage"]
-    result.stage_schedule_risk = progress["stage_schedule_risk"]
-    result.schedule_status = progress["schedule_status"]
-    result.finished_at = _now_utc().isoformat()
-
-    wi.save_worker_run_result(result, project_root=project_root)
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -828,15 +627,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gated-episode-id",
         metavar="EPISODE_ID",
         default=None,
-        help="Run one episode via run_gated_episode() under Channel Operations "
-             "Profile + Backward Plan gating, print the JSON WorkerRunResult, "
-             "and exit. Requires --channel-id. Does not enter the daemon loop.",
-    )
-    parser.add_argument(
-        "--invocation-mode",
-        choices=["manual", "scheduled"],
-        default="manual",
-        help="Gating mode for --gated-episode-id (default: manual).",
+        help="Enqueue and run exactly one gated episode through the real "
+             "queue lifecycle (claim -> gates -> pipeline -> complete/fail), "
+             "print the resulting ProcessResult as JSON, and exit. Requires "
+             "--channel-id. Does not enter the daemon loop.",
     )
     parser.add_argument(
         "--topic",
@@ -845,21 +639,46 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Explicit topic text for --gated-episode-id. If omitted, the topic "
              "is claimed from the channel's existing topic backlog.",
     )
-    parser.add_argument(
-        "--target-publish-at",
-        metavar="ISO8601",
-        default=None,
-        help="Target publish datetime (ISO8601, timezone-aware) for "
-             "--gated-episode-id. Builds a new backward plan if no plan "
-             "artifact already exists for the episode.",
-    )
-    parser.add_argument(
-        "--youtube-privacy",
-        choices=["public", "private", "unlisted"],
-        default="private",
-        help="YouTube privacy for --gated-episode-id (default: private).",
-    )
     return parser.parse_args(argv)
+
+
+def _run_gated_cli(channel_id: str, episode_id: str, topic: str | None, db_path: Path) -> int:
+    """
+    Enqueues one run_queue item for (channel_id, episode_id) and runs a
+    single gated poll() iteration against it — the exact same queue
+    lifecycle (claim/topic-resolve/complete/fail/release) and the exact
+    same gated executor the daemon loop uses, not a second implementation.
+    Returns a process exit code: 0 only for a genuinely completed run.
+    """
+    from hypogeum.config import Config
+    from hypogeum.db import initialize_schema
+    from hypogeum.queue import enqueue, poll
+    from hypogeum.worker_integration import build_gated_pipeline_executor
+
+    try:
+        initialize_schema(db_path)
+        config = Config()
+    except Exception as exc:
+        print(f"startup error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+    queue_id = enqueue(
+        db_path=db_path, channel_id=channel_id, episode_id=episode_id,
+        priority=-100, source="manual",
+    )
+    topic_resolver = (lambda _claimed_row: topic) if topic else None
+    executor = build_gated_pipeline_executor(db_path=db_path)
+
+    result = poll(
+        worker_id=str(uuid.uuid4()), db_path=db_path, dry_run=False,
+        max_iterations=1, config=config, topic_resolver=topic_resolver,
+        pipeline_executor=executor,
+    )
+    proc = next((r for r in result.results if r.status != "empty"), None)
+    output = proc.__dict__ if proc is not None else {"status": "empty", "queue_id": queue_id}
+    print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+
+    return 0 if proc is not None and proc.status == "completed" else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -870,23 +689,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.channel_id:
             print("--gated-episode-id requires --channel-id", file=sys.stderr)
             return 1
-        from hypogeum.config import Config
-        config = Config()
-        target_publish_at = None
-        if args.target_publish_at:
-            target_publish_at = datetime.fromisoformat(args.target_publish_at)
-        result = run_gated_episode(
-            channel_id=args.channel_id,
-            episode_id=args.gated_episode_id,
-            invocation_mode=args.invocation_mode,
-            config=config,
-            db_path=db_path,
-            topic_input=args.topic,
-            target_publish_at=target_publish_at,
-            youtube_privacy=args.youtube_privacy,
+        return _run_gated_cli(
+            channel_id=args.channel_id, episode_id=args.gated_episode_id,
+            topic=args.topic, db_path=db_path,
         )
-        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
-        return 0
 
     return run_worker(
         db_path=db_path,

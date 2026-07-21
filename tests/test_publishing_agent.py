@@ -636,6 +636,95 @@ class TestSuccessfulFullRun:
 
 
 # ---------------------------------------------------------------------------
+# TestEnabledPlatformsFilter — run_worker.py <-> ChannelOperationsProfile
+# platform gating (2026-07-21 correction). Proves the filter reaches real
+# provider calls, not just result metadata.
+# ---------------------------------------------------------------------------
+
+class TestEnabledPlatformsFilter:
+    def test_youtube_only_skips_other_platforms_with_no_provider_calls(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True, has_tiktok=True)
+        pkg = _make_final_render_package("ep_filter_yt_only", tmp_path)
+
+        with _patch_platforms(tiktok_avail=True) as _, \
+             patch(f"{_META}.refresh_meta_token") as meta_refresh_mock, \
+             patch(f"{_META}.upload_facebook_video") as fb_upload_mock, \
+             patch(f"{_META}.create_instagram_container") as ig_container_mock, \
+             patch(f"{_TT}.refresh_tiktok_token") as tt_refresh_mock, \
+             patch(f"{_TT}.check_tiktok_availability") as tt_avail_mock, \
+             patch(f"{_TT}.init_tiktok_upload") as tt_init_mock:
+            result = run_publishing_agent(
+                pkg, config, "ep_filter_yt_only",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+                enabled_platforms=frozenset({"youtube"}),
+            )
+
+        # No provider call of any kind for excluded platforms — not even
+        # OAuth/token refresh or availability checks.
+        meta_refresh_mock.assert_not_called()
+        fb_upload_mock.assert_not_called()
+        ig_container_mock.assert_not_called()
+        tt_refresh_mock.assert_not_called()
+        tt_avail_mock.assert_not_called()
+        tt_init_mock.assert_not_called()
+
+        assert result["summary"]["youtube_main_published"] is True
+
+        fb_results = [r for r in result["platform_results"] if r["platform"] == "facebook"]
+        assert all(r["status"] == "skipped" and r["skipped_reason"] == "platform_disabled" for r in fb_results)
+
+        ig_results = [r for r in result["platform_results"] if r["platform"] == "instagram"]
+        assert all(r["status"] == "skipped" and r["skipped_reason"] == "platform_disabled" for r in ig_results)
+
+        tt_results = [r for r in result["platform_results"] if r["platform"] == "tiktok"]
+        assert all(r["status"] == "skipped" for r in tt_results)
+
+    def test_empty_filter_blocks_every_platform_including_youtube(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True, has_tiktok=True)
+        pkg = _make_final_render_package("ep_filter_empty", tmp_path)
+
+        with patch(f"{_YT}.refresh_youtube_token") as yt_refresh_mock, \
+             patch(f"{_YT}.upload_video") as yt_upload_mock, \
+             patch(f"{_META}.refresh_meta_token") as meta_refresh_mock, \
+             patch(f"{_TT}.refresh_tiktok_token") as tt_refresh_mock, \
+             patch(f"{_TT}.check_tiktok_availability") as tt_avail_mock:
+            result = run_publishing_agent(
+                pkg, config, "ep_filter_empty",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+                enabled_platforms=frozenset(),
+            )
+
+        yt_refresh_mock.assert_not_called()
+        yt_upload_mock.assert_not_called()
+        meta_refresh_mock.assert_not_called()
+        tt_refresh_mock.assert_not_called()
+        tt_avail_mock.assert_not_called()
+
+        assert result["summary"]["youtube_main_published"] is False
+        assert all(
+            r["status"] in ("skipped", "failed") for r in result["platform_results"]
+        )
+
+    def test_none_filter_preserves_legacy_attempt_all_behavior(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=True, has_tiktok=False)
+        pkg = _make_final_render_package("ep_filter_none", tmp_path)
+
+        with _patch_platforms():
+            result = run_publishing_agent(
+                pkg, config, "ep_filter_none",
+                output_dir=tmp_path, project_root=tmp_path,
+                publish_at="2026-07-02T14:00:00+00:00",
+                enabled_platforms=None,
+            )
+
+        assert result["package_metadata"]["overall_status"] == "published"
+        fb_results = [r for r in result["platform_results"] if r["platform"] == "facebook"]
+        assert all(r["status"] == "published" for r in fb_results)
+
+
+# ---------------------------------------------------------------------------
 # TestOverallStatusLogic
 # ---------------------------------------------------------------------------
 

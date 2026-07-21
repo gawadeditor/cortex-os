@@ -1,12 +1,15 @@
 """
 hypogeum/pipeline.py — Pipeline orchestrator
 
-Single run_pipeline() entry point that executes all 9 agents in the frozen order.
+Single run_pipeline() entry point that executes all 10 agents in the frozen order.
 This is a scaffold — every agent stub raises NotImplementedError until implemented
 in M1–M5. The orchestration flow, lifecycle logging, and fail-fast checks are complete.
 
-Agent order (frozen — architecture-index.md):
-  EP → RD → NA → SE → VPD → TD → Audio → Assembly → Publishing
+Agent order (frozen — architecture-index.md; Thumbnail Strategy inserted
+2026-07-19, completing the architecture its own module docstring already
+specified — see hypogeum/agents/thumbnail_strategy.py and
+docs/architecture/THUMBNAIL_CONCEPT_MODE_CONTEXT_AUDIT.md):
+  EP → RD → NA → SE → Thumbnail Strategy → VPD → TD → Audio → Assembly → Publishing
 
 Integration contracts (must not be violated by callers or this module):
   - All environment access goes through the Config object — never os.getenv()
@@ -25,12 +28,14 @@ Execution sequence:
         PDR issued → PackageDeficiencyError (pipeline halts; operator resolves + re-runs)
   6.  Narrative Architect → narrative_package
   7.  Script Engine → script_package
-  8.  Visual Package Director → visual_package
-  9.  Thumbnail Director → thumbnail_package
-  10. Audio Agent → narration_package
-  11. Assembly Agent → final_render_package
-  12. Publishing Agent → publishing_record
-  13. Log pipeline_run_completed; return PipelineResult
+  8.  Thumbnail Strategy → thumbnail_concept_brief (activates CONCEPT_DRIVEN_MODE
+        downstream in Thumbnail Director)
+  9.  Visual Package Director → visual_package
+  10. Thumbnail Director → thumbnail_package
+  11. Audio Agent → narration_package
+  12. Assembly Agent → final_render_package
+  13. Publishing Agent → publishing_record
+  14. Log pipeline_run_completed; return PipelineResult
 
 Logging events emitted:
   pipeline_run_started         — info  — before startup checks
@@ -39,7 +44,7 @@ Logging events emitted:
   pipeline_stage_completed     — info  — after each agent returns
   pipeline_topic_rejected      — warn  — EP scored topic REJECT
   pipeline_pdr_issued          — error — RD issued a Package Deficiency Report
-  pipeline_run_completed       — info  — all 9 agents completed
+  pipeline_run_completed       — info  — all 10 agents completed
 """
 
 from __future__ import annotations
@@ -65,6 +70,7 @@ from hypogeum.agents.research_director import run_research_director
 from hypogeum.agents.script_engine import run_script_engine
 from hypogeum.agents.thumbnail_director import run_thumbnail_director
 from hypogeum.agents.thumbnail_handoff_brief_builder import build_thumbnail_handoff_brief
+from hypogeum.agents.thumbnail_strategy import run_thumbnail_strategy
 from hypogeum.agents.visual_package_director import (
     run_visual_package_director,
     run_visual_package_director_from_plan,
@@ -79,6 +85,7 @@ from hypogeum.db import (
 )
 from hypogeum.finance import clear_run_context, set_run_context, write_episode_rollup
 from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_blocked, is_factory_blocked
+from hypogeum.production_gate import require_full_production_authorized
 from hypogeum.post_run_intelligence import run_post_run_intelligence
 from hypogeum.production_metadata import write_analytics_pending, write_production_metadata
 from hypogeum.logger import get_logger
@@ -379,6 +386,7 @@ def run_pipeline(
     channel_id: Optional[str] = "hypogeum",
     db_path: Optional[Path] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    publishing_platform_filter: Optional[frozenset] = None,
 ) -> PipelineResult:
     """
     Execute the full 9-agent pipeline end-to-end.
@@ -405,6 +413,17 @@ def run_pipeline(
         db_path:          Path to the SQLite audit database. Defaults to
                           .hypogeum-assets/hypogeum.db. Pass a tmp_path in
                           tests to isolate stage_executions writes.
+        publishing_platform_filter: Optional frozenset of platform names
+                          (e.g. {"youtube"}). When given, only these
+                          platforms are attempted by the Publishing Agent —
+                          disabled/blocked platforms never reach a provider
+                          call. None means no filter (every platform with
+                          valid credentials is attempted — unchanged
+                          default behavior for callers that don't pass
+                          this). An empty frozenset blocks every platform
+                          (used when publishing_enabled is False upstream).
+                          See hypogeum.agents.publishing_agent.run_publishing_agent's
+                          enabled_platforms parameter.
 
     Returns:
         PipelineResult — all 11 packages populated on success.
@@ -447,6 +466,16 @@ def run_pipeline(
         raise
     except Exception:
         pass  # OIS unavailable — don't block the pipeline
+
+    # -----------------------------------------------------------------------
+    # -0.4. Expensive-run safety gate — before run registration, before any
+    # agent or spend. Unlike the OIS check above, this does NOT fail open:
+    # ProductionGateBlocked propagates unless full production is explicitly
+    # authorized (Config.FULL_PRODUCTION_ENABLED=True, PRODUCTION_MODE!=
+    # "validation", a configured max spend, and passed preflight). See
+    # hypogeum/production_gate.py.
+    # -----------------------------------------------------------------------
+    require_full_production_authorized(config, log=log)
 
     log.info(
         "pipeline_run_started",
@@ -635,6 +664,37 @@ def run_pipeline(
 
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="finance_agent_authorization")
+
+        # -----------------------------------------------------------------------
+        # 6b. Thumbnail Strategy — produces thumbnail_concept_brief, which
+        # activates CONCEPT_DRIVEN_MODE for Thumbnail Director below. Runs
+        # between Script Engine and Visual Package Director per this
+        # module's own designed architecture position (see
+        # hypogeum/agents/thumbnail_strategy.py's docstring) — placed after
+        # the finance gate so a BLOCKED verdict skips even this small spend.
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="thumbnail_strategy")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "thumbnail_strategy", log,
+            output_schema="thumbnail_concept_brief",
+            db_path=db_path,
+        )
+        thumbnail_concept_brief = _run_thumbnail_strategy(
+            topic_brief=topic_brief,
+            script_package=script_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
+        log.info(
+            "pipeline_stage_completed",
+            agent="thumbnail_strategy",
+            concepts_count=len(thumbnail_concept_brief.get("concepts", [])),
+        )
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="thumbnail_strategy")
 
         # -----------------------------------------------------------------------
         # 7. Visual Package Director
@@ -920,6 +980,7 @@ def run_pipeline(
             output_dir=output_dir,
             youtube_privacy=youtube_privacy,
             publish_at=_episode_publish_at,
+            enabled_platforms=publishing_platform_filter,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
@@ -1390,6 +1451,54 @@ def _run_script_engine(
     )
 
 
+def _run_thumbnail_strategy(
+    topic_brief: dict,
+    script_package: dict,
+    config: Config,
+    episode_id: str,
+    output_dir: Optional[Path],
+) -> dict:
+    """
+    Thumbnail Strategy (wired into the pipeline 2026-07-19 — completing an
+    already-designed architecture, per hypogeum/agents/thumbnail_strategy.py's
+    own docstring: "Architecture position: topic_brief + script_package ->
+    [THIS SKILL] -> thumbnail_concept_brief; thumbnail_concept_brief ->
+    (future) VPD + TD." Previously reachable only via the standalone
+    scripts/generate_thumbnail_strategy.py — see
+    docs/architecture/THUMBNAIL_CONCEPT_MODE_CONTEXT_AUDIT.md for the full
+    prior-state audit (2026-07-11) that first identified this disconnect:
+    0 of ~55 real local episodes had ever exercised concept-driven mode via
+    the automated pipeline, while hypogeum.agents.thumbnail_qa.py's own
+    existing regression test asserts legacy-mode thumbnails must fail QA.
+
+    Delegates to hypogeum.agents.thumbnail_strategy.run_thumbnail_strategy().
+    Consumes topic_brief + script_package and produces thumbnail_concept_brief
+    via Claude Sonnet. Writing it to output_dir as
+    thumbnail_concept_brief_{episode_id}.json is what activates
+    CONCEPT_DRIVEN_MODE downstream — hypogeum.agents.thumbnail_director.py's
+    own existing file-existence check picks it up automatically; no change
+    to that file's own logic was needed or made.
+
+    Model: Sonnet 4.6
+    Max tokens: 1,500
+    Output schema: thumbnail_concept_brief
+
+    Checkpoint: loads existing thumbnail_concept_brief from disk if present.
+    """
+    pkg = _load_package(episode_id, "thumbnail_concept_brief", output_dir)
+    if pkg is not None:
+        log = get_logger(episode_id=episode_id, agent="pipeline")
+        log.info("pipeline_stage_skipped", agent="thumbnail_strategy", reason="existing_output")
+        return pkg
+    return run_thumbnail_strategy(
+        topic_brief=topic_brief,
+        script_package=script_package,
+        config=config,
+        episode_id=episode_id,
+        output_dir=output_dir,
+    )
+
+
 def _run_visual_package_director(
     script_package: dict,
     config: Config,
@@ -1775,6 +1884,7 @@ def _run_publishing_agent(
     output_dir: Optional[Path],
     youtube_privacy: str = "public",
     publish_at: Optional[str] = None,
+    enabled_platforms: Optional[frozenset] = None,
 ) -> dict:
     """
     Publishing Agent (M5.2 — implemented).
@@ -1783,6 +1893,10 @@ def _run_publishing_agent(
     Distributes the main episode (16:9) and all 3 Shorts (9:16) to YouTube,
     Instagram Reels, Facebook Video, and TikTok (if available). Applies
     platform-specific metadata, AI disclosure text, and retry policy.
+
+    enabled_platforms: forwarded unchanged to run_publishing_agent()'s own
+    enabled_platforms parameter — see that function's docstring for the
+    exact per-platform gating contract. None preserves prior behavior.
 
     No Claude calls — pure Python orchestration over platform client modules.
 
@@ -1796,4 +1910,5 @@ def _run_publishing_agent(
         output_dir=output_dir,
         youtube_privacy=youtube_privacy,
         publish_at=publish_at,
+        enabled_platforms=enabled_platforms,
     )

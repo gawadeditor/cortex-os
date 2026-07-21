@@ -468,6 +468,7 @@ def process_next(
     dry_run: bool = True,
     config=None,
     topic_resolver: Optional[Callable[[dict], Optional[str]]] = None,
+    pipeline_executor: Optional[Callable[..., None]] = None,
 ) -> ProcessResult:
     """
     Claim the next queued item, check CALOG, resolve a topic, run pipeline.
@@ -510,6 +511,24 @@ def process_next(
                          When None, the default backlog path is used (recommended).
                          Custom resolvers are responsible for their own topic
                          lifecycle (consume_topic is NOT called for custom resolvers).
+        pipeline_executor: Optional callable replacing the direct call to
+                         hypogeum.pipeline.run_pipeline() in Step 5. When
+                         given, it is called as
+                         executor(topic_input=, episode_id=, config=,
+                                  channel_id=, cancel_check=, queue_id=,
+                                  worker_id=) — two extra keyword arguments
+                         beyond the default call, so a gated executor can
+                         call queue.release() itself on a transient block
+                         (see hypogeum.worker_integration.build_gated_pipeline_executor).
+                         When None (default, every existing caller), the
+                         call is byte-identical to prior behavior — no
+                         extra keywords, calling hypogeum.pipeline.run_pipeline()
+                         directly. This is the sole seam for inserting
+                         per-run gating (ChannelOperationsProfile /
+                         BackwardPlan / publishing platform filtering)
+                         into the real claim → topic → pipeline →
+                         complete/fail/release lifecycle without
+                         duplicating any of it.
 
     Failure hygiene (dry_run=False, backlog path):
         On any pipeline exception:
@@ -645,13 +664,24 @@ def process_next(
         except Exception:
             pass
 
-        _pipeline_module.run_pipeline(
-            topic_input=topic_text,
-            episode_id=episode_id,
-            config=config,
-            channel_id=channel_id,
-            cancel_check=_cancel_check,
-        )
+        if pipeline_executor is not None:
+            pipeline_executor(
+                topic_input=topic_text,
+                episode_id=episode_id,
+                config=config,
+                channel_id=channel_id,
+                cancel_check=_cancel_check,
+                queue_id=queue_id,
+                worker_id=worker_id,
+            )
+        else:
+            _pipeline_module.run_pipeline(
+                topic_input=topic_text,
+                episode_id=episode_id,
+                config=config,
+                channel_id=channel_id,
+                cancel_check=_cancel_check,
+            )
 
         # Mark topic consumed on success (backlog path only)
         if using_backlog and topic_id is not None:
@@ -774,6 +804,7 @@ def poll(
     config=None,
     topic_resolver: Optional[Callable[[dict], Optional[str]]] = None,
     max_stall_iterations: int = 100,
+    pipeline_executor: Optional[Callable[..., None]] = None,
 ) -> PollResult:
     """
     Run process_next() in a loop until the queue is empty, the iteration
@@ -821,6 +852,10 @@ def poll(
                                consecutive non-progress results (no_topic or skipped).
                                Prevents infinite loops when released items cycle back.
                                Default 100. Must be > 0.
+        pipeline_executor:     Forwarded unchanged to process_next()'s own
+                               pipeline_executor parameter — see there for
+                               the full contract. None (default) preserves
+                               prior behavior exactly.
 
     Returns:
         PollResult with per-status counts and stop_reason.
@@ -836,6 +871,7 @@ def poll(
                 dry_run=dry_run,
                 config=config,
                 topic_resolver=topic_resolver,
+                pipeline_executor=pipeline_executor,
             )
             result.results.append(pr)
 

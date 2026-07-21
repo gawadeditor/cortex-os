@@ -212,6 +212,7 @@ def run_publishing_agent(
     youtube_privacy: str = "public",
     publish_at: Optional[str] = None,
     project_root: Optional[Path] = None,
+    enabled_platforms: Optional[frozenset] = None,
 ) -> dict:
     """
     Execute the Publishing Agent end-to-end.
@@ -229,6 +230,23 @@ def run_publishing_agent(
                               privacyStatus is forced to "private" and publishAt is sent to
                               the YouTube API so the platform schedules the go-live.
                               When None and youtube_privacy="public", upload is blocked.
+        enabled_platforms:    Optional frozenset/set of platform names
+                              ("youtube", "facebook", "instagram", "tiktok").
+                              None means no filter — every platform with valid
+                              credentials is attempted (unchanged default
+                              behavior for every existing caller that doesn't
+                              pass this). When given, a platform absent from
+                              the set is skipped before any provider call is
+                              made for it — no OAuth refresh, no upload
+                              attempt, regardless of credential state. An
+                              empty set/frozenset blocks every platform.
+                              Facebook and Instagram share one Meta OAuth
+                              token: if either is present in enabled_platforms
+                              the shared token refresh still runs, but the
+                              actual per-platform upload call is independently
+                              gated (see STEP 8 / STEP 9 below) — this is an
+                              existing architecture constraint, not something
+                              this parameter changes.
 
     Returns:
         publishing_record dict (schema-validated, written to disk).
@@ -236,6 +254,9 @@ def run_publishing_agent(
     Raises:
         PublishingAgentError — only if ai_disclosure_text is missing (pre-flight hard halt).
     """
+    _platform_filter_active = enabled_platforms is not None
+    def _platform_enabled(name: str) -> bool:
+        return (not _platform_filter_active) or (name in enabled_platforms)
     log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
 
     log.info(
@@ -382,7 +403,10 @@ def run_publishing_agent(
     except Exception:
         pass  # fall back to env token
 
-    if (
+    if not _platform_enabled("youtube"):
+        log.info("publishing_youtube_skipped_platform_disabled", episode_id=episode_id)
+        youtube_available = False
+    elif (
         config.YOUTUBE_CLIENT_ID
         and config.YOUTUBE_CLIENT_SECRET
         and config.YOUTUBE_REFRESH_TOKEN
@@ -501,8 +525,16 @@ def run_publishing_agent(
     # ------------------------------------------------------------------
     meta_token: Optional[str] = None
     meta_available = False
+    # Facebook and Instagram share one Meta OAuth token — the refresh below
+    # runs if either platform is enabled (see enabled_platforms docstring
+    # above). The actual per-platform upload call is independently gated
+    # further down (STEP 8 / STEP 9), so a disabled platform still never
+    # reaches its own provider upload call even if this shared refresh ran.
+    _meta_platform_enabled = _platform_enabled("facebook") or _platform_enabled("instagram")
 
-    if (
+    if not _meta_platform_enabled:
+        log.info("publishing_meta_skipped_platform_disabled", episode_id=episode_id)
+    elif (
         config.META_APP_ID
         and config.META_APP_SECRET
         and config.META_ACCESS_TOKEN
@@ -532,8 +564,11 @@ def run_publishing_agent(
     # token (non-blocking). If a refresh was attempted and the API rejected
     # it, we block TikTok for this run.
     _tiktok_refresh_error: Optional[str] = None
+    _tiktok_platform_disabled = not _platform_enabled("tiktok")
 
-    if config.TIKTOK_ACCESS_TOKEN:
+    if _tiktok_platform_disabled:
+        log.info("publishing_tiktok_skipped_platform_disabled", episode_id=episode_id)
+    elif config.TIKTOK_ACCESS_TOKEN:
         try:
             _new_tt_token = tt_client.refresh_tiktok_token(db_path=_db_for_creds)
             config.TIKTOK_ACCESS_TOKEN = _new_tt_token
@@ -1011,8 +1046,19 @@ def run_publishing_agent(
     # STEP 8: Facebook Video upload
     # ------------------------------------------------------------------
     fb_video_id_result: Optional[str] = None
+    _facebook_platform_enabled = _platform_enabled("facebook")
 
-    if not meta_available:
+    if not _facebook_platform_enabled:
+        entry = make_result_entry(
+            platform="facebook",
+            deliverable_type="main_episode",
+            status="skipped",
+            skipped_reason="platform_disabled",
+            title=get_episode_title(metadata_source),
+            ai_disclosure_included=False,
+        )
+        record.append_result(entry)
+    elif not meta_available:
         entry = make_result_entry(
             platform="facebook",
             deliverable_type="main_episode",
@@ -1090,6 +1136,7 @@ def run_publishing_agent(
     )
 
     ig_auth_failed = False
+    _instagram_platform_enabled = _platform_enabled("instagram")
 
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
@@ -1102,6 +1149,19 @@ def run_publishing_agent(
                 status="skipped",
                 short_id=short_id,
                 skipped_reason="short_not_produced",
+                title=get_short_title(metadata_source, short_id),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            continue
+
+        if not _instagram_platform_enabled:
+            entry = make_result_entry(
+                platform="instagram",
+                deliverable_type="short",
+                status="skipped",
+                short_id=short_id,
+                skipped_reason="platform_disabled",
                 title=get_short_title(metadata_source, short_id),
                 ai_disclosure_included=False,
             )
@@ -1288,7 +1348,9 @@ def run_publishing_agent(
     # ------------------------------------------------------------------
     # STEP 10: TikTok (conditional)
     # ------------------------------------------------------------------
-    if _tiktok_refresh_error:
+    if _tiktok_platform_disabled:
+        tiktok_available = False
+    elif _tiktok_refresh_error:
         tiktok_available = False
         log.warn(
             "publishing_tiktok_skipped_token_refresh_failed",

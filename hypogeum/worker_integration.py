@@ -1,24 +1,30 @@
 """
-hypogeum/worker_integration.py — run_worker.py <-> ChannelOperationsProfile
-<-> BackwardPlan integration helpers.
+hypogeum/worker_integration.py — Channel Operations Profile / Backward Plan
+gating for the real queue-driven worker path (P3, corrected 2026-07-21).
 
-Extracted from run_worker.py into its own module because it would otherwise
-be materially harder to unit-test in isolation (gate logic, plan
-loading/validation, platform filtering, and schedule-risk computation are
-all pure-ish functions over existing models, independent of the daemon
-loop). This module does not implement Scheduler behavior and never claims
-from run_queue — see run_worker.py::run_gated_episode() for the actual
-integration point that calls hypogeum.pipeline.run_pipeline().
+build_gated_pipeline_executor() is the sole integration point: it returns a
+callable matching the pipeline_executor contract hypogeum.queue.process_next()
+now accepts (see that function's docstring). Passing this executor into
+queue.poll()/process_next() means every claimed run_queue item — whether
+autonomously drained by run_worker.py's daemon loop or enqueued for a manual
+run — is gated by ChannelOperationsProfile and BackwardPlan before
+hypogeum.pipeline.run_pipeline() is ever called. There is no second,
+queue-agnostic execution path: claim, topic resolution, complete/fail/
+release, and the pipeline call itself all remain exactly where they already
+are, in hypogeum/queue.py and hypogeum/pipeline.py.
 
 Reuses, never reimplements:
     hypogeum.channel_config.ChannelOperationsProfile / get_channel_operations_profile
     hypogeum.backward_planner.BackwardPlan / build_backward_plan / save_backward_plan / load_backward_plan
-    hypogeum.db.get_connection (read-only queries against stage_executions)
+    hypogeum.queue.release() (for a transient/deferred gate block)
+    hypogeum.db.get_connection (read-only queries)
+    hypogeum.pipeline.run_pipeline() (called exactly once per attempt, unchanged)
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -35,18 +41,13 @@ from hypogeum.channel_config import SUPPORTED_PLATFORMS, get_channel_operations_
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Independent of hypogeum.backward_planner's own module version — this is the
-# WORKER-side gating contract version, recorded on every WorkerRunResult so a
-# future Scheduler/Dashboard can tell which gating contract produced a run.
-WORKER_INTEGRATION_VERSION = "1"
+WORKER_INTEGRATION_VERSION = "2"
 
 _VALID_PLAN_STATUSES = frozenset({"executable", "infeasible", "refused"})
-_TERMINAL_STAGE_STATUSES = ("completed", "failed", "skipped")
 
 
 # ---------------------------------------------------------------------------
-# Invocation mode — smallest explicit mechanism per the task: an enum with
-# exactly two known values. Anything else fails closed (InvocationMode.parse).
+# Invocation mode
 # ---------------------------------------------------------------------------
 
 class InvocationMode(str, Enum):
@@ -69,6 +70,21 @@ class InvocationMode(str, Enum):
 
 # ---------------------------------------------------------------------------
 # Exceptions
+#
+# GatedExecutionDeferred and GatedExecutionRefused are both plain Exception
+# subclasses so hypogeum.queue.process_next()'s existing generic
+# `except Exception` handler catches either one unchanged (fail() + topic
+# release, exactly like any other pipeline failure) — no new queue-level
+# exception handling was added. The distinction between them is enforced by
+# the executor itself: for a *deferred* (transient) block, the executor
+# calls queue.release() on the item BEFORE raising, so the item is already
+# back in 'queued' by the time process_next()'s handler runs its own
+# fail()/release_topic() calls — those become safe no-ops (release_queue_item/
+# fail_queue_item are conditional UPDATEs gated on current status, per
+# hypogeum/queue.py's own docs) and the item is genuinely retryable on the
+# next poll. For a *refused* (terminal) block, no release() call is made —
+# process_next()'s own fail() applies normally, matching existing terminal
+# failure semantics.
 # ---------------------------------------------------------------------------
 
 class OperationsProfileMissingError(RuntimeError):
@@ -80,47 +96,22 @@ class BackwardPlanArtifactError(RuntimeError):
 
 
 class WorkerPersistenceError(RuntimeError):
-    """Worker run metadata could not be durably persisted. Always fail closed on this."""
+    """Worker attempt metadata could not be durably persisted. Always fail closed on this."""
+
+
+class GatedExecutionDeferred(RuntimeError):
+    """A transient gate (currently: max_concurrent_episodes) blocked this attempt.
+    The queue item has already been released back to 'queued' for retry."""
+
+
+class GatedExecutionRefused(RuntimeError):
+    """A terminal gate (profile/plan) blocked this attempt. The queue item
+    will be marked 'failed' by process_next()'s existing exception handling."""
 
 
 # ---------------------------------------------------------------------------
-# Result shape
+# Result shape — one immutable record per attempt (see save_worker_attempt).
 # ---------------------------------------------------------------------------
-
-@dataclass
-class WorkerRunResult:
-    worker_run_id: str
-    channel_id: str
-    episode_id: str
-    invocation_mode: str
-    plan_id: Optional[str]
-    plan_status: Optional[str]
-    target_publish_at: Optional[str]
-    current_stage: Optional[str]
-    completed_stages: list
-    skipped_stages: list
-    failed_stage: Optional[str]
-    blocked_reason: Optional[str]
-    schedule_status: str  # "on_time" | "at_risk" | "late" | "not_applicable" | "unknown"
-    started_at: Optional[str]
-    finished_at: Optional[str]
-    checkpoint_status: str  # "fresh" | "resumed" | "not_applicable"
-    eligible_platforms: list
-    excluded_platforms: dict  # platform -> reason
-    required_lead_time_seconds: Optional[int] = None
-    available_lead_time_seconds: Optional[int] = None
-    earliest_feasible_publish_at: Optional[str] = None
-    stage_schedule_risk: list = field(default_factory=list)  # list[dict]
-    worker_integration_version: str = WORKER_INTEGRATION_VERSION
-    success: bool = False
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "WorkerRunResult":
-        return cls(**d)
-
 
 @dataclass
 class StageScheduleRisk:
@@ -135,6 +126,36 @@ class StageScheduleRisk:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class WorkerAttempt:
+    worker_run_id: str
+    channel_id: str
+    episode_id: str
+    invocation_mode: str
+    plan_id: Optional[str]
+    plan_status: Optional[str]
+    target_publish_at: Optional[str]
+    blocked_reason: Optional[str]
+    schedule_status: str  # "on_time" | "at_risk" | "late" | "not_applicable" | "unknown"
+    started_at: Optional[str]
+    finished_at: Optional[str]
+    eligible_platforms: list
+    excluded_platforms: dict  # platform -> reason
+    required_lead_time_seconds: Optional[int] = None
+    available_lead_time_seconds: Optional[int] = None
+    earliest_feasible_publish_at: Optional[str] = None
+    stage_schedule_risk: list = field(default_factory=list)  # list[dict]
+    worker_integration_version: str = WORKER_INTEGRATION_VERSION
+    success: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "WorkerAttempt":
+        return cls(**d)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +212,63 @@ def resolve_publishing_platforms(profile) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Concurrency gate — v1: count real 'running' pipeline runs for this channel
+# in the runs table (populated by hypogeum.run_registry.register_run(),
+# which stamps channel_id — see hypogeum/pipeline.py's run registration
+# step). Not a general resource scheduler: a single read-count against
+# existing state, sufficient for the current single-worker-process
+# deployment model. A second concurrent worker process has a narrow race
+# window between this count and the next run's registration — acceptable
+# for v1 per the task's explicit "do not build a general resource
+# scheduler" instruction.
+# ---------------------------------------------------------------------------
+
+def count_active_runs_for_channel(channel_id: str, db_path=None) -> int:
+    from hypogeum.db import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM runs WHERE channel_id = ? AND status = 'running'",
+            (channel_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["n"] if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Target lookup — reuses the SAME episode_topics.target_publish_at column
+# hypogeum/pipeline.py's own _get_episode_publish_at() already reads to
+# schedule the real YouTube publishAt call. This is not an invented target:
+# it is whatever hypogeum.dashboard_control.enqueue_topic() (or an approved
+# discovery candidate) already wrote for this episode before the worker ever
+# claimed it. None when no such row exists — never fabricated.
+# ---------------------------------------------------------------------------
+
+def lookup_episode_target_publish_at(episode_id: str, db_path=None) -> Optional[datetime]:
+    from hypogeum.db import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT target_publish_at FROM episode_topics "
+            "WHERE episode_id = ? AND target_publish_at IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT 1",
+            (episode_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None or not row["target_publish_at"]:
+        return None
+    try:
+        return datetime.fromisoformat(row["target_publish_at"])
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Backward plan resolution
 # ---------------------------------------------------------------------------
 
@@ -227,18 +305,22 @@ def resolve_backward_plan(
     """
     Returns (plan, blocked_reason).
 
-    plan is None only when no plan applies at all — manual mode, no existing
-    artifact, no target_publish_at supplied (the pre-existing unscheduled
-    supervised flow). blocked_reason is set whenever production must not
-    begin (refused/infeasible plan, or scheduled mode missing both a plan
-    and a target).
+    plan is None only when no plan applies at all (no existing artifact, no
+    target_publish_at — the pre-existing unscheduled flow this correction
+    still honors for every queue item that has no production deadline
+    recorded on episode_topics). blocked_reason is set whenever production
+    must not begin (refused/infeasible plan, or scheduled mode missing both
+    a plan and a target).
 
     Rules (never violated):
       - An existing plan artifact always wins over building a new one, so
         plan_id is preserved across resumes without ever being rebuilt.
       - Corrupted or channel-mismatched artifacts raise BackwardPlanArtifactError
         rather than being silently accepted or discarded.
-      - Scheduled mode with neither an artifact nor a target fails closed.
+      - Scheduled-invocation items with neither an artifact nor a target
+        fail closed (see build_gated_pipeline_executor's invocation_mode
+        derivation — this only applies to items that actually came through
+        hypogeum.scheduler, not every autonomous queue item).
     """
     try:
         existing = load_backward_plan(episode_id, project_root=project_root)
@@ -264,7 +346,7 @@ def resolve_backward_plan(
                 "scheduled invocation requires an existing backward plan artifact "
                 "or an explicit target_publish_at — neither was supplied"
             )
-        return None, None  # manual, unscheduled supervised flow — no plan enforced
+        return None, None
 
     if plan.plan_status == "refused":
         return plan, f"backward plan refused: {plan.refusal_reason}"
@@ -280,7 +362,6 @@ def resolve_backward_plan(
 
 # ---------------------------------------------------------------------------
 # Stage progress / schedule-risk — read-only against stage_executions.
-# Never writes, never invents progress that isn't in the DB.
 # ---------------------------------------------------------------------------
 
 def get_latest_stage_rows(episode_id: str, db_path=None) -> dict:
@@ -317,11 +398,8 @@ def compute_stage_schedule_risk(
 ) -> list:
     """
     Compares each planned stage's timing against the latest stage_executions
-    row for that stage. Returns list[dict] (StageScheduleRisk.to_dict()).
-    Empty when there is no plan to compare against — never invents a plan.
-
-    Never compresses or mutates plan durations — this is a read-only
-    observation layer over the plan and the DB.
+    row for that stage. Empty when there is no plan to compare against.
+    Never compresses or mutates plan durations — read-only observation.
     """
     if plan is None or not plan.stages:
         return []
@@ -369,103 +447,250 @@ def compute_stage_schedule_risk(
     return results
 
 
-def summarize_stage_progress(
-    plan: Optional[BackwardPlan],
-    episode_id: str,
-    db_path=None,
-    topic_selected: bool = False,
-    evaluated_at: Optional[datetime] = None,
-) -> dict:
-    """
-    Single read of stage_executions, used to populate current_stage,
-    completed_stages, skipped_stages, failed_stage, stage_schedule_risk, and
-    schedule_status truthfully — never asserting progress beyond what the DB
-    actually records.
-
-    topic_selection is synthetic (see hypogeum.backward_planner's module
-    docstring) — it is never a stage_executions row. When a topic has
-    genuinely been selected (topic_selected=True, i.e. topic_input was
-    resolved — from an explicit caller value or the topic backlog — before
-    this call), it is reported as completed using that existing evidence,
-    without inventing any new execution for it.
-    """
-    latest_by_stage = get_latest_stage_rows(episode_id, db_path=db_path)
-
-    completed_stages = ["topic_selection"] if topic_selected else []
-    skipped_stages: list = []
-    failed_stage: Optional[str] = None
-    current_stage: Optional[str] = None
-
-    # Preserve chronological order via started_at across all known stages.
-    ordered = sorted(latest_by_stage.values(), key=lambda r: r["started_at"])
-    for row in ordered:
-        if row["status"] == "completed":
-            completed_stages.append(row["stage_name"])
-        elif row["status"] == "skipped":
-            skipped_stages.append(row["stage_name"])
-        elif row["status"] == "failed":
-            failed_stage = row["stage_name"]
-        elif row["status"] == "running":
-            current_stage = row["stage_name"]
-
-    if current_stage is None and ordered:
-        current_stage = ordered[-1]["stage_name"]
-    elif current_stage is None and topic_selected:
-        current_stage = "topic_selection"
-
-    stage_schedule_risk = compute_stage_schedule_risk(
-        plan, episode_id, db_path=db_path, evaluated_at=evaluated_at,
-    )
-
+def _schedule_status_from_risk(plan: Optional[BackwardPlan], stage_schedule_risk: list) -> str:
     if plan is None:
-        schedule_status = "not_applicable"
-    else:
-        statuses = [s["deadline_status"] for s in stage_schedule_risk]
-        if any(s == "late" for s in statuses):
-            schedule_status = "late"
-        elif any(s == "at_risk" for s in statuses):
-            schedule_status = "at_risk"
-        elif statuses:
-            schedule_status = "on_time"
-        else:
-            schedule_status = "not_applicable"
-
-    return {
-        "completed_stages": completed_stages,
-        "skipped_stages": skipped_stages,
-        "failed_stage": failed_stage,
-        "current_stage": current_stage,
-        "stage_schedule_risk": stage_schedule_risk,
-        "schedule_status": schedule_status,
-    }
+        return "not_applicable"
+    statuses = [s["deadline_status"] for s in stage_schedule_risk]
+    if any(s == "late" for s in statuses):
+        return "late"
+    if any(s == "at_risk" for s in statuses):
+        return "at_risk"
+    if statuses:
+        return "on_time"
+    return "not_applicable"
 
 
 # ---------------------------------------------------------------------------
-# Worker run result persistence — mirrors backward_planner's own JSON-artifact
-# convention (no new DB table). Fails closed: never swallows a write error.
+# Worker attempt persistence — one immutable file per attempt plus a "latest"
+# pointer, so resuming an episode never overwrites prior attempt history.
+# Mirrors backward_planner's own JSON-artifact convention (no new DB table).
+# Fails closed: never swallows a write error.
 # ---------------------------------------------------------------------------
 
-def _worker_run_artifact_path(episode_id: str, project_root: Optional[Path]) -> Path:
+def _episode_dir(episode_id: str, project_root: Optional[Path]) -> Path:
     root = project_root if project_root is not None else _PROJECT_ROOT
-    return root / ".hypogeum-assets" / "episodes" / episode_id / f"worker_run_{episode_id}.json"
+    return root / ".hypogeum-assets" / "episodes" / episode_id
 
 
-def save_worker_run_result(result: WorkerRunResult, project_root: Optional[Path] = None) -> Path:
-    path = _worker_run_artifact_path(result.episode_id, project_root)
+def _worker_attempt_path(episode_id: str, worker_run_id: str, project_root: Optional[Path]) -> Path:
+    return _episode_dir(episode_id, project_root) / "worker_attempts" / f"{worker_run_id}.json"
+
+
+def _worker_run_latest_path(episode_id: str, project_root: Optional[Path]) -> Path:
+    return _episode_dir(episode_id, project_root) / "worker_run_latest.json"
+
+
+def save_worker_attempt(attempt: WorkerAttempt, project_root: Optional[Path] = None) -> Path:
+    """
+    Writes {episode_dir}/worker_attempts/{worker_run_id}.json (one immutable
+    file per attempt — never overwritten) and updates
+    {episode_dir}/worker_run_latest.json to point at it. Raises
+    WorkerPersistenceError on any write failure — never swallowed.
+    """
+    attempt_path = _worker_attempt_path(attempt.episode_id, attempt.worker_run_id, project_root)
+    latest_path = _worker_run_latest_path(attempt.episode_id, project_root)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        attempt_path.parent.mkdir(parents=True, exist_ok=True)
+        attempt_path.write_text(json.dumps(attempt.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        latest_path.write_text(json.dumps(attempt.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:
         raise WorkerPersistenceError(
-            f"failed to persist worker run result for channel_id={result.channel_id!r} "
-            f"episode_id={result.episode_id!r}: {type(exc).__name__}: {exc}"
+            f"failed to persist worker attempt for channel_id={attempt.channel_id!r} "
+            f"episode_id={attempt.episode_id!r} worker_run_id={attempt.worker_run_id!r}: "
+            f"{type(exc).__name__}: {exc}"
         ) from exc
-    return path
+    return attempt_path
 
 
-def load_worker_run_result(episode_id: str, project_root: Optional[Path] = None) -> Optional[WorkerRunResult]:
-    path = _worker_run_artifact_path(episode_id, project_root)
+def load_latest_worker_attempt(episode_id: str, project_root: Optional[Path] = None) -> Optional[WorkerAttempt]:
+    path = _worker_run_latest_path(episode_id, project_root)
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    return WorkerRunResult.from_dict(data)
+    return WorkerAttempt.from_dict(data)
+
+
+def list_worker_attempts(episode_id: str, project_root: Optional[Path] = None) -> list:
+    """Returns all persisted attempts for this episode, oldest first (by started_at)."""
+    attempts_dir = _episode_dir(episode_id, project_root) / "worker_attempts"
+    if not attempts_dir.exists():
+        return []
+    records = [
+        WorkerAttempt.from_dict(json.loads(p.read_text(encoding="utf-8")))
+        for p in sorted(attempts_dir.glob("*.json"))
+    ]
+    records.sort(key=lambda a: a.started_at or "")
+    return records
+
+
+# ---------------------------------------------------------------------------
+# The canonical gated executor — the sole integration point.
+# ---------------------------------------------------------------------------
+
+def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = None):
+    """
+    Returns a callable matching hypogeum.queue.process_next()'s
+    pipeline_executor contract:
+        executor(*, topic_input, episode_id, config, channel_id,
+                 cancel_check, queue_id, worker_id)
+
+    Pass the result as queue.poll(..., pipeline_executor=...) or
+    queue.process_next(..., pipeline_executor=...) to gate every claimed
+    queue item with ChannelOperationsProfile + BackwardPlan before
+    hypogeum.pipeline.run_pipeline() is invoked. db_path/project_root are
+    captured once here (closure) — process_next() itself never needs to
+    know about either.
+
+    Gate order for a channel-scoped item (channel_id is not None — matches
+    process_next()'s own CALOG check, which is likewise skipped for
+    factory-level/unscoped items):
+      1. Load ChannelOperationsProfile — fail closed if missing/corrupt.
+      2. invocation_mode is derived PER ITEM from whether it came through
+         hypogeum.scheduler (run_queue.scheduled_run_id is set => "scheduled")
+         or not (manually enqueued / topic-backlog-driven => "manual"). This
+         is not a caller-supplied flag — it is read from the claimed item
+         itself via queue.get_item(queue_id), so unattended_operation_enabled
+         is only required for genuinely scheduler-originated work, and every
+         other existing queue path (today's only real traffic) continues to
+         run under the manual/supervised gate contract.
+      3. operator_enabled / production_enabled (always) and
+         unattended_operation_enabled (scheduled only).
+      4. max_concurrent_episodes — count_active_runs_for_channel(); over the
+         limit raises GatedExecutionDeferred after releasing the queue item
+         for retry (transient block, never a hard failure).
+      5. BackwardPlan: load existing artifact for episode_id, or build one
+         from episode_topics.target_publish_at if present (never invented
+         from cadence) — resolve_backward_plan() never rebuilds an existing
+         artifact, so plan_id survives resume. Refused/infeasible/corrupted
+         plans raise GatedExecutionRefused (terminal).
+      6. Publishing platform filter — resolve_publishing_platforms(), forced
+         to empty when publishing_enabled is False — passed to
+         hypogeum.pipeline.run_pipeline()'s publishing_platform_filter
+         parameter, which reaches hypogeum.agents.publishing_agent.run_publishing_agent()'s
+         enabled_platforms parameter. Disabled/blocked platforms never reach
+         a provider call (see that function's docstring).
+
+    Every gate outcome (blocked or not) is persisted via save_worker_attempt()
+    — one immutable file per attempt plus a "latest" pointer (see
+    list_worker_attempts() / load_latest_worker_attempt()) — before either
+    raising or calling run_pipeline(), so state is truthful even if this
+    process is interrupted mid-run. save_worker_attempt() itself fails closed
+    (WorkerPersistenceError propagates, never swallowed).
+    """
+    def _executor(
+        *, topic_input, episode_id, config, channel_id,
+        cancel_check=None, queue_id=None, worker_id=None,
+    ) -> None:
+        from hypogeum.pipeline import run_pipeline
+
+        if channel_id is None:
+            # No channel scope — nothing to gate (matches process_next()'s
+            # own CALOG check, which is also conditional on channel_id).
+            run_pipeline(
+                topic_input=topic_input, episode_id=episode_id, config=config,
+                channel_id=channel_id, db_path=db_path, cancel_check=cancel_check,
+            )
+            return
+
+        from hypogeum.queue import get_item, release
+
+        row = get_item(queue_id, db_path=db_path) if queue_id else None
+        scheduled_run_id = row.get("scheduled_run_id") if row else None
+        mode = InvocationMode.SCHEDULED if scheduled_run_id else InvocationMode.MANUAL
+
+        attempt = WorkerAttempt(
+            worker_run_id=str(uuid.uuid4()),
+            channel_id=channel_id,
+            episode_id=episode_id,
+            invocation_mode=mode.value,
+            plan_id=None,
+            plan_status=None,
+            target_publish_at=None,
+            blocked_reason=None,
+            schedule_status="unknown",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=None,
+            eligible_platforms=[],
+            excluded_platforms={},
+        )
+
+        def _refuse(reason: str) -> None:
+            attempt.blocked_reason = reason
+            attempt.finished_at = datetime.now(timezone.utc).isoformat()
+            save_worker_attempt(attempt, project_root=project_root)
+            raise GatedExecutionRefused(reason)
+
+        def _defer(reason: str) -> None:
+            attempt.blocked_reason = reason
+            attempt.finished_at = datetime.now(timezone.utc).isoformat()
+            save_worker_attempt(attempt, project_root=project_root)
+            if queue_id and worker_id:
+                release(queue_id, worker_id, db_path=db_path)
+            raise GatedExecutionDeferred(reason)
+
+        try:
+            profile = load_operations_profile_or_fail(channel_id, db_path=db_path)
+        except OperationsProfileMissingError as exc:
+            _refuse(str(exc))
+            return  # unreachable — _refuse always raises
+
+        gate_reason = check_invocation_gates(profile, mode)
+        if gate_reason is not None:
+            _refuse(gate_reason)
+            return
+
+        active = count_active_runs_for_channel(channel_id, db_path=db_path)
+        if active >= max(1, profile.max_concurrent_episodes):
+            _defer(
+                f"max_concurrent_episodes reached ({active}/{profile.max_concurrent_episodes}) "
+                f"for channel_id={channel_id!r}"
+            )
+            return
+
+        target_publish_at = lookup_episode_target_publish_at(episode_id, db_path=db_path)
+        try:
+            plan, plan_blocked_reason = resolve_backward_plan(
+                channel_id=channel_id, episode_id=episode_id, invocation_mode=mode,
+                profile=profile, target_publish_at=target_publish_at,
+                generated_at=datetime.now(timezone.utc), project_root=project_root,
+            )
+        except (BackwardPlanArtifactError, ValueError) as exc:
+            _refuse(str(exc))
+            return
+
+        if plan is not None:
+            attempt.plan_id = plan.plan_id
+            attempt.plan_status = plan.plan_status
+            attempt.target_publish_at = plan.target_publish_at
+            attempt.required_lead_time_seconds = plan.required_lead_time_seconds
+            attempt.available_lead_time_seconds = plan.available_lead_time_seconds
+            attempt.earliest_feasible_publish_at = plan.earliest_feasible_publish_at
+
+        if plan_blocked_reason is not None:
+            _refuse(plan_blocked_reason)
+            return
+
+        eligible_platforms, excluded_platforms = resolve_publishing_platforms(profile)
+        if not profile.publishing_enabled:
+            excluded_platforms = {p: "publishing_enabled is False for this channel" for p in eligible_platforms}
+            eligible_platforms = []
+        attempt.eligible_platforms = eligible_platforms
+        attempt.excluded_platforms = excluded_platforms
+
+        save_worker_attempt(attempt, project_root=project_root)
+
+        try:
+            run_pipeline(
+                topic_input=topic_input, episode_id=episode_id, config=config,
+                channel_id=channel_id, db_path=db_path, cancel_check=cancel_check,
+                publishing_platform_filter=frozenset(eligible_platforms),
+            )
+            attempt.success = True
+        finally:
+            attempt.finished_at = datetime.now(timezone.utc).isoformat()
+            progress_risk = compute_stage_schedule_risk(plan, episode_id, db_path=db_path)
+            attempt.stage_schedule_risk = progress_risk
+            attempt.schedule_status = _schedule_status_from_risk(plan, progress_risk)
+            save_worker_attempt(attempt, project_root=project_root)
+
+    return _executor

@@ -7,7 +7,11 @@ Coverage:
     TestPlatformAwareness     — blocked platforms excluded, enabled-only duration
     TestRefusals              — publishing/operator/production disabled behavior
     TestInputValidation       — invalid timezone/timestamp, missing/non-positive duration
+    TestWorkloadValidation    — unknown/invalid workload overrides fail closed
     TestFeasibility           — infeasible target, earliest feasible publish time
+    TestTimingCalibration     — active/wait/retry/buffer transparency, workload-driven
+                                 visual generation, split publishing allowances, and the
+                                 conservative multi-day default lead time (2026-07-21)
     TestConcurrency           — max_concurrent_episodes represented
     TestDeterminism           — identical input/output, no randomness
     TestPersistence           — JSON serialization round-trip
@@ -253,6 +257,69 @@ class TestInputValidation:
 
 
 # ===========================================================================
+# TestWorkloadValidation — unknown/invalid workload overrides fail closed
+# ===========================================================================
+
+class TestWorkloadValidation:
+    def test_unknown_workload_key_raises(self):
+        with pytest.raises(ValueError, match="unknown workload override key"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"bogus_key": 5},
+            )
+
+    def test_zero_scene_count_raises(self):
+        with pytest.raises(ValueError, match="expected_scene_count"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"expected_scene_count": 0},
+            )
+
+    def test_negative_scene_count_raises(self):
+        with pytest.raises(ValueError, match="expected_scene_count"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"expected_scene_count": -5},
+            )
+
+    def test_scene_count_above_sanity_bound_raises(self):
+        with pytest.raises(ValueError, match="expected_scene_count"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"expected_scene_count": 100_000},
+            )
+
+    def test_non_positive_generation_seconds_per_scene_raises(self):
+        with pytest.raises(ValueError, match="generation_seconds_per_scene"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"generation_seconds_per_scene": 0},
+            )
+
+    def test_generation_seconds_per_scene_above_sanity_bound_raises(self):
+        with pytest.raises(ValueError, match="generation_seconds_per_scene"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"generation_seconds_per_scene": 999_999},
+            )
+
+    def test_non_int_workload_value_raises(self):
+        with pytest.raises(ValueError, match="expected_scene_count"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"expected_scene_count": "fifty"},
+            )
+
+    def test_bool_workload_value_raises(self):
+        """bool is technically an int subclass in Python — must still be rejected."""
+        with pytest.raises(ValueError, match="expected_scene_count"):
+            build_backward_plan(
+                "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+                workload={"expected_scene_count": True},
+            )
+
+
+# ===========================================================================
 # TestFeasibility
 # ===========================================================================
 
@@ -289,6 +356,105 @@ class TestFeasibility:
         plan = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
         assert plan.plan_status == "executable"
         assert plan.available_lead_time_seconds >= plan.required_lead_time_seconds
+
+
+# ===========================================================================
+# TestTimingCalibration — 2026-07-21 calibration: active/wait/retry/buffer
+# transparency, workload-driven visual generation, split publishing
+# allowances, and the conservative multi-day default lead time.
+# ===========================================================================
+
+class TestTimingCalibration:
+    def test_total_planned_seconds_includes_all_four_components(self):
+        plan = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
+        for s in plan.stages:
+            assert s.estimated_duration_seconds == (
+                s.active_execution_seconds + s.expected_external_wait_seconds
+            )
+            assert s.total_planned_seconds == (
+                s.estimated_duration_seconds + s.retry_allowance_seconds + s.safety_buffer_seconds
+            )
+
+    def test_external_wait_contributes_to_required_lead_time(self):
+        plan_with_wait = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
+        research_with_wait = next(s for s in plan_with_wait.stages if s.stage_name == "research_director")
+        assert research_with_wait.expected_external_wait_seconds > 0
+
+        # Collapse research_director to just its active_execution_seconds (i.e. simulate
+        # zero external wait) via a flat override and confirm lead time shrinks accordingly.
+        plan_no_wait = build_backward_plan(
+            "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+            stage_durations={"research_director": research_with_wait.active_execution_seconds},
+        )
+        assert plan_no_wait.required_lead_time_seconds < plan_with_wait.required_lead_time_seconds
+
+    def test_scene_count_deterministically_changes_visual_generation_duration(self):
+        plan_default = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
+        plan_more_scenes = build_backward_plan(
+            "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+            workload={"expected_scene_count": 100},
+        )
+        vpd_default = next(s for s in plan_default.stages if s.stage_name == "visual_package_director")
+        vpd_more = next(s for s in plan_more_scenes.stages if s.stage_name == "visual_package_director")
+
+        assert vpd_more.expected_external_wait_seconds == 100 * 240
+        assert vpd_more.expected_external_wait_seconds > vpd_default.expected_external_wait_seconds
+        assert plan_more_scenes.required_lead_time_seconds > plan_default.required_lead_time_seconds
+
+    def test_generation_seconds_per_scene_override_changes_duration_too(self):
+        plan_default = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
+        plan_slower = build_backward_plan(
+            "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED,
+            workload={"generation_seconds_per_scene": 480},
+        )
+        vpd_default = next(s for s in plan_default.stages if s.stage_name == "visual_package_director")
+        vpd_slower = next(s for s in plan_slower.stages if s.stage_name == "visual_package_director")
+        assert vpd_slower.expected_external_wait_seconds == 2 * vpd_default.expected_external_wait_seconds
+
+    def test_publishing_splits_upload_and_verification_allowances(self):
+        from hypogeum.backward_planner import (
+            PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS,
+            PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS,
+            PUBLISHING_PREP_DURATION_SECONDS,
+        )
+        plan = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
+        pub_stage = next(s for s in plan.stages if s.stage_name == "publishing_agent")
+        assert pub_stage.active_execution_seconds == (
+            PUBLISHING_PREP_DURATION_SECONDS + PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS["youtube"]
+        )
+        assert pub_stage.expected_external_wait_seconds == PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS["youtube"]
+
+    def test_blocked_and_disabled_platforms_add_exactly_zero(self):
+        from hypogeum.backward_planner import (
+            PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS,
+            PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS,
+            PUBLISHING_PREP_DURATION_SECONDS,
+        )
+        plan = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
+        pub_stage = next(s for s in plan.stages if s.stage_name == "publishing_agent")
+        # Only youtube is enabled+unblocked in _make_profile(); facebook/tiktok/instagram
+        # are blocked, so they must contribute nothing to either allowance.
+        assert pub_stage.active_execution_seconds == (
+            PUBLISHING_PREP_DURATION_SECONDS + PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS["youtube"]
+        )
+        assert pub_stage.expected_external_wait_seconds == PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS["youtube"]
+
+    def test_default_full_episode_lead_time_is_conservative_and_measured_in_days(self):
+        plan = build_backward_plan("hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED)
+        assert plan.plan_status == "executable"
+        assert plan.required_lead_time_seconds >= 86400  # at least one full day
+        assert plan.required_lead_time_seconds < 7 * 86400  # sanity ceiling — not absurdly padded
+
+    def test_workload_overrides_are_deterministic(self):
+        workload = {"expected_scene_count": 40, "generation_seconds_per_scene": 200}
+        plan1 = build_backward_plan(
+            "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED, workload=workload,
+        )
+        plan2 = build_backward_plan(
+            "hypogeum", _TARGET, _make_profile(), generated_at=_GENERATED, workload=dict(workload),
+        )
+        assert plan1.to_dict() == plan2.to_dict()
+        assert plan1.plan_id == plan2.plan_id
 
 
 # ===========================================================================

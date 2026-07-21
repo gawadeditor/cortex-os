@@ -27,10 +27,27 @@ sequential _record_stage_start() checkpoint names exactly, except
   assembly_agent -> asset_archive -> qa_agent -> compliance_agent ->
   publishing_agent
 
+Timing model (2026-07-21 calibration):
+  Every stage's duration is decomposed into four inspectable components —
+  active_execution_seconds, expected_external_wait_seconds,
+  retry_allowance_seconds, safety_buffer_seconds — summed into
+  total_planned_seconds (the actual span reserved in the timeline).
+  estimated_duration_seconds = active_execution_seconds +
+  expected_external_wait_seconds, preserved as a field for compatibility
+  with the original v1 shape.
+
+  visual_package_director and publishing_agent are workload-driven rather
+  than flat constants — see DEFAULT_EXPECTED_SCENE_COUNT and
+  PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS / PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS
+  below for exactly which numbers are grounded in repository evidence
+  (real benchmarks, real code timeout/poll constants) versus clearly-marked
+  conservative provisional assumptions (no real telemetry exists yet).
+
 Public API:
     build_backward_plan(channel_id, target_publish_at, operations_profile,
                         generated_at, stage_durations=None,
-                        safety_buffer_seconds=3600) -> BackwardPlan
+                        safety_buffer_seconds=_DEFAULT_SAFETY_BUFFER_SECONDS (86400),
+                        workload=None) -> BackwardPlan
     save_backward_plan(plan, episode_id, project_root=None) -> Path
     load_backward_plan(episode_id, project_root=None) -> Optional[BackwardPlan]
 """
@@ -82,50 +99,165 @@ PIPELINE_STAGE_ORDER: tuple[str, ...] = (
     "publishing_agent",
 )
 
+_VISUAL_PACKAGE_STAGE = "visual_package_director"
 _PUBLISHING_STAGE = "publishing_agent"
 
 # ---------------------------------------------------------------------------
-# Default duration estimates — seconds. Smallest transparent v1 mechanism:
-# named constants, one local structure, no benchmarking/ML, no secrets.
-# These are deliberately rough, documented defaults an operator can override
-# per call via the stage_durations parameter as real data becomes available.
-# publishing_agent has no fixed default here — its duration is computed from
-# PUBLISHING_PREP_DURATION_SECONDS + only the channel's currently enabled
-# platforms (see _resolve_publishing_duration), unless explicitly overridden.
+# Per-stage active/wait defaults — seconds. Each entry is
+# (active_execution_seconds, expected_external_wait_seconds).
+#
+# active_execution_seconds  — work done on our side: prompt assembly, local
+#                              parsing/validation, ffmpeg CPU time, etc.
+# expected_external_wait_seconds — time genuinely spent waiting on a
+#                              provider (LLM call, MUAPI generation/poll,
+#                              ElevenLabs synthesis, platform processing).
+#
+# visual_package_director and publishing_agent are NOT looked up here —
+# they are computed from workload (see _resolve_visual_package_duration /
+# _resolve_publishing_duration) because a flat constant cannot represent
+# "how many scenes" or "how many platforms," which is exactly what made the
+# original v1 defaults optimistic regardless of real episode size.
+#
+# Evidence basis per stage (grounded vs provisional):
+#   startup_checks               — provisional (local checks + a reachability ping)
+#   executive_producer            — provisional (single LLM scoring call)
+#   research_director             — provisional (multiple sequential Perplexity queries)
+#   narrative_architect            — provisional (single LLM structuring call)
+#   script_engine                 — provisional (single LLM script-generation call)
+#   finance_agent_authorization    — provisional (local budget check)
+#   thumbnail_strategy             — provisional (single LLM concept call)
+#   thumbnail_director              — provisional (multiple image-generation calls; not
+#                                     scene-driven in v1 — thumbnails are a small,
+#                                     roughly-fixed count of candidates, not one per scene)
+#   audio_agent                   — grounded in ELEVENLABS_TIMEOUT_SECONDS=240
+#                                    (hypogeum/config.py) as the per-call ceiling,
+#                                    with a provisional narration+music multi-segment
+#                                    assumption on top
+#   assembly_agent                 — grounded in ASSEMBLY_FFMPEG_TIMEOUT=600
+#                                    (hypogeum/agents/assembly_agent.py:238), the
+#                                    real hard timeout ceiling the code enforces
+#   asset_archive, qa_agent, compliance_agent — provisional (local/LLM checks)
 # ---------------------------------------------------------------------------
 
-DEFAULT_STAGE_DURATIONS_SECONDS: dict[str, int] = {
-    "topic_selection": 300,               # 5 min  — candidate review/selection
-    "startup_checks": 30,                 # 30 sec — provider reachability check
-    "executive_producer": 180,            # 3 min  — topic scoring LLM call
-    "research_director": 900,             # 15 min — Perplexity research queries
-    "narrative_architect": 300,           # 5 min  — story structure LLM call
-    "script_engine": 600,                 # 10 min — narration + visual direction LLM call
-    "finance_agent_authorization": 30,    # 30 sec — budget gate check
-    "thumbnail_strategy": 180,            # 3 min  — CTR concept LLM call
-    "visual_package_director": 5400,      # 90 min — scene planning + MUAPI video generation
-    "thumbnail_director": 900,            # 15 min — thumbnail image generation + compositing
-    "audio_agent": 600,                   # 10 min — ElevenLabs narration + music
-    "assembly_agent": 1200,               # 20 min — FFmpeg render
-    "asset_archive": 60,                  # 1 min  — asset cataloging
-    "qa_agent": 300,                      # 5 min  — pre-publish QA checks
-    "compliance_agent": 180,              # 3 min  — rights/compliance checks
+DEFAULT_STAGE_ACTIVE_WAIT_SECONDS: dict[str, tuple[int, int]] = {
+    "topic_selection": (300, 0),                    # 5 min  active — candidate review/selection
+    "startup_checks": (10, 20),                      # provider reachability ping
+    "executive_producer": (30, 150),                 # LLM scoring call
+    "research_director": (60, 840),                  # multiple sequential Perplexity queries
+    "narrative_architect": (30, 270),                # LLM structuring call
+    "script_engine": (60, 540),                      # LLM script-generation call
+    "finance_agent_authorization": (10, 20),         # local budget check
+    "thumbnail_strategy": (30, 150),                 # LLM concept call
+    "thumbnail_director": (180, 720),                 # ~6 image-generation calls (3 main candidates + 3 short thumbnails)
+    "audio_agent": (120, 480),                       # ElevenLabs narration+music; per-call ceiling 240s (config)
+    "assembly_agent": (600, 60),                      # active=ASSEMBLY_FFMPEG_TIMEOUT (real ceiling); wait=I/O overhead
+    "asset_archive": (60, 0),                         # local cataloging
+    "qa_agent": (60, 240),                            # LLM-based QA checks
+    "compliance_agent": (30, 150),                    # LLM-based compliance checks
 }
 
-# publishing_agent duration = prep (once) + sum of per-enabled-platform time.
-PUBLISHING_PREP_DURATION_SECONDS = 300  # 5 min — metadata/description building, common to all platforms
+# ---------------------------------------------------------------------------
+# Visual generation workload model — the primary v1 calibration target.
+#
+# DEFAULT_EXPECTED_SCENE_COUNT is grounded in real completed episode
+# manifests (final_render_package_ep_*.json, package_integrity.scenes_expected):
+# ep_1f827369=58, ep_20260629063505=50, ep_74237788=55 (main+shorts combined,
+# the workload visual_package_director actually generates in one stage).
+# Average of these three real episodes ≈ 54.3, rounded to 55.
+#
+# GENERATION_SECONDS_PER_SCENE=240 is GROUNDED in the real production
+# polling loop, not a diagnostic-script estimate: hypogeum/muapi.py's
+# _poll_until_complete() — the function submit_scene() actually calls —
+# polls for config.MUAPI_MAX_POLL_ATTEMPTS (default 24) x
+# config.MUAPI_POLL_INTERVAL_SECONDS (default 5s) = 120s before treating the
+# job as failed, and its own docstring states "Timeout is treated as a job
+# failure (triggers Attempt 2 in the caller)" — i.e. the code itself
+# automatically retries once at the per-scene level, below and before the
+# stage-level retry_policy is ever invoked. A single scene can therefore
+# legitimately take up to ~240s (2 x 120s) in completely normal operation.
+# Separate isolated single-clip benchmarks corroborate the 120s figure as
+# plausible for a real generation: Seedance t2v ~78s, i2v ~72s
+# (scripts/seedance_diagnostic_result.json); Runway t2v ~90s, i2v ~54s
+# (scripts/runway_diagnostic_result.json); Veo3 Premium 128.5s
+# (hypogeum/config.py comment). Override via
+# workload={"generation_seconds_per_scene": ...} as real multi-scene
+# telemetry becomes available.
+# ---------------------------------------------------------------------------
 
+DEFAULT_EXPECTED_SCENE_COUNT = 55
+DEFAULT_GENERATION_SECONDS_PER_SCENE = 240
+_VPD_PLANNING_ACTIVE_SECONDS = 900  # fixed batched Claude scene-planning overhead (provisional)
+
+_VALID_WORKLOAD_KEYS = frozenset({"expected_scene_count", "generation_seconds_per_scene"})
+_MAX_SCENE_COUNT = 500                    # sanity bound against configuration mistakes
+_MAX_GENERATION_SECONDS_PER_SCENE = 3600  # sanity bound (1 hour/scene)
+
+# ---------------------------------------------------------------------------
+# Publishing workload model — per-platform upload / processing-verification
+# allowance, only for platforms that are both enabled and not blocked.
+# Blocked or disabled platforms contribute exactly zero.
+#
+# Evidence basis:
+#   tiktok verification_allowance=180  — GROUNDED: hypogeum/publishing/tiktok.py
+#       _TIKTOK_POLL_MAX_ATTEMPTS=18 x _TIKTOK_POLL_INTERVAL=10s = 180s real
+#       max poll window this code will actually wait.
+#   instagram verification_allowance=360 — GROUNDED: hypogeum/publishing/meta.py
+#       _IG_POLL_MAX_ATTEMPTS=24 x _IG_POLL_INTERVAL=15s = 360s real max poll
+#       window. The prior v1 flat total (300s) was BELOW this real ceiling —
+#       a genuine under-estimate this calibration corrects.
+#   youtube/facebook upload_allowance and youtube processing_verification
+#       (captions/thumbnail/end-screen) — PROVISIONAL: no upload-bandwidth or
+#       server-side-processing telemetry exists in the repository.
+# ---------------------------------------------------------------------------
+
+PUBLISHING_PREP_DURATION_SECONDS = 300  # 5 min — metadata/description building, common to all platforms, active/local
+
+PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS: dict[str, int] = {
+    "youtube": 300,     # provisional — main + 3 shorts, chunked resumable upload
+    "facebook": 180,    # provisional
+    "tiktok": 120,      # provisional — chunked upload of one short
+    "instagram": 120,   # provisional — staging + container creation
+    "email": 60,        # provisional
+}
+
+PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS: dict[str, int] = {
+    "youtube": 300,     # provisional — captions/thumbnail/end-screen processing (no explicit poll in code)
+    "facebook": 120,    # provisional
+    "tiktok": 180,      # GROUNDED — real poll ceiling, see module docstring above
+    "instagram": 360,   # GROUNDED — real poll ceiling, see module docstring above
+    "email": 0,
+}
+
+# Retained for backward-compatible external references; publishing_agent's
+# own duration is always computed from the two allowance dicts above.
 PER_PLATFORM_UPLOAD_DURATION_SECONDS: dict[str, int] = {
-    "youtube": 600,     # 10 min — main + shorts upload, captions, thumbnail
-    "facebook": 300,    # 5 min
-    "tiktok": 300,      # 5 min
-    "instagram": 300,   # 5 min
-    "email": 60,        # 1 min
+    p: PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS[p] + PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS[p]
+    for p in PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS
 }
+
+# Backward-compatible view: the flat total per stage at DEFAULT workload
+# (default scene count / generation time for visual_package_director;
+# publishing_agent is excluded — its default depends entirely on which
+# platforms a given channel has enabled, so there is no single default total
+# to show here).
+DEFAULT_STAGE_DURATIONS_SECONDS: dict[str, int] = {
+    name: active + wait for name, (active, wait) in DEFAULT_STAGE_ACTIVE_WAIT_SECONDS.items()
+}
+DEFAULT_STAGE_DURATIONS_SECONDS[_VISUAL_PACKAGE_STAGE] = (
+    _VPD_PLANNING_ACTIVE_SECONDS + DEFAULT_EXPECTED_SCENE_COUNT * DEFAULT_GENERATION_SECONDS_PER_SCENE
+)
 
 # Flat per-stage padding: a simple, deterministic, documented fraction —
 # not a statistical/ML estimate.
 _PER_STAGE_SAFETY_BUFFER_FRACTION = 0.10
+
+# Overall go-live buffer default — a deliberate v1 operational policy choice,
+# NOT derived from workload. 24h ensures a normal complete episode is not
+# scheduled to begin on the same calendar day as its publication, leaving a
+# full day of margin for human monitoring and retry headroom ahead of
+# unattended go-live. See build_backward_plan()'s safety_buffer_seconds
+# docstring.
+_DEFAULT_SAFETY_BUFFER_SECONDS = 86400
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -140,9 +272,12 @@ class StagePlan:
     sequence_index: int
     planned_start_at: str
     planned_finish_at: str
-    estimated_duration_seconds: int
+    active_execution_seconds: int
+    expected_external_wait_seconds: int
+    estimated_duration_seconds: int   # = active_execution_seconds + expected_external_wait_seconds
     safety_buffer_seconds: int
     retry_allowance_seconds: int
+    total_planned_seconds: int        # = estimated_duration_seconds + retry_allowance_seconds + safety_buffer_seconds
     hard_deadline_at: str
     depends_on: Optional[str]
     critical: bool
@@ -217,21 +352,60 @@ def _compute_plan_id(channel_id: str, target_publish_at: datetime, generated_at:
     return f"bp_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
 
 
-def _resolve_publishing_duration(operations_profile, overrides: Optional[dict]) -> int:
-    if overrides and _PUBLISHING_STAGE in overrides:
-        return overrides[_PUBLISHING_STAGE]
+def _validate_workload(workload: Optional[dict]) -> dict:
+    """Fails closed: unknown keys, non-positive values, or values beyond the
+    sanity bounds all raise ValueError rather than being silently accepted
+    or ignored."""
+    if not workload:
+        return {}
 
+    unknown = set(workload) - _VALID_WORKLOAD_KEYS
+    if unknown:
+        raise ValueError(f"unknown workload override key(s): {sorted(unknown)}")
+
+    if "expected_scene_count" in workload:
+        v = workload["expected_scene_count"]
+        if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+            raise ValueError(f"workload.expected_scene_count must be a positive int, got {v!r}")
+        if v > _MAX_SCENE_COUNT:
+            raise ValueError(
+                f"workload.expected_scene_count {v} exceeds the sanity bound of {_MAX_SCENE_COUNT}"
+            )
+
+    if "generation_seconds_per_scene" in workload:
+        v = workload["generation_seconds_per_scene"]
+        if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+            raise ValueError(f"workload.generation_seconds_per_scene must be a positive int, got {v!r}")
+        if v > _MAX_GENERATION_SECONDS_PER_SCENE:
+            raise ValueError(
+                f"workload.generation_seconds_per_scene {v} exceeds the sanity bound of "
+                f"{_MAX_GENERATION_SECONDS_PER_SCENE}"
+            )
+
+    return dict(workload)
+
+
+def _resolve_visual_package_active_wait(workload: dict) -> tuple[int, int]:
+    scene_count = workload.get("expected_scene_count", DEFAULT_EXPECTED_SCENE_COUNT)
+    per_scene = workload.get("generation_seconds_per_scene", DEFAULT_GENERATION_SECONDS_PER_SCENE)
+    # Sequential generation — no parallelism assumed (none exists in the
+    # active runtime today: no threading/asyncio in hypogeum/muapi.py or
+    # hypogeum/agents/visual_package_director.py).
+    return _VPD_PLANNING_ACTIVE_SECONDS, scene_count * per_scene
+
+
+def _resolve_publishing_active_wait(operations_profile) -> tuple[int, int]:
     enabled_platforms = operations_profile.enabled_platforms or {}
     blocked = operations_profile.blocked_platform_reasons or {}
     # Blocked/disabled platforms contribute zero duration — only genuinely
     # enabled, unblocked platforms add upload/verification time.
-    active = [
+    active_platforms = [
         p for p, is_enabled in enabled_platforms.items()
         if is_enabled and p not in blocked and p in SUPPORTED_PLATFORMS
     ]
-    return PUBLISHING_PREP_DURATION_SECONDS + sum(
-        PER_PLATFORM_UPLOAD_DURATION_SECONDS.get(p, 0) for p in active
-    )
+    upload_total = sum(PER_PLATFORM_UPLOAD_ALLOWANCE_SECONDS.get(p, 0) for p in active_platforms)
+    verification_total = sum(PER_PLATFORM_VERIFICATION_ALLOWANCE_SECONDS.get(p, 0) for p in active_platforms)
+    return PUBLISHING_PREP_DURATION_SECONDS + upload_total, verification_total
 
 
 def _refused_plan(
@@ -266,7 +440,8 @@ def build_backward_plan(
     operations_profile,
     generated_at: datetime,
     stage_durations: Optional[dict] = None,
-    safety_buffer_seconds: int = 3600,
+    safety_buffer_seconds: int = _DEFAULT_SAFETY_BUFFER_SECONDS,
+    workload: Optional[dict] = None,
 ) -> BackwardPlan:
     """
     Build a deterministic backward production plan for one episode.
@@ -283,13 +458,31 @@ def build_backward_plan(
                                 injectable clock upstream) — this function
                                 never reads the real wall clock, which is
                                 what makes it pure and deterministic.
-        stage_durations:       Optional per-stage overrides (seconds), merged
-                                over DEFAULT_STAGE_DURATIONS_SECONDS.
+        stage_durations:       Optional per-stage total-seconds overrides,
+                                applied as a flat (active+wait) replacement
+                                for the named stage — e.g. {"publishing_agent": 900}
+                                bypasses the platform-workload computation
+                                entirely for that stage.
         safety_buffer_seconds: Single overall margin applied once, between
                                 the last stage's finish and target_publish_at
-                                (the "go-live" cushion). Each individual
-                                stage also carries its own smaller buffer —
-                                see _PER_STAGE_SAFETY_BUFFER_FRACTION.
+                                (the "go-live" cushion). Defaults to
+                                _DEFAULT_SAFETY_BUFFER_SECONDS (24h) — a
+                                deliberate v1 operational policy choice, not
+                                workload-derived: it exists so a normal
+                                complete episode is not scheduled to begin
+                                on the same calendar day as publication,
+                                leaving a full day for human monitoring and
+                                retry headroom before unattended go-live.
+                                Each individual stage also carries its own
+                                smaller buffer — see
+                                _PER_STAGE_SAFETY_BUFFER_FRACTION.
+        workload:              Optional overrides for the workload-driven
+                                visual_package_director stage:
+                                {"expected_scene_count": int,
+                                 "generation_seconds_per_scene": int}.
+                                Unknown keys or invalid values raise
+                                ValueError (fail closed) — see
+                                _validate_workload.
 
     Returns:
         BackwardPlan — plan_status is "executable", "infeasible", or
@@ -297,13 +490,14 @@ def build_backward_plan(
         time or for a disabled operator/production flag — those are
         represented in the returned plan, not exceptions. Raises ValueError
         for genuinely invalid input (naive timestamps, bad timezone, missing
-        or non-positive stage duration).
+        or non-positive stage duration, invalid workload override).
     """
     _require_aware(target_publish_at, "target_publish_at")
     _require_aware(generated_at, "generated_at")
 
     tz_name = operations_profile.timezone
     tz = _validate_timezone(tz_name)
+    workload = _validate_workload(workload)
 
     max_concurrent_episodes = operations_profile.max_concurrent_episodes
 
@@ -322,19 +516,29 @@ def build_backward_plan(
     # unattended_operation_enabled=False deliberately does NOT refuse — it
     # only means a future worker cannot run this plan unattended yet.
 
-    merged_durations = dict(DEFAULT_STAGE_DURATIONS_SECONDS)
-    if stage_durations:
-        merged_durations.update(stage_durations)
-
     publishing_included = bool(operations_profile.publishing_enabled)
     stages_to_plan = [s for s in PIPELINE_STAGE_ORDER if s != _PUBLISHING_STAGE or publishing_included]
 
+    # Resolve (active, wait) per stage — workload-driven stages computed
+    # dynamically; everything else from the static defaults; stage_durations
+    # (when given for a stage) wins outright as a flat total (wait=0 role
+    # folded into active for simplicity of the override path).
+    active_wait: dict[str, tuple[int, int]] = dict(DEFAULT_STAGE_ACTIVE_WAIT_SECONDS)
+    active_wait[_VISUAL_PACKAGE_STAGE] = _resolve_visual_package_active_wait(workload)
     if publishing_included:
-        merged_durations[_PUBLISHING_STAGE] = _resolve_publishing_duration(operations_profile, stage_durations)
+        active_wait[_PUBLISHING_STAGE] = _resolve_publishing_active_wait(operations_profile)
+
+    if stage_durations:
+        for stage_name, total in stage_durations.items():
+            if total is None or not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+                raise ValueError(
+                    f"missing or non-positive duration estimate for stage {stage_name!r}"
+                )
+            active_wait[stage_name] = (total, 0)
 
     for stage_name in stages_to_plan:
-        duration = merged_durations.get(stage_name)
-        if duration is None or duration <= 0:
+        pair = active_wait.get(stage_name)
+        if pair is None or (pair[0] + pair[1]) <= 0:
             raise ValueError(
                 f"missing or non-positive duration estimate for stage {stage_name!r}"
             )
@@ -350,7 +554,8 @@ def build_backward_plan(
     reversed_plans: list[StagePlan] = []
 
     for stage_name in reversed(stages_to_plan):
-        duration = merged_durations[stage_name]
+        active_s, wait_s = active_wait[stage_name]
+        duration = active_s + wait_s
         buffer_s = round(duration * _PER_STAGE_SAFETY_BUFFER_FRACTION)
         retry_s = max_retries * (duration + backoff_seconds)
         total = duration + buffer_s + retry_s
@@ -363,9 +568,12 @@ def build_backward_plan(
             sequence_index=0,  # corrected below once order is restored
             planned_start_at=start_at.isoformat(),
             planned_finish_at=finish_at.isoformat(),
+            active_execution_seconds=active_s,
+            expected_external_wait_seconds=wait_s,
             estimated_duration_seconds=duration,
             safety_buffer_seconds=buffer_s,
             retry_allowance_seconds=retry_s,
+            total_planned_seconds=total,
             hard_deadline_at=finish_at.isoformat(),
             depends_on=None,  # filled below
             critical=True,    # v1 has no parallel branches — every stage is on the critical path

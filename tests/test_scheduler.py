@@ -36,9 +36,12 @@ from hypogeum.db import (
 )
 from hypogeum.scheduler import (
     cancel_scheduled_run,
+    compute_next_publish_slot,
     compute_next_run,
     create_schedule,
     get_pending_runs,
+    get_scheduled_run,
+    is_scheduled_invocation,
     set_next_run,
     set_schedule_status,
     tick,
@@ -149,6 +152,117 @@ class TestComputeNextRun:
         dt = _utc(2026, 1, 28, 0, 0, 0)
         result = compute_next_run("weekly", dt)
         assert result == _utc(2026, 2, 4, 0, 0, 0)
+
+
+# ===========================================================================
+# compute_next_publish_slot — pure function, no I/O (Scheduler Integration)
+# ===========================================================================
+
+class TestComputeNextPublishSlot:
+
+    def test_returns_next_utc_occurrence_same_timezone(self):
+        # 2026-06-15 is a Monday. Next Thursday 18:00 UTC is 2026-06-18.
+        from_dt = _utc(2026, 6, 15, 9, 0, 0)
+        result = compute_next_publish_slot(
+            {"day_of_week": "thursday", "time_of_day": "18:00"}, "UTC", from_dt,
+        )
+        assert result == _utc(2026, 6, 18, 18, 0, 0)
+
+    def test_case_insensitive_day_name(self):
+        from_dt = _utc(2026, 6, 15, 9, 0, 0)
+        result = compute_next_publish_slot(
+            {"day_of_week": "THURSDAY", "time_of_day": "18:00"}, "UTC", from_dt,
+        )
+        assert result == _utc(2026, 6, 18, 18, 0, 0)
+
+    def test_today_before_slot_time_returns_today(self):
+        # 2026-06-18 is a Thursday, 09:00 UTC — before 18:00, so today's slot applies.
+        from_dt = _utc(2026, 6, 18, 9, 0, 0)
+        result = compute_next_publish_slot(
+            {"day_of_week": "thursday", "time_of_day": "18:00"}, "UTC", from_dt,
+        )
+        assert result == _utc(2026, 6, 18, 18, 0, 0)
+
+    def test_today_after_slot_time_rolls_to_next_week(self):
+        # 2026-06-18 is a Thursday, 20:00 UTC — after 18:00, so next week's slot applies.
+        from_dt = _utc(2026, 6, 18, 20, 0, 0)
+        result = compute_next_publish_slot(
+            {"day_of_week": "thursday", "time_of_day": "18:00"}, "UTC", from_dt,
+        )
+        assert result == _utc(2026, 6, 25, 18, 0, 0)
+
+    def test_missing_day_of_week_returns_none(self):
+        result = compute_next_publish_slot({"time_of_day": "18:00"}, "UTC", _now())
+        assert result is None
+
+    def test_missing_time_of_day_returns_none(self):
+        result = compute_next_publish_slot({"day_of_week": "thursday"}, "UTC", _now())
+        assert result is None
+
+    def test_empty_publishing_schedule_returns_none(self):
+        assert compute_next_publish_slot({}, "UTC", _now()) is None
+
+    def test_invalid_day_name_returns_none(self):
+        result = compute_next_publish_slot(
+            {"day_of_week": "someday", "time_of_day": "18:00"}, "UTC", _now(),
+        )
+        assert result is None
+
+    def test_invalid_time_format_returns_none(self):
+        result = compute_next_publish_slot(
+            {"day_of_week": "thursday", "time_of_day": "6pm"}, "UTC", _now(),
+        )
+        assert result is None
+
+    def test_invalid_timezone_returns_none(self):
+        result = compute_next_publish_slot(
+            {"day_of_week": "thursday", "time_of_day": "18:00"}, "Not/AZone", _now(),
+        )
+        assert result is None
+
+    def test_deterministic_for_fixed_from_dt(self):
+        from_dt = _utc(2026, 6, 15, 9, 0, 0)
+        schedule = {"day_of_week": "thursday", "time_of_day": "18:00"}
+        a = compute_next_publish_slot(schedule, "UTC", from_dt)
+        b = compute_next_publish_slot(schedule, "UTC", from_dt)
+        assert a == b
+
+    def test_non_utc_timezone_converts_correctly(self):
+        # Thursday 18:00 America/New_York (EDT, UTC-4) == Thursday 22:00 UTC.
+        from_dt = _utc(2026, 6, 15, 9, 0, 0)
+        result = compute_next_publish_slot(
+            {"day_of_week": "thursday", "time_of_day": "18:00"},
+            "America/New_York", from_dt,
+        )
+        assert result == _utc(2026, 6, 18, 22, 0, 0)
+
+    def test_result_is_timezone_aware_utc(self):
+        result = compute_next_publish_slot(
+            {"day_of_week": "thursday", "time_of_day": "18:00"}, "UTC", _now(),
+        )
+        assert result.tzinfo is not None
+        assert result.utcoffset().total_seconds() == 0
+
+
+# ===========================================================================
+# is_scheduled_invocation — pure function, no I/O (Scheduler Integration
+# race-condition correction: single source of truth for "is this scheduled",
+# so process_next() doesn't hardcode a scheduled_run_id check inline)
+# ===========================================================================
+
+class TestIsScheduledInvocation:
+
+    def test_true_when_scheduled_run_id_present(self):
+        assert is_scheduled_invocation({"scheduled_run_id": "sr_1"}) is True
+
+    def test_false_when_scheduled_run_id_none(self):
+        assert is_scheduled_invocation({"scheduled_run_id": None}) is False
+
+    def test_false_when_scheduled_run_id_absent(self):
+        assert is_scheduled_invocation({}) is False
+
+    def test_false_when_scheduled_run_id_empty_string(self):
+        assert is_scheduled_invocation({"scheduled_run_id": ""}) is False
 
 
 # ===========================================================================
@@ -506,6 +620,46 @@ class TestTick:
         }
         assert "run_pipeline" not in called, "scheduler.py must not call run_pipeline"
 
+    def test_tick_missed_window_still_enqueues_and_logs(self, db_path, monkeypatch):
+        """A schedule ticked well past its due next_run_at is still enqueued
+        (nothing dropped) and logs a scheduled_tick_missed_window event."""
+        logged = []
+
+        class _StubLogger:
+            def warn(self, event, **fields):
+                logged.append((event, fields))
+
+        monkeypatch.setattr(
+            "hypogeum.logger.get_logger", lambda **kw: _StubLogger(),
+        )
+
+        due = _now() - timedelta(minutes=10)  # well past the 300s grace period
+        sid = create_schedule(db_path=db_path, cadence="daily", next_run_at=due)
+        now = _now()
+        result = tick(db_path=db_path, now=now)
+
+        assert len(result) == 1  # still enqueued — nothing dropped
+        events = [e for e, _ in logged]
+        assert "scheduled_tick_missed_window" in events
+
+    def test_tick_on_time_does_not_log_missed_window(self, db_path, monkeypatch):
+        logged = []
+
+        class _StubLogger:
+            def warn(self, event, **fields):
+                logged.append((event, fields))
+
+        monkeypatch.setattr(
+            "hypogeum.logger.get_logger", lambda **kw: _StubLogger(),
+        )
+
+        due = _now() - timedelta(seconds=5)  # well within the 300s grace period
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=due)
+        tick(db_path=db_path, now=_now())
+
+        events = [e for e, _ in logged]
+        assert "scheduled_tick_missed_window" not in events
+
 
 # ===========================================================================
 # get_pending_runs
@@ -546,6 +700,45 @@ class TestGetPendingRuns:
         assert isinstance(pending, list)
         assert isinstance(pending[0], dict)
         assert "scheduled_run_id" in pending[0]
+
+
+# ===========================================================================
+# get_scheduled_run — read-only lookup by primary key (Scheduler Integration
+# race-condition correction: anchors claim-time target_publish_at
+# derivation to the immutable scheduled_for this returns)
+# ===========================================================================
+
+class TestGetScheduledRun:
+
+    def test_returns_none_for_unknown_id(self, db_path):
+        assert get_scheduled_run("does_not_exist", db_path=db_path) is None
+
+    def test_returns_row_by_id(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        row = get_scheduled_run(sr_ids[0], db_path=db_path)
+        assert row is not None
+        assert row["scheduled_run_id"] == sr_ids[0]
+        assert row["scheduled_for"] is not None
+
+    def test_scheduled_for_unaffected_by_status_transitions(self, db_path):
+        """scheduled_for must be immutable — update_scheduled_run_status()
+        only ever touches status/triggered_at/run_id."""
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        original_scheduled_for = get_scheduled_run(sr_ids[0], db_path=db_path)["scheduled_for"]
+
+        conn = get_connection(db_path)
+        try:
+            update_scheduled_run_status(conn, sr_ids[0], "triggered",
+                                        triggered_at=_now().isoformat())
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert get_scheduled_run(sr_ids[0], db_path=db_path)["scheduled_for"] == original_scheduled_for
 
 
 # ===========================================================================

@@ -301,6 +301,13 @@ def release(
 
 _NULL_CONTEXT_CANCEL_MSG = "Cancelled invalid scheduler queue item"
 
+# A pending scheduled_run promoted later than this many seconds after it was
+# created (scheduled_for — tick() time) is tagged source="schedule_missed"
+# instead of "schedule" and logged (req 6, Scheduler Integration milestone —
+# e.g. the queue was paused, or the worker was down between tick() and this
+# promotion). Nothing is ever dropped either way — see docstring below.
+_STALE_PROMOTION_GRACE_SECONDS = 300
+
 
 def consume_scheduled_runs(
     db_path: Optional[Path] = None,
@@ -308,11 +315,27 @@ def consume_scheduled_runs(
     """
     Promote all pending scheduled_runs to run_queue entries.
 
-    For each scheduled_run with status='pending':
-      1. Skip (cancel) if both channel_id and episode_id are NULL — no execution
-         context exists and the queue item would loop forever as no_topic.
-      2. Otherwise: insert a run_queue row with status='queued' and mark the
-         scheduled_run as 'triggered'.
+    This is the Scheduler's own promotion step (queue.py's "Scheduler
+    integration" section) — the only place scheduler-originated work becomes
+    a real queue item, and its only responsibility: deciding WHEN work
+    should be enqueued. For each scheduled_run with status='pending':
+      - If both channel_id and episode_id are NULL: no execution context
+        exists — skip promotion, mark the scheduled_run 'cancelled' (the
+        queue item would loop forever as no_topic otherwise).
+      - Otherwise: call queue.enqueue() (this module's own public entry
+        point — never a raw insert) with source="schedule" (or
+        "schedule_missed" if this scheduled_run sat pending well past its
+        creation time — see _STALE_PROMOTION_GRACE_SECONDS) and mark the
+        scheduled_run 'triggered'.
+
+    This function never reads or writes episode_topics, and never claims or
+    even looks at any topic — that remains exclusively process_next()'s job
+    (see its own docstring's Step 4 for the claim-time target_publish_at
+    derivation that replaces this). Peeking at "the next queued topic" here
+    was tried and reverted: it's a positional assumption over mutable
+    shared state that two independently-timed reads (this promotion vs. the
+    later real claim) can disagree on — see the Scheduler Integration
+    milestone's race-condition correction for the full analysis.
 
     Also cancels any existing queued/claimed run_queue rows that have both
     channel_id and episode_id NULL (stale NULL items from prior ticks).
@@ -326,7 +349,8 @@ def consume_scheduled_runs(
     Returns:
         List of queue_ids created (one per valid promoted scheduled_run).
     """
-    now = _iso(_now_utc())
+    now_dt = _now_utc()
+    now = _iso(now_dt)
     created_ids: list[str] = []
 
     conn = get_connection(db_path)
@@ -344,9 +368,15 @@ def consume_scheduled_runs(
             """,
             (_NULL_CONTEXT_CANCEL_MSG, now),
         )
+        conn.commit()
 
         pending = get_pending_scheduled_runs(conn)
-        for row in pending:
+    finally:
+        conn.close()
+
+    for row in pending:
+        conn = get_connection(db_path)
+        try:
             if row["channel_id"] is None and row["episode_id"] is None:
                 # No execution context — skip promotion, mark scheduled_run cancelled.
                 update_scheduled_run_status(
@@ -355,30 +385,54 @@ def consume_scheduled_runs(
                     status="cancelled",
                     triggered_at=now,
                 )
+                conn.commit()
                 continue
+        finally:
+            conn.close()
 
-            queue_id = _new_id()
-            insert_queue_item(
-                conn,
-                queue_id=queue_id,
-                queued_at=now,
-                created_at=now,
-                scheduled_run_id=row["scheduled_run_id"],
-                schedule_id=row["schedule_id"],
-                channel_id=row["channel_id"],
-                episode_id=row["episode_id"],
-                priority=0,
-            )
+        # Missed-promotion detection: how long this row sat 'pending' before
+        # this consume() pass reached it.
+        source = "schedule"
+        scheduled_for = row["scheduled_for"]
+        if scheduled_for:
+            delay_seconds = (now_dt - datetime.fromisoformat(scheduled_for)).total_seconds()
+            if delay_seconds > _STALE_PROMOTION_GRACE_SECONDS:
+                source = "schedule_missed"
+                from hypogeum.logger import get_logger
+                get_logger(agent="scheduler").warn(
+                    "scheduled_run_promoted_late",
+                    schedule_id=row["schedule_id"],
+                    scheduled_run_id=row["scheduled_run_id"],
+                    channel_id=row["channel_id"],
+                    scheduled_for=scheduled_for,
+                    promoted_at=now,
+                    delay_seconds=int(delay_seconds),
+                )
+
+        # Enqueue via the canonical entry point — never a raw insert.
+        queue_id = enqueue(
+            db_path=db_path,
+            scheduled_run_id=row["scheduled_run_id"],
+            schedule_id=row["schedule_id"],
+            channel_id=row["channel_id"],
+            episode_id=row["episode_id"],
+            priority=0,
+            source=source,
+        )
+
+        conn = get_connection(db_path)
+        try:
             update_scheduled_run_status(
                 conn,
                 scheduled_run_id=row["scheduled_run_id"],
                 status="triggered",
                 triggered_at=now,
             )
-            created_ids.append(queue_id)
-        conn.commit()
-    finally:
-        conn.close()
+            conn.commit()
+        finally:
+            conn.close()
+
+        created_ids.append(queue_id)
 
     return created_ids
 
@@ -484,7 +538,21 @@ def process_next(
            a. If topic_resolver is provided: call it with the claimed item dict.
               Must return a non-empty string or None.
            b. Otherwise: call topics.claim_next_topic(channel_id) from backlog.
-              topic_id is kept for the consume step on success.
+              topic_id is kept for the consume step on success. If the
+              claimed item is a scheduled invocation (see
+              hypogeum.scheduler.is_scheduled_invocation()), derive a
+              deterministic target_publish_at (hypogeum.scheduler.
+              compute_next_publish_slot()) for the topic just claimed and
+              persist it via hypogeum.topics.set_topic_target_publish_at()
+              if not already set — computed here, after the claim, for the
+              exact topic claimed, so there is no positional/timing
+              assumption about which topic this ends up being (see the
+              Scheduler Integration milestone's race-condition correction).
+              The computation is anchored to the scheduled_run's own
+              scheduled_for (hypogeum.scheduler.get_scheduled_run()), not the
+              live clock, so a claim delayed past the intended slot's own
+              time-of-day never silently retargets a different calendar
+              occurrence. Best-effort: never blocks the claim.
            c. If no topic (None or empty): release queue item, return "no_topic".
            d. If topic is the placeholder sentinel: block — never reaches pipeline.
         5. Call run_pipeline(topic_input, episode_id, config, channel_id).
@@ -619,6 +687,58 @@ def process_next(
             topic_text = topic_row["topic_text"]
             topic_id = topic_row["topic_id"]
             using_backlog = True
+
+            # Scheduler Integration: for a scheduled invocation, derive the
+            # deterministic publish time now — for the topic just actually
+            # claimed, never a topic merely observed earlier — and persist
+            # it onto episode_topics if not already set. compute_next_publish_slot()
+            # is a pure function of (channel config, from_dt); it does not
+            # depend on which topic gets claimed, so there is nothing to
+            # get wrong by computing it here instead of at promotion time.
+            # from_dt is anchored to the scheduled_run's own scheduled_for
+            # (set once by tick(), never mutated afterward) rather than the
+            # live wall clock at claim time — otherwise a claim delayed past
+            # the intended slot's own time-of-day would silently roll the
+            # target forward by a full cadence period, retargeting a
+            # different calendar occurrence than the one the Scheduler
+            # actually fired for. Using the frozen scheduled_for makes the
+            # result identical no matter how long the claim was delayed, and
+            # stable across any number of release/reclaim retries of the
+            # same scheduled_run.
+            # Best-effort: never blocks the claim or the pipeline call —
+            # a failure here just means worker_integration.py's existing
+            # fail-closed gate behavior applies unchanged.
+            from hypogeum.scheduler import is_scheduled_invocation
+            if is_scheduled_invocation(claimed) and not topic_row.get("target_publish_at"):
+                try:
+                    from hypogeum.channel_config import get_channel_operations_profile
+                    from hypogeum.scheduler import compute_next_publish_slot, get_scheduled_run
+                    from hypogeum.topics import set_topic_target_publish_at
+
+                    profile = get_channel_operations_profile(channel_id, db_path=db_path)
+                    if profile is not None:
+                        scheduled_run = get_scheduled_run(
+                            claimed.get("scheduled_run_id"), db_path=db_path,
+                        )
+                        anchor_dt = (
+                            datetime.fromisoformat(scheduled_run["scheduled_for"])
+                            if scheduled_run is not None and scheduled_run.get("scheduled_for")
+                            else _now_utc()  # defensive fallback only — should not happen
+                        )
+                        slot = compute_next_publish_slot(
+                            profile.publishing_schedule, profile.timezone, anchor_dt,
+                        )
+                        if slot is not None:
+                            set_topic_target_publish_at(topic_id, _iso(slot), db_path=db_path)
+                except Exception as exc:
+                    from hypogeum.logger import get_logger
+                    get_logger(agent="scheduler").warn(
+                        "claim_time_publish_slot_derivation_failed",
+                        queue_id=queue_id,
+                        channel_id=channel_id,
+                        topic_id=topic_id,
+                        error=str(exc),
+                    )
 
     if not topic_text or topic_text == _PLACEHOLDER_TOPIC:
         # No topic available — release queue item for retry on next pass

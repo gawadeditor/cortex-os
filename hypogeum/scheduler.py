@@ -29,13 +29,17 @@ Public API:
     set_schedule_status(...)      -> None
     set_next_run(...)             -> None
     compute_next_run(cadence, dt) -> datetime | None
+    compute_next_publish_slot(...) -> datetime | None
+    is_scheduled_invocation(...)  -> bool
     tick(db_path, now)            -> list[str]     (scheduled_run_ids created)
     get_pending_runs(db_path)     -> list[dict]
+    get_scheduled_run(scheduled_run_id, db_path=None) -> dict | None
     cancel_scheduled_run(...)     -> None
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,6 +55,18 @@ from hypogeum.db import (
     update_schedule_status,
     update_scheduled_run_status,
 )
+
+# Schedules ticked later than this many seconds past their due next_run_at
+# are logged as missed/catch-up firings (req 6, Scheduler Integration
+# milestone) — observability only, no schema/data change. Nothing is ever
+# dropped: get_due_schedules() already picks up any overdue schedule on the
+# very next tick regardless of how late it is.
+_MISSED_SCHEDULE_GRACE_SECONDS = 300
+
+_WEEKDAY_NAMES = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +110,79 @@ def compute_next_run(cadence: str, from_dt: datetime) -> Optional[datetime]:
     if cadence == "manual":
         return None
     raise ValueError(f"Unknown cadence: {cadence!r}")
+
+
+def compute_next_publish_slot(
+    publishing_schedule: dict,
+    tz_name: str,
+    from_dt: datetime,
+) -> Optional[datetime]:
+    """
+    Return the next occurrence of publishing_schedule's day_of_week +
+    time_of_day at or after from_dt, interpreted in the channel's own
+    timezone (ChannelOperationsProfile.timezone — the same field
+    hypogeum.backward_planner.build_backward_plan() already uses).
+
+    Pure and deterministic: never reads the wall clock, always returns the
+    same result for the same inputs. Generalizes
+    hypogeum.dashboard_control.next_thursday_publish_slot()'s "next weekday
+    at fixed time" pattern to any channel-configured day/time/timezone.
+
+    Args:
+        publishing_schedule: e.g. {"day_of_week": "thursday", "time_of_day": "18:00"}.
+        tz_name:             IANA timezone name (ChannelOperationsProfile.timezone).
+        from_dt:              Timezone-aware reference datetime.
+
+    Returns:
+        A timezone-aware UTC datetime, or None if day_of_week/time_of_day is
+        missing or unparseable, or tz_name is invalid — never fabricates a
+        value; the caller (queue.consume_scheduled_runs) treats None as
+        "nothing to persist," matching worker_integration.py's existing
+        fail-closed behavior for scheduled runs with no target_publish_at.
+    """
+    day_raw = publishing_schedule.get("day_of_week")
+    time_raw = publishing_schedule.get("time_of_day")
+    if not day_raw or not time_raw:
+        return None
+
+    weekday = _WEEKDAY_NAMES.get(str(day_raw).strip().lower())
+    if weekday is None:
+        return None
+
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time_raw)):
+        return None
+    hour, minute = (int(p) for p in str(time_raw).split(":"))
+
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        return None
+
+    local_from = from_dt.astimezone(tz)
+    days_ahead = (weekday - local_from.weekday()) % 7
+    candidate = (local_from + timedelta(days=days_ahead)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0,
+    )
+    if candidate <= local_from:
+        candidate += timedelta(weeks=1)
+
+    return candidate.astimezone(timezone.utc)
+
+
+def is_scheduled_invocation(claimed_row: dict) -> bool:
+    """
+    True when a claimed run_queue row represents a scheduler-driven
+    invocation (hypogeum.worker_integration.InvocationMode.SCHEDULED), as
+    opposed to a manually/directly enqueued one.
+
+    Single source of truth for this decision: hypogeum.queue.process_next()
+    calls this instead of checking claimed_row.get("scheduled_run_id")
+    inline, so that "what makes something a scheduled invocation" lives in
+    exactly one place — future-proof if a second scheduled-execution source
+    is ever introduced. Currently keyed on scheduled_run_id being set.
+    """
+    return bool(claimed_row.get("scheduled_run_id"))
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +343,21 @@ def tick(
             cadence = row["cadence"]
             next_dt = compute_next_run(cadence, now)
 
+            due_at = row["next_run_at"]
+            if due_at:
+                delay_seconds = (now - datetime.fromisoformat(due_at)).total_seconds()
+                if delay_seconds > _MISSED_SCHEDULE_GRACE_SECONDS:
+                    from hypogeum.logger import get_logger
+                    get_logger(agent="scheduler").warn(
+                        "scheduled_tick_missed_window",
+                        schedule_id=row["schedule_id"],
+                        scheduled_run_id=scheduled_run_id,
+                        channel_id=row["channel_id"],
+                        due_at=due_at,
+                        fired_at=now_iso,
+                        delay_seconds=int(delay_seconds),
+                    )
+
             insert_scheduled_run(
                 conn,
                 scheduled_run_id=scheduled_run_id,
@@ -307,6 +411,37 @@ def get_pending_runs(db_path: Optional[Path] = None) -> list[dict]:
             """
         )
         return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_scheduled_run(
+    scheduled_run_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[dict]:
+    """
+    Return a single scheduled_runs row as a dict, or None if not found.
+
+    Read-only lookup by primary key — no ordering, no candidate selection,
+    no positional assumption. Used by hypogeum.queue.process_next() to
+    anchor claim-time target_publish_at derivation to scheduled_for (the
+    timestamp tick() recorded once, when this run was decided due, and
+    which is never mutated afterward — update_scheduled_run_status() only
+    ever touches status/triggered_at/run_id), instead of the live wall
+    clock at claim time. This keeps the derived publish slot identical
+    regardless of how long the run_queue item sits before being claimed.
+
+    Args:
+        scheduled_run_id: Target scheduled run.
+        db_path:          Override DB path (for tests).
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM scheduled_runs WHERE scheduled_run_id = ?",
+            (scheduled_run_id,),
+        ).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 

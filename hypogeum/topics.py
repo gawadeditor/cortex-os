@@ -45,6 +45,8 @@ Public API:
     get_topic(topic_id, db_path=None)                   -> dict | None
     list_topics(channel_id=None, status=None, db_path=None) -> list[dict]
     make_topic_resolver(db_path=None)                   -> Callable
+    set_topic_target_publish_at(topic_id, target_publish_at,
+                                 db_path=None)            -> bool
 
 Exceptions:
     DuplicateTopicError — raised when a queued/claimed topic with the same
@@ -501,6 +503,50 @@ def cancel_topic(
             (_now_iso(), topic_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def set_topic_target_publish_at(
+    topic_id: str,
+    target_publish_at: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """
+    Fill target_publish_at on a specific topic, only if it is currently unset.
+
+    Used by queue.process_next() immediately after it atomically claims a
+    topic for a scheduler-linked run_queue item (see
+    hypogeum.scheduler.is_scheduled_invocation()) — the deterministic
+    publish time is computed for and written onto the exact topic that was
+    just claimed, never a topic merely observed earlier. Unlike a "next
+    queued" lookup, there is no ordering/positional assumption here: the
+    caller already holds the specific topic_id of a row it owns the claim
+    for, so this is a single unambiguous conditional UPDATE by primary key.
+    Never overwrites an explicit/operator-set value.
+
+    Args:
+        topic_id:            Topic to update (already claimed by the caller).
+        target_publish_at:  ISO 8601 UTC datetime string.
+        db_path:             Override DB path (for tests).
+
+    Returns:
+        True if the row was updated, False if the topic does not exist or
+        already had an explicit target_publish_at.
+    """
+    now = _now_iso()
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE episode_topics
+            SET target_publish_at = ?, updated_at = ?
+            WHERE topic_id = ? AND target_publish_at IS NULL
+            """,
+            (target_publish_at, now, topic_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()
 

@@ -59,6 +59,7 @@ from hypogeum.topics import (
     import_topics_from_csv,
     list_topics,
     make_topic_resolver,
+    set_topic_target_publish_at,
     skip_topic,
 )
 
@@ -351,6 +352,66 @@ class TestClaimNextTopic:
             conn.close()
         assert r1 is not None
         assert r2 is None
+
+
+# ===========================================================================
+# 3b. set_topic_target_publish_at (Scheduler Integration, race-condition
+# correction: exact-topic_id write, no "next queued" peek/ordering at all —
+# the caller already holds the specific topic_id of a row it just claimed)
+# ===========================================================================
+
+class TestSetTopicTargetPublishAt:
+
+    def test_fills_null_target_by_exact_topic_id(self, db_path):
+        tid = enqueue_topic("ch_tp", "topic", db_path=db_path)
+        target = "2026-07-30T18:00:00+00:00"
+        result = set_topic_target_publish_at(tid, target, db_path=db_path)
+        assert result is True
+        row = get_topic(tid, db_path=db_path)
+        assert row["target_publish_at"] == target
+
+    def test_does_not_overwrite_existing_explicit_value(self, db_path):
+        tid = enqueue_topic("ch_tp2", "topic", db_path=db_path)
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE episode_topics SET target_publish_at = ? WHERE topic_id = ?",
+                ("2026-01-01T00:00:00+00:00", tid),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = set_topic_target_publish_at(
+            tid, "2026-07-30T18:00:00+00:00", db_path=db_path,
+        )
+        assert result is False
+        row = get_topic(tid, db_path=db_path)
+        assert row["target_publish_at"] == "2026-01-01T00:00:00+00:00"
+
+    def test_returns_false_for_unknown_topic_id(self, db_path):
+        result = set_topic_target_publish_at(
+            "topic_does_not_exist", "2026-07-30T18:00:00+00:00", db_path=db_path,
+        )
+        assert result is False
+
+    def test_ignores_other_topics_in_same_channel(self, db_path):
+        """Unlike the removed peek-based setter, this writes only to the
+        exact topic_id given — never to 'whichever topic ranks first'."""
+        t_low = enqueue_topic("ch_tp3", "Low priority", priority=5, db_path=db_path)
+        t_high = enqueue_topic("ch_tp3", "High priority", priority=-1, db_path=db_path)
+        set_topic_target_publish_at(t_low, "2026-07-30T18:00:00+00:00", db_path=db_path)
+        assert get_topic(t_low, db_path=db_path)["target_publish_at"] is not None
+        assert get_topic(t_high, db_path=db_path)["target_publish_at"] is None
+
+    def test_does_not_claim_or_change_status(self, db_path):
+        tid = enqueue_topic("ch_tp4", "topic", db_path=db_path)
+        set_topic_target_publish_at(tid, "2026-07-30T18:00:00+00:00", db_path=db_path)
+        row = get_topic(tid, db_path=db_path)
+        assert row["status"] == "queued"
+        claimed = claim_next_topic("ch_tp4", db_path=db_path)
+        assert claimed["topic_id"] == tid
+        assert claimed["target_publish_at"] == "2026-07-30T18:00:00+00:00"
 
 
 # ===========================================================================

@@ -57,7 +57,8 @@ from hypogeum.queue import (
     release,
 )
 from hypogeum.topics import enqueue_topic, get_topic
-from hypogeum.scheduler import create_schedule, tick
+from hypogeum.scheduler import compute_next_publish_slot, create_schedule, get_scheduled_run, tick
+from hypogeum.channel_config import create_channel_operations_profile, create_channel_profile
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,39 @@ def _all_queue_rows(db_path: Path) -> list[dict]:
 
 def _worker() -> str:
     return str(uuid.uuid4())
+
+
+def _make_operations_profile(db_path, channel_id, **overrides):
+    """Minimal valid ChannelOperationsProfile — mirrors the helper in
+    tests/test_worker_integration.py. Default publishing_schedule is a
+    concrete, always-computable slot for target_publish_at derivation."""
+    create_channel_profile(channel_id=channel_id, name="Test Channel", db_path=db_path)
+    kwargs = dict(
+        channel_id=channel_id,
+        channel_name="Test Channel",
+        timezone="UTC",
+        operator_enabled=True,
+        production_cadence={"videos_per_week": 1},
+        publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+        enabled_platforms={"youtube": True, "facebook": False, "tiktok": False, "instagram": False},
+        blocked_platform_reasons={},
+        discovery_enabled=True,
+        production_enabled=True,
+        publishing_enabled=True,
+        analytics_sync_enabled=True,
+        unattended_operation_enabled=False,
+        max_concurrent_episodes=1,
+        retry_policy={"max_retries_per_stage": 1, "backoff_seconds": 60},
+        failure_halt_policy={
+            "halt_on_production_failure": True,
+            "halt_on_validation_failure": True,
+            "halt_on_enabled_platform_publish_failure": True,
+            "blocked_or_disabled_platforms_do_not_halt": True,
+        },
+        db_path=db_path,
+    )
+    kwargs.update(overrides)
+    return create_channel_operations_profile(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +569,60 @@ class TestSchedulerIntegration:
         create_schedule(db_path=db_path, cadence="daily", next_run_at=past)
         tick(db_path=db_path, now=_now())
         consume_scheduled_runs(db_path=db_path)
+
+    def test_consume_tags_source_schedule_for_on_time_promotion(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_src1",
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        queue_ids = consume_scheduled_runs(db_path=db_path)
+        row = _queue_row(db_path, queue_ids[0])
+        assert row["source"] == "schedule"
+
+    def test_consume_tags_source_schedule_missed_for_stale_pending_row(self, db_path):
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_src2",
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+
+        # Simulate the scheduled_run having sat pending for a long time
+        # (worker/queue was down) before this consume() pass reaches it.
+        conn = get_connection(db_path)
+        try:
+            stale = _iso(_now() - timedelta(minutes=10))
+            conn.execute(
+                "UPDATE scheduled_runs SET scheduled_for = ? WHERE channel_id = ?",
+                (stale, "ch_src2"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        queue_ids = consume_scheduled_runs(db_path=db_path)
+        row = _queue_row(db_path, queue_ids[0])
+        assert row["source"] == "schedule_missed"
+
+    def test_consume_never_touches_episode_topics(self, db_path, monkeypatch):
+        """Race-condition correction: consume_scheduled_runs() must never
+        peek at or write episode_topics — that derivation now happens only
+        in process_next(), strictly after its own topic claim."""
+        channel_id = "ch_no_peek"
+        _make_operations_profile(db_path, channel_id)
+        topic_id = enqueue_topic(channel_id, "A topic with no explicit target", db_path=db_path)
+
+        from hypogeum import topics as topics_module
+        def _fail(*a, **k):
+            raise AssertionError("consume_scheduled_runs() must not touch episode_topics")
+        monkeypatch.setattr(topics_module, "set_topic_target_publish_at", _fail)
+        monkeypatch.setattr(topics_module, "claim_next_topic", _fail)
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is None
 
 
 # ===========================================================================
@@ -1190,6 +1278,297 @@ class TestConsumer:
                 config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
             )
         assert "bad topic" in result.error_message
+
+    # -----------------------------------------------------------------------
+    # Scheduler Integration — claim-time target_publish_at derivation
+    # (race-condition correction: computed strictly after this function's
+    # own claim_next_topic() call, for the exact topic just claimed — never
+    # a pre-write consume_scheduled_runs() has to hope survives untouched)
+    # -----------------------------------------------------------------------
+
+    def test_scheduled_invocation_claims_topic_and_derives_target(self, db_path):
+        channel_id = "ch_sched_claim"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        topic_id = enqueue_topic(channel_id, "A scheduled topic", db_path=db_path)
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is None
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed"
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is not None
+
+    def test_manual_invocation_does_not_derive_target(self, db_path):
+        """A plain, non-scheduler-linked run_queue item (no scheduled_run_id)
+        must not get a target_publish_at derived/written at claim time."""
+        channel_id = "ch_manual_claim"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        topic_id = enqueue_topic(channel_id, "A manually enqueued topic", db_path=db_path)
+        enqueue(db_path=db_path, channel_id=channel_id)  # no scheduled_run_id
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed"
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is None
+
+    def test_scheduled_claim_does_not_overwrite_explicit_target(self, db_path):
+        channel_id = "ch_sched_explicit"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        topic_id = enqueue_topic(channel_id, "Topic with explicit target", db_path=db_path)
+        explicit = "2026-01-01T00:00:00+00:00"
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE episode_topics SET target_publish_at = ? WHERE topic_id = ?",
+                (explicit, topic_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] == explicit
+
+    def test_two_scheduled_runs_same_channel_same_tick_both_get_correct_targets(self, db_path):
+        """Regression test for the exact bug the race-condition correction
+        fixes: under the old peek-then-write design, promoting two
+        scheduled_runs for the same channel in one consume_scheduled_runs()
+        pass meant the second row's write silently no-op'd (the topic the
+        peek would select already had a non-NULL target from the first
+        row's write), leaving the second run's actual topic with no target
+        at all. With derivation moved to claim time, each independent claim
+        derives and writes its own topic's target correctly."""
+        channel_id = "ch_sched_multi"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        topic_a = enqueue_topic(channel_id, "Topic A", db_path=db_path)
+        topic_b = enqueue_topic(channel_id, "Topic B", db_path=db_path)
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        sr_ids = tick(db_path=db_path, now=_now())
+        assert len(sr_ids) == 2
+        queue_ids = consume_scheduled_runs(db_path=db_path)
+        assert len(queue_ids) == 2
+
+        claimed_topic_ids = []
+        for _ in range(2):
+            with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+                result = process_next(
+                    worker_id=_worker(), db_path=db_path, dry_run=False,
+                    config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+                )
+            assert result.status == "completed"
+            claimed_topic_ids.append(result.topic_id)
+
+        assert set(claimed_topic_ids) == {topic_a, topic_b}
+        assert get_topic(topic_a, db_path=db_path)["target_publish_at"] is not None
+        assert get_topic(topic_b, db_path=db_path)["target_publish_at"] is not None
+
+    # -----------------------------------------------------------------------
+    # Claim-time derivation is anchored to scheduled_for, not the live clock
+    # at claim time — a second race-condition correction. Without this, a
+    # claim delayed past the intended slot's own time-of-day would silently
+    # roll target_publish_at forward by a full cadence period.
+    # -----------------------------------------------------------------------
+
+    def test_delayed_claim_produces_same_target_as_scheduled_for_anchor(self, db_path):
+        """No matter how much real wall-clock time has elapsed since
+        promotion (here: years, since scheduled_for is fixed far in the
+        past relative to whenever this test actually runs), the derived
+        target_publish_at must equal what compute_next_publish_slot()
+        produces directly from scheduled_for — never from "now"."""
+        channel_id = "ch_anchor1"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        profile = _make_operations_profile(
+            db_path, channel_id, timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+        )
+        topic_id = enqueue_topic(channel_id, "Anchored topic", db_path=db_path)
+
+        # scheduled_for is fixed to a Thursday morning years in the past —
+        # nowhere near the real "now" this test executes at.
+        fixed_scheduled_for = datetime(2020, 1, 2, 8, 0, tzinfo=timezone.utc)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=fixed_scheduled_for)
+        tick(db_path=db_path, now=fixed_scheduled_for)
+        consume_scheduled_runs(db_path=db_path)
+
+        expected = compute_next_publish_slot(
+            profile.publishing_schedule, profile.timezone, fixed_scheduled_for,
+        )
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed"
+        actual = get_topic(topic_id, db_path=db_path)["target_publish_at"]
+        assert actual == expected.isoformat()
+
+    def test_boundary_crossing_delay_does_not_shift_to_following_week(self, db_path):
+        """The exact scenario in question: scheduled at 08:00, but the claim
+        happens (in real wall-clock terms) long after the intended slot's
+        own 20:00 time-of-day has passed for that calendar day. The target
+        must still be that same Thursday at 20:00 — not the following
+        Thursday — because the anchor is scheduled_for (08:00 that day),
+        not the live clock at claim time."""
+        channel_id = "ch_anchor2"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(
+            db_path, channel_id, timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "20:00"},
+        )
+        topic_id = enqueue_topic(channel_id, "Boundary topic", db_path=db_path)
+
+        # 2020-01-02 is a Thursday. scheduled_for = 08:00 that day — before
+        # the 20:00 slot. The real "now" this test runs at is years later,
+        # i.e. long past 2020-01-02 20:00 — the exact delayed-claim scenario.
+        scheduled_for = datetime(2020, 1, 2, 8, 0, tzinfo=timezone.utc)
+        expected_same_day_slot = datetime(2020, 1, 2, 20, 0, tzinfo=timezone.utc)
+
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=scheduled_for)
+        tick(db_path=db_path, now=scheduled_for)
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed"
+        actual = get_topic(topic_id, db_path=db_path)["target_publish_at"]
+        assert actual == expected_same_day_slot.isoformat()
+        # Explicitly rule out the bug: must not have rolled to the next week.
+        assert actual != (expected_same_day_slot + timedelta(weeks=1)).isoformat()
+
+    def test_release_and_reclaim_still_derives_from_original_scheduled_for(self, db_path):
+        """A run_queue item claimed, then released back to 'queued' before
+        topic resolution ever ran (simulating a worker crash/transient
+        failure recovery — the same release() primitive
+        hypogeum.worker_integration's concurrency-deferral and
+        hypogeum.orphan_runs both use), and later genuinely reclaimed, must
+        still derive target_publish_at from the same scheduled_for."""
+        channel_id = "ch_anchor3"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        profile = _make_operations_profile(
+            db_path, channel_id, timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+        )
+        topic_id = enqueue_topic(channel_id, "Reclaimed topic", db_path=db_path)
+
+        fixed_scheduled_for = datetime(2020, 1, 2, 8, 0, tzinfo=timezone.utc)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=fixed_scheduled_for)
+        tick(db_path=db_path, now=fixed_scheduled_for)
+        queue_ids = consume_scheduled_runs(db_path=db_path)
+        queue_id = queue_ids[0]
+
+        # Simulate a crash before topic resolution ever ran: claim, then
+        # release without touching any topic.
+        first_claim = claim_next(worker_id="crashed-worker", db_path=db_path)
+        assert first_claim["queue_id"] == queue_id
+        release(queue_id, "crashed-worker", db_path=db_path)
+        assert _queue_row(db_path, queue_id)["status"] == "queued"
+
+        expected = compute_next_publish_slot(
+            profile.publishing_schedule, profile.timezone, fixed_scheduled_for,
+        )
+
+        # Genuine reclaim by a different worker.
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result = process_next(
+                worker_id="recovered-worker", db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed"
+        actual = get_topic(topic_id, db_path=db_path)["target_publish_at"]
+        assert actual == expected.isoformat()
+
+    def test_repeated_claims_for_same_scheduled_run_derive_identical_targets(self, db_path):
+        """Two independent run_queue items both linked to the same
+        scheduled_run_id (the realistic shape of a retried/re-enqueued
+        attempt for one scheduled production slot) must derive the exact
+        same target_publish_at for whichever topic each one claims —
+        proving the derivation is a function of the scheduled_run, not of
+        claim order or timing."""
+        channel_id = "ch_anchor4"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(
+            db_path, channel_id, timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+        )
+        topic_1 = enqueue_topic(channel_id, "First attempt topic", db_path=db_path)
+
+        fixed_scheduled_for = datetime(2020, 1, 2, 8, 0, tzinfo=timezone.utc)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=fixed_scheduled_for)
+        sr_ids = tick(db_path=db_path, now=fixed_scheduled_for)
+        sr_id = sr_ids[0]
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result_1 = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+        assert result_1.status == "completed"
+        target_1 = get_topic(topic_1, db_path=db_path)["target_publish_at"]
+        assert target_1 is not None
+
+        # A second attempt tied to the SAME scheduled_run_id — the row
+        # get_scheduled_run() will resolve is identical, and scheduled_for
+        # was never mutated by the first claim/complete cycle.
+        assert get_scheduled_run(sr_id, db_path=db_path)["scheduled_for"] == fixed_scheduled_for.isoformat()
+        topic_2 = enqueue_topic(channel_id, "Second attempt topic", db_path=db_path)
+        row = get_scheduled_run(sr_id, db_path=db_path)
+        enqueue(db_path=db_path, channel_id=channel_id, scheduled_run_id=sr_id,
+               schedule_id=row["schedule_id"], priority=0, source="schedule")
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result_2 = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+        assert result_2.status == "completed"
+        target_2 = get_topic(topic_2, db_path=db_path)["target_publish_at"]
+
+        assert target_1 == target_2
 
     # -----------------------------------------------------------------------
     # Worker ownership

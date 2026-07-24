@@ -38,7 +38,9 @@ from hypogeum.channel_config import (
     get_channel_operations_profile,
 )
 from hypogeum.db import get_connection, initialize_schema
-from hypogeum.queue import enqueue, get_item, poll, process_next
+from hypogeum.queue import consume_scheduled_runs, enqueue, get_item, poll, process_next
+from hypogeum.scheduler import create_schedule, tick
+from hypogeum.topics import enqueue_topic, get_topic
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +313,69 @@ class TestScheduledVsManualMode:
 
         assert pr.status == "completed"
         assert len(call_log) == 1
+
+    def test_scheduler_derived_target_reaches_backward_plan_via_real_backlog_claim(
+        self, db_path, project_root, monkeypatch,
+    ):
+        """End-to-end, real (unmocked) scheduler -> queue path — proves req 4
+        without any change to worker_integration.py:
+        tick() -> consume_scheduled_runs() (pure promotion — no topic lookup,
+        no topic write; see the race-condition correction) -> the real
+        backlog-claim branch of process_next() (topic_resolver=None, not the
+        fixed-topic test helper), which derives target_publish_at from
+        ChannelOperationsProfile.publishing_schedule and persists it onto
+        episode_topics strictly AFTER its own claim_next_topic() call
+        succeeds, for the exact topic just claimed -> resolve_backward_plan()
+        succeeds under InvocationMode.SCHEDULED.
+
+        The topic is enqueued with an explicit episode_id (the same
+        convention hypogeum.dashboard_control's rerun/finance-approval flows
+        already use) so the pipeline's episode_id matches the episode_topics
+        row process_next() writes target_publish_at onto — episode_id
+        auto-assignment for brand-new (non-rerun) topics is a separate,
+        pre-existing characteristic of process_next() unrelated to this
+        milestone.
+        """
+        _make_operations_profile(db_path, unattended_operation_enabled=True)
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+
+        topic_id = enqueue_topic(
+            "hypogeum", "Scheduler-derived topic", db_path=db_path,
+            episode_id="ep_sched_e2e",
+        )
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is None
+
+        past = datetime.now(timezone.utc) - timedelta(minutes=1)
+        create_schedule(
+            db_path=db_path, scope="channel", channel_id="hypogeum",
+            cadence="daily", next_run_at=past,
+        )
+        tick(db_path=db_path, now=datetime.now(timezone.utc))
+        consume_scheduled_runs(db_path=db_path)
+
+        # consume_scheduled_runs() must NOT have touched episode_topics —
+        # nothing is derived/written until process_next() actually claims.
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is None
+
+        executor = wi.build_gated_pipeline_executor(db_path=db_path, project_root=project_root)
+        pr = process_next(
+            worker_id="w1", db_path=db_path, dry_run=False, config=object(),
+            pipeline_executor=executor,  # topic_resolver=None — real backlog claim
+        )
+
+        # Only now — after the real claim — is the target derived and written
+        # onto the exact topic that was claimed.
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is not None
+
+        assert pr.status == "completed"
+        assert len(call_log) == 1
+        assert call_log[0]["episode_id"] == "ep_sched_e2e"
+
+        attempt = wi.load_latest_worker_attempt("ep_sched_e2e", project_root=project_root)
+        assert attempt.blocked_reason is None
+        assert attempt.plan_status == "executable"
+        assert attempt.success is True
 
 
 # ===========================================================================

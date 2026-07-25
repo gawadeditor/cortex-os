@@ -248,12 +248,14 @@ class Config:
     MUAPI_VIDEO_RESOLUTION: str               # default: 1080p (sent explicitly for veo3.1 models)
     MUAPI_I2V_MODEL: str                      # default: veo3-image-to-video
     MUAPI_IMAGE_MODEL: str                    # legacy alias — use THUMBNAIL_IMAGE_MODEL
-    THUMBNAIL_IMAGE_PROVIDER: str             # default: openrouter (primary)
+    THUMBNAIL_IMAGE_PROVIDER: str             # default: muapi (primary — canonical GPT Image 2 route;
+                                               # see docs/validation/thumbnail_image_generation_validation/
+                                               # GPT_IMAGE_2_ROUTING_AUDIT.md)
     THUMBNAIL_IMAGE_MODEL: str               # default: gpt-image-2-text-to-image (MUAPI path only)
     THUMBNAIL_IMAGE_RESOLUTION: str          # default: 2K (GPT Image 2 only)
     THUMBNAIL_IMAGE_QUALITY: str             # default: high (GPT Image 2 only)
-    THUMBNAIL_FALLBACK_PROVIDER: str         # default: openai  (fallback #1 when primary fails)
-    THUMBNAIL_FALLBACK2_PROVIDER: str        # default: muapi   (fallback #2 when fallback #1 fails)
+    THUMBNAIL_FALLBACK_PROVIDER: str         # default: openrouter (fallback #1 when primary fails)
+    THUMBNAIL_FALLBACK2_PROVIDER: str        # default: openai     (fallback #2 when fallback #1 fails)
     THUMBNAIL_FALLBACK_MODEL: str            # default: flux-2-dev (MUAPI-internal model fallback)
     MUAPI_DEFAULT_TIER: int                   # default: 2 (VPD routing fallback)
     MUAPI_TIMEOUT_SECONDS: int                # default: 180 (Veo3 Premium took 128.5s in benchmark)
@@ -271,6 +273,10 @@ class Config:
     MUAPI_RUNWAY_ONLY_MODE: bool          # force T2 for all video scenes (T2=veo3-fast since 2026-06-27); default: false
     MUAPI_DRY_RUN: bool                   # no real API calls; default: false
     MUAPI_ALLOW_PAID_FALLBACKS: bool      # allow automatic paid fallback; default: false
+
+    # Queue auto-retry (Roadmap priority 3 — recovery hardening)
+    QUEUE_MAX_AUTO_RETRIES: int           # default: 2 (3 total attempts including original)
+    QUEUE_RETRY_BACKOFF_MINUTES: str      # comma-separated minutes per retry; default: "5,20"
     ENABLE_DEDICATED_SHORT_GENERATION: bool  # allow VPD to plan/generate 9:16 Short scenes; default: false
 
     # ------------------------------------------------------------------
@@ -293,6 +299,12 @@ class Config:
     # Brand Guardian Agent (BGA v1A) — pre-generation brand compliance gate
     # ------------------------------------------------------------------
     BGA_ENABLED: bool  # run BGA Pass 1 + Pass 2 before MUAPI generation; default: false
+
+    # ------------------------------------------------------------------
+    # Expensive-run safety gate (2026-07-13) — see hypogeum/production_gate.py
+    # ------------------------------------------------------------------
+    PRODUCTION_MODE: str          # "validation" | "production"; default: validation
+    FULL_PRODUCTION_ENABLED: bool  # must be explicitly true to run a full paid episode; default: false
 
     # ------------------------------------------------------------------
     # Per-agent text reasoning model assignments (configurable)
@@ -427,16 +439,23 @@ class Config:
         self.MUAPI_VIDEO_RESOLUTION = _get_optional("MUAPI_VIDEO_RESOLUTION", default="1080p")
         self.MUAPI_I2V_MODEL = _get_optional("MUAPI_I2V_MODEL", default="veo3-image-to-video")
         self.MUAPI_IMAGE_MODEL = _get_optional("MUAPI_IMAGE_MODEL", default="flux-2-dev")  # legacy
-        self.THUMBNAIL_IMAGE_PROVIDER = _get_optional("THUMBNAIL_IMAGE_PROVIDER", default="openrouter")
+        # Canonical routing decision (docs/validation/thumbnail_image_generation_validation/
+        # GPT_IMAGE_2_ROUTING_AUDIT.md): MUAPI gpt-image-2-text-to-image is the primary
+        # thumbnail provider/model. openrouter and openai are genuine-failure fallbacks only.
+        self.THUMBNAIL_IMAGE_PROVIDER = _get_optional("THUMBNAIL_IMAGE_PROVIDER", default="muapi")
         self.THUMBNAIL_IMAGE_MODEL = _get_optional(
             "THUMBNAIL_IMAGE_MODEL", default="gpt-image-2-text-to-image"
         )
         self.THUMBNAIL_IMAGE_RESOLUTION = _get_optional("THUMBNAIL_IMAGE_RESOLUTION", default="2K")
         self.THUMBNAIL_IMAGE_QUALITY = _get_optional("THUMBNAIL_IMAGE_QUALITY", default="high")
-        self.THUMBNAIL_FALLBACK_PROVIDER = _get_optional("THUMBNAIL_FALLBACK_PROVIDER", default="openai")
-        self.THUMBNAIL_FALLBACK2_PROVIDER = _get_optional("THUMBNAIL_FALLBACK2_PROVIDER", default="muapi")
+        self.THUMBNAIL_FALLBACK_PROVIDER = _get_optional("THUMBNAIL_FALLBACK_PROVIDER", default="openrouter")
+        self.THUMBNAIL_FALLBACK2_PROVIDER = _get_optional("THUMBNAIL_FALLBACK2_PROVIDER", default="openai")
         self.THUMBNAIL_FALLBACK_MODEL = _get_optional("THUMBNAIL_FALLBACK_MODEL", default="flux-2-dev")
         self.MUAPI_DEFAULT_TIER = _get_int("MUAPI_DEFAULT_TIER", default=2)
+        self.QUEUE_MAX_AUTO_RETRIES = _get_int("QUEUE_MAX_AUTO_RETRIES", default=2)
+        self.QUEUE_RETRY_BACKOFF_MINUTES = _get_optional(
+            "QUEUE_RETRY_BACKOFF_MINUTES", default="5,20",
+        )
         self.MUAPI_TIMEOUT_SECONDS = _get_int("MUAPI_TIMEOUT_SECONDS", default=180)
         self.MUAPI_POLL_INTERVAL_SECONDS = _get_int("MUAPI_POLL_INTERVAL_SECONDS", default=5)
         self.MUAPI_MAX_POLL_ATTEMPTS = _get_int("MUAPI_MAX_POLL_ATTEMPTS", default=24)
@@ -487,6 +506,10 @@ class Config:
 
         # --- Brand Guardian Agent ---
         self.BGA_ENABLED = _get_bool("BGA_ENABLED", default=False)
+
+        # --- Expensive-run safety gate ---
+        self.PRODUCTION_MODE = _get_optional("PRODUCTION_MODE", default="validation") or "validation"
+        self.FULL_PRODUCTION_ENABLED = _get_bool("FULL_PRODUCTION_ENABLED", default=False)
 
         # --- Thumbnail Identity Guardian ---
         self.TIG_ENABLED = _get_bool("TIG_ENABLED", default=True)

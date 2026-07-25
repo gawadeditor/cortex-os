@@ -65,7 +65,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -87,6 +87,7 @@ from hypogeum.db import (
     set_worker_control,
     update_scheduled_run_status,
 )
+from hypogeum.failure_policy import FailurePolicy
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,8 @@ def enqueue(
     priority: int = 0,
     source: Optional[str] = None,
     recovery_from_run_id: Optional[str] = None,
+    retry_count: int = 0,
+    next_attempt_at: Optional[str] = None,
 ) -> str:
     """
     Add a work item to the run queue.
@@ -134,10 +137,16 @@ def enqueue(
         episode_id:            Links queue item to a specific episode for reruns.
         priority:              Claim ordering — lower integer = higher priority.
                                Default 0. Use negative values for urgent items.
-        source:                'rerun' | 'schedule' | 'manual'. Used for claim
-                               ordering (reruns are preferred over schedules).
+        source:                'rerun' | 'schedule' | 'manual' | 'auto_retry'.
+                               Used for claim ordering (reruns are preferred
+                               over schedules).
         recovery_from_run_id:  run_id of the failed run this item recovers.
-                               Set for source='rerun' items.
+                               Set for source='rerun'/'auto_retry' items.
+        retry_count:           Attempt number for auto-retry items (0 for
+                               every other source). See _maybe_schedule_retry().
+        next_attempt_at:       ISO 8601 UTC — claim_next() will not select
+                               this item before this time. None (default)
+                               means immediately claimable.
 
     Returns:
         New queue_id (UUID4 string).
@@ -160,6 +169,8 @@ def enqueue(
             priority=priority,
             source=source,
             recovery_from_run_id=recovery_from_run_id,
+            retry_count=retry_count,
+            next_attempt_at=next_attempt_at,
         )
         conn.commit()
     finally:
@@ -486,6 +497,126 @@ def get_item(
 # Queue Consumer
 # ===========================================================================
 
+# Fallback backoff (minutes per retry attempt, 1-indexed) — used only if
+# Config.QUEUE_RETRY_BACKOFF_MINUTES is absent/unparseable. The real default
+# lives in Config (see hypogeum/config.py) so this is a defensive floor, not
+# the source of truth.
+_FALLBACK_BACKOFF_MINUTES = [5, 20]
+
+
+def _resolve_backoff_minutes(config, retry_count: int) -> int:
+    """
+    Parse config.QUEUE_RETRY_BACKOFF_MINUTES ("5,20") into delay minutes for
+    the given 1-indexed retry attempt number. Reuses the last entry if
+    retry_count exceeds the parsed list's length — protects against a
+    policy shorter than QUEUE_MAX_AUTO_RETRIES.
+    """
+    raw = getattr(config, "QUEUE_RETRY_BACKOFF_MINUTES", None) if config is not None else None
+    minutes_list = list(_FALLBACK_BACKOFF_MINUTES)
+    if raw:
+        try:
+            parsed = [int(x.strip()) for x in raw.split(",") if x.strip()]
+            if parsed:
+                minutes_list = parsed
+        except ValueError:
+            pass
+    idx = min(max(retry_count, 1), len(minutes_list)) - 1
+    return minutes_list[idx]
+
+
+def _lookup_latest_run_id(episode_id: Optional[str], db_path: Optional[Path]) -> Optional[str]:
+    """Most recent runs.run_id for episode_id — the run that just failed."""
+    if not episode_id:
+        return None
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT run_id FROM runs WHERE episode_id = ? ORDER BY started_at DESC LIMIT 1",
+            (episode_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["run_id"] if row else None
+
+
+def _maybe_schedule_retry(
+    exc: Optional[BaseException],
+    *,
+    channel_id: Optional[str],
+    episode_id: Optional[str],
+    topic_text: Optional[str],
+    retry_count: int,
+    priority: int,
+    config=None,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """
+    Decide whether to schedule a bounded auto-retry for a failed attempt.
+
+    exc: the exception that caused the failure (live process_next() path),
+    or None (orphan reconciliation path — infrastructure interruption, not
+    a business decision, so always retry-eligible; never TERMINAL).
+
+    Classification never names a concrete exception type — reads
+    exc.failure_policy (hypogeum.failure_policy.FailurePolicy), defaulting
+    to TRANSIENT when the attribute is absent, so any current or future
+    exception class is retryable unless it explicitly opts out.
+
+    Creates both a fresh episode_topics row and a fresh run_queue row (via
+    topics.enqueue_topic() + this module's own enqueue()) — mirroring
+    exactly how run_dashboard.py::api_run_rerun already reruns an episode,
+    so claim_next_topic() reliably resolves the same content on the next
+    claim rather than an unrelated backlog topic. Never touches the
+    original topic's own release/skip handling — topic-quality
+    classification and execution-reliability retries are independent
+    concerns.
+
+    Returns True if a retry topic+queue pair was created, False otherwise
+    (terminal classification, retry budget exhausted, or missing enough
+    context to safely recreate the attempt). Never raises — best-effort,
+    matching the surrounding failure-handling code's own philosophy.
+    """
+    try:
+        if exc is not None and getattr(
+            exc, "failure_policy", FailurePolicy.TRANSIENT,
+        ) == FailurePolicy.TERMINAL:
+            return False
+
+        if not channel_id or not episode_id or not topic_text:
+            return False
+
+        max_retries = getattr(config, "QUEUE_MAX_AUTO_RETRIES", 2) if config is not None else 2
+        if retry_count >= max_retries:
+            return False
+
+        next_retry_count = retry_count + 1
+        backoff_minutes = _resolve_backoff_minutes(config, next_retry_count)
+        next_attempt_at = _iso(_now_utc() + timedelta(minutes=backoff_minutes))
+        recovery_from_run_id = _lookup_latest_run_id(episode_id, db_path)
+
+        from hypogeum.topics import enqueue_topic
+        enqueue_topic(
+            channel_id, topic_text,
+            priority=priority,
+            source="auto_retry",
+            episode_id=episode_id,
+            db_path=db_path,
+        )
+        enqueue(
+            db_path=db_path,
+            channel_id=channel_id,
+            episode_id=episode_id,
+            priority=priority,
+            source="auto_retry",
+            recovery_from_run_id=recovery_from_run_id,
+            retry_count=next_retry_count,
+            next_attempt_at=next_attempt_at,
+        )
+        return True
+    except Exception:
+        return False
+
+
 # States that are permanently non-runnable — fail item instead of releasing
 _PERMANENT_BLOCK_STATES = frozenset({"archived", "error"})
 
@@ -672,6 +803,9 @@ def process_next(
     topic_text: Optional[str] = None
     topic_id: Optional[str] = None
     using_backlog = False
+    # Guards _maybe_schedule_retry()'s call site against a NameError if an
+    # exception is raised before Step 5 assigns the real value below.
+    episode_id: Optional[str] = None
 
     if topic_resolver is not None:
         # Caller-provided resolver — caller owns topic lifecycle
@@ -914,6 +1048,8 @@ def process_next(
         # PipelineRejectedError means the EP scored the topic below threshold —
         # the topic content itself is the problem, so skip it permanently.
         # All other exceptions are infrastructure failures — release for retry.
+        # Unaffected by and independent of the auto-retry decision below —
+        # topic quality and execution reliability are different concerns.
         if topic_id is not None and using_backlog:
             try:
                 if isinstance(exc, _pipeline_module.PipelineRejectedError):
@@ -924,6 +1060,33 @@ def process_next(
                     release_topic(topic_id, db_path=db_path)
             except Exception:
                 pass  # never let cleanup block the result
+
+        # Auto-retry (Roadmap priority 3 — recovery hardening): bounded,
+        # backed-off, execution-level retry — see _maybe_schedule_retry().
+        # Independent of the topic hygiene above; never raises.
+        retry_scheduled = _maybe_schedule_retry(
+            exc,
+            channel_id=channel_id,
+            episode_id=episode_id,
+            topic_text=topic_text,
+            retry_count=claimed.get("retry_count") or 0,
+            priority=claimed.get("priority") or 0,
+            config=config,
+            db_path=db_path,
+        )
+        if retry_scheduled:
+            from hypogeum.logger import get_logger
+            get_logger(agent="queue").info(
+                "queue_item_retry_scheduled",
+                queue_id=queue_id, episode_id=episode_id,
+            )
+        elif getattr(exc, "failure_policy", FailurePolicy.TRANSIENT) != FailurePolicy.TERMINAL:
+            from hypogeum.logger import get_logger
+            get_logger(agent="queue").info(
+                "queue_item_retry_exhausted",
+                queue_id=queue_id, episode_id=episode_id,
+                retry_count=claimed.get("retry_count") or 0,
+            )
 
         try:
             set_worker_control("worker_status", "idle", db_path=db_path)

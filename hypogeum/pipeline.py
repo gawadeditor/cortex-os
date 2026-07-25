@@ -83,6 +83,7 @@ from hypogeum.db import (
     update_stage_execution_failed,
     update_stage_execution_skipped,
 )
+from hypogeum.failure_policy import FailurePolicy
 from hypogeum.finance import clear_run_context, set_run_context, write_episode_rollup
 from hypogeum.ois import OISBlockedError, get_blocking_signals, is_channel_blocked, is_factory_blocked
 from hypogeum.production_gate import require_full_production_authorized
@@ -302,6 +303,8 @@ class PipelineRejectedError(PipelineError):
         episode_id  — episode identifier from the failed run.
         scorecard   — the validation_scorecard dict produced by the EP.
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, episode_id: str, scorecard: dict) -> None:
         self.episode_id = episode_id
         self.scorecard = scorecard
@@ -324,6 +327,8 @@ class ComplianceRejectedError(PipelineError):
         episode_id  — episode identifier from the failed run.
         report      — the compliance_report dict produced by the Compliance Agent.
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, episode_id: str, report: dict) -> None:
         self.episode_id = episode_id
         self.report = report
@@ -346,6 +351,8 @@ class QARejectedError(PipelineError):
         episode_id  — episode identifier from the failed run.
         report      — the qa_approval_report dict produced by the QA Agent.
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, episode_id: str, report: dict) -> None:
         self.episode_id = episode_id
         self.report = report
@@ -369,6 +376,8 @@ class FinanceBudgetBlockedError(PipelineError):
         episode_id  — episode identifier from the failed run.
         record      — the finance_record dict produced by the Finance Agent.
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, episode_id: str, record: dict) -> None:
         self.episode_id = episode_id
         self.record = record
@@ -412,6 +421,8 @@ class ChannelNotFoundError(PipelineError):
     Attributes:
         channel_id — the channel_id that was not found.
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, channel_id: str) -> None:
         self.channel_id = channel_id
         super().__init__(
@@ -432,6 +443,8 @@ class ChannelNotActiveError(PipelineError):
         channel_id — the channel that was found.
         status     — its current status (e.g. 'configured', 'paused').
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, channel_id: str, status: str) -> None:
         self.channel_id = channel_id
         self.status = status
@@ -453,6 +466,8 @@ class PackageDeficiencyError(PipelineError):
         episode_id — episode identifier from the failed run.
         pdr        — the package_deficiency_report dict issued by the RD.
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, episode_id: str, pdr: dict) -> None:
         self.episode_id = episode_id
         self.pdr = pdr

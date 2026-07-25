@@ -823,6 +823,28 @@ class TestDuplicatePrevention:
         with pytest.raises(DuplicateTopicError):
             enqueue_topic("ch_cl", "Topic X", validate_channel=False, db_path=db_path)
 
+    def test_rerun_bypasses_duplicate_check(self, db_path):
+        enqueue_topic("ch_rerun_dup", "Same Topic Rerun", validate_channel=False, db_path=db_path)
+        # source='rerun' must proceed even against an active duplicate
+        tid2 = enqueue_topic(
+            "ch_rerun_dup", "Same Topic Rerun",
+            validate_channel=False, source="rerun", db_path=db_path,
+        )
+        assert tid2 is not None
+
+    def test_auto_retry_bypasses_duplicate_check(self, db_path):
+        """
+        Auto-retry (Roadmap priority 3) recreates the exact topic text an
+        earlier failed attempt was about — must bypass dedup exactly like
+        source='rerun' does.
+        """
+        enqueue_topic("ch_retry_dup", "Same Topic Retry", validate_channel=False, db_path=db_path)
+        tid2 = enqueue_topic(
+            "ch_retry_dup", "Same Topic Retry",
+            validate_channel=False, source="auto_retry", db_path=db_path,
+        )
+        assert tid2 is not None
+
     def test_consumed_topic_allows_reenqueue(self, db_path):
         tid = enqueue_topic("ch_rc", "Pompeii", validate_channel=False, db_path=db_path)
         claim_next_topic("ch_rc", db_path=db_path)

@@ -42,6 +42,7 @@ from hypogeum.channel_config import (
     _SUPPORTED_PRIVACY_STATES,
     get_channel_operations_profile,
 )
+from hypogeum.failure_policy import FailurePolicy
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,24 +94,35 @@ class InvocationMode(str, Enum):
 
 class OperationsProfileMissingError(RuntimeError):
     """No ChannelOperationsProfile exists for the requested channel_id."""
+    failure_policy = FailurePolicy.TERMINAL  # config/data problem, not timing
 
 
 class BackwardPlanArtifactError(RuntimeError):
     """An existing backward plan artifact is corrupted or does not match the requested run."""
+    failure_policy = FailurePolicy.TERMINAL  # config/data problem, not timing
 
 
 class WorkerPersistenceError(RuntimeError):
     """Worker attempt metadata could not be durably persisted. Always fail closed on this."""
+    # Deliberately left TRANSIENT (default) — a persistence hiccup is
+    # plausibly transient; queue-level auto-retry bounds the cost either way.
 
 
 class GatedExecutionDeferred(RuntimeError):
     """A transient gate (currently: max_concurrent_episodes) blocked this attempt.
     The queue item has already been released back to 'queued' for retry."""
+    # TERMINAL for queue-level auto-retry purposes specifically — not because
+    # this is unretryable, but because it already self-manages its own retry
+    # (release() called before raising, see module docstring above). Auto-retry
+    # creating a second, separate retry item for the same episode_id would
+    # race against this class's own already-released queue item.
+    failure_policy = FailurePolicy.TERMINAL
 
 
 class GatedExecutionRefused(RuntimeError):
     """A terminal gate (profile/plan) blocked this attempt. The queue item
     will be marked 'failed' by process_next()'s existing exception handling."""
+    failure_policy = FailurePolicy.TERMINAL
 
 
 # ---------------------------------------------------------------------------

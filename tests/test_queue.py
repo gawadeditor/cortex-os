@@ -183,8 +183,19 @@ class TestSchema:
             "episode_id", "priority", "status", "worker_id",
             "queued_at", "claimed_at", "completed_at", "failed_at",
             "error_message", "created_at",
+            "source", "recovery_from_run_id", "retry_count", "next_attempt_at",
         }
         assert required <= cols
+
+    def test_retry_count_defaults_to_zero(self, db_path):
+        qid = enqueue(db_path=db_path)
+        row = _queue_row(db_path, qid)
+        assert row["retry_count"] == 0
+
+    def test_next_attempt_at_defaults_to_none(self, db_path):
+        qid = enqueue(db_path=db_path)
+        row = _queue_row(db_path, qid)
+        assert row["next_attempt_at"] is None
 
     def test_run_queue_indexes_exist(self, db_path):
         conn = get_connection(db_path)
@@ -476,6 +487,28 @@ class TestClaimOrdering:
         w = _worker()
         claimed = claim_next(worker_id=w, db_path=db_path)
         assert claimed["queue_id"] == q_second
+
+    def test_future_next_attempt_at_not_claimable(self, db_path):
+        future = _iso(_now() + timedelta(minutes=10))
+        qid = enqueue(db_path=db_path, next_attempt_at=future)
+        claimed = claim_next(worker_id=_worker(), db_path=db_path)
+        assert claimed is None
+
+    def test_past_next_attempt_at_is_claimable(self, db_path):
+        past = _iso(_now() - timedelta(minutes=1))
+        qid = enqueue(db_path=db_path, next_attempt_at=past)
+        claimed = claim_next(worker_id=_worker(), db_path=db_path)
+        assert claimed is not None
+        assert claimed["queue_id"] == qid
+
+    def test_null_next_attempt_at_claimable_alongside_backoff_item(self, db_path):
+        # A normal item must still be claimed even while a backed-off retry
+        # item exists — backoff gating must not stall the whole queue.
+        future = _iso(_now() + timedelta(minutes=10))
+        q_retry = enqueue(db_path=db_path, priority=-5, next_attempt_at=future)
+        q_normal = enqueue(db_path=db_path, priority=0)
+        claimed = claim_next(worker_id=_worker(), db_path=db_path)
+        assert claimed["queue_id"] == q_normal
 
 
 # ===========================================================================
@@ -2400,3 +2433,181 @@ class TestConsumerHygiene:
         # process_next must return a ProcessResult even when cleanup raises
         assert result.status == "failed"
         assert "original error" in result.error_message
+
+
+# ===========================================================================
+# Auto-retry (Roadmap priority 3 — recovery hardening)
+# ===========================================================================
+
+class TestAutoRetry:
+    """
+    Verifies hypogeum.queue._maybe_schedule_retry(), wired into
+    process_next()'s exception handler. TRANSIENT (default) failures get a
+    bounded, backed-off auto-retry topic+queue pair; TERMINAL failures
+    (FailurePolicy.TERMINAL, read via getattr — no isinstance taxonomy in
+    queue.py) never do. Original topic release/skip handling is unaffected
+    either way — topic quality and execution reliability are independent.
+    """
+
+    def _active_channel(self, db_path, channel_id="ch_retry"):
+        from hypogeum.calog import set_channel_state
+        set_channel_state(channel_id, "active", db_path=db_path)
+        return channel_id
+
+    def _setup(self, db_path, channel_id="ch_retry", topic_text="retry test topic"):
+        self._active_channel(db_path, channel_id)
+        topic_id = enqueue_topic(channel_id, topic_text, db_path=db_path)
+        queue_id = enqueue(db_path=db_path, channel_id=channel_id)
+        return topic_id, queue_id
+
+    def _config(self, max_retries=2, backoff="5,20"):
+        return MagicMock(
+            FINANCE_BUDGET_CEILING_USD=10.0,
+            QUEUE_MAX_AUTO_RETRIES=max_retries,
+            QUEUE_RETRY_BACKOFF_MINUTES=backoff,
+        )
+
+    def _auto_retry_rows(self, db_path):
+        return [r for r in _all_queue_rows(db_path) if r["source"] == "auto_retry"]
+
+    def test_retryable_generic_exception_schedules_auto_retry(self, db_path):
+        topic_id, queue_id = self._setup(db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        assert result.status == "failed"
+        retries = self._auto_retry_rows(db_path)
+        assert len(retries) == 1
+        assert retries[0]["retry_count"] == 1
+        assert retries[0]["next_attempt_at"] is not None
+        assert retries[0]["next_attempt_at"] > _iso(_now())
+
+    def test_auto_retry_creates_matching_topic(self, db_path):
+        self._setup(db_path, topic_text="unique retry content")
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM episode_topics WHERE source = 'auto_retry'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0]["topic_text"] == "unique retry content"
+
+        retry_queue_row = self._auto_retry_rows(db_path)[0]
+        assert rows[0]["episode_id"] == retry_queue_row["episode_id"]
+
+    def test_terminal_exception_does_not_schedule_retry(self, db_path):
+        from hypogeum.pipeline import PipelineRejectedError
+
+        self._setup(db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=PipelineRejectedError("ep_x", {"overall_score": 3.0})):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        assert result.status == "failed"
+        assert self._auto_retry_rows(db_path) == []
+
+    def test_synthetic_terminal_exception_needs_no_queue_py_change(self, db_path):
+        """
+        Proves classification is generic: a brand-new exception class,
+        unknown to queue.py, is treated as terminal purely by setting
+        failure_policy — no isinstance/taxonomy update required.
+        """
+        from hypogeum.failure_policy import FailurePolicy
+
+        class _SomeFutureTerminalError(RuntimeError):
+            failure_policy = FailurePolicy.TERMINAL
+
+        self._setup(db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=_SomeFutureTerminalError("new kind of terminal failure")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        assert self._auto_retry_rows(db_path) == []
+
+    def test_exception_with_no_failure_policy_attribute_defaults_transient(self, db_path):
+        """A plain exception with no failure_policy attribute at all is retryable."""
+        class _UnknownProviderError(Exception):
+            pass
+
+        self._setup(db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=_UnknownProviderError("some brand new provider error")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        assert len(self._auto_retry_rows(db_path)) == 1
+
+    def test_retry_exhausted_at_configured_limit(self, db_path):
+        self._setup(db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(max_retries=0),
+            )
+
+        # max_retries=0 means the very first failure is already exhausted.
+        assert self._auto_retry_rows(db_path) == []
+
+    def test_original_topic_release_unaffected_by_retry_scheduling(self, db_path):
+        """
+        Topic quality and execution reliability are independent: the
+        original topic must still be released to 'queued' (existing
+        behavior for non-content failures) regardless of whether an
+        auto-retry topic+queue pair was also created.
+        """
+        topic_id, _ = self._setup(db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        original_topic = get_topic(topic_id, db_path=db_path)
+        assert original_topic["status"] == "queued"
+        assert len(self._auto_retry_rows(db_path)) == 1
+
+    def test_custom_backoff_minutes_respected(self, db_path):
+        self._setup(db_path)
+
+        before = _now()
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(backoff="1,2"),
+            )
+
+        retry_row = self._auto_retry_rows(db_path)[0]
+        next_attempt = datetime.fromisoformat(retry_row["next_attempt_at"])
+        delta_minutes = (next_attempt - before).total_seconds() / 60.0
+        assert 0.9 <= delta_minutes <= 1.5  # ~1 minute, first configured value

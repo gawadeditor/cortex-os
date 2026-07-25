@@ -49,6 +49,7 @@ def make_config(env: dict) -> Config:
         "OPENROUTER_APP_NAME", "OPENROUTER_FALLBACK_MODEL",
         "PERPLEXITY_API_KEY", "PERPLEXITY_MODEL", "PERPLEXITY_MAX_TOKENS",
         "MUAPI_API_KEY", "MUAPI_DEFAULT_TIER", "MUAPI_TIMEOUT_SECONDS", "MUAPI_WEBHOOK_URL",
+        "QUEUE_MAX_AUTO_RETRIES", "QUEUE_RETRY_BACKOFF_MINUTES",
         "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID",
         "ELEVENLABS_STABILITY", "ELEVENLABS_SIMILARITY_BOOST",
         "ELEVENLABS_MUSIC_MODEL_ID", "ELEVENLABS_MUSIC_DEFAULT_DURATION",
@@ -167,6 +168,22 @@ class TestOptionalVars:
         assert cfg.YOUTUBE_CLIENT_ID is None
         assert cfg.META_APP_ID is None
         assert cfg.META_STAGING_BASE_URL is None
+
+    def test_queue_max_auto_retries_default(self):
+        cfg = make_config(MINIMUM_ENV)
+        assert cfg.QUEUE_MAX_AUTO_RETRIES == 2
+
+    def test_queue_max_auto_retries_override(self):
+        cfg = make_config({**MINIMUM_ENV, "QUEUE_MAX_AUTO_RETRIES": "5"})
+        assert cfg.QUEUE_MAX_AUTO_RETRIES == 5
+
+    def test_queue_retry_backoff_minutes_default(self):
+        cfg = make_config(MINIMUM_ENV)
+        assert cfg.QUEUE_RETRY_BACKOFF_MINUTES == "5,20"
+
+    def test_queue_retry_backoff_minutes_override(self):
+        cfg = make_config({**MINIMUM_ENV, "QUEUE_RETRY_BACKOFF_MINUTES": "1,2,3"})
+        assert cfg.QUEUE_RETRY_BACKOFF_MINUTES == "1,2,3"
 
 
 # ---------------------------------------------------------------------------

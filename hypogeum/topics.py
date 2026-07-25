@@ -217,7 +217,8 @@ def enqueue_topic(
         ChannelNotFoundError: If validate_channel=True and the channel does not exist.
         DuplicateTopicError: If an identical queued/claimed topic already exists
                              for this channel (case-insensitive, whitespace-normalised).
-                             NOT raised when source='rerun' (reruns always proceed).
+                             NOT raised when source='rerun' or 'auto_retry'
+                             (both always proceed).
     """
     if not topic_text or not topic_text.strip():
         raise ValueError("topic_text must be a non-empty string.")
@@ -237,8 +238,12 @@ def enqueue_topic(
 
     conn = get_connection(db_path)
     try:
-        # Reruns bypass dedup — same topic text is expected and intentional
-        if source != "rerun" and _has_active_duplicate(conn, channel_id, clean_text):
+        # Reruns and auto-retries bypass dedup — same topic text is expected
+        # and intentional (auto-retry recreates the exact topic the failed
+        # attempt was about; see hypogeum.queue._maybe_schedule_retry()).
+        if source not in ("rerun", "auto_retry") and _has_active_duplicate(
+            conn, channel_id, clean_text,
+        ):
             raise DuplicateTopicError(channel_id, clean_text)
 
         insert_episode_topic(

@@ -208,8 +208,17 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("release_id", "TEXT"),   # P12-22: FK → releases.release_id
     ],
     "run_queue": [
-        ("source",               "TEXT"),  # 'rerun' | 'schedule' | 'manual'
-        ("recovery_from_run_id", "TEXT"),  # FK → runs.run_id; set for reruns only
+        ("source",               "TEXT"),  # 'rerun' | 'schedule' | 'manual' | 'auto_retry'
+        ("recovery_from_run_id", "TEXT"),  # FK → runs.run_id; set for reruns/auto_retry only
+        # Auto-retry (Roadmap priority 3): 0 for every original/manual/
+        # scheduled item; incremented by 1 relative to the failed item's
+        # own retry_count each time an auto-retry is created from it.
+        # Manual reruns never propagate this — always fresh 0.
+        ("retry_count",     "INTEGER NOT NULL DEFAULT 0"),
+        # NULL = claimable immediately (every existing item type). Set
+        # only on auto_retry items — claim_next_queue_item() excludes a
+        # row until this time has passed.
+        ("next_attempt_at", "TEXT"),
     ],
 }
 
@@ -1479,19 +1488,23 @@ def insert_queue_item(
     priority: int = 0,
     source: Optional[str] = None,
     recovery_from_run_id: Optional[str] = None,
+    retry_count: int = 0,
+    next_attempt_at: Optional[str] = None,
 ) -> None:
     """Insert a new queued work item with status='queued'."""
     conn.execute(
         """
         INSERT INTO run_queue
             (queue_id, scheduled_run_id, schedule_id, channel_id, episode_id,
-             priority, status, queued_at, created_at, source, recovery_from_run_id)
+             priority, status, queued_at, created_at, source, recovery_from_run_id,
+             retry_count, next_attempt_at)
         VALUES
-            (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
         """,
         (
             queue_id, scheduled_run_id, schedule_id, channel_id, episode_id,
             priority, queued_at, created_at, source, recovery_from_run_id,
+            retry_count, next_attempt_at,
         ),
     )
 
@@ -1529,17 +1542,21 @@ def claim_next_queue_item(
     # Step 1: identify the best candidate without modifying it.
     # Reruns: newest wins (created_at DESC, using NULL for non-reruns to skip).
     # Regular items: FIFO (queued_at ASC as final tiebreaker).
+    # next_attempt_at gates auto-retry items until their backoff elapses —
+    # NULL (every other item type) is always immediately claimable.
     candidate = conn.execute(
         """
         SELECT queue_id FROM run_queue
         WHERE status = 'queued'
+          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         ORDER BY
             priority ASC,
             CASE WHEN source = 'rerun' THEN 0 ELSE 1 END ASC,
             CASE WHEN source = 'rerun' THEN created_at ELSE NULL END DESC,
             queued_at ASC
         LIMIT 1
-        """
+        """,
+        (claimed_at,),
     ).fetchone()
     if candidate is None:
         return None

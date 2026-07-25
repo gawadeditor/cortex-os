@@ -644,3 +644,127 @@ class TestQueueAndStageReconciliation:
 
         assert _row(db, "run_queue", "queue_id", queued_id)["status"] == "queued"
         assert _row(db, "run_queue", "queue_id", completed_id)["status"] == "completed"
+
+
+# ===========================================================================
+# 3. Tier 3 — auto-retry (Roadmap priority 3 — recovery hardening)
+# ===========================================================================
+
+def _insert_episode_topic(
+    db: Path, channel_id: str, episode_id: str, topic_text: str,
+) -> str:
+    """Minimal episode_topics row so Tier 3 can resolve topic_text for retry."""
+    topic_id = str(uuid.uuid4())
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO episode_topics (topic_id, channel_id, topic_text, "
+            "status, created_at, updated_at, episode_id) "
+            "VALUES (?, ?, ?, 'consumed', datetime('now'), datetime('now'), ?)",
+            (topic_id, channel_id, topic_text, episode_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return topic_id
+
+
+def _auto_retry_queue_rows(db: Path, episode_id: str) -> list:
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        return [
+            dict(r) for r in conn.execute(
+                "SELECT * FROM run_queue WHERE episode_id = ? AND source = 'auto_retry'",
+                (episode_id,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+class TestOrphanAutoRetryTier3:
+    def test_orphaned_item_with_resolvable_topic_gets_retry_scheduled(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        _insert_queue_item(db, episode_id, "claimed")
+        _insert_episode_topic(db, "hypogeum", episode_id, "orphan retry topic")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        retries = _auto_retry_queue_rows(db, episode_id)
+        assert len(retries) == 1
+        assert retries[0]["retry_count"] == 1
+        assert retries[0]["next_attempt_at"] is not None
+
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            topic_rows = conn.execute(
+                "SELECT * FROM episode_topics WHERE source = 'auto_retry'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(topic_rows) == 1
+        assert topic_rows[0]["topic_text"] == "orphan retry topic"
+
+    def test_orphaned_item_without_resolvable_topic_gets_no_retry(self, tmp_path):
+        """
+        No episode_topics/episodes row exists for this episode_id — Tier 3
+        must not guess; it does nothing rather than risk retrying with
+        wrong or missing content (matches the pre-existing "no duplicate
+        rows" invariant in TestQueueAndStageReconciliation).
+        """
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        _insert_queue_item(db, episode_id, "claimed")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert _auto_retry_queue_rows(db, episode_id) == []
+
+    def test_exhausted_retry_budget_creates_no_new_retry(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        # retry_count already at the default limit (2) via a direct insert —
+        # simulates this being the item's third attempt.
+        queue_id = str(uuid.uuid4())
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "INSERT INTO run_queue (queue_id, channel_id, episode_id, priority, "
+                "status, worker_id, queued_at, claimed_at, created_at, source, retry_count) "
+                "VALUES (?, 'hypogeum', ?, 0, 'claimed', 'dead-worker', datetime('now'), "
+                "datetime('now'), datetime('now'), 'auto_retry', 2)",
+                (queue_id, episode_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _insert_episode_topic(db, "hypogeum", episode_id, "exhausted retry topic")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        # No NEW retry item beyond the pre-existing one already at the limit.
+        retries = _auto_retry_queue_rows(db, episode_id)
+        assert [r["queue_id"] for r in retries] == [queue_id]
+        # The item itself is still reconciled to failed — dead-letter, not stuck.
+        q = _row(db, "run_queue", "queue_id", queue_id)
+        assert q["status"] == "failed"
+
+    def test_second_reconciliation_pass_does_not_duplicate_retry(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        _insert_queue_item(db, episode_id, "claimed")
+        _insert_episode_topic(db, "hypogeum", episode_id, "idempotent retry topic")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        # The original orphaned run is only reconciled once (no longer
+        # 'running' on the second pass), so no second retry item is created.
+        assert len(_auto_retry_queue_rows(db, episode_id)) == 1

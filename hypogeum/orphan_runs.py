@@ -84,10 +84,8 @@ def reconcile_orphaned_runs(
     except Exception:
         return []
 
-    if not rows:
-        return []
-
     orphaned_ids: list[str] = []
+    orphaned_episode_ids: list[str] = []
     now = _now_iso()
 
     for row in rows:
@@ -96,10 +94,100 @@ def reconcile_orphaned_runs(
         try:
             _mark_orphaned(run_id, episode_id, now, db_path)
             orphaned_ids.append(run_id)
+            if episode_id:
+                orphaned_episode_ids.append(episode_id)
         except Exception:
             pass
 
+    # Reconcile run_queue / stage_executions too — same invariant as above
+    # (no worker is actively running a pipeline right now) means neither
+    # table can legitimately hold a 'claimed'/'running' row at this
+    # instant. Best-effort: a failure here must never affect the runs-table
+    # result already computed above. Runs even when `rows` was empty, so
+    # the Tier 2 residual sweep below still fires for a queue item whose
+    # owning worker crashed before its runs row was ever registered.
+    try:
+        _reconcile_queue_and_stage_state(orphaned_episode_ids, now, db_path)
+    except Exception:
+        pass
+
     return orphaned_ids
+
+
+def _reconcile_queue_and_stage_state(
+    orphaned_episode_ids: list,
+    now: str,
+    db_path: Optional[Path],
+) -> None:
+    """
+    Tier 1: reconcile run_queue/stage_executions rows attributable to the
+    orphaned runs rows just identified — the preferred path, since it
+    produces precise evidence (which run each stuck item belonged to).
+
+    Tier 2: reconcile any run_queue row still 'claimed' afterward. A
+    worker can crash after claiming a queue item but before its runs row
+    is even inserted, leaving a row with no orphaned run to associate it
+    with. The caller has already established no worker is actively
+    running a pipeline right now, so any row still 'claimed' at this point
+    is unconditionally stale — this tier exists so such a row is still
+    reconciled (never invisibly claimed), just logged separately so the
+    evidence honestly distinguishes "attributed" from "unattributed."
+
+    Never raises past this function — the caller treats it as best-effort.
+    """
+    from hypogeum.db import (
+        fail_all_claimed_queue_items,
+        fail_orphaned_queue_items_for_episodes,
+        get_connection,
+        get_running_stage_execution_ids_for_episodes,
+        update_stage_execution_failed,
+    )
+    from hypogeum.logger import get_logger
+
+    log = get_logger(agent="orphan_runs")
+
+    conn = get_connection(db_path)
+    try:
+        tier1_queue_ids = fail_orphaned_queue_items_for_episodes(
+            conn, orphaned_episode_ids, now, ORPHAN_ERROR,
+        )
+        stage_exec_ids = get_running_stage_execution_ids_for_episodes(
+            conn, orphaned_episode_ids,
+        )
+        for stage_exec_id in stage_exec_ids:
+            try:
+                update_stage_execution_failed(conn, stage_exec_id, now, ORPHAN_ERROR)
+            except Exception:
+                pass
+        conn.commit()
+    finally:
+        conn.close()
+
+    if tier1_queue_ids:
+        log.info(
+            "orphaned_queue_items_reconciled",
+            queue_ids=tier1_queue_ids,
+            episode_ids=orphaned_episode_ids,
+        )
+    if stage_exec_ids:
+        log.info(
+            "orphaned_stage_executions_reconciled",
+            stage_exec_ids=stage_exec_ids,
+            episode_ids=orphaned_episode_ids,
+        )
+
+    conn = get_connection(db_path)
+    try:
+        tier2_queue_ids = fail_all_claimed_queue_items(conn, now, ORPHAN_ERROR)
+        conn.commit()
+    finally:
+        conn.close()
+
+    if tier2_queue_ids:
+        log.warn(
+            "orphaned_queue_item_reconciled_unassociated",
+            queue_ids=tier2_queue_ids,
+        )
 
 
 def _mark_orphaned(

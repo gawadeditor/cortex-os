@@ -1650,6 +1650,113 @@ def release_queue_item(
     )
 
 
+def fail_orphaned_queue_items_for_episodes(
+    conn: sqlite3.Connection,
+    episode_ids: list,
+    failed_at: str,
+    error_message: str,
+) -> list:
+    """
+    Mark every 'claimed' run_queue row whose episode_id is in episode_ids
+    as 'failed'.
+
+    Used only by startup/idle-time orphan reconciliation
+    (hypogeum.orphan_runs.reconcile_orphaned_runs()), which has already
+    established that no worker is actively running a pipeline right now.
+    Unlike fail_queue_item(), this does not require a worker_id match —
+    the reconciling process never claimed these rows and cannot know the
+    dead worker's id.
+
+    Returns the list of queue_ids that were transitioned.
+    """
+    if not episode_ids:
+        return []
+    placeholders = ",".join("?" for _ in episode_ids)
+    rows = conn.execute(
+        f"SELECT queue_id FROM run_queue "
+        f"WHERE status = 'claimed' AND episode_id IN ({placeholders})",
+        tuple(episode_ids),
+    ).fetchall()
+    ids = [r["queue_id"] for r in rows]
+    if ids:
+        id_placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"UPDATE run_queue SET status = 'failed', failed_at = ?, error_message = ? "
+            f"WHERE queue_id IN ({id_placeholders})",
+            (failed_at, error_message, *ids),
+        )
+    return ids
+
+
+def fail_all_claimed_queue_items(
+    conn: sqlite3.Connection,
+    failed_at: str,
+    error_message: str,
+) -> list:
+    """
+    Mark every remaining 'claimed' run_queue row as 'failed', regardless of
+    episode_id association.
+
+    Residual safety net for orphan reconciliation — covers a worker
+    crashing after claiming a queue item but before its runs row is even
+    registered, so no episode_id association is possible. Call only after
+    fail_orphaned_queue_items_for_episodes() has already handled every row
+    it could attribute to a confirmed orphaned run; safe because the
+    caller has already established no worker is actively running a
+    pipeline right now, so any row still 'claimed' at this point is
+    unconditionally stale.
+
+    Returns the list of queue_ids that were transitioned.
+    """
+    rows = conn.execute("SELECT queue_id FROM run_queue WHERE status = 'claimed'").fetchall()
+    ids = [r["queue_id"] for r in rows]
+    if ids:
+        conn.execute(
+            "UPDATE run_queue SET status = 'failed', failed_at = ?, error_message = ? "
+            "WHERE status = 'claimed'",
+            (failed_at, error_message),
+        )
+    return ids
+
+
+def get_running_stage_execution_ids_for_episodes(
+    conn: sqlite3.Connection,
+    episode_ids: list,
+) -> list:
+    """Return stage_exec_ids currently 'running' for the given episode_ids."""
+    if not episode_ids:
+        return []
+    placeholders = ",".join("?" for _ in episode_ids)
+    rows = conn.execute(
+        f"SELECT stage_exec_id FROM stage_executions "
+        f"WHERE status = 'running' AND episode_id IN ({placeholders})",
+        tuple(episode_ids),
+    ).fetchall()
+    return [r["stage_exec_id"] for r in rows]
+
+
+def set_queue_item_episode_id(
+    conn: sqlite3.Connection,
+    queue_id: str,
+    episode_id: str,
+) -> bool:
+    """
+    Fill episode_id on a run_queue row, only if currently unset.
+
+    Mirrors topics.set_topic_episode_id()'s conditional-UPDATE-by-primary-
+    key pattern — part of the same target_publish_at identity-propagation
+    contract documented in queue.py::process_next(), Step 5. Populating
+    this is also what lets orphan reconciliation's Tier 1
+    (fail_orphaned_queue_items_for_episodes) attribute a scheduler-
+    originated queue item to its orphaned run.
+    """
+    cursor = conn.execute(
+        "UPDATE run_queue SET episode_id = ? WHERE queue_id = ? AND episode_id IS NULL",
+        (episode_id, queue_id),
+    )
+    return cursor.rowcount > 0
+
+
 def get_queue_item(
     conn: sqlite3.Connection,
     queue_id: str,

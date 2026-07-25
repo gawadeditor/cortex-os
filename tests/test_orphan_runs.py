@@ -71,6 +71,49 @@ def _run_error(db: Path, run_id: str) -> str | None:
         conn.close()
 
 
+def _insert_queue_item(
+    db: Path, episode_id: str | None, status: str = "claimed", worker_id: str = "dead-worker",
+) -> str:
+    queue_id = str(uuid.uuid4())
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO run_queue (queue_id, channel_id, episode_id, priority, status, "
+            "worker_id, queued_at, claimed_at, created_at, source) "
+            "VALUES (?, 'hypogeum', ?, 0, ?, ?, datetime('now'), datetime('now'), datetime('now'), 'manual')",
+            (queue_id, episode_id, status, worker_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return queue_id
+
+
+def _insert_stage_execution(db: Path, run_id: str, episode_id: str, status: str = "running") -> str:
+    stage_exec_id = str(uuid.uuid4())
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO stage_executions (stage_exec_id, run_id, episode_id, stage_name, "
+            "started_at, status) VALUES (?, ?, ?, 'research_director', datetime('now'), ?)",
+            (stage_exec_id, run_id, episode_id, status),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return stage_exec_id
+
+
+def _row(db: Path, table: str, id_col: str, id_val: str) -> dict | None:
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(f"SELECT * FROM {table} WHERE {id_col}=?", (id_val,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 # ===========================================================================
 # 1. No worker + running run → orphaned
 # ===========================================================================
@@ -466,3 +509,138 @@ class TestCLIWorkerVisibility:
             "Crashed worker (no PID file, stale DB status) must still trigger orphan detection"
         )
         assert _run_status(db, run_id) == "failed"
+
+
+# ===========================================================================
+# 10. H1 — run_queue / stage_executions reconciliation (MAR Production Repair)
+# ===========================================================================
+
+class TestQueueAndStageReconciliation:
+    def test_claimed_queue_item_associated_with_orphaned_run_is_reconciled(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        queue_id = _insert_queue_item(db, episode_id, "claimed")
+
+        result = reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert run_id in result
+        assert _run_status(db, run_id) == "failed"
+        q = _row(db, "run_queue", "queue_id", queue_id)
+        assert q["status"] == "failed"
+        assert q["error_message"] == ORPHAN_ERROR
+
+    def test_orphaned_mid_stage_execution_is_reconciled(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        queue_id = _insert_queue_item(db, episode_id, "claimed")
+        stage_exec_id = _insert_stage_execution(db, run_id, episode_id, "running")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        se = _row(db, "stage_executions", "stage_exec_id", stage_exec_id)
+        assert se["status"] == "failed"
+        assert se["error_message"] == ORPHAN_ERROR
+        assert se["completed_at"] is not None
+        q = _row(db, "run_queue", "queue_id", queue_id)
+        assert q["status"] == "failed"
+
+    def test_full_reconciliation_consistent_across_all_three_tables(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        queue_id = _insert_queue_item(db, episode_id, "claimed")
+        stage_exec_id = _insert_stage_execution(db, run_id, episode_id, "running")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert _run_status(db, run_id) == "failed"
+        assert _row(db, "run_queue", "queue_id", queue_id)["status"] == "failed"
+        assert _row(db, "stage_executions", "stage_exec_id", stage_exec_id)["status"] == "failed"
+
+    def test_second_reconciliation_is_a_no_op(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        queue_id = _insert_queue_item(db, episode_id, "claimed")
+        stage_exec_id = _insert_stage_execution(db, run_id, episode_id, "running")
+
+        r1 = reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+        q1 = _row(db, "run_queue", "queue_id", queue_id)
+        se1 = _row(db, "stage_executions", "stage_exec_id", stage_exec_id)
+
+        r2 = reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+        q2 = _row(db, "run_queue", "queue_id", queue_id)
+        se2 = _row(db, "stage_executions", "stage_exec_id", stage_exec_id)
+
+        assert run_id in r1
+        assert r2 == []
+        assert q1 == q2, "second reconciliation must not modify an already-reconciled row"
+        assert se1 == se2
+
+    def test_no_duplicate_queue_or_topic_rows_created(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        _insert_queue_item(db, episode_id, "claimed")
+
+        def _count(table):
+            conn = sqlite3.connect(str(db))
+            try:
+                return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            finally:
+                conn.close()
+
+        before_queue = _count("run_queue")
+        before_topics = _count("episode_topics")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert _count("run_queue") == before_queue, "reconciliation must never insert new run_queue rows"
+        assert _count("episode_topics") == before_topics, "reconciliation must never touch episode_topics"
+
+    def test_active_worker_protects_queue_and_stage_rows_too(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        queue_id = _insert_queue_item(db, episode_id, "claimed")
+        stage_exec_id = _insert_stage_execution(db, run_id, episode_id, "running")
+
+        result = reconcile_orphaned_runs(
+            db_path=db, worker_process_alive=True, worker_db_status="running",
+        )
+
+        assert result == []
+        assert _run_status(db, run_id) == "running"
+        assert _row(db, "run_queue", "queue_id", queue_id)["status"] == "claimed"
+        assert _row(db, "stage_executions", "stage_exec_id", stage_exec_id)["status"] == "running"
+
+    def test_unassociated_claimed_queue_item_still_reconciled_tier2(self, tmp_path):
+        """
+        A run_queue row can be 'claimed' with no corresponding orphaned runs
+        row at all (worker crashed after claiming but before registering its
+        runs row). Tier 2 must still reconcile it — must not remain
+        invisibly claimed.
+        """
+        db = _db(tmp_path)
+        queue_id = _insert_queue_item(db, None, "claimed")  # no runs row exists at all
+
+        result = reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert result == [], "no orphaned runs row exists, so orphaned_ids stays empty"
+        q = _row(db, "run_queue", "queue_id", queue_id)
+        assert q["status"] == "failed"
+        assert q["error_message"] == ORPHAN_ERROR
+
+    def test_queued_and_completed_queue_items_untouched(self, tmp_path):
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        episode_id = f"ep_{run_id[:8]}"
+        queued_id = _insert_queue_item(db, episode_id, "queued", worker_id=None)
+        completed_id = _insert_queue_item(db, episode_id, "completed")
+
+        reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert _row(db, "run_queue", "queue_id", queued_id)["status"] == "queued"
+        assert _row(db, "run_queue", "queue_id", completed_id)["status"] == "completed"

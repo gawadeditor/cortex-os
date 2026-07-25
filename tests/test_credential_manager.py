@@ -36,6 +36,7 @@ from hypogeum.credential_manager import (
     get_secret_profile,
     list_secret_profiles,
     resolve_credential,
+    resolve_oauth_credential,
     revoke_secret_profile,
     update_secret_profile,
 )
@@ -268,6 +269,124 @@ class TestResolveCredential:
     def test_missing_profile_raises_key_error(self, db_path):
         with pytest.raises(KeyError):
             resolve_credential("ghost-id", db_path=db_path)
+
+
+# ===========================================================================
+# TestResolveOAuthCredential — MAR/OAuth secret-source-of-truth repair.
+# secret_profiles is the canonical live source for OAuth-rotatable
+# credentials (YouTube, Meta); env/.env is the bootstrap/import fallback
+# only. Mirrors refresh_tiktok_token()'s already-correct resolution rule.
+# ===========================================================================
+
+class TestResolveOAuthCredential:
+
+    def test_active_profile_wins_over_env_fallback(self, db_path):
+        _make_profile(db_path, provider="youtube", label="youtube-oauth-refresh",
+                      credential_data="fresh-live-token", credential_type="oauth2_token")
+        result = resolve_oauth_credential(
+            providers=["youtube"], label="youtube-oauth-refresh",
+            db_path=db_path,
+        )
+        assert result == "fresh-live-token"
+
+    def test_env_fallback_when_no_active_profile_exists(self, db_path):
+        result = resolve_oauth_credential(
+            providers=["youtube"], label="youtube-oauth-refresh",
+            db_path=db_path,
+        )
+        assert result is None  # caller applies its own env fallback on None
+
+    def test_revoked_profile_is_ignored_falls_back(self, db_path):
+        sp = _make_profile(db_path, provider="youtube", label="youtube-oauth-refresh",
+                           credential_data="old-revoked-token", credential_type="oauth2_token")
+        revoke_secret_profile(sp.secret_profile_id, db_path=db_path)
+        result = resolve_oauth_credential(
+            providers=["youtube"], label="youtube-oauth-refresh",
+            db_path=db_path,
+        )
+        assert result is None
+
+    def test_expired_profile_is_ignored_falls_back(self, db_path):
+        sp = _make_profile(db_path, provider="youtube", label="youtube-oauth-refresh",
+                           credential_data="stale-token", credential_type="oauth2_token")
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE secret_profiles SET status='expired' WHERE secret_profile_id=?",
+                (sp.secret_profile_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        result = resolve_oauth_credential(
+            providers=["youtube"], label="youtube-oauth-refresh",
+            db_path=db_path,
+        )
+        assert result is None
+
+    def test_label_mismatch_is_ignored(self, db_path):
+        """An active profile with a different label (e.g. a stale 'youtube-env'
+        import row) must not be picked up in place of the oauth-refresh one."""
+        _make_profile(db_path, provider="youtube", label="youtube-env",
+                      credential_data="original-env-import", credential_type="oauth2_token")
+        result = resolve_oauth_credential(
+            providers=["youtube"], label="youtube-oauth-refresh",
+            db_path=db_path,
+        )
+        assert result is None
+
+    def test_provider_fallback_order_facebook_before_instagram(self, db_path):
+        _make_profile(db_path, provider="instagram", label="meta-oauth-token",
+                      credential_data="ig-token", credential_type="oauth2_token")
+        _make_profile(db_path, provider="facebook", label="meta-oauth-token",
+                      credential_data="fb-token", credential_type="oauth2_token")
+        result = resolve_oauth_credential(
+            providers=["facebook", "instagram"], label="meta-oauth-token",
+            db_path=db_path,
+        )
+        assert result == "fb-token"
+
+    def test_provider_fallback_to_second_when_first_absent(self, db_path):
+        _make_profile(db_path, provider="instagram", label="meta-oauth-token",
+                      credential_data="ig-token", credential_type="oauth2_token")
+        result = resolve_oauth_credential(
+            providers=["facebook", "instagram"], label="meta-oauth-token",
+            db_path=db_path,
+        )
+        assert result == "ig-token"
+
+    def test_json_key_extraction(self, db_path):
+        import json
+        _make_profile(db_path, provider="facebook", label="meta-oauth-token",
+                      credential_data=json.dumps({"access_token": "unwrapped-token"}),
+                      credential_type="oauth2_token")
+        result = resolve_oauth_credential(
+            providers=["facebook"], label="meta-oauth-token", json_key="access_token",
+            db_path=db_path,
+        )
+        assert result == "unwrapped-token"
+
+    def test_json_key_falls_back_to_raw_string_when_not_json(self, db_path):
+        _make_profile(db_path, provider="facebook", label="meta-oauth-token",
+                      credential_data="plain-raw-token", credential_type="oauth2_token")
+        result = resolve_oauth_credential(
+            providers=["facebook"], label="meta-oauth-token", json_key="access_token",
+            db_path=db_path,
+        )
+        assert result == "plain-raw-token"
+
+    def test_does_not_mutate_the_resolved_profile(self, db_path):
+        """Resolution must be read-only — the secret_profiles row remains
+        exactly as it was, so a subsequent resolve gets the same result."""
+        sp = _make_profile(db_path, provider="youtube", label="youtube-oauth-refresh",
+                           credential_data="stable-token", credential_type="oauth2_token")
+        resolve_oauth_credential(providers=["youtube"], label="youtube-oauth-refresh", db_path=db_path)
+        fetched = get_secret_profile(sp.secret_profile_id, db_path=db_path)
+        assert fetched.credential_data == "stable-token"
+        assert fetched.status == "active"
+        # Second resolution is identical — no state was consumed.
+        result2 = resolve_oauth_credential(providers=["youtube"], label="youtube-oauth-refresh", db_path=db_path)
+        assert result2 == "stable-token"
 
 
 # ===========================================================================

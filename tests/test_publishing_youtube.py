@@ -79,7 +79,7 @@ def _fake_srt(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 class TestRefreshYoutubeToken:
-    def test_success_returns_access_token(self):
+    def test_success_returns_access_token(self, tmp_path):
         config = _make_config()
         mock_resp = _make_response(
             200,
@@ -87,45 +87,123 @@ class TestRefreshYoutubeToken:
         )
 
         with patch("requests.post", return_value=mock_resp):
-            token = yt.refresh_youtube_token(config)
+            token = yt.refresh_youtube_token(config, db_path=tmp_path / "no_profiles.db")
 
         assert token == "ya29.fresh_token"
 
-    def test_http_401_raises_hard_failure(self):
+    def test_http_401_raises_hard_failure(self, tmp_path):
         config = _make_config()
         mock_resp = _make_response(401, text="Unauthorized")
 
         with patch("requests.post", return_value=mock_resp):
             with pytest.raises(HardFailureError) as exc_info:
-                yt.refresh_youtube_token(config)
+                yt.refresh_youtube_token(config, db_path=tmp_path / "no_profiles.db")
 
         assert exc_info.value.status_code == 401
 
-    def test_network_error_raises_soft_failure(self):
+    def test_network_error_raises_soft_failure(self, tmp_path):
         config = _make_config()
 
         with patch("requests.post", side_effect=requests.ConnectionError("no conn")):
             with pytest.raises(SoftFailureError):
-                yt.refresh_youtube_token(config)
+                yt.refresh_youtube_token(config, db_path=tmp_path / "no_profiles.db")
 
-    def test_missing_access_token_in_response_raises_hard_failure(self):
+    def test_missing_access_token_in_response_raises_hard_failure(self, tmp_path):
         config = _make_config()
         mock_resp = _make_response(200, json_data={"token_type": "Bearer"})
 
         with patch("requests.post", return_value=mock_resp):
             with pytest.raises(HardFailureError):
-                yt.refresh_youtube_token(config)
+                yt.refresh_youtube_token(config, db_path=tmp_path / "no_profiles.db")
 
-    def test_delegates_to_exchange_refresh_token_with_correct_fields(self):
+    def test_delegates_to_exchange_refresh_token_with_correct_fields(self, tmp_path):
         """refresh_youtube_token() must be a thin wrapper around
         exchange_refresh_token() -- the sole shared OAuth exchange
-        primitive -- not a second, independent implementation."""
+        primitive -- not a second, independent implementation. No active
+        secret_profile exists at this isolated db_path, so the resolved
+        refresh_token must fall back to config.YOUTUBE_REFRESH_TOKEN."""
         config = _make_config()
         with patch("hypogeum.publishing.youtube.exchange_refresh_token",
                    return_value="ya29.delegated") as mock_exchange:
-            token = yt.refresh_youtube_token(config)
+            token = yt.refresh_youtube_token(config, db_path=tmp_path / "no_profiles.db")
 
         assert token == "ya29.delegated"
+        mock_exchange.assert_called_once_with(
+            refresh_token="refresh_token_123",
+            client_id="client_id_123",
+            client_secret="client_secret_123",
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestRefreshYoutubeTokenSecretProfileResolution — MAR/OAuth
+# source-of-truth repair: secret_profiles is canonical, config/.env is
+# bootstrap fallback only. Uses the real credential_manager + a real
+# isolated tmp_path DB (not mocked) to prove the actual resolution wiring,
+# not just that some function got called.
+# ---------------------------------------------------------------------------
+
+class TestRefreshYoutubeTokenSecretProfileResolution:
+    def _seed_active_profile(self, db_path, token="live-secret-profile-token"):
+        from hypogeum.credential_manager import create_secret_profile
+        create_secret_profile(
+            provider="youtube",
+            label="youtube-oauth-refresh",
+            credential_type="oauth2_token",
+            credential_data=token,
+            db_path=db_path,
+        )
+
+    def test_active_secret_profile_token_used_over_stale_env(self, tmp_path):
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "cred.db"
+        initialize_schema(db_path)
+        self._seed_active_profile(db_path, token="fresh-from-oauth-flow")
+
+        config = _make_config()  # YOUTUBE_REFRESH_TOKEN = "refresh_token_123" (stale)
+        with patch("hypogeum.publishing.youtube.exchange_refresh_token",
+                   return_value="ya29.ok") as mock_exchange:
+            yt.refresh_youtube_token(config, db_path=db_path)
+
+        mock_exchange.assert_called_once_with(
+            refresh_token="fresh-from-oauth-flow",
+            client_id="client_id_123",
+            client_secret="client_secret_123",
+        )
+
+    def test_env_fallback_used_when_no_active_profile(self, tmp_path):
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "cred.db"
+        initialize_schema(db_path)  # schema exists, but no youtube profile row
+
+        config = _make_config()
+        with patch("hypogeum.publishing.youtube.exchange_refresh_token",
+                   return_value="ya29.ok") as mock_exchange:
+            yt.refresh_youtube_token(config, db_path=db_path)
+
+        mock_exchange.assert_called_once_with(
+            refresh_token="refresh_token_123",
+            client_id="client_id_123",
+            client_secret="client_secret_123",
+        )
+
+    def test_revoked_profile_does_not_shadow_env_fallback(self, tmp_path):
+        from hypogeum.credential_manager import revoke_secret_profile, create_secret_profile
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "cred.db"
+        initialize_schema(db_path)
+        sp = create_secret_profile(
+            provider="youtube", label="youtube-oauth-refresh",
+            credential_type="oauth2_token", credential_data="old-revoked-token",
+            db_path=db_path,
+        )
+        revoke_secret_profile(sp.secret_profile_id, db_path=db_path)
+
+        config = _make_config()
+        with patch("hypogeum.publishing.youtube.exchange_refresh_token",
+                   return_value="ya29.ok") as mock_exchange:
+            yt.refresh_youtube_token(config, db_path=db_path)
+
         mock_exchange.assert_called_once_with(
             refresh_token="refresh_token_123",
             client_id="client_id_123",

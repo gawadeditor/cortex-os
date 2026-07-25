@@ -7,7 +7,10 @@ Public API:
         and by provider verification (hypogeum.provider_verifier,
         hypogeum.credential_manager), so real publish-time refresh and
         dashboard "is YouTube connected" status can never disagree.
-    refresh_youtube_token(config) -> str
+    refresh_youtube_token(config, db_path=None) -> str
+        Resolves the refresh token from secret_profiles first (canonical
+        live source), config.YOUTUBE_REFRESH_TOKEN (.env) as bootstrap
+        fallback only — see the function's own docstring.
     upload_video(config, access_token, video_path, metadata) -> str
     upload_thumbnail(config, access_token, video_id, thumb_path) -> bool
     upload_captions(config, access_token, video_id, srt_path) -> bool
@@ -230,22 +233,38 @@ def exchange_refresh_token(
     return access_token
 
 
-def refresh_youtube_token(config: Config) -> str:
+def refresh_youtube_token(config: Config, db_path: Optional[Path] = None) -> str:
     """
-    Exchange the configured YouTube refresh token for a fresh access token.
+    Exchange the live YouTube refresh token for a fresh access token.
 
     Thin wrapper around exchange_refresh_token() — see that function for the
-    full failure-mode contract.
+    full failure-mode contract. The refresh token itself is resolved via
+    hypogeum.credential_manager.resolve_oauth_credential(): secret_profiles
+    (label='youtube-oauth-refresh', status='active') is the canonical live
+    source — written by the OAuth re-authorization flow
+    (/platforms/youtube/oauth_callback) — with config.YOUTUBE_REFRESH_TOKEN
+    (.env) used only as the bootstrap/import fallback when no active
+    profile exists. Mirrors refresh_tiktok_token()'s resolution rule; see
+    that function's docstring for why a single source of truth matters here
+    (a re-authorization is otherwise silently ignored by every caller that
+    only reads .env).
 
     Args:
-        config: Config instance with YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET,
-                YOUTUBE_REFRESH_TOKEN.
+        config:  Config instance with YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET,
+                 YOUTUBE_REFRESH_TOKEN (fallback only).
+        db_path: Override DB path for secret_profiles lookup (tests).
 
     Returns:
         Fresh access_token string.
     """
+    from hypogeum.credential_manager import resolve_oauth_credential
+
+    refresh_token = resolve_oauth_credential(
+        providers=["youtube"], label="youtube-oauth-refresh", db_path=db_path,
+    ) or config.YOUTUBE_REFRESH_TOKEN
+
     return exchange_refresh_token(
-        refresh_token=config.YOUTUBE_REFRESH_TOKEN,
+        refresh_token=refresh_token,
         client_id=config.YOUTUBE_CLIENT_ID,
         client_secret=config.YOUTUBE_CLIENT_SECRET,
     )

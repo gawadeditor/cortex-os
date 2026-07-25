@@ -14,6 +14,12 @@ Public API:
     get_secret_profile(secret_profile_id, db_path=None) -> Optional[SecretProfile]
     list_secret_profiles(provider=None, scope=None, db_path=None) -> list[SecretProfile]
 
+    resolve_oauth_credential(providers, label=None, json_key=None, db_path=None) -> Optional[str]
+      # Live credential for an OAuth-rotatable provider (secret_profiles is
+      # canonical; env/.env is only the bootstrap fallback). See
+      # hypogeum.publishing.youtube.refresh_youtube_token() /
+      # hypogeum.publishing.meta.refresh_meta_token() for the reference callers.
+
     update_secret_profile(secret_profile_id, credential_data=None, expires_at=None,
                           label=None, user_id=None, db_path=None) -> bool
 
@@ -267,6 +273,56 @@ def list_secret_profiles(
         return [_row_to_profile(r) for r in rows]
     except Exception:
         return []
+
+
+def resolve_oauth_credential(
+    providers: list,
+    label: Optional[str] = None,
+    json_key: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> Optional[str]:
+    """
+    Resolve the live credential_data for an OAuth-rotatable provider from
+    secret_profiles — the canonical runtime source for these credentials.
+    .env / Config is the one-time bootstrap/import fallback only (see
+    scripts/import_credentials.py); callers use it when this returns None.
+
+    Mirrors the resolution rule hypogeum.publishing.tiktok.refresh_tiktok_token()
+    already establishes (secret_profiles first, nothing else) — this is the
+    same rule generalized for reuse, not a new mechanism.
+
+    Tries each provider in `providers` order (first match wins — e.g. Meta's
+    Facebook and Instagram profiles share one app token, either can supply
+    it); within a provider, only a `status == "active"` profile counts, and
+    only one matching `label` when `label` is given. credential_data may be
+    a raw token string or a JSON object; when `json_key` is given, the value
+    is parsed as JSON and that key extracted, falling back to the raw
+    string if it isn't valid JSON.
+
+    Returns None when no active profile exists for any provider — this is
+    the signal for callers to fall back to their own env-derived value.
+    Never raises.
+    """
+    import json as _json
+    try:
+        for provider in providers:
+            profiles = list_secret_profiles(provider=provider, db_path=db_path)
+            active = [
+                p for p in profiles
+                if p.status == "active" and (label is None or p.label == label)
+            ]
+            if active:
+                cred = active[0].credential_data
+                if json_key:
+                    try:
+                        blob = _json.loads(cred)
+                        return blob.get(json_key) or cred
+                    except (ValueError, TypeError):
+                        return cred
+                return cred
+    except Exception:
+        pass
+    return None
 
 
 def update_secret_profile(

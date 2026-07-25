@@ -2,7 +2,10 @@
 hypogeum/publishing/meta.py — Meta Graph API client (Facebook + Instagram)
 
 Public API:
-    refresh_meta_token(config) -> str
+    refresh_meta_token(config, episode_id=None, db_path=None) -> str
+        Resolves the exchange token from secret_profiles first (canonical
+        live source), config.META_ACCESS_TOKEN (.env) as bootstrap
+        fallback only — see the function's own docstring.
     upload_facebook_video(config, access_token, video_path, metadata) -> str
     create_instagram_container(config, access_token, video_url, thumb_url, caption) -> str
     poll_instagram_container(config, access_token, creation_id) -> str
@@ -145,14 +148,30 @@ def _raise_for_status(response: requests.Response, context: str = "") -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def refresh_meta_token(config: Config, episode_id: Optional[str] = None) -> str:
+def refresh_meta_token(
+    config: Config,
+    episode_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> str:
     """
     Refresh the Meta long-lived page access token.
     GET /oauth/access_token?grant_type=fb_exchange_token&...
 
+    The token being exchanged is resolved via
+    hypogeum.credential_manager.resolve_oauth_credential(): secret_profiles
+    is the canonical live source — the Meta OAuth callback
+    (/platforms/meta/oauth_callback) writes it under label='meta-oauth-token',
+    trying provider='facebook' then provider='instagram' (Facebook and
+    Instagram share one Meta app token, either row can supply it) — with
+    config.META_ACCESS_TOKEN (.env) used only as the bootstrap/import
+    fallback when neither has an active profile. Mirrors
+    refresh_youtube_token()/refresh_tiktok_token()'s resolution rule.
+
     Args:
-        config: Config instance with META_APP_ID, META_APP_SECRET, META_ACCESS_TOKEN.
+        config: Config instance with META_APP_ID, META_APP_SECRET,
+                META_ACCESS_TOKEN (fallback only).
         episode_id: For log correlation.
+        db_path: Override DB path for secret_profiles lookup (tests).
 
     Returns:
         New long-lived access token string.
@@ -161,14 +180,21 @@ def refresh_meta_token(config: Config, episode_id: Optional[str] = None) -> str:
         HardFailureError — on 401/403 or unexpected response.
         SoftFailureError — on network error or 429/500/503.
     """
+    from hypogeum.credential_manager import resolve_oauth_credential
+
     log = get_logger(episode_id=episode_id, agent="meta")
     log.info("meta_token_refresh_start", episode_id=episode_id)
+
+    exchange_token = resolve_oauth_credential(
+        providers=["facebook", "instagram"], label="meta-oauth-token",
+        json_key="access_token", db_path=db_path,
+    ) or config.META_ACCESS_TOKEN
 
     params = {
         "grant_type": "fb_exchange_token",
         "client_id": config.META_APP_ID,
         "client_secret": config.META_APP_SECRET,
-        "fb_exchange_token": config.META_ACCESS_TOKEN,
+        "fb_exchange_token": exchange_token,
     }
 
     try:

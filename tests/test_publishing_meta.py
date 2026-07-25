@@ -144,39 +144,115 @@ class TestRaiseForStatusGraphDiagnostics:
 # ---------------------------------------------------------------------------
 
 class TestRefreshMetaToken:
-    def test_success_returns_new_token(self):
+    def test_success_returns_new_token(self, tmp_path):
         config = _make_config()
         mock_resp = _make_response(200, json_data={"access_token": "EAA_new_long_lived"})
 
         with patch("requests.get", return_value=mock_resp):
-            token = refresh_meta_token(config, episode_id="ep_test")
+            token = refresh_meta_token(config, episode_id="ep_test", db_path=tmp_path / "no_profiles.db")
 
         assert token == "EAA_new_long_lived"
 
-    def test_401_raises_hard_failure(self):
+    def test_401_raises_hard_failure(self, tmp_path):
         config = _make_config()
         mock_resp = _make_response(401, text="Unauthorized")
 
         with patch("requests.get", return_value=mock_resp):
             with pytest.raises(HardFailureError) as exc_info:
-                refresh_meta_token(config)
+                refresh_meta_token(config, db_path=tmp_path / "no_profiles.db")
 
         assert exc_info.value.status_code == 401
 
-    def test_network_error_raises_soft_failure(self):
+    def test_network_error_raises_soft_failure(self, tmp_path):
         config = _make_config()
 
         with patch("requests.get", side_effect=requests.ConnectionError("no conn")):
             with pytest.raises(SoftFailureError):
-                refresh_meta_token(config)
+                refresh_meta_token(config, db_path=tmp_path / "no_profiles.db")
 
-    def test_missing_token_in_response_raises_hard_failure(self):
+    def test_missing_token_in_response_raises_hard_failure(self, tmp_path):
         config = _make_config()
         mock_resp = _make_response(200, json_data={"token_type": "bearer"})
 
         with patch("requests.get", return_value=mock_resp):
             with pytest.raises(HardFailureError):
-                refresh_meta_token(config)
+                refresh_meta_token(config, db_path=tmp_path / "no_profiles.db")
+
+
+# ---------------------------------------------------------------------------
+# TestRefreshMetaTokenSecretProfileResolution — MAR/OAuth source-of-truth
+# repair, mirrors TestRefreshYoutubeTokenSecretProfileResolution in
+# tests/test_publishing_youtube.py. Uses the real credential_manager + a
+# real isolated tmp_path DB (not mocked).
+# ---------------------------------------------------------------------------
+
+class TestRefreshMetaTokenSecretProfileResolution:
+    def test_active_facebook_profile_used_over_stale_env(self, tmp_path):
+        from hypogeum.credential_manager import create_secret_profile
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "cred.db"
+        initialize_schema(db_path)
+        create_secret_profile(
+            provider="facebook", label="meta-oauth-token",
+            credential_type="oauth2_token", credential_data="fresh-fb-token",
+            db_path=db_path,
+        )
+
+        config = _make_config()  # META_ACCESS_TOKEN = "EAA_access_token" (stale)
+        mock_resp = _make_response(200, json_data={"access_token": "EAA_refreshed"})
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            refresh_meta_token(config, db_path=db_path)
+
+        assert mock_get.call_args.kwargs["params"]["fb_exchange_token"] == "fresh-fb-token"
+
+    def test_env_fallback_used_when_no_active_profile(self, tmp_path):
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "cred.db"
+        initialize_schema(db_path)
+
+        config = _make_config()
+        mock_resp = _make_response(200, json_data={"access_token": "EAA_refreshed"})
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            refresh_meta_token(config, db_path=db_path)
+
+        assert mock_get.call_args.kwargs["params"]["fb_exchange_token"] == "EAA_access_token"
+
+    def test_falls_back_to_instagram_profile_when_facebook_absent(self, tmp_path):
+        from hypogeum.credential_manager import create_secret_profile
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "cred.db"
+        initialize_schema(db_path)
+        create_secret_profile(
+            provider="instagram", label="meta-oauth-token",
+            credential_type="oauth2_token", credential_data="fresh-ig-token",
+            db_path=db_path,
+        )
+
+        config = _make_config()
+        mock_resp = _make_response(200, json_data={"access_token": "EAA_refreshed"})
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            refresh_meta_token(config, db_path=db_path)
+
+        assert mock_get.call_args.kwargs["params"]["fb_exchange_token"] == "fresh-ig-token"
+
+    def test_revoked_profile_does_not_shadow_env_fallback(self, tmp_path):
+        from hypogeum.credential_manager import create_secret_profile, revoke_secret_profile
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "cred.db"
+        initialize_schema(db_path)
+        sp = create_secret_profile(
+            provider="facebook", label="meta-oauth-token",
+            credential_type="oauth2_token", credential_data="old-revoked-token",
+            db_path=db_path,
+        )
+        revoke_secret_profile(sp.secret_profile_id, db_path=db_path)
+
+        config = _make_config()
+        mock_resp = _make_response(200, json_data={"access_token": "EAA_refreshed"})
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            refresh_meta_token(config, db_path=db_path)
+
+        assert mock_get.call_args.kwargs["params"]["fb_exchange_token"] == "EAA_access_token"
 
 
 # ---------------------------------------------------------------------------

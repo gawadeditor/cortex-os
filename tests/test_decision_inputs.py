@@ -287,6 +287,36 @@ class TestGetPublishingOutcome:
             "ep_013", "youtube", db_path=tmp_path / "missing.db"
         ) is None
 
+    def test_default_deliverable_id_is_main_episode(self, db):
+        # Multi-platform publishing idempotency (2026-07-25): default
+        # preserves every pre-existing call site's behavior unchanged.
+        record_publishing_outcome("ep_014", "youtube", "success", db_path=db)
+        row = get_publishing_outcome("ep_014", "youtube", db_path=db)
+        assert row["deliverable_id"] == "main_episode"
+
+    def test_different_deliverables_coexist_for_same_episode_platform(self, db):
+        # The actual capability the old UNIQUE(episode_id, platform)
+        # constraint could not provide.
+        record_publishing_outcome("ep_015", "youtube", "success",
+                                   platform_video_id="yt-main",
+                                   deliverable_id="main_episode", db_path=db)
+        record_publishing_outcome("ep_015", "youtube", "success",
+                                   platform_video_id="yt-short1",
+                                   deliverable_id="short_sh_001", db_path=db)
+        main = get_publishing_outcome("ep_015", "youtube",
+                                       deliverable_id="main_episode", db_path=db)
+        short = get_publishing_outcome("ep_015", "youtube",
+                                        deliverable_id="short_sh_001", db_path=db)
+        assert main["platform_video_id"] == "yt-main"
+        assert short["platform_video_id"] == "yt-short1"
+
+    def test_scoped_to_deliverable_id(self, db):
+        record_publishing_outcome("ep_016", "youtube", "success",
+                                   deliverable_id="short_sh_001", db_path=db)
+        assert get_publishing_outcome(
+            "ep_016", "youtube", deliverable_id="short_sh_002", db_path=db,
+        ) is None
+
 
 # ---------------------------------------------------------------------------
 # TestAudienceFacts

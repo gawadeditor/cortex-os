@@ -45,13 +45,16 @@ def record_publishing_outcome(
     published_at:      Optional[str] = None,
     failure_reason:    Optional[str] = None,
     run_id:            Optional[str] = None,
+    deliverable_id:    str = "main_episode",
     db_path:           Optional[Path] = None,
 ) -> str:
     """
-    Insert or replace a publishing outcome for an episode × platform pair.
+    Insert or replace a publishing outcome for an episode x platform x
+    deliverable triple.
 
-    Uses INSERT OR REPLACE so the same (episode_id, platform) pair is
-    idempotent — subsequent calls update the existing row.
+    Uses INSERT OR REPLACE so the same (episode_id, platform,
+    deliverable_id) triple is idempotent — subsequent calls update the
+    existing row.
 
     Args:
         episode_id:        Episode identifier.
@@ -61,6 +64,14 @@ def record_publishing_outcome(
         published_at:      ISO timestamp when the video went live.
         failure_reason:    Human-readable failure description if status='failed'.
         run_id:            Run that triggered publishing (optional).
+        deliverable_id:    'main_episode' (default) or 'short_<short_id>' —
+                           distinguishes the flagship upload from individual
+                           Shorts/Reels on the same platform. Every call
+                           site that predates multi-platform idempotency
+                           (2026-07-25) implicitly meant 'main_episode',
+                           which is why it is the default rather than a
+                           required argument — existing callers are
+                           unaffected.
         db_path:           Override DB path.
 
     Returns:
@@ -85,24 +96,25 @@ def record_publishing_outcome(
     try:
         conn.execute("""
             INSERT OR REPLACE INTO publishing_outcomes
-              (outcome_id, episode_id, run_id, platform, publishing_status,
-               platform_video_id, published_at, failure_reason, recorded_at,
-               metadata_version)
+              (outcome_id, episode_id, run_id, platform, deliverable_id,
+               publishing_status, platform_video_id, published_at,
+               failure_reason, recorded_at, metadata_version)
             VALUES (COALESCE(
                         (SELECT outcome_id FROM publishing_outcomes
-                          WHERE episode_id=? AND platform=?),
+                          WHERE episode_id=? AND platform=? AND deliverable_id=?),
                         ?
-                    ), ?, ?, ?, ?, ?, ?, ?, ?, 'v1')
+                    ), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v1')
         """, (
-            episode_id, platform,  # for the COALESCE lookup
-            outcome_id,            # new id if not exists
-            episode_id, run_id, platform, publishing_status,
+            episode_id, platform, deliverable_id,  # for the COALESCE lookup
+            outcome_id,                            # new id if not exists
+            episode_id, run_id, platform, deliverable_id, publishing_status,
             platform_video_id, published_at, failure_reason, recorded_at,
         ))
         # Return the actual outcome_id (may be the existing one)
         row = conn.execute(
-            "SELECT outcome_id FROM publishing_outcomes WHERE episode_id=? AND platform=?",
-            (episode_id, platform),
+            "SELECT outcome_id FROM publishing_outcomes "
+            "WHERE episode_id=? AND platform=? AND deliverable_id=?",
+            (episode_id, platform, deliverable_id),
         ).fetchone()
         conn.commit()
     finally:

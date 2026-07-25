@@ -292,15 +292,105 @@ def _apply_v4_column_migrations(conn: sqlite3.Connection) -> None:
     _apply_column_migrations(conn, _V4_COLUMN_MIGRATIONS)
 
 
+def _migrate_publishing_outcomes_deliverable_id(conn: sqlite3.Connection) -> None:
+    """
+    Multi-platform publishing idempotency (2026-07-25): add deliverable_id
+    to publishing_outcomes and widen its UNIQUE constraint from
+    (episode_id, platform) to (episode_id, platform, deliverable_id).
+
+    SQLite cannot ALTER a UNIQUE constraint directly, so this rebuilds the
+    table (rename -> create -> copy -> drop) inside one explicit
+    transaction. SQLite DDL is fully transactional when the transaction is
+    started explicitly (BEGIN) rather than relying on sqlite3's own
+    implicit-transaction heuristics — verified empirically before this was
+    written: a crash/rollback mid-sequence leaves the database in its
+    exact original state, never a half-migrated table. Idempotent via
+    PRAGMA table_info: a database that already has deliverable_id is
+    left untouched.
+
+    Every existing row was written by exactly one call site (the
+    YouTube-main publishing guard) before this migration existed, so
+    'main_episode' is the historically correct backfill value for every
+    pre-existing row, not a guess.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(publishing_outcomes)").fetchall()}
+    if not cols or "deliverable_id" in cols:
+        return  # no table yet (schema.sql just created the new shape), or already migrated
+
+    conn.execute("BEGIN")
+    try:
+        conn.execute("ALTER TABLE publishing_outcomes RENAME TO publishing_outcomes_v1")
+        conn.execute(
+            """
+            CREATE TABLE publishing_outcomes (
+                outcome_id          TEXT NOT NULL PRIMARY KEY,
+                episode_id          TEXT NOT NULL,
+                run_id              TEXT,
+                platform            TEXT NOT NULL,
+                deliverable_id      TEXT NOT NULL DEFAULT 'main_episode',
+                publishing_status   TEXT NOT NULL DEFAULT 'unknown'
+                                         CHECK(publishing_status IN
+                                             ('success','failed','pending','skipped','unknown')),
+                platform_video_id   TEXT,
+                published_at        TEXT,
+                url                 TEXT,
+                failure_reason      TEXT,
+                recorded_at         TEXT NOT NULL,
+                metadata_version    TEXT NOT NULL DEFAULT 'v1',
+                UNIQUE(episode_id, platform, deliverable_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO publishing_outcomes
+                (outcome_id, episode_id, run_id, platform, deliverable_id,
+                 publishing_status, platform_video_id, published_at, url,
+                 failure_reason, recorded_at, metadata_version)
+            SELECT outcome_id, episode_id, run_id, platform, 'main_episode',
+                   publishing_status, platform_video_id, published_at, url,
+                   failure_reason, recorded_at, metadata_version
+            FROM publishing_outcomes_v1
+            """
+        )
+        conn.execute("DROP TABLE publishing_outcomes_v1")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pub_outcomes_episode ON publishing_outcomes(episode_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pub_outcomes_platform ON publishing_outcomes(platform)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pub_outcomes_status ON publishing_outcomes(publishing_status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pub_outcomes_deliverable ON publishing_outcomes(deliverable_id)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def initialize_schema(db_path: Optional[Path] = None) -> None:
     """
     Create all tables and indexes defined in schema.sql, then apply v2–v4
-    column migrations to existing v1 tables.
+    column migrations and the publishing_outcomes deliverable_id migration
+    to existing v1 tables.
 
     Idempotent: safe to call on every pipeline startup.
       - CREATE TABLE IF NOT EXISTS handles new tables and views.
       - _apply_v*_column_migrations() handles new columns on existing tables.
-    Existing tables and their data are never dropped or modified.
+      - _migrate_publishing_outcomes_deliverable_id() is the one exception
+        to "existing tables are never modified" below — it widens a UNIQUE
+        constraint via an atomic table rebuild (see that function's
+        docstring). Runs *before* executescript() so a pre-existing
+        old-shape table is already rebuilt by the time schema.sql's
+        CREATE INDEX IF NOT EXISTS statements for the new column run
+        (those would otherwise fail against a still-old-shape table, since
+        CREATE TABLE IF NOT EXISTS is a no-op once a table already exists).
+        Every other existing table and its data is never dropped or
+        modified.
 
     Args:
         db_path: Path to the SQLite database file. Defaults to
@@ -309,6 +399,7 @@ def initialize_schema(db_path: Optional[Path] = None) -> None:
     schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
     conn = get_connection(db_path)
     try:
+        _migrate_publishing_outcomes_deliverable_id(conn)
         conn.executescript(schema_sql)
         conn.commit()
         _apply_v2_column_migrations(conn)

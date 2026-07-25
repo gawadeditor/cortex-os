@@ -553,6 +553,9 @@ class TestSuccessfulFullRun:
     def test_full_run_writes_publishing_outcome_to_db(self, tmp_path):
         # Regression: run_publishing_agent must call record_publishing_outcome
         # after a successful YouTube main upload so analytics sync can discover it.
+        # (Multi-platform publishing idempotency, 2026-07-25: shorts/reels now
+        # also call this for their own deliverable_id — assert on the main
+        # episode's call specifically, not call count.)
         config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
         pkg = _make_final_render_package("ep_outcome_db_001", tmp_path)
 
@@ -560,10 +563,14 @@ class TestSuccessfulFullRun:
              patch("hypogeum.agents.publishing_agent.record_publishing_outcome") as mock_outcome:
             _run(pkg, config, "ep_outcome_db_001", tmp_path)
 
-        mock_outcome.assert_called_once()
-        _, call_kwargs = mock_outcome.call_args
+        main_calls = [
+            c for c in mock_outcome.call_args_list
+            if c.kwargs.get("platform") == "youtube"
+            and c.kwargs.get("deliverable_id", "main_episode") == "main_episode"
+        ]
+        assert len(main_calls) == 1
+        call_kwargs = main_calls[0].kwargs
         assert call_kwargs["episode_id"] == "ep_outcome_db_001"
-        assert call_kwargs["platform"] == "youtube"
         assert call_kwargs["publishing_status"] == "success"
         assert call_kwargs["platform_video_id"] == "yt_vid_main"
 
@@ -678,6 +685,11 @@ class TestYouTubeIdempotencyGuard:
         assert result["summary"]["youtube_main_video_id"] == "yt_prior_video"
 
     def test_does_not_rewrite_outcome_when_skipping(self, tmp_path):
+        # Regression: skipping the already-published YouTube main must not
+        # re-record its outcome. (Multi-platform publishing idempotency,
+        # 2026-07-25: the 3 shorts are NOT pre-populated here, so they still
+        # upload normally and correctly get their own record calls — assert
+        # specifically that the main episode's deliverable is never re-recorded.)
         from hypogeum.decision_inputs.store import record_publishing_outcome
 
         config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
@@ -692,7 +704,12 @@ class TestYouTubeIdempotencyGuard:
              patch("hypogeum.agents.publishing_agent.record_publishing_outcome") as mock_outcome:
             _run(pkg, config, "ep_idem_002", tmp_path)
 
-        mock_outcome.assert_not_called()
+        main_calls = [
+            c for c in mock_outcome.call_args_list
+            if c.kwargs.get("platform") == "youtube"
+            and c.kwargs.get("deliverable_id", "main_episode") == "main_episode"
+        ]
+        assert main_calls == []
 
     def test_failed_prior_outcome_does_not_block_reupload(self, tmp_path):
         from hypogeum.decision_inputs.store import record_publishing_outcome
@@ -757,6 +774,156 @@ class TestYouTubeIdempotencyGuard:
             if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
         )
         assert yt_main["platform_video_id"].startswith("dry_run_")
+
+
+# ---------------------------------------------------------------------------
+# TestMultiPlatformIdempotencyGuard — generalizes TestYouTubeIdempotencyGuard's
+# guard to YouTube Shorts, Facebook, Instagram Reels, and TikTok Shorts
+# (multi-platform publishing idempotency, 2026-07-25). Each platform reuses
+# the same get_publishing_outcome()/record_publishing_outcome() pair, keyed
+# by deliverable_id ('main_episode' or 'short_<short_id>') — not a
+# platform-specific mechanism.
+# ---------------------------------------------------------------------------
+
+class TestMultiPlatformIdempotencyGuard:
+    def _pre_record(self, episode_id, platform, deliverable_id, video_id, tmp_path):
+        from hypogeum.decision_inputs.store import record_publishing_outcome
+        record_publishing_outcome(
+            episode_id, platform, "success",
+            platform_video_id=video_id,
+            deliverable_id=deliverable_id,
+            db_path=tmp_path / "hypogeum.db",
+        )
+
+    def test_youtube_short_skipped_when_already_published(self, tmp_path):
+        episode_id = "ep_mpi_yt_short"
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package(episode_id, tmp_path)
+        self._pre_record(episode_id, "youtube", "short_sh_001", "yt_prior_short", tmp_path)
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video") as mock_upload:
+                mock_upload.return_value = "yt_new_upload"
+                result = _run(pkg, config, episode_id, tmp_path)
+
+        # main + 2 remaining shorts upload; sh_001 is skipped.
+        assert mock_upload.call_count == 3
+        assert all(
+            "sh_001" not in str(call.kwargs.get("video_path", ""))
+            for call in mock_upload.call_args_list
+        )
+        sh1 = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r.get("short_id") == "sh_001"
+        )
+        assert sh1["status"] == "published"
+        assert sh1["platform_video_id"] == "yt_prior_short"
+
+    def test_facebook_skipped_when_already_published(self, tmp_path):
+        episode_id = "ep_mpi_fb"
+        config = _make_config(has_youtube=False, has_meta=True, has_tiktok=False)
+        pkg = _make_final_render_package(episode_id, tmp_path)
+        self._pre_record(episode_id, "facebook", "main_episode", "fb_prior_video", tmp_path)
+
+        with _patch_platforms():
+            with patch(f"{_META}.upload_facebook_video") as mock_fb:
+                result = _run(pkg, config, episode_id, tmp_path)
+
+        mock_fb.assert_not_called()
+        fb = next(r for r in result["platform_results"] if r["platform"] == "facebook")
+        assert fb["status"] == "published"
+        assert fb["platform_video_id"] == "fb_prior_video"
+
+    def test_instagram_reel_skipped_when_already_published(self, tmp_path):
+        episode_id = "ep_mpi_ig"
+        config = _make_config(has_youtube=False, has_meta=True, has_tiktok=False)
+        pkg = _make_final_render_package(episode_id, tmp_path)
+        self._pre_record(episode_id, "instagram", "short_sh_001", "ig_prior_media", tmp_path)
+
+        with _patch_platforms():
+            with patch(f"{_META}.create_instagram_container") as mock_create:
+                mock_create.return_value = "ig_cont_new"
+                result = _run(pkg, config, episode_id, tmp_path)
+
+        # Only the 2 remaining reels create a container — sh_001 is skipped.
+        assert mock_create.call_count == 2
+        ig1 = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "instagram" and r.get("short_id") == "sh_001"
+        )
+        assert ig1["status"] == "published"
+        assert ig1["platform_video_id"] == "ig_prior_media"
+
+    def test_tiktok_short_skipped_when_already_published(self, tmp_path):
+        episode_id = "ep_mpi_tt"
+        config = _make_config(has_youtube=False, has_meta=False, has_tiktok=True)
+        pkg = _make_final_render_package(episode_id, tmp_path)
+        self._pre_record(episode_id, "tiktok", "short_sh_001", "tt_prior_post", tmp_path)
+
+        with _patch_platforms(tiktok_avail=True):
+            with patch(f"{_TT}.init_tiktok_upload") as mock_init:
+                mock_init.return_value = ("tt_pub_new", "https://upload.tiktok/new")
+                result = _run(pkg, config, episode_id, tmp_path)
+
+        assert mock_init.call_count == 2
+        tt1 = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "tiktok" and r.get("short_id") == "sh_001"
+        )
+        assert tt1["status"] == "published"
+        assert tt1["platform_video_id"] == "tt_prior_post"
+
+    def test_partial_instagram_reels_resume_only_unfinished(self, tmp_path):
+        """
+        Requirement: partial multi-platform publishing resumes only the
+        unfinished platforms/deliverables. 2 of 3 Instagram Reels already
+        succeeded — only the 1 remaining reel should attempt a real upload.
+        """
+        episode_id = "ep_mpi_ig_partial"
+        config = _make_config(has_youtube=False, has_meta=True, has_tiktok=False)
+        pkg = _make_final_render_package(episode_id, tmp_path)
+        self._pre_record(episode_id, "instagram", "short_sh_001", "ig_done_1", tmp_path)
+        self._pre_record(episode_id, "instagram", "short_sh_002", "ig_done_2", tmp_path)
+
+        with _patch_platforms():
+            with patch(f"{_META}.create_instagram_container") as mock_create:
+                mock_create.return_value = "ig_cont_new"
+                result = _run(pkg, config, episode_id, tmp_path)
+
+        assert mock_create.call_count == 1
+        ig_results = {
+            r["short_id"]: r for r in result["platform_results"]
+            if r["platform"] == "instagram"
+        }
+        assert ig_results["sh_001"]["status"] == "published"
+        assert ig_results["sh_001"]["platform_video_id"] == "ig_done_1"
+        assert ig_results["sh_002"]["status"] == "published"
+        assert ig_results["sh_002"]["platform_video_id"] == "ig_done_2"
+        assert ig_results["sh_003"]["status"] == "published"  # freshly uploaded
+
+    def test_youtube_main_and_shorts_all_skip_on_full_rerun(self, tmp_path):
+        """
+        Integration check (verification plan item 2): run twice for the
+        same episode_id with everything mocked to succeed on the first
+        call; the second call must not re-attempt any of the 4 YouTube
+        deliverables (main + 3 shorts).
+        """
+        episode_id = "ep_mpi_full_rerun"
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package(episode_id, tmp_path)
+
+        with _patch_platforms():
+            first = _run(pkg, config, episode_id, tmp_path)
+        assert first["package_metadata"]["overall_status"] == "published"
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video") as mock_upload:
+                second = _run(pkg, config, episode_id, tmp_path)
+
+        mock_upload.assert_not_called()
+        yt_results = [r for r in second["platform_results"] if r["platform"] == "youtube"]
+        assert len(yt_results) == 4
+        assert all(r["status"] == "published" for r in yt_results)
 
 
 # ---------------------------------------------------------------------------

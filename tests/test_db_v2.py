@@ -861,3 +861,155 @@ class TestV2Views:
         assert row["total_executions"] == 3
         assert row["successes"] == 2
         assert row["failures"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestPublishingOutcomesDeliverableMigration
+# Multi-platform publishing idempotency (2026-07-25): publishing_outcomes
+# gains deliverable_id, UNIQUE(episode_id, platform) -> UNIQUE(episode_id,
+# platform, deliverable_id), via a table-rebuild migration
+# (db.py::_migrate_publishing_outcomes_deliverable_id).
+# ---------------------------------------------------------------------------
+
+class TestPublishingOutcomesDeliverableMigration:
+    def _make_old_shape_db(self, tmp_path) -> Path:
+        """A pre-existing DB with publishing_outcomes in its old 2-column-
+        unique shape, plus one real row — exactly what a production
+        database looked like before this migration existed."""
+        db_path = tmp_path / "old_shape.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE publishing_outcomes (
+                outcome_id          TEXT NOT NULL PRIMARY KEY,
+                episode_id          TEXT NOT NULL,
+                run_id              TEXT,
+                platform            TEXT NOT NULL,
+                publishing_status   TEXT NOT NULL DEFAULT 'unknown',
+                platform_video_id   TEXT,
+                published_at        TEXT,
+                url                 TEXT,
+                failure_reason      TEXT,
+                recorded_at         TEXT NOT NULL,
+                metadata_version    TEXT NOT NULL DEFAULT 'v1',
+                UNIQUE(episode_id, platform)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO publishing_outcomes
+                (outcome_id, episode_id, run_id, platform, publishing_status,
+                 platform_video_id, published_at, url, recorded_at, metadata_version)
+            VALUES ('out1', 'ep_real_001', 'run_1', 'youtube', 'success',
+                    'yt_vid_abc', '2026-07-01T00:00:00Z',
+                    'https://youtube.com/watch?v=yt_vid_abc',
+                    '2026-07-01T00:00:01Z', 'v1')
+            """
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_migration_adds_deliverable_id_and_widens_constraint(self, tmp_path):
+        db_path = self._make_old_shape_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(publishing_outcomes)").fetchall()}
+        assert "deliverable_id" in cols
+        conn.close()
+
+    def test_migration_backfills_existing_rows_as_main_episode(self, tmp_path):
+        db_path = self._make_old_shape_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        row = dict(conn.execute(
+            "SELECT * FROM publishing_outcomes WHERE episode_id='ep_real_001'"
+        ).fetchone())
+        conn.close()
+
+        assert row["deliverable_id"] == "main_episode"
+
+    def test_migration_preserves_all_original_row_data(self, tmp_path):
+        db_path = self._make_old_shape_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        row = dict(conn.execute(
+            "SELECT * FROM publishing_outcomes WHERE episode_id='ep_real_001'"
+        ).fetchone())
+        conn.close()
+
+        assert row["outcome_id"] == "out1"
+        assert row["run_id"] == "run_1"
+        assert row["platform"] == "youtube"
+        assert row["publishing_status"] == "success"
+        assert row["platform_video_id"] == "yt_vid_abc"
+        assert row["published_at"] == "2026-07-01T00:00:00Z"
+        assert row["url"] == "https://youtube.com/watch?v=yt_vid_abc"
+        assert row["recorded_at"] == "2026-07-01T00:00:01Z"
+        assert row["metadata_version"] == "v1"
+
+    def test_migration_is_idempotent(self, tmp_path):
+        db_path = self._make_old_shape_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        row_before = dict(conn.execute(
+            "SELECT * FROM publishing_outcomes WHERE episode_id='ep_real_001'"
+        ).fetchone())
+        conn.close()
+
+        initialize_schema(db_path)  # second call must be a no-op
+
+        conn = get_connection(db_path)
+        row_after = dict(conn.execute(
+            "SELECT * FROM publishing_outcomes WHERE episode_id='ep_real_001'"
+        ).fetchone())
+        count = conn.execute("SELECT COUNT(*) FROM publishing_outcomes").fetchone()[0]
+        conn.close()
+
+        assert row_before == row_after
+        assert count == 1
+
+    def test_new_deliverable_id_enables_multiple_rows_per_platform(self, tmp_path):
+        """
+        The actual capability the old UNIQUE(episode_id, platform)
+        constraint could not provide: a second deliverable (e.g. a Short)
+        for the same episode+platform now coexists with the main episode.
+        """
+        db_path = self._make_old_shape_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        conn.execute(
+            """
+            INSERT INTO publishing_outcomes
+                (outcome_id, episode_id, run_id, platform, deliverable_id,
+                 publishing_status, platform_video_id, recorded_at)
+            VALUES ('out2', 'ep_real_001', 'run_1', 'youtube', 'short_sh_001',
+                    'success', 'yt_vid_short1', '2026-07-02T00:00:00Z')
+            """
+        )
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM publishing_outcomes "
+            "WHERE episode_id='ep_real_001' AND platform='youtube'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert count == 2
+
+    def test_fresh_database_gets_new_shape_directly(self, tmp_path):
+        """A brand-new database never touches the migration path at all —
+        schema.sql's own CREATE TABLE IF NOT EXISTS already has the new shape."""
+        db_path = tmp_path / "fresh.db"
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(publishing_outcomes)").fetchall()}
+        conn.close()
+
+        assert "deliverable_id" in cols

@@ -103,15 +103,20 @@ def get_publishing_facts(db_path: Optional[Path] = None) -> dict:
 def get_publishing_outcome(
     episode_id: str,
     platform: str,
+    deliverable_id: str = "main_episode",
     db_path: Optional[Path] = None,
 ) -> Optional[dict]:
     """
     Return the single canonical publishing_outcomes row for
-    (episode_id, platform), or None if no row exists.
+    (episode_id, platform, deliverable_id), or None if no row exists.
 
     Used as a pre-upload idempotency check — a prior row with
-    publishing_status='success' means this episode/platform pair has
-    already published and must not be re-uploaded on a rerun.
+    publishing_status='success' means this specific deliverable (the
+    flagship upload, or one individual Short/Reel — see deliverable_id)
+    has already published and must not be re-uploaded on a rerun.
+
+    deliverable_id defaults to 'main_episode' so every call site that
+    predates multi-platform idempotency (2026-07-25) is unaffected.
 
     Fails open (returns None) on any DB error, matching this module's
     existing non-blocking read philosophy — a failed idempotency lookup
@@ -124,12 +129,12 @@ def get_publishing_outcome(
         try:
             row = conn.execute(
                 """
-                SELECT episode_id, platform, publishing_status,
+                SELECT episode_id, platform, deliverable_id, publishing_status,
                        platform_video_id, published_at, recorded_at
                 FROM publishing_outcomes
-                WHERE episode_id = ? AND platform = ?
+                WHERE episode_id = ? AND platform = ? AND deliverable_id = ?
                 """,
-                (episode_id, platform),
+                (episode_id, platform, deliverable_id),
             ).fetchone()
         finally:
             conn.close()

@@ -1095,10 +1095,16 @@ GROUP BY dimension;
 
 -- ---------------------------------------------------------------------------
 -- publishing_outcomes
--- One row per episode × platform publishing attempt.
+-- One row per episode × platform × deliverable publishing attempt.
 -- Written by store.record_publishing_outcome() — never by live publishing code.
 -- publishing_status: 'success' | 'failed' | 'pending' | 'skipped' | 'unknown'
--- UNIQUE(episode_id, platform) — one canonical outcome per episode/platform pair.
+-- deliverable_id: 'main_episode' | 'short_<short_id>' — distinguishes the
+--   flagship upload from individual Shorts/Reels on the same platform.
+--   Multi-platform publishing idempotency (2026-07-25): existing databases
+--   are migrated in place by db.py::_migrate_publishing_outcomes_deliverable_id()
+--   (this CREATE TABLE only governs brand-new databases).
+-- UNIQUE(episode_id, platform, deliverable_id) — one canonical outcome per
+--   episode/platform/deliverable triple.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS publishing_outcomes (
@@ -1106,6 +1112,7 @@ CREATE TABLE IF NOT EXISTS publishing_outcomes (
     episode_id          TEXT NOT NULL,
     run_id              TEXT,
     platform            TEXT NOT NULL,
+    deliverable_id      TEXT NOT NULL DEFAULT 'main_episode',
     publishing_status   TEXT NOT NULL DEFAULT 'unknown'
                              CHECK(publishing_status IN
                                  ('success','failed','pending','skipped','unknown')),
@@ -1115,12 +1122,13 @@ CREATE TABLE IF NOT EXISTS publishing_outcomes (
     failure_reason      TEXT,
     recorded_at         TEXT NOT NULL,
     metadata_version    TEXT NOT NULL DEFAULT 'v1',
-    UNIQUE(episode_id, platform)
+    UNIQUE(episode_id, platform, deliverable_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_pub_outcomes_episode  ON publishing_outcomes(episode_id);
-CREATE INDEX IF NOT EXISTS idx_pub_outcomes_platform ON publishing_outcomes(platform);
-CREATE INDEX IF NOT EXISTS idx_pub_outcomes_status   ON publishing_outcomes(publishing_status);
+CREATE INDEX IF NOT EXISTS idx_pub_outcomes_episode     ON publishing_outcomes(episode_id);
+CREATE INDEX IF NOT EXISTS idx_pub_outcomes_platform    ON publishing_outcomes(platform);
+CREATE INDEX IF NOT EXISTS idx_pub_outcomes_status      ON publishing_outcomes(publishing_status);
+CREATE INDEX IF NOT EXISTS idx_pub_outcomes_deliverable ON publishing_outcomes(deliverable_id);
 
 -- ---------------------------------------------------------------------------
 -- decision_reviews  (F4)

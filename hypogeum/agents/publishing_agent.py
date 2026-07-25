@@ -102,6 +102,19 @@ def _resolve_asset_path(asset_id: str, assets_root: Path, ext: str = ".mp4") -> 
     return p
 
 
+def _deliverable_id_for(deliverable_type: str, short_id: str = "") -> str:
+    """
+    Derive the publishing_outcomes deliverable_id from fields every
+    make_result_entry() call site already has — 'main_episode' for the
+    flagship upload, 'short_<short_id>' for an individual Short/Reel.
+    Same formula reused for every platform (multi-platform publishing
+    idempotency, 2026-07-25) — never duplicated per platform.
+    """
+    if deliverable_type == "main_episode":
+        return "main_episode"
+    return f"short_{short_id}"
+
+
 def _validate_asset_files(
     final_render_package: dict,
     assets_root: Path,
@@ -902,6 +915,35 @@ def run_publishing_agent(
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
         sr_video_id = sr.get("video_asset_id", "")
+        _yt_short_deliverable_id = _deliverable_id_for("short", short_id)
+
+        _existing_yt_short = None
+        if not getattr(config, "YOUTUBE_DRY_RUN", False):
+            _existing_yt_short = get_publishing_outcome(
+                episode_id, "youtube", deliverable_id=_yt_short_deliverable_id,
+                db_path=assets_root / "hypogeum.db",
+            )
+        if _existing_yt_short and _existing_yt_short.get("publishing_status") == "success":
+            _prior_id = _existing_yt_short.get("platform_video_id") or ""
+            log.info(
+                "publishing_youtube_short_already_published",
+                episode_id=episode_id, short_id=short_id, video_id=_prior_id,
+            )
+            entry = make_result_entry(
+                platform="youtube",
+                deliverable_type="short",
+                status="published",
+                short_id=short_id,
+                platform_video_id=_prior_id,
+                published_url=(
+                    f"https://www.youtube.com/shorts/{_prior_id}" if _prior_id else None
+                ),
+                published_at=_existing_yt_short.get("published_at"),
+                title=get_short_title(metadata_source, short_id),
+                ai_disclosure_included=True,
+            )
+            record.append_result(entry)
+            continue
 
         if not youtube_available or youtube_quota_exceeded:
             reason = "youtube_auth_failed" if not youtube_available else "youtube_quota_exceeded"
@@ -1023,6 +1065,7 @@ def run_publishing_agent(
                         episode_id=episode_id,
                     )
 
+            _yt_short_published_at = datetime.now(timezone.utc).isoformat()
             entry = make_result_entry(
                 platform="youtube",
                 deliverable_type="short",
@@ -1030,13 +1073,30 @@ def run_publishing_agent(
                 short_id=short_id,
                 platform_video_id=yt_short_id,
                 published_url=f"https://www.youtube.com/shorts/{yt_short_id}",
-                published_at=datetime.now(timezone.utc).isoformat(),
+                published_at=_yt_short_published_at,
                 title=short_title,
                 description_length_chars=len(short_description),
                 thumbnail_applied=short_thumb_applied,
                 ai_disclosure_included=True,
             )
             record.append_result(entry)
+
+            try:
+                record_publishing_outcome(
+                    episode_id=episode_id,
+                    platform="youtube",
+                    publishing_status="success",
+                    platform_video_id=yt_short_id,
+                    published_at=_yt_short_published_at,
+                    deliverable_id=_yt_short_deliverable_id,
+                    db_path=assets_root / "hypogeum.db",
+                )
+            except Exception as _exc:
+                log.warn(
+                    "publishing_outcome_record_failed",
+                    episode_id=episode_id, platform="youtube",
+                    deliverable_id=_yt_short_deliverable_id, error=str(_exc),
+                )
 
         except HardFailureError as exc:
             log.error(
@@ -1083,7 +1143,27 @@ def run_publishing_agent(
     fb_video_id_result: Optional[str] = None
     _facebook_platform_enabled = _platform_enabled("facebook")
 
-    if not _facebook_platform_enabled:
+    _existing_fb = get_publishing_outcome(
+        episode_id, "facebook", deliverable_id="main_episode",
+        db_path=assets_root / "hypogeum.db",
+    )
+    if _existing_fb and _existing_fb.get("publishing_status") == "success":
+        fb_video_id_result = _existing_fb.get("platform_video_id") or ""
+        log.info(
+            "publishing_facebook_already_published",
+            episode_id=episode_id, video_id=fb_video_id_result,
+        )
+        entry = make_result_entry(
+            platform="facebook",
+            deliverable_type="main_episode",
+            status="published",
+            platform_video_id=fb_video_id_result,
+            published_at=_existing_fb.get("published_at"),
+            title=get_episode_title(metadata_source),
+            ai_disclosure_included=True,
+        )
+        record.append_result(entry)
+    elif not _facebook_platform_enabled:
         entry = make_result_entry(
             platform="facebook",
             deliverable_type="main_episode",
@@ -1123,17 +1203,35 @@ def run_publishing_agent(
                     episode_id=episode_id,
                 )
 
+                _fb_published_at = datetime.now(timezone.utc).isoformat()
                 entry = make_result_entry(
                     platform="facebook",
                     deliverable_type="main_episode",
                     status="published",
                     platform_video_id=fb_video_id_result,
-                    published_at=datetime.now(timezone.utc).isoformat(),
+                    published_at=_fb_published_at,
                     title=get_episode_title(metadata_source),
                     description_length_chars=len(fb_description),
                     ai_disclosure_included=True,
                 )
                 record.append_result(entry)
+
+                try:
+                    record_publishing_outcome(
+                        episode_id=episode_id,
+                        platform="facebook",
+                        publishing_status="success",
+                        platform_video_id=fb_video_id_result,
+                        published_at=_fb_published_at,
+                        deliverable_id="main_episode",
+                        db_path=assets_root / "hypogeum.db",
+                    )
+                except Exception as _exc:
+                    log.warn(
+                        "publishing_outcome_record_failed",
+                        episode_id=episode_id, platform="facebook",
+                        deliverable_id="main_episode", error=str(_exc),
+                    )
 
             except (HardFailureError, SoftFailureError, Exception) as exc:
                 log.error(
@@ -1176,6 +1274,30 @@ def run_publishing_agent(
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
         sr_video_id = sr.get("video_asset_id", "")
+        _ig_deliverable_id = _deliverable_id_for("short", short_id)
+
+        _existing_ig = get_publishing_outcome(
+            episode_id, "instagram", deliverable_id=_ig_deliverable_id,
+            db_path=assets_root / "hypogeum.db",
+        )
+        if _existing_ig and _existing_ig.get("publishing_status") == "success":
+            _prior_id = _existing_ig.get("platform_video_id") or ""
+            log.info(
+                "publishing_instagram_short_already_published",
+                episode_id=episode_id, short_id=short_id, video_id=_prior_id,
+            )
+            entry = make_result_entry(
+                platform="instagram",
+                deliverable_type="short",
+                status="published",
+                short_id=short_id,
+                platform_video_id=_prior_id,
+                published_at=_existing_ig.get("published_at"),
+                title=get_short_title(metadata_source, short_id),
+                ai_disclosure_included=True,
+            )
+            record.append_result(entry)
+            continue
 
         if "_placeholder" in short_id and not sr_video_id:
             entry = make_result_entry(
@@ -1357,17 +1479,34 @@ def run_publishing_agent(
                 )
 
         if ig_success:
+            _ig_published_at = datetime.now(timezone.utc).isoformat()
             entry = make_result_entry(
                 platform="instagram",
                 deliverable_type="short",
                 status="published",
                 short_id=short_id,
                 platform_video_id=ig_media_id,
-                published_at=datetime.now(timezone.utc).isoformat(),
+                published_at=_ig_published_at,
                 title=short_title,
                 description_length_chars=len(ig_caption),
                 ai_disclosure_included=True,
             )
+            try:
+                record_publishing_outcome(
+                    episode_id=episode_id,
+                    platform="instagram",
+                    publishing_status="success",
+                    platform_video_id=ig_media_id,
+                    published_at=_ig_published_at,
+                    deliverable_id=_ig_deliverable_id,
+                    db_path=assets_root / "hypogeum.db",
+                )
+            except Exception as _exc:
+                log.warn(
+                    "publishing_outcome_record_failed",
+                    episode_id=episode_id, platform="instagram",
+                    deliverable_id=_ig_deliverable_id, error=str(_exc),
+                )
         else:
             entry = make_result_entry(
                 platform="instagram",
@@ -1401,6 +1540,30 @@ def run_publishing_agent(
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
         sr_video_id = sr.get("video_asset_id", "")
+        _tt_deliverable_id = _deliverable_id_for("short", short_id)
+
+        _existing_tt = get_publishing_outcome(
+            episode_id, "tiktok", deliverable_id=_tt_deliverable_id,
+            db_path=assets_root / "hypogeum.db",
+        )
+        if _existing_tt and _existing_tt.get("publishing_status") == "success":
+            _prior_id = _existing_tt.get("platform_video_id") or ""
+            log.info(
+                "publishing_tiktok_short_already_published",
+                episode_id=episode_id, short_id=short_id, video_id=_prior_id,
+            )
+            entry = make_result_entry(
+                platform="tiktok",
+                deliverable_type="short",
+                status="published",
+                short_id=short_id,
+                platform_video_id=_prior_id,
+                published_at=_existing_tt.get("published_at"),
+                title=build_tiktok_title(metadata_source, short_id=short_id, episode_id=episode_id),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            continue
 
         if "_placeholder" in short_id and not sr_video_id:
             entry = make_result_entry(
@@ -1469,17 +1632,35 @@ def run_publishing_agent(
                 publish_id=publish_id,
                 episode_id=episode_id,
             )
+            _tt_published_at = datetime.now(timezone.utc).isoformat()
             entry = make_result_entry(
                 platform="tiktok",
                 deliverable_type="short",
                 status="published",
                 short_id=short_id,
                 platform_video_id=post_id,
-                published_at=datetime.now(timezone.utc).isoformat(),
+                published_at=_tt_published_at,
                 title=tt_title,
                 ai_disclosure_included=False,
             )
             record.append_result(entry)
+
+            try:
+                record_publishing_outcome(
+                    episode_id=episode_id,
+                    platform="tiktok",
+                    publishing_status="success",
+                    platform_video_id=post_id,
+                    published_at=_tt_published_at,
+                    deliverable_id=_tt_deliverable_id,
+                    db_path=assets_root / "hypogeum.db",
+                )
+            except Exception as _exc:
+                log.warn(
+                    "publishing_outcome_record_failed",
+                    episode_id=episode_id, platform="tiktok",
+                    deliverable_id=_tt_deliverable_id, error=str(_exc),
+                )
 
         except (HardFailureError, SoftFailureError, PollTimeoutError, Exception) as exc:
             log.error(

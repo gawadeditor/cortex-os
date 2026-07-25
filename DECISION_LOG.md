@@ -311,6 +311,74 @@ Improved long-term maintainability.
 
 ---
 
+# ADR-008
+
+## Title
+
+Service Layer convergence is incremental and roadmap-subordinate.
+
+Status
+
+Accepted
+
+Context
+
+The Core → Service → Agent boundary defined by `SERVICE_MODEL.md` /
+`AGENT_MODEL.md` / `EXECUTION_MODEL.md` does not exist in the current
+implementation. `pipeline.py::run_pipeline()` calls each agent module
+directly, with no intermediate Service abstraction (Architecture Alignment
+Report, Major Architectural Conflict #1). A disruptive rewrite to close
+this gap immediately was considered and rejected as inconsistent with
+Progressive Evolution.
+
+Decision
+
+The Service layer is built incrementally, never as a standalone rewrite:
+
+- New code is built Service-shaped from the start.
+- Existing code converges to a Service boundary only when touched for a
+  real reason (a bug fix or feature), never touched solely to relocate it.
+- Architecture defines HOW code is built when it is built. The Roadmap
+  defines WHAT is built next and WHEN. Neither constraint overrides the
+  other. A capability is never prioritized ahead of its roadmap position
+  because building it as a Service would be easier or lower-risk than
+  converging existing code.
+
+Full mapping of target Services to current modules, and the specific
+opportunistic-convergence candidates, are recorded in
+`docs/architecture/SERVICE_LAYER_MIGRATION_PLAN.md`.
+
+Alternatives Considered
+
+- Immediate full Service-layer extraction across all ten pipeline agents —
+  rejected: high regression risk to a frozen, production-validated stage
+  order, with no roadmap item currently requiring it.
+- Deferring the Service layer entirely to Phase 6 (Multi-Channel
+  Platform) — rejected: leaves new Phase 3/4 work (Analytics, Learning)
+  built the wrong shape, which is more expensive to correct later than to
+  build correctly the first time.
+
+Consequences
+
+Positive
+
+- Zero regression risk to existing production code.
+- Analytics (Phase 3) and Learning (Phase 4) become the first real,
+  working examples of the Service Model, at no added cost over building
+  them anyway.
+- Existing agent modules converge over time without a dedicated
+  migration effort.
+
+Trade-offs
+
+- The Service layer will exist unevenly for a period — some domains
+  Service-shaped, most still direct agent-module calls — until enough
+  opportunistic touches accumulate.
+- Requires discipline at each future touch point to actually perform the
+  convergence rather than deferring it again.
+
+---
+
 # Decision Lifecycle
 
 Architectural decisions are expected to evolve.

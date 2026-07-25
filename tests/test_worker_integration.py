@@ -171,6 +171,7 @@ def _patch_pipeline_success(monkeypatch, call_log=None):
                 "episode_id": episode_id, "topic_input": topic_input,
                 "channel_id": channel_id,
                 "publishing_platform_filter": publishing_platform_filter,
+                "youtube_privacy": youtube_privacy,
             })
     monkeypatch.setattr("hypogeum.pipeline.run_pipeline", _fake)
     return _fake
@@ -611,6 +612,127 @@ class TestPublishingFilterReachesPipeline:
         _process_gated(db_path, project_root)
 
         assert call_log[0]["publishing_platform_filter"] == frozenset()
+
+
+# ===========================================================================
+# TestYoutubePrivacyResolution — MAR/publishing-safety repair: run_pipeline()
+# defaults youtube_privacy to "public" and the gated executor never passed
+# it, so every autonomous queue-driven run silently uploaded public. Now
+# resolved from ChannelOperationsProfile.default_privacy_state (the
+# canonical source) and passed explicitly, failing closed on an
+# unresolved/invalid value rather than falling through to "public".
+# ===========================================================================
+
+class TestYoutubePrivacyResolution:
+    def test_autonomous_worker_uses_channel_profile_privacy_value(
+        self, db_path, project_root, monkeypatch,
+    ):
+        """Uses a non-default value (unlisted) specifically to prove the
+        value is actually read from the profile, not coincidentally
+        matching a hardcoded default."""
+        _make_operations_profile(db_path, default_privacy_state="unlisted")
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_privacy_unlisted")
+
+        pr = _process_gated(db_path, project_root)
+
+        assert pr.status == "completed"
+        assert call_log[0]["youtube_privacy"] == "unlisted"
+
+    def test_private_remains_private(self, db_path, project_root, monkeypatch):
+        _make_operations_profile(db_path, default_privacy_state="private")
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_privacy_private")
+
+        _process_gated(db_path, project_root)
+
+        assert call_log[0]["youtube_privacy"] == "private"
+
+    def test_explicit_direct_caller_override_still_works(self, db_path, monkeypatch):
+        """A caller that invokes hypogeum.pipeline.run_pipeline() directly
+        (e.g. run_pipeline.py's CLI, which passes --youtube-privacy
+        explicitly) is untouched by this fix — only the gated executor's
+        own call site was changed."""
+        import hypogeum.pipeline as pipeline_module
+        captured = {}
+
+        def _fake_run_pipeline(*, youtube_privacy="public", **kwargs):
+            captured["youtube_privacy"] = youtube_privacy
+
+        monkeypatch.setattr(pipeline_module, "run_pipeline", _fake_run_pipeline)
+        pipeline_module.run_pipeline(
+            topic_input="t", episode_id="ep_direct", config=object(),
+            channel_id="hypogeum", youtube_privacy="private",
+        )
+        assert captured["youtube_privacy"] == "private"
+
+    def test_missing_privacy_value_fails_closed(self, db_path, project_root, monkeypatch):
+        """A profile with no resolvable default_privacy_state must refuse
+        the run, never fall through to run_pipeline()'s public default.
+
+        The DB schema enforces NOT NULL on this column (belt-and-suspenders
+        at that layer already), so a true NULL can't be constructed via a
+        real row — this simulates the same "no valid value" condition the
+        way it could still occur (a profile object missing/blanking the
+        field) via dataclasses.replace() on the real, otherwise-valid
+        profile the executor already loads.
+        """
+        import dataclasses
+        _make_operations_profile(db_path)
+        real_profile = get_channel_operations_profile("hypogeum", db_path=db_path)
+        blank_profile = dataclasses.replace(real_profile, default_privacy_state="")
+        monkeypatch.setattr(wi, "load_operations_profile_or_fail", lambda *a, **kw: blank_profile)
+
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_privacy_missing")
+
+        pr = _process_gated(db_path, project_root)
+
+        assert pr.status == "failed"
+        assert call_log == [], "run_pipeline() must never be called when privacy can't be resolved"
+        attempt = wi.load_latest_worker_attempt("ep_privacy_missing", project_root=project_root)
+        assert attempt.blocked_reason is not None
+        assert "youtube_privacy" in attempt.blocked_reason
+
+    def test_invalid_privacy_value_fails_closed(self, db_path, project_root, monkeypatch):
+        _make_operations_profile(db_path)
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE channel_operations_profiles SET default_privacy_state = 'garbage' "
+                "WHERE channel_id = 'hypogeum'",
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_privacy_invalid")
+
+        pr = _process_gated(db_path, project_root)
+
+        assert pr.status == "failed"
+        assert call_log == []
+
+    def test_no_gated_run_ever_passes_none_or_public_by_default(
+        self, db_path, project_root, monkeypatch,
+    ):
+        """Regression guard for the exact defect: a channel using the
+        schema's own default profile (default_privacy_state='private',
+        the DB column default) must never silently resolve to 'public'."""
+        _make_operations_profile(db_path)  # uses the helper's own default
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_privacy_default")
+
+        _process_gated(db_path, project_root)
+
+        assert call_log[0]["youtube_privacy"] is not None
+        assert call_log[0]["youtube_privacy"] != "public"
 
 
 # ===========================================================================

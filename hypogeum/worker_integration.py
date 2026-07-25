@@ -37,7 +37,11 @@ from hypogeum.backward_planner import (
     load_backward_plan,
     save_backward_plan,
 )
-from hypogeum.channel_config import SUPPORTED_PLATFORMS, get_channel_operations_profile
+from hypogeum.channel_config import (
+    SUPPORTED_PLATFORMS,
+    _SUPPORTED_PRIVACY_STATES,
+    get_channel_operations_profile,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -578,6 +582,13 @@ def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = N
          parameter, which reaches hypogeum.agents.publishing_agent.run_publishing_agent()'s
          enabled_platforms parameter. Disabled/blocked platforms never reach
          a provider call (see that function's docstring).
+      7. youtube_privacy — run_pipeline() defaults this to "public" and this
+         executor never previously passed it, so every autonomous run
+         silently uploaded public. Resolved from the already-loaded
+         profile.default_privacy_state and passed explicitly;
+         GatedExecutionRefused (terminal) if that value is missing or not
+         one of channel_config._SUPPORTED_PRIVACY_STATES — never falls
+         through to run_pipeline()'s public default.
 
     Every gate outcome (blocked or not) is persisted via save_worker_attempt()
     — one immutable file per attempt plus a "latest" pointer (see
@@ -686,6 +697,24 @@ def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = N
         attempt.eligible_platforms = eligible_platforms
         attempt.excluded_platforms = excluded_platforms
 
+        # youtube_privacy: run_pipeline() itself defaults to "public", and
+        # this executor is the only place that gates every autonomous
+        # queue-driven run before it reaches run_pipeline() — so this is
+        # where the channel's actual privacy intent must be resolved and
+        # passed explicitly. ChannelOperationsProfile.default_privacy_state
+        # is the canonical source (already loaded above as `profile`).
+        # Fail closed: an unresolved/invalid value refuses the run rather
+        # than silently falling through to run_pipeline()'s public default.
+        resolved_privacy = getattr(profile, "default_privacy_state", None)
+        if resolved_privacy not in _SUPPORTED_PRIVACY_STATES:
+            _refuse(
+                f"cannot resolve a valid youtube_privacy from "
+                f"ChannelOperationsProfile.default_privacy_state="
+                f"{resolved_privacy!r} for channel_id={channel_id!r} — "
+                f"refusing rather than defaulting to a public upload"
+            )
+            return
+
         save_worker_attempt(attempt, project_root=project_root)
 
         try:
@@ -693,6 +722,7 @@ def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = N
                 topic_input=topic_input, episode_id=episode_id, config=config,
                 channel_id=channel_id, db_path=db_path, cancel_check=cancel_check,
                 publishing_platform_filter=frozenset(eligible_platforms),
+                youtube_privacy=resolved_privacy,
             )
             attempt.success = True
         finally:

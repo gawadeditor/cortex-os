@@ -37,6 +37,8 @@ from hypogeum.pipeline import (
     PipelineError,
     PipelineRejectedError,
     PipelineResult,
+    _CheckpointSpec,
+    _load_verified_checkpoint,
     _run_assembly_agent,
     _run_audio_agent,
     _run_executive_producer,
@@ -48,6 +50,7 @@ from hypogeum.pipeline import (
     _run_visual_package_director,
     run_pipeline,
 )
+from hypogeum.logger import get_logger
 from hypogeum.startup import StartupError, StartupReport
 
 
@@ -191,6 +194,38 @@ MINIMAL_SCRIPT_PACKAGE = {
     ],
     "traceability_manifest": {},
     "script_integrity": {},
+}
+
+MINIMAL_THUMBNAIL_CONCEPT_BRIEF = {
+    "thumbnail_concept_brief_id": "tcb_001",
+    "episode_id": "ep_001",
+    "central_viewer_question": "What was it?",
+    "concepts": [
+        {
+            "concept_id": "c_001",
+            "concept_name": "Concept A",
+            "viewer_promise": "Promise A",
+            "curiosity_gap": "Gap A",
+            "visual_thesis": "Thesis A",
+            "emotional_trigger": "forbidden_knowledge",
+        },
+        {
+            "concept_id": "c_002",
+            "concept_name": "Concept B",
+            "viewer_promise": "Promise B",
+            "curiosity_gap": "Gap B",
+            "visual_thesis": "Thesis B",
+            "emotional_trigger": "scale_awe",
+        },
+        {
+            "concept_id": "c_003",
+            "concept_name": "Concept C",
+            "viewer_promise": "Promise C",
+            "curiosity_gap": "Gap C",
+            "visual_thesis": "Thesis C",
+            "emotional_trigger": "human_cost",
+        },
+    ],
 }
 
 MINIMAL_VISUAL_PACKAGE = {
@@ -407,6 +442,7 @@ def _all_stubs_context(
     narrative_package=None,
     script_package=None,
     finance_authorization=None,
+    thumbnail_concept_brief=None,
     visual_package=None,
     thumbnail_package=None,
     narration_package=None,
@@ -435,6 +471,8 @@ def _all_stubs_context(
                    return_value=script_package or MINIMAL_SCRIPT_PACKAGE) as se, \
              patch("hypogeum.pipeline._run_budget_authorization",
                    return_value=finance_authorization or MINIMAL_FINANCE_AUTHORIZATION) as fa, \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=thumbnail_concept_brief or MINIMAL_THUMBNAIL_CONCEPT_BRIEF) as ts, \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=visual_package or MINIMAL_VISUAL_PACKAGE) as vpd, \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -448,7 +486,7 @@ def _all_stubs_context(
              patch("hypogeum.pipeline._run_cost_ledger",
                    return_value=finance_record or MINIMAL_FINANCE_RECORD) as fl:
             yield {
-                "ep": ep, "rd": rd, "na": na, "se": se, "fa": fa, "vpd": vpd,
+                "ep": ep, "rd": rd, "na": na, "se": se, "fa": fa, "ts": ts, "vpd": vpd,
                 "td": td, "audio": audio, "asm": asm, "pub": pub, "fl": fl,
             }
 
@@ -707,13 +745,13 @@ class TestSuccessfulRun:
 # ---------------------------------------------------------------------------
 
 class TestAgentCallOrder:
-    def test_all_nine_agents_called(self):
+    def test_all_ten_agents_called(self):
         _, mocks = run_full()
         for name, mock in mocks.items():
             assert mock.call_count == 1, f"Expected {name} to be called once"
 
     def test_agents_called_in_frozen_order(self):
-        """Verify the frozen execution order: EP→RD→NA→SE→VPD→TD→Audio→Asm→Pub."""
+        """Verify the frozen execution order: EP→RD→NA→SE→TS→VPD→TD→Audio→Asm→Pub."""
         call_order = []
         cfg = make_config()
         report = make_startup_report()
@@ -733,6 +771,8 @@ class TestAgentCallOrder:
                        side_effect=make_recorder("na", MINIMAL_NARRATIVE_PACKAGE)), \
                  patch("hypogeum.pipeline._run_script_engine",
                        side_effect=make_recorder("se", MINIMAL_SCRIPT_PACKAGE)), \
+                 patch("hypogeum.pipeline._run_thumbnail_strategy",
+                       side_effect=make_recorder("ts", MINIMAL_THUMBNAIL_CONCEPT_BRIEF)), \
                  patch("hypogeum.pipeline._run_visual_package_director",
                        side_effect=make_recorder("vpd", MINIMAL_VISUAL_PACKAGE)), \
                  patch("hypogeum.pipeline._run_thumbnail_director",
@@ -745,7 +785,7 @@ class TestAgentCallOrder:
                        side_effect=make_recorder("pub", MINIMAL_PUBLISHING_RECORD)):
                 run_pipeline(topic_input="Test", episode_id="ep_001", config=cfg)
 
-        assert call_order == ["ep", "rd", "na", "se", "vpd", "td", "audio", "asm", "pub"]
+        assert call_order == ["ep", "rd", "na", "se", "ts", "vpd", "td", "audio", "asm", "pub"]
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +808,8 @@ class TestAgentInputHandoff:
                            return_value=MINIMAL_NARRATIVE_PACKAGE), \
                      patch("hypogeum.pipeline._run_script_engine",
                            return_value=MINIMAL_SCRIPT_PACKAGE), \
+                     patch("hypogeum.pipeline._run_thumbnail_strategy",
+                           return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
                      patch("hypogeum.pipeline._run_visual_package_director",
                            return_value=MINIMAL_VISUAL_PACKAGE), \
                      patch("hypogeum.pipeline._run_thumbnail_director",
@@ -797,6 +839,8 @@ class TestAgentInputHandoff:
                        return_value=MINIMAL_NARRATIVE_PACKAGE) as mock_na, \
                  patch("hypogeum.pipeline._run_script_engine",
                        return_value=MINIMAL_SCRIPT_PACKAGE), \
+                 patch("hypogeum.pipeline._run_thumbnail_strategy",
+                       return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
                  patch("hypogeum.pipeline._run_visual_package_director",
                        return_value=MINIMAL_VISUAL_PACKAGE), \
                  patch("hypogeum.pipeline._run_thumbnail_director",
@@ -879,14 +923,14 @@ class TestLogging:
     def test_stage_started_for_all_agents(self):
         events = self._capture_log_events()
         stage_started = [e for _, e in events if e == "pipeline_stage_started"]
-        # 15 stages (9 original + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
-        assert len(stage_started) == 15
+        # 16 stages (9 original + Thumbnail Strategy + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
+        assert len(stage_started) == 16
 
     def test_stage_completed_for_all_agents(self):
         events = self._capture_log_events()
         stage_completed = [e for _, e in events if e == "pipeline_stage_completed"]
-        # 15 stages (9 original + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
-        assert len(stage_completed) == 15
+        # 16 stages (9 original + Thumbnail Strategy + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
+        assert len(stage_completed) == 16
 
     def test_started_before_completed(self):
         events = self._capture_log_events()
@@ -1464,6 +1508,265 @@ class TestCheckpointLoading:
 
 
 # ---------------------------------------------------------------------------
+# TestVerifiedCheckpoints
+# Checkpoint-resume for Audio, Assembly (previously unchecked), and the
+# pipeline-level Publishing checkpoint, all via the shared _CheckpointSpec /
+# _load_verified_checkpoint() interface. See docs/architecture — checkpoint
+# design approved 2026-07-25.
+# ---------------------------------------------------------------------------
+
+class TestVerifiedCheckpoints:
+    def _write_json(self, path: Path, data: dict) -> None:
+        import json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+
+    def _write_file(self, path: Path, content: bytes = b"x") -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    # -- Audio Agent ----------------------------------------------------
+
+    def _narration_pkg(self, production_ready: bool = True) -> dict:
+        return {
+            "package_metadata": {"narration_package_id": "np_ck", "episode_id": "ep_ck"},
+            "voice_configuration": {"voice_id": "v", "environment_source": "ELEVENLABS_VOICE_ID"},
+            "narration_segments": [],
+            "stitched_tracks": [
+                {"track_id": "t_main", "audio_asset_id": "narration/main", "source_type": "main_episode"},
+            ],
+            "captions": [],
+            "audio_qa_report": {"overall_status": "pass"},
+            "package_integrity": {"production_ready": production_ready},
+        }
+
+    def test_audio_skipped_when_complete_and_assets_present(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "narration_package_ep_ck.json", self._narration_pkg())
+        self._write_file(ep_dir / "narration" / "main.mp3")
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_audio_agent") as mock_audio:
+            result = _run_audio_agent(MINIMAL_SCRIPT_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_audio.assert_not_called()
+        assert result["package_metadata"]["narration_package_id"] == "np_ck"
+
+    def test_audio_runs_when_file_missing(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        ep_dir.mkdir(parents=True)
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_audio_agent",
+                   return_value=MINIMAL_NARRATION_PACKAGE) as mock_audio:
+            _run_audio_agent(MINIMAL_SCRIPT_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_audio.assert_called_once()
+
+    def test_audio_runs_when_not_production_ready(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(
+            ep_dir / "narration_package_ep_ck.json",
+            self._narration_pkg(production_ready=False),
+        )
+        self._write_file(ep_dir / "narration" / "main.mp3")  # present but must not matter
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_audio_agent",
+                   return_value=MINIMAL_NARRATION_PACKAGE) as mock_audio:
+            _run_audio_agent(MINIMAL_SCRIPT_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_audio.assert_called_once()
+
+    def test_audio_runs_when_asset_file_missing(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "narration_package_ep_ck.json", self._narration_pkg())
+        # Deliberately do NOT create narration/main.mp3.
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_audio_agent",
+                   return_value=MINIMAL_NARRATION_PACKAGE) as mock_audio:
+            _run_audio_agent(MINIMAL_SCRIPT_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_audio.assert_called_once()
+
+    # -- Assembly Agent ---------------------------------------------------
+
+    def _render_pkg(self, production_ready: bool = True) -> dict:
+        return {
+            "package_metadata": {"render_package_id": "rp_ck", "episode_id": "ep_ck"},
+            "episode_render": {"video_asset_id": "video/main", "caption_asset_id": "captions/main"},
+            "shorts_renders": [
+                {"short_id": "sh_001", "video_asset_id": "video/sh1", "caption_asset_id": "captions/sh1"},
+            ],
+            "thumbnail_references": [],
+            "music_log": [],
+            "metadata_source": {
+                "episode_title": "Test",
+                "ai_disclosure_text": "AI-assisted.",
+                "description": "Test description.",
+                "section_titles": ["Intro"],
+            },
+            "assembly_qa_report": {"overall_status": "pass"},
+            "package_integrity": {"production_ready": production_ready},
+        }
+
+    def _run_assembly(self, cfg, ep_dir):
+        return _run_assembly_agent(
+            MINIMAL_VISUAL_PACKAGE, MINIMAL_NARRATION_PACKAGE, MINIMAL_THUMBNAIL_PACKAGE,
+            cfg, "ep_ck", ep_dir,
+        )
+
+    def test_assembly_skipped_when_complete_and_assets_present(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "final_render_package_ep_ck.json", self._render_pkg())
+        self._write_file(ep_dir / "video" / "main.mp4")
+        self._write_file(ep_dir / "video" / "sh1.mp4")
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_assembly_agent") as mock_asm:
+            result = self._run_assembly(cfg, ep_dir)
+        mock_asm.assert_not_called()
+        assert result["package_metadata"]["render_package_id"] == "rp_ck"
+
+    def test_assembly_runs_when_file_missing(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        ep_dir.mkdir(parents=True)
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_assembly_agent",
+                   return_value=MINIMAL_FINAL_RENDER_PACKAGE) as mock_asm:
+            self._run_assembly(cfg, ep_dir)
+        mock_asm.assert_called_once()
+
+    def test_assembly_runs_when_not_production_ready(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(
+            ep_dir / "final_render_package_ep_ck.json",
+            self._render_pkg(production_ready=False),
+        )
+        self._write_file(ep_dir / "video" / "main.mp4")
+        self._write_file(ep_dir / "video" / "sh1.mp4")
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_assembly_agent",
+                   return_value=MINIMAL_FINAL_RENDER_PACKAGE) as mock_asm:
+            self._run_assembly(cfg, ep_dir)
+        mock_asm.assert_called_once()
+
+    def test_assembly_runs_when_short_asset_missing(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "final_render_package_ep_ck.json", self._render_pkg())
+        self._write_file(ep_dir / "video" / "main.mp4")
+        # Deliberately do NOT create video/sh1.mp4.
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_assembly_agent",
+                   return_value=MINIMAL_FINAL_RENDER_PACKAGE) as mock_asm:
+            self._run_assembly(cfg, ep_dir)
+        mock_asm.assert_called_once()
+
+    # -- Publishing (pipeline-level checkpoint) --------------------------
+
+    def _publishing_pkg(self, overall_status: str) -> dict:
+        return {
+            "package_metadata": {
+                "publishing_record_id": "pr_ck",
+                "episode_id": "ep_ck",
+                "overall_status": overall_status,
+            },
+            "platform_results": [],
+            "failures": [],
+            "summary": {
+                "youtube_main_published": overall_status == "published",
+                "total_deliverables_attempted": 1,
+                "total_published": 1 if overall_status == "published" else 0,
+                "total_failed": 0 if overall_status == "published" else 1,
+                "total_skipped": 0,
+            },
+            "package_integrity": {"production_ready": overall_status == "published"},
+        }
+
+    def test_publishing_skipped_when_overall_status_published(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(
+            ep_dir / "publishing_record_ep_ck.json", self._publishing_pkg("published"),
+        )
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_publishing_agent") as mock_pub:
+            result = _run_publishing_agent(MINIMAL_FINAL_RENDER_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_pub.assert_not_called()
+        assert result["package_metadata"]["overall_status"] == "published"
+
+    def test_publishing_runs_when_partially_published(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(
+            ep_dir / "publishing_record_ep_ck.json",
+            self._publishing_pkg("partially_published"),
+        )
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_publishing_agent",
+                   return_value=MINIMAL_PUBLISHING_RECORD) as mock_pub:
+            _run_publishing_agent(MINIMAL_FINAL_RENDER_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_pub.assert_called_once()
+
+    def test_publishing_runs_when_failed(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(
+            ep_dir / "publishing_record_ep_ck.json", self._publishing_pkg("failed"),
+        )
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_publishing_agent",
+                   return_value=MINIMAL_PUBLISHING_RECORD) as mock_pub:
+            _run_publishing_agent(MINIMAL_FINAL_RENDER_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_pub.assert_called_once()
+
+    def test_publishing_runs_when_file_missing(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        ep_dir.mkdir(parents=True)
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_publishing_agent",
+                   return_value=MINIMAL_PUBLISHING_RECORD) as mock_pub:
+            _run_publishing_agent(MINIMAL_FINAL_RENDER_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_pub.assert_called_once()
+
+    # -- Generic interface (proves the abstraction is actually reusable,
+    #    not just wired through the two/three real specs above) ---------
+
+    def test_generic_spec_presence_only_matches_load_package_behavior(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "widget_package_ep_ck.json", {"widget": "value"})
+        log = get_logger(episode_id="ep_ck", agent="test")
+        spec = _CheckpointSpec(schema_name="widget_package")
+        result = _load_verified_checkpoint("ep_ck", ep_dir, spec, log)
+        assert result == {"widget": "value"}
+
+    def test_generic_spec_rejects_incomplete(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "widget_package_ep_ck.json", {"ready": False})
+        log = get_logger(episode_id="ep_ck", agent="test")
+        spec = _CheckpointSpec(
+            schema_name="widget_package", is_complete=lambda pkg: pkg.get("ready") is True,
+        )
+        assert _load_verified_checkpoint("ep_ck", ep_dir, spec, log) is None
+
+    def test_generic_spec_checks_asset_refs(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "widget_package_ep_ck.json", {"ready": True, "files": ["a"]})
+        log = get_logger(episode_id="ep_ck", agent="test")
+        spec = _CheckpointSpec(
+            schema_name="widget_package",
+            is_complete=lambda pkg: pkg.get("ready") is True,
+            asset_refs=lambda pkg: [(f, ".bin") for f in pkg.get("files", [])],
+        )
+        assert _load_verified_checkpoint("ep_ck", ep_dir, spec, log) is None
+        self._write_file(ep_dir / "a.bin")
+        assert _load_verified_checkpoint("ep_ck", ep_dir, spec, log) == {
+            "ready": True, "files": ["a"],
+        }
+
+    def test_generic_spec_rejects_zero_byte_asset(self, tmp_path):
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(ep_dir / "widget_package_ep_ck.json", {"ready": True, "files": ["a"]})
+        self._write_file(ep_dir / "a.bin", content=b"")
+        log = get_logger(episode_id="ep_ck", agent="test")
+        spec = _CheckpointSpec(
+            schema_name="widget_package",
+            is_complete=lambda pkg: pkg.get("ready") is True,
+            asset_refs=lambda pkg: [(f, ".bin") for f in pkg.get("files", [])],
+        )
+        assert _load_verified_checkpoint("ep_ck", ep_dir, spec, log) is None
+
+
+# ---------------------------------------------------------------------------
 # TestSkipShortsFlag
 # Tests for ENABLE_DEDICATED_SHORT_GENERATION → skip_shorts passed to Audio Agent.
 # ---------------------------------------------------------------------------
@@ -1511,6 +1814,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -1540,6 +1845,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -1569,6 +1876,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -1606,6 +1915,8 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_NARRATIVE_PACKAGE), \
              patch("hypogeum.pipeline._run_script_engine",
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",

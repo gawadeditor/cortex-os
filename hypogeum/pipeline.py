@@ -149,6 +149,140 @@ def _load_package(
         return None
 
 
+def _resolve_checkpoint_assets_root(output_dir: Optional[Path], episode_id: str) -> Path:
+    """
+    Determine the .hypogeum-assets root from output_dir or default.
+
+    Mirrors hypogeum.agents.publishing_agent._resolve_assets_root() exactly,
+    so a checkpoint check and a real publish attempt always agree on where
+    a given asset_id resolves on disk.
+    """
+    if output_dir is not None:
+        search = Path(output_dir)
+        for _ in range(8):
+            probe = search / ".hypogeum-assets"
+            if probe.is_dir():
+                return probe
+            search = search.parent
+        return Path(output_dir)
+    return _ASSETS_ROOT
+
+
+def _resolve_checkpoint_asset_path(
+    asset_id: str, assets_root: Path, ext: str,
+) -> Optional[Path]:
+    """Resolve a relative asset_id to an absolute path. None if empty."""
+    if not asset_id:
+        return None
+    return assets_root / f"{asset_id}{ext}"
+
+
+@dataclass(frozen=True)
+class _CheckpointSpec:
+    """
+    Declarative description of what makes a stage's disk artifact a valid,
+    reusable checkpoint. New stages participate by adding a spec constant,
+    not by writing a new validation function — see _load_verified_checkpoint().
+
+    schema_name:  passed straight through to _load_package().
+    is_complete:  optional predicate over the loaded package; None means
+                  presence-only (identical to the plain _load_package()
+                  behavior already used by EP/RD/NA/SE/Thumbnail Strategy/TD).
+    asset_refs:   optional extractor returning (asset_id, extension) pairs
+                  whose files must exist and be non-empty on disk; None
+                  means no file check (text-only packages have nothing to
+                  verify beyond their own JSON).
+    """
+    schema_name: str
+    is_complete: Optional[Callable[[dict], bool]] = None
+    asset_refs: Optional[Callable[[dict], list]] = None
+
+
+def _load_verified_checkpoint(
+    episode_id: str,
+    output_dir: Optional[Path],
+    spec: "_CheckpointSpec",
+    log,
+) -> Optional[dict]:
+    """
+    Shared checkpoint loader: parse -> completion check -> asset check.
+
+    Returns the loaded package only if all three pass; otherwise None,
+    which callers treat exactly like "no checkpoint" (safe fallback to
+    regenerating the stage). Each rejection reason is logged so a
+    checkpoint miss is diagnosable, not silent.
+    """
+    pkg = _load_package(episode_id, spec.schema_name, output_dir)
+    if pkg is None:
+        return None
+
+    if spec.is_complete is not None and not spec.is_complete(pkg):
+        log.info(
+            "pipeline_checkpoint_incomplete",
+            schema=spec.schema_name,
+            reason="completion_flag_false",
+        )
+        return None
+
+    if spec.asset_refs is not None:
+        assets_root = _resolve_checkpoint_assets_root(output_dir, episode_id)
+        for asset_id, ext in spec.asset_refs(pkg):
+            p = _resolve_checkpoint_asset_path(asset_id, assets_root, ext)
+            if p is None or not p.exists() or p.stat().st_size == 0:
+                log.info(
+                    "pipeline_checkpoint_incomplete",
+                    schema=spec.schema_name,
+                    reason="asset_missing",
+                    asset_id=asset_id,
+                )
+                return None
+
+    return pkg
+
+
+_NARRATION_CHECKPOINT = _CheckpointSpec(
+    schema_name="narration_package",
+    is_complete=lambda pkg: bool(
+        pkg.get("package_integrity", {}).get("production_ready")
+    ),
+    asset_refs=lambda pkg: [
+        (t.get("audio_asset_id", ""), ".mp3")
+        for t in pkg.get("stitched_tracks", [])
+        if t.get("audio_asset_id")
+    ],
+)
+
+_ASSEMBLY_CHECKPOINT = _CheckpointSpec(
+    schema_name="final_render_package",
+    # production_ready (not main_episode_complete) — the same field name
+    # and semantics narration_package uses, and the broader whole-stage
+    # gate (main_episode_complete is a narrower, per-deliverable signal
+    # publishing_agent.py reads for its own, different purpose).
+    is_complete=lambda pkg: bool(
+        pkg.get("package_integrity", {}).get("production_ready")
+    ),
+    asset_refs=lambda pkg: [
+        (pkg.get("episode_render", {}).get("video_asset_id", ""), ".mp4"),
+        *[
+            (s.get("video_asset_id", ""), ".mp4")
+            for s in pkg.get("shorts_renders", [])
+            if s.get("video_asset_id")
+        ],
+    ],
+)
+
+_PUBLISHING_CHECKPOINT = _CheckpointSpec(
+    schema_name="publishing_record",
+    is_complete=lambda pkg: pkg.get("package_metadata", {}).get(
+        "overall_status"
+    ) == "published",
+    # No asset_refs: the deliverable-level idempotency guard inside
+    # run_publishing_agent() (publishing_outcomes-backed) already
+    # re-verifies platform state on every call. This spec only needs to
+    # decide whether to re-enter the stage at all.
+)
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -1629,7 +1763,17 @@ def _run_audio_agent(
 
     Max tokens: 2,048 (not applicable — no LLM call)
     Output schema: narration_package
+
+    Checkpoint: loads existing narration_package from disk if present,
+    production_ready, and every referenced audio asset file still exists.
     """
+    log = get_logger(episode_id=episode_id, agent="pipeline")
+    pkg = _load_verified_checkpoint(
+        episode_id, output_dir, _NARRATION_CHECKPOINT, log,
+    )
+    if pkg is not None:
+        log.info("pipeline_stage_skipped", agent="audio_agent", reason="existing_output")
+        return pkg
     return run_audio_agent(
         script_package=script_package,
         config=config,
@@ -1663,7 +1807,17 @@ def _run_assembly_agent(
 
     Max tokens: 4,096 (not applicable — no LLM call)
     Output schema: final_render_package
+
+    Checkpoint: loads existing final_render_package from disk if present,
+    production_ready, and every referenced video asset file still exists.
     """
+    log = get_logger(episode_id=episode_id, agent="pipeline")
+    pkg = _load_verified_checkpoint(
+        episode_id, output_dir, _ASSEMBLY_CHECKPOINT, log,
+    )
+    if pkg is not None:
+        log.info("pipeline_stage_skipped", agent="assembly_agent", reason="existing_output")
+        return pkg
     return run_assembly_agent(
         visual_package=visual_package,
         narration_package=narration_package,
@@ -1902,7 +2056,22 @@ def _run_publishing_agent(
 
     Max tokens: 2,048 (not applicable — no LLM call)
     Output schema: publishing_record
+
+    Checkpoint: loads existing publishing_record from disk if present and
+    overall_status == "published" — skips re-entering this agent entirely
+    (OAuth refresh, pre-flight validation, all platform attempts).
+    "partially_published" and "failed" always re-run. Complementary to,
+    not a replacement for, the deliverable-level publishing_outcomes guard
+    inside run_publishing_agent() itself, which still protects the YouTube
+    main upload specifically even if this checkpoint is ever bypassed.
     """
+    log = get_logger(episode_id=episode_id, agent="pipeline")
+    pkg = _load_verified_checkpoint(
+        episode_id, output_dir, _PUBLISHING_CHECKPOINT, log,
+    )
+    if pkg is not None:
+        log.info("pipeline_stage_skipped", agent="publishing_agent", reason="already_published")
+        return pkg
     return run_publishing_agent(
         final_render_package=final_render_package,
         config=config,

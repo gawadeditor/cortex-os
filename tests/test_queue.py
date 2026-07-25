@@ -1356,6 +1356,142 @@ class TestConsumer:
 
         assert get_topic(topic_id, db_path=db_path)["target_publish_at"] == explicit
 
+    # -----------------------------------------------------------------------
+    # MAR Production Repair, H2 — episode_id identity contract: the value
+    # target_publish_at is written under (topic_id) must be findable by the
+    # key it's read under (episode_id) — see queue.py's Step 5 comment.
+    # -----------------------------------------------------------------------
+
+    def test_scheduled_claim_persists_episode_id_onto_topic(self, db_path):
+        channel_id = "ch_sched_epid"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        topic_id = enqueue_topic(channel_id, "Organically queued topic", db_path=db_path)
+        assert get_topic(topic_id, db_path=db_path)["episode_id"] is None
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed"
+        topic_after = get_topic(topic_id, db_path=db_path)
+        # episode_id was consumed off the row by the time we read it back
+        # (consume_topic doesn't touch episode_id), so it must be present.
+        assert topic_after.get("episode_id"), "episode_id must be persisted onto the topic"
+
+    def test_scheduled_claim_persists_episode_id_onto_queue_row(self, db_path):
+        channel_id = "ch_sched_qepid"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        enqueue_topic(channel_id, "Organically queued topic 2", db_path=db_path)
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed"
+        row = _queue_row(db_path, result.queue_id)
+        assert row["episode_id"], "run_queue.episode_id must be persisted for H1 Tier-1 association"
+
+    def test_lookup_episode_target_publish_at_resolves_after_scheduled_claim(self, db_path):
+        """The actual identity-contract regression: worker_integration's
+        episode_id-keyed lookup must find what queue.py's topic_id-keyed
+        write produced, for a topic with no pre-assigned episode_id."""
+        from hypogeum.worker_integration import lookup_episode_target_publish_at
+
+        channel_id = "ch_sched_lookup"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        enqueue_topic(channel_id, "Organically queued topic 3", db_path=db_path)
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()) as mock_pl:
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+        _, kwargs = mock_pl.call_args
+        episode_id = kwargs["episode_id"]
+
+        resolved = lookup_episode_target_publish_at(episode_id, db_path=db_path)
+        assert resolved is not None, (
+            "lookup_episode_target_publish_at() must resolve the target_publish_at "
+            "derived at claim time for a topic with no pre-assigned episode_id"
+        )
+
+    def test_manual_topic_with_preassigned_episode_id_is_not_overwritten(self, db_path):
+        """Regression guard: a topic that already carries an episode_id
+        (e.g. manual submission via production_launcher.py) must not have
+        it touched — set_topic_episode_id() only fills NULLs."""
+        channel_id = "ch_manual_epid"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        topic_id = enqueue_topic(
+            channel_id, "Manually submitted topic", db_path=db_path, episode_id="ep_preassigned",
+        )
+        enqueue(db_path=db_path, channel_id=channel_id)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert get_topic(topic_id, db_path=db_path)["episode_id"] == "ep_preassigned"
+
+    def test_identity_contract_regression_guard_logs_on_mismatch(self, db_path):
+        """If persistence succeeds but the downstream lookup somehow still
+        can't resolve it, the regression guard must log a warning and must
+        NOT block or fail the claim."""
+        channel_id = "ch_sched_guard"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id)
+        enqueue_topic(channel_id, "Guard test topic", db_path=db_path)
+
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()), \
+             patch(
+                 "hypogeum.worker_integration.lookup_episode_target_publish_at",
+                 return_value=None,
+             ), \
+             patch("hypogeum.logger.get_logger") as mock_get_logger:
+            mock_log = MagicMock()
+            mock_get_logger.return_value = mock_log
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "completed", "regression guard must never block the claim"
+        warned_events = [c.args[0] for c in mock_log.warn.call_args_list]
+        assert "target_publish_at_identity_contract_broken" in warned_events
+
     def test_two_scheduled_runs_same_channel_same_tick_both_get_correct_targets(self, db_path):
         """Regression test for the exact bug the race-condition correction
         fixes: under the old peek-then-write design, promoting two

@@ -377,6 +377,63 @@ class TestScheduledVsManualMode:
         assert attempt.plan_status == "executable"
         assert attempt.success is True
 
+    def test_organically_queued_topic_with_no_preassigned_episode_id_reaches_pipeline(
+        self, db_path, project_root, monkeypatch,
+    ):
+        """MAR Production Repair, H2 regression test — the exact scenario the
+        prior test above deliberately worked around (see its docstring):
+        a topic enqueued with NO pre-assigned episode_id (the default case
+        for organically-queued/discovered topics, not just a test
+        convenience) must still resolve target_publish_at and reach
+        run_pipeline() under InvocationMode.SCHEDULED, instead of failing
+        closed with 'scheduled invocation requires an existing backward
+        plan artifact or an explicit target_publish_at — neither was
+        supplied'.
+        """
+        _make_operations_profile(db_path, unattended_operation_enabled=True)
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+
+        topic_id = enqueue_topic(
+            "hypogeum", "Organically discovered topic", db_path=db_path,
+            # no episode_id — this is the default/common case being fixed.
+        )
+        assert get_topic(topic_id, db_path=db_path)["episode_id"] is None
+        assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is None
+
+        past = datetime.now(timezone.utc) - timedelta(minutes=1)
+        create_schedule(
+            db_path=db_path, scope="channel", channel_id="hypogeum",
+            cadence="daily", next_run_at=past,
+        )
+        tick(db_path=db_path, now=datetime.now(timezone.utc))
+        consume_scheduled_runs(db_path=db_path)
+
+        executor = wi.build_gated_pipeline_executor(db_path=db_path, project_root=project_root)
+        pr = process_next(
+            worker_id="w1", db_path=db_path, dry_run=False, config=object(),
+            pipeline_executor=executor,
+        )
+
+        topic_after = get_topic(topic_id, db_path=db_path)
+        assert topic_after["episode_id"] is not None, "episode_id must be persisted onto the topic"
+        assert topic_after["target_publish_at"] is not None
+
+        assert pr.status == "completed", (
+            f"expected the pipeline to actually run, got status={pr.status!r} "
+            f"error={pr.error_message!r}"
+        )
+        assert len(call_log) == 1
+        resolved_episode_id = call_log[0]["episode_id"]
+        assert resolved_episode_id == topic_after["episode_id"]
+
+        attempt = wi.load_latest_worker_attempt(resolved_episode_id, project_root=project_root)
+        assert attempt.blocked_reason is None, (
+            "must not be refused with 'neither was supplied' — the exact H2 defect"
+        )
+        assert attempt.plan_status == "executable"
+        assert attempt.success is True
+
 
 # ===========================================================================
 # TestConcurrencyGate

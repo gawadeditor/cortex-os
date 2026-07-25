@@ -59,6 +59,7 @@ from hypogeum.topics import (
     import_topics_from_csv,
     list_topics,
     make_topic_resolver,
+    set_topic_episode_id,
     set_topic_target_publish_at,
     skip_topic,
 )
@@ -412,6 +413,32 @@ class TestSetTopicTargetPublishAt:
         claimed = claim_next_topic("ch_tp4", db_path=db_path)
         assert claimed["topic_id"] == tid
         assert claimed["target_publish_at"] == "2026-07-30T18:00:00+00:00"
+
+
+# ===========================================================================
+# 3c. set_topic_episode_id (MAR Production Repair, H2 — target_publish_at
+# identity contract: structural twin of set_topic_target_publish_at)
+# ===========================================================================
+
+class TestSetTopicEpisodeId:
+
+    def test_fills_null_episode_id_by_exact_topic_id(self, db_path):
+        tid = enqueue_topic("ch_eid", "topic", db_path=db_path)
+        result = set_topic_episode_id(tid, "ep_abc123", db_path=db_path)
+        assert result is True
+        row = get_topic(tid, db_path=db_path)
+        assert row["episode_id"] == "ep_abc123"
+
+    def test_does_not_overwrite_existing_episode_id(self, db_path):
+        tid = enqueue_topic("ch_eid2", "topic", db_path=db_path, episode_id="ep_original")
+        result = set_topic_episode_id(tid, "ep_different", db_path=db_path)
+        assert result is False
+        row = get_topic(tid, db_path=db_path)
+        assert row["episode_id"] == "ep_original"
+
+    def test_returns_false_for_unknown_topic_id(self, db_path):
+        result = set_topic_episode_id("topic_does_not_exist", "ep_x", db_path=db_path)
+        assert result is False
 
 
 # ===========================================================================

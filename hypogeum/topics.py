@@ -47,6 +47,8 @@ Public API:
     make_topic_resolver(db_path=None)                   -> Callable
     set_topic_target_publish_at(topic_id, target_publish_at,
                                  db_path=None)            -> bool
+    set_topic_episode_id(topic_id, episode_id,
+                          db_path=None)                  -> bool
 
 Exceptions:
     DuplicateTopicError — raised when a queued/claimed topic with the same
@@ -544,6 +546,49 @@ def set_topic_target_publish_at(
             WHERE topic_id = ? AND target_publish_at IS NULL
             """,
             (target_publish_at, now, topic_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def set_topic_episode_id(
+    topic_id: str,
+    episode_id: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """
+    Fill episode_id on a specific topic, only if it is currently unset.
+
+    Structural twin of set_topic_target_publish_at() — same conditional
+    UPDATE-by-primary-key shape, same idempotency guarantee, never
+    overwrites an existing value. Part of the identity contract documented
+    in queue.py::process_next(), Step 5: this is what makes
+    lookup_episode_target_publish_at(episode_id) (keyed by episode_id) able
+    to find the row that set_topic_target_publish_at(topic_id, ...) (keyed
+    by topic_id) just wrote, for a topic that had no pre-assigned
+    episode_id at claim time.
+
+    Args:
+        topic_id:   Topic to update (already claimed by the caller).
+        episode_id: The episode_id assigned to this claim.
+        db_path:    Override DB path (for tests).
+
+    Returns:
+        True if the row was updated, False if the topic does not exist or
+        already had an episode_id.
+    """
+    now = _now_iso()
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE episode_topics
+            SET episode_id = ?, updated_at = ?
+            WHERE topic_id = ? AND episode_id IS NULL
+            """,
+            (episode_id, now, topic_id),
         )
         conn.commit()
         return cursor.rowcount > 0

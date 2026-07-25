@@ -244,6 +244,15 @@ def count_active_runs_for_channel(channel_id: str, db_path=None) -> int:
 # it is whatever hypogeum.dashboard_control.enqueue_topic() (or an approved
 # discovery candidate) already wrote for this episode before the worker ever
 # claimed it. None when no such row exists — never fabricated.
+#
+# Keyed by episode_id — see the identity contract documented at the write
+# site, hypogeum/queue.py::process_next() Step 5 (topic_id claimed ->
+# episode_id assigned -> episode_topics.episode_id persisted ->
+# target_publish_at resolved here by episode_id). This lookup only finds a
+# scheduler-derived target_publish_at (written keyed by topic_id via
+# hypogeum.topics.set_topic_target_publish_at) once that persistence has
+# happened; do not read here by episode_id while writing elsewhere by
+# topic_id without that mapping existing first.
 # ---------------------------------------------------------------------------
 
 def lookup_episode_target_publish_at(episode_id: str, db_path=None) -> Optional[datetime]:

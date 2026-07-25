@@ -766,6 +766,65 @@ def process_next(
         _topic_ep_id = (topic_row.get("episode_id") if using_backlog and topic_row else None)
         episode_id = _topic_ep_id or claimed.get("episode_id") or f"ep_{queue_id[:8]}"
 
+        # Identity contract: topic_id claimed -> episode_id assigned (above) ->
+        # episode_topics.episode_id persisted (here) -> run_queue.episode_id
+        # persisted (here) -> target_publish_at resolved by episode_id
+        # (hypogeum.worker_integration.lookup_episode_target_publish_at) ->
+        # resolve_backward_plan() -> run_pipeline(). target_publish_at is
+        # written keyed by topic_id (set_topic_target_publish_at, Step 4
+        # above) but read keyed by episode_id — the two only refer to the
+        # same row once episode_id is persisted onto the topic here. Future
+        # code must never write a value keyed by topic_id and read it keyed
+        # by episode_id without this mapping existing first.
+        if using_backlog and topic_id is not None and _topic_ep_id is None:
+            try:
+                from hypogeum.topics import set_topic_episode_id
+                set_topic_episode_id(topic_id, episode_id, db_path=db_path)
+            except Exception as exc:
+                from hypogeum.logger import get_logger
+                get_logger(agent="scheduler").warn(
+                    "claim_time_episode_id_persist_failed",
+                    queue_id=queue_id, channel_id=channel_id, topic_id=topic_id,
+                    episode_id=episode_id, error=str(exc),
+                )
+
+            try:
+                from hypogeum.db import get_connection as _gc, set_queue_item_episode_id
+                _conn = _gc(db_path)
+                try:
+                    set_queue_item_episode_id(_conn, queue_id, episode_id)
+                    _conn.commit()
+                finally:
+                    _conn.close()
+            except Exception as exc:
+                from hypogeum.logger import get_logger
+                get_logger(agent="scheduler").warn(
+                    "claim_time_queue_episode_id_persist_failed",
+                    queue_id=queue_id, channel_id=channel_id, topic_id=topic_id,
+                    episode_id=episode_id, error=str(exc),
+                )
+
+            # Regression guard: if this topic now carries a target_publish_at
+            # (already set, or derived in Step 4 above), the identity chain
+            # just established should let the downstream lookup resolve it.
+            # Passive only — never raises, retries, or blocks the claim.
+            try:
+                from hypogeum.topics import get_topic
+                _current_topic = get_topic(topic_id, db_path=db_path)
+                if _current_topic and _current_topic.get("target_publish_at"):
+                    from hypogeum.worker_integration import lookup_episode_target_publish_at
+                    if lookup_episode_target_publish_at(episode_id, db_path=db_path) is None:
+                        from hypogeum.logger import get_logger
+                        get_logger(agent="scheduler").warn(
+                            "target_publish_at_identity_contract_broken",
+                            queue_id=queue_id, channel_id=channel_id, topic_id=topic_id,
+                            episode_id=episode_id,
+                            topic_target_publish_at=_current_topic.get("target_publish_at"),
+                            topic_episode_id=_current_topic.get("episode_id"),
+                        )
+            except Exception:
+                pass
+
         # Cancellation check: polled by pipeline.py between every stage.
         # Also updates worker_status to 'cancelling' on first detection.
         def _cancel_check() -> bool:

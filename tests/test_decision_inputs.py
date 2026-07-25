@@ -27,7 +27,7 @@ from hypogeum.db import get_connection, initialize_schema
 from hypogeum.decision_inputs.discovery  import get_discovery_facts
 from hypogeum.decision_inputs.episodes   import get_episode_facts
 from hypogeum.decision_inputs.costs      import get_cost_facts
-from hypogeum.decision_inputs.publishing import get_publishing_facts
+from hypogeum.decision_inputs.publishing import get_publishing_facts, get_publishing_outcome
 from hypogeum.decision_inputs.audience   import get_audience_facts
 from hypogeum.decision_inputs.store      import record_publishing_outcome
 from hypogeum.decision_inputs.state      import get_decision_inputs_state
@@ -251,6 +251,41 @@ class TestPublishingFacts:
     def test_safe_on_missing_db(self, tmp_path):
         p = get_publishing_facts(db_path=tmp_path / "missing.db")
         assert p["total_outcomes"] == 0
+
+
+# ---------------------------------------------------------------------------
+# TestGetPublishingOutcome — single-row lookup backing the publishing_agent
+# pre-upload idempotency guard.
+# ---------------------------------------------------------------------------
+
+class TestGetPublishingOutcome:
+    def test_returns_none_when_no_row(self, db):
+        assert get_publishing_outcome("ep_missing", "youtube", db_path=db) is None
+
+    def test_returns_row_when_present(self, db):
+        record_publishing_outcome("ep_010", "youtube", "success",
+                                   platform_video_id="yt-010", db_path=db)
+        row = get_publishing_outcome("ep_010", "youtube", db_path=db)
+        assert row is not None
+        assert row["publishing_status"] == "success"
+        assert row["platform_video_id"] == "yt-010"
+
+    def test_scoped_to_platform(self, db):
+        record_publishing_outcome("ep_011", "youtube", "success", db_path=db)
+        assert get_publishing_outcome("ep_011", "tiktok", db_path=db) is None
+
+    def test_reflects_latest_status_after_upsert(self, db):
+        record_publishing_outcome("ep_012", "youtube", "pending", db_path=db)
+        record_publishing_outcome("ep_012", "youtube", "success",
+                                   platform_video_id="yt-012", db_path=db)
+        row = get_publishing_outcome("ep_012", "youtube", db_path=db)
+        assert row["publishing_status"] == "success"
+        assert row["platform_video_id"] == "yt-012"
+
+    def test_safe_on_missing_db(self, tmp_path):
+        assert get_publishing_outcome(
+            "ep_013", "youtube", db_path=tmp_path / "missing.db"
+        ) is None
 
 
 # ---------------------------------------------------------------------------

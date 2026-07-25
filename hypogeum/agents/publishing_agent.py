@@ -49,6 +49,7 @@ from hypogeum.publishing.record import PublishingRecord, make_result_entry
 from hypogeum.publishing.retry import HardFailureError, PollTimeoutError, SoftFailureError
 from hypogeum.publishing.staging import StagingError, get_staging_provider
 from hypogeum.agents.covered_topics_writer import record_published_topic
+from hypogeum.decision_inputs.publishing import get_publishing_outcome
 from hypogeum.decision_inputs.store import record_publishing_outcome
 from hypogeum.schemas import SchemaError, validate
 
@@ -607,7 +608,41 @@ def run_publishing_agent(
     main_video_id = ep_render.get("video_asset_id", "")
     main_caption_id = ep_render.get("caption_asset_id", "")
 
-    if not youtube_available:
+    # Idempotency guard: a rerun (e.g. after a crash between a successful
+    # upload and the run being marked complete) must not re-upload a video
+    # that already published. publishing_outcomes is the canonical record —
+    # see hypogeum/decision_inputs/publishing.py::get_publishing_outcome().
+    # Dry-run mode is exempt: it never uploads, so it can't duplicate one.
+    _existing_yt_outcome = None
+    if not getattr(config, "YOUTUBE_DRY_RUN", False):
+        _existing_yt_outcome = get_publishing_outcome(
+            episode_id, "youtube", db_path=assets_root / "hypogeum.db",
+        )
+
+    if _existing_yt_outcome and _existing_yt_outcome.get("publishing_status") == "success":
+        _prior_video_id = _existing_yt_outcome.get("platform_video_id") or ""
+        log.info(
+            "publishing_youtube_main_already_published",
+            episode_id=episode_id,
+            video_id=_prior_video_id,
+        )
+        entry = make_result_entry(
+            platform="youtube",
+            deliverable_type="main_episode",
+            status="published",
+            platform_video_id=_prior_video_id,
+            published_url=(
+                f"https://www.youtube.com/watch?v={_prior_video_id}"
+                if _prior_video_id else None
+            ),
+            published_at=_existing_yt_outcome.get("published_at"),
+            title=get_episode_title(metadata_source),
+            ai_disclosure_included=True,
+        )
+        record.append_result(entry)
+        youtube_main_published = True
+        youtube_main_video_id = _prior_video_id
+    elif not youtube_available:
         # Mark YouTube main as failed (due to auth failure)
         entry = make_result_entry(
             platform="youtube",

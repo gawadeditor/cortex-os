@@ -636,6 +636,130 @@ class TestSuccessfulFullRun:
 
 
 # ---------------------------------------------------------------------------
+# TestYouTubeIdempotencyGuard — a rerun after a crash between a successful
+# upload and the run being marked complete must not re-upload the video.
+# Guard reads publishing_outcomes (the same table record_publishing_outcome
+# already writes to on success) before attempting the upload.
+# ---------------------------------------------------------------------------
+
+class TestYouTubeIdempotencyGuard:
+    def test_skips_reupload_when_already_published(self, tmp_path):
+        from hypogeum.decision_inputs.store import record_publishing_outcome
+
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_idem_001", tmp_path)
+        record_publishing_outcome(
+            "ep_idem_001", "youtube", "success",
+            platform_video_id="yt_prior_video",
+            published_at="2026-07-20T00:00:00+00:00",
+            db_path=tmp_path / "hypogeum.db",
+        )
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video") as mock_upload:
+                mock_upload.return_value = "yt_short_generic"
+                result = _run(pkg, config, "ep_idem_001", tmp_path)
+
+        # Main episode is never re-uploaded (guard fires); the 3 shorts are
+        # a separate deliverable the guard does not cover, so they still
+        # upload normally — call_count reflects shorts only.
+        assert mock_upload.call_count == 3
+        assert all(
+            "main_" not in str(call.kwargs.get("video_path", ""))
+            for call in mock_upload.call_args_list
+        )
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        assert yt_main["status"] == "published"
+        assert yt_main["platform_video_id"] == "yt_prior_video"
+        assert result["summary"]["youtube_main_published"] is True
+        assert result["summary"]["youtube_main_video_id"] == "yt_prior_video"
+
+    def test_does_not_rewrite_outcome_when_skipping(self, tmp_path):
+        from hypogeum.decision_inputs.store import record_publishing_outcome
+
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_idem_002", tmp_path)
+        record_publishing_outcome(
+            "ep_idem_002", "youtube", "success",
+            platform_video_id="yt_prior_video_2",
+            db_path=tmp_path / "hypogeum.db",
+        )
+
+        with _patch_platforms(), \
+             patch("hypogeum.agents.publishing_agent.record_publishing_outcome") as mock_outcome:
+            _run(pkg, config, "ep_idem_002", tmp_path)
+
+        mock_outcome.assert_not_called()
+
+    def test_failed_prior_outcome_does_not_block_reupload(self, tmp_path):
+        from hypogeum.decision_inputs.store import record_publishing_outcome
+
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_idem_003", tmp_path)
+        record_publishing_outcome(
+            "ep_idem_003", "youtube", "failed",
+            failure_reason="prior attempt failed",
+            db_path=tmp_path / "hypogeum.db",
+        )
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video") as mock_upload:
+                mock_upload.return_value = "yt_new_upload"
+                result = _run(pkg, config, "ep_idem_003", tmp_path)
+
+        # Main + 3 shorts all upload normally — a prior *failed* outcome
+        # must not be treated as "already published".
+        assert mock_upload.call_count == 4
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        assert yt_main["platform_video_id"] == "yt_new_upload"
+
+    def test_no_prior_outcome_uploads_normally(self, tmp_path):
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_idem_004", tmp_path)
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video") as mock_upload:
+                mock_upload.return_value = "yt_first_upload"
+                result = _run(pkg, config, "ep_idem_004", tmp_path)
+
+        assert mock_upload.call_count == 4  # main + 3 shorts
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        assert yt_main["platform_video_id"] == "yt_first_upload"
+
+    def test_dry_run_ignores_prior_outcome(self, tmp_path):
+        from hypogeum.decision_inputs.store import record_publishing_outcome
+
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        config.YOUTUBE_DRY_RUN = True
+        pkg = _make_final_render_package("ep_idem_005", tmp_path)
+        record_publishing_outcome(
+            "ep_idem_005", "youtube", "success",
+            platform_video_id="yt_prior_video_5",
+            db_path=tmp_path / "hypogeum.db",
+        )
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video") as mock_upload:
+                result = _run(pkg, config, "ep_idem_005", tmp_path)
+
+        mock_upload.assert_not_called()  # dry-run never calls upload_video regardless
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        assert yt_main["platform_video_id"].startswith("dry_run_")
+
+
+# ---------------------------------------------------------------------------
 # TestEnabledPlatformsFilter — run_worker.py <-> ChannelOperationsProfile
 # platform gating (2026-07-21 correction). Proves the filter reaches real
 # provider calls, not just result metadata.

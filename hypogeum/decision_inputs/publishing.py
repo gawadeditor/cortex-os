@@ -6,6 +6,7 @@ No live publishing calls. No external APIs. Non-blocking.
 
 Public API:
     get_publishing_facts(db_path=None) -> dict
+    get_publishing_outcome(episode_id, platform, db_path=None) -> Optional[dict]
 """
 
 from __future__ import annotations
@@ -97,3 +98,41 @@ def get_publishing_facts(db_path: Optional[Path] = None) -> dict:
         }
     except Exception:
         return empty
+
+
+def get_publishing_outcome(
+    episode_id: str,
+    platform: str,
+    db_path: Optional[Path] = None,
+) -> Optional[dict]:
+    """
+    Return the single canonical publishing_outcomes row for
+    (episode_id, platform), or None if no row exists.
+
+    Used as a pre-upload idempotency check — a prior row with
+    publishing_status='success' means this episode/platform pair has
+    already published and must not be re-uploaded on a rerun.
+
+    Fails open (returns None) on any DB error, matching this module's
+    existing non-blocking read philosophy — a failed idempotency lookup
+    must not block a legitimate first-time publish attempt.
+    """
+    try:
+        db = _resolve_db(db_path)
+        initialize_schema(db)
+        conn = get_connection(db)
+        try:
+            row = conn.execute(
+                """
+                SELECT episode_id, platform, publishing_status,
+                       platform_video_id, published_at, recorded_at
+                FROM publishing_outcomes
+                WHERE episode_id = ? AND platform = ?
+                """,
+                (episode_id, platform),
+            ).fetchone()
+        finally:
+            conn.close()
+        return dict(row) if row is not None else None
+    except Exception:
+        return None

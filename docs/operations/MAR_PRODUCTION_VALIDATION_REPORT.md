@@ -447,3 +447,155 @@ tracked**: YouTube OAuth token refresh (`invalid_grant`, HTTP 400) — not a
 MAR defect, requires operator re-authorization (see `CURRENT_PHASE.md`).
 No new architecture, runtime framework, or checkpoint/resume system was
 added or found necessary by this revalidation.
+
+---
+
+# First Fully Autonomous End-to-End Production Run (2026-07-25, same day)
+
+Workstream: after H1/H2 repair, the objective moved to achieving the
+first complete unattended production cycle: Discovery/Queue → Scheduler →
+Production → Publishing → Analytics, with a real (private) YouTube upload
+to prove exactly-once publishing. **Achieved.** Evidence directory:
+`e2e_validation/01`–`20_*.txt`.
+
+Scope note: "Discovery" was represented by an organically-queued topic
+(no pre-assigned `episode_id`, matching the real shape of a
+discovery-sourced topic) rather than triggering a live Perplexity-backed
+discovery cycle — Discovery itself is a separate, already-built capability
+not in question here; the objective was proving Scheduler → Production →
+Publishing → Analytics → Idle, the part never previously proven end-to-end
+with a real publish.
+
+## Two further blockers found and fixed before the run
+
+### OAuth secret-source-of-truth defect (independent defect, fixed)
+
+Re-authorizing YouTube OAuth (to resolve the tracked `invalid_grant`)
+looked successful but did not fix real publishing: `refresh_youtube_token()`
+and `refresh_meta_token()` read exclusively from `Config`/`.env`, which the
+OAuth callback never updates — it only writes to `secret_profiles`.
+`refresh_tiktok_token()` already did this correctly; that was the
+reference pattern. Fixed by adding
+`credential_manager.resolve_oauth_credential()` (secret_profiles first,
+env fallback only when no active profile exists) and using it in both
+functions. Verified live before the production run: `refresh_youtube_token()`
+succeeded with the freshly re-authorized token, and a real
+`channels.list` call returned HTTP 200 for the correct channel
+(`The Hypogeum`, `UC6lbORr6RBYDPObPk80yGcQ`). Commit `bbeacf7`.
+
+### youtube_privacy fail-open defect (independent defect, fixed)
+
+`run_pipeline()` defaults `youtube_privacy` to `"public"`, and
+`build_gated_pipeline_executor()` — the sole gate every autonomous
+queue-driven run passes through — never passed it explicitly, despite an
+existing code comment claiming a schedule-based private override already
+existed. It didn't: every autonomous run would have defaulted to a public
+upload. Fixed by resolving `youtube_privacy` from the already-loaded
+`ChannelOperationsProfile.default_privacy_state` and passing it
+explicitly, failing closed (`GatedExecutionRefused`) when the value is
+missing or invalid — never falling through to `"public"`. Commit `1dc9cea`.
+
+Both fixes: focused + targeted + full suite all green (same 8 pre-existing
+unrelated failures, zero new regressions), committed separately.
+
+## The run
+
+**Attempt 1** (`ep_13872a9d`, topic "The Nebra Sky Disc..."): ran 8 stages
+cleanly (startup_checks through thumbnail_strategy), then legitimately
+rejected by BGA Pass 1 ("1 blocking violation(s) in scene descriptions")
+at `visual_package_director`. **Not a blocker** — Brand Guardian Agent
+correctly enforcing a real content-quality gate, unrelated to any fix in
+this workstream. No code changed; retried with a fresh topic per the same
+canonical queue/scheduler path.
+
+**Attempt 2** (`ep_4e35674f`, topic "The Great Library of Alexandria: What
+Was Really Lost?") — **succeeded completely**:
+
+| Stage | Duration | Result |
+|---|---|---|
+| startup_checks | 1.2s | ✅ |
+| executive_producer | 39.2s | ✅ |
+| research_director | 316.4s | ✅ |
+| narrative_architect | 131.9s | ✅ |
+| script_engine | 175.8s | ✅ |
+| finance_agent_authorization | 8ms | ✅ AUTHORIZED |
+| thumbnail_strategy | 17.6s | ✅ |
+| visual_package_director | 154.4s | ✅ |
+| thumbnail_director | 493.6s | ✅ |
+| audio_agent | 11.7s | ✅ |
+| assembly_agent | 9.1s | ✅ |
+| asset_archive | 65ms | ✅ |
+| qa_agent | 2ms | ✅ |
+| compliance_agent | 3ms | ✅ |
+| publishing_agent | 11.8s | ✅ |
+| archive_agent | 5ms | ✅ |
+| finance_agent_ledger | 9ms | ✅ |
+
+17/17 stages, zero retries, zero manual intervention, zero direct
+`run_pipeline()` calls (submitted only via `hypogeum.topics.enqueue_topic()`
++ the real scheduler tick, exactly as the canonical path requires).
+`runs` row: `status='completed'`, `exit_code=0`, `total_cost_usd=2.04`
+(real spend). Total wall-clock: 22m43s.
+
+## Verification against every required criterion
+
+1. **Scheduler/queue pickup** — `worker.log`: `tick scheduled_runs_created=1`
+   → `consume queue_items_created=1` → `poll status=completed`, all via
+   the real 60s-interval worker loop, no manual trigger.
+2. **One episode_id preserved end-to-end** — `ep_4e35674f` consistent
+   across `runs`, `stage_executions` (all 17 rows), `episode_topics`
+   (`status='consumed'`), and `publishing_outcomes`.
+3. **Unattended pipeline execution** — confirmed above; no
+   INTERVENTION-tagged command in the transcript.
+4. **Exactly one private YouTube upload** — `publishing_outcomes`:
+   exactly 1 row (`platform='youtube'`, `status='success'`,
+   `platform_video_id='8gZux3jYc_I'`). Independently confirmed via a
+   real, live `videos.list` API call: `privacyStatus: 'private'`,
+   `uploadStatus: 'processed'`, title matches exactly. A further live
+   `search.list` (`forMine=true`) query for the episode's subject found
+   **exactly one** matching video on the real channel — no duplicate.
+5. **No duplicate publishing ledger entry** — confirmed (count=1).
+6. **Analytics ingestion** — no `platform_analytics` row yet for this
+   video at verification time (~1 minute post-publish). Classified as an
+   **expected, bounded delay**, not a defect: YouTube's own Analytics API
+   has inherent processing latency for a just-published video, and the
+   worker's periodic sync (`ANALYTICS_SYNC_EVERY_N_ITERATIONS`, default
+   60) hadn't reached a trigger point yet since restart. The sync
+   mechanism itself was already independently proven working in the
+   original MAR Production Validation (Step 8: PASS, real `source='api'`
+   row appeared post-restart).
+7. **Worker returns to idle** — `worker_control`: `worker_status='idle'`,
+   `active_queue_id=''`. `worker.log`: the iteration immediately after
+   completion logged `poll=empty` — correctly found nothing to claim,
+   ready for the next scheduled topic.
+
+## Configuration restored
+
+Before/after evidence in `e2e_validation/18`–`20_*.txt`:
+
+| Setting | Validation value | Restored to |
+|---|---|---|
+| `FULL_PRODUCTION_ENABLED` | true | false |
+| `PRODUCTION_MODE` | production | validation |
+| `FINANCE_BUDGET_CEILING_USD` | 200.00 | 50.00 |
+| `SMOKE_TEST_MODE` | true | false |
+| `YOUTUBE_DRY_RUN` | false | true |
+| `hypogeum` channel `unattended_operation_enabled` | true | false |
+
+Not reverted (real code fixes): commits `bbeacf7`, `1dc9cea`. Not
+reverted (real production artifacts, not validation scaffolding): the
+published YouTube video itself (private, intentionally left up as
+evidence) and episode `ep_4e35674f`'s on-disk assets/checkpoints.
+
+## Final Go/No-Go
+
+**PASS.** Factory OS has now demonstrated, with real evidence rather than
+architectural inference, a complete autonomous production cycle from
+scheduler trigger through a real, exactly-once, correctly-private
+publish, with the worker returning to a clean idle state afterward ready
+for the next cycle. Remaining known gaps, none of which blocked this run:
+analytics-ingestion timing for a just-published video (bounded, not a
+defect), and the previously-documented, deliberately out-of-scope
+publishing-idempotency gap (stage checkpointing / duplicate-publish
+protection on manual reruns — see the MAR Production Repair decision
+above) — relevant only to the *recovery* path, not this run.

@@ -26,15 +26,15 @@ Its purpose is to answer one question:
 
 Current Phase
 
-Late Phase 2
+Late Phase 2 — exit criteria met, hardening before advancing to Phase 3
 
 Roadmap Progress
 
 Foundation → Largely Complete
 
-Autonomous Production → Mostly Operational
+Autonomous Production → Operational, validated end-to-end
 
-Autonomous Runtime → In Progress
+Autonomous Runtime → Core objectives met, monitoring and recovery hardening in progress
 
 Analytics → Partial
 
@@ -44,6 +44,11 @@ Multi-Channel → Planned
 
 Commercial Platform → Planned
 
+Documentation → Synchronized with implementation as of 2026-07-25 (Cortex
+Constitution adopted, Architecture Alignment Report reviewed, ADR-008
+recorded for Service Layer convergence). Documentation work is closed
+until implementation materially changes reality.
+
 ---
 
 # Completed Foundations
@@ -52,11 +57,15 @@ The following platform foundations are considered operational.
 
 ## Core
 
-- Runtime framework
+- Runtime framework, including a validated Minimum Autonomous Runtime
+  (launchd-supervised worker, live-tested against a hard process kill with
+  full before/after evidence)
 - Orchestration framework
 - Multi-agent workflow
 - Configuration system
-- Secret management
+- Secret management, including a single canonical runtime source of truth
+  for OAuth-rotatable credentials (`secret_profiles`, `.env` as bootstrap
+  fallback only)
 - Provider abstraction
 - Execution pipeline
 
@@ -111,15 +120,41 @@ The following systems exist but are not yet considered production complete.
 
 Status
 
-In Progress
+Core objectives met. A complete unattended production cycle has been
+executed and verified live: Discovery → Queue → Scheduler → Production →
+Publishing → Analytics, with exactly-once private YouTube upload
+confirmed against the live YouTube API (not database evidence alone), and
+the worker returning to idle afterward. Two defects that blocked this
+were found and fixed this cycle: orphaned `run_queue`/`stage_executions`
+state after a worker crash never reconciling (queue and stage
+reconciliation now extended alongside the existing `runs`-table
+reconciliation), and a scheduler-derived `target_publish_at` written
+keyed by `topic_id` but read keyed by `episode_id` for organically-queued
+topics (now persisted at claim time with a passive regression guard).
 
-Remaining objectives
+Achieved
 
-- Continuous execution
-- Background scheduling
-- Runtime supervision
-- Recovery from failures
-- Long-running worker reliability
+- Continuous execution (validated live via the launchd-supervised worker)
+- Background scheduling (validated live end-to-end)
+- Long-running worker reliability (validated against a real hard-kill)
+- Baseline recovery from failures (orphaned queue/stage/run state
+  reconciles to a terminal failed state on next worker startup; recovery
+  is manual re-run via the existing dashboard endpoint, not automatic
+  retry)
+
+Remaining objectives (current priority — see Current Priorities below)
+
+- Runtime supervision / monitoring: no proactive alerting exists yet on
+  stuck runs, repeated failures, or worker health beyond what the
+  dashboard surfaces on request.
+- Recovery hardening: reconciliation is terminal-only by design (no
+  auto-retry). A confirmed, documented-but-unfixed gap remains: neither
+  `hypogeum/pipeline.py` (`_record_stage_skipped()` exists but is never
+  called) nor `hypogeum/agents/publishing_agent.py` (no
+  `publishing_outcomes` check before upload) implements checkpoint-skip or
+  publish-idempotency, so a rerun after a crash that happens after a real
+  publish succeeds but before its run/queue rows are marked complete would
+  re-publish. Not yet in scope for a fix.
 
 ---
 
@@ -211,12 +246,16 @@ The objective is to establish a reliable autonomous operating platform before in
 
 The current phase is complete when Cortex can:
 
-- Discover opportunities autonomously.
-- Produce complete media assets.
-- Publish without routine human intervention.
-- Monitor execution continuously.
-- Recover from failures automatically.
-- Use collected analytics to improve future executions.
+- Discover opportunities autonomously. — Achieved, validated live.
+- Produce complete media assets. — Achieved, validated live.
+- Publish without routine human intervention. — Achieved, validated live
+  against the real YouTube API, exactly once.
+- Monitor execution continuously. — Not yet. Current priority.
+- Recover from failures automatically. — Partial. Orphaned state
+  reconciles to a safe terminal state; recovery itself (re-run) is
+  triggered manually, not automatically. Current priority.
+- Use collected analytics to improve future executions. — Not yet.
+  Analytics feedback loop is Phase 3, not started.
 
 ---
 

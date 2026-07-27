@@ -60,8 +60,9 @@ The official documentation hierarchy is:
 11. SKILLS_SPEC
 12. AGENT_MODEL
 13. WORKFLOW_MODEL
-14. DATA_MODEL
-15. GOVERNANCE
+14. INTERFACE_CONTRACT_MODEL
+15. DATA_MODEL
+16. GOVERNANCE
 
 Lower documents must never contradict higher documents.
 

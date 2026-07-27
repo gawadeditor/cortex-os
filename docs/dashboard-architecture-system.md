@@ -1,12 +1,21 @@
 # Dashboard Architecture System — Phase B5 Design
 
 **Status:** Design only — no implementation  
-**Phase:** B5 (Factory OS Productization)  
+**Phase:** B5 (Factory OS Productization) — predates the Cortex
+Constitution's Phase 0–8 numbering; not yet reconciled. See
+`CURRENT_STATE.md` § Dashboard / Interfaces.  
 **Date:** 2026-06-13  
 **Scope gate:** docs/dashboard-surface-area.md — 15 V1 pages only  
 **Depends on:** B1–B4.95 (all prior phases)  
 **Feeds into:** B5.25 (Product Experience System)  
 **Author:** Factory OS Architect
+
+> **Mandatory prerequisite:** any model or agent doing Dashboard UI/UX
+> work from this document must first install, load, and follow the
+> **UI/UX Pro Max Skill** — `DECISION_LOG.md` ADR-009, `SKILLS_SPEC.md`
+> § Mandatory Skills. Not yet installed in this repo. The Dashboard must
+> also remain channel-agnostic (Hypogeum supplies Channel Package data
+> only) — see `CURRENT_STATE.md` § Dashboard / Interfaces.
 
 ---
 

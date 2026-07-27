@@ -132,6 +132,14 @@ Capabilities
 | Scheduling Learning | 🔴 |
 | Provider Learning | 🔴 |
 
+Ownership note (2026-07-26, `DECISION_LOG.md` ADR-012): Factory Learning
+and Provider Learning are cross-channel and owned by Factory OS — never
+placed inside Hypogeum or any Channel Package. Channel Learning stays
+scoped to channel-specific audience, brand, editorial, content, and
+performance learning only. Provider Learning here is passive evidence
+collection; the active discovery/benchmark/promotion loop that consumes
+it is Level 9's Factory Capability Evolution capability, below.
+
 ---
 
 # LEVEL 5
@@ -169,7 +177,7 @@ Capabilities
 | Roles & Permissions | 🔴 |
 | Secret Management | 🟡 |
 | OAuth Management | 🟡 |
-| Audit Logs | 🔴 |
+| Audit Logs | 🟡 |
 | Configuration Management | 🟡 |
 
 ---
@@ -220,6 +228,15 @@ Capabilities
 
 The ability to work with external AI systems.
 
+Two sub-layers, per `DECISION_LOG.md` ADR-012 — kept distinct so one is
+never mistaken for the other: a static **decoupling substrate**
+(registry, routing, fallback — architected during `ROADMAP.md` Phase 3,
+Production Hardening, as P1) versus an active **evolution loop**
+(discovery, benchmarking, promotion — `ROADMAP.md` Phase 6, Factory
+Capability Evolution, gated behind Phase 4/5 shipping real evidence).
+The substrate has standalone value even if the evolution loop is never
+built; the evolution loop cannot exist without the substrate.
+
 Capabilities
 
 | Capability | Status |
@@ -230,6 +247,14 @@ Capabilities
 | Cost Benchmarking | 🔴 |
 | Quality Benchmarking | 🔴 |
 | Model Registry | 🔴 |
+| Capability-Based Routing | 🔴 |
+| Configurable Fallback Chains | 🔴 |
+| Model Lifecycle Status | 🔴 |
+| Deprecation Detection | 🔴 |
+| Shadow Testing | 🔴 |
+| Canary Rollout | 🔴 |
+| Automatic Rollback | 🔴 |
+| Provider/Model Decision Audit Trail | 🔴 |
 
 ---
 
@@ -247,6 +272,7 @@ Capabilities
 | Skill Registry | 🔴 |
 | Skill Discovery | 🔴 |
 | Skill Versioning | 🔴 |
+| Skill Effectiveness Evaluation | 🔴 |
 | Third-party Skills | 🔴 |
 | Marketplace | ⚪ |
 

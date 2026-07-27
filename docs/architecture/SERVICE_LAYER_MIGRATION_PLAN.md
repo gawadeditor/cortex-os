@@ -1,5 +1,16 @@
 # Service Layer Incremental Migration Plan
 
+**2026-07-26 phase-numbering note**: `ROADMAP.md` was renumbered after
+this document was written. Phase references below use the pre-renumber
+scheme (Phase 3 = Analytics, Phase 4 = Learning, Phase 6 = Multi-Channel
+Platform). Current numbering: Analytics = Phase 4, Learning = Phase 5,
+Multi-Channel Platform = Phase 8. Two new phases were inserted before
+Multi-Channel: Phase 3 (Production Hardening) and Phase 6 (Factory
+Capability Evolution, `DECISION_LOG.md` ADR-012). This note is a pointer,
+not a rewrite — treat `ROADMAP.md` as authoritative for phase numbers,
+this document for the Service-layer analysis itself, which is unaffected
+by the renumbering.
+
 Produced 2026-07-25, in response to explicit correction on the Architecture
 Alignment Report: the Core → Service → Agent boundary defined by
 `SERVICE_MODEL.md` / `AGENT_MODEL.md` / `EXECUTION_MODEL.md` is not a

@@ -346,6 +346,19 @@ Deprecated Skills remain available until safely removed.
 
 ---
 
+# Mandatory Skills (by domain)
+
+Some domains require a specific Skill as a precondition of the work
+itself, not merely as an available reference. Each such requirement is
+recorded here and in the Decision Log as an ADR.
+
+- **Dashboard UI/UX work** requires the **UI/UX Pro Max Skill** before
+  any design or implementation begins (`DECISION_LOG.md` ADR-009). Not
+  yet installed as of 2026-07-26 — this entry records the requirement;
+  it does not assert the Skill currently exists.
+
+---
+
 # Relationship to Other Components
 
 Core

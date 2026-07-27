@@ -84,24 +84,25 @@ python3 scripts/bootstrap_channel.py --verify-only
 
 ### Pipeline Execution Order (frozen)
 ```
-EP → RD → NA → SE → VPD → TD → Audio → Assembly → Publishing
+EP → RD → NA → SE → Thumbnail Strategy → VPD → TD → Audio → Assembly → Publishing
 ```
 1. **Executive Producer** — scores topic (ACCEPT/WARN/REJECT), produces `topic_brief`
 2. **Research Director** — Perplexity queries, produces `research_package`
 3. **Narrative Architect** — story structure, produces `narrative_package`
 4. **Script Engine** — narration beats + visual directions, produces `script_package`
-5. **Visual Package Director** — plans scenes (Phase 1: Claude), generates video clips (Phase 2: MUAPI), produces `visual_package`
-6. **Thumbnail Director** — generates thumbnail candidates, produces `thumbnail_package`
-7. **Audio Agent** — ElevenLabs narration + music, produces `narration_package`
-8. **Assembly Agent** — FFmpeg render, produces `final_render_package`
-9. **Publishing Agent** — YouTube upload, produces `publishing_record`
+5. **Thumbnail Strategy** — three CTR concept hypotheses from `topic_brief`+`script_package`, produces `thumbnail_concept_brief` (wired into the pipeline 2026-07-19; previously reachable only via `scripts/generate_thumbnail_strategy.py`). Writing this file is what activates CONCEPT_DRIVEN_MODE in Thumbnail Director below — see `hypogeum/agents/thumbnail_strategy.py`.
+6. **Visual Package Director** — plans scenes (Phase 1: Claude), generates video clips (Phase 2: MUAPI), produces `visual_package`
+7. **Thumbnail Director** — generates thumbnail candidates, produces `thumbnail_package`. QA (`hypogeum/agents/thumbnail_qa.py`) requires the layered `composition_plan`/`typography_plan` fields that only CONCEPT_DRIVEN_MODE produces — legacy-mode thumbnails fail QA by design.
+8. **Audio Agent** — ElevenLabs narration + music, produces `narration_package`
+9. **Assembly Agent** — FFmpeg render, produces `final_render_package`
+10. **Publishing Agent** — YouTube upload, produces `publishing_record`
 
 Every agent output is validated by `hypogeum/schemas.py` (26 schemas) before passing to the next stage. A failed validation raises `SchemaError` and halts the pipeline.
 
 ### Key Modules
 | Module | Role |
 |---|---|
-| `hypogeum/pipeline.py` | Orchestrator — calls all 9 agents in order, handles fail-fast exits |
+| `hypogeum/pipeline.py` | Orchestrator — calls all 10 agents in order, handles fail-fast exits |
 | `hypogeum/agent.py` | Central LLM runner — serialize → call OpenRouter → validate → write disk |
 | `hypogeum/config.py` | Single read point for all env vars. **Never call `os.getenv()` directly.** |
 | `hypogeum/db.py` | SQLite write helpers. `initialize_schema()` is idempotent. DB: `.hypogeum-assets/hypogeum.db` |
@@ -121,18 +122,21 @@ Every agent output is validated by `hypogeum/schemas.py` (26 schemas) before pas
 
 ### MUAPI Video Tier Routing
 ```
-T1 = veo3-text-to-video        $2.50/gen  premium / hero scenes
-T2 = veo3-fast-text-to-video   $0.60/gen  primary production tier  ← .env override
-T3 = veo3-fast-text-to-video   $0.60/gen  cheap-mode alias
-I2V = veo3-image-to-video                 image-to-video path
+T1 = veo3-text-to-video          $2.50/gen  premium / hero scenes
+T2 = veo3.1-lite-text-to-video   $0.39/gen  primary production tier, 1080p candidate  ← default, .env override
+T3 = veo3.1-lite-text-to-video   $0.39/gen  cheap-mode alias (same model as T2)
+I2V = veo3-image-to-video                   image-to-video path
 ```
-Controlled by `MUAPI_DEFAULT_TIER=2` in `.env`. Override individual tiers with `MUAPI_T2_MODEL`, etc. Set `MUAPI_DRY_RUN=true` to test without spending credits.
+`veo3.1-lite-text-to-video` is the default production model for T2/T3 (confirmed 2026-07-06; better quality than `veo3-fast-text-to-video` at lower cost). Fixed 8s duration — duration/resolution are sent explicitly for veo3.1 models (see `hypogeum/muapi.py::_VEO3_1_MODELS`). Controlled by `MUAPI_DEFAULT_TIER=2` in `.env`. Override individual tiers with `MUAPI_T2_MODEL`, etc. Set `MUAPI_DRY_RUN=true` to test without spending credits.
+
+### Video DNA v1 + Prompt Writer architecture (2026-07-14, split into per-concept DNA modules 2026-07-18, Phases B2.1–B2.6)
+Canonical, topic-agnostic cinematic visual language for every video scene, now split by concept into single-owner modules per `docs/validation/prompt_writer_architecture/B1_3_ARCHITECTURE_CONTRACT.md`: `hypogeum/video_dna.py` (fine-detail preservation, continuity, subject hierarchy, scene transitions), `hypogeum/camera_dna.py` (camera-verb vocabulary + static-framing policy), `hypogeum/motion_dna.py` (subject/environmental motion and pacing), `hypogeum/lighting_dna.py` (temperature/entry-verb/connector/falloff vocabulary, `[lamp source off-frame]` tag), `hypogeum/historical_dna.py` (archaeological/period-plausibility rule, material-observation pattern, per-setting-type anachronism library), `hypogeum/composition_dna.py` (spatial/frame-layout structure — optional section, not yet default-on, see that module's docstring), and `hypogeum/forbidden_dna.py` (aggregation/dedup of every module's negative items — the sole collector, not a content source). Every scene prompt is assembled by `hypogeum/video_prompt_writer.py::assemble_video_scene_prompt()` (the only thing `hypogeum/muapi.py::submit_scene()` calls) in a fixed section order — **Scene → Camera → Subject → Motion → Lighting → Visual Priorities → [Composition, optional] → Video DNA → Camera DNA → Motion DNA → Lighting DNA → Historical DNA → Brand DNA → Forbidden** — never mixed together; see that module's own docstring for the authoritative order and which sections are default-on vs. optional. Each concept has exactly one owner across these modules; `hypogeum.brand.visual_identity`'s adaptive-tier directive owns material character, finish, lighting *character* (color-temperature philosophy, distinct from Lighting DNA's technical vocabulary), and color philosophy only. All prohibitions live in one dedicated Forbidden section (collected + deduplicated by `hypogeum/forbidden_dna.py` from every module) — never scattered "never/no/avoid" language. A deterministic compression pass removes duplicate concept restatements across the deterministic sections (never touches Scene/Camera/Subject/Motion/Lighting). Never edit a scene prompt by hand to add cinematic guidance — extend the relevant DNA module instead so every future episode inherits the change automatically. See `hypogeum/video_dna_validation_suite.py` (18 topic-agnostic validation scenes) + `hypogeum/video_dna_validator.py` (structural, zero-provider-call checker, supports comparing Video DNA versions) for the reusable regression suite.
 
 ### Database Schema Migrations
 New columns on existing tables go in `_V2_COLUMN_MIGRATIONS` dict in `hypogeum/db.py`. The dict is a `{table_name: [(col_name, col_def), ...]}` map. `initialize_schema()` applies them idempotently via `PRAGMA table_info()` checks.
 
 ### Cinematic Prompt Architecture
-VPD scene prompts follow a strict 9-layer spec in `hypogeum/skills/visual_package_director/cinematic_prompt_architecture.md`. This file is read by the VPD agent at runtime and dictates how prompts are assembled. Key rules: no `static` camera verb (use `controlled slow push in`), always include `[no vignette]`, include `[lamp source off-frame]` when any period light source appears.
+VPD scene prompts follow a strict 9-layer spec in `hypogeum/skills/visual_package_director/cinematic_prompt_architecture.md`. This file is read by the VPD agent at runtime and dictates how prompts are assembled. Key rules: static framing is constrained, not banned — permitted only with meaningful subject/environmental/atmospheric/lighting motion in frame and only when intentional, rare, and narratively justified (default to `controlled slow push in` otherwise); this canonical static-framing policy is owned by `hypogeum/camera_dna.py` (as of Phase B2.5), not restated here (see `docs/validation/prompt_writer_architecture/B1_2A_STATIC_CAMERA_POLICY_MEMO.md`); always include `[no vignette]`; include `[lamp source off-frame]` when any period light source appears.
 
 ### LLM Provider Context Injected to Claude
 `hypogeum/agents/scene_planner.py` contains `PROVIDER_CAPABILITIES` — a dict injected into every scene-planning LLM call. When tier or pricing changes, update this dict or the LLM will plan using stale assumptions.

@@ -21,6 +21,16 @@ preserved"). Do not treat anything in this folder as current.
 | `DECISION_LOG.md` | `/DECISION_LOG.md` (new — architectural ADRs only; this archived version is the real operational/engineering decision history and remains the reference for that) |
 | `EXECUTION_PROTOCOL.md` | `/EXECUTION_MODEL.md` |
 | `PROJECT_CONSTITUTION.md`, `PROJECT_PRINCIPLES.md` | `/FACTORY_PHILOSOPHY.md`, `/DESIGN_PRINCIPLES.md` |
+| `roadmap.md` (was `docs/roadmap.md`, "Pipeline Roadmap", last updated 2026-05-31) | `/ROADMAP.md` |
+| `master-project-brief.md` (was `docs/master-project-brief.md`, 2026-05-30) | `/PROJECT_NORTH_STAR.md` |
+| `FACTORY_FIX_LEDGER.md` (was repo root, June 2026 fix audit) | Historical engineering record only — no direct Constitution successor; superseded in spirit by live regression suites and `docs/operations/PLATFORM_READINESS.md` for platform-specific verification |
+| `E2E_VERIFICATION_PLAN.md` (was repo root, June 2026) | Superseded by `scripts/multiplatform_publishing_smoke.py` and the live-evidence verification methodology used throughout the Multi-Platform Publishing phase |
+| `ROADMAP_REPAIR_PLAN.md` (was repo root, 2026-06-20) | `/ROADMAP.md` (current) |
+
+Archived 2026-07-26 (second pass — these five were identified as obsolete
+during the Multi-Platform Publishing phase's documentation-synchronization
+work but not moved until the Operational Validation phase's documentation
+closure step).
 
 **Not archived, and not superseded** (see the Architecture Alignment
 Report for why): the repo's root `CLAUDE.md` — it serves a distinct,

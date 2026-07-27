@@ -1,10 +1,19 @@
 # Dashboard Surface Area — V1 Scope Definition
 
 **Status:** Design only — no implementation  
-**Phase:** Pre-B5 (Dashboard scope gate)  
+**Phase:** Pre-B5 (Dashboard scope gate) — predates the Cortex
+Constitution's Phase 0–8 numbering; not yet reconciled. See
+`CURRENT_STATE.md` § Dashboard / Interfaces.  
 **Date:** 2026-06-13  
 **Purpose:** Define the minimum operator-facing page set required to operate a Factory in V1. Prevent dashboard sprawl before B5 architecture begins.  
 **Author:** Factory OS Architect
+
+> **Mandatory prerequisite:** any model or agent doing Dashboard UI/UX
+> work from this document must first install, load, and follow the
+> **UI/UX Pro Max Skill** — `DECISION_LOG.md` ADR-009, `SKILLS_SPEC.md`
+> § Mandatory Skills. Not yet installed in this repo. The Dashboard must
+> also remain channel-agnostic (Hypogeum supplies Channel Package data
+> only) — see `CURRENT_STATE.md` § Dashboard / Interfaces.
 
 ---
 

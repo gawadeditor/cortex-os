@@ -505,10 +505,12 @@ class TestFactoryClearanceGate:
         self._seed_cost(db, 999.0)
         _enqueue_directly(db)
 
+        from hypogeum.factory_entity import update_factory
+        update_factory("hypogeum", db_path=db, factory_policies={"monthly_ceiling_usd": 10.0})
+
         from run_worker import run_iteration
 
-        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=10.0), \
-             patch("hypogeum.pipeline.run_pipeline") as mock_pipe:
+        with patch("hypogeum.pipeline.run_pipeline") as mock_pipe:
             result = run_iteration(
                 worker_id=str(uuid.uuid4()),
                 db_path=db,
@@ -534,16 +536,18 @@ class TestFactoryClearanceGate:
         self._seed_cost(db, 1.0)
         _enqueue_directly(db)
 
+        from hypogeum.factory_entity import update_factory
+        update_factory("hypogeum", db_path=db, factory_policies={"monthly_ceiling_usd": 10.0})
+
         from run_worker import run_iteration
 
-        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=10.0):
-            result = run_iteration(
-                worker_id=str(uuid.uuid4()),
-                db_path=db,
-                dry_run=True,
-                channel_id=None,
-                config=MagicMock(),
-            )
+        result = run_iteration(
+            worker_id=str(uuid.uuid4()),
+            db_path=db,
+            dry_run=True,
+            channel_id=None,
+            config=MagicMock(),
+        )
 
         assert result["factory_cleared"] is True
         assert result["poll_status"] != "not_cleared"
@@ -557,17 +561,19 @@ class TestFactoryClearanceGate:
         self._seed_cost(db, 999.0)
         _enqueue_directly(db)
 
+        from hypogeum.factory_entity import update_factory
+        update_factory("hypogeum", db_path=db, factory_policies={"monthly_ceiling_usd": 10.0})
+
         from run_worker import run_iteration
 
-        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=10.0):
-            result = run_iteration(
-                worker_id=str(uuid.uuid4()),
-                db_path=db,
-                dry_run=True,
-                channel_id=None,
-                config=MagicMock(),
-                validation_mode=True,
-            )
+        result = run_iteration(
+            worker_id=str(uuid.uuid4()),
+            db_path=db,
+            dry_run=True,
+            channel_id=None,
+            config=MagicMock(),
+            validation_mode=True,
+        )
 
         assert result["factory_cleared"] is True
         assert result["poll_status"] != "not_cleared"
@@ -581,16 +587,18 @@ class TestFactoryClearanceGate:
         self._seed_cost(db, 999.0)
         _enqueue_directly(db)
 
+        from hypogeum.factory_entity import update_factory
+        update_factory("hypogeum", db_path=db, factory_policies={"monthly_ceiling_usd": 10.0})
+
         from run_worker import run_iteration
 
-        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=10.0):
-            result = run_iteration(
-                worker_id=str(uuid.uuid4()),
-                db_path=db,
-                dry_run=True,
-                channel_id=None,
-                config=MagicMock(),
-            )
+        result = run_iteration(
+            worker_id=str(uuid.uuid4()),
+            db_path=db,
+            dry_run=True,
+            channel_id=None,
+            config=MagicMock(),
+        )
 
         assert result["factory_cleared"] is False
         assert result["poll_status"] == "not_cleared"

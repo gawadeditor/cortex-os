@@ -80,6 +80,28 @@ _GUARDRAIL_VARS = [
 ]
 
 
+def pytest_configure(config):
+    """
+    Blank every guardrail var before test collection begins.
+
+    A session-scoped autouse fixture (see _block_guardrail_leakage below) runs
+    too late for this: pytest imports every test module during collection,
+    which happens before any fixture executes. If any collected module
+    constructs a real Config() at import/module level, the real _load_dotenv()
+    (not yet patched — that patch is itself a fixture, same timing problem)
+    injects production .env values into os.environ, and _block_guardrail_leakage
+    then sees them as "already set to something meaningful" and leaves them
+    alone. pytest_configure() is the one hook pytest guarantees runs before
+    collection, so it's the only place this can be closed reliably. Found via
+    a full-suite run hanging in TestDiscoveryCycleIntegration on a live
+    network call — DISCOVERY_ENGINE had leaked to the production .env's "v2"
+    despite _block_guardrail_leakage (2026-07-27 repository integrity pass).
+    """
+    for k in _GUARDRAIL_VARS:
+        if not os.environ.get(k):
+            os.environ[k] = ""
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _block_guardrail_leakage():
     """
@@ -91,6 +113,10 @@ def _block_guardrail_leakage():
 
     Tests that need a specific value explicitly set it themselves (or use Config()
     attribute assignment), which is the correct and intentional test pattern.
+
+    Belt-and-suspenders alongside pytest_configure() above, which does the same
+    blanking earlier (before collection); kept here too so restoration at
+    session end still happens in one obvious place.
     """
     saved = {k: os.environ.get(k) for k in _GUARDRAIL_VARS}
     for k in _GUARDRAIL_VARS:

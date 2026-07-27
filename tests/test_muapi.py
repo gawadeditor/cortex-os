@@ -354,7 +354,15 @@ class TestSubmitSceneSuccess:
             mock_get.return_value = _mock_poll_completed()
             result = submit_scene(spec, config, "ep_001", tmp_path)
 
-        assert result["prompt_used"] == "A pharaoh's tomb entrance, torchlight."
+        # 2026-07-14 Prompt Writer architecture revision: submit_scene()
+        # assembles prompts via hypogeum.video_prompt_writer's structured
+        # 9-section format (Scene/.../Visual Priorities/Video DNA/Brand
+        # DNA/Forbidden) rather than raw concatenation. The original scene
+        # text remains byte-identical as the Scene section's exact body.
+        assert result["prompt_used"].startswith("SCENE: A pharaoh's tomb entrance, torchlight.")
+        for label in ("SCENE:", "VISUAL PRIORITIES:", "VIDEO DNA:", "BRAND DNA:", "FORBIDDEN:"):
+            assert result["prompt_used"].count(label) == 1
+        assert "% of frame" not in result["prompt_used"]
 
     def test_poll_url_uses_request_id(self, tmp_path):
         config = make_config()
@@ -372,6 +380,117 @@ class TestSubmitSceneSuccess:
 
         poll_url = mock_get.call_args[0][0]
         assert "predictions/req_xyz789/result" in poll_url
+
+
+# ---------------------------------------------------------------------------
+# TestSubmitSceneDryRun
+# ---------------------------------------------------------------------------
+
+class TestSubmitSceneDryRun:
+    """Regression coverage for a real 2026-07-18 production validation
+    finding: MUAPI_DRY_RUN previously returned generation_status="dry_run"
+    with no clip file written, which hypogeum.agents.visual_package_director
+    does NOT count as available (only "generated"/"reused" count) -- every
+    dry-run episode therefore had clip_availability_rate=0%, which
+    final_render_reviewer.py's Check 4 always hard-rejects. Fixed so dry-run
+    writes a real placeholder clip and reports "generated" -- the exact
+    same structural contract as a real success, no special-casing anywhere
+    downstream (Assembly/QA logic is completely untouched)."""
+
+    def _mock_ffmpeg_writes_file(self):
+        def _side_effect(cmd, capture_output, text, timeout):
+            out_path = Path(cmd[-1])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(b"FAKEMP4" * 2000)
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+        return _side_effect
+
+    def test_dry_run_never_calls_real_http(self, tmp_path):
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+        spec = make_scene_spec()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()):
+            submit_scene(spec, config, "ep_001", tmp_path, episode_id_for_asset="ep_001")
+
+        mock_post.assert_not_called()
+        mock_get.assert_not_called()
+
+    def test_dry_run_reports_generated_not_dry_run(self, tmp_path):
+        """generation_status must be "generated" -- VPD's own counting
+        logic (generated = status in ("generated", "reused")) does not
+        recognize a "dry_run" status as available."""
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+        spec = make_scene_spec()
+
+        with patch("hypogeum.muapi.requests.post"), \
+             patch("hypogeum.muapi.requests.get"), \
+             patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()):
+            result = submit_scene(spec, config, "ep_001", tmp_path, episode_id_for_asset="ep_001")
+
+        assert result["generation_status"] == "generated"
+        assert result["failure_reason"] is None
+
+    def test_dry_run_writes_a_real_clip_file(self, tmp_path):
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+        spec = make_scene_spec(scene_id="s05b02")
+
+        with patch("hypogeum.muapi.requests.post"), \
+             patch("hypogeum.muapi.requests.get"), \
+             patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()) as mock_run:
+            submit_scene(spec, config, "ep_001", tmp_path, episode_id_for_asset="ep_001")
+
+        clip_path = tmp_path / "video" / "sc_s05b02.mp4"
+        assert clip_path.exists()
+        assert clip_path.stat().st_size > 0
+
+        # Confirm it's a real ffmpeg lavfi color-source command, not a copy
+        # of a real download -- verifies no accidental live network path.
+        cmd = mock_run.call_args[0][0]
+        assert "ffmpeg" in cmd[0]
+        assert "lavfi" in cmd
+        assert any("color=" in arg for arg in cmd)
+
+    def test_dry_run_placeholder_uses_correct_resolution_for_aspect_ratio(self, tmp_path):
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+        spec = make_scene_spec(aspect_ratio="9:16", short_id="sh_01")
+
+        with patch("hypogeum.muapi.requests.post"), \
+             patch("hypogeum.muapi.requests.get"), \
+             patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()) as mock_run:
+            submit_scene(spec, config, "ep_001", tmp_path, episode_id_for_asset="ep_001")
+
+        cmd = mock_run.call_args[0][0]
+        color_arg = next(a for a in cmd if a.startswith("color="))
+        assert "s=720x1280" in color_arg
+
+    def test_dry_run_ffmpeg_failure_raises_muapi_error(self, tmp_path):
+        """A broken placeholder must be a genuine failure, not silently
+        skipped -- otherwise a real clip-writing regression would go
+        unnoticed under dry-run."""
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+        spec = make_scene_spec()
+
+        def _failing_ffmpeg(cmd, capture_output, text, timeout):
+            result = MagicMock()
+            result.returncode = 1
+            result.stderr = "ffmpeg: error: unknown color"
+            return result
+
+        with patch("hypogeum.muapi.requests.post"), \
+             patch("hypogeum.muapi.requests.get"), \
+             patch("hypogeum.muapi.subprocess.run", side_effect=_failing_ffmpeg):
+            with pytest.raises(MUAPIError):
+                submit_scene(spec, config, "ep_001", tmp_path, episode_id_for_asset="ep_001")
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +518,12 @@ class TestSubmitSceneFallbackTrigger:
 
         assert result["generation_status"] == "generated"
         assert result["fallback_used"] is True
-        assert result["prompt_used"] == spec["production_spec"]["fallback_prompt"]
+        # 2026-07-14 Prompt Writer architecture revision — see the equivalent
+        # primary-prompt assertion above for the full rationale. The fallback
+        # prompt receives the identical structured assembly.
+        assert result["prompt_used"].startswith(f"SCENE: {spec['production_spec']['fallback_prompt']}")
+        for label in ("SCENE:", "VISUAL PRIORITIES:", "VIDEO DNA:", "BRAND DNA:", "FORBIDDEN:"):
+            assert result["prompt_used"].count(label) == 1
         assert result["tier_used"] == spec["production_spec"]["fallback_tier"]
 
     def test_fallback_used_when_primary_submission_fails_with_400(self, tmp_path):
@@ -1633,6 +1757,75 @@ def _mock_poll_image_completed(image_url: str = "https://cdn.example.com/thumb.j
     return m
 
 
+class TestGenerateThumbnailDryRun:
+    """Regression coverage for a real 2026-07-18 production validation
+    failure: MUAPI_DRY_RUN=true correctly short-circuits video generation
+    (submit_scene()) but _generate_thumbnail_with_model() had no equivalent
+    check -- it submitted a fake 'dry-run-*' request_id via _submit_http()
+    (which itself dry-run-short-circuits correctly) and then unconditionally
+    polled that fake id against the real MUAPI endpoint, which 404s forever
+    since no real job was ever submitted. Fixed by mirroring the exact
+    dry-run-prefix check submit_scene() already used."""
+
+    def test_dry_run_never_calls_real_http(self, tmp_path):
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="Pharaoh on throne, golden light",
+                aspect_ratio="16:9",
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        mock_post.assert_not_called()
+        mock_get.assert_not_called()
+        assert isinstance(result, ThumbnailResult)
+
+    def test_dry_run_writes_a_real_placeholder_file(self, tmp_path):
+        """Post-processing (_normalize_thumbnail, wordmark overlay) needs a
+        real image file on disk even in dry-run -- a missing file would
+        crash PIL, not just skip cleanly."""
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+
+        with patch("hypogeum.muapi.requests.post"), patch("hypogeum.muapi.requests.get"):
+            generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="Pharaoh on throne",
+                aspect_ratio="16:9",
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        thumb_path = tmp_path / "thumbnails" / "main.jpg"
+        assert thumb_path.exists()
+        img = Image.open(thumb_path)
+        assert img.size == (1280, 720)
+
+    def test_dry_run_placeholder_matches_short_aspect_ratio(self, tmp_path):
+        config = make_config()
+        config.MUAPI_DRY_RUN = True
+
+        with patch("hypogeum.muapi.requests.post"), patch("hypogeum.muapi.requests.get"):
+            generate_thumbnail(
+                deliverable_id="sh_01",
+                image_prompt="Hieroglyphs close-up",
+                aspect_ratio="9:16",
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        img = Image.open(tmp_path / "thumbnails" / "sh_01.jpg")
+        assert img.size == (720, 1280)
+
+
 class TestGenerateThumbnail:
 
     def _dl_writes_file(self, tmp_path, deliverable_id: str = "main"):
@@ -2477,9 +2670,17 @@ class TestGenerateThumbnailOpenAI:
 
 class TestThumbnailProviderChain:
     """
-    Tests for the 3-tier thumbnail provider fallback chain.
+    Tests for the 3-tier thumbnail provider fallback chain mechanism itself.
 
-    Default priority: openrouter (primary) → openai (fallback #1) → muapi (fallback #2).
+    These tests use an explicitly hand-built config (arbitrary primary/fallback1/
+    fallback2 values passed to _make_config()) to verify generate_thumbnail()
+    respects whatever provider order the config reports — they are NOT asserting
+    that openrouter-first is the production default. For the actual production
+    default (muapi/GPT Image 2 primary), see
+    TestThumbnailProviderChainCanonicalDefaults below, which uses the real
+    Config class. See docs/validation/thumbnail_image_generation_validation/
+    GPT_IMAGE_2_ROUTING_AUDIT.md for the routing decision.
+
     Each provider is tried in order; failure falls through to the next.
     MUAPIBudgetExhausted halts the chain immediately (never falls through).
     """
@@ -2699,3 +2900,338 @@ class TestThumbnailProviderChain:
             f"Duplicate provider openrouter must only be called once, got {call_count[0]}"
         )
         assert result.provider_used == "muapi"
+
+
+class TestThumbnailProviderChainCanonicalDefaults:
+    """
+    Canonical routing decision (docs/validation/thumbnail_image_generation_validation/
+    GPT_IMAGE_2_ROUTING_AUDIT.md): MUAPI gpt-image-2-text-to-image must be the
+    PRIMARY thumbnail provider/model for legacy single-image generation, with
+    openrouter and openai retained only as genuine-failure fallbacks.
+
+    These tests use the real Config class (not a hand-built MagicMock with
+    arbitrary test-local provider values) to verify the actual code-level
+    defaults. tests/conftest.py's autouse .env-leakage block prevents any local
+    .env override from reaching this Config() instance; OPENROUTER_API_KEY is
+    Config's one required field, stubbed here via monkeypatch (not read from
+    the real environment) so these assertions read pure code defaults for
+    every THUMBNAIL_* field.
+    """
+
+    @staticmethod
+    def _real_config(monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        from hypogeum.config import Config
+        return Config()
+
+    def test_config_default_provider_is_muapi(self, monkeypatch):
+        assert self._real_config(monkeypatch).THUMBNAIL_IMAGE_PROVIDER == "muapi"
+
+    def test_config_default_fallback1_is_openrouter(self, monkeypatch):
+        assert self._real_config(monkeypatch).THUMBNAIL_FALLBACK_PROVIDER == "openrouter"
+
+    def test_config_default_fallback2_is_openai(self, monkeypatch):
+        assert self._real_config(monkeypatch).THUMBNAIL_FALLBACK2_PROVIDER == "openai"
+
+    def test_config_default_thumbnail_image_model_is_gpt_image_2(self, monkeypatch):
+        assert self._real_config(monkeypatch).THUMBNAIL_IMAGE_MODEL == "gpt-image-2-text-to-image"
+
+    def test_muapi_called_first_with_real_default_config(self, tmp_path, monkeypatch):
+        """With the real Config defaults, MUAPI GPT Image 2 must be attempted
+        before openrouter or openai — not the reverse."""
+        from hypogeum.muapi import generate_thumbnail
+
+        call_order = []
+
+        def _fake_muapi(*a, **kw):
+            call_order.append("muapi")
+            return ("gpt-image-2-text-to-image", False)
+
+        cfg = self._real_config(monkeypatch)
+
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._generate_thumbnail_openrouter") as mock_or, \
+             patch("hypogeum.muapi._generate_thumbnail_openai") as mock_oai, \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            result = generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=cfg,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert call_order == ["muapi"], f"Expected muapi first, got {call_order}"
+        mock_or.assert_not_called()
+        mock_oai.assert_not_called()
+        assert result.provider_used == "muapi"
+        assert result.used_fallback is False
+
+    def test_muapi_primary_attempt_receives_thumbnail_image_model(self, tmp_path, monkeypatch):
+        """The primary MUAPI attempt must be passed config.THUMBNAIL_IMAGE_MODEL —
+        the single authoritative source, never a separately hardcoded string."""
+        from hypogeum.muapi import generate_thumbnail
+
+        received = {}
+
+        def _fake_muapi(*, primary_model, **kw):
+            received["primary_model"] = primary_model
+            return ("gpt-image-2-text-to-image", False)
+
+        cfg = self._real_config(monkeypatch)
+
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            generate_thumbnail(
+                deliverable_id="main",
+                image_prompt="test",
+                aspect_ratio="16:9",
+                config=cfg,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert received["primary_model"] == cfg.THUMBNAIL_IMAGE_MODEL == "gpt-image-2-text-to-image"
+
+    def test_no_fallback_provider_called_on_primary_success(self, tmp_path, monkeypatch):
+        """When MUAPI (primary) succeeds, openrouter/openai must never be invoked."""
+        from hypogeum.muapi import generate_thumbnail
+
+        def _fake_muapi(*a, **kw):
+            return ("gpt-image-2-text-to-image", False)
+
+        cfg = self._real_config(monkeypatch)
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._generate_thumbnail_openrouter") as mock_or, \
+             patch("hypogeum.muapi._generate_thumbnail_openai") as mock_oai, \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            generate_thumbnail(
+                deliverable_id="main", image_prompt="test", aspect_ratio="16:9",
+                config=cfg, episode_id="ep_001", output_dir=tmp_path,
+            )
+        mock_or.assert_not_called()
+        mock_oai.assert_not_called()
+
+    def test_fallback_to_openrouter_when_muapi_fails(self, tmp_path, monkeypatch):
+        """When MUAPI (primary) fails, openrouter must be attempted next (fallback #1)."""
+        from hypogeum.muapi import generate_thumbnail
+
+        call_order = []
+
+        def _fake_muapi(*a, **kw):
+            call_order.append("muapi")
+            raise MUAPIError("muapi unavailable")
+
+        def _fake_openrouter(*a, **kw):
+            call_order.append("openrouter")
+            return "openai/gpt-5-image-mini"
+
+        cfg = self._real_config(monkeypatch)
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter), \
+             patch("hypogeum.muapi._generate_thumbnail_openai") as mock_oai, \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            result = generate_thumbnail(
+                deliverable_id="main", image_prompt="test", aspect_ratio="16:9",
+                config=cfg, episode_id="ep_001", output_dir=tmp_path,
+            )
+
+        assert call_order == ["muapi", "openrouter"]
+        mock_oai.assert_not_called()
+        assert result.provider_used == "openrouter"
+        assert result.used_fallback is True
+
+    def test_final_fallback_to_openai_when_muapi_and_openrouter_fail(self, tmp_path, monkeypatch):
+        """When MUAPI and openrouter both fail, openai direct is the final fallback."""
+        from hypogeum.muapi import generate_thumbnail
+
+        call_order = []
+
+        def _fake_muapi(*a, **kw):
+            call_order.append("muapi")
+            raise MUAPIError("muapi unavailable")
+
+        def _fake_openrouter(*a, **kw):
+            call_order.append("openrouter")
+            raise MUAPIError("openrouter unavailable")
+
+        def _fake_openai(*a, **kw):
+            call_order.append("openai")
+            return "gpt-image-1"
+
+        cfg = self._real_config(monkeypatch)
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter), \
+             patch("hypogeum.muapi._generate_thumbnail_openai", side_effect=_fake_openai), \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            result = generate_thumbnail(
+                deliverable_id="main", image_prompt="test", aspect_ratio="16:9",
+                config=cfg, episode_id="ep_001", output_dir=tmp_path,
+            )
+
+        assert call_order == ["muapi", "openrouter", "openai"]
+        assert result.provider_used == "openai"
+        assert result.used_fallback is True
+
+    def test_all_providers_fail_final_error_raised(self, tmp_path, monkeypatch):
+        """If muapi, openrouter, and openai all fail, the final failure raises the
+        last provider's exception (never a silent fallback)."""
+        from hypogeum.muapi import generate_thumbnail
+
+        cfg = self._real_config(monkeypatch)
+        with patch("hypogeum.muapi._attempt_thumbnail_generation",
+                   side_effect=MUAPIError("muapi fail")), \
+             patch("hypogeum.muapi._generate_thumbnail_openrouter",
+                   side_effect=MUAPIError("or fail")), \
+             patch("hypogeum.muapi._generate_thumbnail_openai",
+                   side_effect=MUAPIError("oai fail")):
+            with pytest.raises(MUAPIError, match="oai fail"):
+                generate_thumbnail(
+                    deliverable_id="main", image_prompt="test", aspect_ratio="16:9",
+                    config=cfg, episode_id="ep_001", output_dir=tmp_path,
+                )
+
+    def test_provider_attempt_logged_before_call_with_model_and_status(self, tmp_path, monkeypatch):
+        """thumbnail_provider_attempt must be logged before the real call, with
+        provider, model, and primary/fallback status."""
+        from hypogeum.muapi import generate_thumbnail
+
+        def _fake_muapi(*a, **kw):
+            return ("gpt-image-2-text-to-image", False)
+
+        cfg = self._real_config(monkeypatch)
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi.get_logger") as mock_get_logger, \
+             patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi), \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            mock_log = MagicMock()
+            mock_get_logger.return_value = mock_log
+            generate_thumbnail(
+                deliverable_id="main", image_prompt="test", aspect_ratio="16:9",
+                config=cfg, episode_id="ep_001", output_dir=tmp_path,
+            )
+
+        attempt_call = next(
+            c for c in mock_log.info.call_args_list if c[0][0] == "thumbnail_provider_attempt"
+        )
+        assert attempt_call[1]["provider"] == "muapi"
+        assert attempt_call[1]["model"] == "gpt-image-2-text-to-image"
+        assert attempt_call[1]["status"] == "primary"
+
+    def test_fallback_warning_identifies_failed_provider_model_and_next(self, tmp_path, monkeypatch):
+        """thumbnail_provider_failed_trying_next must never fall back silently —
+        it must name the failed provider/model and the selected fallback."""
+        from hypogeum.muapi import generate_thumbnail
+
+        def _fake_muapi_fail(*a, **kw):
+            raise MUAPIError("muapi unavailable")
+
+        def _fake_openrouter_ok(*a, **kw):
+            return "openai/gpt-5-image-mini"
+
+        cfg = self._real_config(monkeypatch)
+        local_path = tmp_path / "thumbnails" / "main.jpg"
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
+
+        with patch("hypogeum.muapi.get_logger") as mock_get_logger, \
+             patch("hypogeum.muapi._attempt_thumbnail_generation", side_effect=_fake_muapi_fail), \
+             patch("hypogeum.muapi._generate_thumbnail_openrouter", side_effect=_fake_openrouter_ok), \
+             patch("hypogeum.muapi._normalize_thumbnail"), \
+             patch("hypogeum.muapi._apply_wordmark_overlay"):
+            mock_log = MagicMock()
+            mock_get_logger.return_value = mock_log
+            generate_thumbnail(
+                deliverable_id="main", image_prompt="test", aspect_ratio="16:9",
+                config=cfg, episode_id="ep_001", output_dir=tmp_path,
+            )
+
+        warn_call = next(
+            c for c in mock_log.warn.call_args_list
+            if c[0][0] == "thumbnail_provider_failed_trying_next"
+        )
+        assert warn_call[1]["provider"] == "muapi"
+        assert warn_call[1]["model"] == "gpt-image-2-text-to-image"
+        assert warn_call[1]["next_provider"] == "openrouter"
+        assert warn_call[1]["next_model"] == "openai/gpt-5-image-mini"
+
+
+class TestLayeredThumbnailUsesGptImage2:
+    """
+    Regression protection for the concept-driven layered path
+    (thumbnail_compositor.py::generate_and_composite / _generate_layer):
+    it must continue using GPT Image 2 for all three visual layers, with no
+    OpenRouter/OpenAI route introduced, and typography must remain deterministic
+    PIL — none of this changed by the legacy single-image routing correction.
+    """
+
+    def test_generate_layer_uses_thumbnail_image_model(self, tmp_path):
+        from hypogeum.agents.thumbnail_compositor import _generate_layer
+
+        cfg = MagicMock()
+        cfg.THUMBNAIL_IMAGE_MODEL = "gpt-image-2-text-to-image"
+        log = MagicMock()
+
+        with patch("hypogeum.agents.thumbnail_compositor._generate_thumbnail_with_model") as mock_gen, \
+             patch("hypogeum.agents.thumbnail_compositor._normalize_thumbnail"):
+            _generate_layer("base_scene", "prompt text", "main", cfg, tmp_path, log)
+
+        assert mock_gen.call_args[1]["model"] == "gpt-image-2-text-to-image"
+
+    def test_generate_layer_logs_layered_status_before_generation(self, tmp_path):
+        from hypogeum.agents.thumbnail_compositor import _generate_layer
+
+        cfg = MagicMock()
+        cfg.THUMBNAIL_IMAGE_MODEL = "gpt-image-2-text-to-image"
+        log = MagicMock()
+
+        with patch("hypogeum.agents.thumbnail_compositor._generate_thumbnail_with_model"), \
+             patch("hypogeum.agents.thumbnail_compositor._normalize_thumbnail"):
+            _generate_layer("hero_subject", "prompt text", "main", cfg, tmp_path, log)
+
+        attempt_call = next(
+            c for c in log.info.call_args_list if c[0][0] == "thumbnail_provider_attempt"
+        )
+        assert attempt_call[1]["provider"] == "muapi"
+        assert attempt_call[1]["model"] == "gpt-image-2-text-to-image"
+        assert attempt_call[1]["status"] == "layered"
+        assert attempt_call[1]["layer"] == "hero_subject"
+
+    def test_no_openrouter_or_openai_import_used_in_compositor(self):
+        """The layered compositor must never call the single-image provider-chain
+        functions — it always calls MUAPI directly via _generate_thumbnail_with_model."""
+        import inspect
+        import hypogeum.agents.thumbnail_compositor as mod
+        source = inspect.getsource(mod)
+        assert "_generate_thumbnail_openrouter" not in source
+        assert "_generate_thumbnail_openai" not in source

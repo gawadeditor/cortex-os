@@ -5,18 +5,32 @@ Extracted from thumbnail_director.py Phase 2.
 
 Thumbnail mode routing
 ----------------------
+UNIFIED_INTEGRATED (unified_integrated) — candidate["composite_mode"] falsy AND
+    typography_integration == "embedded". APPROVED PRIMARY PATH (Thumbnail DNA
+    v1, 2026-07-13) for all concept-driven main-episode candidates.
+    Routed to generate_unified_integrated_thumbnail() in thumbnail_compositor.
+    One unified MUAPI call: topic concept + integrated typography + canonical
+    Thumbnail DNA directive + canonical FULL brand directive, each exactly
+    once. No PIL headline. Wordmark still applied via PIL (TIG-07).
+
 PREMIUM  (multi_layer_composite)   — candidate["composite_mode"] = True AND layer_prompts present.
     Routed to generate_and_composite() in thumbnail_compositor.
     4 focused MUAPI calls (base_scene, hero_subject, fx, typography) + PIL screen-blend composite.
-    Main path for all premium main-episode thumbnails.
+    Layered path — preserved for rollback, no longer the default for
+    concept-driven candidates (see thumbnail_prompt_writer._attach_concept_plans).
+    Also the safety net when _attach_concept_plans() sees an unrecognized
+    emotional_trigger (thumbnail_composition_planner._FALLBACK carries
+    typography_integration="composited", which sets composite_mode=True).
 
-FAST     (single_pass_integrated)  — candidate["composite_mode"] falsy, typography_integration=embedded.
+FAST     (single_pass_integrated)  — candidate["composite_mode"] falsy, typography_integration=embedded,
+    reached only for legacy (non-concept-driven) candidates whose image_prompt
+    was authored directly by the LLM rather than by _attach_concept_plans().
     Routed to _generate_for_deliverable() → generate_thumbnail() with embedded typography prompt.
-    Single MUAPI call. Used for rapid iteration, cost-capped runs, shorts.
+    Single MUAPI call.
 
 LEGACY   (pil_composited_text)     — candidate["composite_mode"] falsy, typography_integration=composited.
     Routed to _generate_for_deliverable() → generate_thumbnail() + PIL text overlay.
-    Fallback only.
+    Fallback only — reached for legacy (non-concept-driven) candidates.
 
 Owns:
 - Iterating ranked candidates for each deliverable (main + shorts) in rank order
@@ -51,7 +65,7 @@ from pathlib import Path
 from typing import Optional
 
 import hypogeum.asset_registry as _asset_registry
-from hypogeum.agents.thumbnail_compositor import generate_and_composite
+from hypogeum.agents.thumbnail_compositor import generate_and_composite, generate_unified_integrated_thumbnail
 from hypogeum.config import Config
 from hypogeum.muapi import (
     MUAPIAuthFailure,
@@ -158,6 +172,53 @@ def generate_thumbnails(
                 "composition_plan":  candidate.get("composition_plan"),
                 "typography_plan":   candidate.get("typography_plan"),
                 "composite_mode":    True,
+            })
+            if rank == 1:
+                main_ok = ok
+                main_asset_id = asset_id
+                if ok and cand_path.exists():
+                    import shutil
+                    shutil.copy2(str(cand_path), str(thumb_dir / "main.jpg"))
+            continue
+
+        # Unified integrated mode — approved primary path (Thumbnail DNA v1,
+        # 2026-07-13). One unified MUAPI call: topic concept + integrated
+        # typography + canonical DNA directive + canonical FULL brand
+        # directive, each exactly once. No layered base/hero/FX calls.
+        if not candidate.get("composite_mode") and candidate.get("typography_integration") == "embedded":
+            log.info("td_unified_integrated_mode_started", deliverable_id=deliverable_id)
+            ok = generate_unified_integrated_thumbnail(
+                candidate=candidate,
+                config=config,
+                episode_id=episode_id,
+                output_dir=output_dir,
+                deliverable_id=deliverable_id,
+                log=log,
+            )
+            thumb_dir = output_dir / "thumbnails"
+            cand_path = thumb_dir / f"candidate_{rank}.jpg"
+            gen_path  = thumb_dir / f"{deliverable_id}.jpg"
+            if ok and gen_path.exists() and gen_path != cand_path:
+                gen_path.rename(cand_path)
+            asset_id  = (
+                f"episodes/{episode_id}/thumbnails/{deliverable_id}"
+                if ok else
+                f"episodes/{episode_id}/thumbnails/{deliverable_id}_failed"
+            )
+            file_path = f"episodes/{episode_id}/thumbnails/candidate_{rank}.jpg" if ok else None
+            main_candidates.append({
+                "rank":              rank,
+                "candidate_id":      candidate_id,
+                "asset_id":          asset_id,
+                "ok":                ok,
+                "file_path":         file_path,
+                "text_overlay":      candidate.get("text_overlay"),
+                "image_prompt":      candidate.get("image_prompt"),
+                "ctr_rationale":     candidate.get("ctr_rationale"),
+                "composition_plan":  candidate.get("composition_plan"),
+                "typography_plan":   candidate.get("typography_plan"),
+                "composite_mode":    False,
+                "thumbnail_mode":    "unified_integrated",
             })
             if rank == 1:
                 main_ok = ok

@@ -57,12 +57,17 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agent import run_agent
-from hypogeum.agents.thumbnail_composition_planner import plan_composition
+from hypogeum.agents.thumbnail_composition_planner import (
+    plan_composition,
+    resolve_composition_distinctness,
+)
 from hypogeum.agents.thumbnail_compositor import build_layer_prompts
 from hypogeum.agents.thumbnail_typography_planner import plan_typography
 from hypogeum.config import Config
+from hypogeum.prompt_composition import SkillSpec, select_skills
 from hypogeum.prompt_loader import compose_system_prompt
 from hypogeum import skill_registry as _skill_registry
+from hypogeum.brand import visual_identity
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -91,6 +96,21 @@ _GPT_IMAGE2_SKILL_PATH = (
 
 _TPW_ALL_SKILL_PATHS: list[Path] = [_THUMBNAIL_INTELLIGENCE_SKILL_FILE, _GPT_IMAGE2_SKILL_PATH]
 
+# Per-call, mode-based skill selection (see write_thumbnail_prompts()).
+#
+# Current matrix: neither attached skill is mode-exclusive in
+# thumbnail_director.txt's present content — the GPT-Image2 bridge
+# (SECTION 12B) and the Thumbnail Intelligence pipeline map both apply
+# regardless of LEGACY_SCENE_MODE vs CONCEPT_DRIVEN_MODE. Both skills are
+# therefore marked applicable to both modes, so this slice selects the
+# same full stack for both modes today (zero behavior change). Narrowing
+# this matrix is a separate, later change — see
+# docs/validation/prompt_writer_architecture/IMPLEMENTATION_PLAN.md.
+_TPW_SKILL_SPECS: list[SkillSpec] = [
+    SkillSpec(_THUMBNAIL_INTELLIGENCE_SKILL_FILE, frozenset({"legacy", "concept_driven"})),
+    SkillSpec(_GPT_IMAGE2_SKILL_PATH, frozenset({"legacy", "concept_driven"})),
+]
+
 
 def _load_system_prompt() -> str:
     return compose_system_prompt(
@@ -98,7 +118,25 @@ def _load_system_prompt() -> str:
     )
 
 
+# Retained for backward compatibility: benchmark_thumbnail_prompt_skills.py
+# imports this as the "real, unmodified production constant" for its
+# condition C. It always represents the full skill stack, independent of
+# any specific call's mode. write_thumbnail_prompts() below no longer uses
+# it directly — it composes a per-call, mode-selected system prompt instead
+# (see select_thumbnail_mode / _TPW_SKILL_SPECS) — but the two are
+# byte-identical today because the current selection matrix resolves both
+# modes to the same full stack.
 SYSTEM_PROMPT: str = _load_system_prompt()
+
+
+def select_thumbnail_mode(concept_driven: bool) -> str:
+    """
+    Map the already-computed concept_driven flag to a mode string for
+    select_skills(). Kept as a separate function (rather than an inline
+    ternary) so it has one clear, independently testable place to grow if
+    a genuinely ambiguous signal is ever introduced.
+    """
+    return "concept_driven" if concept_driven else "legacy"
 
 
 # ---------------------------------------------------------------------------
@@ -121,18 +159,34 @@ def write_thumbnail_prompts(
     "thumbnail_concept_brief". The TD system prompt (SECTION 11C) instructs
     Claude to use the three marketing concepts as the primary creative source
     rather than VPD scene candidates. Concept A → rank 1, B → rank 2, C → rank 3.
+
+    The system prompt sent to Claude is composed per call from
+    _TPW_SKILL_SPECS via select_skills(), using the mode determined for THIS
+    call (select_thumbnail_mode) — never a module-level or import-time
+    decision. See _TPW_SKILL_SPECS for the current selection matrix.
     """
     candidates_count = len(handoff_brief.get("candidates", []))
     short_candidates_count = len(handoff_brief.get("short_candidates", []))
     concept_driven = concept_brief is not None and bool(concept_brief.get("concepts"))
+    thumbnail_mode = select_thumbnail_mode(concept_driven)
 
-    _skill_registry.log_loaded_skills(_AGENT_NAME, _TPW_ALL_SKILL_PATHS, log)
+    skill_selection = select_skills(_TPW_SKILL_SPECS, thumbnail_mode)
+    system_prompt = compose_system_prompt(_PROMPT_FILE, *skill_selection.paths)
+    system_prompt = system_prompt.rstrip() + "\n\n" + visual_identity.build_visual_identity_directive(
+        mode="thumbnail_prompt_writer"
+    )
+
+    _skill_registry.log_loaded_skills(_AGENT_NAME, list(skill_selection.paths), log)
+    visual_identity.log_palette_injection(log, mode="thumbnail_prompt_writer", injected=True)
 
     log.info(
         "td_planning_started",
         candidates_count=candidates_count,
         short_candidates_count=short_candidates_count,
         concept_driven=concept_driven,
+        thumbnail_mode=thumbnail_mode,
+        skill_selection_reason=skill_selection.reason,
+        skill_count=len(skill_selection.paths),
     )
 
     input_package: dict = {
@@ -145,7 +199,7 @@ def write_thumbnail_prompts(
     generation_plan = run_agent(
         agent_name=_AGENT_NAME,
         model_slug=config.TD_PLANNING_MODEL,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         input_package=input_package,
         output_schema="thumbnail_generation_plan",
         episode_id=episode_id,
@@ -175,16 +229,36 @@ def write_thumbnail_prompts(
 
 def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
     """
-    Attach deterministic composition_plan, typography_plan, layer_prompts, and
-    composite_mode=True to every main_episode ranked_candidate.
+    Attach deterministic composition_plan, typography_plan, layer_prompts,
+    typography_integration, and composite_mode to every main_episode
+    ranked_candidate.
 
-    composite_mode is always True for premium episodes regardless of
-    typography_integration. The compositor renders typography via PIL
-    (_render_typography_pil), not via MUAPI, so the typography_integration
-    field on composition_plan no longer controls routing.
+    Routing (Thumbnail DNA v1, 2026-07-13 — approved primary path correction):
+      typography_integration == "embedded" (every current trigger in
+      thumbnail_composition_planner._TRIGGER_MAP) -> composite_mode=False.
+      thumbnail_generation_agent.generate_thumbnails() routes this to
+      generate_unified_integrated_thumbnail() — one unified GPT Image 2 call
+      with typography baked in, not the layered compositor.
+
+      typography_integration == "composited" (only thumbnail_composition_
+      planner._FALLBACK, i.e. an unrecognized emotional_trigger) ->
+      composite_mode=True, the proven layered path, as a safety net.
+
+    layer_prompts is still computed and attached in both cases — this
+    preserves rollback capability to the layered path without removing it,
+    even though the unified path does not read layer_prompts.
 
     Mapping: concepts[0] → rank 1, concepts[1] → rank 2, concepts[2] → rank 3.
     Mutates generation_plan in place.
+
+    After every candidate's composition_plan is attached from the frozen,
+    per-trigger _TRIGGER_MAP defaults, resolve_composition_distinctness()
+    runs once over the full assembled set to deterministically de-collide
+    focal_zone across the ranked A/B/C candidates (see that function's
+    docstring in thumbnail_composition_planner.py) — required because most
+    triggers deliberately share the same CTR-optimized focal_zone, which
+    would otherwise fail thumbnail_qa's composition_distinctness check.
+    Rank 1 is never touched by that pass.
     """
     concepts = concept_brief.get("concepts", [])
     candidates = generation_plan.get("main_episode", {}).get("ranked_candidates", [])
@@ -200,12 +274,15 @@ def _attach_concept_plans(generation_plan: dict, concept_brief: dict) -> None:
         hook_text = concept.get("suggested_hook_text", "")
         comp_plan = plan_composition(trigger)
         typo_plan = plan_typography(hook_text, trigger, comp_plan)
-        candidate["composition_plan"]      = comp_plan
-        candidate["typography_plan"]       = typo_plan
-        candidate["typography_integration"] = comp_plan.get("typography_integration", "composited")
-        # Always use the multi-layer compositor. Typography is PIL-rendered.
-        candidate["layer_prompts"]  = build_layer_prompts(concept, comp_plan)
-        candidate["composite_mode"] = True
+        typography_integration = comp_plan.get("typography_integration", "composited")
+
+        candidate["composition_plan"]       = comp_plan
+        candidate["typography_plan"]        = typo_plan
+        candidate["typography_integration"] = typography_integration
+        candidate["layer_prompts"]          = build_layer_prompts(concept, comp_plan)
+        candidate["composite_mode"]         = (typography_integration != "embedded")
+
+    resolve_composition_distinctness(candidates)
 
 
 def _embed_typography_in_prompt(base_prompt: str, typography_plan: dict) -> str:
@@ -218,6 +295,25 @@ def _embed_typography_in_prompt(base_prompt: str, typography_plan: dict) -> str:
 
     The PIL compositor will skip typography rendering when typography_integration
     is "embedded", trusting the image model to have rendered it correctly.
+
+    Typography-only building block — owns exactly: exact headline text, line
+    breaks, font character, scale relationship, placement, spelling. Does NOT
+    restate frame-share/width percentages, mobile readability, or hierarchy —
+    those are owned by hypogeum.agents.thumbnail_composition_planner.
+    describe_dna_constraints_compact(). Does NOT append the brand
+    visual-identity directive or a hardcoded color (a hardcoded hex here would
+    be a second, uncoordinated palette source — colors come from
+    hypogeum.brand.visual_identity only). Callers (e.g.
+    hypogeum.agents.thumbnail_compositor.generate_unified_integrated_thumbnail())
+    own composing the full unified prompt from all required components, each
+    exactly once, in a single well-defined order.
+
+    2026-07-13 (V5.1 prompt-length/quote-consistency correction): previously
+    used Python's !r format spec for quoting, which silently switches between
+    single and double quotes depending on whether the string itself contains
+    an apostrophe (repr("EXIST") -> 'EXIST' but repr("IT SHOULDN'T") ->
+    "IT SHOULDN'T") — an unintentional, inconsistent punctuation pattern in
+    the submitted prompt. Now uses explicit double-quoting throughout.
     """
     headline      = typography_plan.get("headline", "").upper()
     emphasis      = typography_plan.get("emphasis", "").upper()
@@ -233,27 +329,20 @@ def _embed_typography_in_prompt(base_prompt: str, typography_plan: dict) -> str:
 
     # Describe the hierarchy: headline small above, emphasis huge below
     if headline and emphasis:
-        text_block = (
-            f'"{headline}" in smaller, lighter weight on one line, '
-            f'with "{emphasis}" in enormous dominant bold letters directly below it'
-        )
+        text_block = f'"{headline}" (smaller, upper line), then "{emphasis}" (dramatically larger, directly below)'
+        scale_note = f' "{emphasis}" is approximately {emph_scale:.0f}x taller than "{headline}".'
     elif emphasis:
-        text_block = f'"{emphasis}" in enormous dominant bold letters'
+        text_block = f'"{emphasis}" (dramatically larger)'
+        scale_note = ""
     else:
         return base_prompt
 
     integration_block = (
-        f" — INTEGRATED TYPOGRAPHY: in the {zone_desc}, large bold text reads: "
-        f"{text_block}. "
-        f"The {emphasis!r} word is dramatically larger than {headline!r} "
-        f"(approximately {emph_scale:.0f}× taller). "
-        f"The text is physically part of the image — it receives realistic shadows, "
-        f"warm amber light from the scene's key light source, and depth that matches "
-        f"the surrounding environment. "
-        f"The text is NOT a subtitle, NOT an overlay, NOT in a box, NOT a lower-third. "
-        f"It feels designed together with the image. "
-        f"Text color: warm cream or aged parchment (#F5E3B9), matching the scene's warm palette. "
-        f"Text must be fully legible and correctly spelled."
+        f" — INTEGRATED TYPOGRAPHY ({zone_desc}): exact text reads {text_block}."
+        f"{scale_note} Carved weathered stone letterforms, restrained metallic "
+        f"edge highlight only — not a solid glowing fill. Physically integrated "
+        f"into the scene's own lighting, not a subtitle, overlay, box, or "
+        f"lower-third. Correctly spelled, fully legible."
     )
 
-    return base_prompt.rstrip(" ,;.") + integration_block
+    return base_prompt + integration_block

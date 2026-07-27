@@ -7,11 +7,17 @@ concept-driven thumbnail generation — the alternative to the scene-candidate
 system used by VPD → TD.
 
 Phase 1: standalone skill, invoked manually via scripts/generate_thumbnail_strategy.py.
-Phase 2 (future): wired into the pipeline between Script Engine and VPD.
+Phase 2 (2026-07-19): wired into hypogeum/pipeline.py between Script Engine and
+Visual Package Director — see pipeline.py's own docstring and
+_run_thumbnail_strategy(). scripts/generate_thumbnail_strategy.py remains
+valid for manual/backfill use (e.g. re-running strategy for one episode)
+but is no longer the only path that activates CONCEPT_DRIVEN_MODE.
 
 Architecture position:
     topic_brief + script_package → [THIS SKILL] → thumbnail_concept_brief
-    thumbnail_concept_brief → (future) VPD + TD
+    thumbnail_concept_brief → VPD + TD (automatic — TD's existing
+        file-existence check on thumbnail_concept_brief_{episode_id}.json
+        is what activates CONCEPT_DRIVEN_MODE; unchanged by this wiring)
 
 Public API:
     run_thumbnail_strategy(

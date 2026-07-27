@@ -361,6 +361,22 @@ def _validate_visual_package(p: dict) -> None:
         _req_str(scene, s, "scene_id", path=path)
         _req_in(scene, s, "source_type", ("main_episode", "short"), path=path)
         _req_str(scene, s, "derivation_source", path=path)
+        # setting_type / lighting_selection (Phase B2.3): optional — absent
+        # on legacy records written before this checkpoint. When present,
+        # must be one of the frozen taxonomies in
+        # hypogeum.agents.setting_lighting_classifier — imported locally
+        # (not at module load time) to keep schemas.py a dependency-free
+        # leaf module for every other schema in this file, matching the
+        # existing lazy-import convention already used elsewhere in this
+        # codebase (e.g. visual_package_director.py's shot_diversity_planner
+        # import) rather than duplicating the taxonomy tuple here by hand.
+        from hypogeum.agents.setting_lighting_classifier import (  # noqa: PLC0415
+            SETTING_TYPE_VALUES, LIGHTING_SELECTION_VALUES,
+        )
+        if "setting_type" in scene and scene["setting_type"] is not None:
+            _req_in(scene, s, "setting_type", SETTING_TYPE_VALUES, path=path)
+        if "lighting_selection" in scene and scene["lighting_selection"] is not None:
+            _req_in(scene, s, "lighting_selection", LIGHTING_SELECTION_VALUES, path=path)
     _req_dict(p, s, "asset_manifest")
     _req_dict(p, s, "provider_routing_manifest")
     _req_dict(p, s, "visual_integrity_log")
@@ -702,7 +718,7 @@ def _validate_publishing_record(p: dict) -> None:
             raise SchemaError(s, path, "each platform_result must be a dict")
         _req_str(res, s, "result_id", path=path)
         _req_str(res, s, "platform", path=path)
-        _req_in(res, s, "status", ("published", "failed", "skipped"), path=path)
+        _req_in(res, s, "status", ("published", "failed", "skipped", "uploaded_to_inbox"), path=path)
         # Optional — the actual delivery visibility/state on the platform
         # (e.g. "private", "unpublished", "self_only", "container_only"),
         # distinct from `status` (whether the operation itself succeeded).

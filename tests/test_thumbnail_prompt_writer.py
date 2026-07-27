@@ -39,8 +39,12 @@ from hypogeum.agents.thumbnail_prompt_writer import (
     _GPT_IMAGE2_SKILL_PATH,
     _PROMPT_FILE,
     _THUMBNAIL_INTELLIGENCE_SKILL_FILE,
+    _TPW_SKILL_SPECS,
+    select_thumbnail_mode,
     write_thumbnail_prompts,
 )
+from hypogeum.prompt_loader import compose_system_prompt
+from hypogeum.brand import visual_identity
 
 
 # ---------------------------------------------------------------------------
@@ -448,4 +452,140 @@ class TestSystemPrompt:
             write_thumbnail_prompts(
                 _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), _make_log(),
             )
-        assert mock_ra.call_args[1]["system_prompt"] == SYSTEM_PROMPT
+        sent = mock_ra.call_args[1]["system_prompt"]
+        # SYSTEM_PROMPT must remain byte-identical as a prefix — a brand
+        # visual identity directive (full/thumbnail enforcement) is now
+        # appended, exactly once.
+        assert sent.startswith(SYSTEM_PROMPT.rstrip())
+        assert sent.count("HYPOGEUM BRAND VISUAL IDENTITY") == 1
+        assert "(thumbnail_prompt_writer, full enforcement)" in sent
+
+
+# ---------------------------------------------------------------------------
+# TestSkillSelectionWiring — conditional skill selection, wired per call
+#
+# Proves write_thumbnail_prompts() calls select_skills() (via
+# select_thumbnail_mode + _TPW_SKILL_SPECS) rather than the module-level
+# SYSTEM_PROMPT constant, and that the current selection matrix preserves
+# existing output behavior in both modes (zero-provider-call: run_agent is
+# always mocked).
+# ---------------------------------------------------------------------------
+
+def _make_concept_brief() -> dict:
+    return {
+        "concepts": [
+            {
+                "emotional_trigger": "impossibility",
+                "suggested_hook_text": "IT SHOULDN'T EXIST",
+            },
+            {
+                "emotional_trigger": "loss",
+                "suggested_hook_text": "THE KNOWLEDGE VANISHED",
+            },
+            {
+                "emotional_trigger": "betrayal",
+                "suggested_hook_text": "NO ONE KNOWS WHO BUILT IT",
+            },
+        ]
+    }
+
+
+class TestSelectThumbnailMode:
+    def test_legacy_when_concept_driven_false(self):
+        assert select_thumbnail_mode(False) == "legacy"
+
+    def test_concept_driven_when_concept_driven_true(self):
+        assert select_thumbnail_mode(True) == "concept_driven"
+
+
+class TestSkillSelectionWiring:
+    def test_legacy_mode_receives_expected_stack(self):
+        """Legacy call (no concept_brief): the composed prompt equals the
+        current full production stack — this slice's selection matrix marks
+        both attached skills applicable to both modes, so legacy mode is
+        unchanged from today's behavior."""
+        with patch(_PATCH, return_value=_make_generation_plan()) as mock_ra:
+            write_thumbnail_prompts(
+                _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), _make_log(),
+            )
+        expected = compose_system_prompt(
+            _PROMPT_FILE, _THUMBNAIL_INTELLIGENCE_SKILL_FILE, _GPT_IMAGE2_SKILL_PATH,
+        ).rstrip() + "\n\n" + visual_identity.build_visual_identity_directive(
+            mode="thumbnail_prompt_writer"
+        )
+        assert mock_ra.call_args[1]["system_prompt"] == expected
+
+    def test_concept_driven_mode_receives_expected_stack(self):
+        """Concept-driven call: the composed prompt equals the same full
+        production stack — required behavior: concept-driven mode must
+        retain all skills required for current behavior."""
+        with patch(_PATCH, return_value=_make_generation_plan()) as mock_ra:
+            write_thumbnail_prompts(
+                _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), _make_log(),
+                concept_brief=_make_concept_brief(),
+            )
+        expected = compose_system_prompt(
+            _PROMPT_FILE, _THUMBNAIL_INTELLIGENCE_SKILL_FILE, _GPT_IMAGE2_SKILL_PATH,
+        ).rstrip() + "\n\n" + visual_identity.build_visual_identity_directive(
+            mode="thumbnail_prompt_writer"
+        )
+        assert mock_ra.call_args[1]["system_prompt"] == expected
+
+    def test_selector_is_invoked_and_logged(self):
+        """The selector's decision (mode, reason, skill count) is logged —
+        proving it was actually called, not bypassed, for both modes."""
+        log = _make_log()
+        with patch(_PATCH, return_value=_make_generation_plan()):
+            write_thumbnail_prompts(
+                _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), log,
+            )
+        started_call = next(
+            c for c in log.info.call_args_list if c[0][0] == "td_planning_started"
+        )
+        assert started_call[1]["thumbnail_mode"] == "legacy"
+        assert started_call[1]["skill_selection_reason"] == "mode=legacy:selected=2_of_2"
+        assert started_call[1]["skill_count"] == 2
+
+    def test_selector_logged_for_concept_driven_mode(self):
+        log = _make_log()
+        with patch(_PATCH, return_value=_make_generation_plan()):
+            write_thumbnail_prompts(
+                _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), log,
+                concept_brief=_make_concept_brief(),
+            )
+        started_call = next(
+            c for c in log.info.call_args_list if c[0][0] == "td_planning_started"
+        )
+        assert started_call[1]["thumbnail_mode"] == "concept_driven"
+        assert started_call[1]["skill_selection_reason"] == "mode=concept_driven:selected=2_of_2"
+        assert started_call[1]["skill_count"] == 2
+
+    def test_full_stack_fallback_matrix_covers_both_recognised_modes(self):
+        """_TPW_SKILL_SPECS itself: both specs apply to both modes today —
+        documents the current (zero-reduction) selection matrix directly
+        against the production spec list, independent of the wiring call."""
+        for spec in _TPW_SKILL_SPECS:
+            assert spec.modes == frozenset({"legacy", "concept_driven"})
+        assert len(_TPW_SKILL_SPECS) == 2
+
+    def test_no_provider_call_made(self):
+        """run_agent is the only external call surface and is always mocked
+        in this test — this test asserts the mock, not the real network,
+        was exercised."""
+        with patch(_PATCH, return_value=_make_generation_plan()) as mock_ra:
+            write_thumbnail_prompts(
+                _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), _make_log(),
+            )
+        mock_ra.assert_called_once()
+
+    def test_system_prompt_non_empty_in_both_modes(self):
+        for concept_brief in (None, _make_concept_brief()):
+            with patch(_PATCH, return_value=_make_generation_plan()) as mock_ra:
+                write_thumbnail_prompts(
+                    _make_handoff_brief(), MagicMock(), "ep_001", Path("/tmp"), _make_log(),
+                    concept_brief=concept_brief,
+                )
+            prompt = mock_ra.call_args[1]["system_prompt"]
+            assert isinstance(prompt, str)
+            assert len(prompt) > 0
+            assert "THUMBNAIL DIRECTOR" in prompt.upper()

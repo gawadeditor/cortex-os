@@ -25,6 +25,7 @@ from hypogeum.agents.timeline_builder import (
     TimelineEntry,
     TimelinePlan,
     build_timelines,
+    compute_music_sections,
     compute_section_durations,
     derive_asset_id,
     find_clip_asset_id,
@@ -83,6 +84,8 @@ def _make_entry(
     clip_duration_seconds=8.0,
     clip_path=None,
     narration_path=None,
+    start_seconds=0.0,
+    music_section=None,
 ):
     return TimelineEntry(
         scene_index=scene_index,
@@ -91,10 +94,10 @@ def _make_entry(
         short_id=None,
         clip_path=clip_path,
         narration_path=narration_path,
-        start_seconds=0.0,
+        start_seconds=start_seconds,
         duration_seconds=duration_seconds,
         text_overlays=[],
-        music_section=None,
+        music_section=music_section,
         text_safe_zone=None,
         clip_duration_seconds=clip_duration_seconds,
     )
@@ -246,20 +249,35 @@ class TestSumTimelineDuration:
 class TestComputeSectionDurations:
 
     def test_main_episode_key_present(self):
+        """Single-category timeline collapses to exactly one main section."""
         main = [_make_entry(duration_seconds=40.0)]
         result = compute_section_durations(main, {}, [])
-        assert "main_episode" in result
+        assert "main_episode_0" in result
+        assert len([k for k in result if k.startswith("main_episode_")]) == 1
 
     def test_main_floor_is_30_seconds(self):
         """Even if main timeline is very short, floor is 30.0s."""
         main = [_make_entry(duration_seconds=5.0)]
         result = compute_section_durations(main, {}, [])
-        assert result["main_episode"] == pytest.approx(30.0)
+        assert result["main_episode_0"] == pytest.approx(30.0)
 
     def test_main_uses_actual_duration_when_above_floor(self):
         main = [_make_entry(duration_seconds=60.0)]
         result = compute_section_durations(main, {}, [])
-        assert result["main_episode"] == pytest.approx(60.0)
+        assert result["main_episode_0"] == pytest.approx(60.0)
+
+    def test_multiple_categories_produce_multiple_section_keys(self):
+        """A category change mid-timeline (Option B) yields two section keys,
+        each independently floored at 30.0s."""
+        main = [
+            _make_entry(scene_index=0, start_seconds=0.0, duration_seconds=40.0,
+                        music_section="Mystery"),
+            _make_entry(scene_index=1, start_seconds=40.0, duration_seconds=50.0,
+                        music_section="Tension"),
+        ]
+        result = compute_section_durations(main, {}, [])
+        assert result["main_episode_0"] == pytest.approx(40.0)
+        assert result["main_episode_1"] == pytest.approx(50.0)
 
     def test_short_keys_added_for_each_short_id(self):
         short_entry = _make_entry(duration_seconds=15.0)
@@ -279,6 +297,95 @@ class TestComputeSectionDurations:
         shorts = {"sh_001": [short_entry]}
         result = compute_section_durations([], shorts, ["sh_001"])
         assert result["short_sh_001"] == pytest.approx(25.0)
+
+
+# ---------------------------------------------------------------------------
+# TestComputeMusicSections (Option B, 2026-07-19)
+# ---------------------------------------------------------------------------
+
+class TestComputeMusicSections:
+
+    def test_empty_timeline_returns_single_zero_duration_section(self):
+        result = compute_music_sections([])
+        assert len(result) == 1
+        assert result[0]["section_key"] == "main_episode_0"
+        assert result[0]["duration_seconds"] == pytest.approx(0.0)
+
+    def test_single_category_collapses_to_one_section(self):
+        """Consecutive same-category entries merge into a single section."""
+        main = [
+            _make_entry(scene_index=0, start_seconds=0.0, duration_seconds=10.0,
+                        music_section="Mystery"),
+            _make_entry(scene_index=1, start_seconds=10.0, duration_seconds=15.0,
+                        music_section="Mystery"),
+            _make_entry(scene_index=2, start_seconds=25.0, duration_seconds=8.0,
+                        music_section="Mystery"),
+        ]
+        result = compute_music_sections(main)
+        assert len(result) == 1
+        assert result[0]["section_key"] == "main_episode_0"
+        assert result[0]["category"] == "Mystery"
+        assert result[0]["start_seconds"] == pytest.approx(0.0)
+        assert result[0]["end_seconds"] == pytest.approx(33.0)
+        assert result[0]["duration_seconds"] == pytest.approx(33.0)
+
+    def test_category_change_starts_new_section(self):
+        """A category change mid-timeline starts a new contiguous section."""
+        main = [
+            _make_entry(scene_index=0, start_seconds=0.0, duration_seconds=10.0,
+                        music_section="Mystery"),
+            _make_entry(scene_index=1, start_seconds=10.0, duration_seconds=10.0,
+                        music_section="Mystery"),
+            _make_entry(scene_index=2, start_seconds=20.0, duration_seconds=12.0,
+                        music_section="Tension"),
+        ]
+        result = compute_music_sections(main)
+        assert len(result) == 2
+        assert result[0] == {
+            "section_key": "main_episode_0", "category": "Mystery",
+            "start_seconds": 0.0, "end_seconds": 20.0, "duration_seconds": 20.0,
+        }
+        assert result[1] == {
+            "section_key": "main_episode_1", "category": "Tension",
+            "start_seconds": 20.0, "end_seconds": 32.0, "duration_seconds": 12.0,
+        }
+
+    def test_category_reverts_creates_third_section_not_merged_with_first(self):
+        """Non-adjacent runs of the same category are NOT merged -- grouping
+        is purely by adjacency, not by category identity overall."""
+        main = [
+            _make_entry(scene_index=0, start_seconds=0.0, duration_seconds=10.0,
+                        music_section="Mystery"),
+            _make_entry(scene_index=1, start_seconds=10.0, duration_seconds=10.0,
+                        music_section="Tension"),
+            _make_entry(scene_index=2, start_seconds=20.0, duration_seconds=10.0,
+                        music_section="Mystery"),
+        ]
+        result = compute_music_sections(main)
+        assert [s["section_key"] for s in result] == [
+            "main_episode_0", "main_episode_1", "main_episode_2",
+        ]
+        assert [s["category"] for s in result] == ["Mystery", "Tension", "Mystery"]
+
+    def test_first_section_starts_at_zero(self):
+        main = [_make_entry(start_seconds=0.0, duration_seconds=10.0, music_section="Mystery")]
+        result = compute_music_sections(main)
+        assert result[0]["start_seconds"] == pytest.approx(0.0)
+
+    def test_last_section_end_matches_total_duration(self):
+        main = [
+            _make_entry(scene_index=0, start_seconds=0.0, duration_seconds=10.0,
+                        music_section="Mystery"),
+            _make_entry(scene_index=1, start_seconds=10.0, duration_seconds=5.0,
+                        music_section="Discovery"),
+        ]
+        result = compute_music_sections(main)
+        assert result[-1]["end_seconds"] == pytest.approx(sum_timeline_duration(main))
+
+    def test_missing_music_section_falls_back_to_mystery(self):
+        main = [_make_entry(start_seconds=0.0, duration_seconds=10.0, music_section=None)]
+        result = compute_music_sections(main)
+        assert result[0]["category"] == "Mystery"
 
 
 # ---------------------------------------------------------------------------

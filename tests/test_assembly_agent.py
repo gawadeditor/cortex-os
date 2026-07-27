@@ -793,6 +793,201 @@ class TestMusicSourcingChain:
 
 
 # ---------------------------------------------------------------------------
+# TestOptionBMusicSegments (Option B, 2026-07-19 — main episode only)
+# ---------------------------------------------------------------------------
+
+class TestOptionBMusicSegments:
+    """
+    Assembly Agent sources per-section main-episode music (compute_music_sections
+    + run_music_agent(section_categories=...)) and hands the Video Renderer a
+    ready-to-place music_segments list. Assembly derives the sections and
+    categories; render_episode() only consumes them (verified separately in
+    test_video_renderer.py::TestMultiSegmentMusic).
+    """
+
+    def _two_category_scenes(self, episode_id="ep_001"):
+        return [
+            {
+                "scene_id": "sc_001", "scene_index": 0, "source_type": "main_episode",
+                "narration_reference": "b_001",
+                "asset_id": f"episodes/{episode_id}/sc_001",
+                "production_spec": {"duration_seconds": 8},
+                "narrative_signals": [{"signal_type": "mystery_deepening"}],
+                "section_reference": "s01",
+            },
+            {
+                "scene_id": "sc_002", "scene_index": 1, "source_type": "main_episode",
+                "narration_reference": "b_002",
+                "asset_id": f"episodes/{episode_id}/sc_002",
+                "production_spec": {"duration_seconds": 8},
+                "narrative_signals": [{"signal_type": "shock_fact"}],  # -> Tension
+                "section_reference": "s01",
+            },
+            {
+                "scene_id": "sc_sh1_001", "scene_index": 0, "source_type": "short",
+                "short_id": "sh_001", "narration_reference": "sh1b_001",
+                "asset_id": f"episodes/{episode_id}/sc_sh1_001",
+                "production_spec": {"duration_seconds": 5},
+                "narrative_signals": [], "text_safe_zone": "bottom",
+            },
+            {
+                "scene_id": "sc_sh2_001", "scene_index": 0, "source_type": "short",
+                "short_id": "sh_002", "narration_reference": "sh2b_001",
+                "asset_id": f"episodes/{episode_id}/sc_sh2_001",
+                "production_spec": {"duration_seconds": 5},
+                "narrative_signals": [], "text_safe_zone": "bottom",
+            },
+            {
+                "scene_id": "sc_sh3_001", "scene_index": 0, "source_type": "short",
+                "short_id": "sh_003", "narration_reference": "sh3b_001",
+                "asset_id": f"episodes/{episode_id}/sc_sh3_001",
+                "production_spec": {"duration_seconds": 5},
+                "narrative_signals": [], "text_safe_zone": "bottom",
+            },
+        ]
+
+    def test_two_categories_source_two_main_sections_with_distinct_categories(self, tmp_path):
+        """A category change between two consecutive main scenes results in
+        two generate_music_track calls for the main episode, requesting the
+        two distinct derived categories (Mystery, Tension) -- not the flat
+        tone_arc category repeated for the whole episode."""
+        cfg = _make_config()
+        visual = _make_visual_package(scenes=self._two_category_scenes())
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        requested = []
+        def _capture(**kwargs):
+            requested.append((kwargs["category"], kwargs["episode_id"]))
+            return _make_music_track_result(category=kwargs["category"], tmp_path=tmp_path)
+
+        with patch("hypogeum.agents.music_agent.generate_music_track", side_effect=_capture):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                run_assembly_agent(
+                    visual_package=visual,
+                    narration_package=narration,
+                    thumbnail_package=thumbnails,
+                    config=cfg,
+                    episode_id="ep_001",
+                    output_dir=tmp_path / "episodes" / "ep_001",
+                )
+
+        main_categories = {cat for cat, _ in requested[:2]}
+        assert main_categories == {"Mystery", "Tension"}
+
+    def test_render_episode_receives_music_segments_with_boundaries(self, tmp_path):
+        """render_episode() is called with a music_segments list whose
+        section boundaries match the two-category grouping, and whose
+        tracks are the actually-sourced MusicTrackResult objects."""
+        cfg = _make_config()
+        visual = _make_visual_package(scenes=self._two_category_scenes())
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            side_effect=lambda **kw: _make_music_track_result(category=kw["category"], tmp_path=tmp_path),
+        ):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                with patch(
+                    "hypogeum.agents.assembly_agent.render_episode",
+                    wraps=__import__("hypogeum.agents.video_renderer", fromlist=["render_episode"]).render_episode,
+                ) as mock_render:
+                    run_assembly_agent(
+                        visual_package=visual,
+                        narration_package=narration,
+                        thumbnail_package=thumbnails,
+                        config=cfg,
+                        episode_id="ep_001",
+                        output_dir=tmp_path / "episodes" / "ep_001",
+                    )
+
+        assert mock_render.call_count == 1
+        segments = mock_render.call_args.kwargs["music_segments"]
+        assert len(segments) == 2
+        assert segments[0]["start_seconds"] == pytest.approx(0.0)
+        assert segments[1]["start_seconds"] == segments[0]["end_seconds"]
+        assert all(s["track"] is not None for s in segments)
+
+    def test_legacy_pre_supplied_package_falls_back_to_single_segment(self, tmp_path):
+        """Backward compatibility: a pre-supplied music_track_package using
+        the old flat 'main_episode' key (as every other test in this file
+        still uses) produces music_segments whose per-section track lookups
+        all miss -- render_episode() and the ffmpeg layer fall back to the
+        legacy single music_tracks['main_episode'] track (verified directly
+        in test_video_renderer.py; here we only confirm Assembly doesn't
+        error and still produces a normal successful render)."""
+        cfg = _make_config()
+        visual = _make_visual_package()  # single-category default fixture
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        mtp = _make_music_track_package(tmp_path=tmp_path)  # legacy "main_episode" key
+
+        with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+            result = run_assembly_agent(
+                visual_package=visual,
+                narration_package=narration,
+                thumbnail_package=thumbnails,
+                config=cfg,
+                episode_id="ep_001",
+                output_dir=tmp_path / "episodes" / "ep_001",
+                music_track_package=mtp,
+            )
+
+        assert result["package_integrity"]["production_ready"] is True
+
+    def test_shorts_music_sourcing_key_format_unchanged(self, tmp_path):
+        """Shorts are never split into sections -- their section_durations
+        keys remain 'short_{short_id}', exactly as before Option B."""
+        cfg = _make_config()
+        visual = _make_visual_package(scenes=self._two_category_scenes())
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch(
+            "hypogeum.agents.assembly_agent.run_music_agent",
+            wraps=__import__(
+                "hypogeum.agents.music_agent", fromlist=["run_music_agent"]
+            ).run_music_agent,
+        ) as mock_run_music_agent:
+            with patch(
+                "hypogeum.agents.music_agent.generate_music_track",
+                side_effect=lambda **kw: _make_music_track_result(category=kw["category"], tmp_path=tmp_path),
+            ):
+                with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                    run_assembly_agent(
+                        visual_package=visual,
+                        narration_package=narration,
+                        thumbnail_package=thumbnails,
+                        config=cfg,
+                        episode_id="ep_001",
+                        output_dir=tmp_path / "episodes" / "ep_001",
+                    )
+
+        assert mock_run_music_agent.call_count == 1
+        section_durations = mock_run_music_agent.call_args.kwargs["section_durations"]
+        short_keys = {k for k in section_durations if k.startswith("short_")}
+        assert short_keys == {"short_sh_001", "short_sh_002", "short_sh_003"}
+
+
+# ---------------------------------------------------------------------------
 # TestAudioMixingOrchestration
 # ---------------------------------------------------------------------------
 

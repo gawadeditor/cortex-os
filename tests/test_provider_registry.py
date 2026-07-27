@@ -629,26 +629,30 @@ class TestThumbnailConfigDefaults:
              patch.dict(os.environ, env, clear=True):
             return Config()
 
-    def test_thumbnail_image_provider_defaults_to_openrouter(self):
-        """Code default for THUMBNAIL_IMAGE_PROVIDER must be 'openrouter'."""
+    def test_thumbnail_image_provider_defaults_to_muapi(self):
+        """Code default for THUMBNAIL_IMAGE_PROVIDER must be 'muapi'.
+
+        Canonical routing decision (docs/validation/thumbnail_image_generation_validation/
+        GPT_IMAGE_2_ROUTING_AUDIT.md, superseding the 2026-06-21 comparison this test
+        previously cited): MUAPI GPT Image 2 is the primary thumbnail provider.
+        """
         cfg = self._config_no_dotenv()
-        assert cfg.THUMBNAIL_IMAGE_PROVIDER == "openrouter", (
-            f"Expected default 'openrouter', got {cfg.THUMBNAIL_IMAGE_PROVIDER!r}. "
-            "This is the primary thumbnail provider after the 2026-06-21 comparison."
+        assert cfg.THUMBNAIL_IMAGE_PROVIDER == "muapi", (
+            f"Expected default 'muapi', got {cfg.THUMBNAIL_IMAGE_PROVIDER!r}."
         )
 
-    def test_thumbnail_fallback_provider_defaults_to_openai(self):
-        """Code default for THUMBNAIL_FALLBACK_PROVIDER must be 'openai'."""
+    def test_thumbnail_fallback_provider_defaults_to_openrouter(self):
+        """Code default for THUMBNAIL_FALLBACK_PROVIDER must be 'openrouter'."""
         cfg = self._config_no_dotenv()
-        assert cfg.THUMBNAIL_FALLBACK_PROVIDER == "openai", (
-            f"Expected default 'openai', got {cfg.THUMBNAIL_FALLBACK_PROVIDER!r}."
+        assert cfg.THUMBNAIL_FALLBACK_PROVIDER == "openrouter", (
+            f"Expected default 'openrouter', got {cfg.THUMBNAIL_FALLBACK_PROVIDER!r}."
         )
 
-    def test_thumbnail_fallback2_provider_defaults_to_muapi(self):
-        """Code default for THUMBNAIL_FALLBACK2_PROVIDER must be 'muapi'."""
+    def test_thumbnail_fallback2_provider_defaults_to_openai(self):
+        """Code default for THUMBNAIL_FALLBACK2_PROVIDER must be 'openai'."""
         cfg = self._config_no_dotenv()
-        assert cfg.THUMBNAIL_FALLBACK2_PROVIDER == "muapi", (
-            f"Expected default 'muapi', got {cfg.THUMBNAIL_FALLBACK2_PROVIDER!r}."
+        assert cfg.THUMBNAIL_FALLBACK2_PROVIDER == "openai", (
+            f"Expected default 'openai', got {cfg.THUMBNAIL_FALLBACK2_PROVIDER!r}."
         )
 
     def test_thumbnail_fallback2_provider_is_overridable_via_env(self):
@@ -656,7 +660,7 @@ class TestThumbnailConfigDefaults:
         cfg = self._config_no_dotenv({"THUMBNAIL_FALLBACK2_PROVIDER": "openrouter"})
         assert cfg.THUMBNAIL_FALLBACK2_PROVIDER == "openrouter"
 
-    def test_chain_order_is_openrouter_openai_muapi_by_default(self):
+    def test_chain_order_is_muapi_openrouter_openai_by_default(self):
         """The three default fields assemble to the expected priority chain."""
         cfg = self._config_no_dotenv()
         chain = [
@@ -664,8 +668,8 @@ class TestThumbnailConfigDefaults:
             cfg.THUMBNAIL_FALLBACK_PROVIDER,
             cfg.THUMBNAIL_FALLBACK2_PROVIDER,
         ]
-        assert chain == ["openrouter", "openai", "muapi"], (
-            f"Expected ['openrouter', 'openai', 'muapi'], got {chain}."
+        assert chain == ["muapi", "openrouter", "openai"], (
+            f"Expected ['muapi', 'openrouter', 'openai'], got {chain}."
         )
 
 

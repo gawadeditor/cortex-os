@@ -484,6 +484,7 @@ class TestPipelineApprovalGate:
             MINIMAL_RESEARCH_PACKAGE,
             MINIMAL_SCRIPT_PACKAGE,
             MINIMAL_SCORECARD_PASS,
+            MINIMAL_THUMBNAIL_CONCEPT_BRIEF,
             MINIMAL_THUMBNAIL_PACKAGE,
             MINIMAL_TOPIC_BRIEF,
             MINIMAL_VISUAL_PACKAGE,
@@ -507,6 +508,8 @@ class TestPipelineApprovalGate:
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
              patch("hypogeum.pipeline._run_budget_authorization",
                    return_value=MINIMAL_FINANCE_AUTHORIZATION), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -537,7 +540,8 @@ class TestPipelineApprovalGate:
             MINIMAL_FINAL_RENDER_PACKAGE, MINIMAL_FINANCE_AUTHORIZATION,
             MINIMAL_NARRATION_PACKAGE, MINIMAL_NARRATIVE_PACKAGE,
             MINIMAL_RESEARCH_PACKAGE, MINIMAL_SCRIPT_PACKAGE,
-            MINIMAL_SCORECARD_PASS, MINIMAL_THUMBNAIL_PACKAGE,
+            MINIMAL_SCORECARD_PASS, MINIMAL_THUMBNAIL_CONCEPT_BRIEF,
+            MINIMAL_THUMBNAIL_PACKAGE,
             MINIMAL_TOPIC_BRIEF, MINIMAL_VISUAL_PACKAGE,
             make_config, make_startup_report,
         )
@@ -556,6 +560,8 @@ class TestPipelineApprovalGate:
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
              patch("hypogeum.pipeline._run_budget_authorization",
                    return_value=MINIMAL_FINANCE_AUTHORIZATION), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",
@@ -587,7 +593,8 @@ class TestPipelineApprovalGate:
             MINIMAL_FINANCE_RECORD, MINIMAL_NARRATION_PACKAGE,
             MINIMAL_NARRATIVE_PACKAGE, MINIMAL_PUBLISHING_RECORD,
             MINIMAL_RESEARCH_PACKAGE, MINIMAL_SCRIPT_PACKAGE,
-            MINIMAL_SCORECARD_PASS, MINIMAL_THUMBNAIL_PACKAGE,
+            MINIMAL_SCORECARD_PASS, MINIMAL_THUMBNAIL_CONCEPT_BRIEF,
+            MINIMAL_THUMBNAIL_PACKAGE,
             MINIMAL_TOPIC_BRIEF, MINIMAL_VISUAL_PACKAGE,
             make_config, make_startup_report,
         )
@@ -609,6 +616,8 @@ class TestPipelineApprovalGate:
                    return_value=MINIMAL_SCRIPT_PACKAGE), \
              patch("hypogeum.pipeline._run_budget_authorization",
                    return_value=MINIMAL_FINANCE_AUTHORIZATION), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy",
+                   return_value=MINIMAL_THUMBNAIL_CONCEPT_BRIEF), \
              patch("hypogeum.pipeline._run_visual_package_director",
                    return_value=MINIMAL_VISUAL_PACKAGE), \
              patch("hypogeum.pipeline._run_thumbnail_director",

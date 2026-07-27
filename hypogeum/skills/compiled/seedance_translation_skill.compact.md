@@ -97,6 +97,8 @@ Note: Segment fidelity is [L5] pending L4 testing.
 
 Note: [L3] means terms appear in community skill attributed to official ByteDance docs. Behavioral reliability is [L5].
 
+> **Hypogeum Policy Note:** "Static camera" is listed above as community-documented Seedance vocabulary, not a recommendation. Hypogeum's own canonical static-framing policy (owned by `hypogeum/camera_dna.py` as of Phase B2.5, see `docs/validation/prompt_writer_architecture/B1_2A_STATIC_CAMERA_POLICY_MEMO.md`) constrains when it may be used: only with meaningful subject, environmental, atmospheric, or lighting motion in frame, and only when intentional, rare, and narratively justified — never as a default. This note does not redefine that policy, only points to it.
+
 **Shot scales:** extreme close-up, close-up, medium close-up, medium shot, full shot, wide shot / establishing shot, bird's eye view / overhead, low angle
 
 ## Translation Rules (§7 Condensed)

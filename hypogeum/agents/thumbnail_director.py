@@ -71,6 +71,7 @@ from hypogeum.agents.thumbnail_killer_concept_validator import validate_concept_
 from hypogeum.agents.thumbnail_plan_validator import (
     ThumbnailPreGenerationError,
     validate_all_candidates_pre_generation,
+    validate_all_candidates_thumbnail_dna,
     validate_all_prompts_zone_reservations,
     validate_ctr_readability,
 )
@@ -224,6 +225,27 @@ def run_thumbnail_director(
         )
         raise ThumbnailPreGenerationError(
             "composition_typography_plan", plan_validation["failures"]
+        )
+
+    # ------------------------------------------------------------------
+    # Thumbnail DNA v1 gate (2026-07-13) — headline weight, focal-zone
+    # buffer, highlight containment, mobile readability. Blocking failures
+    # stop generation before any paid call, matching the pattern of every
+    # other pre-generation gate in this sequence.
+    # ------------------------------------------------------------------
+    dna_validation = validate_all_candidates_thumbnail_dna(main_candidates_for_validation)
+    if not dna_validation["passed"]:
+        log.error(
+            "td_thumbnail_dna_validation_failed",
+            failures=dna_validation["failures"],
+        )
+        raise ThumbnailPreGenerationError(
+            "thumbnail_dna", dna_validation["failures"]
+        )
+    if dna_validation["warnings"]:
+        log.warn(
+            "td_thumbnail_dna_warnings",
+            warnings=dna_validation["warnings"],
         )
 
     # ------------------------------------------------------------------

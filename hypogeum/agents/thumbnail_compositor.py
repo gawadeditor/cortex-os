@@ -3,8 +3,21 @@ hypogeum/agents/thumbnail_compositor.py — Multi-layer thumbnail compositor
 
 Thumbnail mode registry
 -----------------------
+THUMBNAIL_MODE_UNIFIED_INTEGRATED = "unified_integrated"
+    APPROVED PRIMARY PATH (Thumbnail DNA v1, 2026-07-13). One unified GPT
+    Image 2 call with integrated typography baked into the same prompt —
+    no layered base/hero/FX calls, no PIL headline. The final provider
+    prompt is built deterministically from exactly four components, each
+    present exactly once: (1) candidate["image_prompt"] topic-specific
+    concept, (2) integrated typography instructions, (3) the canonical
+    Thumbnail DNA directive, (4) the canonical FULL brand visual-identity
+    directive. Use generate_unified_integrated_thumbnail(). Wordmark is
+    still applied via PIL afterward (TIG-07 requirement).
+
 THUMBNAIL_MODE_PREMIUM  = "multi_layer_composite"
-    Main path for all premium main-episode thumbnails.
+    Layered path. Preserved, not removed — no longer the default for new
+    concept-driven candidates as of Thumbnail DNA v1, but still fully
+    functional for rollback or manual override.
     Generates 3 visual layers via MUAPI, renders typography + wordmark via PIL.
     Required layers: base_scene, hero_subject, fx  (MUAPI)
                      typography                     (PIL — deterministic)
@@ -12,13 +25,16 @@ THUMBNAIL_MODE_PREMIUM  = "multi_layer_composite"
     Use generate_and_composite() with candidate["composite_mode"] = True.
 
 THUMBNAIL_MODE_FAST     = "single_pass_integrated"
-    Fast/low-cost mode. Single MUAPI call with embedded typography instruction.
-    Used for rapid iteration, cost-capped runs, or shorts.
-    Falls through the _generate_for_deliverable() path in thumbnail_generation_agent.
+    Legacy single-call mode reached only via the LLM-authored (non-concept-
+    driven) image_prompt path in thumbnail_generation_agent.py's
+    _generate_for_deliverable(). Superseded for concept-driven candidates by
+    THUMBNAIL_MODE_UNIFIED_INTEGRATED, which is deterministic rather than
+    relying on the LLM to have embedded DNA/brand guidance itself.
 
 THUMBNAIL_MODE_LEGACY   = "pil_composited_text"
     Fallback only. Single image generation + PIL text overlay (old behaviour).
-    Only reached when typography_plan is present but composite_mode is False.
+    Only reached when typography_plan is present but composite_mode is False
+    and typography_integration != "embedded".
 
 Layered compositing workflow (PREMIUM only):
   Layer 1 — base_scene:    Environment plate only (no subject, no text) — MUAPI
@@ -30,6 +46,7 @@ Layered compositing workflow (PREMIUM only):
 Public API:
     build_layer_prompts(concept, composition_plan) -> dict
     generate_and_composite(candidate, config, episode_id, output_dir, deliverable_id, log) -> bool
+    generate_unified_integrated_thumbnail(candidate, config, episode_id, output_dir, deliverable_id, log) -> bool
     validate_premium_thumbnail(output_dir, deliverable_id) -> dict
 """
 from __future__ import annotations
@@ -39,14 +56,20 @@ from typing import Optional
 
 from hypogeum.config import Config
 from hypogeum.muapi import _generate_thumbnail_with_model, _normalize_thumbnail
+from hypogeum.brand import visual_identity
+from hypogeum.agents.thumbnail_composition_planner import (
+    describe_dna_constraints,
+    describe_dna_constraints_compact,
+)
 
 
 # ---------------------------------------------------------------------------
 # Thumbnail mode constants
 # ---------------------------------------------------------------------------
 
-THUMBNAIL_MODE_PREMIUM = "multi_layer_composite"    # main path
-THUMBNAIL_MODE_FAST    = "single_pass_integrated"   # fast/cost mode
+THUMBNAIL_MODE_UNIFIED_INTEGRATED = "unified_integrated"  # approved primary path
+THUMBNAIL_MODE_PREMIUM = "multi_layer_composite"    # layered path — preserved, not default
+THUMBNAIL_MODE_FAST    = "single_pass_integrated"   # legacy LLM-authored single-call mode
 THUMBNAIL_MODE_LEGACY  = "pil_composited_text"      # fallback only
 
 
@@ -159,10 +182,13 @@ def build_layer_prompts(concept: dict, composition_plan: dict) -> dict:
         "No subjects, no text, only atmosphere and particles."
     )
 
+    directive = visual_identity.build_visual_identity_directive(mode="thumbnail_compositor")
+    dna_directive = describe_dna_constraints(composition_plan)
+
     return {
-        "base_scene":   env_prompt,
-        "hero_subject": subject_prompt,
-        "fx":           fx_prompt,
+        "base_scene":   env_prompt + dna_directive + directive,
+        "hero_subject": subject_prompt + dna_directive + directive,
+        "fx":           fx_prompt + directive,
     }
 
 
@@ -173,8 +199,17 @@ def build_layer_prompts(concept: dict, composition_plan: dict) -> dict:
 _WORDMARK_LINE1 = "THE"
 _WORDMARK_LINE2 = "HYPOGEUM"
 _WORDMARK_LINE3 = "— CHRONICLES —"
-_GOLD_COLOR     = (196, 154, 66)   # brand antique_gold #C49A42
-_CREAM_COLOR    = (245, 243, 238)  # brand parchment_cream #F5F3EE
+
+
+def _hex_to_rgb(hex_str: str) -> tuple:
+    hex_str = hex_str.lstrip("#")
+    return tuple(int(hex_str[i:i + 2], 16) for i in (0, 2, 4))
+
+
+# Sourced from hypogeum.brand.visual_identity (single canonical palette) —
+# do not hardcode brand hex values here again.
+_GOLD_COLOR  = _hex_to_rgb(visual_identity.get_palette()["aged_gold"]["hex"])       # antique_gold
+_CREAM_COLOR = _hex_to_rgb(visual_identity.get_palette()["soft_off_white"]["hex"])  # parchment_cream
 
 _FONT_SEARCH_PATHS = [
     # macOS system fonts
@@ -354,6 +389,14 @@ def _generate_layer(
 ) -> Optional[Path]:
     """Generate one layer via MUAPI. Returns path on success, None on failure."""
     path = _layer_path(output_dir, deliverable_id, layer_name)
+    log.info(
+        "thumbnail_provider_attempt",
+        provider="muapi",
+        model=config.THUMBNAIL_IMAGE_MODEL,
+        status="layered",
+        layer=layer_name,
+        deliverable_id=deliverable_id,
+    )
     try:
         _generate_thumbnail_with_model(
             model=config.THUMBNAIL_IMAGE_MODEL,
@@ -592,6 +635,286 @@ def _apply_vignette(img: "Image.Image", strength: float = 0.55) -> "Image.Image"
     from PIL import ImageChops
     mask_rgb = Image.merge("RGB", (mask, mask, mask))
     return ImageChops.multiply(img, mask_rgb)
+
+
+# ---------------------------------------------------------------------------
+# APPROVED PRIMARY PATH — unified integrated-image generation
+# (Thumbnail DNA v1, 2026-07-13)
+# ---------------------------------------------------------------------------
+
+def generate_unified_integrated_thumbnail(
+    candidate: dict,
+    config: Config,
+    episode_id: str,
+    output_dir: Path,
+    deliverable_id: str,
+    log,
+    apply_wordmark: bool = True,
+) -> bool:
+    """
+    Approved primary thumbnail generation path. One unified GPT Image 2 call
+    with integrated typography baked into the same prompt — no layered
+    base/hero/FX calls, no PIL headline.
+
+    Builds the final provider prompt deterministically from exactly four
+    components, each present exactly once, in this fixed order:
+        1. candidate["image_prompt"]  — topic-specific image concept, kept
+           byte-identical as an exact prefix (never mutated/stripped)
+        2. integrated headline typography instructions
+           (thumbnail_prompt_writer._embed_typography_in_prompt), when
+           candidate["typography_plan"] is present
+        3. the compact Thumbnail DNA directive
+           (thumbnail_composition_planner.describe_dna_constraints_compact),
+           derived from candidate["composition_plan"]
+        4. the compact FULL-tier brand visual-identity directive
+           (hypogeum.brand.visual_identity.build_visual_identity_directive_compact,
+           mode="thumbnail")
+
+    2026-07-13 (V5.1 provider-safe prompt correction): switched components 3
+    and 4 from the verbose/full directive builders to their compact
+    counterparts after a real MUAPI "content could not be processed"
+    rejection on a 6,730-character prompt. Every structured constraint is
+    unchanged — describe_dna_constraints_compact() and
+    build_visual_identity_directive_compact() read the exact same
+    composition_plan fields / Brand Bible values as the full builders, only
+    the rendered prose is shorter and each rule is stated once, not several
+    times across components. The full/verbose builders remain unchanged and
+    are still used by the layered path (build_layer_prompts()) and by
+    hypogeum.agents.thumbnail_plan_validator / documentation.
+
+    Single-source requirements: composition rules come only from
+    thumbnail_composition_planner.py; brand palette/finish come only from
+    hypogeum.brand.visual_identity (itself reading only
+    docs/brand_guardian/brand_bible_hypogeum.json). No DNA or brand prose is
+    duplicated or hardcoded here or anywhere episode-specific.
+
+    One paid MUAPI call (config.THUMBNAIL_IMAGE_MODEL). No fallback, no
+    retry after a valid image. Wordmark is applied via PIL afterward
+    (TIG-07 requirement) unless apply_wordmark=False — no other PIL
+    typography step runs; the headline is rendered by the image model.
+
+    Args:
+        candidate: ranked_candidate dict with image_prompt, and optionally
+            typography_plan and composition_plan.
+        config, episode_id, output_dir, deliverable_id, log: as elsewhere.
+        apply_wordmark: True in production (TIG-07). Set False only for
+            review/comparison generations that must not carry the wordmark.
+
+    Returns:
+        True on success (final image written), False on generation failure.
+        Raises nothing — failures are logged and result in a False return.
+    """
+    # Local import: thumbnail_prompt_writer imports build_layer_prompts from
+    # this module, so importing at module scope here would be circular.
+    from hypogeum.agents.thumbnail_prompt_writer import _embed_typography_in_prompt
+
+    base_prompt = candidate.get("image_prompt", "")
+    typography_plan = candidate.get("typography_plan")
+    composition_plan = candidate.get("composition_plan") or {}
+
+    log.info(
+        "unified_integrated_thumbnail_started",
+        deliverable_id=deliverable_id,
+        has_typography_plan=bool(typography_plan),
+    )
+
+    prompt = base_prompt
+    if typography_plan:
+        prompt = _embed_typography_in_prompt(prompt, typography_plan)
+    prompt = prompt + describe_dna_constraints_compact(composition_plan)
+    prompt = prompt + visual_identity.build_visual_identity_directive_compact(mode="thumbnail")
+    visual_identity.log_palette_injection(log, mode="thumbnail", injected=True)
+
+    out_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _generate_thumbnail_with_model(
+            model=config.THUMBNAIL_IMAGE_MODEL,
+            deliverable_id=deliverable_id,
+            image_prompt=prompt,
+            aspect_ratio="16:9",
+            config=config,
+            local_path=out_path,
+            budget_guard=None,
+            log=log,
+        )
+        _normalize_thumbnail(out_path, "16:9")
+    except Exception as exc:  # noqa: BLE001
+        log.error("unified_integrated_thumbnail_generation_failed",
+                  deliverable_id=deliverable_id, error=str(exc)[:300])
+        return False
+
+    if apply_wordmark and out_path.exists():
+        from hypogeum.muapi import _apply_wordmark_overlay
+        _apply_wordmark_overlay(out_path)
+
+    log.info("unified_integrated_thumbnail_finished", deliverable_id=deliverable_id,
+             output=str(out_path),
+             size_kb=round(out_path.stat().st_size / 1024) if out_path.exists() else 0)
+    return out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# EXPERIMENTAL — hybrid unified-image path (not wired into production)
+# ---------------------------------------------------------------------------
+
+def generate_hybrid_thumbnail_experiment(
+    unified_image_prompt: str,
+    typography_plan: dict,
+    config: Config,
+    episode_id: str,
+    output_dir: Path,
+    deliverable_id: str,
+    log,
+) -> bool:
+    """
+    EXPERIMENTAL hybrid thumbnail path — isolated from production.
+
+    Generates ONE unified GPT Image 2 image containing both the environment
+    and the hero subject in a single coherent camera/lighting/perspective
+    decision, instead of the production path's separate base_scene +
+    hero_subject layers. No FX layer in this experiment. Typography and
+    wordmark are applied exactly as the production layered path does, reusing
+    the same deterministic PIL steps.
+
+    Does NOT call generate_and_composite(), _generate_layer(), or
+    build_layer_prompts(). Does not read candidate["layer_prompts"]. The
+    production multi_layer_composite path is completely untouched by this
+    function and remains available for rollback/comparison.
+
+    Args:
+        unified_image_prompt: a single provider-ready prompt describing the
+            full scene (environment + hero subject together) — not a
+            concatenation of layer prompts.
+        typography_plan:      same shape as the production typography_plan.
+        config, episode_id, output_dir, deliverable_id, log: as elsewhere.
+
+    Returns:
+        True on success (final composite written), False if the unified
+        image generation failed. Raises nothing — failures are logged and
+        result in a False return, matching generate_and_composite()'s
+        base_path-failure contract.
+    """
+    log.info("hybrid_experiment_started", deliverable_id=deliverable_id,
+             mode="unified_single_image")
+
+    branded_prompt = unified_image_prompt + visual_identity.build_visual_identity_directive(
+        mode="thumbnail"
+    )
+    visual_identity.log_palette_injection(log, mode="thumbnail", injected=True)
+
+    unified_path = _layer_path(output_dir, deliverable_id, "unified")
+    try:
+        _generate_thumbnail_with_model(
+            model=config.THUMBNAIL_IMAGE_MODEL,
+            deliverable_id=f"{deliverable_id}_unified",
+            image_prompt=branded_prompt,
+            aspect_ratio="16:9",
+            config=config,
+            local_path=unified_path,
+            budget_guard=None,
+            log=log,
+        )
+        _normalize_thumbnail(unified_path, "16:9")
+    except Exception as exc:  # noqa: BLE001
+        log.error("hybrid_experiment_unified_generation_failed",
+                  deliverable_id=deliverable_id, error=str(exc)[:300])
+        return False
+
+    # PIL typography layer — deterministic, no MUAPI. Same function as production.
+    typo_path = _render_typography_pil(output_dir, deliverable_id, typography_plan, log)
+
+    # Composite: unified image as base, no hero_subject layer, no fx layer.
+    out_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+    _composite_layers(unified_path, None, None, typo_path, out_path)
+
+    # Wordmark overlay — mandatory brand identity step, same function as production.
+    if out_path.exists():
+        _apply_wordmark(out_path, log)
+
+    log.info("hybrid_experiment_finished", deliverable_id=deliverable_id,
+             output=str(out_path),
+             size_kb=round(out_path.stat().st_size / 1024) if out_path.exists() else 0)
+    return out_path.exists()
+
+
+def finish_unified_thumbnail(
+    unified_path: Path,
+    typography_plan: dict,
+    output_dir: Path,
+    deliverable_id: str,
+    log,
+) -> bool:
+    """
+    EXPERIMENTAL — finish an ALREADY-GENERATED unified hybrid source image
+    with typography + wordmark only. Zero provider calls. Does not
+    regenerate, re-request, or re-tone the source in any way.
+
+    Unlike _composite_layers() / generate_hybrid_thumbnail_experiment(),
+    this function applies NO color grade (contrast/warmth push), NO
+    vignette, and NO shadow-floor clamp. Those three steps exist in
+    _composite_layers() specifically to compensate for screen-blend
+    compositing raising dark pixels across multiple independently generated
+    layers (base_scene + hero_subject + fx) — see
+    docs/validation/thumbnail_image_generation_validation/
+    COMPOSITE_PIPELINE_QUALITY_AUDIT.md. A single already-generated unified
+    image never goes through that raising step, so applying the same
+    correction over-crushes it. This function exists to skip that mismatch
+    entirely rather than parameterize it.
+
+    Pipeline: unified source (already normalized, unmodified) -> full-frame
+    screen-blend of the PIL typography layer (rendered at full 1280x720,
+    so no cropping/repositioning is needed) -> wordmark -> JPEG export.
+    No hero blend, no fx blend, no color grade, no vignette, no shadow-floor
+    clamp, no multi-layer tonal normalization.
+
+    Args:
+        unified_path: path to the already-generated, already-normalized
+            unified source image (e.g. the *_unified.jpg file written by
+            generate_hybrid_thumbnail_experiment()). Must already exist —
+            this function never generates or fetches it.
+        typography_plan, output_dir, deliverable_id, log: as elsewhere.
+
+    Returns:
+        True on success (final composite written), False if unified_path
+        does not exist.
+    """
+    from PIL import Image, ImageChops
+
+    if not unified_path.exists():
+        log.error("finish_unified_thumbnail_source_missing", path=str(unified_path))
+        return False
+
+    base = Image.open(unified_path).convert("RGB")
+    w, h = base.size
+
+    # PIL typography layer — deterministic, no MUAPI. Same function as production.
+    typo_path = _render_typography_pil(output_dir, deliverable_id, typography_plan, log)
+
+    result = base
+    if typo_path and typo_path.exists():
+        # _render_typography_pil() always renders at the full 1280x720 frame
+        # with text already placed at the correct zone — no resize/reposition
+        # needed, unlike _composite_layers()'s sub-rectangle hero_subject
+        # handling. Plain full-frame screen blend: black stays transparent.
+        typo = Image.open(typo_path).convert("RGB")
+        if typo.size != (w, h):
+            typo = typo.resize((w, h), Image.LANCZOS)
+        result = ImageChops.screen(result, typo)
+
+    out_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    result.save(str(out_path), format="JPEG", quality=95)
+
+    # Wordmark overlay — mandatory brand identity step, same function as production.
+    if out_path.exists():
+        _apply_wordmark(out_path, log)
+
+    log.info("finish_unified_thumbnail_finished", deliverable_id=deliverable_id,
+             output=str(out_path),
+             size_kb=round(out_path.stat().st_size / 1024) if out_path.exists() else 0)
+    return out_path.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -1533,7 +1533,7 @@ class TestPublishingRecord:
             validate(self.S, _drop(_publishing_record(), "failures"))
 
     def test_all_result_statuses_valid(self):
-        for status in ("published", "failed", "skipped"):
+        for status in ("published", "failed", "skipped", "uploaded_to_inbox"):
             p = copy.deepcopy(_publishing_record())
             p["platform_results"][0]["status"] = status
             validate(self.S, p)

@@ -77,7 +77,12 @@ class TestBuildVisualSpecText:
             markers=[],
         )
         result = build_visual_spec_text(entity)
-        assert result == "A tall figure in robes."
+        # A brand visual identity directive is appended by
+        # hypogeum.brand.visual_identity — the original semantic text must
+        # remain byte-identical as an exact prefix (no trailing-punctuation
+        # mutation), with the directive appended exactly once.
+        assert result.startswith("A tall figure in robes.")
+        assert result.count("HYPOGEUM BRAND VISUAL IDENTITY") == 1
 
     def test_description_plus_period_detail(self):
         entity = _make_entity(
@@ -86,7 +91,18 @@ class TestBuildVisualSpecText:
             markers=[],
         )
         result = build_visual_spec_text(entity)
-        assert result == "A tall figure. New Kingdom Egypt."
+        # Original text must remain byte-identical as an exact prefix.
+        assert result.startswith("A tall figure. New Kingdom Egypt.")
+        assert result.count("HYPOGEUM BRAND VISUAL IDENTITY") == 1
+
+    def test_reference_image_mode_receives_light_enforcement_not_thumbnail_ratios(self):
+        # Reference images must NOT receive thumbnail-strength frame-coverage
+        # percentage targets (e.g. "60-70% of frame") — only light guidance.
+        entity = _make_entity(description="A tall figure.", period_detail="", markers=[])
+        result = build_visual_spec_text(entity)
+        assert "(reference_image, light enforcement)" in result
+        assert "% of frame" not in result
+        assert "entity continuity" in result.lower()
 
     def test_description_plus_markers(self):
         entity = _make_entity(
@@ -145,8 +161,10 @@ class TestBuildVisualSpecText:
             markers=[],
         )
         result = build_visual_spec_text(entity)
-        # Must be "Subject. Ptolemaic period." — space-separated
-        assert result == "Subject. Ptolemaic period."
+        # "Subject. Ptolemaic period." must remain space-separated and
+        # byte-identical as a prefix; a brand directive is appended after it.
+        assert result.startswith("Subject. Ptolemaic period.")
+        assert result.count("HYPOGEUM BRAND VISUAL IDENTITY") == 1
 
     def test_markers_suffix_ends_with_period(self):
         entity = _make_entity(

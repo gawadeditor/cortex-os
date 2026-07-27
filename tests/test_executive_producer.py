@@ -828,6 +828,8 @@ class TestPipelineIntegration:
              patch("hypogeum.pipeline.run_budget_authorization",
                    return_value={"verdict": "AUTHORIZED", "authorized": True,
                                  "checks": [], "failures": [], "warnings": []}), \
+             patch("hypogeum.pipeline.run_thumbnail_strategy",
+                   return_value={}), \
              patch("hypogeum.pipeline.run_visual_package_director",
                    return_value={}), \
              patch("hypogeum.pipeline.build_thumbnail_handoff_brief",
@@ -877,6 +879,8 @@ class TestPipelineIntegration:
              patch("hypogeum.pipeline.run_budget_authorization",
                    return_value={"verdict": "AUTHORIZED", "authorized": True,
                                  "checks": [], "failures": [], "warnings": []}), \
+             patch("hypogeum.pipeline.run_thumbnail_strategy",
+                   return_value={}), \
              patch("hypogeum.pipeline.run_visual_package_director",
                    return_value={}), \
              patch("hypogeum.pipeline.build_thumbnail_handoff_brief",

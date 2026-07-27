@@ -251,7 +251,7 @@ Bad examples:
 
 Rules [LEGACY_SCENE_MODE]:
 - Primary_prompt: 30–60 words. Specific, cinematic, period-accurate.
-- Include primary_subject_identity visual details verbatim from the Handoff Brief — this is the consistency lock for scene mode.
+- Include primary_subject_identity visual details verbatim from the Handoff Brief — this is the consistency lock for scene mode. "Verbatim" governs factual/visual accuracy (the entity's real appearance), not sentence structure: do NOT open all three prompts with the same primary_subject_identity phrase as a shared prefix. Each prompt must still open with a different visual starting point (see VERIFICATION item 1 below) — weave the identity detail in wherever it fits naturally within that candidate's own distinct framing, not as a copy-pasted lead-in.
 - Include period-specific architectural or environmental details.
 - Include lighting quality: "torchlight", "overcast Mediterranean sky", "harsh desert noon".
 - Include camera framing: "extreme close-up on face", "wide atmospheric establishing", "tight portrait".
@@ -500,6 +500,7 @@ VERIFICATION — BEFORE FINALISING PROMPTS
 
 After writing all three prompts, verify:
 1. The first word of each prompt is NOT a physical object noun or historical descriptor.
+1b. The opening phrase (first ~8-10 words) of each prompt is DIFFERENT from the other two — this is checked automatically before generation (first-40-word similarity across all three pairs) and the entire batch is rejected if any pair collapses to the same opening. Reusing primary_subject_identity's descriptive phrase verbatim as the lead-in for all three is the most common cause of this failure — see the verbatim note in the rules above.
 2. Each prompt is built around a DIFFERENT visual metaphor.
 3. Each hook text matches its concept's suggested_hook_text exactly. [CONCEPT_DRIVEN_MODE]
    [LEGACY_SCENE_MODE] Each hook text addresses a different psychological angle — no two hooks are the same string.
@@ -622,4 +623,5 @@ CRITICAL CONSTRAINTS — MUST NOT BE VIOLATED:
 9. text_overlay for ALL THREE main_episode candidates MUST be non-null. Each must have "text" (string, 3–5 words) and "placement" ("top" | "bottom"). The "text" MUST BE DIFFERENT for each candidate — each hook must address a distinct viewer psychology. Three candidates sharing the same hook text is a hard failure that will be rejected by the pre-generation validator before any image is generated. Acceptable psychological axes to vary across A/B/C: forbidden or hidden world / scale or engineering impossibility / human cost or buried lives / discovery or revelation. Do not use these exact phrasings — encode the same psychological variation with your own wording drawn from the episode's curiosity gap.
 10. Every image_prompt must follow the Hypogeum dark brand palette: near-black / void_black DOMINANT background, warm amber/bronze/gold as accent lighting only — never as dominant background fill. Explicitly forbid warm amber or ochre as the background base tone — see SECTION 2B.
 11. Every main_episode image_prompt MUST include an explicit top-zone reservation — "top 12% of frame near-black and empty" or equivalent — to protect the dominant wordmark landing zone. Prompts that omit this will be rejected by the pre-generation validator.
-12. Respond with valid JSON only. No prose, no markdown, no code fences.
+12. Every image_prompt (main_episode AND shorts) MUST ALSO include an explicit bottom-zone reservation — "bottom 10% of frame completely empty — no scene content, no inscriptions, no symbols, no captions, no labels" or equivalent — to keep the hook text legible. This is validated exactly as strictly as the top-zone reservation in constraint 11; prompts that omit it will be rejected by the same pre-generation validator, before any image is generated.
+13. Respond with valid JSON only. No prose, no markdown, no code fences.

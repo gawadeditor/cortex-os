@@ -54,6 +54,8 @@ Format: `[Temperature] light [entry verb] from [direction/position], [connector]
 
 The falloff sentence must name what recedes into darkness — not just that darkness exists.
 
+> **Hypogeum Policy Note (2026-07-18, Phase B2.6):** this Layer's canonical, deterministic form — temperature categories, entry-verb/connector/falloff vocabulary, and the bleached-noon-white forbidden item — now lives in `hypogeum/lighting_dna.py`, not a BGA rule-ID cross-reference (the "BGA rule E-C02" citation above was found to have drifted from what `brand_guardian_agent.txt` actually says under that ID — see `B1_1_DEPENDENCY_AUDIT_AND_OWNERSHIP.md` §3.2 — and is superseded by `lighting_dna.py`'s own first-class forbidden item, not fixed in place here). Retained here as temporary, synchronized duplication, not eliminated duplication — deterministic injection into live Stage B generation does not exist yet (Phase B4, Prompt Compiler). Scheduled for deletion once B4 lands — see `B1_3_ARCHITECTURE_CONTRACT.md`'s extraction plan, Checkpoint 9.
+
 Examples:
 - "Harsh noon glare descends from overhead, illuminating the wave crests hard-edged at the shoulder; warm amber underlighting in the deep shadow below the surface line; Aegean water deepens to intense ultramarine below the scatter layer; limestone cliff holds iron-oxide warmth in its deep fissures only."
 - "Warm amber light enters from the upper left, raking across the corroded ridges and gear tooth faces, casting micro-shadow relief into the tooth valleys at a low oblique angle; opposing face recedes into deep surrounding shadow with no ambient fill; hard falloff to pure unlit black."
@@ -74,6 +76,8 @@ Four distinct observations. Each must name a specific material surface and descr
 
 **Observation 4**: The precision detail — one observation that could not appear in any other period or setting. This is the shot's authenticity proof. Begin after the period from obs_3.
 
+> **Hypogeum Policy Note (2026-07-18, Phase B2.7):** this four-observation pattern's canonical, topic-agnostic form (the structure only — never scene-specific worked examples) now lives in `hypogeum/historical_dna.py` — see `B1_3_ARCHITECTURE_CONTRACT.md`. Retained here as temporary, synchronized duplication, not eliminated duplication: deterministic injection of the pattern into live Stage B generation does not exist yet (Phase B4, Prompt Compiler), and the specific per-scene material content below always remains Creative Intent/LLM territory regardless. Scheduled for deletion once B4 lands — see the Architecture Contract's extraction plan, Checkpoint 9.
+
 Examples from s01:
 - "rough canvas shirt — salt-bleached along the shoulders, charcoal-heavy where seawater saturates the fabric fully; layers of salt service visible in the fibre texture;"
 - "hemp rope at the diver's waist — still beaded with water, fibres darkened by salt immersion, individual strands visible in the noon light;"
@@ -92,6 +96,8 @@ Three statements in sequence:
 
 Format: `Spatial composition: [background]. Composition: [subject position]. Negative space: [where and what].`
 
+> **Hypogeum Policy Note (2026-07-17, Phase B2.1):** this three-part pattern's canonical, deterministic form now lives in `hypogeum/composition_dna.py` (`describe_composition_constraints()`) — see `docs/validation/prompt_writer_architecture/B1_3_ARCHITECTURE_CONTRACT.md`. This paragraph is retained here as temporary, synchronized duplication, not eliminated duplication: deterministic injection into live generation does not exist yet (that is Phase B4, Prompt Compiler work) so this prose remains what the model actually reads today. Scheduled for deletion once B4 lands — see the Architecture Contract's extraction plan, Checkpoint 9.
+
 ---
 
 ## Layer 6 — Camera and Motion Plan
@@ -100,7 +106,7 @@ Format: `Camera: [verb]. Subject: [subject behavior]. [Motion qualifier].`
 
 **Camera verbs**: controlled slow push in, slow drift, slow pan, pull back, slow tilt, overhead descent, handheld drift
 
-Do not use `static` as a camera verb. Use `controlled slow push in` for close-up and macro shots; use `slow drift` for wide and establishing shots. Controlled motion gives the frame cinematic life without displacing the subject.
+Default to `controlled slow push in` for close-up and macro shots, and `slow drift` for wide and establishing shots — controlled motion gives the frame cinematic life without displacing the subject. A held or static frame follows Hypogeum's canonical static-framing policy (owned by `hypogeum/camera_dna.py` as of Phase B2.5 — see that module, not a restatement here): permitted only when the frame carries meaningful subject, environmental, atmospheric, or lighting motion, and only when intentional, rare, and narratively justified — never as a default choice.
 
 **Subject behavior**: what the primary subject physically does during the clip — not what it means, what it does. A fragment does not "convey age." It sits, catches light, holds position, recedes to shadow.
 
@@ -148,6 +154,8 @@ Target what AI video models default to for this setting — museum lighting for 
 
 `[no vignette]` — always include. AI video models apply post-processing vignette by default; this flattens edge-frame depth and obscures material detail at the periphery.
 
+> **Hypogeum Policy Note (2026-07-18, Phase B2.7):** the setting-type-to-anachronism-risk pattern named above (museum lighting for artefacts, fluorescent for interiors, modern coastline infrastructure for seascape shots, synthetic materials for period figures) is now generalized into a per-setting-type anachronism library in `hypogeum/historical_dna.py` (`get_historical_forbidden_items(setting_type)`) — see `B1_3_ARCHITECTURE_CONTRACT.md`. Retained here as temporary, synchronized duplication pending Phase B4. `[no vignette]` itself is a universal, non-setting-specific tag and is not part of that library — it remains this Layer's own instruction.
+
 Examples:
 - `[without modern watercraft] [without contemporary diving equipment] [no wetsuit] [no modern coastline infrastructure] [no synthetic rope] [no vignette]`
 - `[without modern surfaces] [without institutional display context] [no ambient fill] [no background detail] [no lens flare] [no motion blur] [no museum case or display hardware] [no label or scale reference] [no vignette]`
@@ -184,6 +192,6 @@ The fallback is not a lazy version of the primary. It is a simpler scene that ac
 - [ ] The 0–4s / 4–8s transition is a physical change, not an emotion
 - [ ] No word in the prompt is "mysterious", "important", "significant", "ancient" without a physical qualifier
 - [ ] The fallback would render if the primary fails — it is a distinct achievable scene, not a truncated version
-- [ ] Camera verb is not "static" — use controlled slow push in (close-up/macro) or slow drift (wide/establishing)
+- [ ] If the camera is held or static, the frame carries meaningful subject, environmental, atmospheric, or lighting motion, and the choice is intentional and rare — not a lazy default (Hypogeum canonical static-framing policy, owned by `hypogeum/video_dna.py`); otherwise use controlled slow push in (close-up/macro) or slow drift (wide/establishing)
 - [ ] `[no vignette]` is present in Layer 9 constraints
 - [ ] `[lamp source off-frame]` is present in Layer 8 tags if any practical light source is named in the lighting plan

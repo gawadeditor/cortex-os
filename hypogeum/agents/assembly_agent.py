@@ -71,6 +71,7 @@ from hypogeum.agents.music_agent import run_music_agent
 from hypogeum.agents.timeline_qa import run_timeline_qa
 from hypogeum.agents.timeline_builder import (
     build_timelines,
+    compute_music_sections,
     compute_section_durations,
     find_clip_asset_id,
     sum_timeline_duration,
@@ -510,19 +511,30 @@ def run_assembly_agent(
     # ------------------------------------------------------------------
     # C. Music sourcing — delegated to Music Agent
     # Assembly Agent must not call generate_music_track directly.
+    #
+    # Option B (2026-07-19): the main episode is split into contiguous
+    # per-category sections (main_music_sections, pure timeline grouping —
+    # no I/O). Section boundaries are used both to build per-section
+    # categories for Music Agent and, after sourcing, to build the ordered
+    # music_segments list the Video Renderer places directly. Shorts are
+    # untouched (single section, tone_arc category, exactly as before).
     # ------------------------------------------------------------------
+    main_music_sections = compute_music_sections(main_timeline)
+
     if music_track_package is None:
         section_durations = compute_section_durations(
             main_timeline=main_timeline,
             shorts_timelines=shorts_timelines,
             short_ids=short_ids,
         )
+        section_categories = {s["section_key"]: s["category"] for s in main_music_sections}
         music_track_package = run_music_agent(
             visual_package=visual_package,
             episode_id=episode_id,
             config=config,
             assets_root=assets_root,
             section_durations=section_durations,
+            section_categories=section_categories,
         )
 
     music_tracks, music_log, sections_without_music = _music_package_to_tracks(
@@ -536,6 +548,22 @@ def run_assembly_agent(
         sections_without_music=sections_without_music,
         sourcing_status=music_track_package.get("sourcing_status", "unknown"),
     )
+
+    # music_segments: ready-to-place timed segments for the Video Renderer.
+    # The renderer receives only start/end/track — no narrative logic or
+    # category derivation happens downstream of this point. When a section
+    # has no sourced track (sections_without_music, or an older single-key
+    # "main_episode" package), its track is None here; the renderer falls
+    # back to the legacy single music_tracks["main_episode"] path when no
+    # segment in this list carries a real track.
+    music_segments = [
+        {
+            "start_seconds": s["start_seconds"],
+            "end_seconds": s["end_seconds"],
+            "track": music_tracks.get(s["section_key"]),
+        }
+        for s in main_music_sections
+    ]
 
     # ------------------------------------------------------------------
     # D. Audio mixing — narration + music level computations
@@ -576,6 +604,7 @@ def run_assembly_agent(
         log=log,
         end_page_path=_end_page_path if _end_page_path.exists() else None,
         end_page_duration=_end_page_duration,
+        music_segments=music_segments,
     )
     render_status = render_manifest["render_status"]
 

@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from hypogeum.brand import visual_identity
+
 
 # ---------------------------------------------------------------------------
 # Visual spec text construction
@@ -58,7 +60,10 @@ def build_visual_spec_text(entity: dict) -> str:
     if markers:
         text += f" Distinctive features: {markers}."
 
-    return text
+    if not text:
+        return text
+
+    return text + visual_identity.build_visual_identity_directive(mode="reference_image")
 
 
 # ---------------------------------------------------------------------------

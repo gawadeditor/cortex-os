@@ -35,15 +35,64 @@ Any of the following make a scene BLOCKING:
 Exception: A single small human SILHOUETTE in an environmental or architectural context is ON-REGISTER (rule E-VG02). Silhouette = figure with no legible face.
 
 **Category B — Forbidden aesthetic modes (rules E-C02 through E-C08)**
-Any of the following make a scene BLOCKING:
+Any of the following make a scene BLOCKING in BOTH passes — no natural-world exception applies to these:
 - Neon colors, neon lighting, neon glow effects
 - Cyberpunk aesthetic / sci-fi futurism / dystopian urban
-- Cool blue color palette / cool blue dominant lighting
-- Green dominant palette or green lighting
-- Pink or purple dominant palette
 - Bright-key lighting / studio flat lighting / softbox setup
 - Light or white dominant surfaces (bright white walls, white backgrounds)
 - Modern urban environment as setting (glass skyscrapers, contemporary city)
+
+**Category B — context-aware color-hue rules (Pass 1 vs Pass 2, Brand Bible v1.1 activation 2026-07-13)**
+Cool blue, teal, green, pink, and purple dominant palette or lighting are evaluated differently by pass:
+- **Pass 2 (thumbnails):** ALWAYS BLOCKING regardless of justification. A thumbnail is a designed
+  graphic composition, not a factual scene record — there is no "natural sky" exception here.
+- **Pass 1 (video scenes):** BLOCKING only when the color is an ARTIFICIAL color grade, mood-lighting
+  choice, or stylistic cast (e.g. "cool blue color grade over the whole scene", "teal-and-orange
+  cinematic look", "green sci-fi glow"). NOT a violation when the color is historically or
+  environmentally accurate content the scene truthfully requires — natural daytime sky, sea or open
+  water, natural daylight, natural vegetation greens, or an accurately dark bronze-green (not bright
+  turquoise) patina on an artifact. Do not flag a scene for depicting a blue sky, blue sea, or green
+  landscape when the narration/scene context calls for daylight or a natural outdoor/maritime setting.
+  Flag only when the prompt itself frames the color as a deliberate stylistic wash rather than scene truth.
+
+**Category B (extended) — canonical forbidden color behavior (color_system.forbidden_color_behavior, Brand Bible v1.1)**
+Added 2026-07-13, activated 2026-07-13 (Brand Bible v1.1 approved by Mohamed Abdelgawad) from the
+canonical, machine-readable forbidden-color-behavior list (docs/brand_guardian/brand_bible_hypogeum.json,
+also consumed programmatically by hypogeum/brand/visual_identity.py for prompt injection). These extend,
+not replace, Category B above. BLOCKING in BOTH passes — these are never scene-truth requirements:
+- Fluorescent colors of any hue (extends the existing neon-color prohibition above)
+- Heavy saturated color cast dominating the overall frame, of any hue, that is NOT natural daylight or
+  natural environmental color (see the context-aware note above — a naturally bright, saturated daytime
+  sky or sea in a Pass 1 scene is not itself a violation)
+- Bright polished gold — flat, high-value, chrome-like gold with no aging, texture, or patina.
+  The brand standard is restrained, weathered, aged gold — never a glossy/polished metallic finish.
+
+BLOCKING with a context-aware carve-out (evaluate against scene truth before flagging):
+- Turquoise verdigris — corroded bronze/metal patina rendered as bright cyan-green rather than
+  muted dark bronze-green. Flag prompts describing "turquoise patina", "bright cyan-green corrosion",
+  or similar as a deliberate stylistic color choice. Do NOT flag a Pass 1 scene that accurately
+  describes an artifact's authentic dark bronze-green corrosion — that is scene truth, not a violation.
+- Orange/yellow scene wash covering the full frame — BLOCKING when the prompt describes an artificial,
+  full-frame color-grade wash (e.g. "the whole scene is bathed in an orange filter", "warm sepia-orange
+  grade over everything"). NOT a violation when warm tones are localized, accent, or narratively
+  required lighting (torchlight, sunset, golden hour) rather than an artificial full-frame override.
+- Full-frame sepia tint — the entire image uniformly tinted a single warm sepia/monochrome wash as a
+  stylistic choice, as distinct from restrained warm accent lighting or a scene that is truthfully warm
+  (e.g. desert daylight, firelit interior) without being flattened into a single monochrome wash.
+
+**Category B (extended) — canonical visual finish (visual_finish_system, Brand Bible v1.1)**
+Added 2026-07-13, activated 2026-07-13. The channel's finish register is: premium archaeological
+documentary, restrained aged gold, weathered stone and bronze, realistic photographic texture, controlled
+directional light, deep but readable shadows. BLOCKING in BOTH passes, with no scene-truth exception —
+these three describe rendering *style*, never a factual requirement of any scene:
+- A generic fantasy-art finish (glowing magic effects, saturated fantasy-illustration rendering)
+- A museum-display finish (glass display case, exhibit lighting, placard/label framing — distinct from
+  the existing E-TH04 product-shot-void rule; this covers a lit-exhibit look even with environmental context)
+- A glossy modern product-render look (chrome/plastic sheen, studio product photography finish)
+
+Note: "near-black dominant" framing itself is a Pass 2 (thumbnail) composition requirement (rule E-TH07)
+and is NOT a Pass 1 rule — do not flag a Pass 1 video scene merely for depicting daylight or a
+brightly-lit natural setting when the scene's historical/narrative context requires it.
 
 **Category D — Thumbnail-specific blocking (Pass 2 only, rules E-TH01–E-TH07, E-L01 through E-L09)**
 For thumbnail candidates, these are BLOCKING:
@@ -120,6 +169,10 @@ For each candidate in the input, evaluate:
 - Specific hex color values (not enforceable — hex values are verified from the approved Style Board
   but exact hex matching in generated JPEG/bitmap output is not reliable due to compression and
   rendering variation; enforcement remains character-based by intentional policy decision)
+- Pass 1 only: natural daytime sky, sea/open water, natural vegetation, or an artifact's accurately dark
+  bronze-green patina — when these are scene-truth, not an artificial stylistic color grade (see the
+  context-aware color-hue rules above). Bright daylight in a Pass 1 scene when historically/narratively
+  required is not a violation of the near-black-dominant framing, which is a Pass 2 (thumbnail) rule only.
 - Historical battle scenes, violence, death (content policy — not brand)
 - Music, audio, narration (not visual — out of scope for BGA)
 - AI disclosure text or YouTube metadata

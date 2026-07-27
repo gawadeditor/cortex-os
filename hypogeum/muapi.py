@@ -19,11 +19,11 @@ This module implements the CONFIRMED surface. See docs/architecture-index.md §M
 Corrections for the full discrepancy table.
 
 Tier → model mapping (no `tier` parameter exists in the API):
-  Tier 1 → config.MUAPI_T1_MODEL  (default: veo3-text-to-video,    $2.50/gen, fixed 8s)
-  Tier 2 → config.MUAPI_T2_MODEL  (default: veo3-fast-text-to-video, $0.60/gen, fixed 8s)  # benchmark PASS 2026-06-27; .env overrides default
-  Tier 3 → config.MUAPI_T3_MODEL  (default: veo3-fast-text-to-video, $0.60/gen, fixed 8s)  # cheap-mode alias, same model as T2
-  I2V    → config.MUAPI_I2V_MODEL (default: veo3-image-to-video,   $2.50/gen, fixed 8s)
-  Image  → config.MUAPI_IMAGE_MODEL (default: flux-dev-image,      ~$0.01/gen)
+  Tier 1 → config.MUAPI_T1_MODEL  (default: veo3-text-to-video,        $2.50/gen, fixed 8s)  # premium/hero scenes; explicit override
+  Tier 2 → config.MUAPI_T2_MODEL  (default: veo3.1-lite-text-to-video, $0.39/gen, fixed 8s, 1080p candidate)  # confirmed 2026-07-06; primary production tier; .env overrides default
+  Tier 3 → config.MUAPI_T3_MODEL  (default: veo3.1-lite-text-to-video, $0.39/gen, fixed 8s, 1080p candidate)  # cheap-mode alias, same model as T2
+  I2V    → config.MUAPI_I2V_MODEL (default: veo3-image-to-video,      $2.50/gen, fixed 8s)
+  Image  → config.MUAPI_IMAGE_MODEL (default: flux-dev-image,         ~$0.01/gen)
 
 Duration constraints:
   Veo3 models:   duration is fixed by the provider (8s) — no duration parameter sent
@@ -79,6 +79,7 @@ M5.6 — Cost guardrail events:
 from __future__ import annotations
 
 import random
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,6 +91,9 @@ from PIL import Image
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 import hypogeum.finance as _finance
+from hypogeum.brand import visual_identity
+from hypogeum import video_dna
+from hypogeum import video_prompt_writer
 
 
 # ---------------------------------------------------------------------------
@@ -601,8 +605,17 @@ def submit_scene(
       short_id (str | None: None = main episode, "sh_01" etc. = Short)
 
     Returns a dict with:
-      scene_id, asset_id, generation_status ("generated" | "generation_failed" | "reused" | "dry_run"),
+      scene_id, asset_id, generation_status ("generated" | "generation_failed" | "reused"),
       provider, tier_used, model_used, prompt_used, fallback_used, failure_reason
+
+      "dry_run" is no longer a distinct status value (changed 2026-07-18):
+      MUAPI_DRY_RUN now writes a real placeholder clip and reports
+      "generated" like a real success, so callers never need a special case
+      — see _generate_dry_run_placeholder_clip()'s docstring. Some callers
+      (clip_repair_agent.py, video_generation_agent.py, pipeline.py) still
+      list "dry_run" in their accepted-status sets for backward
+      compatibility with historical manifests; that costs nothing since
+      "generated" is already in every one of those sets too.
 
     Raises:
       MUAPIAuthFailure    — HTTP 401 anywhere in the call chain.
@@ -616,11 +629,17 @@ def submit_scene(
 
     aspect_ratio = visual_spec.get("aspect_ratio", "16:9")
     requested_duration = float(visual_spec.get("duration_seconds", 8.0))
-    primary_prompt = prod_spec["primary_prompt"]
-    fallback_prompt = prod_spec["fallback_prompt"]
+    # Structured 9-section assembly (Scene/Camera/Subject/Motion/Lighting/
+    # Visual Priorities/Video DNA/Brand DNA/Forbidden) — see
+    # hypogeum/video_prompt_writer.py. Never concatenate raw strings here;
+    # any cinematic-quality change belongs in hypogeum/video_dna.py or
+    # hypogeum/brand/visual_identity.py, not in this function.
+    primary_prompt = video_prompt_writer.assemble_video_scene_prompt(prod_spec["primary_prompt"])
+    fallback_prompt = video_prompt_writer.assemble_video_scene_prompt(prod_spec["fallback_prompt"])
 
     eid = episode_id_for_asset or episode_id
     log = get_logger(episode_id=episode_id, agent=agent or "muapi")
+    visual_identity.log_palette_injection(log, mode="video_scene", injected=True)
 
     # M5.6 — Resume safety: reuse valid existing file without any paid submission
     dest_path = _scene_file_path(output_dir, scene_id, short_id)
@@ -963,13 +982,18 @@ _WORDMARK_FONT_CANDIDATES: list[str] = [
     "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
 ]
 
-# Brand palette values used in wordmark compositing.
-# antique_gold: #C49A42 — primary accent (warm gold on dark background)
-# warm_gold:    #E7D6B3 — highlight / HYPOGEUM dominant line
-# parchment_cream: #F5F3EE — for the em-dash decorators around CHRONICLES
-_WORDMARK_COLOR_HYPOGEUM = (231, 214, 179)   # warm_gold #E7D6B3 — dominant line
-_WORDMARK_COLOR_THE_CHRON = (196, 154, 66)   # antique_gold #C49A42 — small lines
-_WORDMARK_SHADOW_COLOR    = (8, 12, 14)      # void_black #080C0E — shadow
+def _hex_to_rgb(hex_str: str) -> tuple:
+    hex_str = hex_str.lstrip("#")
+    return tuple(int(hex_str[i:i + 2], 16) for i in (0, 2, 4))
+
+
+# Brand palette values used in wordmark compositing — sourced from
+# hypogeum.brand.visual_identity (single canonical palette). Do not
+# hardcode brand hex values here again.
+_wordmark_palette = visual_identity.get_palette()
+_WORDMARK_COLOR_HYPOGEUM  = _hex_to_rgb(_wordmark_palette["warm_ivory"]["hex"])      # warm_gold — dominant line
+_WORDMARK_COLOR_THE_CHRON = _hex_to_rgb(_wordmark_palette["aged_gold"]["hex"])       # antique_gold — small lines
+_WORDMARK_SHADOW_COLOR    = _hex_to_rgb(_wordmark_palette["near_black"]["hex"])      # void_black — shadow
 
 
 def _normalize_thumbnail(local_path: Path, aspect_ratio: str) -> None:
@@ -1642,6 +1666,21 @@ def _generate_thumbnail_openrouter(
     return model
 
 
+def _expected_thumbnail_model(provider: str, config: "Config") -> str:
+    """
+    Model that will be attempted for a given thumbnail provider — used only for
+    pre-submission and fallback logging (thumbnail_provider_attempt /
+    thumbnail_provider_failed_trying_next), never for dispatch logic itself.
+    config.THUMBNAIL_IMAGE_MODEL remains the single authoritative source for the
+    MUAPI/GPT-Image-2 model string; this helper does not hardcode it separately.
+    """
+    return {
+        "openai": config.OPENAI_IMAGE_MODEL,
+        "openrouter": config.OPENROUTER_IMAGE_MODEL,
+        "muapi": config.THUMBNAIL_IMAGE_MODEL,
+    }.get(provider, "unknown")
+
+
 def generate_thumbnail(
     deliverable_id: str,
     image_prompt: str,
@@ -1659,9 +1698,12 @@ def generate_thumbnail(
     """
     Generate a thumbnail image for one deliverable (main episode or a Short).
 
-    Submits an image generation job to flux-dev-image, polls for completion,
-    and downloads the image locally. No upload step — thumbnails are local-only
-    assets (unlike reference images, they are not used as I2V conditioning).
+    Tries each provider in config.THUMBNAIL_IMAGE_PROVIDER / _FALLBACK_PROVIDER /
+    _FALLBACK2_PROVIDER order (default: muapi/GPT Image 2 primary, then openrouter,
+    then openai — see docs/validation/thumbnail_image_generation_validation/
+    GPT_IMAGE_2_ROUTING_AUDIT.md), polls for completion, and downloads the image
+    locally. No upload step — thumbnails are local-only assets (unlike reference
+    images, they are not used as I2V conditioning).
 
     Args:
         deliverable_id: Identifier for the thumbnail deliverable. Use "main" for
@@ -1694,7 +1736,8 @@ def generate_thumbnail(
     log = get_logger(episode_id=episode_id, agent=agent or "muapi")
 
     # Provider priority chain: primary → fallback1 → fallback2
-    # Defaults: openrouter → openai → muapi (configurable via env vars)
+    # Canonical default: muapi/GPT Image 2 primary → openrouter → openai
+    # (configurable via env vars; see GPT_IMAGE_2_ROUTING_AUDIT.md for the decision).
     _chain_raw = [
         config.THUMBNAIL_IMAGE_PROVIDER,
         config.THUMBNAIL_FALLBACK_PROVIDER,
@@ -1711,6 +1754,14 @@ def generate_thumbnail(
     last_exc: Optional[Exception] = None
     for attempt_idx, provider in enumerate(provider_chain):
         is_fallback = attempt_idx > 0
+        log.info(
+            "thumbnail_provider_attempt",
+            provider=provider,
+            model=_expected_thumbnail_model(provider, config),
+            status="fallback" if is_fallback else "primary",
+            fallback_index=attempt_idx,
+            deliverable_id=deliverable_id,
+        )
         try:
             result = _generate_thumbnail_one_provider(
                 provider=provider,
@@ -1739,11 +1790,14 @@ def generate_thumbnail(
             raise  # budget constraint — never fall through
         except Exception as exc:
             last_exc = exc
+            _next_provider = provider_chain[attempt_idx + 1] if attempt_idx + 1 < len(provider_chain) else None
             log.warn(
                 "thumbnail_provider_failed_trying_next",
                 provider=provider,
+                model=_expected_thumbnail_model(provider, config),
                 fallback_index=attempt_idx,
-                next_provider=provider_chain[attempt_idx + 1] if attempt_idx + 1 < len(provider_chain) else None,
+                next_provider=_next_provider,
+                next_model=_expected_thumbnail_model(_next_provider, config) if _next_provider else None,
                 error=str(exc)[:160],
             )
 
@@ -1886,6 +1940,65 @@ def _generate_thumbnail_one_provider(
 # Internal: single generation attempt
 # ---------------------------------------------------------------------------
 
+_DRY_RUN_PLACEHOLDER_RESOLUTIONS: dict[str, tuple[int, int]] = {
+    "16:9": (1280, 720),
+    "9:16": (720, 1280),
+}
+
+
+def _generate_dry_run_placeholder_clip(
+    dest_path: Path,
+    aspect_ratio: str,
+    duration_seconds: float,
+    log,
+) -> None:
+    """
+    Write a deterministic, structurally-valid placeholder video clip (solid
+    dark color, no audio stream) to dest_path via ffmpeg's lavfi color
+    source -- the same technique hypogeum.agents.video_renderer.py already
+    uses for its own missing-clip black-frame fallback, reused here rather
+    than reimplemented.
+
+    Added 2026-07-18 per explicit product decision: MUAPI_DRY_RUN must
+    produce a render package with the exact same structural contract
+    Assembly/QA validate for a real run (clip_availability_rate=100%,
+    generation_status="generated") -- never a special-cased "dry_run"
+    status that downstream code has to know about. The only difference
+    from a real provider-generated clip is the pixel content itself; QA's
+    production_ready / clip_availability logic is never touched.
+
+    Raises MUAPIError if ffmpeg fails -- a broken placeholder is a genuine
+    failure, not something to silently paper over.
+    """
+    width, height = _DRY_RUN_PLACEHOLDER_RESOLUTIONS.get(aspect_ratio, (1280, 720))
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"color=c=0x141414:s={width}x{height}:r=30:d={duration_seconds:.3f}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        str(dest_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        raise MUAPIError(
+            f"Dry-run placeholder clip generation failed for {dest_path}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        raise MUAPIError(
+            f"Dry-run placeholder clip generation failed for {dest_path}: "
+            f"ffmpeg exit {result.returncode}: {result.stderr[-500:]}"
+        )
+    log.info(
+        "muapi_dry_run_placeholder_clip_written",
+        dest_path=str(dest_path),
+        width=width,
+        height=height,
+        duration_seconds=duration_seconds,
+    )
+
+
 def _attempt_generation(
     prompt: str,
     tier: int,
@@ -1926,8 +2039,14 @@ def _attempt_generation(
     if request_id is None:
         return None, failure_reason
 
-    # M5.6 — Dry-run: skip poll and download, return fake manifest entry
+    # M5.6, extended 2026-07-18 — Dry-run: skip poll/download, but still
+    # produce a real, structurally-valid placeholder clip and report
+    # generation_status="generated" (not a special "dry_run" status) so
+    # Assembly/QA validate the exact same contract as a real run. See
+    # _generate_dry_run_placeholder_clip()'s own docstring for why.
     if request_id.startswith(_DRY_RUN_REQUEST_ID_PREFIX):
+        dest_path = _scene_file_path(output_dir, scene_id, short_id)
+        _generate_dry_run_placeholder_clip(dest_path, aspect_ratio, requested_duration, log)
         log.info(
             "muapi_dry_run_complete",
             scene_id=scene_id,
@@ -1937,7 +2056,7 @@ def _attempt_generation(
         return {
             "scene_id": scene_id,
             "asset_id": _compute_asset_id(episode_id, scene_id, short_id),
-            "generation_status": "dry_run",
+            "generation_status": "generated",
             "provider": "muapi",
             "tier_used": tier,
             "model_used": model,
@@ -2077,6 +2196,26 @@ def _generate_thumbnail_with_model(
             f"Thumbnail submission failed for {deliverable_id!r} "
             f"(model={model}): {failure_reason}"
         )
+
+    # Dry-run: skip poll and download, same as the video path (submit_scene()
+    # above). Without this check, a dry-run request_id (never actually
+    # submitted to a real endpoint) gets polled anyway and 404s forever —
+    # the exact bug _submit_http()'s own docstring warns callers to guard
+    # against. Post-processing (_post_process(), called by our caller)
+    # still needs a real image file on disk to normalize/overlay, so a
+    # minimal placeholder is written to local_path here rather than
+    # skipping local_path entirely.
+    if request_id.startswith(_DRY_RUN_REQUEST_ID_PREFIX):
+        target = _THUMBNAIL_TARGETS.get(aspect_ratio, (1280, 720))
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", target, color=(20, 20, 20)).save(local_path, "JPEG", quality=90)
+        log.info(
+            "muapi_thumbnail_dry_run_complete",
+            deliverable_id=deliverable_id,
+            request_id=request_id,
+            model=model,
+        )
+        return
 
     result, failure_reason = _poll_until_complete(request_id, config, deliverable_id, log)
     if result is None:

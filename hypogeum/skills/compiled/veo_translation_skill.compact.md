@@ -43,6 +43,8 @@ Use descriptor approach: name what to exclude as nouns/descriptors integrated in
 | `[no modern elements]` | Positive: `ancient stone construction, period-accurate materials` |
 | `[no ambient fill]` | Positive: `directional key light from one side, deep shadow zones` |
 
+> **Hypogeum Policy Note (2026-07-17, Phase B1.2A):** This table is the confirmed source of a platform-wide finding — negative/forbidden-rule expression syntax is provider-specific, not universal. Veo's own guidance discourages the bracketed `[no X]` form that `cinematic_prompt_architecture.md` (Layer 9) and Video DNA's Forbidden-section rendering currently use unconditionally for every provider. This is not corrected here — the fix belongs to a future Provider Adapter's translation layer (Phase B3), which must render each DNA module's canonical forbidden-item list into whatever syntax the target provider actually prefers, rather than one bracket-tag format assumed to be universally valid. See `PHASE_B_IMPLEMENTATION_ROADMAP.md` for the amendment this finding produced.
+
 **ONE CAMERA MOVEMENT PER PROMPT** [L5: C-02]
 Stacking movements produces inconsistent output. One official movement term + one speed qualifier (§AP-01).
 
@@ -65,6 +67,8 @@ Note: `[00:00-00:04]` is the official format [L2]. Previous `0-4s:` format is NO
 ## Camera Vocabulary [L2: VEO-DOC-01]
 
 **Movements:** static shot, pan (left/right), tilt (up/down), dolly (in/out), truck (left/right), pedestal (up/down), zoom (in/out), crane shot, aerial/drone shot, handheld, whip pan, arc shot, tracking shot, slow pan, POV shot
+
+> **Hypogeum Policy Note:** "static shot" is genuine, officially-supported Veo vocabulary — listed here as a provider fact, not a recommendation. Hypogeum's own canonical static-framing policy (owned by `hypogeum/camera_dna.py` as of Phase B2.5, see `docs/validation/prompt_writer_architecture/B1_2A_STATIC_CAMERA_POLICY_MEMO.md`) constrains when it may be used: only with meaningful subject, environmental, atmospheric, or lighting motion in frame, and only when intentional, rare, and narratively justified — never as a default. This note does not redefine that policy, only points to it.
 
 **Angles / Shot scales:**
 | Term | §Ref |

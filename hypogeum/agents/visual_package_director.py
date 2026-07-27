@@ -154,6 +154,7 @@ from hypogeum.agents.video_generation_agent import generate_all_scene_videos
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 from hypogeum.prompt_loader import compose_system_prompt
+from hypogeum.prompt_composition import SkillSpec, select_skills
 from hypogeum import skill_registry as _skill_registry
 from hypogeum.muapi import (
     MUAPIAuthFailure,
@@ -290,6 +291,87 @@ def _load_scene_prompts_prompt() -> str:
         _SEEDANCE2_SKILL_PATH,
         _VEO_PROMPT_DIRECTOR_SKILL_PATH,
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage B conditional skill attachment (Phase B1 Checkpoint 1, 2026-07-18)
+#
+# SCENE_PROMPTS_PROMPT (below) remains the full, unconditional 5-skill
+# composition — kept as-is so existing callers/tests that depend on "the
+# full stack" continue to see the same value. Actual Stage B run_agent()
+# calls now use _compose_stage_b_prompt(mode), which narrows the two
+# provider-translation skill pairs (Veo / Seedance) to only the family(s)
+# actually present in that batch's tier routing. The Cinematic Prompt
+# Architecture skill is not provider-specific and is always attached.
+#
+# mode is resolved per batch from Config's actual MUAPI_T{1,2,3}_MODEL
+# values (never a hardcoded tier assumption), so it stays correct if tier
+# routing configuration ever changes.
+# ---------------------------------------------------------------------------
+
+_TIER_MODEL_CONFIG_ATTRS = {
+    1: "MUAPI_T1_MODEL",
+    2: "MUAPI_T2_MODEL",
+    3: "MUAPI_T3_MODEL",
+}
+
+
+def _tier_provider_family(tier: int, config: Config) -> str:
+    """
+    Map a tier number to a provider family ("seedance" or "veo") using
+    Config's actual configured model name for that tier. Any model name
+    that is not Seedance is treated as Veo family — accurate for all tiers
+    today (T1/T2/T3 are all Veo-family per CLAUDE.md) and never narrows
+    the skill stack incorrectly for a genuinely different provider (e.g.
+    Runway), since neither translation skill is Runway-specific and today
+    Runway batches receive both skill pairs unconditionally anyway.
+    """
+    attr = _TIER_MODEL_CONFIG_ATTRS.get(tier, "MUAPI_T2_MODEL")
+    model = (getattr(config, attr, "") or "").lower()
+    return "seedance" if "seedance" in model else "veo"
+
+
+def _resolve_stage_b_mode(scenes: list[dict], config: Config) -> str:
+    """
+    Determine which provider family(s) are present across a Stage B batch,
+    from each scene's primary_tier and fallback_tier. Returns one of
+    "veo_only", "seedance_only", "mixed_tier", or "no_tier" (no resolvable
+    tier info at all) for use as the select_skills() mode.
+    """
+    families: set[str] = set()
+    for scene in scenes:
+        routing = scene.get("production_spec", {}).get("provider_routing", {})
+        for tier_key in ("primary_tier", "fallback_tier"):
+            tier = routing.get(tier_key)
+            if tier is None:
+                continue
+            families.add(_tier_provider_family(tier, config))
+    if not families:
+        return "no_tier"
+    if families == {"veo"}:
+        return "veo_only"
+    if families == {"seedance"}:
+        return "seedance_only"
+    return "mixed_tier"
+
+
+# Provider-specific Stage B skills only — Cinematic Prompt Architecture is
+# always attached separately (not conditional, not provider-specific).
+# "no_tier"/"mixed_tier" are included in every spec's modes so an
+# unresolvable or mixed batch always gets the full stack (safe fallback),
+# matching select_skills()'s own "never silently narrow when uncertain"
+# contract.
+_VPD_STAGE_B_PROVIDER_SKILL_SPECS: list[SkillSpec] = [
+    SkillSpec(_VEO_TRANSLATION_SKILL_FILE, frozenset({"veo_only", "mixed_tier", "no_tier"})),
+    SkillSpec(_SEEDANCE_TRANSLATION_SKILL_FILE, frozenset({"seedance_only", "mixed_tier", "no_tier"})),
+    SkillSpec(_SEEDANCE2_SKILL_PATH, frozenset({"seedance_only", "mixed_tier", "no_tier"})),
+    SkillSpec(_VEO_PROMPT_DIRECTOR_SKILL_PATH, frozenset({"veo_only", "mixed_tier", "no_tier"})),
+]
+
+
+def _compose_stage_b_prompt(mode: str) -> str:
+    selection = select_skills(_VPD_STAGE_B_PROVIDER_SKILL_SPECS, mode)
+    return compose_system_prompt(_SCENE_PROMPTS_PROMPT_FILE, _CINEMATIC_SKILL_FILE, *selection.paths)
 
 def _load_presentation_planner_prompt() -> str:
     return compose_system_prompt(_SCENE_PRESENTATION_PLANNER_PROMPT_FILE, _VLE_SKILL_FILE)
@@ -678,6 +760,18 @@ def run_visual_package_director(
             scene["presentation_plan"] = _presentation_plan_map[sid]
 
     # ------------------------------------------------------------------
+    # setting_type / lighting_selection — deterministic upstream groundwork
+    # for the future Historical Authenticity DNA / Lighting DNA modules
+    # (Phase B2.3). Must run after presentation planning (A4, needs
+    # presentation_plan.presentation_method) and does not depend on Shot
+    # Diversity Planner, so it runs here, before that stage. Sole writer —
+    # see hypogeum.agents.setting_lighting_classifier module docstring.
+    # No LLM call; deterministic code only.
+    # ------------------------------------------------------------------
+    from hypogeum.agents.setting_lighting_classifier import assign_setting_and_lighting  # noqa: PLC0415
+    assign_setting_and_lighting(visual_package.get("scenes", []))
+
+    # ------------------------------------------------------------------
     # Shot Diversity Planner — distributes visual variety across episode
     # Must run after presentation planning (A4) and before prompt writing (B)
     # so Stage B knows the assigned shot_scale, camera_movement etc.
@@ -771,6 +865,15 @@ def run_visual_package_director(
                     },
                     "presentation_plan": s.get("presentation_plan", {}),
                     "diversity_assignment": s.get("diversity_assignment", {}),
+                    # setting_type / lighting_selection (Phase B2.3): data
+                    # passthrough only. vpd_scene_prompts.txt is NOT updated
+                    # this checkpoint to instruct compliance with these
+                    # fields — that is deliberately deferred (no new
+                    # Historical/Lighting DNA rules activated here; see
+                    # docs/validation/prompt_writer_architecture/
+                    # B1_3_ARCHITECTURE_CONTRACT.md).
+                    "setting_type": s.get("setting_type", "unspecified"),
+                    "lighting_selection": s.get("lighting_selection", "unspecified"),
                 }
                 for s in batch
             ],
@@ -788,7 +891,7 @@ def run_visual_package_director(
             prompts_result = run_agent(
                 agent_name=_AGENT_NAME,
                 model_slug=_CLAUDE_SONNET,
-                system_prompt=SCENE_PROMPTS_PROMPT,
+                system_prompt=_compose_stage_b_prompt(_resolve_stage_b_mode(batch, config)),
                 input_package=batch_input,
                 output_schema="vpd_scene_prompts_batch",
                 episode_id=episode_id,
@@ -1357,6 +1460,8 @@ def _run_visual_intent_qa(
                     },
                     "presentation_plan": scene.get("presentation_plan", {}),
                     "diversity_assignment": scene.get("diversity_assignment", {}),
+                    "setting_type": scene.get("setting_type", "unspecified"),
+                    "lighting_selection": scene.get("lighting_selection", "unspecified"),
                     "_qa_rejection_reason": (
                         f"PREVIOUS PROMPT FAILED QA. Rejection reason: {rejection_reason} "
                         f"Previous prompt: {primary_prompt[:300]}"
@@ -1369,7 +1474,7 @@ def _run_visual_intent_qa(
             retry_result = run_agent(
                 agent_name=_AGENT_NAME,
                 model_slug=_CLAUDE_SONNET,
-                system_prompt=SCENE_PROMPTS_PROMPT,
+                system_prompt=_compose_stage_b_prompt(_resolve_stage_b_mode([scene], config)),
                 input_package=retry_input,
                 output_schema="vpd_scene_prompts_batch",
                 episode_id=episode_id,

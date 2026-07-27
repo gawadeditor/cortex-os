@@ -8,6 +8,8 @@ Owns:
 - TimelinePlan   — domain type: complete timeline for an episode (main + all Shorts)
 - build_timelines()     — public entry point: scenes + narration → TimelinePlan
 - sum_timeline_duration()    — public: total duration across a timeline
+- compute_music_sections() — public: group main_timeline into contiguous
+  music-category sections with start/end boundaries (Option B, 2026-07-19)
 - compute_section_durations() — public: section durations for Music Agent input
 - find_clip_asset_id()   — public: resolve video clip asset_id for a scene
 - derive_asset_id()      — public: derive conventional asset_id from scene fields
@@ -33,6 +35,7 @@ Public API:
     ) -> TimelinePlan
 
     sum_timeline_duration(timeline: List[TimelineEntry]) -> float
+    compute_music_sections(main_timeline) -> List[dict]
     compute_section_durations(main_timeline, shorts_timelines, short_ids) -> dict
     find_clip_asset_id(scene, asset_lookup, assets_root, episode_id) -> Optional[str]
     derive_asset_id(scene, episode_id) -> str
@@ -164,6 +167,65 @@ def sum_timeline_duration(timeline: List[TimelineEntry]) -> float:
     return sum(e.duration_seconds for e in timeline)
 
 
+def compute_music_sections(main_timeline: List[TimelineEntry]) -> List[dict]:
+    """
+    Group the main timeline into contiguous sections by consecutive
+    TimelineEntry.music_section (category) runs (Option B, 2026-07-19 —
+    restores the frozen spec's section/category-based music architecture
+    for the main documentary only; Shorts are untouched, see
+    compute_section_durations()).
+
+    A new section starts whenever the category changes; entries sharing the
+    same category as their immediate predecessor extend the current section.
+    Returns an ordered list of section descriptors:
+        {section_key, category, start_seconds, end_seconds, duration_seconds}
+    section_key format: "main_episode_{index}" (0-based, in timeline order).
+
+    An empty timeline returns a single zero-duration section so callers
+    always have at least one section_key to work with.
+    """
+    if not main_timeline:
+        return [{
+            "section_key": "main_episode_0",
+            "category": "Mystery",
+            "start_seconds": 0.0,
+            "end_seconds": 0.0,
+            "duration_seconds": 0.0,
+        }]
+
+    sections: List[dict] = []
+    current_category = main_timeline[0].music_section or "Mystery"
+    current_start = main_timeline[0].start_seconds
+    current_end = main_timeline[0].start_seconds + main_timeline[0].duration_seconds
+
+    for entry in main_timeline[1:]:
+        entry_category = entry.music_section or "Mystery"
+        if entry_category == current_category:
+            current_end = entry.start_seconds + entry.duration_seconds
+        else:
+            sections.append(_finalize_music_section(
+                len(sections), current_category, current_start, current_end,
+            ))
+            current_category = entry_category
+            current_start = entry.start_seconds
+            current_end = entry.start_seconds + entry.duration_seconds
+
+    sections.append(_finalize_music_section(
+        len(sections), current_category, current_start, current_end,
+    ))
+    return sections
+
+
+def _finalize_music_section(index: int, category: str, start: float, end: float) -> dict:
+    return {
+        "section_key": f"main_episode_{index}",
+        "category": category,
+        "start_seconds": start,
+        "end_seconds": end,
+        "duration_seconds": max(0.0, end - start),
+    }
+
+
 def compute_section_durations(
     main_timeline: List[TimelineEntry],
     shorts_timelines: Dict[str, List[TimelineEntry]],
@@ -173,14 +235,19 @@ def compute_section_durations(
     Compute section duration requirements for Music Agent input.
 
     Returns {section_key: required_duration_seconds} where:
-    - "main_episode" key has a minimum floor of 30.0 seconds.
-    - "short_{short_id}" keys have a minimum floor of 10.0 seconds.
+    - Main episode keys are "main_episode_{index}", one per contiguous
+      music-category run (see compute_music_sections()), each with a
+      minimum floor of 30.0 seconds — the same floor previously applied to
+      the whole main episode as a single section.
+    - "short_{short_id}" keys have a minimum floor of 10.0 seconds. Shorts
+      remain exactly one section each (Option 1, 2026-07-19 decision — no
+      section splitting for Shorts).
 
     The Music Agent uses these to select tracks of sufficient length.
     """
     durations: dict = {}
-    main_dur = sum_timeline_duration(main_timeline)
-    durations["main_episode"] = max(main_dur, 30.0)
+    for section in compute_music_sections(main_timeline):
+        durations[section["section_key"]] = max(section["duration_seconds"], 30.0)
     for short_id in short_ids:
         tl = shorts_timelines.get(short_id, [])
         dur = sum_timeline_duration(tl)

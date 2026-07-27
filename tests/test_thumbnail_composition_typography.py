@@ -22,12 +22,17 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hypogeum.agents.thumbnail_composition_planner import plan_composition
+from hypogeum.agents.thumbnail_composition_planner import (
+    FOCAL_ZONE_RESOLUTION_POOL,
+    plan_composition,
+    resolve_composition_distinctness,
+)
 from hypogeum.agents.thumbnail_typography_planner import plan_typography
 from hypogeum.agents.thumbnail_plan_validator import (
     validate_composition_typography_pre_generation,
     validate_post_compositing,
     validate_all_candidates_pre_generation,
+    validate_thumbnail_dna,
 )
 
 
@@ -66,9 +71,13 @@ class TestCompositionPlanner:
         for trigger in ("impossibility", "loss", "betrayal", "discovery", "awe", "dread"):
             assert plan_composition(trigger)["dominant_tone"] == "near_black"
 
-    def test_impossibility_focal_scale_large(self):
+    def test_impossibility_focal_scale_medium(self):
+        # DNA v2 (2026-07-13, V4 regression correction): tightened from
+        # "large" (40-60% of right frame) to "medium" (25-40%), consistent
+        # with the new hero_object_max_frame_share_pct=[28, 32] ceiling —
+        # the two fields must not contradict each other.
         p = plan_composition("impossibility")
-        assert p["focal_scale"] == "large"
+        assert p["focal_scale"] == "medium"
 
     def test_impossibility_focal_zone_center_right(self):
         p = plan_composition("impossibility")
@@ -730,3 +739,278 @@ class TestConceptCandidatePlans:
         for c in result["main_episode"]["ranked_candidates"]:
             assert "composition_plan" not in c
             assert "typography_plan" not in c
+
+
+# ===========================================================================
+# TestResolveCompositionDistinctness (2026-07-19 — candidate-assembly-layer
+# fix for the real thumbnail_composition_distinctness failure found during
+# the 2026-07-19 supervised validation campaign; see
+# hypogeum/agents/thumbnail_composition_planner.py's own module-level
+# comment for the full root-cause history).
+# ===========================================================================
+
+class TestResolveCompositionDistinctness:
+
+    def _cand(self, rank: int, trigger: str) -> dict:
+        return {
+            "candidate_id": f"cand_{rank}",
+            "rank": rank,
+            "emotional_trigger": trigger,
+            "concept_name": f"concept for {trigger}",
+            "ctr_rationale": f"rationale for {trigger}",
+            "image_prompt": f"image prompt for {trigger}",
+            "composition_plan": plan_composition(trigger),
+        }
+
+    def test_three_candidates_sharing_center_right_become_distinct(self):
+        """The exact real-world collision from Validation Run 2
+        (ep_74237788): impossibility, betrayal, discovery all share
+        focal_zone='center_right' before resolution."""
+        candidates = [
+            self._cand(1, "impossibility"),
+            self._cand(2, "betrayal"),
+            self._cand(3, "discovery"),
+        ]
+        zones_before = [c["composition_plan"]["focal_zone"] for c in candidates]
+        assert len(set(zones_before)) == 1  # sanity: the collision is real
+
+        resolve_composition_distinctness(candidates)
+
+        zones_after = [c["composition_plan"]["focal_zone"] for c in candidates]
+        assert len(set(zones_after)) == 3
+        assert set(zones_after) <= set(FOCAL_ZONE_RESOLUTION_POOL)
+
+    def test_two_candidates_sharing_a_zone(self):
+        """Rank 1 and Rank 3 collide (both 'discovery' -> center_right);
+        Rank 2 ('loss' -> center) is already distinct and must be left
+        alone -- only the actual collision is touched."""
+        candidates = [
+            self._cand(1, "discovery"),   # center_right
+            self._cand(2, "loss"),        # center
+            self._cand(3, "dread"),       # center_right -- collides with rank 1
+        ]
+        rank2_zone_before = candidates[1]["composition_plan"]["focal_zone"]
+
+        resolve_composition_distinctness(candidates)
+
+        zones_after = [c["composition_plan"]["focal_zone"] for c in candidates]
+        assert len(set(zones_after)) == 3
+        assert candidates[1]["composition_plan"]["focal_zone"] == rank2_zone_before
+
+    def test_three_candidates_already_distinct_is_a_no_op(self):
+        """When focal_zone is already fully distinct, nothing changes at all
+        -- not just the zone values, the whole composition_plan dict."""
+        candidates = [
+            self._cand(1, "discovery"),   # center_right
+            self._cand(2, "loss"),        # center
+        ]
+        # Manually force a third, already-distinct zone that isn't even in
+        # the resolution pool, to prove the no-op path doesn't force
+        # candidates onto pool values when no collision exists.
+        candidates.append(self._cand(3, "discovery"))
+        candidates[2]["composition_plan"]["focal_zone"] = "some_other_zone"
+
+        before = [dict(c["composition_plan"]) for c in candidates]
+        resolve_composition_distinctness(candidates)
+        after = [c["composition_plan"] for c in candidates]
+
+        assert before == after
+
+    def test_rank1_never_modified(self):
+        """Rank 1's composition_plan is byte-for-byte identical before and
+        after resolution, regardless of collisions among ranks 2/3."""
+        candidates = [
+            self._cand(1, "impossibility"),
+            self._cand(2, "betrayal"),
+            self._cand(3, "discovery"),
+        ]
+        rank1_before = dict(candidates[0]["composition_plan"])
+
+        resolve_composition_distinctness(candidates)
+
+        assert candidates[0]["composition_plan"] == rank1_before
+
+    def test_rank1_never_modified_even_when_processed_out_of_list_order(self):
+        """The function sorts by rank internally -- passing candidates in a
+        shuffled list order must not change which one is 'rank 1'."""
+        candidates = [
+            self._cand(3, "discovery"),
+            self._cand(1, "impossibility"),
+            self._cand(2, "betrayal"),
+        ]
+        rank1_cand = next(c for c in candidates if c["rank"] == 1)
+        rank1_before = dict(rank1_cand["composition_plan"])
+
+        resolve_composition_distinctness(candidates)
+
+        assert rank1_cand["composition_plan"] == rank1_before
+
+    def test_only_focal_zone_field_is_modified(self):
+        """Every other field on a reassigned candidate -- trigger, concept,
+        CTR rationale, image_prompt, and every other composition_plan key --
+        is preserved exactly."""
+        candidates = [
+            self._cand(1, "impossibility"),
+            self._cand(2, "betrayal"),
+            self._cand(3, "discovery"),
+        ]
+        snapshot = [
+            {k: v for k, v in c.items() if k != "composition_plan"}
+            for c in candidates
+        ]
+        comp_snapshot = [
+            {k: v for k, v in c["composition_plan"].items() if k != "focal_zone"}
+            for c in candidates
+        ]
+
+        resolve_composition_distinctness(candidates)
+
+        for i, c in enumerate(candidates):
+            assert {k: v for k, v in c.items() if k != "composition_plan"} == snapshot[i]
+            assert {
+                k: v for k, v in c["composition_plan"].items() if k != "focal_zone"
+            } == comp_snapshot[i]
+
+    def test_deterministic_across_repeated_runs(self):
+        """Running the resolver on independently-built, identical input
+        always produces the same output -- no randomness."""
+        def _build():
+            return [
+                self._cand(1, "impossibility"),
+                self._cand(2, "betrayal"),
+                self._cand(3, "discovery"),
+            ]
+
+        results = []
+        for _ in range(10):
+            candidates = _build()
+            resolve_composition_distinctness(candidates)
+            results.append([c["composition_plan"]["focal_zone"] for c in candidates])
+
+        assert all(r == results[0] for r in results)
+
+    def test_does_not_modify_trigger_map(self):
+        """Resolving a collision must never mutate the shared, frozen
+        per-trigger defaults -- calling plan_composition() again for the
+        same trigger after a resolution pass must return the original,
+        untouched value."""
+        candidates = [
+            self._cand(1, "impossibility"),
+            self._cand(2, "betrayal"),
+            self._cand(3, "discovery"),
+        ]
+        resolve_composition_distinctness(candidates)
+
+        assert plan_composition("betrayal")["focal_zone"] == "center_right"
+        assert plan_composition("discovery")["focal_zone"] == "center_right"
+        assert plan_composition("impossibility")["focal_zone"] == "center_right"
+
+    def test_no_op_when_composition_plan_missing(self):
+        """Candidates without a composition_plan (Shorts, legacy-mode) are
+        skipped safely -- no KeyError, no crash."""
+        candidates = [
+            {"rank": 1, "candidate_id": "a"},
+            {"rank": 2, "candidate_id": "b"},
+        ]
+        resolve_composition_distinctness(candidates)  # must not raise
+        assert "composition_plan" not in candidates[0]
+        assert "composition_plan" not in candidates[1]
+
+    def test_empty_list_is_safe(self):
+        resolve_composition_distinctness([])  # must not raise
+
+    def test_single_candidate_is_a_no_op(self):
+        candidates = [self._cand(1, "impossibility")]
+        before = dict(candidates[0]["composition_plan"])
+        resolve_composition_distinctness(candidates)
+        assert candidates[0]["composition_plan"] == before
+
+    def test_resolved_candidates_pass_validate_thumbnail_dna(self):
+        """Every reassigned focal_zone must still satisfy
+        validate_thumbnail_dna()'s text_zone-overlap check (focal_zone !=
+        text_zone) -- compatibility with the composition validator."""
+        candidates = [
+            self._cand(1, "impossibility"),
+            self._cand(2, "betrayal"),
+            self._cand(3, "discovery"),
+        ]
+        resolve_composition_distinctness(candidates)
+
+        for c in candidates:
+            result = validate_thumbnail_dna(c)
+            assert result["passed"], result["errors"]
+            assert c["composition_plan"]["focal_zone"] != c["composition_plan"]["text_zone"]
+
+    def test_resolved_candidates_pass_typography_pre_generation_validator(self):
+        """Reassigning focal_zone must not disturb typography_plan.zone
+        consistency -- compatibility with the typography validator.
+        typography_plan is derived from text_zone (fixed at 'lower_left'
+        for every trigger), never from focal_zone, so this must hold
+        trivially, but is verified directly rather than assumed."""
+        candidates = [
+            self._cand(1, "impossibility"),
+            self._cand(2, "betrayal"),
+            self._cand(3, "discovery"),
+        ]
+        for c in candidates:
+            c["typography_plan"] = plan_typography(
+                "IT SHOULDN'T EXIST", c["emotional_trigger"], c["composition_plan"],
+            )
+            # composite/embedded mode skip the zone-reservation-in-prompt
+            # checks (2 and 3); this test only exercises check 1 (zone
+            # consistency), which is unaffected by that skip.
+        resolve_composition_distinctness(candidates)
+
+        for c in candidates:
+            result = validate_composition_typography_pre_generation(c)
+            assert c["composition_plan"]["text_zone"] == c["typography_plan"]["zone"]
+            assert not any("text_zone" in e and "!=" in e for e in result["errors"])
+
+    def test_resolution_pool_never_includes_text_zone(self):
+        """Structural guard: the pool itself must never contain the fixed
+        text_zone value, independent of any specific trigger's plan."""
+        assert "lower_left" not in FOCAL_ZONE_RESOLUTION_POOL
+
+
+# ===========================================================================
+# TestConceptCandidatePlansDistinctness (end-to-end via write_thumbnail_prompts)
+# ===========================================================================
+
+class TestConceptCandidatePlansDistinctness(TestConceptCandidatePlans):
+    """
+    Reuses TestConceptCandidatePlans' exact concept_brief/generation_plan
+    fixtures (impossibility/loss/betrayal -- already a real rank1/rank3
+    'center_right' collision) to verify the distinctness resolution runs
+    automatically as part of write_thumbnail_prompts(), the real
+    candidate-assembly entry point, not just when calling
+    resolve_composition_distinctness() directly.
+    """
+
+    def test_write_thumbnail_prompts_produces_distinct_focal_zones(self, tmp_path):
+        from hypogeum.agents.thumbnail_prompt_writer import write_thumbnail_prompts
+
+        concept_brief   = self._make_concept_brief()
+        generation_plan = self._make_generation_plan()
+        log             = MagicMock()
+
+        with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent",
+                   return_value=generation_plan):
+            config = MagicMock()
+            config.TD_PLANNING_MODEL = "test-model"
+            config.TD_PLANNING_MAX_TOKENS = 4096
+            result = write_thumbnail_prompts(
+                handoff_brief={"candidates": [], "short_candidates": []},
+                config=config,
+                episode_id="ep_test",
+                output_dir=tmp_path,
+                log=log,
+                concept_brief=concept_brief,
+            )
+
+        cands = sorted(
+            result["main_episode"]["ranked_candidates"], key=lambda c: c["rank"],
+        )
+        zones = [c["composition_plan"]["focal_zone"] for c in cands]
+        assert len(set(zones)) == 3
+        # Rank 1 (impossibility) keeps its untouched CTR-first default.
+        assert cands[0]["composition_plan"]["focal_zone"] == "center_right"

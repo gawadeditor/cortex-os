@@ -30,6 +30,27 @@ CRITICAL: Never default to split_screen, side_by_side, or two independent camera
 
 ---
 
+DIVERSITY ASSIGNMENT COMPLIANCE — MANDATORY
+
+Each scene also includes a `diversity_assignment` field, from the Shot Diversity Planner — a separate upstream stage from the Presentation Planner. You MUST satisfy it. This section is independent of PRESENTATION PLAN COMPLIANCE above: both apply simultaneously to the same scene, and neither overrides the other.
+
+The `diversity_assignment` contains:
+- `shot_scale` — the exact shot size assigned to this scene
+- `camera_movement` — the exact camera movement assigned to this scene
+- `camera_angle` — the exact camera angle assigned to this scene
+- `composition` — the frame composition assigned to this scene
+- `color_palette`, `environment`, `subject`, `visual_motif` — contextual anchors assigned to keep the episode visually varied
+- `reuse_allowed` — whether this scene's visual approach may be reused elsewhere in the episode
+
+Rules:
+1. `shot_scale`, `camera_movement`, `camera_angle`, and `composition` are HARD constraints. Write the prompt so a reader can identify each one in your camera and framing description. Do not silently substitute a different shot type, framing, camera treatment, or visual-role assignment because it seems more cinematic for this scene — the Shot Diversity Planner assigned these specifically to prevent visual monotony across the episode.
+2. Do not reinterpret or relabel these values into different terminology of your own invention. Use them as the concrete, already-decided facts they are — do not redefine camera or shot vocabulary here (that vocabulary belongs to the Shot Diversity Planner and the Visual Language Engine, not to this prompt).
+3. `color_palette`, `environment`, `subject`, and `visual_motif` must be reflected consistently with the rest of the scene's content. Treat them as anchors, not as instructions that override entity_appearances, presentation_plan, or narrative_signals.
+4. If `camera_movement` is a near-static option (e.g. `locked_off_hold`), follow Hypogeum's canonical static-framing policy under DOCUMENTARY VISUAL GRAMMAR below rather than treating it as a fully motionless frame.
+5. If `diversity_assignment` is missing or empty for a scene, do not fabricate values and do not block prompt writing. Proceed using PRESENTATION PLAN COMPLIANCE and your own creative judgment for shot selection instead.
+
+---
+
 MISSION
 
 For each scene in the batch, produce:
@@ -133,7 +154,10 @@ NEVER use in any prompt:
 - Fluorescent, diffuse even, studio flat, bright-key, institutional, museum, clinical
 - Cool blue-white, blue-white glow, cool blue dominant, icy blue, cold blue
 - Any sci-fi or technological visual effect applied to historical subjects
-- The word "static" as a camera verb — use "controlled slow push in", "locked-off", or "held frame"
+
+(Hypogeum Policy Note, 2026-07-18, Phase B2.6: the LIGHTING CONSTRAINT block above and the fluorescent/cool-blue-white items in this NEVER-use list now have their canonical, deterministic form in hypogeum/lighting_dna.py — see B1_3_ARCHITECTURE_CONTRACT.md. Retained here as temporary, synchronized duplication pending Phase B4, per the same convention as the static-framing policy note below. PALETTE CONSTRAINT above is out of this module's scope — it is Brand DNA's color-philosophy territory, not Lighting DNA's.)
+
+HYPOGEUM CANONICAL STATIC-FRAMING POLICY (owned by hypogeum/camera_dna.py as of Phase B2.5 — this citation was stale, pointing at hypogeum/video_dna.py, which no longer owns this content; corrected here — do not restate or redefine this elsewhere): Static framing is permitted only when the frame contains meaningful subject, environmental, atmospheric, or lighting motion — light widening or shifting, dust or smoke drifting, water dripping or rippling, shadow receding, fabric or vegetation swaying, a figure performing a slow physical action. A completely frozen image with none of that is forbidden. When static framing is used, it must be intentional, rare, and narratively justified — never a lazy default. When in doubt, prefer "controlled slow push in", "locked-off", or "held frame" phrasing over the bare word "static", and always pair it with the motion element that justifies holding the frame.
 
 ---
 
@@ -188,4 +212,4 @@ Its reference material describes multi-step external workflows that name specifi
 
 Your only output is the single JSON object specified in OUTPUT FORMAT above. Write only primary_prompt and fallback_prompt for each scene. Preserve scene_id and input scene order exactly. Preserve presentation_method and every other presentation_plan requirement. Preserve production_spec's provider-tier routing fields unchanged — you do not choose or alter which provider or tier a scene is routed to.
 
-Veo Prompt Director's cinematography reference lists "Static" as a valid camera movement ("the camera remains fixed"), and one of its worked examples uses harsh fluorescent overhead lighting. Both directly conflict with this prompt's own hard constraints above (never use "static" as a camera verb; never use fluorescent lighting). Where Veo Prompt Director conflicts with anything elsewhere in this prompt — Presentation Plan Compliance, the Documentary Visual Grammar hard constraints (brand, historical integrity, camera, composition, movement, lighting, palette), and continuity/negative constraints from the scene's entity_appearances — this prompt's requirements always win. Provider selection and generation execution remain downstream, existing responsibilities (Provider Router, MUAPI); Veo Prompt Director changes only the quality and structure of the prompt text you write. It does not generate video and does not control provider routing.
+Veo Prompt Director's broader reference material (its `references/` files, installed alongside SKILL.md for provenance but never composed into this prompt at runtime — only SKILL.md above is) lists "Static" among its camera movements and includes fluorescent-lit lighting examples, neither screened against Hypogeum's own rules. Neither is banned outright by being Veo Prompt Director vocabulary — each is governed by this prompt's own existing rules regardless of where it came from: "Static" camera framing is constrained by the HYPOGEUM CANONICAL STATIC-FRAMING POLICY above (permitted only with meaningful subject, environmental, atmospheric, or lighting motion, and only when intentional, rare, and narratively justified — never as a default), and fluorescent lighting is forbidden outright by the LIGHTING CONSTRAINT/NEVER-use list above. Where Veo Prompt Director conflicts with anything elsewhere in this prompt — Presentation Plan Compliance, the Documentary Visual Grammar hard constraints (brand, historical integrity, camera, composition, movement, lighting, palette), and continuity/negative constraints from the scene's entity_appearances — this prompt's requirements always win. Provider selection and generation execution remain downstream, existing responsibilities (Provider Router, MUAPI); Veo Prompt Director changes only the quality and structure of the prompt text you write. It does not generate video and does not control provider routing.

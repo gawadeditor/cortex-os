@@ -393,6 +393,8 @@ class TestPipelineOISIsolation:
                             with patch("hypogeum.pipeline._run_budget_authorization",
                                        return_value={"verdict": "AUTHORIZED",
                                                      "estimated_spend_usd": 1.0}):
+                              with patch("hypogeum.pipeline._run_thumbnail_strategy",
+                                         return_value={}):
                                 with patch("hypogeum.pipeline._run_visual_package_director",
                                            return_value={"scenes": [],
                                                          "episode_metadata": {},

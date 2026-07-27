@@ -1848,6 +1848,89 @@ class TestComposeSystemPrompt:
 
 
 # ---------------------------------------------------------------------------
+# TestDiversityAssignmentCompliance (Phase B1.2A, Objective 1)
+# ---------------------------------------------------------------------------
+
+class TestDiversityAssignmentCompliance:
+    """
+    B1.1 audit finding: the Shot Diversity Planner's diversity_assignment field
+    already reaches Stage B's input payload (visual_package_director.py lines
+    773/1359), but Stage B's base prompt had no MANDATORY compliance section
+    for it — unlike presentation_plan, which does. This closes that gap with
+    an explicit, separately-labeled section. Content-of-prompt tests only —
+    they do not call Claude.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _load_prompt(self):
+        from hypogeum.agents import visual_package_director as vpd
+        self.base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        self.composed = vpd.SCENE_PROMPTS_PROMPT
+
+    def test_diversity_assignment_has_mandatory_compliance_section(self):
+        assert "DIVERSITY ASSIGNMENT COMPLIANCE" in self.base_content
+        assert "MANDATORY" in self.base_content
+
+    def test_diversity_assignment_section_survives_full_composition(self):
+        # Must still be present after compose_system_prompt() attaches all
+        # five Stage B skills on top of the base prompt.
+        assert "DIVERSITY ASSIGNMENT COMPLIANCE" in self.composed
+
+    def test_presentation_plan_and_diversity_assignment_both_present_and_distinct(self):
+        assert "PRESENTATION PLAN COMPLIANCE" in self.base_content
+        assert "DIVERSITY ASSIGNMENT COMPLIANCE" in self.base_content
+        pres_idx = self.base_content.index("PRESENTATION PLAN COMPLIANCE")
+        div_idx = self.base_content.index("DIVERSITY ASSIGNMENT COMPLIANCE")
+        assert pres_idx != div_idx
+        # The two sections must not be merged into one another — each has
+        # its own section break before the next major heading.
+        between = self.base_content[pres_idx:div_idx]
+        assert between.count("---") >= 1
+
+    def test_diversity_hard_constraint_fields_named(self):
+        for field in ("shot_scale", "camera_movement", "camera_angle", "composition"):
+            assert field in self.base_content
+
+    def test_missing_diversity_assignment_degrades_safely(self):
+        lowered = self.base_content.lower()
+        assert "diversity_assignment" in lowered
+        assert "missing" in lowered or "empty" in lowered, (
+            "Stage B prompt must instruct safe degradation when "
+            "diversity_assignment is absent for a scene"
+        )
+
+    def test_diversity_section_references_static_policy_not_redefines_it(self):
+        # Objective 2: the new section must point to the canonical
+        # static-framing policy (owned by video_dna.py) rather than
+        # restating its own rule for locked_off_hold.
+        div_idx = self.base_content.index("DIVERSITY ASSIGNMENT COMPLIANCE")
+        mission_idx = self.base_content.index("MISSION", div_idx)
+        section = self.base_content[div_idx:mission_idx]
+        assert "canonical static-framing policy" in section.lower()
+
+
+def test_vpd_scene_prompts_batch_schema_still_valid_after_prompt_change():
+    """
+    Regression check: the Stage B prompt-text changes in this slice must not
+    have altered the vpd_scene_prompts_batch OUTPUT schema (they don't touch
+    schemas.py at all) — confirmed by actually validating a representative
+    sample against it, not merely by absence of a schemas.py diff.
+    """
+    from hypogeum.schemas import validate
+
+    sample = {
+        "scene_prompts": [
+            {
+                "scene_id": "s01",
+                "primary_prompt": "A stone corridor, warm torchlight raking across the walls.",
+                "fallback_prompt": "A dim stone corridor lit by a single torch.",
+            }
+        ]
+    }
+    validate("vpd_scene_prompts_batch", sample)  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # TestSeedance2StageBAttachment
 # ---------------------------------------------------------------------------
 
@@ -1993,6 +2076,10 @@ class TestSeedance2StageBAttachment:
         src = inspect.getsource(vpd.run_visual_package_director)
         tree = ast.parse(src)
 
+        # Phase B1 Checkpoint 1 (2026-07-18): Stage B's system_prompt is now
+        # computed per batch via _compose_stage_b_prompt(_resolve_stage_b_mode(...))
+        # instead of referencing the bare SCENE_PROMPTS_PROMPT constant, so the
+        # call-site check now looks for that call expression.
         matches = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -2002,13 +2089,21 @@ class TestSeedance2StageBAttachment:
             if name != "run_agent":
                 continue
             for kw in node.keywords:
-                if kw.arg == "system_prompt" and isinstance(kw.value, ast.Name):
-                    if kw.value.id == "SCENE_PROMPTS_PROMPT":
-                        matches.append(node)
+                if kw.arg != "system_prompt":
+                    continue
+                value = kw.value
+                is_stage_b_call = (
+                    isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Name)
+                    and value.func.id == "_compose_stage_b_prompt"
+                )
+                if is_stage_b_call:
+                    matches.append(node)
 
         assert len(matches) == 1, (
-            f"Expected exactly one Stage B run_agent() call using SCENE_PROMPTS_PROMPT "
-            f"inside run_visual_package_director, found {len(matches)}"
+            f"Expected exactly one Stage B run_agent() call using "
+            f"_compose_stage_b_prompt(...) inside run_visual_package_director, "
+            f"found {len(matches)}"
         )
 
     def test_no_new_run_agent_call_sites_added_to_module(self):
@@ -2228,6 +2323,10 @@ class TestVeoPromptDirectorStageBAttachment:
         src = inspect.getsource(vpd.run_visual_package_director)
         tree = ast.parse(src)
 
+        # Phase B1 Checkpoint 1 (2026-07-18): Stage B's system_prompt is now
+        # computed per batch via _compose_stage_b_prompt(_resolve_stage_b_mode(...))
+        # instead of referencing the bare SCENE_PROMPTS_PROMPT constant, so the
+        # call-site check now looks for that call expression.
         matches = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -2237,13 +2336,21 @@ class TestVeoPromptDirectorStageBAttachment:
             if name != "run_agent":
                 continue
             for kw in node.keywords:
-                if kw.arg == "system_prompt" and isinstance(kw.value, ast.Name):
-                    if kw.value.id == "SCENE_PROMPTS_PROMPT":
-                        matches.append(node)
+                if kw.arg != "system_prompt":
+                    continue
+                value = kw.value
+                is_stage_b_call = (
+                    isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Name)
+                    and value.func.id == "_compose_stage_b_prompt"
+                )
+                if is_stage_b_call:
+                    matches.append(node)
 
         assert len(matches) == 1, (
-            f"Expected exactly one Stage B run_agent() call using SCENE_PROMPTS_PROMPT "
-            f"inside run_visual_package_director, found {len(matches)}"
+            f"Expected exactly one Stage B run_agent() call using "
+            f"_compose_stage_b_prompt(...) inside run_visual_package_director, "
+            f"found {len(matches)}"
         )
 
     def test_no_new_run_agent_call_sites_added_to_module(self):
@@ -2288,3 +2395,255 @@ class TestVeoPromptDirectorStageBAttachment:
         pinned_content = vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.read_text(encoding="utf-8")
         internal_content = vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
         assert pinned_content not in internal_content
+
+
+# ---------------------------------------------------------------------------
+# TestStageBConditionalSkillAttachment (Phase B1 Checkpoint 1, 2026-07-18)
+# ---------------------------------------------------------------------------
+
+class TestStageBConditionalSkillAttachment:
+    """Stage B's system prompt is now composed per batch, narrowed to the
+    provider family(s) actually present in that batch's tier routing, instead
+    of always attaching all five skills. SCENE_PROMPTS_PROMPT itself is kept
+    as the full-stack reference value (existing tests above still assert its
+    content) — these tests cover the new per-batch resolution and composition
+    functions only.
+    """
+
+    def _scene(self, primary_tier=None, fallback_tier=None):
+        routing = {}
+        if primary_tier is not None:
+            routing["primary_tier"] = primary_tier
+        if fallback_tier is not None:
+            routing["fallback_tier"] = fallback_tier
+        return {"production_spec": {"provider_routing": routing}}
+
+    # -- _tier_provider_family --------------------------------------------
+
+    def test_tier_provider_family_default_config_is_veo_for_all_tiers(self):
+        import hypogeum.agents.visual_package_director as vpd
+        config = make_config()
+        for tier in (1, 2, 3):
+            assert vpd._tier_provider_family(tier, config) == "veo"
+
+    def test_tier_provider_family_detects_seedance_model_name(self):
+        import hypogeum.agents.visual_package_director as vpd
+
+        class _FakeConfig:
+            MUAPI_T2_MODEL = "seedance-1-lite-text-to-video"
+
+        assert vpd._tier_provider_family(2, _FakeConfig()) == "seedance"
+
+    # -- _resolve_stage_b_mode ---------------------------------------------
+
+    def test_resolve_mode_all_veo_tiers_is_veo_only(self):
+        import hypogeum.agents.visual_package_director as vpd
+        config = make_config()
+        scenes = [self._scene(primary_tier=2), self._scene(primary_tier=1, fallback_tier=2)]
+        assert vpd._resolve_stage_b_mode(scenes, config) == "veo_only"
+
+    def test_resolve_mode_all_seedance_tiers_is_seedance_only(self):
+        import hypogeum.agents.visual_package_director as vpd
+
+        class _FakeConfig:
+            MUAPI_T1_MODEL = "seedance-1-pro"
+            MUAPI_T2_MODEL = "seedance-1-lite"
+            MUAPI_T3_MODEL = "seedance-1-lite"
+
+        scenes = [self._scene(primary_tier=2), self._scene(primary_tier=3)]
+        assert vpd._resolve_stage_b_mode(scenes, _FakeConfig()) == "seedance_only"
+
+    def test_resolve_mode_mixed_families_is_mixed_tier(self):
+        import hypogeum.agents.visual_package_director as vpd
+
+        class _FakeConfig:
+            MUAPI_T2_MODEL = "veo3.1-lite-text-to-video"
+            MUAPI_T3_MODEL = "seedance-1-lite"
+
+        scenes = [self._scene(primary_tier=2), self._scene(primary_tier=3)]
+        assert vpd._resolve_stage_b_mode(scenes, _FakeConfig()) == "mixed_tier"
+
+    def test_resolve_mode_no_scenes_is_no_tier(self):
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd._resolve_stage_b_mode([], make_config()) == "no_tier"
+
+    def test_resolve_mode_scenes_missing_tier_info_is_no_tier(self):
+        import hypogeum.agents.visual_package_director as vpd
+        scenes = [{"production_spec": {}}, {}]
+        assert vpd._resolve_stage_b_mode(scenes, make_config()) == "no_tier"
+
+    def test_resolve_mode_checks_fallback_tier_too(self):
+        """A scene routed to veo on primary_tier but seedance on fallback_tier
+        must be classified as mixed, not veo_only — the fallback prompt is
+        composed with the same system prompt and must not lose its skill."""
+        import hypogeum.agents.visual_package_director as vpd
+
+        class _FakeConfig:
+            MUAPI_T2_MODEL = "veo3.1-lite-text-to-video"
+            MUAPI_T3_MODEL = "seedance-1-lite"
+
+        scenes = [self._scene(primary_tier=2, fallback_tier=3)]
+        assert vpd._resolve_stage_b_mode(scenes, _FakeConfig()) == "mixed_tier"
+
+    # -- _compose_stage_b_prompt ---------------------------------------------
+
+    def test_no_tier_mode_is_byte_identical_to_full_stack(self):
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd._compose_stage_b_prompt("no_tier") == vpd.SCENE_PROMPTS_PROMPT
+
+    def test_mixed_tier_mode_is_byte_identical_to_full_stack(self):
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd._compose_stage_b_prompt("mixed_tier") == vpd.SCENE_PROMPTS_PROMPT
+
+    def test_veo_only_mode_excludes_seedance_skills(self):
+        import hypogeum.agents.visual_package_director as vpd
+        prompt = vpd._compose_stage_b_prompt("veo_only")
+        seedance_content = vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
+        seedance2_content = vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8")
+        assert seedance_content not in prompt
+        assert seedance2_content not in prompt
+
+    def test_veo_only_mode_includes_cinematic_and_veo_skills(self):
+        import hypogeum.agents.visual_package_director as vpd
+        prompt = vpd._compose_stage_b_prompt("veo_only")
+        assert vpd._CINEMATIC_SKILL_FILE.read_text(encoding="utf-8") in prompt
+        assert vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8") in prompt
+        assert vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.read_text(encoding="utf-8") in prompt
+
+    def test_seedance_only_mode_excludes_veo_skills(self):
+        import hypogeum.agents.visual_package_director as vpd
+        prompt = vpd._compose_stage_b_prompt("seedance_only")
+        veo_content = vpd._VEO_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8")
+        veo_pd_content = vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.read_text(encoding="utf-8")
+        assert veo_content not in prompt
+        assert veo_pd_content not in prompt
+
+    def test_seedance_only_mode_includes_cinematic_and_seedance_skills(self):
+        import hypogeum.agents.visual_package_director as vpd
+        prompt = vpd._compose_stage_b_prompt("seedance_only")
+        assert vpd._CINEMATIC_SKILL_FILE.read_text(encoding="utf-8") in prompt
+        assert vpd._SEEDANCE_TRANSLATION_SKILL_FILE.read_text(encoding="utf-8") in prompt
+        assert vpd._SEEDANCE2_SKILL_PATH.read_text(encoding="utf-8") in prompt
+
+    def test_unrecognised_mode_falls_back_to_full_stack(self):
+        """A mode string not produced by _resolve_stage_b_mode must still be
+        safe — select_skills()'s own fallback contract applies unchanged."""
+        import hypogeum.agents.visual_package_director as vpd
+        assert vpd._compose_stage_b_prompt("something_unexpected") == vpd.SCENE_PROMPTS_PROMPT
+
+    # -- call-site wiring (both Stage B run_agent call sites) ----------------
+
+    def test_qa_retry_call_site_uses_compose_stage_b_prompt(self):
+        import ast
+        import inspect
+        import hypogeum.agents.visual_package_director as vpd
+
+        src = inspect.getsource(vpd)
+        tree = ast.parse(src)
+
+        matches = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "run_agent":
+                continue
+            for kw in node.keywords:
+                if kw.arg != "system_prompt":
+                    continue
+                value = kw.value
+                if (
+                    isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Name)
+                    and value.func.id == "_compose_stage_b_prompt"
+                ):
+                    matches += 1
+
+        assert matches == 2, (
+            f"Expected both Stage B run_agent() call sites (main batch loop and "
+            f"QA-rejection retry) to use _compose_stage_b_prompt(...), found {matches}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestStaticCameraConflictSanitization (Phase B1 Checkpoint 2, 2026-07-18)
+# ---------------------------------------------------------------------------
+
+class TestStaticCameraConflictSanitization:
+    """B1 Checkpoint 2: the VEO PROMPT DIRECTOR SKILL USAGE bridge in
+    vpd_scene_prompts.txt no longer restates Veo Prompt Director's specific
+    contradicting example ("the camera remains fixed" / "one of its worked
+    examples uses harsh fluorescent overhead lighting") — content that, per
+    the pinned skill's own composition rule, is never actually loaded into
+    the runtime prompt in the first place (only SKILL.md is; references/
+    files, including cinematography.md where that example lives, are not).
+    The bridge still explicitly names "Static" and fluorescent lighting as
+    governed/forbidden concepts (not merely a generic precedence statement),
+    preserving the pre-existing TestVeoPromptDirectorStageBAttachment
+    contract this checkpoint does not redefine.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _load_prompt(self):
+        import hypogeum.agents.visual_package_director as vpd
+        self.base_content = vpd._SCENE_PROMPTS_PROMPT_FILE.read_text(encoding="utf-8")
+        self.composed = vpd.SCENE_PROMPTS_PROMPT
+
+    def test_fabricated_worked_example_quote_removed(self):
+        assert "the camera remains fixed" not in self.base_content
+        assert "one of its worked examples uses harsh fluorescent overhead" not in self.base_content
+
+    def test_sanitization_survives_full_composition(self):
+        assert "the camera remains fixed" not in self.composed
+        assert "one of its worked examples uses harsh fluorescent overhead" not in self.composed
+
+    def test_static_and_fluorescent_still_explicitly_named(self):
+        """Per the pre-existing TestVeoPromptDirectorStageBAttachment contract
+        (test_bridge_names_static_camera_and_fluorescent_lighting_conflicts),
+        the bridge must still name both concepts explicitly, not collapse to
+        a generic precedence-only statement."""
+        assert '"Static"' in self.base_content
+        assert "fluorescent" in self.base_content.lower()
+
+    def test_bridge_cites_accurate_composition_boundary(self):
+        """The corrected text must not claim Veo Prompt Director's contradicting
+        content is part of the composed runtime prompt — it must instead state
+        that the references/ material carrying that content is not composed."""
+        veo_idx = self.base_content.find("VEO PROMPT DIRECTOR SKILL USAGE")
+        section = self.base_content[veo_idx:]
+        assert "never composed into this prompt at runtime" in section
+
+    def test_camera_dna_remains_sole_cited_owner_of_static_policy(self):
+        """This checkpoint must not move static-framing ownership anywhere —
+        the bridge's own reconciliation text must still cite the same
+        HYPOGEUM CANONICAL STATIC-FRAMING POLICY block (owned by camera_dna.py)
+        introduced in Phase B2.5, not redefine or relocate it."""
+        veo_idx = self.base_content.find("VEO PROMPT DIRECTOR SKILL USAGE")
+        section = self.base_content[veo_idx:]
+        assert "HYPOGEUM CANONICAL STATIC-FRAMING POLICY above" in section
+        assert self.base_content.count("HYPOGEUM CANONICAL STATIC-FRAMING POLICY") == 2, (
+            "Expected exactly one definition (DOCUMENTARY VISUAL GRAMMAR section) "
+            "plus exactly one reference from the Veo Prompt Director bridge — "
+            "not a second, competing definition"
+        )
+
+    def test_pinned_skill_md_untouched(self):
+        """The pinned upstream SKILL.md must remain byte-identical — this
+        checkpoint sanitizes only Hypogeum's own bridge text, never the
+        verbatim pinned skill file."""
+        import hypogeum.agents.visual_package_director as vpd
+        content = vpd._VEO_PROMPT_DIRECTOR_SKILL_PATH.read_text(encoding="utf-8")
+        assert "static" not in content.lower()
+        assert "fluorescent" not in content.lower()
+
+    def test_camera_dna_static_policy_unchanged(self):
+        """Camera DNA's own policy text must be untouched by this checkpoint —
+        only the Veo Prompt Director bridge reconciliation was in scope."""
+        import hypogeum.camera_dna as camera_dna
+        rules = camera_dna.get_camera_dna_rules()
+        assert rules["camera_language"]["static_framing_policy"] == (
+            "static framing is permitted only when the frame contains meaningful "
+            "subject, environmental, atmospheric, or lighting motion; static "
+            "framing is intentional, rare, and narratively justified"
+        )

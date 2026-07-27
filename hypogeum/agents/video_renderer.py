@@ -88,6 +88,7 @@ def render_episode(
     log,
     end_page_path: Optional[Path] = None,
     end_page_duration: float = 20.0,
+    music_segments: Optional[List[dict]] = None,
 ) -> dict:
     """
     Execute all ffmpeg renders for one episode and return a render_output_manifest.
@@ -108,6 +109,16 @@ def render_episode(
         episode_id:             Episode identifier for file naming and logging.
         ffmpeg_timeout:         subprocess timeout in seconds.
         log:                    Caller-supplied logger.
+        music_segments:         Optional ordered list of timed music segments
+                                for the main episode only (Option B,
+                                2026-07-19): [{start_seconds, end_seconds,
+                                track}, ...]. Video Renderer does not derive
+                                narrative categories or section boundaries —
+                                it only places whatever ready-made segments
+                                it is given. When omitted or when no segment
+                                carries a real track, falls back to the
+                                legacy single music_tracks["main_episode"]
+                                track unchanged. Shorts are never affected.
 
     Returns:
         render_output_manifest dict — factual record of what was produced.
@@ -122,7 +133,17 @@ def render_episode(
 
     # --- Main episode render ---
     main_output_path = episode_dir / f"main_{episode_id}.mp4"
+    # Legacy single-track lookup (used as fallback when no segment carries a
+    # real track — see _build_ffmpeg_concat_command). Option B, 2026-07-19.
     main_music_track = music_tracks.get("main_episode")
+    main_music_segments = music_segments or []
+    # For end-page continuation and manifest facts: the last segment's track
+    # is what's actually playing at the end of the body when multi-segment
+    # music is active; otherwise the legacy single track.
+    _segments_with_tracks = [s for s in main_music_segments if s.get("track") is not None]
+    end_page_music_track = (
+        _segments_with_tracks[-1]["track"] if _segments_with_tracks else main_music_track
+    )
 
     main_success = _render_main_episode(
         timeline=main_timeline,
@@ -132,6 +153,7 @@ def render_episode(
         episode_id=episode_id,
         timeout=ffmpeg_timeout,
         log=log,
+        music_segments=main_music_segments,
     )
     if not (main_success and main_output_path.exists() and main_output_path.stat().st_size > 0):
         render_status = "failed"
@@ -148,7 +170,7 @@ def render_episode(
             episode_id=episode_id,
             timeout=ffmpeg_timeout,
             log=log,
-            music_track=main_music_track,
+            music_track=end_page_music_track,
             body_duration=body_duration,
         )
         if not end_page_ok:
@@ -239,10 +261,10 @@ def render_episode(
 
     # Music QA facts — used by rerender_ep.py report
     music_dur_used = 0.0
-    if main_music_track is not None:
-        music_dur_used = _probe_output_duration(main_music_track.local_path)
+    if end_page_music_track is not None:
+        music_dur_used = _probe_output_duration(end_page_music_track.local_path)
     music_continues = (
-        main_music_track is not None
+        end_page_music_track is not None
         and end_page_path is not None
         and end_page_path.exists()
     )
@@ -264,6 +286,7 @@ def _render_main_episode(
     episode_id: str,
     timeout: int,
     log,
+    music_segments: Optional[List[dict]] = None,
 ) -> bool:
     """
     Render main episode (16:9) using ffmpeg.
@@ -276,6 +299,12 @@ def _render_main_episode(
     large filter complexes), performs a stream-copy trim pass to correct it.
     This is a hard-safety fallback — the filtergraph already contains an
     explicit trim filter, but the stream-copy pass guarantees correctness.
+
+    music_segments (Option B, 2026-07-19): optional list of timed music
+    segments for the main episode, each {start_seconds, end_seconds, track}.
+    When at least one segment carries a real track, multi-segment music
+    placement is used (see _build_multi_segment_music_filter()). Otherwise
+    falls back to the legacy single music_track parameter unchanged.
     """
     if not timeline and not narration_path:
         log.error(
@@ -302,6 +331,7 @@ def _render_main_episode(
         resolution=MAIN_RESOLUTION,
         episode_id=episode_id,
         music_tail_seconds=_MUSIC_TAIL_SECONDS,
+        music_segments=music_segments,
     )
     ok = _run_ffmpeg(
         cmd=cmd,
@@ -672,6 +702,86 @@ def _render_short(
     )
 
 
+def _build_multi_segment_music_filter(
+    segments: List[dict],
+    start_input_index: int,
+    music_tail_seconds: float,
+) -> Tuple[List[str], str, int]:
+    """
+    Build ffmpeg -i inputs and a filter_complex fragment for multiple timed
+    music segments, combined into a single [msc] label (Option B, 2026-07-19,
+    main episode only).
+
+    Each segment's track is looped via the same atrim->aloop->atrim idiom
+    used for the single-track case (see _build_ffmpeg_concat_command) to
+    fill exactly its own [start_seconds, end_seconds) window, then shifted
+    into absolute timeline position with adelay. The last segment's window
+    is extended by music_tail_seconds so music continues into the outro
+    hold, matching the single-track behavior. All segment streams are
+    summed via amix into one [msc] output — everything downstream of [msc]
+    (the narration mix, the loudnorm pass) is unchanged.
+
+    Args:
+        segments:           Ordered list of {start_seconds, end_seconds, track}
+                            dicts. Every entry must have a real track (callers
+                            filter out None tracks before calling this).
+        start_input_index:  Next available ffmpeg -i input index.
+        music_tail_seconds: Seconds to extend the final segment by.
+
+    Returns:
+        (extra_inputs, filter_fragment, next_input_index) — filter_fragment
+        is a single string (already ";"-joined) ending in a [msc] label.
+    """
+    inputs: List[str] = []
+    seg_filter_parts: List[str] = []
+    seg_labels: List[str] = []
+    idx = start_input_index
+
+    for i, seg in enumerate(segments):
+        track = seg["track"]
+        inputs += ["-i", str(track.local_path)]
+
+        seg_duration = seg["end_seconds"] - seg["start_seconds"]
+        if i == len(segments) - 1:
+            seg_duration += music_tail_seconds
+        seg_duration = max(0.1, seg_duration)
+
+        usable_dur = _probe_music_usable_duration(track.local_path)
+        try:
+            sr_result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "stream=sample_rate",
+                 "-of", "csv=p=0", str(track.local_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            sample_rate = int(sr_result.stdout.strip().splitlines()[0])
+        except Exception:
+            sample_rate = 44100
+        usable_samples = int(usable_dur * sample_rate)
+        delay_ms = max(0, int(round(seg["start_seconds"] * 1000)))
+
+        label = f"[mscseg{i}]"
+        seg_filter_parts.append(
+            f"[{idx}:a]"
+            f"atrim=0:{usable_dur:.6f},asetpts=PTS-STARTPTS,"
+            f"aloop=loop=-1:size={usable_samples},"
+            f"atrim=0:{seg_duration:.6f},asetpts=PTS-STARTPTS,"
+            f"adelay=delays={delay_ms}:all=1,"
+            f"volume={_MUSIC_AMPLITUDE_FACTOR}{label}"
+        )
+        seg_labels.append(label)
+        idx += 1
+
+    if len(seg_labels) == 1:
+        seg_filter_parts.append(f"{seg_labels[0]}anull[msc]")
+    else:
+        seg_filter_parts.append(
+            f"{''.join(seg_labels)}amix=inputs={len(seg_labels)}:"
+            f"duration=longest:dropout_transition=0[msc]"
+        )
+
+    return inputs, ";".join(seg_filter_parts), idx
+
+
 def _build_ffmpeg_concat_command(
     timeline: List[TimelineEntry],
     narration_path: Optional[Path],
@@ -681,6 +791,7 @@ def _build_ffmpeg_concat_command(
     episode_id: str,
     is_short: bool = False,
     music_tail_seconds: float = 0.0,
+    music_segments: Optional[List[dict]] = None,
 ) -> List[str]:
     """
     Build an ffmpeg command list for concatenating scenes with audio.
@@ -701,6 +812,15 @@ def _build_ffmpeg_concat_command(
     - Music input uses -stream_loop -1 so it covers the entire body regardless of length.
     - Music at _MUSIC_AMPLITUDE_FACTOR (≈ −14 dB) — audible background bed under VO.
     - amix with duration=first; first input is narration padded to body_dur.
+
+    music_segments (Option B, 2026-07-19, main episode only): when supplied
+    and at least one segment carries a real track, the [msc] label is built
+    by _build_multi_segment_music_filter() instead of the single-track loop
+    below — each segment is looped/trimmed to its own [start, end) window
+    and adelay-shifted into place, then summed into one [msc] stream. Every
+    line downstream of [msc] (the narration mix, loudnorm) is unchanged.
+    Falls back to the single music_track path when no segment has a track
+    (empty/None music_segments, or an older single-key music_track_package).
     """
     width, height = resolution.split("x")
 
@@ -872,7 +992,17 @@ def _build_ffmpeg_concat_command(
     # Count actual -i arguments (not len//2 — lavfi adds "-f lavfi -i" = 4 items for 1 input)
     audio_input_index = inputs.count("-i")
     has_narration = narration_path is not None and narration_path.exists()
-    has_music = music_track is not None and music_track.local_path.exists()
+
+    # Multi-segment music (Option B, 2026-07-19): only segments carrying a real,
+    # on-disk track are used. When none do, this falls through to the legacy
+    # single music_track path below unchanged.
+    segments_with_tracks = [
+        seg for seg in (music_segments or [])
+        if seg.get("track") is not None and Path(seg["track"].local_path).exists()
+    ]
+    use_multi_segment_music = len(segments_with_tracks) > 0
+    has_music = (not use_multi_segment_music) and music_track is not None and music_track.local_path.exists()
+    has_music_any = use_multi_segment_music or has_music
 
     if has_narration:
         inputs += ["-i", str(narration_path)]
@@ -881,7 +1011,15 @@ def _build_ffmpeg_concat_command(
     else:
         narration_idx = None
 
-    if has_music:
+    msc_filter_str: Optional[str] = None
+    if use_multi_segment_music:
+        seg_inputs, msc_filter_str, audio_input_index = _build_multi_segment_music_filter(
+            segments=segments_with_tracks,
+            start_input_index=audio_input_index,
+            music_tail_seconds=music_tail_seconds,
+        )
+        inputs += seg_inputs
+    elif has_music:
         # Load music file once (no stream_loop — looping is done in the filter graph via
         # aloop to avoid including any end-of-track fade-out in the loop unit).
         inputs += ["-i", str(music_track.local_path)]
@@ -912,18 +1050,24 @@ def _build_ffmpeg_concat_command(
     # When music_tail_seconds > 0: narration is padded with silence to body_dur so
     # amix does not cut the music early when duration=first. Music plays at full level
     # through both the VO section and the music tail.
-    if has_narration and has_music:
-        # Music loop prefix: loop only the usable portion of the track (before any
-        # end-of-track fade-out). aloop=loop=-1:size=N loops the first N samples
-        # indefinitely, then atrim caps the result to exactly body_dur.
-        # This prevents the track's natural fade-out from reappearing on each loop.
-        _music_loop_prefix = (
-            f"[{music_idx}:a]"
-            f"atrim=0:{_music_usable_dur:.6f},asetpts=PTS-STARTPTS,"
-            f"aloop=loop=-1:size={_music_usable_samples},"
-            f"atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,"
-            f"volume={_MUSIC_AMPLITUDE_FACTOR}[msc]"
-        )
+    if has_narration and has_music_any:
+        if use_multi_segment_music:
+            # msc_filter_str already ends in a [msc] label (see
+            # _build_multi_segment_music_filter) — everything below is
+            # byte-identical to the single-track path.
+            _music_loop_prefix = msc_filter_str
+        else:
+            # Music loop prefix: loop only the usable portion of the track (before any
+            # end-of-track fade-out). aloop=loop=-1:size=N loops the first N samples
+            # indefinitely, then atrim caps the result to exactly body_dur.
+            # This prevents the track's natural fade-out from reappearing on each loop.
+            _music_loop_prefix = (
+                f"[{music_idx}:a]"
+                f"atrim=0:{_music_usable_dur:.6f},asetpts=PTS-STARTPTS,"
+                f"aloop=loop=-1:size={_music_usable_samples},"
+                f"atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,"
+                f"volume={_MUSIC_AMPLITUDE_FACTOR}[msc]"
+            )
         if music_tail_seconds > 0.001:
             # apad=pad_dur unconditionally appends exactly music_tail_seconds of silence
             # after the narration content, regardless of declared stream duration.
@@ -947,14 +1091,17 @@ def _build_ffmpeg_concat_command(
             f"[{narration_idx}:a]atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,volume=1.0[aout]"
         )
         audio_map = "[aout]"
-    elif has_music:
-        filter_parts.append(
-            f"[{music_idx}:a]"
-            f"atrim=0:{_music_usable_dur:.6f},asetpts=PTS-STARTPTS,"
-            f"aloop=loop=-1:size={_music_usable_samples},"
-            f"atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,"
-            f"volume={_MUSIC_AMPLITUDE_FACTOR}[aout]"
-        )
+    elif has_music_any:
+        if use_multi_segment_music:
+            filter_parts.append(f"{msc_filter_str};[msc]anull[aout]")
+        else:
+            filter_parts.append(
+                f"[{music_idx}:a]"
+                f"atrim=0:{_music_usable_dur:.6f},asetpts=PTS-STARTPTS,"
+                f"aloop=loop=-1:size={_music_usable_samples},"
+                f"atrim=0:{body_dur:.6f},asetpts=PTS-STARTPTS,"
+                f"volume={_MUSIC_AMPLITUDE_FACTOR}[aout]"
+            )
         audio_map = "[aout]"
     else:
         # Generate silent audio

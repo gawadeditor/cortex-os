@@ -3,14 +3,24 @@
     "schema_version": "1.0",
     "schema_status": "defined",
     "content_status": "extracted_v1",
-    "_global_status": "inactive",
-    "_note": "Content extracted from approved visual reference docs/brand_guardian/bible.png. _global_status remains 'inactive' until human review and approval. Set to 'active' only after gap report items are resolved.",
-    "last_updated": "2026-06-06",
-    "approved_by": null,
-    "bible_version": "v1",
+    "_global_status": "active",
+    "_note": "_global_status is 'active' as of 2026-07-13 (see activation_note below). This activates ENFORCEABLE_CORE-tagged, already-verified content; it does not retroactively resolve unrelated open gaps (see activation_note).",
+    "last_updated": "2026-07-13",
+    "approved_by": "Mohamed Abdelgawad",
+    "approved_date": "2026-07-13",
+    "bible_version": "v1.1",
     "source_reference": "docs/brand_guardian/bible.png — approved Version 2 visual direction reference",
     "extraction_notes": "Hex values extracted from image swatches. Exact precision limited by image resolution — verify by eyedropping from the original source file before activation.",
-    "audit_notes": "Extraction audit performed 2026-06-06. See docs/brand_guardian/extraction_audit.md. Items marked REQUIRES_HUMAN_APPROVAL are not binding BGA rules until explicitly approved. motion_language._binding set to false (static image — no motion evidence). Pre-existing policy items marked with _source field."
+    "audit_notes": "Extraction audit performed 2026-06-06. See docs/brand_guardian/extraction_audit.md. Items marked REQUIRES_HUMAN_APPROVAL are not binding BGA rules until explicitly approved. motion_language._binding set to false (static image — no motion evidence). Pre-existing policy items marked with _source field.",
+    "v1_1_note": "2026-07-13 — color_system extended with usage_ratios and forbidden_color_behavior; new visual_finish_system section added, as the canonical project-wide visual-identity source consumed by hypogeum/brand/visual_identity.py. No existing hex values or ENFORCEABLE_CORE rules were changed. Cross-checked for consistency against the same three approved references already governing this Bible: bible.png (primary), ~/Downloads/512E92D5-39B9-49B6-9EF4-A43C825516CA.PNG (thumbnail composition reference), ~/Downloads/brand_board.jpg (brand board), ~/Downloads/hypogeum_endscreen_master.png (endscreen identity reference). This remains the single canonical visual-identity source — no duplicate palette file was created.",
+    "v1_1_approved_sections": [
+      "color_system.primary_palette (canonical 7-swatch palette, verified 2026-06-08, unchanged in v1.1)",
+      "color_system.usage_ratios (palette roles / frame-coverage targets, added v1.1)",
+      "color_system.forbidden_color_behavior (added v1.1)",
+      "visual_finish_system (added v1.1)",
+      "context-aware enforcement modes (full / adaptive / light, implemented in hypogeum/brand/visual_identity.py and hypogeum/prompts/brand_guardian_agent.txt, 2026-07-13)"
+    ],
+    "activation_note": "_global_status changed from 'inactive' to 'active' on 2026-07-13 following explicit human approval by Mohamed Abdelgawad, scoped to the v1_1_approved_sections listed above (all already ENFORCEABLE_CORE / VERIFIED / directly observed, per brand_spec_executable.md). This activation does NOT make gap_report.md's remaining blocking gaps (AI disclosure text, shorts/typography safe-zone margins, title max_characters) enforceable — those fields remain literal 'TBD' strings, and BGA's existing per-field TBD-skip behavior (see gap_report.md: 'BGA cannot validate against a TBD value — it will skip the section and log bible_section_unpopulated') continues to apply regardless of _global_status. Sections/fields still marked _binding:false, REQUIRES_HUMAN_APPROVAL, or NOT_VERIFIED remain non-binding; this activation does not implicitly promote them. As of 2026-07-13, hypogeum/agents/brand_guardian_agent.py still does not parse this JSON file at runtime (enforcement content is a separately-maintained prose file, hypogeum/prompts/brand_guardian_agent.txt) — this activation is a governance/approval record, not by itself a runtime behavior change."
   },
 
   "identity": {
@@ -99,6 +109,45 @@
       "text_color": "warm_gold (title) + parchment_cream (subtitle)",
       "forbidden_colors": ["bright white (#FFFFFF)", "pure red", "neon any hue", "cool blue", "green", "purple", "pink", "bright orange"],
       "contrast_minimum": "WCAG AA minimum. Gold text on near-black background."
+    },
+    "usage_ratios": {
+      "_status": "extracted",
+      "_binding": true,
+      "_added": "v1.1 — 2026-07-13. Quantifies the frame-coverage proportions already directly observable in bible.png, brand_board.jpg, and every approved thumbnail reference. Consumed by hypogeum/brand/visual_identity.py for automatic prompt injection.",
+      "near_black_and_charcoal": {
+        "swatches": ["void_black", "deep_stone"],
+        "target_range_pct": [60, 70],
+        "role": "dominant background / negative space across nearly every frame"
+      },
+      "dark_stone_and_muted_bronze": {
+        "swatches": ["charcoal_earth", "ancient_soil"],
+        "target_range_pct": [20, 30],
+        "role": "midground surfaces, secondary depth layer, structural material"
+      },
+      "aged_gold": {
+        "swatches": ["antique_gold"],
+        "target_range_pct": [5, 10],
+        "role": "restrained accent only — never a dominant field color"
+      },
+      "warm_ivory_and_off_white": {
+        "swatches": ["warm_gold", "parchment_cream"],
+        "usage": "highlights and text only — never a background or large fill area"
+      }
+    },
+    "forbidden_color_behavior": {
+      "_status": "extracted",
+      "_binding": true,
+      "_added": "v1.1 — 2026-07-13. Supersedes/extends thumbnail_palette.forbidden_colors above with specific lighting/wash behaviors, not just hues, to close gaps surfaced during real-generation validation (docs/validation/thumbnail_image_generation_validation/).",
+      "items": [
+        "blue or cyan lighting of any kind",
+        "teal lighting",
+        "turquoise verdigris (patina rendered as bright cyan-green rather than muted dark bronze-green)",
+        "orange/yellow scene wash covering the full frame",
+        "full-frame sepia tint",
+        "bright polished gold (flat, high-value, chrome-like gold with no aging/texture)",
+        "fluorescent or neon colors of any hue",
+        "heavy saturated color cast dominating the overall frame"
+      ]
     },
     "text_on_dark": "warm_gold (#E7D6B3) for display/titles. parchment_cream (#F5F3EE) for body.",
     "text_on_light": "TBD — no light surfaces appear in reference. Avoid until defined.",
@@ -279,6 +328,27 @@
         "items": ["Flat even lighting", "Overexposed bright scenes", "Neon or artificial colored lighting", "Ring light aesthetics"]
       }
     }
+  },
+
+  "visual_finish_system": {
+    "_status": "extracted",
+    "_binding": true,
+    "_added": "v1.1 — 2026-07-13. Formalises the overall material/finish register already implicit in documentary_visual_grammar and color_system, as a standalone consumable section for automatic prompt injection.",
+    "_description": "The finish and rendering character every generated visual output (thumbnails, video scenes, reference images) must share, independent of subject matter.",
+    "positive_finish": [
+      "premium archaeological documentary",
+      "near-black dominant",
+      "restrained aged gold",
+      "weathered stone and bronze",
+      "realistic photographic texture",
+      "controlled directional light",
+      "deep but readable shadows"
+    ],
+    "forbidden_finish": [
+      "generic fantasy-art finish",
+      "museum-display finish",
+      "glossy modern product-render look"
+    ]
   },
 
   "motion_language": {

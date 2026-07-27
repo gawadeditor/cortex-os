@@ -58,6 +58,8 @@ Use for the `spatial_relationship` field in the presentation plan:
 - **before_after**: "Past and present states share the same physical location — transition is temporal, not spatial"
 - **micro_macro**: "The close detail exists within its larger context — scale readable without cutting away"
 
+> **Hypogeum Policy Note (2026-07-17, Phase B2.1):** these four templates' canonical, deterministic form now lives in `hypogeum/composition_dna.py` (`get_composition_dna_rules()["spatial_relationship_templates"]`) — see `docs/validation/prompt_writer_architecture/B1_3_ARCHITECTURE_CONTRACT.md`. Retained here as temporary, synchronized duplication (deterministic injection into Stage A4/Shot Diversity Planner generation does not exist yet), not eliminated duplication. Scheduled for deletion once Phase B4 lands.
+
 ## Hard Constraints for Stage B
 
 When writing `primary_prompt`, Stage B MUST:

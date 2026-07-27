@@ -17,6 +17,8 @@ Public API:
     validate_ctr_readability(candidates) -> dict
     validate_prompt_zone_reservations(candidate) -> dict
     validate_all_prompts_zone_reservations(candidates) -> dict
+    validate_thumbnail_dna(candidate) -> dict
+    validate_all_candidates_thumbnail_dna(candidates) -> dict
 
 Exceptions:
     ThumbnailPreGenerationError — raised by thumbnail_director when any blocking
@@ -71,10 +73,17 @@ def validate_composition_typography_pre_generation(candidate: dict) -> dict:
     prompt_lower = prompt.lower()
 
     # composite_mode=True means the PIL compositor handles typography placement
-    # independently of the image_prompt. Checks 2 and 3 (which require the image
-    # model to reserve a zone for text) do not apply — the image model is not
-    # responsible for accommodating typography in this mode.
+    # independently of the image_prompt. typography_integration="embedded"
+    # means the image model renders the headline text itself (either via the
+    # unified integrated path, which appends the typography instruction at
+    # generation time — after this pre-generation check runs against the raw
+    # candidate image_prompt — or via the legacy FAST single-pass path).
+    # Checks 2 and 3 (which require the image model to reserve a *blank* zone
+    # for text to be added afterward) do not apply in either case — the image
+    # model is not being asked to leave space; it is asked to render the text.
     composite_mode = bool(candidate.get("composite_mode"))
+    embedded_typography = candidate.get("typography_integration") == "embedded"
+    skip_zone_reservation_checks = composite_mode or embedded_typography
 
     # 1. Zone consistency
     comp_zone = comp.get("text_zone", "")
@@ -84,15 +93,15 @@ def validate_composition_typography_pre_generation(candidate: dict) -> dict:
             f"composition_plan.text_zone ({comp_zone!r}) != typography_plan.zone ({typo_zone!r})"
         )
 
-    # 2. image_prompt mentions reserved text zone (skip in composite mode)
-    if not composite_mode and comp_zone and not _prompt_mentions_zone(prompt_lower, comp_zone):
+    # 2. image_prompt mentions reserved text zone (skip in composite/embedded mode)
+    if not skip_zone_reservation_checks and comp_zone and not _prompt_mentions_zone(prompt_lower, comp_zone):
         errors.append(
             f"image_prompt does not mention reserved text zone {comp_zone!r}"
         )
 
-    # 3. image_prompt mentions negative space (skip in composite mode)
+    # 3. image_prompt mentions negative space (skip in composite/embedded mode)
     neg_zones = comp.get("negative_space_zones", [])
-    if not composite_mode and neg_zones and not _prompt_mentions_negative_space(prompt_lower, neg_zones):
+    if not skip_zone_reservation_checks and neg_zones and not _prompt_mentions_negative_space(prompt_lower, neg_zones):
         errors.append(
             "image_prompt does not mention negative space or reserved empty zones"
         )
@@ -352,6 +361,162 @@ def validate_all_prompts_zone_reservations(candidates: list[dict]) -> dict:
     warnings: list[dict] = []
     for c in candidates:
         result = validate_prompt_zone_reservations(c)
+        cid = c.get("candidate_id", "unknown")
+        if not result["passed"]:
+            failures.append({"candidate_id": cid, "errors": result["errors"]})
+        if result["warnings"]:
+            warnings.append({"candidate_id": cid, "warnings": result["warnings"]})
+    return {
+        "passed":   len(failures) == 0,
+        "failures": failures,
+        "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail DNA v1 (2026-07-13) — permanent, topic-agnostic composition rules
+#
+# Enforces the fields added to composition_plan by
+# hypogeum.agents.thumbnail_composition_planner (headline_zone_width_pct,
+# focal_zone_buffer, highlight_containment, hero_object_detail_density,
+# mobile_readability_target, exception_reason, brightest_source_role).
+# Structural/field checks only — semantic judgment (does the image actually
+# look fantasy-poster-ish) remains BGA's job, per this file's own header.
+# ---------------------------------------------------------------------------
+
+_BLOWN_HIGHLIGHT_PHRASES = [
+    "blown out", "blown-out", "overexposed", "blinding light", "pure white glow",
+    "pure white light", "full-frame glow", "washes out the whole frame",
+    "entire frame glows", "light fills the whole frame",
+]
+_HIGHLIGHT_CONTAINMENT_PHRASES = [
+    "localized", "contained", "does not spread", "stays contained",
+    "does not spread across the frame", "confined to",
+]
+
+_DEFAULTS_CEILING_FALLBACK = 40  # mirrors thumbnail_composition_planner._DEFAULTS
+
+
+def validate_thumbnail_dna(candidate: dict) -> dict:
+    """
+    Pre-generation validator for the Thumbnail DNA v1 composition rules.
+
+    Skips silently if composition_plan is absent (mirrors
+    validate_composition_typography_pre_generation's convention).
+
+    Returns:
+        {"passed": bool, "errors": list[str], "warnings": list[str]}
+        Errors are blocking; warnings are advisory.
+    """
+    comp = candidate.get("composition_plan")
+    if comp is None:
+        return {"passed": True, "errors": [], "warnings": []}
+
+    prompt = str(candidate.get("image_prompt", "")).lower()
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # --- Blocking ---
+
+    # 1. Missing hierarchy — no declared eye path.
+    eye_path = comp.get("eye_path") or []
+    if not eye_path:
+        errors.append("composition_plan.eye_path is missing or empty — no declared hierarchy")
+
+    # 2. No safe separation between focal zones.
+    if comp.get("focal_zone_buffer") != "required":
+        errors.append(
+            "composition_plan.focal_zone_buffer must be 'required' — "
+            "focal zones need visible negative-space separation"
+        )
+
+    # 3. Text zone overlaps the narrative/hero focal zone.
+    text_zone = comp.get("text_zone")
+    focal_zone = comp.get("focal_zone")
+    if text_zone and focal_zone and text_zone == focal_zone:
+        errors.append(
+            f"composition_plan.text_zone ({text_zone!r}) overlaps focal_zone "
+            f"({focal_zone!r}) — headline and hero object cannot share a zone"
+        )
+
+    # 4. No mobile readability target declared.
+    if not comp.get("mobile_readability_target"):
+        errors.append("composition_plan.mobile_readability_target is not specified")
+
+    # 5. Uncontrolled blown highlight explicitly requested in the prompt.
+    if prompt:
+        blown = [p for p in _BLOWN_HIGHLIGHT_PHRASES if p in prompt]
+        contained = any(p in prompt for p in _HIGHLIGHT_CONTAINMENT_PHRASES)
+        if blown and not contained:
+            errors.append(
+                f"image_prompt requests an uncontrolled blown highlight ({blown}) "
+                "with no containment language — add 'localized' / 'does not spread "
+                "across the frame' or remove the blown-highlight phrasing"
+            )
+
+    # --- Warnings ---
+
+    # 6. Headline near/over its upper visual-weight limit without an exception.
+    width_pct = comp.get("headline_zone_width_pct")
+    ceiling = comp.get(
+        "headline_visual_weight_ceiling_pct",
+        _DEFAULTS_CEILING_FALLBACK,
+    )
+    if isinstance(width_pct, (list, tuple)) and len(width_pct) == 2:
+        _, hi = width_pct
+        if hi >= ceiling and not comp.get("exception_reason"):
+            warnings.append(
+                f"composition_plan.headline_zone_width_pct upper bound ({hi}%) is at or "
+                f"above the {ceiling}% visual-weight ceiling with no exception_reason declared"
+            )
+
+    # 7. Hero object detail competing with headline readability.
+    if (
+        comp.get("hero_object_detail_density") == "high"
+        and comp.get("subject_readability_at_320px") == "critical"
+    ):
+        warnings.append(
+            "composition_plan.hero_object_detail_density='high' may compete with "
+            "headline readability at critical subject_readability_at_320px"
+        )
+
+    # 8. Highlight may need further containment.
+    if comp.get("highlight_containment") != "required":
+        warnings.append(
+            "composition_plan.highlight_containment is not 'required' — the brightest "
+            "source may not stay localized"
+        )
+
+    # 9. Heuristic: three equal competing blocks. Structural proxy only — a
+    # real pixel-level check belongs to the palette/composition validator,
+    # not this deterministic plan validator. Fires only when every control
+    # that would differentiate the three reads is simultaneously absent.
+    if (
+        len(eye_path) >= 3
+        and comp.get("focal_scale") in ("hero", "large")
+        and comp.get("hero_object_detail_density") == "high"
+        and comp.get("highlight_containment") != "required"
+    ):
+        warnings.append(
+            "plan shows signs of three equal competing blocks: a large/hero focal "
+            "object with high detail density and uncontained highlight alongside a "
+            "3+ step eye_path — nothing differentiates primary from secondary/tertiary reads"
+        )
+
+    return {"passed": len(errors) == 0, "errors": errors, "warnings": warnings}
+
+
+def validate_all_candidates_thumbnail_dna(candidates: list[dict]) -> dict:
+    """
+    Run validate_thumbnail_dna on a list of candidates.
+
+    Returns:
+        {"passed": bool, "failures": list[dict], "warnings": list[dict]}
+    """
+    failures: list[dict] = []
+    warnings: list[dict] = []
+    for c in candidates:
+        result = validate_thumbnail_dna(c)
         cid = c.get("candidate_id", "unknown")
         if not result["passed"]:
             failures.append({"candidate_id": cid, "errors": result["errors"]})

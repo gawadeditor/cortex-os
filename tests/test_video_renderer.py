@@ -90,6 +90,19 @@ def _make_music_track(tmp_path: Path) -> MusicTrackResult:
     )
 
 
+def _make_music_track_named(tmp_path: Path, name: str, category: str = "Mystery") -> MusicTrackResult:
+    music_path = tmp_path / f"{name}.mp3"
+    music_path.write_bytes(b"\xff\xfb" * 100)
+    return MusicTrackResult(
+        track_id=name,
+        category=category,
+        asset_id=f"channel/music/mystery/{name}",
+        local_path=music_path,
+        source="ai_generated",
+        duration_seconds=120.0,
+    )
+
+
 def _mock_ffmpeg_success():
     def _side_effect(cmd, capture_output, text, timeout):
         out = Path(cmd[-1])
@@ -547,6 +560,248 @@ class TestAudioMixingInternals:
         cmd_str = " ".join(str(c) for c in cmd)
         assert "amix" in cmd_str
         assert f"volume={_MUSIC_AMPLITUDE_FACTOR}" in cmd_str
+
+    def test_short_with_clip_narration_and_music_all_audio_indices_valid(self, tmp_path):
+        """Regression test for a real 2026-07-05 production failure: a Short
+        with one video clip + narration + music produced a filtergraph
+        referencing [3:a] when only 3 inputs (indices 0-2) existed --
+        'Invalid file index 3 in filtergraph description', causing every
+        short in that episode to fail and cascading into
+        production_ready=False. Already fixed in code (audio_input_index is
+        derived from inputs.count('-i'), not a hardcoded offset), but no
+        test previously covered this exact clip+narration+music+is_short
+        combination -- this locks the fix in so it cannot silently regress."""
+        import re
+
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"\xff\xfb" * 100)
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        music_track = _make_music_track(tmp_path)
+
+        entry = _make_entry(
+            source_type="short", short_id="short_001",
+            clip_path=clip_path, duration_seconds=4.5, clip_duration_seconds=4.5,
+        )
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry],
+            narration_path=narration_path,
+            music_track=music_track,
+            output_path=tmp_path / "out.mp4",
+            resolution="1080x1920",
+            episode_id="ep_001",
+            is_short=True,
+        )
+
+        n_inputs = cmd.count("-i")
+        filter_str = " ".join(str(c) for c in cmd)
+        referenced_indices = {int(m) for m in re.findall(r"\[(\d+):a\]", filter_str)}
+        assert referenced_indices, "expected at least one [N:a] audio reference"
+        for idx in referenced_indices:
+            assert idx < n_inputs, (
+                f"filtergraph references audio input index {idx}, but only "
+                f"{n_inputs} -i argument(s) were supplied (valid range "
+                f"0..{n_inputs - 1}) -- this is the exact 'Invalid file "
+                f"index' failure mode from the 2026-07-05 incident"
+            )
+
+
+# ---------------------------------------------------------------------------
+# TestMultiSegmentMusic (Option B, 2026-07-19 — main episode only)
+# ---------------------------------------------------------------------------
+
+class TestMultiSegmentMusic:
+    """
+    _build_ffmpeg_concat_command() places multiple timed music segments into
+    one [msc] stream (see _build_multi_segment_music_filter). Everything
+    downstream of [msc] -- the narration mix, loudnorm -- is byte-identical
+    to the single-track path; these tests only probe how [msc] itself gets
+    built.
+    """
+
+    def _fc(self, cmd):
+        if "-filter_complex" in cmd:
+            return cmd[cmd.index("-filter_complex") + 1]
+        return ""
+
+    def test_two_segments_produce_two_delayed_streams_summed_via_amix(self, tmp_path):
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        seg_a = _make_music_track_named(tmp_path, "seg_a", category="Mystery")
+        seg_b = _make_music_track_named(tmp_path, "seg_b", category="Tension")
+        music_segments = [
+            {"start_seconds": 0.0, "end_seconds": 40.0, "track": seg_a},
+            {"start_seconds": 40.0, "end_seconds": 90.0, "track": seg_b},
+        ]
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001", music_segments=music_segments,
+        )
+        fc = self._fc(cmd)
+
+        assert "[mscseg0]" in fc
+        assert "[mscseg1]" in fc
+        assert "adelay=delays=0:all=1" in fc          # first segment starts at t=0
+        assert "adelay=delays=40000:all=1" in fc      # second segment starts at t=40s
+        assert "amix=inputs=2" in fc
+        assert "[msc]" in fc
+        assert "[narr][msc]amix" in fc                # unchanged downstream combine step
+
+    def test_single_segment_uses_anull_not_amix_for_segment_combine(self, tmp_path):
+        """With exactly one real-track segment, the segment stream is
+        passed straight through via anull -- no self-amix of one input."""
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        seg = _make_music_track_named(tmp_path, "seg_only")
+        music_segments = [{"start_seconds": 0.0, "end_seconds": 60.0, "track": seg}]
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001", music_segments=music_segments,
+        )
+        fc = self._fc(cmd)
+
+        assert "[mscseg0]anull[msc]" in fc
+        assert "amix=inputs=1" not in fc
+
+    def test_none_music_segments_falls_back_to_legacy_single_track(self, tmp_path):
+        """music_segments omitted entirely reproduces the original
+        single-track filtergraph byte-for-byte."""
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        music_track = _make_music_track(tmp_path)
+
+        cmd_legacy = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=music_track,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001",
+        )
+        cmd_explicit_none = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=music_track,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001", music_segments=None,
+        )
+        assert cmd_legacy == cmd_explicit_none
+        assert "mscseg" not in " ".join(str(c) for c in cmd_legacy)
+
+    def test_segments_with_no_track_fall_back_to_legacy_single_track(self, tmp_path):
+        """Backward compatibility with an older single-key music_track_package:
+        when every segment's track is None (Assembly could not resolve any
+        per-section track), the legacy music_track parameter is used
+        instead of an empty/silent multi-segment graph."""
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        legacy_track = _make_music_track(tmp_path)
+        music_segments = [
+            {"start_seconds": 0.0, "end_seconds": 40.0, "track": None},
+            {"start_seconds": 40.0, "end_seconds": 90.0, "track": None},
+        ]
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=legacy_track,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001", music_segments=music_segments,
+        )
+        fc = self._fc(cmd)
+
+        assert "mscseg" not in fc
+        assert "[msc]" in fc  # legacy single-track loop path still present
+
+    def test_missing_track_segment_excluded_leaves_gap_not_error(self, tmp_path):
+        """A mix of present and missing per-section tracks only emits inputs
+        for the present ones -- the missing section's window is silence
+        (excluded), not a crash or a stretched neighbor."""
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        seg_a = _make_music_track_named(tmp_path, "present")
+        music_segments = [
+            {"start_seconds": 0.0, "end_seconds": 40.0, "track": seg_a},
+            {"start_seconds": 40.0, "end_seconds": 90.0, "track": None},
+        ]
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001", music_segments=music_segments,
+        )
+        fc = self._fc(cmd)
+
+        assert "[mscseg0]" in fc
+        assert "[mscseg1]" not in fc
+        assert "[mscseg0]anull[msc]" in fc
+
+    def test_multi_segment_all_audio_indices_valid(self, tmp_path):
+        """Same class of regression as the 2026-07-05 [3:a] incident: every
+        [N:a] index referenced in the filtergraph must correspond to a real
+        -i input, including the new multi-segment music inputs."""
+        import re
+
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        seg_a = _make_music_track_named(tmp_path, "seg_a")
+        seg_b = _make_music_track_named(tmp_path, "seg_b")
+        music_segments = [
+            {"start_seconds": 0.0, "end_seconds": 40.0, "track": seg_a},
+            {"start_seconds": 40.0, "end_seconds": 90.0, "track": seg_b},
+        ]
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001", music_segments=music_segments,
+        )
+        n_inputs = cmd.count("-i")
+        fc = self._fc(cmd)
+        referenced_indices = {int(m) for m in re.findall(r"\[(\d+):a\]", fc)}
+        assert referenced_indices
+        for idx in referenced_indices:
+            assert idx < n_inputs
+
+    def test_last_segment_extended_by_music_tail_seconds(self, tmp_path):
+        """The final segment's atrim duration is extended by
+        music_tail_seconds so music continues into the outro hold, matching
+        single-track behavior; earlier segments are not extended."""
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        seg_a = _make_music_track_named(tmp_path, "seg_a")
+        seg_b = _make_music_track_named(tmp_path, "seg_b")
+        music_segments = [
+            {"start_seconds": 0.0, "end_seconds": 40.0, "track": seg_a},
+            {"start_seconds": 40.0, "end_seconds": 90.0, "track": seg_b},
+        ]
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080",
+            episode_id="ep_001", music_segments=music_segments,
+            music_tail_seconds=2.5,
+        )
+        fc = self._fc(cmd)
+        # seg_a (not last): atrim=0:40.000000 unchanged by the tail.
+        assert "atrim=0:40.000000,asetpts=PTS-STARTPTS,adelay=delays=0" in fc
+        # seg_b (last): 50s window + 2.5s tail = 52.5s.
+        assert "atrim=0:52.500000,asetpts=PTS-STARTPTS,adelay=delays=40000" in fc
+
+    def test_is_short_ignores_music_segments(self, tmp_path):
+        """Shorts must remain completely unchanged (Option 1, 2026-07-19) --
+        even if a caller mistakenly passed music_segments for a Short, the
+        renderer path itself is untouched by is_short (Assembly Agent never
+        actually does this in production; this only guards the ffmpeg
+        command builder's own behavior)."""
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        music_track = _make_music_track(tmp_path)
+
+        cmd_no_segments = _build_ffmpeg_concat_command(
+            timeline=[], narration_path=narration_path, music_track=music_track,
+            output_path=tmp_path / "out.mp4", resolution="1080x1920",
+            episode_id="ep_001", is_short=True,
+        )
+        assert "mscseg" not in " ".join(str(c) for c in cmd_no_segments)
 
 
 # ---------------------------------------------------------------------------

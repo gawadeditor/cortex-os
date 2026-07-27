@@ -219,6 +219,22 @@
     </div>
   </div>
 
+  {# ── Diagnostics ── #}
+  <div style="border-top:1px solid var(--border); padding-top:10px; margin-bottom:14px;">
+    <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase;
+                letter-spacing:.05em; margin-bottom:6px;">Diagnostics</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:6px;">
+      <button class="btn" id="btn-smoke-test" onclick="smokeTestAction(this)">
+        ⚙ Run Smoke Test
+      </button>
+      <span id="smoke-test-result" style="font-size:12px; color:var(--muted); margin-left:4px;"></span>
+    </div>
+    <div style="font-size:11px; color:var(--muted); line-height:1.7;">
+      <strong style="color:var(--text);">⚙ Run Smoke Test</strong> — exercises the full scheduler → queue → worker
+      path end-to-end with dry_run enforced. Never calls run_pipeline, never generates content, never publishes.
+    </div>
+  </div>
+
   {# ── Failed runs shortcut ── #}
   <div style="display:flex; gap:12px; flex-wrap:wrap; font-size:12px; margin-bottom:14px;">
     <a href="/runs?status=failed" class="btn" style="font-size:11px; padding:4px 12px;">
@@ -263,6 +279,73 @@
   <span class="err">Worker state unavailable. Check system logs.</span>
 </div>
 {% endif %}
+
+{# ══════════════════════════════════════════════════════
+   FACTORY / RUNTIME STATUS (read-only) — Minimum Operational Dashboard Phase 1
+══════════════════════════════════════════════════════ #}
+<div class="card" style="margin-bottom:var(--gap); padding:16px 20px;">
+  <div class="card-title" style="margin-bottom:10px;">Factory Status</div>
+  {% if factory_status %}
+  <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+    <span class="badge
+      {% if factory_status.readiness_level == 'READY' %}badge-worker-idle
+      {% elif factory_status.readiness_level == 'DEGRADED' %}badge-worker-paused
+      {% elif factory_status.readiness_level == 'BLOCKED' %}badge-worker-error
+      {% else %}badge-worker-unknown{% endif %}"
+      style="font-size:11px; padding:2px 10px;">
+      {{ factory_status.readiness_level }}
+    </span>
+    <span style="font-size:12px; color:var(--muted);">score {{ factory_status.readiness_score }}/100</span>
+    <span style="font-size:12px; color:var(--muted);">·
+      {{ "can run" if factory_status.can_run else "cannot run" }}
+    </span>
+    {% if factory_status.assessed_at %}
+    <span style="font-size:11px; color:var(--muted); margin-left:auto;">as of {{ factory_status.assessed_at[:19] | replace('T',' ') }}</span>
+    {% endif %}
+  </div>
+  {% if factory_status.run_clearance.reason %}
+  <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
+    <strong style="color:var(--text);">Run clearance:</strong> {{ factory_status.run_clearance.reason }}
+  </div>
+  {% endif %}
+  {% if factory_status.blocking_reasons %}
+  <div style="font-size:12px; margin-bottom:6px;">
+    <strong style="color:var(--red);">Blocking:</strong>
+    <ul style="margin:4px 0 0 18px; padding:0; color:var(--muted);">
+      {% for r in factory_status.blocking_reasons %}<li>{{ r }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% if factory_status.warnings %}
+  <div style="font-size:12px;">
+    <strong style="color:var(--yellow);">Warnings:</strong>
+    <ul style="margin:4px 0 0 18px; padding:0; color:var(--muted);">
+      {% for w in factory_status.warnings %}<li>{{ w }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% else %}
+  <div style="color:var(--muted); font-size:13px;">Factory status unavailable.</div>
+  {% endif %}
+
+  {% if latest_worker_attempt %}
+  <div style="border-top:1px solid var(--border); margin-top:12px; padding-top:10px; font-size:12px;">
+    <strong style="color:var(--text);">Last worker attempt</strong>
+    <span style="color:var(--muted);">
+      — episode {{ latest_worker_attempt.episode_id }} ({{ latest_worker_attempt.channel_id or "—" }},
+      {{ latest_worker_attempt.invocation_mode }}) —
+      {% if latest_worker_attempt.blocked_reason %}
+        <span style="color:var(--red);">blocked: {{ latest_worker_attempt.blocked_reason }}</span>
+      {% elif latest_worker_attempt.success %}
+        <span style="color:var(--green);">succeeded</span>
+      {% else %}
+        <span>in progress / not yet resolved</span>
+      {% endif %}
+      {% if latest_worker_attempt.finished_at %} ({{ latest_worker_attempt.finished_at[:19] | replace('T',' ') }}){% endif %}
+    </span>
+  </div>
+  {% endif %}
+</div>
 
 {# ── Summary strip ── #}
 {% set n_idle    = workers | selectattr('status','eq','idle')    | list | length %}
@@ -426,6 +509,57 @@
     No schedules configured.
     <a href="/api/schedules" style="color:var(--blue);">Create via API →</a>
   </div>
+  {% endif %}
+</div>
+
+
+{# ══════════════════════════════════════════════════════
+   CHANNEL OPERATIONS PROFILES (read-only) — Minimum Operational Dashboard Phase 1
+══════════════════════════════════════════════════════ #}
+<div class="card" style="margin-top:var(--gap); padding:16px 20px;">
+  <div class="card-title" style="margin-bottom:12px;">
+    Channel Operations Profiles
+    <span style="font-size:11px; color:var(--muted); font-weight:400; margin-left:8px;">
+      — why autonomous production is or isn't allowed per channel
+    </span>
+  </div>
+  {% if channel_operations_profiles %}
+  <table class="sched-table">
+    <thead>
+      <tr>
+        <th>Channel</th>
+        <th>Operator</th>
+        <th>Production</th>
+        <th>Publishing</th>
+        <th>Unattended</th>
+        <th>Max Concurrent</th>
+        <th>Publishing Schedule</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for p in channel_operations_profiles %}
+    <tr>
+      <td style="font-weight:600; font-size:12px;">{{ p.channel_id }}</td>
+      {% if p.profile %}
+      <td>{% if p.profile.operator_enabled %}<span class="sched-status-active">● On</span>{% else %}<span class="sched-status-disabled">○ Off</span>{% endif %}</td>
+      <td>{% if p.profile.production_enabled %}<span class="sched-status-active">● On</span>{% else %}<span class="sched-status-disabled">○ Off</span>{% endif %}</td>
+      <td>{% if p.profile.publishing_enabled %}<span class="sched-status-active">● On</span>{% else %}<span class="sched-status-disabled">○ Off</span>{% endif %}</td>
+      <td>{% if p.profile.unattended_operation_enabled %}<span class="sched-status-active">● On</span>{% else %}<span class="sched-status-disabled">○ Off</span>{% endif %}</td>
+      <td style="text-align:center; font-size:12px; color:var(--muted);">{{ p.profile.max_concurrent_episodes }}</td>
+      <td style="font-size:12px; color:var(--muted);">
+        {% if p.profile.publishing_schedule and p.profile.publishing_schedule.day_of_week %}
+          {{ p.profile.publishing_schedule.day_of_week }} {{ p.profile.publishing_schedule.time_of_day or '' }}
+        {% else %}—{% endif %}
+      </td>
+      {% else %}
+      <td colspan="6" style="color:var(--muted); font-size:12px;">No operations profile configured</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div style="color:var(--muted); font-size:13px; padding:12px 0;">No channels configured.</div>
   {% endif %}
 </div>
 
@@ -691,6 +825,29 @@ function queueAction(action, btn) {
       }
     } else {
       btn.disabled = false;
+    }
+  })
+  .catch(function(e) {
+    btn.disabled = false;
+    if (resultEl) { resultEl.style.color = 'var(--red)'; resultEl.textContent = '✗ network error'; }
+  });
+}
+
+// ── Smoke test ────────────────────────────────────────────────────────────
+function smokeTestAction(btn) {
+  var resultEl = document.getElementById('smoke-test-result');
+  btn.disabled = true;
+  if (resultEl) { resultEl.style.color = 'var(--muted)'; resultEl.textContent = 'Running…'; }
+
+  fetch('/api/worker/smoke-test', {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    if (resultEl) {
+      resultEl.style.color = d.success ? 'var(--green)' : 'var(--red)';
+      resultEl.textContent = d.success
+        ? '✓ passed — ' + (d.steps_completed || []).join(' → ')
+        : '✗ ' + (d.failure_reason || 'failed');
     }
   })
   .catch(function(e) {

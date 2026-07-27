@@ -1,8 +1,13 @@
 """
 hypogeum/factory_director.py — Factory Director: Cross-System Governance Assessment
 
-Advisory governance layer that assesses operational readiness across all seven
-Factory OS governance domains. Phase A: read-only, advisory, not a runtime gate.
+Governance layer that assesses operational readiness across all seven Factory
+OS governance domains. assess_factory() itself remains read-only/advisory
+(never raises, never blocks). check_run_clearance() is the one exception:
+run_worker.py's autonomous loop calls it as an actual runtime gate before
+starting a new run (wired 2026-07-18) — OIS blocking signals, factory-active
+status, credentials, and now monthly budget-ceiling overage all stop a new
+run from starting, not just from being reported as unhealthy.
 
 Seven domains assessed:
     1. factory_entity    — factory record, status, owner presence
@@ -102,6 +107,14 @@ class RunClearanceDecision:
     blocking_signals:  list       # list[dict] from OIS
     pending_approvals: int
     checked_at:        str
+    # Set to the literal string "supervised validation budget exemption"
+    # only when check_run_clearance()'s validation_mode=True actually
+    # bypassed a would-have-blocked monthly budget-ceiling check (2026-07-18)
+    # -- None in every other case, including validation_mode=True runs that
+    # were never going to be budget-blocked in the first place. This is the
+    # sole audit trail for the exemption: no other blocking check (OIS,
+    # factory-active, credentials) is ever affected by validation_mode.
+    validation_exemption: Optional[str] = None
 
 
 @dataclass
@@ -707,6 +720,125 @@ def _assess_credentials(db_path: Path) -> DomainHealth:
 # Domain 7 — Factory Capacity
 # ---------------------------------------------------------------------------
 
+def _get_month_cost_and_ceiling(db_path: Path, factory_id: str) -> tuple[float, float]:
+    """
+    Single source of truth for "how much has the factory spent this month"
+    vs. "what is the effective monthly budget ceiling" — shared by
+    _assess_factory_capacity()'s non-blocking 90%-headroom warning and
+    check_run_clearance()'s blocking ceiling-exceeded check, so the two
+    call sites can never compute this differently.
+
+    Ceiling resolution is deliberately NOT delegated to
+    hypogeum.policy_cascade.get_effective_budget_ceiling() here: that
+    helper returns a PER-EPISODE value (monthly_ceiling_usd /
+    episodes_per_month) for its own legitimate use in
+    validate_factory_policy_constraints() — correct and unchanged for
+    that purpose. This function's month_cost is a MONTHLY TOTAL summed
+    across every episode, so comparing it against a per-episode-scaled
+    ceiling would gate episodes_per_month times too early. Instead, the
+    factory's monthly_ceiling_usd is read and compared directly — still
+    matching policy_cascade.py's documented precedence
+    ("factory_policies -> runtime env"): the factory value wins whenever
+    it's set (> 0); the env var is used only when the factory value is
+    unset or zero, so `monthly_ceiling_usd = 0` restores the exact
+    pre-existing env-only behavior.
+
+    Returns:
+        (month_cost, ceiling) — both floats. ceiling <= 0 means "no
+        ceiling configured", which callers must treat as "no budget gate
+        applies."
+    """
+    from hypogeum.factory_entity import get_factory_policies
+    from hypogeum.config import Config
+    try:
+        env_ceiling = Config().FINANCE_BUDGET_CEILING_USD
+    except Exception:
+        env_ceiling = 0.0
+
+    try:
+        factory_monthly_ceiling = float(
+            get_factory_policies(factory_id, db_path=db_path).get("monthly_ceiling_usd") or 0
+        )
+    except Exception:
+        # Factory not found, DB error, malformed policy JSON, etc. — fall
+        # back to env, matching policy_cascade.py's own suppression of
+        # FactoryNotFoundError elsewhere in this cascade.
+        factory_monthly_ceiling = 0.0
+
+    ceiling = factory_monthly_ceiling if factory_monthly_ceiling > 0 else env_ceiling
+
+    conn = get_connection(db_path)
+    try:
+        month_cost_row = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM costs "
+            "WHERE strftime('%Y-%m', called_at) = strftime('%Y-%m', 'now')"
+        ).fetchone()
+        month_cost = float(month_cost_row["total"] or 0)
+    finally:
+        conn.close()
+
+    return month_cost, ceiling
+
+
+def get_budget_status(db_path: Optional[Path] = None, factory_id: str = "hypogeum") -> dict:
+    """
+    Composed budget status for the Dashboard budget-ceiling route (GET and
+    POST both use this — one shared computation, never duplicated between
+    the two). Not a new gate — reuses _get_month_cost_and_ceiling() (the
+    same function check_run_clearance() itself calls) and
+    check_run_clearance() directly, so this can never drift from the
+    actual gate's own decision.
+
+    Returns:
+        {
+            "month_to_date_spend_usd": float,
+            "effective_ceiling_usd": float,       # 0.0 = no ceiling configured
+            "ceiling_source": "factory_policy" | "env_fallback" | "none",
+            "headroom_usd": float,                 # max(0, ceiling - spend); 0 if no ceiling
+            "cleared": bool,                       # check_run_clearance()'s own verdict
+            "blocking_reason": Optional[str],       # None when cleared
+        }
+    """
+    resolved = _resolve_db(db_path)
+    month_cost, ceiling = _get_month_cost_and_ceiling(resolved, factory_id)
+
+    from hypogeum.factory_entity import get_factory_policies
+    try:
+        factory_ceiling = float(
+            get_factory_policies(factory_id, db_path=resolved).get("monthly_ceiling_usd") or 0
+        )
+    except Exception:
+        factory_ceiling = 0.0
+
+    if factory_ceiling > 0:
+        source = "factory_policy"
+    elif ceiling > 0:
+        source = "env_fallback"
+    else:
+        source = "none"
+
+    headroom = max(0.0, ceiling - month_cost) if ceiling > 0 else 0.0
+
+    decision = check_run_clearance(db_path=resolved)
+    blocking_reason = None
+    if not decision.cleared and "monthly ceiling" in (decision.reason or ""):
+        blocking_reason = decision.reason
+    elif not decision.cleared:
+        # Cleared is False for a reason unrelated to budget (OIS signal,
+        # factory inactive, missing credentials) — do not mislabel it as
+        # a budget block.
+        blocking_reason = None
+
+    return {
+        "month_to_date_spend_usd": round(month_cost, 2),
+        "effective_ceiling_usd": round(ceiling, 2),
+        "ceiling_source": source,
+        "headroom_usd": round(headroom, 2),
+        "cleared": decision.cleared,
+        "blocking_reason": blocking_reason,
+    }
+
+
 def _assess_factory_capacity(db_path: Path, factory_id: str) -> DomainHealth:
     """
     Four infrastructure-only checks unique to the capacity domain.
@@ -805,27 +937,7 @@ def _assess_factory_capacity(db_path: Path, factory_id: str) -> DomainHealth:
 
     # --- Budget headroom ---
     try:
-        from hypogeum.policy_cascade import get_effective_budget_ceiling
-        from hypogeum.config import Config
-        try:
-            env_ceiling = Config().FINANCE_BUDGET_CEILING_USD
-        except Exception:
-            env_ceiling = 0.0
-        ceiling = get_effective_budget_ceiling(
-            env_ceiling=env_ceiling,
-            factory_id=factory_id,
-            db_path=db_path,
-        )
-
-        conn = get_connection(db_path)
-        try:
-            month_cost_row = conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM costs "
-                "WHERE strftime('%Y-%m', called_at) = strftime('%Y-%m', 'now')"
-            ).fetchone()
-            month_cost = float(month_cost_row["total"] or 0)
-        finally:
-            conn.close()
+        month_cost, ceiling = _get_month_cost_and_ceiling(db_path, factory_id)
 
         if ceiling > 0:
             utilization = month_cost / ceiling
@@ -1027,21 +1139,47 @@ def assess_factory(
 
 
 def check_run_clearance(
-    db_path:    Optional[Path] = None,
-    channel_id: Optional[str]  = None,
+    db_path:         Optional[Path] = None,
+    channel_id:      Optional[str]  = None,
+    validation_mode: bool           = False,
 ) -> RunClearanceDecision:
     """
     Fast-path clearance check: only the checks that can block a new run.
 
-    Covers: OIS blocking signals, factory entity active, credentials present.
-    Does not run the full seven-domain assessment.
+    Covers: OIS blocking signals, factory entity active, credentials present,
+    monthly budget ceiling not exceeded. Does not run the full seven-domain
+    assessment.
+
+    Args:
+        db_path:    Override SQLite path. None = production default.
+        channel_id: Unused by any check below today (no per-channel blocking
+            check exists yet) — accepted for forward-compatible signature
+            parity with callers that already pass it (e.g. run_worker.py).
+        validation_mode: Narrow, explicit exemption for supervised validation
+            runs ONLY (added 2026-07-18, per explicit product decision — see
+            RunClearanceDecision.validation_exemption's own docstring).
+            When True, and ONLY when the monthly budget-ceiling check would
+            otherwise have blocked (utilization >= 100%), that ONE check is
+            skipped and RunClearanceDecision.validation_exemption is set to
+            "supervised validation budget exemption" as the audit trail.
+            Every other blocking check (OIS blocking signals, factory-active
+            status, active credentials) is completely unaffected by this
+            flag — it exempts the budget check alone, nothing else.
+            Deliberately NOT inferred from MUAPI_DRY_RUN (a validation run
+            can still incur real, non-MUAPI cost — OpenRouter/Claude,
+            ElevenLabs) and NOT exposed via any CLI flag or DB-driven
+            toggle — run_worker.py's actual autonomous loop
+            (run_worker()) never sets this; only an explicit, one-off
+            Python caller (e.g. a supervised validation script) can.
 
     Returns:
-        RunClearanceDecision with cleared=True/False and reason.
+        RunClearanceDecision with cleared=True/False, reason, and (when
+        applicable) validation_exemption set.
     """
     checked_at = _now_iso()
     resolved = _resolve_db(db_path)
     blocking_checks: list[DomainCheck] = []
+    validation_exemption: Optional[str] = None
     blocking_signals: list[dict] = []
     pending_approvals = 0
 
@@ -1097,6 +1235,40 @@ def check_run_clearance(
     except Exception:
         pass
 
+    # Budget ceiling exceeded — hard block. Deliberately a stricter
+    # threshold than _assess_factory_capacity()'s own 90%-headroom
+    # warning (non-blocking, "approaching ceiling"): that check is an
+    # early heads-up surfaced in the full assess_factory() report; this
+    # one is the actual runtime gate run_worker.py consults before
+    # starting a new run, and only fires once the ceiling is genuinely
+    # exceeded (utilization >= 100%), via the same shared
+    # _get_month_cost_and_ceiling() computation — never a second,
+    # independently-maintained copy of the budget logic.
+    try:
+        # check_run_clearance() has no factory_id parameter of its own
+        # (single-factory deployment today) -- "hypogeum" matches
+        # assess_factory()'s own default factory_id.
+        month_cost, ceiling = _get_month_cost_and_ceiling(resolved, "hypogeum")
+        if ceiling > 0 and month_cost >= ceiling:
+            if validation_mode:
+                # Narrow, explicit exemption (2026-07-18) -- ONLY this one
+                # check is skipped; every other blocking check above is
+                # completely unaffected. See check_run_clearance()'s own
+                # docstring for why this exists and is never inferable from
+                # MUAPI_DRY_RUN or reachable from the autonomous loop.
+                validation_exemption = "supervised validation budget exemption"
+            else:
+                blocking_checks.append(_fail(
+                    "budget_ceiling_not_exceeded", "Monthly budget ceiling not exceeded",
+                    True,
+                    f"${month_cost:.2f} spent of ${ceiling:.2f} monthly ceiling "
+                    f"({month_cost / ceiling:.0%})",
+                    "Raise the budget ceiling (FINANCE_BUDGET_CEILING_USD or policy_cascade "
+                    "override) or wait for the next billing month before starting new runs",
+                ))
+    except Exception:
+        pass
+
     # Pending approvals (informational) — delegate to approvals API
     try:
         from hypogeum.approvals import list_pending_approvals
@@ -1116,6 +1288,7 @@ def check_run_clearance(
             blocking_signals=blocking_signals,
             pending_approvals=pending_approvals,
             checked_at=checked_at,
+            validation_exemption=validation_exemption,
         )
 
     return RunClearanceDecision(
@@ -1125,6 +1298,7 @@ def check_run_clearance(
         blocking_signals=[],
         pending_approvals=pending_approvals,
         checked_at=checked_at,
+        validation_exemption=validation_exemption,
     )
 
 

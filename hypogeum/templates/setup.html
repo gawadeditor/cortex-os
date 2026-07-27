@@ -162,7 +162,7 @@
 
   <div style="margin-top:14px; border-top:1px solid var(--border); padding-top:10px;">
     <div style="font-size:12px; color:var(--muted); margin-bottom:6px; font-weight:600;">
-      Update ceiling (writes to .env and takes effect immediately):
+      Bootstrap/fallback ceiling (writes to .env — requires a worker restart to take effect for an already-running worker):
     </div>
     <div class="ceiling-form">
       <span style="font-size:13px;">$</span>
@@ -176,6 +176,32 @@
     <div style="font-size:11px; color:var(--muted); margin-top:4px;">
       Recommended minimum: ${{ preflight.estimated_cost_high|int }}
     </div>
+  </div>
+
+  <div style="margin-top:18px; border-top:2px solid var(--border); padding-top:10px;">
+    <div style="font-size:12px; color:var(--muted); margin-bottom:8px; font-weight:600;">
+      Production control — monthly factory ceiling (database-backed; a running worker
+      reads it on its very next iteration, no restart needed). This is a
+      <strong>monthly</strong> total across all episodes, not a per-episode ceiling.
+      This control never edits <code>.env</code>.
+    </div>
+    <div id="factory-budget-status" style="font-size:13px; margin-bottom:10px;">Loading…</div>
+    <div class="ceiling-form">
+      <span style="font-size:13px;">$</span>
+      <input type="number" id="factory-ceiling-input" class="ceiling-input"
+             placeholder="0" min="0" step="1">
+      <button class="btn" onclick="updateFactoryCeiling()">Save</button>
+      <span id="factory-ceiling-save-msg" class="ceiling-msg"></span>
+    </div>
+    <div style="font-size:11px; color:var(--muted); margin-top:6px;">
+      A reason is required for every change. Setting this to 0 restores the
+      .env/bootstrap ceiling above as the active gate. Increasing the ceiling
+      requires an extra confirmation.
+    </div>
+    <textarea id="factory-ceiling-reason" placeholder="Reason for this change (required)"
+              style="width:100%; margin-top:8px; font-size:12px; padding:6px;
+                     box-sizing:border-box; border:1px solid var(--border); border-radius:4px;"
+              rows="2"></textarea>
   </div>
 </div>
 
@@ -314,6 +340,90 @@ function updateCeiling() {
     msg.textContent = '✗ ' + err.message;
   });
 }
+
+function renderFactoryBudgetStatus(data) {
+  var el = document.getElementById('factory-budget-status');
+  if (!el) return;
+  var sourceLabel = data.ceiling_source === 'factory_policy'
+    ? 'factory policy (DB)' : (data.ceiling_source === 'env_fallback' ? '.env fallback' : 'none configured');
+  var clearedLine = data.cleared
+    ? '<span class="ok">✓ Cleared — new runs may be claimed</span>'
+    : '<span class="err">✗ Blocked' + (data.blocking_reason ? ': ' + data.blocking_reason : '') + '</span>';
+  el.innerHTML =
+    '<div>Month-to-date spend: <strong>$' + data.month_to_date_spend_usd.toFixed(2) + '</strong></div>' +
+    '<div>Effective monthly ceiling: <strong>$' + data.effective_ceiling_usd.toFixed(2) + '</strong> (source: ' + sourceLabel + ')</div>' +
+    '<div>Headroom: <strong>$' + data.headroom_usd.toFixed(2) + '</strong></div>' +
+    '<div style="margin-top:4px;">' + clearedLine + '</div>';
+  var input = document.getElementById('factory-ceiling-input');
+  if (input && document.activeElement !== input) {
+    input.setAttribute('data-current', data.effective_ceiling_usd);
+  }
+}
+
+function loadFactoryBudgetStatus() {
+  fetch('/api/factory/budget-ceiling')
+    .then(function(r) { return r.json(); })
+    .then(renderFactoryBudgetStatus)
+    .catch(function() {
+      var el = document.getElementById('factory-budget-status');
+      if (el) el.textContent = 'Could not load factory budget status.';
+    });
+}
+
+function updateFactoryCeiling() {
+  var input = document.getElementById('factory-ceiling-input');
+  var reasonEl = document.getElementById('factory-ceiling-reason');
+  var msg = document.getElementById('factory-ceiling-save-msg');
+  var val = parseFloat(input.value);
+  var reason = (reasonEl.value || '').trim();
+
+  if (isNaN(val) || val < 0) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'Enter a valid non-negative number';
+    return;
+  }
+  if (!reason) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'A reason is required';
+    return;
+  }
+
+  var currentVal = parseFloat(input.getAttribute('data-current') || '0');
+  if (val > currentVal) {
+    var ok = window.confirm(
+      'This will INCREASE the monthly factory budget ceiling from $' +
+      currentVal.toFixed(2) + ' to $' + val.toFixed(2) +
+      '. This takes effect on the worker\'s next iteration — no restart needed. Continue?'
+    );
+    if (!ok) return;
+  }
+
+  msg.style.color = 'var(--muted)';
+  msg.textContent = 'Saving…';
+  fetch('/api/factory/budget-ceiling', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({monthly_ceiling_usd: val, reason: reason})
+  })
+  .then(function(r) { return r.json().then(function(data) { return {ok: r.ok, data: data}; }); })
+  .then(function(result) {
+    if (result.ok) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = '✓ Saved.';
+      renderFactoryBudgetStatus(result.data);
+      reasonEl.value = '';
+    } else {
+      msg.style.color = 'var(--red)';
+      msg.textContent = '✗ ' + (result.data.error || 'save failed');
+    }
+  })
+  .catch(function(err) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = '✗ ' + err.message;
+  });
+}
+
+loadFactoryBudgetStatus();
 </script>
 
 </body>

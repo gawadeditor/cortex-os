@@ -37,9 +37,38 @@ def _now_utc() -> str:
 
 
 def _db(tmp_path: Path) -> Path:
-    from hypogeum.db import initialize_schema
+    from hypogeum.db import initialize_schema, get_connection
     db = tmp_path / "h.db"
     initialize_schema(db)
+
+    # Seed the minimal active factory + credential rows
+    # hypogeum.factory_director.check_run_clearance() requires to return
+    # cleared=True. Without this, run_iteration()'s clearance gate (wired
+    # 2026-07-18) skips poll on a bare schema, since no-factory/no-credentials
+    # is a genuinely un-cleared state, not a test artifact to special-case
+    # around.
+    conn = get_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO factories (factory_id, factory_name, factory_slug, "
+            "status, default_language, default_timezone, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("hypogeum", "Test Factory", "hypogeum", "active", "en", "UTC",
+             "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        conn.execute(
+            "INSERT INTO secret_profiles "
+            "(secret_profile_id, provider, label, credential_type, "
+            "credential_data, status, scope, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), "openrouter", "openrouter-env", "api_key",
+             "dummy", "active", "factory",
+             "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
     return db
 
 
@@ -293,6 +322,7 @@ _ALL_STAGES = [
     "narrative_architect",
     "script_engine",
     "finance_agent_authorization",
+    "thumbnail_strategy",
     "visual_package_director",
     "thumbnail_director",
     "audio_agent",
@@ -333,6 +363,7 @@ class TestCancelCheckFiresBetweenStages:
             "script_engine":               ("hypogeum.pipeline._run_script_engine", {}),
             "finance_agent_authorization": ("hypogeum.pipeline._run_budget_authorization",
                                             {"verdict": "PROCEED", "estimated_spend_usd": 1.0}),
+            "thumbnail_strategy":          ("hypogeum.pipeline._run_thumbnail_strategy", {}),
             "visual_package_director":     ("hypogeum.pipeline._run_visual_package_director", {}),
             "thumbnail_director":          ("hypogeum.pipeline._run_thumbnail_director", {}),
             "audio_agent":                 ("hypogeum.pipeline._run_audio_agent", {}),
@@ -407,6 +438,9 @@ class TestCancelCheckFiresBetweenStages:
 
     def test_cancel_after_finance_authorization(self, tmp_path):
         self._run_pipeline_until_stage("finance_agent_authorization", tmp_path)
+
+    def test_cancel_after_thumbnail_strategy(self, tmp_path):
+        self._run_pipeline_until_stage("thumbnail_strategy", tmp_path)
 
     def test_cancel_after_visual_package_director(self, tmp_path):
         self._run_pipeline_until_stage("visual_package_director", tmp_path)
@@ -614,6 +648,12 @@ class TestQueuePauseResume:
         # dry_run=True completes items immediately; poll_status should not be 'paused'
         assert result["poll_status"] != "paused"
         assert result["queue_paused"] is False
+        # Confirms the clearance gate (wired 2026-07-18) is not the reason
+        # poll ran -- this test's seeded factory/credentials make the
+        # factory genuinely cleared, isolating "resume allows claiming"
+        # from "clearance gate skipped poll" as two independently-tested
+        # conditions.
+        assert result["factory_cleared"] is True
 
     def test_pause_does_not_affect_current_run(self, tmp_path):
         """Setting queue_paused=1 while a run is executing must not interrupt it."""

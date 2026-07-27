@@ -63,6 +63,41 @@
   {% endif %}
 </div>
 
+{# ── Gate Attempt Panel (Minimum Operational Dashboard Phase 2) ──
+   Distinct from the Recovery Panel below: this reflects the latest
+   ChannelOperationsProfile/BackwardPlan/concurrency gate outcome for this
+   episode (hypogeum.worker_integration.WorkerAttempt), which happens
+   BEFORE the pipeline is ever called — a gate refusal never reaches
+   run_pipeline() at all, so it can coexist with (or predate) this run's
+   own pipeline-level status below. WorkerAttempt is keyed by episode_id,
+   not run_id, so this is "the latest attempt for this episode," which may
+   be newer than the run being viewed if a later retry was gate-refused. #}
+{% if d.worker_attempt %}
+<div class="card" style="margin-bottom:var(--gap); border-color:
+  {% if d.worker_attempt.blocked_reason %}var(--red){% else %}var(--border){% endif %};">
+  <div class="card-title" style="display:flex; align-items:center; gap:8px;">
+    Latest Gate Attempt
+    <span style="font-size:11px; color:var(--muted); font-weight:400;">
+      ({{ d.worker_attempt.invocation_mode }}, this episode)
+    </span>
+  </div>
+  {% if d.worker_attempt.blocked_reason %}
+  <div style="font-size:13px;">
+    <span style="color:var(--red); font-weight:600;">Blocked:</span> {{ d.worker_attempt.blocked_reason }}
+  </div>
+  {% elif d.worker_attempt.success %}
+  <div style="font-size:13px; color:var(--green);">✓ Passed all gates and ran</div>
+  {% else %}
+  <div style="font-size:13px; color:var(--muted);">Not yet resolved</div>
+  {% endif %}
+  {% if d.worker_attempt.finished_at %}
+  <div style="font-size:11px; color:var(--muted); margin-top:4px;">
+    as of {{ d.worker_attempt.finished_at[:19] | replace('T',' ') }}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 {# ── Recovery Panel (failed runs only) ── #}
 {% if recovery and d.run.status == 'failed' %}
 <div class="card" style="border-color:

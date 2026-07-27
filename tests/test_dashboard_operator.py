@@ -8,6 +8,12 @@ Coverage:
     TestQueueFirstCreate        — queued topics shown before manual form, launch blocked by blockers
     TestProvidersRealism        — TikTok is OAuth, MUAPI-backed providers show MUAPI note
     TestDiskEpisodeDetailHelper — _make_disk_episode_detail loads packages correctly
+    TestWorkersPageNeverRaises  — Minimum Operational Dashboard Phase 1: empty-DB safety
+    TestWorkersPageFactoryStatus — Phase 1: factory/runtime status (assess_factory)
+    TestWorkersPageChannelOperationsProfiles — Phase 1: read-only ChannelOperationsProfile summary
+    TestWorkersPageLatestWorkerAttempt — Phase 1: latest WorkerAttempt.blocked_reason
+    TestRunDetailGateAttempt    — Phase 2: per-episode blocked_reason on /run/<id>
+    TestSmokeTestControl        — Phase 2: /api/worker/smoke-test wraps hypogeum.runtime.smoke_run()
 """
 
 from __future__ import annotations
@@ -554,3 +560,474 @@ class TestProvidersRealism:
         import re
         seedance_block = re.search(r"Seedance.{0,200}Verified", body, re.DOTALL)
         assert seedance_block is None, "Seedance showed as Verified without a real probe"
+
+
+# ===========================================================================
+# Minimum Operational Dashboard, Phase 1 — read-only additions to
+# _build_workers_context() / /infrastructure/workers.
+#
+# Scope covered:
+#   1. Factory/runtime status (hypogeum.factory_director.assess_factory)
+#   2. Latest WorkerAttempt.blocked_reason
+#      (hypogeum.worker_integration.load_latest_worker_attempt)
+#   3. Read-only ChannelOperationsProfile summary
+#      (hypogeum.channel_config.get_channel_operations_profile)
+#
+# All three are read-only, sourced entirely from existing public APIs, and
+# passed through to the template as the original objects (no DTO copy) —
+# see run_dashboard.py::_build_workers_context() for the field-access
+# rationale. Requirement 2 of the milestone ("all configured schedules")
+# was already satisfied by the pre-existing `schedules` context key before
+# this phase and is not re-tested here.
+# ===========================================================================
+
+def _make_channel_operations_profile(db_path, channel_id="ch1", **overrides):
+    from hypogeum.channel_config import create_channel_operations_profile, create_channel_profile
+    create_channel_profile(channel_id=channel_id, name="Test Channel", db_path=db_path)
+    kwargs = dict(
+        channel_id=channel_id,
+        channel_name="Test Channel",
+        timezone="UTC",
+        operator_enabled=True,
+        production_cadence={"videos_per_week": 1},
+        publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+        enabled_platforms={"youtube": True},
+        blocked_platform_reasons={},
+        discovery_enabled=True,
+        production_enabled=True,
+        publishing_enabled=False,
+        unattended_operation_enabled=True,
+        max_concurrent_episodes=2,
+        retry_policy={"max_retries_per_stage": 1, "backoff_seconds": 60},
+        failure_halt_policy={
+            "halt_on_production_failure": True,
+            "halt_on_validation_failure": True,
+            "halt_on_enabled_platform_publish_failure": True,
+            "blocked_or_disabled_platforms_do_not_halt": True,
+        },
+        db_path=db_path,
+    )
+    kwargs.update(overrides)
+    return create_channel_operations_profile(**kwargs)
+
+
+class TestWorkersPageNeverRaises:
+
+    def test_page_renders_200_with_empty_db(self, client):
+        resp = client.get("/infrastructure/workers")
+        assert resp.status_code == 200
+
+    def test_context_builder_returns_safe_defaults(self, tmp_path):
+        from hypogeum.db import initialize_schema
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        server.app.config["DB_PATH"] = str(db)
+        with server.app.test_request_context():
+            ctx = server._build_workers_context()
+        # assess_factory() is documented as never-raising, so even against
+        # an empty DB the wrapper should reach a real report object, not
+        # silently swallow into the except-branch None fallback.
+        assert ctx["factory_status"] is not None
+        assert ctx["latest_worker_attempt"] is None
+        assert ctx["channel_operations_profiles"] == []
+
+
+class TestWorkersPageFactoryStatus:
+
+    def test_factory_status_populated_via_assess_factory(self, tmp_path):
+        from hypogeum.db import initialize_schema
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        server.app.config["DB_PATH"] = str(db)
+        with server.app.test_request_context():
+            ctx = server._build_workers_context()
+        fs = ctx["factory_status"]
+        # Passed through as the original FactoryDirectorReport object — no
+        # DTO copy — so this is attribute access, not dict-key access.
+        assert fs.readiness_level in ("READY", "DEGRADED", "BLOCKED", "UNKNOWN")
+        assert isinstance(fs.readiness_score, int)
+        assert isinstance(fs.blocking_reasons, list)
+        assert isinstance(fs.warnings, list)
+        assert hasattr(fs.run_clearance, "reason")
+
+    def test_factory_status_uses_real_assess_factory_not_a_duplicate(self, tmp_path, monkeypatch):
+        """Regression: must call the real assess_factory(), never reimplement
+        factory readiness logic locally."""
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        called = {}
+        import hypogeum.factory_director as fd
+        real_assess = fd.assess_factory
+
+        def _spy(*a, **k):
+            called["hit"] = True
+            return real_assess(*a, **k)
+
+        monkeypatch.setattr("run_dashboard.assess_factory", _spy)
+        server.app.config["DB_PATH"] = str(db)
+        with server.app.test_request_context():
+            server._build_workers_context()
+        assert called.get("hit") is True
+
+    def test_factory_status_renders_on_page(self, client):
+        resp = client.get("/infrastructure/workers")
+        assert b"Factory Status" in resp.data
+
+
+class TestWorkersPageChannelOperationsProfiles:
+
+    def test_profile_fields_surfaced_correctly(self, tmp_path):
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        _make_channel_operations_profile(
+            db, "ch1", production_enabled=True, publishing_enabled=False,
+            unattended_operation_enabled=True, max_concurrent_episodes=3,
+        )
+        server.app.config["DB_PATH"] = str(db)
+        with server.app.test_request_context():
+            ctx = server._build_workers_context()
+        profiles = ctx["channel_operations_profiles"]
+        assert len(profiles) == 1
+        entry = profiles[0]
+        assert entry["channel_id"] == "ch1"
+        # Smallest possible wrapper: {channel_id, profile} — the profile
+        # itself is the original ChannelOperationsProfile object.
+        p = entry["profile"]
+        assert p is not None
+        assert p.production_enabled is True
+        assert p.publishing_enabled is False
+        assert p.unattended_operation_enabled is True
+        assert p.max_concurrent_episodes == 3
+        assert p.publishing_schedule["day_of_week"] == "thursday"
+
+    def test_channel_without_profile_reported_gracefully(self, tmp_path):
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        from hypogeum.channel_config import create_channel_profile
+        initialize_schema(db)
+        create_channel_profile(channel_id="ch_no_profile", name="No Profile Channel", db_path=db)
+        server.app.config["DB_PATH"] = str(db)
+        with server.app.test_request_context():
+            ctx = server._build_workers_context()
+        profiles = ctx["channel_operations_profiles"]
+        assert len(profiles) == 1
+        assert profiles[0]["channel_id"] == "ch_no_profile"
+        assert profiles[0]["profile"] is None
+
+    def test_profile_summary_uses_real_get_channel_operations_profile(self, tmp_path, monkeypatch):
+        """Regression: must call the real channel_config accessor, never
+        reimplement ChannelOperationsProfile reads locally."""
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        _make_channel_operations_profile(db, "ch1")
+        called = {}
+        import hypogeum.channel_config as cc
+        real_get = cc.get_channel_operations_profile
+
+        def _spy(*a, **k):
+            called["hit"] = True
+            return real_get(*a, **k)
+
+        monkeypatch.setattr("hypogeum.channel_config.get_channel_operations_profile", _spy)
+        server.app.config["DB_PATH"] = str(db)
+        with server.app.test_request_context():
+            server._build_workers_context()
+        assert called.get("hit") is True
+
+    def test_profiles_render_on_page(self, client, tmp_path):
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        _make_channel_operations_profile(db, "ch1")
+        server.app.config["DB_PATH"] = str(db)
+        resp = client.get("/infrastructure/workers")
+        html = resp.data.decode()
+        assert "Channel Operations Profiles" in html
+        assert "ch1" in html
+
+
+class TestWorkersPageLatestWorkerAttempt:
+
+    def test_none_when_no_runs_exist(self, tmp_path):
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        server.app.config["DB_PATH"] = str(db)
+        with server.app.test_request_context():
+            ctx = server._build_workers_context()
+        assert ctx["latest_worker_attempt"] is None
+
+    def test_surfaces_blocked_reason_from_real_worker_attempt(self, tmp_path):
+        from datetime import datetime, timezone
+        from hypogeum.db import get_connection, initialize_schema, insert_run
+
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db)
+        try:
+            insert_run(conn, run_id="run_1", episode_id="ep_1", started_at=now)
+            conn.commit()
+        finally:
+            conn.close()
+
+        from hypogeum.worker_integration import WorkerAttempt, save_worker_attempt
+        attempt = WorkerAttempt(
+            worker_run_id="wr_1", channel_id="ch1", episode_id="ep_1",
+            invocation_mode="manual", plan_id=None, plan_status=None,
+            target_publish_at=None, blocked_reason="operator_enabled is False",
+            schedule_status="unknown", started_at=now, finished_at=now,
+            eligible_platforms=[], excluded_platforms={},
+        )
+        attempt_dir = tmp_path / "attempts"
+        save_worker_attempt(attempt, project_root=attempt_dir)
+
+        import hypogeum.worker_integration as wi
+        original = wi.load_latest_worker_attempt
+
+        def _patched(episode_id, project_root=None):
+            return original(episode_id, project_root=attempt_dir)
+
+        server.app.config["DB_PATH"] = str(db)
+        with patch("hypogeum.worker_integration.load_latest_worker_attempt", _patched):
+            with server.app.test_request_context():
+                ctx = server._build_workers_context()
+
+        lwa = ctx["latest_worker_attempt"]
+        assert lwa is not None
+        # Passed through as the original WorkerAttempt object — no DTO copy.
+        assert lwa.episode_id == "ep_1"
+        assert lwa.channel_id == "ch1"
+        assert lwa.blocked_reason == "operator_enabled is False"
+
+    def test_blocked_reason_renders_on_page(self, client, tmp_path):
+        from datetime import datetime, timezone
+        from hypogeum.db import get_connection, initialize_schema, insert_run
+
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db)
+        try:
+            insert_run(conn, run_id="run_1", episode_id="ep_1", started_at=now)
+            conn.commit()
+        finally:
+            conn.close()
+
+        from hypogeum.worker_integration import WorkerAttempt, save_worker_attempt
+        attempt = WorkerAttempt(
+            worker_run_id="wr_1", channel_id="ch1", episode_id="ep_1",
+            invocation_mode="manual", plan_id=None, plan_status=None,
+            target_publish_at=None, blocked_reason="production_enabled is False",
+            schedule_status="unknown", started_at=now, finished_at=now,
+            eligible_platforms=[], excluded_platforms={},
+        )
+        attempt_dir = tmp_path / "attempts"
+        save_worker_attempt(attempt, project_root=attempt_dir)
+
+        import hypogeum.worker_integration as wi
+        original = wi.load_latest_worker_attempt
+
+        def _patched(episode_id, project_root=None):
+            return original(episode_id, project_root=attempt_dir)
+
+        server.app.config["DB_PATH"] = str(db)
+        with patch("hypogeum.worker_integration.load_latest_worker_attempt", _patched):
+            resp = client.get("/infrastructure/workers")
+        assert b"production_enabled is False" in resp.data
+
+
+# ===========================================================================
+# Minimum Operational Dashboard, Phase 2
+#
+# Scope covered:
+#   1. Per-episode blocking reason on /run/<id> (hypogeum.dashboard_runs.
+#      get_run_detail(), via hypogeum.worker_integration.load_latest_worker_attempt())
+#   2. "Run Smoke Test" safe operational control
+#      (/api/worker/smoke-test, wraps hypogeum.runtime.smoke_run() verbatim)
+#
+# Both reuse existing runtime functions with no new orchestration logic;
+# smoke_run() itself enforces dry_run=True regardless of caller arguments.
+# ===========================================================================
+
+def _save_attempt(tmp_path, **overrides):
+    from hypogeum.worker_integration import WorkerAttempt, save_worker_attempt
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    kwargs = dict(
+        worker_run_id="wr_1", channel_id="ch1", episode_id="ep_1",
+        invocation_mode="manual", plan_id=None, plan_status=None,
+        target_publish_at=None, blocked_reason=None,
+        schedule_status="unknown", started_at=now, finished_at=now,
+        eligible_platforms=[], excluded_platforms={},
+    )
+    kwargs.update(overrides)
+    attempt = WorkerAttempt(**kwargs)
+    attempt_dir = tmp_path / "attempts"
+    save_worker_attempt(attempt, project_root=attempt_dir)
+    return attempt_dir
+
+
+def _patched_load_latest_worker_attempt(attempt_dir):
+    import hypogeum.worker_integration as wi
+    original = wi.load_latest_worker_attempt
+
+    def _patched(episode_id, project_root=None):
+        return original(episode_id, project_root=attempt_dir)
+
+    return _patched
+
+
+class TestRunDetailGateAttempt:
+
+    def test_get_run_detail_includes_worker_attempt_key(self, tmp_path):
+        from datetime import datetime, timezone
+        from hypogeum.db import get_connection, initialize_schema, insert_run
+        from hypogeum.dashboard_runs import get_run_detail
+
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db)
+        try:
+            insert_run(conn, run_id="run_1", episode_id="ep_1", started_at=now)
+            conn.commit()
+        finally:
+            conn.close()
+
+        attempt_dir = _save_attempt(tmp_path, blocked_reason="operator_enabled is False")
+        with patch("hypogeum.worker_integration.load_latest_worker_attempt",
+                   _patched_load_latest_worker_attempt(attempt_dir)):
+            detail = get_run_detail("run_1", db_path=db)
+
+        assert detail is not None
+        # Passed through as the original WorkerAttempt object — no DTO copy,
+        # same pattern as Phase 1's factory_status/latest_worker_attempt.
+        assert detail["worker_attempt"].episode_id == "ep_1"
+        assert detail["worker_attempt"].blocked_reason == "operator_enabled is False"
+
+    def test_no_attempt_file_yields_none_not_error(self, tmp_path):
+        from datetime import datetime, timezone
+        from hypogeum.db import get_connection, initialize_schema, insert_run
+        from hypogeum.dashboard_runs import get_run_detail
+
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db)
+        try:
+            insert_run(conn, run_id="run_1", episode_id="ep_1", started_at=now)
+            conn.commit()
+        finally:
+            conn.close()
+
+        detail = get_run_detail("run_1", db_path=db)
+        assert detail is not None
+        assert detail["worker_attempt"] is None
+
+    def test_blocked_reason_renders_on_run_detail_page(self, client, tmp_path):
+        from datetime import datetime, timezone
+        from hypogeum.db import get_connection, initialize_schema, insert_run
+
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db)
+        try:
+            insert_run(conn, run_id="run_1", episode_id="ep_1", started_at=now)
+            conn.commit()
+        finally:
+            conn.close()
+
+        attempt_dir = _save_attempt(tmp_path, blocked_reason="production_enabled is False")
+        server.app.config["DB_PATH"] = str(db)
+        with patch("hypogeum.worker_integration.load_latest_worker_attempt",
+                   _patched_load_latest_worker_attempt(attempt_dir)):
+            resp = client.get("/run/run_1")
+
+        html = resp.data.decode()
+        assert "Latest Gate Attempt" in html
+        assert "production_enabled is False" in html
+
+    def test_successful_attempt_shows_passed_not_blocked(self, client, tmp_path):
+        from datetime import datetime, timezone
+        from hypogeum.db import get_connection, initialize_schema, insert_run
+
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db)
+        try:
+            insert_run(conn, run_id="run_1", episode_id="ep_1", started_at=now)
+            conn.commit()
+        finally:
+            conn.close()
+
+        attempt_dir = _save_attempt(tmp_path, blocked_reason=None, success=True)
+        server.app.config["DB_PATH"] = str(db)
+        with patch("hypogeum.worker_integration.load_latest_worker_attempt",
+                   _patched_load_latest_worker_attempt(attempt_dir)):
+            resp = client.get("/run/run_1")
+
+        html = resp.data.decode()
+        assert "Passed all gates" in html
+
+
+class TestSmokeTestControl:
+
+    def test_smoke_test_route_returns_success(self, client, tmp_path):
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        server.app.config["DB_PATH"] = str(db)
+
+        resp = client.post("/api/worker/smoke-test")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["ok"] is True
+        assert "schedule_created" in data["steps_completed"]
+        assert "poll_completed" in data["steps_completed"]
+
+    def test_smoke_test_never_calls_run_pipeline(self, client, tmp_path):
+        """Regression: smoke_run() enforces dry_run=True internally — the
+        dashboard route must not add its own execution path around it."""
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        server.app.config["DB_PATH"] = str(db)
+
+        with patch(
+            "hypogeum.pipeline.run_pipeline",
+            side_effect=AssertionError("run_pipeline must not be called by a smoke test"),
+        ):
+            resp = client.post("/api/worker/smoke-test")
+        assert resp.status_code == 200
+        assert resp.get_json()["success"] is True
+
+    def test_smoke_test_route_uses_real_smoke_run_not_a_duplicate(self, client, tmp_path, monkeypatch):
+        """Regression: must call the real hypogeum.runtime.smoke_run(),
+        never reimplement the scheduler->queue->worker wiring locally."""
+        db = tmp_path / "test.db"
+        from hypogeum.db import initialize_schema
+        initialize_schema(db)
+        server.app.config["DB_PATH"] = str(db)
+
+        called = {}
+        import hypogeum.runtime as rt
+        real_smoke_run = rt.smoke_run
+
+        def _spy(*a, **k):
+            called["hit"] = True
+            return real_smoke_run(*a, **k)
+
+        monkeypatch.setattr("hypogeum.runtime.smoke_run", _spy)
+        client.post("/api/worker/smoke-test")
+        assert called.get("hit") is True
+
+    def test_smoke_test_button_present_on_workers_page(self, client):
+        resp = client.get("/infrastructure/workers")
+        assert b"Run Smoke Test" in resp.data

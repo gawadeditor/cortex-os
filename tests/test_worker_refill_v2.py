@@ -171,7 +171,7 @@ class TestRefillV1:
         db = _init_db(tmp_path)
         old = os.environ.pop("DISCOVERY_ENGINE", None)
         try:
-            with patch("hypogeum.channel_manager.list_channels", return_value=[_fake_channel()]):
+            with patch("hypogeum.channel_config.list_channel_profiles", return_value=[_fake_channel()]):
                 result = _check_and_refill_queue(db_path=db, threshold=2, auto_approve=False)
         finally:
             if old:
@@ -185,7 +185,7 @@ class TestRefillV1:
         db = _init_db(tmp_path)
         old = os.environ.pop("DISCOVERY_ENGINE", None)
         try:
-            with patch("hypogeum.channel_manager.list_channels", return_value=[_fake_channel()]):
+            with patch("hypogeum.channel_config.list_channel_profiles", return_value=[_fake_channel()]):
                 _check_and_refill_queue(db_path=db, threshold=2, auto_approve=False)
         finally:
             if old:
@@ -198,7 +198,7 @@ class TestRefillV1:
         db = _init_db(tmp_path)
         old = os.environ.pop("DISCOVERY_ENGINE", None)
         try:
-            with patch("hypogeum.channel_manager.list_channels", return_value=[_fake_channel()]):
+            with patch("hypogeum.channel_config.list_channel_profiles", return_value=[_fake_channel()]):
                 _check_and_refill_queue(db_path=db, threshold=2, auto_approve=False)
         finally:
             if old:
@@ -227,7 +227,7 @@ class TestRefillV1:
 
         old = os.environ.pop("DISCOVERY_ENGINE", None)
         try:
-            with patch("hypogeum.channel_manager.list_channels", return_value=[_fake_channel()]):
+            with patch("hypogeum.channel_config.list_channel_profiles", return_value=[_fake_channel()]):
                 result = _check_and_refill_queue(db_path=db, threshold=2, auto_approve=False)
         finally:
             if old:
@@ -240,7 +240,7 @@ class TestRefillV1:
         db = _init_db(tmp_path)
         old = os.environ.pop("DISCOVERY_ENGINE", None)
         try:
-            with patch("hypogeum.channel_manager.list_channels", return_value=[_fake_channel()]):
+            with patch("hypogeum.channel_config.list_channel_profiles", return_value=[_fake_channel()]):
                 result = _check_and_refill_queue(db_path=db, threshold=2, auto_approve=True)
         finally:
             if old:
@@ -267,7 +267,7 @@ class TestRefillV2:
         os.environ["DISCOVERY_VERIFY_THRESHOLD"] = "0.40"   # generous → all opps qualify
 
         try:
-            with patch("hypogeum.channel_manager.list_channels", return_value=[_fake_channel()]), \
+            with patch("hypogeum.channel_config.list_channel_profiles", return_value=[_fake_channel()]), \
                  patch("hypogeum.discovery.topic_ideator.run_agent",
                        return_value=_mock_llm_batch()), \
                  patch("hypogeum.discovery.source_verifier.query_perplexity",

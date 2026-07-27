@@ -47,6 +47,7 @@ from hypogeum.factory_director import (
     assess_factory,
     check_run_clearance,
     format_report,
+    get_budget_status,
 )
 
 
@@ -166,6 +167,24 @@ def _seed_approval(db_path: Path, requested_at: str = None) -> str:
     finally:
         conn.close()
     return aid
+
+
+def _seed_cost(db_path: Path, cost_usd: float, called_at: str = None) -> str:
+    rid = _seed_run(db_path, "completed")
+    cid = str(uuid.uuid4())
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO costs "
+            "(cost_id, run_id, episode_id, provider, call_type, cost_usd, called_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (cid, rid, f"ep_{rid[:6]}", "muapi", "video",
+             cost_usd, called_at or datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cid
 
 
 def _minimal_healthy_db(db_path: Path) -> None:
@@ -642,9 +661,22 @@ class TestAssessCapacity:
         assert q.passed
 
     def test_budget_headroom_with_ceiling(self, db_path):
+        """
+        Updated 2026-07-27: _get_month_cost_and_ceiling() no longer routes
+        through get_effective_budget_ceiling() for this monthly-total
+        comparison (that helper's per-episode-scaled value was being
+        compared against a monthly total — a real semantic mismatch, fixed
+        per DECISION_LOG.md's factory-budget-ceiling work). The factory's
+        own monthly_ceiling_usd is now seeded directly instead of mocking
+        the old seam — this exercises the real, corrected code path.
+        """
+        from hypogeum.factory_entity import update_factory
         _seed_factory(db_path)
-        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=100.0):
-            r = assess_factory(db_path=db_path, factory_id="test")
+        update_factory(
+            "test", db_path=db_path,
+            factory_policies={"monthly_ceiling_usd": 100.0, "episodes_per_month": 4},
+        )
+        r = assess_factory(db_path=db_path, factory_id="test")
         cap = next(d for d in r.domains if d.domain == "factory_capacity")
         headroom = next(c for c in cap.checks if c.check_id == "budget_headroom")
         assert headroom.passed
@@ -769,6 +801,155 @@ class TestCheckRunClearance:
     def test_checked_at_is_set(self, db_path):
         decision = check_run_clearance(db_path=db_path)
         assert decision.checked_at is not None
+
+    # -- budget ceiling (hard block, wired 2026-07-18) -----------------------
+
+    def test_not_cleared_when_budget_ceiling_exceeded(self, db_path):
+        """
+        Updated 2026-07-27: check_run_clearance()'s budget check is
+        hardcoded to factory_id="hypogeum" (pre-existing, documented —
+        "single-factory deployment today"), which _seed_factory() here
+        does not create (it seeds factory_id="test"), so the factory
+        policy lookup always misses and correctly falls back to env —
+        exercising that fallback is now the right way to control the
+        ceiling in this test, replacing the old
+        get_effective_budget_ceiling() mock (no longer called by
+        _get_month_cost_and_ceiling() — see factory_director.py).
+        """
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 15.0)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            decision = check_run_clearance(db_path=db_path)
+        assert decision.cleared is False
+        assert "ceiling" in decision.reason.lower()
+        blocking = next(c for c in decision.blocking_checks if c.check_id == "budget_ceiling_not_exceeded")
+        assert blocking.blocking is True
+
+    def test_cleared_when_budget_under_ceiling(self, db_path):
+        """Updated 2026-07-27 -- see test_not_cleared_when_budget_ceiling_exceeded
+        for why the seam changed from get_effective_budget_ceiling() to Config."""
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 5.0)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            decision = check_run_clearance(db_path=db_path)
+        assert decision.cleared is True
+
+    def test_cleared_when_no_ceiling_configured(self, db_path):
+        """ceiling <= 0 means 'no ceiling configured' -- the budget gate must
+        not fire regardless of spend. Updated 2026-07-27 -- see
+        test_not_cleared_when_budget_ceiling_exceeded for why the seam
+        changed from get_effective_budget_ceiling() to Config. Must patch
+        Config explicitly rather than rely on ambient env state -- the real
+        .env's FINANCE_BUDGET_CEILING_USD can otherwise leak into this test
+        depending on full-suite test ordering."""
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 10_000.0)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=0.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            decision = check_run_clearance(db_path=db_path)
+        assert decision.cleared is True
+
+    def test_not_cleared_at_exactly_the_ceiling(self, db_path):
+        """utilization >= 100% blocks -- spend equal to the ceiling counts
+        as exceeded, not merely 'at the edge'. Updated 2026-07-27 -- see
+        test_not_cleared_when_budget_ceiling_exceeded for why the seam
+        changed from get_effective_budget_ceiling() to Config."""
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 10.0)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            decision = check_run_clearance(db_path=db_path)
+        assert decision.cleared is False
+
+    # -- validation_mode exemption (narrow, budget-only, added 2026-07-18) --
+
+    def test_validation_mode_exempts_budget_ceiling(self, db_path):
+        """Updated 2026-07-27 -- see test_not_cleared_when_budget_ceiling_exceeded
+        for why the seam changed from get_effective_budget_ceiling() to Config."""
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 15.0)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            decision = check_run_clearance(db_path=db_path, validation_mode=True)
+        assert decision.cleared is True
+        assert decision.validation_exemption == "supervised validation budget exemption"
+
+    def test_validation_mode_false_by_default_still_blocks(self, db_path):
+        """Updated 2026-07-27 -- see test_not_cleared_when_budget_ceiling_exceeded
+        for why the seam changed from get_effective_budget_ceiling() to Config."""
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 15.0)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            decision = check_run_clearance(db_path=db_path)
+        assert decision.cleared is False
+        assert decision.validation_exemption is None
+
+    def test_validation_mode_does_not_set_exemption_when_under_budget(self, db_path):
+        """The exemption field is only set when it was actually exercised --
+        not merely because validation_mode=True was passed. Updated
+        2026-07-27 -- see test_not_cleared_when_budget_ceiling_exceeded for
+        why the seam changed from get_effective_budget_ceiling() to Config."""
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 1.0)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            decision = check_run_clearance(db_path=db_path, validation_mode=True)
+        assert decision.cleared is True
+        assert decision.validation_exemption is None
+
+    def test_validation_mode_does_not_exempt_ois_blocking(self, db_path):
+        """The exemption is budget-only -- an OIS blocking signal must still
+        block a clearance check even with validation_mode=True."""
+        _seed_factory(db_path)
+        _seed_credentials(db_path)
+        _seed_blocking_signal(db_path)
+        _seed_cost(db_path, 15.0)
+        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=10.0):
+            decision = check_run_clearance(db_path=db_path, validation_mode=True)
+        assert decision.cleared is False
+        assert len(decision.blocking_signals) >= 1
+
+    def test_validation_mode_does_not_exempt_missing_credentials(self, db_path):
+        """The exemption is budget-only -- missing credentials must still
+        block a clearance check even with validation_mode=True."""
+        _seed_factory(db_path)
+        _seed_cost(db_path, 15.0)
+        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=10.0):
+            decision = check_run_clearance(db_path=db_path, validation_mode=True)
+        assert decision.cleared is False
+
+    def test_validation_mode_does_not_exempt_missing_factory(self, db_path):
+        """The exemption is budget-only -- a missing/inactive factory record
+        must still block a clearance check even with validation_mode=True."""
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 15.0)
+        with patch("hypogeum.policy_cascade.get_effective_budget_ceiling", return_value=10.0):
+            decision = check_run_clearance(db_path=db_path, validation_mode=True)
+        assert decision.cleared is False
+
+    def test_budget_check_shares_computation_with_capacity_domain(self, db_path):
+        """check_run_clearance()'s budget block and
+        _assess_factory_capacity()'s budget_headroom warning must derive
+        month_cost/ceiling from the same helper -- not two independently
+        maintained copies of the query."""
+        import hypogeum.factory_director as fd
+        assert fd.check_run_clearance.__module__ == fd._assess_factory_capacity.__module__
+        # Both call sites route through the same private helper.
+        import inspect
+        clearance_src = inspect.getsource(fd.check_run_clearance)
+        capacity_src = inspect.getsource(fd._assess_factory_capacity)
+        assert "_get_month_cost_and_ceiling(" in clearance_src
+        assert "_get_month_cost_and_ceiling(" in capacity_src
 
 
 # ---------------------------------------------------------------------------
@@ -1054,3 +1235,158 @@ class TestCLI:
         with patch("scripts.run_director_check.assess_factory", return_value=r):
             rc = self.cli.main(["--domain", "factory_entity"])
         assert rc == 1  # BLOCKED overall even if factory_entity is healthy
+
+
+# ===========================================================================
+# TestGetBudgetStatus (Phase 3 Production Hardening — factory monthly
+# budget ceiling, DB-backed, live-reloadable)
+# ===========================================================================
+
+def _seed_factory_hypogeum(db_path: Path, status: str = "active") -> None:
+    """
+    check_run_clearance()'s budget check is hardcoded to factory_id=
+    "hypogeum" (documented, single-factory-deployment behavior — see
+    factory_director.py). get_budget_status() composes both that AND a
+    factory-policy lookup for the SAME id, so these tests seed a factory
+    literally named "hypogeum" (not the module's usual "test") to keep
+    ceiling/source resolution and cleared/blocking_reason mutually
+    consistent, matching real single-tenant production shape.
+    """
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO factories (factory_id, factory_name, factory_slug, "
+            "status, default_language, default_timezone, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("hypogeum", "Hypogeum", "hypogeum", status, "en", "UTC",
+             "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestGetBudgetStatus:
+    def test_factory_ceiling_takes_precedence_over_env(self, db_path):
+        from hypogeum.factory_entity import update_factory
+        _seed_factory_hypogeum(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 30.0)
+        update_factory(
+            "hypogeum", db_path=db_path,
+            factory_policies={"monthly_ceiling_usd": 100.0},
+        )
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)  # would block if used
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            status = get_budget_status(db_path=db_path, factory_id="hypogeum")
+
+        assert status["ceiling_source"] == "factory_policy"
+        assert status["effective_ceiling_usd"] == 100.0
+        assert status["cleared"] is True  # 30 < 100, not the env's 10
+
+    def test_zero_factory_ceiling_falls_back_to_env(self, db_path):
+        _seed_factory_hypogeum(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 5.0)
+        # factory_policies never set -> monthly_ceiling_usd defaults to 0
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=10.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            status = get_budget_status(db_path=db_path, factory_id="hypogeum")
+
+        assert status["ceiling_source"] == "env_fallback"
+        assert status["effective_ceiling_usd"] == 10.0
+
+    def test_unset_factory_field_falls_back_to_env(self, db_path):
+        from hypogeum.factory_entity import update_factory
+        _seed_factory_hypogeum(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 5.0)
+        update_factory(
+            "hypogeum", db_path=db_path,
+            factory_policies={"blocked_model_slugs": ["x"]},  # no monthly_ceiling_usd key
+        )
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=25.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            status = get_budget_status(db_path=db_path, factory_id="hypogeum")
+
+        assert status["ceiling_source"] == "env_fallback"
+        assert status["effective_ceiling_usd"] == 25.0
+
+    def test_no_ceiling_configured_anywhere(self, db_path):
+        _seed_factory_hypogeum(db_path)
+        _seed_credentials(db_path)
+        fake_config = MagicMock(FINANCE_BUDGET_CEILING_USD=0.0)
+        with patch("hypogeum.config.Config", return_value=fake_config):
+            status = get_budget_status(db_path=db_path, factory_id="hypogeum")
+
+        assert status["ceiling_source"] == "none"
+        assert status["effective_ceiling_usd"] == 0.0
+        assert status["cleared"] is True  # no ceiling = never blocked on budget
+
+    def test_full_monthly_ceiling_used_against_month_to_date_spend_not_per_episode(self, db_path):
+        """
+        The regression this whole fix exists for: a factory
+        monthly_ceiling_usd of $300 with episodes_per_month=4 must gate at
+        $300 total spend, not at $75 (300/4) -- get_effective_budget_ceiling()
+        would have returned the per-episode-scaled $75 for this same policy;
+        get_budget_status()/the corrected _get_month_cost_and_ceiling() must not.
+        """
+        from hypogeum.factory_entity import update_factory
+        _seed_factory_hypogeum(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 100.0)  # would exceed $75 (per-episode-scaled) but not $300
+        update_factory(
+            "hypogeum", db_path=db_path,
+            factory_policies={"monthly_ceiling_usd": 300.0, "episodes_per_month": 4},
+        )
+        status = get_budget_status(db_path=db_path, factory_id="hypogeum")
+
+        assert status["effective_ceiling_usd"] == 300.0  # not 75.0
+        assert status["cleared"] is True  # 100 < 300
+        assert status["headroom_usd"] == 200.0
+
+    def test_headroom_and_spend_reported_correctly(self, db_path):
+        from hypogeum.factory_entity import update_factory
+        _seed_factory_hypogeum(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 40.0)
+        update_factory(
+            "hypogeum", db_path=db_path,
+            factory_policies={"monthly_ceiling_usd": 100.0},
+        )
+        status = get_budget_status(db_path=db_path, factory_id="hypogeum")
+
+        assert status["month_to_date_spend_usd"] == 40.0
+        assert status["headroom_usd"] == 60.0
+
+    def test_blocking_reason_present_when_exceeded(self, db_path):
+        from hypogeum.factory_entity import update_factory
+        _seed_factory_hypogeum(db_path)
+        _seed_credentials(db_path)
+        _seed_cost(db_path, 150.0)
+        update_factory(
+            "hypogeum", db_path=db_path,
+            factory_policies={"monthly_ceiling_usd": 100.0},
+        )
+        status = get_budget_status(db_path=db_path, factory_id="hypogeum")
+
+        assert status["cleared"] is False
+        assert status["blocking_reason"] is not None
+        assert "ceiling" in status["blocking_reason"].lower()
+        assert status["headroom_usd"] == 0.0  # never negative
+
+    def test_get_effective_budget_ceiling_contract_unchanged(self, db_path):
+        """
+        Confirms the operator's explicit constraint: policy_cascade's
+        get_effective_budget_ceiling() keeps its own documented per-episode
+        contract for its OTHER legitimate caller
+        (validate_factory_policy_constraints()) -- this fix did not touch it.
+        """
+        from hypogeum.policy_cascade import get_effective_budget_ceiling
+        _seed_factory_hypogeum(db_path)
+        result = get_effective_budget_ceiling(
+            env_ceiling=0.0, factory_id="hypogeum", db_path=db_path,
+        )
+        # Factory has no policy set -> 0.0, per its own documented contract --
+        # unrelated to and unaffected by get_budget_status()'s separate path.
+        assert result == 0.0

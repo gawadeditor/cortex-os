@@ -1098,6 +1098,11 @@ GROUP BY dimension;
 -- One row per episode × platform × deliverable publishing attempt.
 -- Written by store.record_publishing_outcome() — never by live publishing code.
 -- publishing_status: 'success' | 'failed' | 'pending' | 'skipped' | 'unknown'
+--   | 'uploaded_to_inbox' — a terminal-but-not-fully-published state (TikTok
+--   Upload-to-Inbox: the draft was delivered to the creator's TikTok inbox,
+--   but a human must still complete posting in-app). Added 2026-07-26;
+--   existing databases are migrated in place by
+--   db.py::_migrate_publishing_outcomes_status_enum().
 -- deliverable_id: 'main_episode' | 'short_<short_id>' — distinguishes the
 --   flagship upload from individual Shorts/Reels on the same platform.
 --   Multi-platform publishing idempotency (2026-07-25): existing databases
@@ -1115,7 +1120,7 @@ CREATE TABLE IF NOT EXISTS publishing_outcomes (
     deliverable_id      TEXT NOT NULL DEFAULT 'main_episode',
     publishing_status   TEXT NOT NULL DEFAULT 'unknown'
                              CHECK(publishing_status IN
-                                 ('success','failed','pending','skipped','unknown')),
+                                 ('success','failed','pending','skipped','unknown','uploaded_to_inbox')),
     platform_video_id   TEXT,
     published_at        TEXT,
     url                 TEXT,
@@ -1601,3 +1606,32 @@ CREATE TABLE IF NOT EXISTS worker_control (
     value      TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- audit_records
+-- Minimal persistence form of DATA_MODEL.md's canonical "Audit Record"
+-- entity ("Represents a significant platform event"). Generic across any
+-- entity_type/action — not specific to factory policy or budget. Append-only
+-- through the public API (hypogeum/audit.py::record_audit_event()); no
+-- update or delete functions exist by design.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS audit_records (
+    audit_id        TEXT NOT NULL PRIMARY KEY,
+    entity_type     TEXT NOT NULL,
+    entity_id       TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    field_name      TEXT,
+    previous_value  TEXT,
+    new_value       TEXT,
+    triggered_by    TEXT NOT NULL DEFAULT 'operator',
+    reason          TEXT,
+    occurred_at     TEXT NOT NULL,
+    metadata_json   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_entity
+    ON audit_records(entity_type, entity_id, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_audit_occurred_at
+    ON audit_records(occurred_at DESC);

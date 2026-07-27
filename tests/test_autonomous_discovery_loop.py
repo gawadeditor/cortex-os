@@ -134,6 +134,37 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _seed_cleared_factory(db_path) -> None:
+    """Seed the minimal active factory + credential rows
+    hypogeum.factory_director.check_run_clearance() requires to return
+    cleared=True. Without this, run_iteration()'s clearance gate (wired
+    2026-07-18) skips poll on a bare test schema, since a schema with no
+    factory row / no active credentials is a genuinely un-cleared state,
+    not a test artifact to special-case around."""
+    from hypogeum.db import get_connection
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO factories (factory_id, factory_name, factory_slug, "
+            "status, default_language, default_timezone, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("hypogeum", "Test Factory", "hypogeum", "active", "en", "UTC",
+             "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        conn.execute(
+            "INSERT INTO secret_profiles "
+            "(secret_profile_id, provider, label, credential_type, "
+            "credential_data, status, scope, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), "openrouter", "openrouter-env", "api_key",
+             "dummy", "active", "factory",
+             "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _add_episode(conn, episode_id: str, channel_id: str) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO episodes (episode_id, created_at) VALUES (?,?)",
@@ -482,7 +513,7 @@ class TestQueueRefillTrigger:
                 "channel_id": "ch",
             }
 
-        def _fake_list_channels(db_path=None):
+        def _fake_list_channels(status=None, db_path=None):
             return channels
 
         # Build an in-memory DB and populate queue counts
@@ -495,7 +526,7 @@ class TestQueueRefillTrigger:
         def _fake_get_conn(db_path=None):
             return _NoClose(real_conn)
 
-        with patch("hypogeum.channel_manager.list_channels", side_effect=_fake_list_channels), \
+        with patch("hypogeum.channel_config.list_channel_profiles", side_effect=_fake_list_channels), \
              patch("hypogeum.topic_discovery.run_discovery_cycle", side_effect=_fake_discovery), \
              patch("hypogeum.topic_discovery.approve_candidate", side_effect=_fake_approve), \
              patch("hypogeum.db.get_connection", side_effect=_fake_get_conn):
@@ -588,7 +619,7 @@ class TestMultiChannelRefill:
         def _fake_get_conn(db_path=None):
             return _NoClose(real_conn)
 
-        with patch("hypogeum.channel_manager.list_channels", return_value=channels), \
+        with patch("hypogeum.channel_config.list_channel_profiles", return_value=channels), \
              patch("hypogeum.topic_discovery.run_discovery_cycle", side_effect=_fake_discovery), \
              patch("hypogeum.topic_discovery.approve_candidate", side_effect=_fake_approve), \
              patch("hypogeum.db.get_connection", side_effect=_fake_get_conn):
@@ -670,7 +701,7 @@ class TestAutoApprove:
         def _fake_get_conn(db_path=None):
             return _NoClose(real_conn)
 
-        with patch("hypogeum.channel_manager.list_channels", return_value=[self._fake_channel()]), \
+        with patch("hypogeum.channel_config.list_channel_profiles", return_value=[self._fake_channel()]), \
              patch("hypogeum.topic_discovery.run_discovery_cycle", side_effect=_fake_discovery), \
              patch("hypogeum.topic_discovery.approve_candidate", side_effect=_fake_approve), \
              patch("hypogeum.db.get_connection", side_effect=_fake_get_conn):
@@ -1010,7 +1041,12 @@ class TestWorkerIntegration:
 
     def test_discovery_error_does_not_crash_worker(self, tmp_path):
         """An exception in _check_and_refill_queue must not propagate to run_iteration."""
+        from hypogeum.db import initialize_schema
         from run_worker import run_iteration
+
+        db_path = tmp_path / "test.db"
+        initialize_schema(db_path)
+        _seed_cleared_factory(db_path)
 
         def _fake_refill(**kw):
             raise RuntimeError("DB exploded")
@@ -1027,7 +1063,7 @@ class TestWorkerIntegration:
             # Must not raise
             result = run_iteration(
                 worker_id="w1",
-                db_path=tmp_path / "test.db",
+                db_path=db_path,
                 dry_run=False,
                 channel_id=None,
                 config=self._make_config(enabled=True),

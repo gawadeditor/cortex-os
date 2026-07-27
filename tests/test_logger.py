@@ -17,6 +17,8 @@ Exercises:
 Run with:  python3 -m pytest tests/test_logger.py -v
 """
 
+import fcntl
+import gzip
 import json
 import os
 import sys
@@ -422,3 +424,153 @@ class TestConcurrentWrites:
         log_a = get_logger(log_file=path_a)
         log_b = get_logger(log_file=path_b)
         assert log_a._lock is not log_b._lock
+
+
+# ---------------------------------------------------------------------------
+# Log rotation (Phase 3 Production Hardening, P0.1)
+# ---------------------------------------------------------------------------
+
+class TestLogRotation:
+    def test_rotation_settings_default_from_config(self):
+        """A fresh Logger picks up LOG_MAX_BYTES/LOG_BACKUP_COUNT from Config."""
+        log = get_logger(log_file=tmp_log())
+        assert log._max_bytes == 50 * 1024 * 1024
+        assert log._backup_count == 10
+
+    def test_rotation_settings_fall_back_if_config_raises(self, monkeypatch):
+        """If Config() cannot be constructed, rotation still gets safe defaults
+        rather than crashing the logger."""
+        import hypogeum.logger as logger_mod
+
+        def _boom():
+            raise RuntimeError("no OPENROUTER_API_KEY in this context")
+
+        monkeypatch.setattr(logger_mod, "Config", _boom)
+        max_bytes, backup_count = logger_mod._rotation_settings()
+        assert max_bytes == logger_mod._DEFAULT_LOG_MAX_BYTES
+        assert backup_count == logger_mod._DEFAULT_LOG_BACKUP_COUNT
+
+    def test_no_rotation_below_threshold(self):
+        """Writes well under max_bytes never trigger rotation."""
+        path = tmp_log()
+        log = get_logger(log_file=path)
+        log._max_bytes = 10_000_000
+        for i in range(20):
+            log.info("test_event", i=i)
+        assert len(read_lines(path)) == 20
+        assert not path.with_name(f"{path.name}.1.gz").exists()
+
+    def test_rotation_triggers_past_max_bytes(self):
+        """Once the file would exceed max_bytes, the next write rotates first."""
+        path = tmp_log()
+        log = get_logger(log_file=path)
+        log._max_bytes = 200  # tiny — a handful of lines exceeds this
+        log._backup_count = 5
+
+        for i in range(30):
+            log.info("test_event", i=i, padding="x" * 20)
+
+        archive = path.with_name(f"{path.name}.1.gz")
+        assert archive.exists(), "expected at least one rotation to have occurred"
+        # Current file must exist and stay small (freshly rotated).
+        assert path.exists()
+        assert path.stat().st_size < 2000
+
+    def test_rotated_archive_contains_valid_prerotation_jsonl(self):
+        """The gzip archive holds exactly the JSONL lines written before rotation."""
+        path = tmp_log()
+        log = get_logger(log_file=path)
+        log._max_bytes = 100_000_000  # no rotation yet
+        log._backup_count = 5
+
+        for i in range(5):
+            log.info("pre_rotation_event", i=i)
+
+        # Force rotation now, independent of size, to isolate archive-content checks.
+        from hypogeum.logger import _rotate_log_file
+        _rotate_log_file(path, log._backup_count)
+
+        archive = path.with_name(f"{path.name}.1.gz")
+        assert archive.exists()
+        with gzip.open(archive, "rt", encoding="utf-8") as fh:
+            lines = [json.loads(line) for line in fh if line.strip()]
+        assert len(lines) == 5
+        assert [entry["i"] for entry in lines] == [0, 1, 2, 3, 4]
+        assert not path.exists(), "original file must be removed after archiving"
+
+    def test_rotation_shifts_existing_archives(self):
+        """A second rotation shifts .1.gz to .2.gz before creating a new .1.gz."""
+        path = tmp_log()
+        from hypogeum.logger import _rotate_log_file
+
+        # First generation of content + rotation -> .1.gz
+        path.write_text('{"event": "first"}\n', encoding="utf-8")
+        _rotate_log_file(path, backup_count=5)
+        first_archive = path.with_name(f"{path.name}.1.gz")
+        assert first_archive.exists()
+
+        # Second generation of content + rotation -> old .1.gz becomes .2.gz
+        path.write_text('{"event": "second"}\n', encoding="utf-8")
+        _rotate_log_file(path, backup_count=5)
+
+        second_slot = path.with_name(f"{path.name}.2.gz")
+        newest_slot = path.with_name(f"{path.name}.1.gz")
+        assert second_slot.exists(), "the original .1.gz must have shifted to .2.gz"
+        assert newest_slot.exists()
+
+        with gzip.open(second_slot, "rt", encoding="utf-8") as fh:
+            assert "first" in fh.read()
+        with gzip.open(newest_slot, "rt", encoding="utf-8") as fh:
+            assert "second" in fh.read()
+
+    def test_rotation_deletes_oldest_beyond_backup_count(self):
+        """Archives beyond backup_count are dropped, not kept forever."""
+        path = tmp_log()
+        from hypogeum.logger import _rotate_log_file
+
+        backup_count = 2
+        for gen in range(4):
+            path.write_text(f'{{"event": "gen{gen}"}}\n', encoding="utf-8")
+            _rotate_log_file(path, backup_count=backup_count)
+
+        assert path.with_name(f"{path.name}.1.gz").exists()
+        assert path.with_name(f"{path.name}.2.gz").exists()
+        assert not path.with_name(f"{path.name}.3.gz").exists()
+
+    def test_backup_count_zero_truncates_instead_of_archiving(self):
+        """A backup_count < 1 disables archiving — the file is just removed."""
+        path = tmp_log()
+        from hypogeum.logger import _rotate_log_file
+
+        path.write_text('{"event": "will_be_dropped"}\n', encoding="utf-8")
+        _rotate_log_file(path, backup_count=0)
+
+        assert not path.exists()
+        assert not path.with_name(f"{path.name}.1.gz").exists()
+
+    def test_rotation_tolerant_of_missing_file(self):
+        """Rotating a path with no existing file must not raise."""
+        from hypogeum.logger import _rotate_log_file
+        path = tmp_log()  # created but never written
+        _rotate_log_file(path, backup_count=5)  # must not raise
+
+    def test_concurrent_process_holding_rotation_lock_is_skipped_gracefully(self):
+        """If another process holds the rotate lock, rotation is skipped (not
+        raised) and the caller's log write still succeeds."""
+        path = tmp_log()
+        log = get_logger(log_file=path)
+        log._max_bytes = 10  # force rotation attempt on first write
+
+        lock_path = path.with_name(f"{path.name}.rotate.lock")
+        lock_path.touch()
+        held_fh = lock_path.open("r+")
+        fcntl.flock(held_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            # Must not raise even though rotation can't proceed.
+            log.info("event_while_lock_held")
+        finally:
+            fcntl.flock(held_fh, fcntl.LOCK_UN)
+            held_fh.close()
+
+        # The write itself must still have succeeded.
+        assert len(read_lines(path)) == 1

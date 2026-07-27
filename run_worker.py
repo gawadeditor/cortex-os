@@ -483,6 +483,25 @@ def run_worker(
         worker_id, mode, interval, db_path, channel_id or "all",
     )
 
+    # Startup verification (Phase 3 Production Hardening, P0.5): run the
+    # preflight checks that already existed as manual CLI tools
+    # (hypogeum/setup_preflight.py) automatically now. Never refuses to
+    # start — the scheduler/queue loop has value even with a blocker
+    # present — but alerts loudly via the same OIS signal substrate P0.3/
+    # P0.4 use, so an operator learns about it immediately instead of via
+    # a string of failed runs.
+    try:
+        from hypogeum.startup_verification import verify_startup
+        preflight = verify_startup(db_path=db_path, config=config)
+        if not preflight["ready"]:
+            log.warning(
+                "startup_preflight_blockers count=%d names=%s",
+                preflight["blocker_count"],
+                [b["name"] for b in preflight["blockers"]],
+            )
+    except Exception as exc:
+        log.warning("startup_preflight_error error=%s", exc)
+
     # Write PID file so the dashboard can detect this worker regardless of whether
     # it was started via the dashboard UI or directly from the CLI. Without this,
     # _get_worker_pid() returns None for CLI workers, causing the dashboard's
@@ -537,6 +556,28 @@ def run_worker(
             _wc_set("stop_requested", "0", db_path)
             stop_reason = "dashboard_stop"
             break
+
+        # Self-healing sweep (Phase 3 Production Hardening, P0.4): orphan
+        # reconciliation previously only ran at startup/dashboard-page-load
+        # trigger moments — running it here, every iteration, before this
+        # worker claims anything (worker_status is still 'idle' at this
+        # point), closes the gap BURN_IN_READINESS_AUDIT.md found. Safe and
+        # cheap: reconcile_orphaned_runs() short-circuits to a no-op
+        # whenever nothing is actually orphaned.
+        try:
+            from hypogeum.self_healing import periodic_check
+            healing_result = periodic_check(
+                db_path=db_path, config=config,
+                worker_process_alive=True, worker_db_status="idle",
+            )
+            if healing_result["orphaned_run_ids"] or healing_result["retry_exhausted_alerted"]:
+                log.info(
+                    "self_healing_sweep orphaned=%s retry_exhausted=%s",
+                    healing_result["orphaned_run_ids"],
+                    healing_result["retry_exhausted_alerted"],
+                )
+        except Exception as exc:
+            log.warning("self_healing_sweep_error error=%s", exc)
 
         _wc_set("worker_status", "claiming", db_path)
         try:

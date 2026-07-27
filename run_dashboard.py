@@ -454,6 +454,14 @@ def create_page():
 
 @app.route("/create/launch", methods=["POST"])
 def create_launch():
+    """
+    Manual Queue Submission — validates and places one topic onto the
+    canonical queue (hypogeum.dashboard_control.enqueue_topic() +
+    hypogeum.queue.enqueue()) instead of executing a pipeline directly. The
+    submitted item is picked up by run_worker.py's existing poll loop and
+    gated exactly like any autonomous item. See
+    hypogeum.production_launcher.launch_episode_from_dashboard().
+    """
     from urllib.parse import quote_plus
     channel_id   = request.form.get("channel_id", "").strip()
     topic        = request.form.get("topic", "").strip()
@@ -1074,6 +1082,104 @@ def setup_page():
 def api_setup_preflight():
     try:
         return jsonify(get_setup_preflight_status(db_path=_db_path()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/api/observability/health")
+def api_observability_health():
+    """
+    Runtime Observability health endpoint (Phase 3 Production Hardening,
+    P0.3). Thin wrapper — all detection logic lives in
+    hypogeum.observability.run_all_checks(); this route only exposes it.
+    Any unhealthy check has already emitted an OIS signal by the time
+    this returns.
+    """
+    try:
+        from hypogeum.observability import run_all_checks
+        report = run_all_checks(db_path=_db_path())
+        return jsonify(report), (200 if report["healthy"] else 503)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+# ---------------------------------------------------------------------------
+# Factory monthly budget ceiling (DB-backed, live-reloadable)
+# ---------------------------------------------------------------------------
+#
+# The DB-backed factory_policies.monthly_ceiling_usd control, distinct
+# from /api/setup/budget-ceiling above (which writes FINANCE_BUDGET_CEILING_USD
+# to .env, the bootstrap/fallback tier). This is the operator-facing
+# production control per policy_cascade.py's own documented precedence
+# ("factory_policies -> runtime env"): a change here is read fresh from
+# the DB by check_run_clearance() on the worker's very next iteration —
+# no worker restart needed, unlike the .env route. Setting the value to
+# 0 restores env-fallback behavior exactly.
+#
+# "Authenticated" per the operator identity field below: this dashboard
+# has no login/session system for ANY existing route (confirmed — none
+# exists anywhere in this file). Building one exists outside this
+# feature's scope ("no broad Dashboard redesign"). operator is an
+# optional, self-reported identity label recorded in the audit trail
+# "when available" — not cryptographic authentication. This matches the
+# existing dashboard's security posture exactly; it does not introduce a
+# weaker model than what every other route already has.
+
+_DEFAULT_FACTORY_ID = "hypogeum"
+
+
+@app.route("/api/factory/budget-ceiling", methods=["GET"])
+def api_factory_budget_ceiling_get():
+    try:
+        from hypogeum.factory_director import get_budget_status
+        status = get_budget_status(db_path=_db_path(), factory_id=_DEFAULT_FACTORY_ID)
+        status["factory_id"] = _DEFAULT_FACTORY_ID
+        return jsonify(status), 200
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/api/factory/budget-ceiling", methods=["POST"])
+def api_factory_budget_ceiling_post():
+    body = request.get_json(silent=True) or {}
+
+    reason = (body.get("reason") or "").strip()
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+
+    raw_value = body.get("monthly_ceiling_usd")
+    try:
+        new_ceiling = float(raw_value)
+    except (TypeError, ValueError):
+        return jsonify({"error": "monthly_ceiling_usd must be a number"}), 400
+
+    operator = (body.get("operator") or "operator").strip() or "operator"
+
+    try:
+        from hypogeum.factory_director import get_budget_status
+        from hypogeum.factory_entity import get_factory_policies, update_factory_policies
+
+        db_path = _db_path()
+        previous_ceiling = float(
+            get_factory_policies(_DEFAULT_FACTORY_ID, db_path=db_path).get("monthly_ceiling_usd") or 0
+        )
+
+        update_factory_policies(
+            factory_id=_DEFAULT_FACTORY_ID,
+            fields={"monthly_ceiling_usd": new_ceiling},
+            reason=reason,
+            triggered_by=operator,
+            metadata={"source": "dashboard", "route": "/api/factory/budget-ceiling"},
+            db_path=db_path,
+        )
+
+        status = get_budget_status(db_path=db_path, factory_id=_DEFAULT_FACTORY_ID)
+        status["factory_id"] = _DEFAULT_FACTORY_ID
+        status["previous_ceiling_usd"] = round(previous_ceiling, 2)
+        status["new_ceiling_usd"] = round(new_ceiling, 2)
+        return jsonify(status), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"error": str(exc)}), 503
 
@@ -7238,6 +7344,43 @@ def api_worker_cancel_run(queue_id: str):
     }), 404
 
 
+@app.route("/api/worker/smoke-test", methods=["POST"])
+def api_worker_smoke_test():
+    """
+    Run a controlled, local-safe smoke test of the full scheduler -> queue
+    -> worker path via hypogeum.runtime.smoke_run() — no new orchestration
+    logic here, this thin wrapper only calls and reports that function.
+
+    smoke_run() enforces dry_run=True internally regardless of arguments:
+    run_pipeline is never called, no content is generated, no publishing
+    occurs, no provider API calls are made. Safe to run at any time.
+    """
+    from hypogeum.runtime import smoke_run
+    result = smoke_run(db_path=_db_path())
+
+    payload = {
+        "ok":                 result.success,
+        "success":            result.success,
+        "schedule_id":        result.schedule_id,
+        "scheduled_run_ids":  result.scheduled_run_ids,
+        "queue_ids":          result.queue_ids,
+        "steps_completed":    result.steps_completed,
+        "failure_reason":     result.failure_reason,
+    }
+    if result.poll_result is not None:
+        pr = result.poll_result
+        payload["poll_summary"] = {
+            "iterations":   pr.iterations,
+            "completed":    pr.completed,
+            "failed":       pr.failed,
+            "skipped":      pr.skipped,
+            "no_topic":     pr.no_topic,
+            "cancelled":    pr.cancelled,
+            "stop_reason":  pr.stop_reason,
+        }
+    return jsonify(payload), (200 if result.success else 500)
+
+
 @app.route("/api/worker/pause-queue", methods=["POST"])
 def api_worker_pause_queue():
     """
@@ -7595,12 +7738,70 @@ def _build_workers_context() -> dict:
     except Exception:
         pass
 
+    # ── Factory / runtime status ────────────────────────────────────────────
+    # Minimum Operational Dashboard Phase 1 — read-only, via the same
+    # assess_factory() already used by /attention and /command. Never
+    # duplicates factory_director's own logic. The original
+    # FactoryDirectorReport is passed straight through to the template — no
+    # DTO copy. Jinja's "." operator already tries attribute access before
+    # falling back to item access, so factory_status.readiness_level etc.
+    # work unchanged whether this is an object or a dict; only its
+    # truthiness (object vs None) and the nested run_clearance.reason
+    # access are template-visible differences from a flattened dict.
+    factory_status = None
+    try:
+        factory_status = assess_factory(db_path=db)
+    except Exception:
+        pass
+
+    # ── Latest worker attempt / blocked reason ──────────────────────────────
+    # Minimum Operational Dashboard Phase 1 — the most recent run's
+    # WorkerAttempt (hypogeum.worker_integration), via the already-existing
+    # list_runs() to find the episode_id. Read-only. Passed through as the
+    # original WorkerAttempt object — no DTO copy, same rationale as above.
+    #
+    # Imported lazily inside this read-only helper.
+    latest_worker_attempt = None
+    try:
+        from hypogeum.worker_integration import load_latest_worker_attempt
+        recent = list_runs(db_path=db, limit=1)
+        if recent and recent[0].get("episode_id"):
+            latest_worker_attempt = load_latest_worker_attempt(recent[0]["episode_id"])
+    except Exception:
+        pass
+
+    # ── Channel operations profiles (read-only summary) ─────────────────────
+    # Minimum Operational Dashboard Phase 1 — via
+    # hypogeum.channel_config.get_channel_operations_profile(), never
+    # invented or duplicated here. Smallest possible wrapper: {channel_id,
+    # profile} per channel — a channel with no configured profile still
+    # needs to appear (profile=None), which a bare list of
+    # ChannelOperationsProfile objects couldn't represent, so this one
+    # case keeps a 2-key wrapper rather than passing the object list raw.
+    # The ChannelOperationsProfile object itself is never copied/flattened.
+    #
+    # Local import to keep dependency loading inside the dashboard context.
+    channel_operations_profiles: list[dict] = []
+    try:
+        from hypogeum.channel_config import list_channel_profiles, get_channel_operations_profile
+        for ch in list_channel_profiles(db_path=db):
+            try:
+                profile = get_channel_operations_profile(ch.channel_id, db_path=db)
+            except Exception:
+                profile = None
+            channel_operations_profiles.append({"channel_id": ch.channel_id, "profile": profile})
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "workers": workers,
         "schedules": raw_schedules,
         "queue_items": queue_items,
         "queue_paused": queue_paused,
+        "factory_status": factory_status,
+        "latest_worker_attempt": latest_worker_attempt,
+        "channel_operations_profiles": channel_operations_profiles,
     }
 
 

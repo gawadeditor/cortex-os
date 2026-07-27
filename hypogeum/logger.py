@@ -4,6 +4,14 @@ hypogeum/logger.py — Structured JSONL logger
 Produces one JSON object per line to a configurable log file.
 All pipeline code must log via this module — never print() or use stdlib logging directly.
 
+Log rotation (Phase 3 Production Hardening, P0.1):
+    The log file rotates once it reaches Config.LOG_MAX_BYTES (default 50MB).
+    Rotated archives are gzip-compressed as <file>.1.gz, <file>.2.gz, ... up to
+    Config.LOG_BACKUP_COUNT (default 10), oldest deleted beyond that. Rotation is
+    guarded by an in-process lock (shared with writes to the same path) and a
+    cross-process advisory file lock (fcntl), since the dashboard and worker
+    processes both write to the same default log file.
+
 Log entry schema (every field present on every line):
   {
     "timestamp":  str  — UTC ISO8601 with microseconds, e.g. "2026-06-01T20:00:00.123456Z"
@@ -36,11 +44,16 @@ Serialization:
 
 from __future__ import annotations
 
+import fcntl
+import gzip
 import json
+import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from hypogeum.config import Config
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +65,20 @@ _DEFAULT_LOG_FILE = _PROJECT_ROOT / ".hypogeum-assets" / "pipeline.log"
 
 # Valid log levels in severity order
 _LEVELS = ("info", "warn", "error")
+
+# Rotation defaults, used only if Config() cannot be constructed (e.g. required
+# env vars unset in a minimal context) — logging must never fail because of this.
+_DEFAULT_LOG_MAX_BYTES = 50 * 1024 * 1024
+_DEFAULT_LOG_BACKUP_COUNT = 10
+
+
+def _rotation_settings() -> tuple[int, int]:
+    """Return (max_bytes, backup_count) via Config, falling back to safe defaults."""
+    try:
+        cfg = Config()
+        return cfg.LOG_MAX_BYTES, cfg.LOG_BACKUP_COUNT
+    except Exception:
+        return _DEFAULT_LOG_MAX_BYTES, _DEFAULT_LOG_BACKUP_COUNT
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +138,7 @@ class Logger:
         self._lock = _get_file_lock(log_file)
         # Ensure the parent directory exists; create if needed
         log_file.parent.mkdir(parents=True, exist_ok=True)
+        self._max_bytes, self._backup_count = _rotation_settings()
 
     # ------------------------------------------------------------------
     # Public API
@@ -162,10 +190,101 @@ class Logger:
                 entry[key] = fields[key]
 
         line = _to_json_line(entry) + "\n"
+        incoming_bytes = len(line.encode("utf-8"))
 
         with self._lock:
+            self._maybe_rotate(incoming_bytes)
             with self._log_file.open("a", encoding="utf-8") as fh:
                 fh.write(line)
+
+    def _maybe_rotate(self, incoming_bytes: int) -> None:
+        """
+        Rotate the log file if appending incoming_bytes would push it over
+        self._max_bytes. Must be called while holding self._lock (guards
+        threads within this process; _rotate_log_file additionally takes a
+        cross-process advisory lock, since the dashboard and worker processes
+        can both write to the same default log file).
+        """
+        try:
+            current_size = self._log_file.stat().st_size
+        except FileNotFoundError:
+            return  # nothing written yet — nothing to rotate
+        if current_size + incoming_bytes <= self._max_bytes:
+            return
+        _rotate_log_file(self._log_file, self._backup_count)
+
+
+# ---------------------------------------------------------------------------
+# Rotation
+# ---------------------------------------------------------------------------
+
+def _rotate_log_file(log_file: Path, backup_count: int) -> None:
+    """
+    Rotate log_file: shift existing .1.gz..(N-1).gz archives up by one,
+    dropping anything beyond backup_count, then gzip-compress the current
+    file to <log_file>.1.gz and remove the uncompressed original so a fresh
+    file starts on the next write.
+
+    Takes a cross-process advisory lock (a sentinel `<log_file>.rotate.lock`
+    file) for the duration of the rotation, since the dashboard and worker
+    processes can both log to the same default file — only the in-process
+    threading.Lock in Logger._write is not enough to prevent two processes
+    rotating concurrently. If the lock is already held by another process,
+    this call skips rotation rather than blocking log writes; the next write
+    past the threshold will retry.
+
+    Tolerant of missing files at every step (another process may have already
+    rotated this file out from under us) — rotation must never raise and
+    break logging.
+    """
+    lock_path = log_file.with_name(f"{log_file.name}.rotate.lock")
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+") as lock_fh:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # another process is mid-rotation; retry on a later write
+        try:
+            _do_rotate(log_file, backup_count)
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
+def _do_rotate(log_file: Path, backup_count: int) -> None:
+    if backup_count < 1:
+        # Rotation disabled via config; truncate so growth stays bounded.
+        log_file.unlink(missing_ok=True)
+        return
+
+    oldest = log_file.with_name(f"{log_file.name}.{backup_count}.gz")
+    if oldest.exists():
+        oldest.unlink()
+
+    for n in range(backup_count - 1, 0, -1):
+        src = log_file.with_name(f"{log_file.name}.{n}.gz")
+        dst = log_file.with_name(f"{log_file.name}.{n + 1}.gz")
+        if src.exists():
+            src.rename(dst)
+
+    # Rename the live file aside FIRST — atomic and instant, unlike a read+
+    # compress+delete sequence. Every Logger in this codebase reopens
+    # log_file fresh on each write (no persistent handle), including any
+    # process unaware of rotation entirely (e.g. an already-running worker
+    # process still executing older code loaded before this feature shipped).
+    # Once the rename completes, such a writer's next open("a") call simply
+    # creates a new file at the original path — nothing written after this
+    # instant can be lost or duplicated. Compression then happens on the
+    # detached file with no concurrent writer able to reach it anymore.
+    detached = log_file.with_name(f"{log_file.name}.rotating")
+    try:
+        log_file.rename(detached)
+    except FileNotFoundError:
+        return  # another process already rotated this file out from under us
+
+    archive = log_file.with_name(f"{log_file.name}.1.gz")
+    with detached.open("rb") as src_fh, gzip.open(archive, "wb") as dst_fh:
+        shutil.copyfileobj(src_fh, dst_fh)
+    detached.unlink()
 
 
 # ---------------------------------------------------------------------------

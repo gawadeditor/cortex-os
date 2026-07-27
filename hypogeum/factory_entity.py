@@ -12,6 +12,8 @@ Public API:
     update_factory(factory_id, db_path=None, **kwargs) -> bool
     get_current_factory_id(db_path=None) -> str
     get_factory_policies(factory_id, db_path=None) -> dict   # P3-05
+    update_factory_policies(factory_id, fields, reason, db_path=None) -> dict
+        # merge-only, audited, atomic with its audit_records row (hypogeum.audit)
 
 Exceptions:
     FactoryNotFoundError  — raised by get_current_factory_id when no row exists
@@ -31,6 +33,7 @@ P3-02-dashboard (BLOCKED):
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -356,3 +359,101 @@ def get_factory_policies(
     if record.factory_policies:
         merged.update(record.factory_policies)
     return merged
+
+
+def update_factory_policies(
+    factory_id:   str,
+    fields:       dict,
+    reason:       str,
+    triggered_by: str = "operator",
+    metadata:     Optional[dict] = None,
+    db_path:      Optional[Path] = None,
+) -> dict:
+    """
+    Merge `fields` into factory_id's existing factory_policies JSON and
+    persist, writing one audit_records row per actually-changed field in
+    the SAME database transaction as the policy update (hypogeum.audit)
+    — an unaudited factory policy change must never happen. If the audit
+    insert fails for any reason, the policy update rolls back with it.
+
+    Only the supplied keys are changed; every other existing policy field
+    (blocked_model_slugs, allowed_model_slugs, etc.) is preserved exactly
+    as-is — this is a merge, never a wholesale replace like
+    update_factory(factory_policies=...) performs.
+
+    monthly_ceiling_usd, if present in fields, must be a finite,
+    non-negative number (bool is rejected — bool is a subclass of int in
+    Python and would otherwise silently pass an isinstance(int) check).
+
+    reason is mandatory, not optional — every factory policy change must
+    be explained. Enforced here, not in the generic audit writer, since
+    that requirement is specific to policy changes, not every audit event.
+
+    Returns the fully-merged policy dict after the update.
+
+    Raises:
+        FactoryNotFoundError — factory_id does not exist.
+        ValueError — invalid field value, or reason is empty/blank.
+    """
+    if not reason or not reason.strip():
+        raise ValueError("reason is required for a factory policy change")
+
+    if "monthly_ceiling_usd" in fields:
+        value = fields["monthly_ceiling_usd"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("monthly_ceiling_usd must be a numeric value")
+        if not math.isfinite(value):
+            raise ValueError("monthly_ceiling_usd must be finite")
+        if value < 0:
+            raise ValueError("monthly_ceiling_usd must be non-negative")
+
+    from hypogeum.audit import record_audit_event
+
+    conn = get_connection(_resolve(db_path))
+    try:
+        row = conn.execute(
+            "SELECT factory_policies FROM factories WHERE factory_id = ?",
+            (factory_id,),
+        ).fetchone()
+        if row is None:
+            raise FactoryNotFoundError(
+                f"Factory {factory_id!r} not found. "
+                "Run scripts/bootstrap_channel.py to create it."
+            )
+
+        current = dict(_DEFAULT_POLICIES)
+        if row["factory_policies"]:
+            current.update(json.loads(row["factory_policies"]))
+
+        merged = dict(current)
+        merged.update(fields)
+
+        conn.execute(
+            "UPDATE factories SET factory_policies = ?, updated_at = ? WHERE factory_id = ?",
+            (json.dumps(merged), _now_iso(), factory_id),
+        )
+
+        for key, new_value in fields.items():
+            previous_value = current.get(key)
+            if previous_value == new_value:
+                continue  # unchanged — nothing to audit
+            record_audit_event(
+                entity_type="factory",
+                entity_id=factory_id,
+                action="factory_policy_updated",
+                field_name=f"factory_policies.{key}",
+                previous_value=previous_value,
+                new_value=new_value,
+                triggered_by=triggered_by,
+                reason=reason,
+                metadata=metadata,
+                conn=conn,
+            )
+
+        conn.commit()
+        return merged
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

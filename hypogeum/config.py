@@ -657,6 +657,45 @@ class Config:
         self.DISCOVERY_SIGNAL_PENALTY_KEYWORD = _get_float("DISCOVERY_SIGNAL_PENALTY_KEYWORD", default=0.25) or 0.25
         self.DISCOVERY_ANALYTICS_DELTA_CAP = _get_float("DISCOVERY_ANALYTICS_DELTA_CAP", default=0.20) or 0.20
 
+        # --- Log Rotation (Phase 3 Production Hardening, P0.1) ---
+        # pipeline.log rotates once it reaches this size. Default 50MB.
+        self.LOG_MAX_BYTES = _get_int("LOG_MAX_BYTES", default=50 * 1024 * 1024)
+        # Number of gzip-compressed archives kept before the oldest is deleted.
+        self.LOG_BACKUP_COUNT = _get_int("LOG_BACKUP_COUNT", default=10)
+
+        # --- Recovery System (Phase 3 Production Hardening, P0.2) ---
+        # Number of scheduled DB backups kept before the oldest is deleted.
+        self.BACKUP_RETENTION_COUNT = _get_int("BACKUP_RETENTION_COUNT", default=14)
+        # Directory backups (and .env snapshots) are written to.
+        self.BACKUP_DIR = _get_optional("BACKUP_DIR")
+
+        # --- Runtime Observability (Phase 3 Production Hardening, P0.3) ---
+        # worker_control.worker_status is touched every iteration of
+        # run_worker.py's main loop regardless of whether work was found —
+        # this threshold is how stale that timestamp can get before the
+        # worker (and, since they're the same process, the scheduler) is
+        # considered offline. Default 300s = 5x the worker's default 60s
+        # poll interval.
+        self.WORKER_HEARTBEAT_STALE_SECONDS = _get_int(
+            "WORKER_HEARTBEAT_STALE_SECONDS", default=300
+        )
+        self.QUEUE_GROWTH_WARNING_THRESHOLD = _get_int(
+            "QUEUE_GROWTH_WARNING_THRESHOLD", default=20
+        )
+        self.STUCK_RUN_THRESHOLD_MINUTES = _get_int(
+            "STUCK_RUN_THRESHOLD_MINUTES", default=120
+        )
+        self.REPEATED_FAILURE_THRESHOLD = _get_int(
+            "REPEATED_FAILURE_THRESHOLD", default=3
+        )
+        self.PROVIDER_FAILURE_THRESHOLD = _get_int(
+            "PROVIDER_FAILURE_THRESHOLD", default=3
+        )
+        self.DISK_FREE_WARNING_PCT = _get_float("DISK_FREE_WARNING_PCT", default=10.0) or 10.0
+        self.WORKER_MEMORY_WARNING_MB = _get_int(
+            "WORKER_MEMORY_WARNING_MB", default=2048
+        )
+
     # ------------------------------------------------------------------
     # Derived properties
     # ------------------------------------------------------------------

@@ -30,7 +30,9 @@ from hypogeum.factory_entity import (
     create_factory,
     get_current_factory_id,
     get_factory,
+    get_factory_policies,
     update_factory,
+    update_factory_policies,
 )
 
 
@@ -433,3 +435,220 @@ class TestNoProductionDB:
         # The production DB is never opened because db_path is always provided.
         # This is a structural guarantee, not one we can assert at runtime;
         # the test documents the intent.
+
+
+# ===========================================================================
+# TestUpdateFactoryPolicies (Phase 3 Production Hardening — factory monthly
+# budget ceiling, DB-backed, audited)
+# ===========================================================================
+
+class TestUpdateFactoryPolicies:
+    def test_merge_does_not_clobber_unrelated_fields(self, db_path):
+        _seed_factory(db_path)
+        update_factory(
+            "test_factory", db_path=db_path,
+            factory_policies={
+                "monthly_ceiling_usd": 50,
+                "blocked_model_slugs": ["some-model"],
+                "episodes_per_month": 4,
+            },
+        )
+
+        update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 100},
+            reason="raising for a demo run", db_path=db_path,
+        )
+
+        policies = get_factory_policies("test_factory", db_path=db_path)
+        assert policies["monthly_ceiling_usd"] == 100
+        assert policies["blocked_model_slugs"] == ["some-model"]
+        assert policies["episodes_per_month"] == 4
+
+    def test_returns_fully_merged_policy_dict(self, db_path):
+        _seed_factory(db_path)
+        merged = update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 75},
+            reason="initial setup", db_path=db_path,
+        )
+        assert merged["monthly_ceiling_usd"] == 75
+        assert "episodes_per_month" in merged  # default present
+
+    # -- numeric validation ---------------------------------------------
+
+    def test_rejects_negative_ceiling(self, db_path):
+        _seed_factory(db_path)
+        with pytest.raises(ValueError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": -10},
+                reason="bad value", db_path=db_path,
+            )
+
+    def test_rejects_non_numeric_ceiling(self, db_path):
+        _seed_factory(db_path)
+        with pytest.raises(ValueError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": "a lot"},
+                reason="bad value", db_path=db_path,
+            )
+
+    def test_rejects_bool_ceiling(self, db_path):
+        """bool is a subclass of int in Python -- must be explicitly rejected,
+        not silently accepted as 0 or 1."""
+        _seed_factory(db_path)
+        with pytest.raises(ValueError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": True},
+                reason="bad value", db_path=db_path,
+            )
+
+    def test_rejects_infinite_ceiling(self, db_path):
+        _seed_factory(db_path)
+        with pytest.raises(ValueError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": float("inf")},
+                reason="bad value", db_path=db_path,
+            )
+
+    def test_rejects_nan_ceiling(self, db_path):
+        _seed_factory(db_path)
+        with pytest.raises(ValueError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": float("nan")},
+                reason="bad value", db_path=db_path,
+            )
+
+    def test_zero_ceiling_is_valid(self, db_path):
+        """0 is the documented 'restore env fallback' value -- must be
+        accepted, not rejected as falsy/invalid."""
+        _seed_factory(db_path)
+        merged = update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 0},
+            reason="reverting to env fallback", db_path=db_path,
+        )
+        assert merged["monthly_ceiling_usd"] == 0
+
+    # -- reason is mandatory ----------------------------------------------
+
+    def test_missing_reason_raises(self, db_path):
+        _seed_factory(db_path)
+        with pytest.raises(ValueError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": 50},
+                reason="", db_path=db_path,
+            )
+
+    def test_whitespace_only_reason_raises(self, db_path):
+        _seed_factory(db_path)
+        with pytest.raises(ValueError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": 50},
+                reason="   ", db_path=db_path,
+            )
+
+    # -- unknown factory --------------------------------------------------
+
+    def test_unknown_factory_raises_not_found(self, db_path):
+        with pytest.raises(FactoryNotFoundError):
+            update_factory_policies(
+                "does_not_exist", fields={"monthly_ceiling_usd": 50},
+                reason="test", db_path=db_path,
+            )
+
+    # -- audit trail: correct actor/reason/from/to -------------------------
+
+    def test_audit_record_has_correct_actor_reason_from_to(self, db_path):
+        _seed_factory(db_path)
+        update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 50},
+            reason="initial setup", triggered_by="operator", db_path=db_path,
+        )
+        update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 75},
+            reason="raising for a demo run", triggered_by="alice", db_path=db_path,
+        )
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM audit_records WHERE entity_type='factory' "
+                "AND entity_id='test_factory' ORDER BY occurred_at"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert len(rows) == 2
+        assert rows[0]["triggered_by"] == "operator"
+        assert rows[0]["previous_value"] == "0"  # _DEFAULT_POLICIES default
+        assert rows[0]["new_value"] == "50"
+        assert rows[0]["reason"] == "initial setup"
+        assert rows[0]["action"] == "factory_policy_updated"
+        assert rows[0]["field_name"] == "factory_policies.monthly_ceiling_usd"
+
+        assert rows[1]["triggered_by"] == "alice"
+        assert rows[1]["previous_value"] == "50"
+        assert rows[1]["new_value"] == "75"
+        assert rows[1]["reason"] == "raising for a demo run"
+
+    def test_no_op_change_does_not_create_an_audit_row(self, db_path):
+        _seed_factory(db_path)
+        update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 50},
+            reason="initial setup", db_path=db_path,
+        )
+        update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 50},  # same value
+            reason="no actual change", db_path=db_path,
+        )
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM audit_records WHERE entity_id='test_factory'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 1  # only the first, real change
+
+    # -- atomicity: policy update and audit record in one transaction -----
+
+    def test_rollback_when_audit_creation_fails(self, db_path, monkeypatch):
+        """An unaudited financial-policy change must never happen -- if the
+        audit insert fails, the policy update must roll back with it."""
+        _seed_factory(db_path)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated audit failure")
+
+        monkeypatch.setattr("hypogeum.audit.record_audit_event", _boom)
+
+        with pytest.raises(RuntimeError):
+            update_factory_policies(
+                "test_factory", fields={"monthly_ceiling_usd": 999},
+                reason="should not persist", db_path=db_path,
+            )
+
+        # The policy change must NOT have persisted.
+        policies = get_factory_policies("test_factory", db_path=db_path)
+        assert policies["monthly_ceiling_usd"] == 0  # unchanged default
+
+    def test_policy_and_audit_commit_together_on_success(self, db_path):
+        """The positive case of the same atomicity guarantee: a successful
+        call leaves both the policy change AND its audit row visible."""
+        _seed_factory(db_path)
+        update_factory_policies(
+            "test_factory", fields={"monthly_ceiling_usd": 42},
+            reason="atomic commit check", db_path=db_path,
+        )
+
+        policies = get_factory_policies("test_factory", db_path=db_path)
+        assert policies["monthly_ceiling_usd"] == 42
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM audit_records WHERE entity_id='test_factory'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 1

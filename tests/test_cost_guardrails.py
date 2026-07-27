@@ -348,26 +348,50 @@ class TestDryRunMode:
         assert request_id is not None
         assert request_id.startswith(_DRY_RUN_REQUEST_ID_PREFIX)
 
-    def test_dry_run_submit_scene_returns_dry_run_status(self, tmp_path):
+    def _mock_ffmpeg_writes_file(self):
+        """subprocess.run side_effect that writes a real (fake-content) mp4
+        file, mirroring hypogeum.muapi._generate_dry_run_placeholder_clip()'s
+        real ffmpeg invocation without actually shelling out in unit tests."""
+        def _side_effect(cmd, capture_output, text, timeout):
+            out_path = Path(cmd[-1])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(b"FAKEMP4" * 2000)
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+        return _side_effect
+
+    def test_dry_run_submit_scene_returns_generated_status(self, tmp_path):
+        """Changed 2026-07-19: dry-run now writes a real placeholder clip and
+        reports "generated" (not a special "dry_run" status) so Assembly/QA
+        validate the exact same contract as a real run — see
+        hypogeum.muapi._generate_dry_run_placeholder_clip()'s docstring."""
         config = make_config(dry_run=True)
         scene_spec = make_scene_spec(scene_id="s01")
 
-        with patch("hypogeum.muapi.requests.post") as mock_post:
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()):
             result = submit_scene(scene_spec, config, "ep_000", tmp_path)
             mock_post.assert_not_called()
 
-        assert result["generation_status"] == "dry_run"
+        assert result["generation_status"] == "generated"
         assert result["scene_id"] == "s01"
 
-    def test_dry_run_does_not_write_mp4_file(self, tmp_path):
+    def test_dry_run_writes_a_real_placeholder_mp4_file(self, tmp_path):
+        """Changed 2026-07-19: dry-run must write a real, structurally-valid
+        placeholder clip file so Assembly's clip_availability_rate reflects
+        100% (not 0%) and QA validates the same contract as a real run."""
         config = make_config(dry_run=True)
         scene_spec = make_scene_spec(scene_id="s01")
 
-        with patch("hypogeum.muapi.requests.post"):
+        with patch("hypogeum.muapi.requests.post"), \
+             patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()):
             submit_scene(scene_spec, config, "ep_000", tmp_path)
 
         mp4 = tmp_path / "video" / "sc_s01.mp4"
-        assert not mp4.exists()
+        assert mp4.exists()
+        assert mp4.stat().st_size > 0
 
     def test_dry_run_does_not_consume_budget(self, tmp_path):
         config = make_config(dry_run=True, episode_budget_credits=0.1)
@@ -384,18 +408,20 @@ class TestDryRunMode:
         # However, in our implementation, budget guard IS checked before submission.
         # In dry-run, we want to allow the run even if budget would be exceeded.
         # This test verifies that submit_scene completes without raising.
-        with patch("hypogeum.muapi.requests.post"):
+        with patch("hypogeum.muapi.requests.post"), \
+             patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()):
             result = submit_scene(scene_spec, config, "ep_000", tmp_path,
                                   budget_guard=guard)
-        assert result["generation_status"] == "dry_run"
+        assert result["generation_status"] == "generated"
 
     def test_dry_run_multiple_scenes_succeed(self, tmp_path):
         config = make_config(dry_run=True)
         for i in range(5):
             scene_spec = make_scene_spec(scene_id=f"s{i:02d}")
-            with patch("hypogeum.muapi.requests.post"):
+            with patch("hypogeum.muapi.requests.post"), \
+                 patch("hypogeum.muapi.subprocess.run", side_effect=self._mock_ffmpeg_writes_file()):
                 result = submit_scene(scene_spec, config, "ep_000", tmp_path)
-            assert result["generation_status"] == "dry_run"
+            assert result["generation_status"] == "generated"
 
 
 # ---------------------------------------------------------------------------

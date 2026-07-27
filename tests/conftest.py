@@ -65,6 +65,18 @@ _GUARDRAIL_VARS = [
     # Smoke Test Mode
     "SMOKE_TEST_MODE",
     "SMOKE_TEST_MAX_NARRATION_BEATS",
+    # Expensive-run safety gate (2026-07-13)
+    "PRODUCTION_MODE",
+    "FULL_PRODUCTION_ENABLED",
+    # Discovery engine selection — production .env currently sets this to
+    # "v2" (LLM + Perplexity). Without blocking it, any test that calls
+    # run_discovery_cycle() without an explicit engine override silently
+    # exercises the real network-calling v2 path instead of the
+    # deterministic v1 heuristic path it was written against, hanging on
+    # live provider calls (found via a full-suite run that hung at
+    # TestDiscoveryCycleIntegration::test_run_discovery_cycle_produces_candidates,
+    # 2026-07-27 repository integrity pass).
+    "DISCOVERY_ENGINE",
 ]
 
 
@@ -151,6 +163,28 @@ def _isolate_pipeline_ois():
     with _patch("hypogeum.pipeline.is_factory_blocked", return_value=False):
         with _patch("hypogeum.pipeline.is_channel_blocked", return_value=False):
             yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_production_gate():
+    """
+    Prevent run_pipeline()'s expensive-run safety gate (2026-07-13,
+    hypogeum/production_gate.py) from blocking existing pipeline tests.
+
+    require_full_production_authorized() raises ProductionGateBlocked unless
+    Config.FULL_PRODUCTION_ENABLED is explicitly True — which no test Config
+    sets, since it isn't part of any existing make_config() helper. Without
+    this fixture, every test that calls run_pipeline() with mocked agents
+    would fail at the gate before reaching the agents it's actually testing.
+
+    This fixture patches require_full_production_authorized in the pipeline
+    module namespace to a no-op during tests. Tests that intentionally
+    verify gate-blocking behaviour patch it themselves within their own
+    context managers (or call hypogeum.production_gate functions directly,
+    unpatched), which take precedence over this fixture.
+    """
+    with _patch("hypogeum.pipeline.require_full_production_authorized"):
+        yield
 
 
 @pytest.fixture(autouse=True)

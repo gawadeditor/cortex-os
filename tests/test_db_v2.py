@@ -1013,3 +1013,131 @@ class TestPublishingOutcomesDeliverableMigration:
         conn.close()
 
         assert "deliverable_id" in cols
+
+
+class TestPublishingOutcomesStatusEnumMigration:
+    """TikTok Upload-to-Inbox support (2026-07-26): publishing_status gains
+    'uploaded_to_inbox' via a second table-rebuild migration, independent of
+    the deliverable_id migration above."""
+
+    def _make_pre_status_enum_db(self, tmp_path) -> Path:
+        """A DB already migrated to the deliverable_id shape (post-2026-07-25)
+        but still with the old 5-value publishing_status CHECK — exactly
+        what a production database looked like before this migration existed."""
+        db_path = tmp_path / "pre_status_enum.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE publishing_outcomes (
+                outcome_id          TEXT NOT NULL PRIMARY KEY,
+                episode_id          TEXT NOT NULL,
+                run_id              TEXT,
+                platform            TEXT NOT NULL,
+                deliverable_id      TEXT NOT NULL DEFAULT 'main_episode',
+                publishing_status   TEXT NOT NULL DEFAULT 'unknown'
+                                         CHECK(publishing_status IN
+                                             ('success','failed','pending','skipped','unknown')),
+                platform_video_id   TEXT,
+                published_at        TEXT,
+                url                 TEXT,
+                failure_reason      TEXT,
+                recorded_at         TEXT NOT NULL,
+                metadata_version    TEXT NOT NULL DEFAULT 'v1',
+                UNIQUE(episode_id, platform, deliverable_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO publishing_outcomes
+                (outcome_id, episode_id, run_id, platform, deliverable_id,
+                 publishing_status, platform_video_id, published_at, url,
+                 recorded_at, metadata_version)
+            VALUES ('out1', 'ep_real_001', 'run_1', 'youtube', 'main_episode',
+                    'success', 'yt_vid_abc', '2026-07-01T00:00:00Z',
+                    'https://youtube.com/watch?v=yt_vid_abc',
+                    '2026-07-01T00:00:01Z', 'v1')
+            """
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_migration_allows_uploaded_to_inbox_status(self, tmp_path):
+        db_path = self._make_pre_status_enum_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        # Would raise sqlite3.IntegrityError against the pre-migration CHECK.
+        conn.execute(
+            """
+            INSERT INTO publishing_outcomes
+                (outcome_id, episode_id, platform, deliverable_id,
+                 publishing_status, platform_video_id, recorded_at)
+            VALUES ('out2', 'ep_real_001', 'tiktok', 'short_sh_001',
+                    'uploaded_to_inbox', 'tiktok_publish_id_1', '2026-07-26T00:00:00Z')
+            """
+        )
+        conn.commit()
+        row = dict(conn.execute(
+            "SELECT * FROM publishing_outcomes WHERE outcome_id='out2'"
+        ).fetchone())
+        conn.close()
+
+        assert row["publishing_status"] == "uploaded_to_inbox"
+
+    def test_migration_preserves_all_original_row_data(self, tmp_path):
+        db_path = self._make_pre_status_enum_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        row = dict(conn.execute(
+            "SELECT * FROM publishing_outcomes WHERE episode_id='ep_real_001'"
+        ).fetchone())
+        conn.close()
+
+        assert row["outcome_id"] == "out1"
+        assert row["deliverable_id"] == "main_episode"
+        assert row["publishing_status"] == "success"
+        assert row["platform_video_id"] == "yt_vid_abc"
+        assert row["recorded_at"] == "2026-07-01T00:00:01Z"
+
+    def test_migration_is_idempotent(self, tmp_path):
+        db_path = self._make_pre_status_enum_db(tmp_path)
+        initialize_schema(db_path)
+        initialize_schema(db_path)  # second call must be a no-op
+
+        conn = get_connection(db_path)
+        count = conn.execute("SELECT COUNT(*) FROM publishing_outcomes").fetchone()[0]
+        conn.close()
+
+        assert count == 1
+
+    def test_still_rejects_a_truly_invalid_status(self, tmp_path):
+        db_path = self._make_pre_status_enum_db(tmp_path)
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO publishing_outcomes
+                    (outcome_id, episode_id, platform, deliverable_id,
+                     publishing_status, recorded_at)
+                VALUES ('out3', 'ep_real_001', 'tiktok', 'short_sh_002',
+                        'not_a_real_status', '2026-07-26T00:00:00Z')
+                """
+            )
+        conn.close()
+
+    def test_fresh_database_gets_new_shape_directly(self, tmp_path):
+        db_path = tmp_path / "fresh2.db"
+        initialize_schema(db_path)
+
+        conn = get_connection(db_path)
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='publishing_outcomes'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert "uploaded_to_inbox" in sql

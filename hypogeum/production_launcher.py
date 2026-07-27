@@ -1,16 +1,34 @@
 """
-hypogeum/production_launcher.py — Dashboard → Pipeline launcher (F14)
+hypogeum/production_launcher.py — Dashboard → Queue submission (F14)
 
 Public function:
     launch_episode_from_dashboard(...) -> dict
+
+Validates a manually-submitted episode request, then places it on the same
+canonical queue the Scheduler uses instead of executing it directly:
+
+    Dashboard -> hypogeum.dashboard_control.enqueue_topic()
+              -> hypogeum.queue.enqueue()
+              -> run_worker (existing poll loop, unmodified)
+              -> queue.process_next()
+              -> worker_integration (gated executor, unmodified)
+              -> pipeline.run_pipeline()
+
+The submitted item is picked up by run_worker.py's existing poll loop and
+gated by hypogeum.worker_integration's executor exactly like an autonomous
+item. This module contains no execution-orchestration logic — no
+subprocess, no direct pipeline.run_pipeline() call, no parallel execution
+path. episode_id is generated and recorded immediately (as before this
+change), then threaded through to enqueue_topic()/queue.enqueue() so the
+worker's eventual claim resolves to this exact episode_id — the same
+"preserve episode_id" pattern already used for reruns (see
+run_dashboard.py's /api/run/<id>/rerun).
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-import subprocess
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,11 +62,21 @@ def launch_episode_from_dashboard(
     youtube_privacy: str = "private",
 ) -> dict:
     """
-    Preflight all required resources, then spawn run_pipeline.py via Popen.
+    Preflight all required resources, then submit the episode to the
+    canonical queue for the worker to pick up.
+
+    video_type/quality_mode/youtube_privacy/platforms are accepted for
+    signature compatibility; platforms was already unused in the prior
+    direct-execution implementation (platform selection is governed
+    downstream by ChannelOperationsProfile.enabled_platforms, not
+    per-submission choice) and remains unused here.
 
     Returns:
-        {"status": "launched", "episode_id": str, "pid": int}   — success
-        {"status": "blocked",  "missing": list[str]}             — preflight failed
+        {"status": "launched", "episode_id": str, "queue_id": str, "pid": None} — success
+        {"status": "blocked",  "missing": list[str]}                           — preflight failed
+
+    "pid" is kept (always None) for response-shape compatibility with
+    callers that previously read it — there is no longer a spawned process.
     """
     missing: list[str] = []
 
@@ -82,7 +110,7 @@ def launch_episode_from_dashboard(
     if missing:
         return {"status": "blocked", "missing": missing}
 
-    # --- create episode record before spawning ---
+    # --- create episode record before submitting ---
     episode_id = _generate_episode_id()
     db_resolved = Path(db_path) if db_path else _DEFAULT_DB_PATH
 
@@ -100,20 +128,25 @@ def launch_episode_from_dashboard(
     except Exception as exc:
         return {"status": "blocked", "missing": [f"DB error creating episode: {exc}"]}
 
-    # --- spawn pipeline (non-blocking) ---
-    run_pipeline_path = _PROJECT_ROOT / "run_pipeline.py"
-    cmd = [
-        sys.executable,
-        str(run_pipeline_path),
-        "--topic", topic,
-        "--episode-id", episode_id,
-        "--channel-id", channel_id,
-        "--youtube-privacy", youtube_privacy,
-    ]
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(_PROJECT_ROOT),
-        start_new_session=True,
+    # --- submit to the canonical queue — never executes directly ---
+    from hypogeum.dashboard_control import enqueue_topic
+    enqueue_result = enqueue_topic(
+        channel_id, topic,
+        priority=0,
+        db_path=db_path,
+        source="manual",
+        episode_id=episode_id,
+    )
+    if not enqueue_result.get("ok"):
+        return {"status": "blocked", "missing": [enqueue_result.get("error", "enqueue failed")]}
+
+    from hypogeum.queue import enqueue as enqueue_queue_item
+    queue_id = enqueue_queue_item(
+        db_path=db_path,
+        channel_id=channel_id,
+        episode_id=episode_id,
+        priority=0,
+        source="manual",
     )
 
-    return {"status": "launched", "episode_id": episode_id, "pid": proc.pid}
+    return {"status": "launched", "episode_id": episode_id, "queue_id": queue_id, "pid": None}

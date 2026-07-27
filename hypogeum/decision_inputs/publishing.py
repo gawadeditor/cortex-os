@@ -19,7 +19,7 @@ from hypogeum.db import get_connection, initialize_schema
 _PROJECT_ROOT    = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 
-_PUB_STATUSES = ("success", "failed", "pending", "skipped", "unknown")
+_PUB_STATUSES = ("success", "failed", "pending", "skipped", "unknown", "uploaded_to_inbox")
 
 
 def _resolve_db(db_path: Optional[Path]) -> Path:

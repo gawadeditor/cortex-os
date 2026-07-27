@@ -177,6 +177,34 @@ class TestRunMusicAgent:
         assert result["sourcing_status"] == "complete"
         assert result["tracks"] == {}
 
+    def test_section_categories_override_flows_to_sourced_track(self, tmp_path):
+        """Option B (2026-07-19): when section_categories is supplied, the
+        override -- not the tone_arc -- is what actually gets requested and
+        recorded for that section."""
+        cfg = _make_config()
+        visual = _make_visual_package()  # tone_arc unrelated to "Tension"
+        section_durations = {"main_episode_0": 40.0, "main_episode_1": 50.0}
+        section_categories = {"main_episode_0": "Tension", "main_episode_1": "Resolution"}
+
+        requested_categories = []
+        def _capture(**kwargs):
+            requested_categories.append(kwargs["category"])
+            return _make_track_result(tmp_path=tmp_path)
+
+        with patch("hypogeum.agents.music_agent.generate_music_track", side_effect=_capture):
+            result = run_music_agent(
+                visual_package=visual,
+                episode_id="ep_001",
+                config=cfg,
+                assets_root=tmp_path / ".hypogeum-assets",
+                section_durations=section_durations,
+                section_categories=section_categories,
+            )
+
+        assert set(requested_categories) == {"Tension", "Resolution"}
+        assert result["tracks"]["main_episode_0"]["category"] == "Tension"
+        assert result["tracks"]["main_episode_1"]["category"] == "Resolution"
+
     def test_track_dict_fields_present(self, tmp_path):
         """Each entry in tracks[] has all required fields."""
         cfg = _make_config()
@@ -511,6 +539,38 @@ class TestSectionCategories:
         """Category derived from tone_arc, not hardcoded."""
         result = _build_section_categories(["main_episode"], "discovery and exploration")
         assert result["main_episode"] == "Discovery"
+
+    def test_override_takes_precedence_over_tone_arc(self):
+        """Option B (2026-07-19): a per-section override (from
+        timeline_builder.compute_music_sections()) wins over the tone_arc
+        fallback for that section key."""
+        result = _build_section_categories(
+            ["main_episode_0", "main_episode_1"],
+            tone_arc="discovery and exploration",
+            overrides={"main_episode_0": "Tension"},
+        )
+        assert result["main_episode_0"] == "Tension"
+        # No override for this key -> falls back to tone_arc, unchanged.
+        assert result["main_episode_1"] == "Discovery"
+
+    def test_shorts_fall_back_to_tone_arc_even_with_overrides_present(self):
+        """Overrides are main-episode-only; Shorts always use the tone_arc
+        fallback (Option 1, 2026-07-19 -- no section splitting for Shorts)."""
+        result = _build_section_categories(
+            ["main_episode_0", "short_sh_001"],
+            tone_arc="mystery of the unknown",
+            overrides={"main_episode_0": "Resolution"},
+        )
+        assert result["main_episode_0"] == "Resolution"
+        assert result["short_sh_001"] == "Mystery"
+
+    def test_no_overrides_argument_is_fully_backward_compatible(self):
+        """Omitting overrides entirely reproduces the original single-category
+        behavior byte-for-byte."""
+        keys = ["main_episode", "short_sh_001"]
+        assert _build_section_categories(keys, "urgent tension builds") == {
+            "main_episode": "Tension", "short_sh_001": "Tension",
+        }
 
 
 # ---------------------------------------------------------------------------

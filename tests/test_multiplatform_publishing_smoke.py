@@ -292,10 +292,11 @@ def test_tiktok_uses_self_only_privacy_level(tmp_path):
         "short_id": short["short_id"], "video_asset_id": short["video_asset_id"],
     }
 
-    with patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")) as m_init, \
+    with patch.object(smoke.tt_client, "resolve_tiktok_publish_mode", return_value="direct_post"), \
+         patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")) as m_init, \
          patch.object(smoke.tt_client, "upload_tiktok_chunks"), \
          patch.object(smoke.tt_client, "poll_tiktok_publish", return_value="post_1"):
-        result = smoke._run_tiktok_short(cfg, assets_root, "ep_test", frp, step, ledger)
+        result = smoke._run_tiktok_short(cfg, assets_root / "hypogeum.db", assets_root, "ep_test", frp, step, ledger)
 
     assert m_init.call_args.kwargs["privacy_level"] == "SELF_ONLY"
     assert result["visibility"] == "self_only"
@@ -709,6 +710,7 @@ def test_platforms_filter_excludes_youtube_and_facebook_steps(tmp_path):
          patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
          patch.object(smoke.meta_client, "upload_facebook_video") as m_fb, \
          patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "resolve_tiktok_publish_mode", return_value="direct_post"), \
          patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")) as m_tt_init, \
          patch.object(smoke.tt_client, "upload_tiktok_chunks"), \
          patch.object(smoke.tt_client, "poll_tiktok_publish", return_value="post_1"), \
@@ -753,6 +755,7 @@ def test_platforms_filter_leaves_excluded_ledger_entries_untouched(tmp_path):
          patch.object(smoke, "Config", return_value=cfg), \
          patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
          patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "resolve_tiktok_publish_mode", return_value="direct_post"), \
          patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")), \
          patch.object(smoke.tt_client, "upload_tiktok_chunks"), \
          patch.object(smoke.tt_client, "poll_tiktok_publish", return_value="post_1"), \
@@ -801,6 +804,7 @@ def test_scoped_run_never_modifies_pre_existing_active_full_record(tmp_path):
          patch.object(smoke, "Config", return_value=cfg), \
          patch.object(smoke.meta_client, "refresh_meta_token", return_value="meta_token"), \
          patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "resolve_tiktok_publish_mode", return_value="direct_post"), \
          patch.object(smoke.tt_client, "init_tiktok_upload", return_value=("pub1", "https://upload.example")), \
          patch.object(smoke.tt_client, "upload_tiktok_chunks"), \
          patch.object(smoke.tt_client, "poll_tiktok_publish", return_value="post_1"), \
@@ -827,6 +831,7 @@ def test_scoped_run_crash_leaves_active_full_record_untouched(tmp_path):
     with _CREDMGR_PATCH, \
          patch.object(smoke, "Config", return_value=cfg), \
          patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "resolve_tiktok_publish_mode", return_value="direct_post"), \
          patch.object(smoke.tt_client, "init_tiktok_upload", side_effect=RuntimeError("simulated crash")):
         try:
             smoke.main(
@@ -851,6 +856,7 @@ def test_tiktok_controlled_failure_is_recorded_as_failed_not_a_crash(tmp_path):
     with _CREDMGR_PATCH, \
          patch.object(smoke, "Config", return_value=cfg), \
          patch.object(smoke.tt_client, "refresh_tiktok_token", return_value="tt_token"), \
+         patch.object(smoke.tt_client, "resolve_tiktok_publish_mode", return_value="direct_post"), \
          patch.object(
              smoke.tt_client, "init_tiktok_upload",
              side_effect=smoke.SoftFailureError(

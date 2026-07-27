@@ -7,11 +7,18 @@ or any ElevenLabs music endpoint directly — it receives a music_track_package.
 
 Inputs:
   visual_package     — episode_metadata.tone_arc drives category selection
+                       (fallback only — see section_categories)
   episode_id         — for asset path construction and log correlation
   config             — Config instance (ElevenLabs credentials)
   assets_root        — root directory for music library and asset storage
   section_durations  — {section_key: required_duration_seconds} from Assembly Agent
-                       Keys: "main_episode", "short_{short_id}", ...
+                       Keys: "main_episode_{index}", "short_{short_id}", ...
+                       (Option B, 2026-07-19: main episode is split into
+                       contiguous per-category sections; Shorts unchanged)
+  section_categories — optional {section_key: category} overrides, one per
+                       main-episode section, from timeline_builder's actual
+                       per-scene narrative signals. Sections without an
+                       override use the tone_arc fallback above.
 
 Output (music_track_package):
   tracks              — {section_key: track_dict} for sections with music
@@ -91,19 +98,29 @@ def run_music_agent(
     config: Config,
     assets_root: Path,
     section_durations: dict[str, float],
+    section_categories: Optional[dict[str, str]] = None,
 ) -> dict:
     """
     Source background music tracks for all sections in section_durations.
 
     Args:
         visual_package:    Visual Package dict (episode_metadata.tone_arc used
-                           for category selection).
+                           as the category fallback — see section_categories).
         episode_id:        Episode identifier for asset path construction.
         config:            Loaded Config instance.
         assets_root:       Root of .hypogeum-assets/ tree.
         section_durations: {section_key: required_duration_seconds} mapping.
-                           Keys: "main_episode", "short_{short_id}", ...
+                           Keys: "main_episode_{index}", "short_{short_id}", ...
                            From Assembly Agent's timeline computation.
+        section_categories: Optional {section_key: category} overrides, one
+                           per main-episode section (Option B, 2026-07-19).
+                           Produced by timeline_builder.compute_music_sections()
+                           from each section's actual scene narrative signals
+                           -- Music Agent does not re-derive categories, it
+                           only applies them. Section keys with no override
+                           (Shorts, or callers that omit this argument
+                           entirely) fall back to the episode tone_arc, the
+                           original single-category behavior.
 
     Returns:
         music_track_package dict (schema-validated).
@@ -130,6 +147,7 @@ def run_music_agent(
     section_categories = _build_section_categories(
         section_keys=list(section_durations.keys()),
         tone_arc=tone_arc,
+        overrides=section_categories,
     )
 
     tracks: dict[str, dict] = {}
@@ -273,10 +291,20 @@ def run_music_agent(
 def _build_section_categories(
     section_keys: list[str],
     tone_arc: str,
+    overrides: Optional[dict[str, str]] = None,
 ) -> dict[str, str]:
-    """Map each section key to a music category derived from the episode tone arc."""
+    """
+    Map each section key to a music category.
+
+    Per-section overrides (main-episode sections, keyed by the actual scene
+    narrative signals via timeline_builder.compute_music_sections()) take
+    precedence when supplied. Any section key with no override -- Shorts,
+    or any caller that omits overrides entirely -- falls back to the
+    episode tone_arc, unchanged from the original single-category design.
+    """
     base_category = _tone_arc_to_category(tone_arc)
-    return {key: base_category for key in section_keys}
+    overrides = overrides or {}
+    return {key: overrides.get(key, base_category) for key in section_keys}
 
 
 def _tone_arc_to_category(tone_arc: str) -> str:

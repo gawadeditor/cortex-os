@@ -190,6 +190,18 @@ def get_run_detail(
         failed_stages = [s["stage_name"] for s in stages_list
                          if s.get("status") == "failed"]
 
+        # Minimum Operational Dashboard Phase 2 — this run's own gate
+        # outcome (why it was blocked/deferred, if it was), not just the
+        # most-recent-overall one shown on /infrastructure/workers.
+        # Read-only; passed through as the original WorkerAttempt object.
+        worker_attempt = None
+        if episode_id:
+            try:
+                from hypogeum.worker_integration import load_latest_worker_attempt
+                worker_attempt = load_latest_worker_attempt(episode_id)
+            except Exception:
+                pass
+
         return {
             "run":              _row_to_dict(run_row),
             "episode":          _row_to_dict(ep_row) if ep_row else {},
@@ -202,6 +214,7 @@ def get_run_detail(
             "total_cost_usd":   round(total_cost, 6),
             "stage_count":      len(stages_list),
             "failed_stages":    failed_stages,
+            "worker_attempt":   worker_attempt,
         }
     except Exception:
         return None

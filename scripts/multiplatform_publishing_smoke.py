@@ -31,7 +31,15 @@ Safe modes (hardcoded constants, never derived from CLI input or config):
     YouTube main   -> privacyStatus = "private"
     YouTube Shorts -> privacyStatus = "private"
     Facebook       -> published = False
-    TikTok         -> privacy_level = "SELF_ONLY"
+    TikTok         -> capability-gated (2026-07-26): if the credential's
+                       granted scope includes video.publish, privacy_level =
+                       "SELF_ONLY" (Direct Post, as before). If it only has
+                       video.upload (the actual state of the current
+                       credential), Upload-to-Inbox is used instead — the
+                       video is delivered as a draft to the creator's TikTok
+                       inbox, never auto-published; recorded as
+                       status="uploaded_to_inbox", never "published". Direct
+                       Post is never attempted without video.publish.
     Instagram      -> container create + poll only. publish_instagram_container
                        is never imported or called. Visibility = "container_only".
 
@@ -52,7 +60,9 @@ Expected real operations for one episode:
     1 YouTube long-form upload (private) + thumbnail + captions
     N YouTube Shorts uploads (private) + thumbnail — one per shorts_renders[] entry
     1 Facebook main video (published=false)
-    1 TikTok short (SELF_ONLY) — first shorts_renders[] entry only
+    1 TikTok short — first shorts_renders[] entry only. SELF_ONLY Direct
+      Post if video.publish is granted, otherwise Upload-to-Inbox (draft,
+      awaiting human completion in-app) with the currently-active credential.
     1 Instagram Reel container (create + poll only, never published)
 
 Usage:
@@ -395,13 +405,25 @@ def _build_steps(final_render_package: dict) -> list[dict]:
     return steps
 
 
-def _build_expected_deliverables(final_render_package: dict) -> list[dict]:
+def _build_expected_deliverables(final_render_package: dict, db_path: Path) -> list[dict]:
     """
     The smoke run's readiness contract — see PublishingRecord's
     expected_deliverables docstring for the entry shape. Mirrors exactly
     what _build_steps() above actually attempts: YouTube shorts count and
     the tiktok/instagram-only-if-shorts-exist condition match 1:1.
+
+    TikTok's expected status/visibility is resolved from the credential's
+    actual granted scope (2026-07-26) rather than hardcoded to "published":
+    an Upload-to-Inbox-only credential (no video.publish) can never produce
+    a "published" result no matter how the run goes, so requiring that
+    status here would make production_ready permanently unreachable for a
+    capability this app was never granted. If the mode can't be resolved
+    at all (no active credential), default to the Direct Post expectation
+    unchanged — the run itself will then fail with a clear credential
+    error, exactly as before this change.
     """
+    from hypogeum.publishing.tiktok import resolve_tiktok_publish_mode
+
     shorts_renders = final_render_package.get("shorts_renders", [])
     deliverables = [
         {"platform": "youtube", "deliverable_type": "main_episode", "count": 1,
@@ -414,10 +436,24 @@ def _build_expected_deliverables(final_render_package: dict) -> list[dict]:
             "platform": "youtube", "deliverable_type": "short", "count": len(shorts_renders),
             "status": "published", "visibility": "private",
         })
-        deliverables.append({
-            "platform": "tiktok", "deliverable_type": "short", "count": 1,
-            "status": "published", "visibility": "self_only",
-        })
+
+        try:
+            tiktok_mode = resolve_tiktok_publish_mode(db_path=db_path)
+        except Exception:
+            tiktok_mode = "direct_post"
+
+        if tiktok_mode == "upload_to_inbox":
+            deliverables.append({
+                "platform": "tiktok", "deliverable_type": "short", "count": 1,
+                "status": "uploaded_to_inbox", "visibility": "inbox_only",
+                "skipped_reason_prefix": "awaiting_human_publish",
+            })
+        else:
+            deliverables.append({
+                "platform": "tiktok", "deliverable_type": "short", "count": 1,
+                "status": "published", "visibility": "self_only",
+            })
+
         deliverables.append({
             "platform": "instagram", "deliverable_type": "short", "count": 1,
             "status": "skipped", "visibility": "container_only",
@@ -635,7 +671,13 @@ def _run_facebook_main(config, token, assets_root, episode_id, final_render_pack
     return {"outcome": "success", "visibility": "unpublished", "result_entry": result_entry}
 
 
-def _run_tiktok_short(config, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
+def _run_tiktok_short(config, db_path, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
+    """
+    Capability-gated (2026-07-26): dispatches to whichever flow this app's
+    actual granted scope authorizes. Never attempts Direct Post when
+    video.publish is absent — see hypogeum/publishing/tiktok.py module
+    docstring and resolve_tiktok_publish_mode().
+    """
     metadata_source = final_render_package.get("metadata_source", {})
     short_id = step["short_id"]
     video_path = _asset_path(assets_root, step["video_asset_id"], ".mp4")
@@ -643,26 +685,58 @@ def _run_tiktok_short(config, assets_root, episode_id, final_render_package, ste
         raise RuntimeError(f"video asset missing: {step['video_asset_id']}")
 
     title = build_tiktok_title(metadata_source, short_id=short_id, episode_id=episode_id)
+    mode = tt_client.resolve_tiktok_publish_mode(db_path=db_path)
 
-    assert _SAFE_TIKTOK_PRIVACY == "SELF_ONLY", "refusing: tiktok privacy_level is not SELF_ONLY"
-    publish_id, upload_url = tt_client.init_tiktok_upload(
-        config=config, video_path=video_path, title=title,
-        episode_id=episode_id, privacy_level=_SAFE_TIKTOK_PRIVACY,
+    if mode == "direct_post":
+        assert _SAFE_TIKTOK_PRIVACY == "SELF_ONLY", "refusing: tiktok privacy_level is not SELF_ONLY"
+        publish_id, upload_url = tt_client.init_tiktok_upload(
+            config=config, video_path=video_path, title=title,
+            episode_id=episode_id, privacy_level=_SAFE_TIKTOK_PRIVACY,
+        )
+        tt_client.upload_tiktok_chunks(
+            config=config, upload_url=upload_url, video_path=video_path, episode_id=episode_id,
+        )
+        post_id = tt_client.poll_tiktok_publish(config=config, publish_id=publish_id, episode_id=episode_id)
+        result_entry = make_result_entry(
+            platform="tiktok", deliverable_type="short", status="published",
+            short_id=short_id,
+            platform_video_id=post_id,
+            published_at=datetime.now(timezone.utc).isoformat(),
+            title=title,
+            ai_disclosure_included=False,
+            visibility="self_only",
+        )
+        return {"outcome": "success", "visibility": "self_only", "result_entry": result_entry}
+
+    # mode == "upload_to_inbox": this credential is not authorized for
+    # Direct Post at all (no video.publish scope) — Upload-to-Inbox is the
+    # only flow that can succeed, and its true outcome is a draft delivered
+    # to the creator's TikTok inbox, not a public post.
+    publish_id, upload_url = tt_client.init_tiktok_inbox_upload(
+        config=config, video_path=video_path, episode_id=episode_id,
     )
     tt_client.upload_tiktok_chunks(
         config=config, upload_url=upload_url, video_path=video_path, episode_id=episode_id,
     )
-    post_id = tt_client.poll_tiktok_publish(config=config, publish_id=publish_id, episode_id=episode_id)
+    inbox_status = tt_client.poll_tiktok_inbox_status(
+        config=config, publish_id=publish_id, episode_id=episode_id,
+    )
     result_entry = make_result_entry(
-        platform="tiktok", deliverable_type="short", status="published",
+        platform="tiktok", deliverable_type="short", status="uploaded_to_inbox",
         short_id=short_id,
-        platform_video_id=post_id,
+        platform_video_id=publish_id,
         published_at=datetime.now(timezone.utc).isoformat(),
+        skipped_reason="awaiting_human_publish",
         title=title,
         ai_disclosure_included=False,
-        visibility="self_only",
+        visibility="inbox_only",
     )
-    return {"outcome": "success", "visibility": "self_only", "result_entry": result_entry}
+    return {
+        "outcome": "uploaded_to_inbox",
+        "visibility": "inbox_only",
+        "inbox_status": inbox_status,
+        "result_entry": result_entry,
+    }
 
 
 def _run_instagram_short(config, token, assets_root, episode_id, final_render_package, step, ledger: CheckpointLedger) -> dict:
@@ -845,7 +919,7 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
         covered_topics_path.read_text(encoding="utf-8") if covered_topics_path.exists() else None
     )
 
-    expected_deliverables = _build_expected_deliverables(final_render_package)
+    expected_deliverables = _build_expected_deliverables(final_render_package, db_path)
     if selected_platforms is not None:
         expected_deliverables = [d for d in expected_deliverables if d["platform"] in selected_platforms]
     record = PublishingRecord(episode_id=episode_id, output_dir=record_output_dir, expected_deliverables=expected_deliverables)
@@ -926,7 +1000,7 @@ def main(argv: Optional[list] = None, project_root: Optional[Path] = None) -> in
                     result = _run_facebook_main(config, meta_token, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "tiktok":
-                    result = _run_tiktok_short(config, assets_root, episode_id, final_render_package, step, ledger)
+                    result = _run_tiktok_short(config, db_path, assets_root, episode_id, final_render_package, step, ledger)
 
                 elif platform == "instagram":
                     result = _run_instagram_short(config, meta_token, assets_root, episode_id, final_render_package, step, ledger)

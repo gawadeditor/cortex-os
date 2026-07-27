@@ -46,7 +46,12 @@ from hypogeum.publishing.metadata import (
     get_short_title,
 )
 from hypogeum.publishing.record import PublishingRecord, make_result_entry
-from hypogeum.publishing.retry import HardFailureError, PollTimeoutError, SoftFailureError
+from hypogeum.publishing.retry import (
+    HardFailureError,
+    PollTimeoutError,
+    SoftFailureError,
+    retry_video_upload,
+)
 from hypogeum.publishing.staging import StagingError, get_staging_provider
 from hypogeum.agents.covered_topics_writer import record_published_topic
 from hypogeum.decision_inputs.publishing import get_publishing_outcome
@@ -1537,6 +1542,32 @@ def run_publishing_agent(
             episode_id=episode_id,
         )
 
+    # Capability-gated publish mode (2026-07-26): TikTok's granted scope
+    # determines which flow is authorized. Direct Post (full publish)
+    # requires video.publish; without it, only Upload-to-Inbox (draft,
+    # awaiting human completion in-app) is available. Never attempt Direct
+    # Post when video.publish is absent — TikTok itself rejects it, and
+    # there is no code-level workaround (see hypogeum/publishing/tiktok.py
+    # module docstring). Resolved once, like tiktok_available above.
+    tiktok_publish_mode: Optional[str] = None
+    if tiktok_available:
+        try:
+            tiktok_publish_mode = tt_client.resolve_tiktok_publish_mode(
+                db_path=assets_root / "hypogeum.db",
+            )
+            log.info(
+                "publishing_tiktok_publish_mode_resolved",
+                episode_id=episode_id,
+                publish_mode=tiktok_publish_mode,
+            )
+        except Exception as _mode_exc:
+            tiktok_available = False
+            log.warn(
+                "publishing_tiktok_publish_mode_unresolved",
+                episode_id=episode_id,
+                error=str(_mode_exc),
+            )
+
     for sr in shorts_renders:
         short_id = sr.get("short_id", "")
         sr_video_id = sr.get("video_asset_id", "")
@@ -1546,19 +1577,26 @@ def run_publishing_agent(
             episode_id, "tiktok", deliverable_id=_tt_deliverable_id,
             db_path=assets_root / "hypogeum.db",
         )
-        if _existing_tt and _existing_tt.get("publishing_status") == "success":
+        if _existing_tt and _existing_tt.get("publishing_status") in ("success", "uploaded_to_inbox"):
             _prior_id = _existing_tt.get("platform_video_id") or ""
+            _prior_status = _existing_tt.get("publishing_status")
+            # A prior uploaded_to_inbox outcome is terminal for our purposes
+            # (idempotency) even though it isn't a full publish — retrying
+            # would create a second, duplicate inbox draft on TikTok's side.
             log.info(
-                "publishing_tiktok_short_already_published",
+                "publishing_tiktok_short_already_published"
+                if _prior_status == "success" else
+                "publishing_tiktok_short_already_uploaded_to_inbox",
                 episode_id=episode_id, short_id=short_id, video_id=_prior_id,
             )
             entry = make_result_entry(
                 platform="tiktok",
                 deliverable_type="short",
-                status="published",
+                status="published" if _prior_status == "success" else _prior_status,
                 short_id=short_id,
                 platform_video_id=_prior_id,
                 published_at=_existing_tt.get("published_at"),
+                skipped_reason="awaiting_human_publish" if _prior_status == "uploaded_to_inbox" else None,
                 title=build_tiktok_title(metadata_source, short_id=short_id, episode_id=episode_id),
                 ai_disclosure_included=False,
             )
@@ -1615,52 +1653,132 @@ def run_publishing_agent(
             continue
 
         try:
-            publish_id, upload_url = tt_client.init_tiktok_upload(
-                config=config,
-                video_path=tt_video_path,
-                title=tt_title,
-                episode_id=episode_id,
-            )
-            tt_client.upload_tiktok_chunks(
-                config=config,
-                upload_url=upload_url,
-                video_path=tt_video_path,
-                episode_id=episode_id,
-            )
-            post_id = tt_client.poll_tiktok_publish(
-                config=config,
-                publish_id=publish_id,
-                episode_id=episode_id,
-            )
-            _tt_published_at = datetime.now(timezone.utc).isoformat()
-            entry = make_result_entry(
-                platform="tiktok",
-                deliverable_type="short",
-                status="published",
-                short_id=short_id,
-                platform_video_id=post_id,
-                published_at=_tt_published_at,
-                title=tt_title,
-                ai_disclosure_included=False,
-            )
-            record.append_result(entry)
+            if tiktok_publish_mode == "direct_post":
+                def _do_tiktok_direct_upload() -> str:
+                    _pub_id, _upload_url = tt_client.init_tiktok_upload(
+                        config=config,
+                        video_path=tt_video_path,
+                        title=tt_title,
+                        episode_id=episode_id,
+                    )
+                    tt_client.upload_tiktok_chunks(
+                        config=config,
+                        upload_url=_upload_url,
+                        video_path=tt_video_path,
+                        episode_id=episode_id,
+                    )
+                    return _pub_id
 
-            try:
-                record_publishing_outcome(
+                # Retry parity with YouTube/Facebook (both wrap their upload
+                # in retry_video_upload() already; TikTok previously had no
+                # in-process retry at all for a transient 429/500/503).
+                publish_id = retry_video_upload(
+                    fn=_do_tiktok_direct_upload,
                     episode_id=episode_id,
                     platform="tiktok",
-                    publishing_status="success",
+                )
+                post_id = tt_client.poll_tiktok_publish(
+                    config=config,
+                    publish_id=publish_id,
+                    episode_id=episode_id,
+                )
+                _tt_published_at = datetime.now(timezone.utc).isoformat()
+                entry = make_result_entry(
+                    platform="tiktok",
+                    deliverable_type="short",
+                    status="published",
+                    short_id=short_id,
                     platform_video_id=post_id,
                     published_at=_tt_published_at,
-                    deliverable_id=_tt_deliverable_id,
-                    db_path=assets_root / "hypogeum.db",
+                    title=tt_title,
+                    ai_disclosure_included=False,
                 )
-            except Exception as _exc:
-                log.warn(
-                    "publishing_outcome_record_failed",
-                    episode_id=episode_id, platform="tiktok",
-                    deliverable_id=_tt_deliverable_id, error=str(_exc),
+                record.append_result(entry)
+
+                try:
+                    record_publishing_outcome(
+                        episode_id=episode_id,
+                        platform="tiktok",
+                        publishing_status="success",
+                        platform_video_id=post_id,
+                        published_at=_tt_published_at,
+                        deliverable_id=_tt_deliverable_id,
+                        db_path=assets_root / "hypogeum.db",
+                    )
+                except Exception as _exc:
+                    log.warn(
+                        "publishing_outcome_record_failed",
+                        episode_id=episode_id, platform="tiktok",
+                        deliverable_id=_tt_deliverable_id, error=str(_exc),
+                    )
+
+            else:
+                # Upload-to-Inbox: this credential's granted scope (video.upload,
+                # no video.publish) does not authorize Direct Post. Never call
+                # init_tiktok_upload() here — it would be rejected by TikTok
+                # regardless, and the whole point of resolving the mode up
+                # front is to never attempt the unauthorized flow.
+                def _do_tiktok_inbox_upload() -> str:
+                    _pub_id, _upload_url = tt_client.init_tiktok_inbox_upload(
+                        config=config,
+                        video_path=tt_video_path,
+                        episode_id=episode_id,
+                    )
+                    tt_client.upload_tiktok_chunks(
+                        config=config,
+                        upload_url=_upload_url,
+                        video_path=tt_video_path,
+                        episode_id=episode_id,
+                    )
+                    return _pub_id
+
+                publish_id = retry_video_upload(
+                    fn=_do_tiktok_inbox_upload,
+                    episode_id=episode_id,
+                    platform="tiktok",
                 )
+                _inbox_status = tt_client.poll_tiktok_inbox_status(
+                    config=config,
+                    publish_id=publish_id,
+                    episode_id=episode_id,
+                )
+                _tt_uploaded_at = datetime.now(timezone.utc).isoformat()
+                entry = make_result_entry(
+                    platform="tiktok",
+                    deliverable_type="short",
+                    status="uploaded_to_inbox",
+                    short_id=short_id,
+                    platform_video_id=publish_id,
+                    published_at=_tt_uploaded_at,
+                    skipped_reason="awaiting_human_publish",
+                    title=tt_title,
+                    ai_disclosure_included=False,
+                )
+                record.append_result(entry)
+                log.info(
+                    "publishing_tiktok_short_uploaded_to_inbox",
+                    episode_id=episode_id,
+                    short_id=short_id,
+                    publish_id=publish_id,
+                    inbox_status=_inbox_status,
+                )
+
+                try:
+                    record_publishing_outcome(
+                        episode_id=episode_id,
+                        platform="tiktok",
+                        publishing_status="uploaded_to_inbox",
+                        platform_video_id=publish_id,
+                        published_at=_tt_uploaded_at,
+                        deliverable_id=_tt_deliverable_id,
+                        db_path=assets_root / "hypogeum.db",
+                    )
+                except Exception as _exc:
+                    log.warn(
+                        "publishing_outcome_record_failed",
+                        episode_id=episode_id, platform="tiktok",
+                        deliverable_id=_tt_deliverable_id, error=str(_exc),
+                    )
 
         except (HardFailureError, SoftFailureError, PollTimeoutError, Exception) as exc:
             log.error(

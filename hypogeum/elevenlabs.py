@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import time
 import random
 import uuid
@@ -1266,6 +1267,21 @@ def generate_music_track(
     if duration_ms > _MUSIC_MAX_DURATION_MS:
         duration_ms = _MUSIC_MAX_DURATION_MS
 
+    # Fixed 2026-07-19: cost recording, library metadata, and the returned
+    # MusicTrackResult must reflect the actual clamped/generated duration,
+    # never the pre-clamp required_duration_seconds request. Using the
+    # unclamped value here previously (a) overstated cost_usd by up to ~3x
+    # whenever a request exceeded _MUSIC_MAX_DURATION_MS, and (b) wrote a
+    # false duration_seconds into music-library.json, which
+    # _search_music_library()'s own `duration_seconds >= required_duration`
+    # filter then trusted at face value — a stored 300s file falsely
+    # eligible for a future request up to whatever the original (wrong,
+    # possibly much larger) value claimed. required_duration_seconds
+    # remains correct to use for the ORIGINAL request itself (already sent
+    # above) and for search-side comparisons elsewhere; only the
+    # downstream bookkeeping of what was actually generated changes here.
+    actual_duration_seconds = duration_ms / 1000.0
+
     body = {
         "prompt": prompt,          # C2: 'prompt' not 'text'
         "music_length_ms": duration_ms,  # C3: ms not duration_seconds
@@ -1358,7 +1374,7 @@ def generate_music_track(
         track_id=track_id,
         category=category,
         provider="elevenlabs",
-        duration_seconds=required_duration_seconds,
+        duration_seconds=actual_duration_seconds,
         path=asset_id,
         audio_bytes=len(audio_bytes),
     )
@@ -1374,7 +1390,7 @@ def generate_music_track(
         "source": "ai_generated",
         "provider": "elevenlabs",
         "model_id": model_id,
-        "duration_seconds": required_duration_seconds,
+        "duration_seconds": actual_duration_seconds,
         "prompt_used": prompt,
         "generated_at": now_iso,
         "usage_count": 0,
@@ -1386,8 +1402,8 @@ def generate_music_track(
         provider="elevenlabs",
         model=model_id,
         call_type="music",
-        cost_usd=round(required_duration_seconds * _MUSIC_USD_PER_SEC, 6),
-        tokens_or_credits=required_duration_seconds,
+        cost_usd=round(actual_duration_seconds * _MUSIC_USD_PER_SEC, 6),
+        tokens_or_credits=actual_duration_seconds,
         asset_id=asset_id,
     )
 
@@ -1397,7 +1413,7 @@ def generate_music_track(
         asset_id=asset_id,
         local_path=local_path,
         source="ai_generated",
-        duration_seconds=required_duration_seconds,
+        duration_seconds=actual_duration_seconds,
         prompt_used=prompt,
     )
 
@@ -1405,6 +1421,41 @@ def generate_music_track(
 # ---------------------------------------------------------------------------
 # Internal: music library helpers
 # ---------------------------------------------------------------------------
+
+def _probe_audio_duration_seconds(path: Path) -> Optional[float]:
+    """
+    Return the real on-disk duration of an audio file via ffprobe's
+    container-format duration, or None if the file is missing, unreadable,
+    or ffprobe itself is unavailable.
+
+    Added 2026-07-19 as the defensive half of the duration-metadata fix:
+    even though generate_music_track() now writes accurate duration_seconds
+    at creation time (see actual_duration_seconds above), a stale entry from
+    before that fix, or metadata corrupted by any other future cause,
+    must never be enough on its own to produce a false cache hit — see
+    _search_music_library()'s verification loop below.
+    """
+    if not path.exists():
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        return None
+
 
 def _search_music_library(
     library_path: Path,
@@ -1418,6 +1469,19 @@ def _search_music_library(
     Search the music library for a suitable track.
     Returns MusicTrackResult on hit; None on miss.
     Updates usage_count and last_used_date on hit.
+
+    Trusts stored duration_seconds metadata as the source of truth at read
+    time (2026-07-19 decision). generate_music_track() writes accurate
+    duration_seconds at creation time (the actual clamped/generated
+    duration, never the pre-clamp request — see that function's own
+    comments), so metadata is correct-by-construction going forward.
+    Historical entries written before that fix are corrected once via
+    scripts/repair_music_library_durations.py (uses the same
+    _probe_audio_duration_seconds() helper), not on every lookup — an
+    ffprobe subprocess call per candidate on every cache search was
+    evaluated and rejected as unnecessary defense-in-depth for a bug the
+    write-time fix already prevents; see that script's module docstring
+    for the full reasoning.
     """
     library = _load_music_library(library_path)
     tracks = library.get("tracks", [])
@@ -1520,6 +1584,102 @@ def _append_to_music_library(library_path: Path, entry: dict, log) -> None:
         track_id=entry["track_id"],
         action="added",
     )
+
+
+def repair_music_library_durations(
+    library_path: Path,
+    assets_root: Path,
+    log,
+    dry_run: bool = True,
+) -> dict:
+    """
+    One-time repair pass for music-library.json entries whose stored
+    duration_seconds does not match their real on-disk file duration.
+
+    Added 2026-07-19 alongside the fix to generate_music_track() (which now
+    writes accurate duration_seconds at creation time going forward). This
+    function is the migration path for entries written before that fix —
+    it is the ONLY place in the module that probes real file duration via
+    ffprobe; _search_music_library() trusts metadata at read time by
+    design (evaluated and decided 2026-07-19: an ffprobe subprocess call
+    on every cache-lookup candidate was rejected as unnecessary
+    defense-in-depth for a bug the write-time fix already prevents, at the
+    cost of adding a new subprocess dependency/failure mode to a
+    previously fast, pure-JSON hot-ish path). Run this script once after
+    upgrading, or periodically as an audit/debug tool -- never as part of
+    the normal generation or cache-lookup path.
+
+    Args:
+        library_path: Path to music-library.json.
+        assets_root:  Root of .hypogeum-assets/ tree (for resolving each
+                      track's real file path).
+        log:          Logger instance.
+        dry_run:      If True (default), reports mismatches without
+                      writing any changes. Set False to apply corrections.
+
+    Returns:
+        {
+            "total_tracks": int,
+            "checked": int,
+            "mismatched": list[dict]  # {track_id, claimed, real, path}
+            "unreadable": list[str]   # track_ids whose file could not be probed
+            "repaired": int,          # count actually corrected (0 if dry_run)
+        }
+    """
+    library = _load_music_library(library_path)
+    tracks = library.get("tracks", [])
+
+    mismatched: list = []
+    unreadable: list = []
+    repaired = 0
+
+    for track in tracks:
+        asset_id = track.get("path", "")
+        file_path = assets_root / f"{asset_id}.mp3"
+        real_duration = _probe_audio_duration_seconds(file_path)
+
+        if real_duration is None:
+            unreadable.append(track.get("track_id", "?"))
+            log.warn(
+                "elevenlabs_music_repair_unreadable",
+                track_id=track.get("track_id"),
+                path=str(file_path),
+            )
+            continue
+
+        claimed_duration = float(track.get("duration_seconds", 0))
+        if abs(real_duration - claimed_duration) > 1.0:  # >1s tolerance for encoding jitter
+            mismatched.append({
+                "track_id": track.get("track_id"),
+                "claimed_duration_seconds": claimed_duration,
+                "real_duration_seconds": real_duration,
+                "path": str(file_path),
+            })
+            log.warn(
+                "elevenlabs_music_repair_mismatch",
+                track_id=track.get("track_id"),
+                claimed_duration_seconds=claimed_duration,
+                real_duration_seconds=real_duration,
+                dry_run=dry_run,
+            )
+            if not dry_run:
+                track["duration_seconds"] = real_duration
+                repaired += 1
+
+    if not dry_run and repaired > 0:
+        _write_music_library(library_path=library_path, library=library)
+
+    result = {
+        "total_tracks": len(tracks),
+        "checked": len(tracks),
+        "mismatched": mismatched,
+        "unreadable": unreadable,
+        "repaired": repaired,
+    }
+    log.info("elevenlabs_music_repair_completed", dry_run=dry_run, **{
+        k: (v if not isinstance(v, list) else len(v)) for k, v in result.items()
+    })
+    return result
 
 
 def _build_music_prompt(category: str, tone_arc: Optional[str]) -> str:

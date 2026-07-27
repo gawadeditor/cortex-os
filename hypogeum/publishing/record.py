@@ -384,9 +384,17 @@ def make_result_entry(
     Args:
         platform:                  "youtube" | "facebook" | "instagram" | "tiktok"
         deliverable_type:          "main_episode" | "short"
-        status:                    "published" | "failed" | "skipped" — whether the
-                                    platform operation itself succeeded, failed, or
-                                    was skipped.
+        status:                    "published" | "failed" | "skipped" |
+                                    "uploaded_to_inbox" — whether the platform
+                                    operation itself succeeded, failed, was
+                                    skipped, or (TikTok Upload-to-Inbox only)
+                                    was delivered to the creator's platform
+                                    inbox awaiting a human to complete
+                                    posting in-app. "uploaded_to_inbox" is
+                                    never counted as "published" by
+                                    PublishingRecord's summary/readiness
+                                    computation — it is real progress, not
+                                    full autonomous publishing.
         short_id:                  Short identifier (for short deliverables)
         platform_video_id:         Platform-assigned video ID
         published_url:             Public URL of published content

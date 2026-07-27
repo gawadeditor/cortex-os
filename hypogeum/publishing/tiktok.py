@@ -3,13 +3,32 @@ hypogeum/publishing/tiktok.py — TikTok Content Posting API client
 
 Public API:
     check_tiktok_availability(config) -> bool
-    init_tiktok_upload(config, video_path, title) -> tuple[str, str]
-    upload_tiktok_chunks(config, upload_url, video_path) -> None
-    poll_tiktok_publish(config, publish_id) -> str
+    resolve_tiktok_publish_mode(db_path=None) -> str   # "direct_post" | "upload_to_inbox"
+    init_tiktok_upload(config, video_path, title) -> tuple[str, str]           # Direct Post
+    init_tiktok_inbox_upload(config, video_path) -> tuple[str, str]            # Upload-to-Inbox
+    upload_tiktok_chunks(config, upload_url, video_path) -> None               # shared by both
+    poll_tiktok_publish(config, publish_id) -> str                            # Direct Post terminal
+    poll_tiktok_inbox_status(config, publish_id) -> str                       # Upload-to-Inbox terminal
     refresh_tiktok_token(db_path=None) -> str   # call before any run; token expires in 24h
 
 TikTok is conditional — all operations are gated by check_tiktok_availability().
 If the gate fails, all TikTok deliverables are marked as skipped (not failed).
+
+Capability-gated publish mode (2026-07-26): TikTok's Content Posting API has
+two distinct flows, gated by the scope actually granted to the app:
+  - Direct Post (/post/publish/video/init/) requires the `video.publish`
+    scope. Unaudited/sandbox apps do not have it. This flow fully publishes
+    the video with the given privacy_level — the existing, unchanged
+    behavior of init_tiktok_upload()/poll_tiktok_publish() below.
+  - Upload-to-Inbox (/post/publish/inbox/video/init/) requires only
+    `video.upload`. It delivers the video as a draft to the creator's TikTok
+    inbox; a human must open the TikTok app and manually complete posting.
+    Its terminal status is SEND_TO_USER_INBOX, not PUBLISH_COMPLETE.
+resolve_tiktok_publish_mode() reads the actual granted scope from the stored
+credential (secret_profiles) and returns which flow is authorized. Callers
+must never attempt Direct Post when video.publish is absent — TikTok itself
+rejects it; there is no way to fully publish autonomously without app review
+granting that scope.
 """
 
 from __future__ import annotations
@@ -38,7 +57,12 @@ from hypogeum.publishing.retry import (
 
 _TIKTOK_API_BASE = "https://open.tiktokapis.com/v2"
 _TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
-_TIKTOK_INIT_URL = f"{_TIKTOK_API_BASE}/post/video/init/"
+# Direct Post (requires video.publish scope). Fixed 2026-07-26: was missing
+# the /publish/ segment present on every other endpoint below — the real
+# cause of the HTTP 404 observed against this endpoint in the prior sprint.
+_TIKTOK_INIT_URL = f"{_TIKTOK_API_BASE}/post/publish/video/init/"
+# Upload-to-Inbox (requires only video.upload scope).
+_TIKTOK_INBOX_INIT_URL = f"{_TIKTOK_API_BASE}/post/publish/inbox/video/init/"
 _TIKTOK_STATUS_URL = f"{_TIKTOK_API_BASE}/post/publish/status/fetch/"
 _TIKTOK_CREATOR_INFO_URL = f"{_TIKTOK_API_BASE}/post/publish/creator_info/query/"
 
@@ -48,11 +72,22 @@ _TIKTOK_CHUNK_SIZE = 10 * 1024 * 1024   # 10 MB
 _TIKTOK_POLL_MAX_ATTEMPTS = 18           # 18 × 10s = 3 minutes max
 _TIKTOK_POLL_INTERVAL = 10.0             # seconds
 
-# Terminal publish statuses
+# Terminal statuses — Direct Post
 _TIKTOK_TERMINAL_STATUSES = ("PUBLISH_COMPLETE", "FAILED")
+
+# Terminal statuses — Upload-to-Inbox. SEND_TO_USER_INBOX means the draft
+# was successfully delivered to the creator's TikTok inbox; PUBLISH_COMPLETE
+# is included defensively (never expected within our poll window, since it
+# only occurs after the human completes posting in-app) so polling still
+# terminates correctly if TikTok ever returns it early.
+_TIKTOK_INBOX_TERMINAL_STATUSES = ("SEND_TO_USER_INBOX", "PUBLISH_COMPLETE", "FAILED")
 
 # Hard failure statuses
 _TIKTOK_HARD_FAIL_STATUSES = frozenset({"FAILED"})
+
+# Scopes
+_TIKTOK_DIRECT_POST_SCOPE = "video.publish"
+_TIKTOK_INBOX_SCOPE = "video.upload"
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +100,31 @@ def _auth_headers(config: Config) -> dict:
         "Authorization": f"Bearer {config.TIKTOK_ACCESS_TOKEN}",
         "Content-Type": "application/json; charset=UTF-8",
     }
+
+
+def _compute_chunk_plan(file_size: int) -> tuple[int, int]:
+    """
+    Compute (chunk_size, total_chunk_count) per TikTok's actual validation
+    rule (confirmed 2026-07-26 against a real "total chunk count is
+    invalid" HTTP 400 — the file used in this repo's own smoke-test episode
+    is 1.78MB, well under the 10MB constant previously sent unconditionally
+    as chunk_size regardless of file size):
+
+    A video that fits in a single chunk must declare chunk_size equal to
+    the video's own byte size, with total_chunk_count = 1 — TikTok rejects
+    a chunk_size larger than the whole file. Only when the file exceeds one
+    chunk does the fixed max chunk size (_TIKTOK_CHUNK_SIZE, 10MB — within
+    TikTok's allowed 5-64MB range) apply, with total_chunk_count computed
+    by ceiling division.
+
+    This is the one place this computation happens; every init function
+    below calls it rather than repeating the (previously buggy) inline
+    formula.
+    """
+    if file_size <= _TIKTOK_CHUNK_SIZE:
+        return file_size, 1
+    total_chunk_count = max(1, (file_size + _TIKTOK_CHUNK_SIZE - 1) // _TIKTOK_CHUNK_SIZE)
+    return _TIKTOK_CHUNK_SIZE, total_chunk_count
 
 
 def _raise_for_status(response: requests.Response, context: str = "") -> None:
@@ -155,6 +215,52 @@ def check_tiktok_availability(
     return True
 
 
+def resolve_tiktok_publish_mode(db_path: Optional[Path] = None) -> str:
+    """
+    Determine which TikTok publish flow this app's actual granted scope
+    authorizes, by reading the stored credential's scope directly from
+    secret_profiles (mirrors refresh_tiktok_token()'s existing direct-DB-read
+    pattern — the scope is a property of the live, rotatable credential, not
+    something Config/.env tracks).
+
+    Returns:
+        "direct_post"     — video.publish is present; init_tiktok_upload() +
+                             poll_tiktok_publish() may be used.
+        "upload_to_inbox" — only video.upload is present; callers must use
+                             init_tiktok_inbox_upload() + poll_tiktok_inbox_status()
+                             and must never attempt Direct Post.
+
+    Raises:
+        RuntimeError — no active TikTok credential, or its scope contains
+                       neither video.publish nor video.upload.
+    """
+    from hypogeum.db import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT credential_data FROM secret_profiles WHERE provider='tiktok' AND status='active'"
+        ).fetchone()
+        if not row:
+            raise RuntimeError("No active TikTok credential in secret_profiles")
+
+        cred = json.loads(row[0])
+        scope = cred.get("scope", "") or ""
+        granted = {s.strip() for s in scope.split(",") if s.strip()}
+
+        if _TIKTOK_DIRECT_POST_SCOPE in granted:
+            return "direct_post"
+        if _TIKTOK_INBOX_SCOPE in granted:
+            return "upload_to_inbox"
+
+        raise RuntimeError(
+            f"TikTok credential scope has neither '{_TIKTOK_DIRECT_POST_SCOPE}' "
+            f"nor '{_TIKTOK_INBOX_SCOPE}': {scope!r}"
+        )
+    finally:
+        conn.close()
+
+
 def init_tiktok_upload(
     config: Config,
     video_path: Path,
@@ -186,8 +292,7 @@ def init_tiktok_upload(
     log = get_logger(episode_id=episode_id, agent="tiktok")
 
     file_size = video_path.stat().st_size
-    chunk_size = _TIKTOK_CHUNK_SIZE
-    total_chunk_count = max(1, (file_size + chunk_size - 1) // chunk_size)
+    chunk_size, total_chunk_count = _compute_chunk_plan(file_size)
 
     body = {
         "post_info": {
@@ -259,6 +364,104 @@ def init_tiktok_upload(
 
     log.info(
         "tiktok_upload_initialized",
+        episode_id=episode_id,
+        publish_id=publish_id,
+        upload_url_prefix=upload_url[:60],
+        file_size=file_size,
+        total_chunks=total_chunk_count,
+    )
+
+    return publish_id, upload_url
+
+
+def init_tiktok_inbox_upload(
+    config: Config,
+    video_path: Path,
+    episode_id: Optional[str] = None,
+) -> tuple[str, str]:
+    """
+    Initialize a TikTok Upload-to-Inbox session — the flow authorized by the
+    video.upload scope (no video.publish required). Unlike Direct Post, the
+    request carries no post_info (title/privacy_level/disable_* are set by
+    the creator in-app, not by the API caller) — this is a real API
+    difference, not an omission.
+
+    Args:
+        config:        Config instance with TIKTOK_ACCESS_TOKEN.
+        video_path:    Path to the video file.
+        episode_id:    For log correlation.
+
+    Returns:
+        Tuple of (publish_id, upload_url) — same shape as init_tiktok_upload(),
+        so upload_tiktok_chunks() is reused unchanged for either flow.
+
+    Raises:
+        HardFailureError — on 400/401/403.
+        SoftFailureError — on 429/500/503, network error, or a malformed response.
+    """
+    log = get_logger(episode_id=episode_id, agent="tiktok")
+
+    file_size = video_path.stat().st_size
+    chunk_size, total_chunk_count = _compute_chunk_plan(file_size)
+
+    body = {
+        "source_info": {
+            "source": "FILE_UPLOAD",
+            "video_size": file_size,
+            "chunk_size": chunk_size,
+            "total_chunk_count": total_chunk_count,
+        },
+    }
+
+    headers = _auth_headers(config)
+    headers["Content-Type"] = "application/json; charset=UTF-8"
+
+    try:
+        response = requests.post(
+            _TIKTOK_INBOX_INIT_URL,
+            headers=headers,
+            json=body,
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise SoftFailureError(
+            f"TikTok inbox init upload network error: {exc}"
+        ) from exc
+
+    _raise_for_status(response, context="tiktok_inbox_init")
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        body_text = response.text or ""
+        detail = (
+            f"content_type={response.headers.get('Content-Type', 'unknown')!r}, "
+            f"body_length={len(body_text)}"
+        )
+        if body_text:
+            detail += f", body_prefix={body_text[:200]!r}"
+        raise SoftFailureError(
+            f"TikTok inbox init upload: HTTP {response.status_code} but response body is "
+            f"not valid JSON ({detail})"
+        ) from exc
+
+    publish_id = (
+        data.get("data", {}).get("publish_id", "")
+        or data.get("publish_id", "")
+    )
+    upload_url = (
+        data.get("data", {}).get("upload_url", "")
+        or data.get("upload_url", "")
+    )
+
+    if not publish_id or not upload_url:
+        raise SoftFailureError(
+            f"TikTok inbox init upload: missing publish_id or upload_url in response. "
+            f"Got: {str(data)[:200]}"
+        )
+
+    log.info(
+        "tiktok_inbox_upload_initialized",
         episode_id=episode_id,
         publish_id=publish_id,
         upload_url_prefix=upload_url[:60],
@@ -427,6 +630,93 @@ def poll_tiktok_publish(
         post_id=post_id,
     )
     return post_id
+
+
+def poll_tiktok_inbox_status(
+    config: Config,
+    publish_id: str,
+    episode_id: Optional[str] = None,
+    _sleep=None,
+) -> str:
+    """
+    Poll TikTok for Upload-to-Inbox delivery status until terminal.
+    Terminal statuses: SEND_TO_USER_INBOX (success — draft delivered to the
+    creator's inbox), PUBLISH_COMPLETE (defensive — see module docstring),
+    FAILED. Same poll interval/attempt budget as poll_tiktok_publish().
+
+    Unlike poll_tiktok_publish(), there is no platform post_id to return —
+    nothing has been publicly posted yet. The caller must record the result
+    as uploaded_to_inbox / awaiting_human_publish, never as published.
+
+    Args:
+        config:      Config instance with TIKTOK_ACCESS_TOKEN.
+        publish_id:  Publish ID from init_tiktok_inbox_upload().
+        episode_id:  For log correlation.
+        _sleep:      Injectable sleep (for testing).
+
+    Returns:
+        The terminal status string (one of _TIKTOK_INBOX_TERMINAL_STATUSES).
+
+    Raises:
+        HardFailureError  — if status is FAILED.
+        PollTimeoutError  — if max_attempts exhausted.
+    """
+    import time as _time_mod
+    sleep_fn = _sleep if _sleep is not None else _time_mod.sleep
+
+    log = get_logger(episode_id=episode_id, agent="tiktok")
+    headers = _auth_headers(config)
+
+    def _check() -> Optional[str]:
+        try:
+            resp = requests.post(
+                _TIKTOK_STATUS_URL,
+                headers=headers,
+                json={"publish_id": publish_id},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            log.warn(
+                "tiktok_inbox_poll_network_error",
+                episode_id=episode_id,
+                publish_id=publish_id,
+                error=str(exc),
+            )
+            return None
+
+        if not resp.ok:
+            return None
+
+        data = resp.json()
+        status = (
+            data.get("data", {}).get("status", "")
+            or data.get("status", "")
+        )
+        return status or None
+
+    status = poll_with_interval(
+        fn=_check,
+        max_attempts=_TIKTOK_POLL_MAX_ATTEMPTS,
+        interval_seconds=_TIKTOK_POLL_INTERVAL,
+        platform="tiktok",
+        episode_id=episode_id,
+        terminal_statuses=_TIKTOK_INBOX_TERMINAL_STATUSES,
+        _sleep=sleep_fn,
+    )
+
+    if status in _TIKTOK_HARD_FAIL_STATUSES:
+        raise HardFailureError(
+            f"TikTok inbox upload status FAILED for publish_id={publish_id}",
+            error_code="FAILED",
+        )
+
+    log.info(
+        "tiktok_uploaded_to_inbox",
+        episode_id=episode_id,
+        publish_id=publish_id,
+        status=status,
+    )
+    return status
 
 
 def refresh_tiktok_token(db_path: Optional[Path] = None) -> str:

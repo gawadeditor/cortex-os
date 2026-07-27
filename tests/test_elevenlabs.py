@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -38,6 +38,7 @@ from hypogeum.config import Config
 from hypogeum.elevenlabs import (
     # Public API
     generate_narration_segment,
+    generate_music_track,
     forced_alignment,
     whisper_fallback,
     build_srt,
@@ -46,6 +47,7 @@ from hypogeum.elevenlabs import (
     CharAlignment,
     WordTiming,
     NarrationSegmentResult,
+    MusicTrackResult,
     # Exceptions
     ElevenLabsError,
     ElevenLabsAuthFailure,
@@ -58,10 +60,15 @@ from hypogeum.elevenlabs import (
     _output_format_extension,
     _retry_delay,
     _detect_quota_exhaustion,
+    _probe_audio_duration_seconds,
+    _search_music_library,
+    repair_music_library_durations,
     _model_cost_cache,
     _RETRY_MAX,
     _QUOTA_KEYWORDS,
     _SRT_MAX_WORDS_PER_LINE,
+    _MUSIC_USD_PER_SEC,
+    _MUSIC_MAX_DURATION_MS,
 )
 
 
@@ -1016,6 +1023,384 @@ class TestInternalHelpers:
 class TestExceptionHierarchy:
     def test_elevenlabs_auth_failure_is_elevenlabs_error(self):
         assert issubclass(ElevenLabsAuthFailure, ElevenLabsError)
+
+
+# ---------------------------------------------------------------------------
+# TestMusicDurationAccuracy (2026-07-19)
+#
+# Regression coverage for a real production bug found 2026-07-19: a
+# validation run requested an 847.8s music track; the real API call was
+# correctly clamped to 300s (_MUSIC_MAX_DURATION_MS), but cost recording,
+# music-library.json metadata, and the returned MusicTrackResult all used
+# the pre-clamp 847.8s value -- overstating cost ~2.8x and writing a false
+# duration into the library cache that _search_music_library()'s own
+# `duration_seconds >= required_duration` filter would later trust at face
+# value, risking a false cache hit on an under-length file.
+# ---------------------------------------------------------------------------
+
+def _mock_music_response(audio_bytes: bytes = b"\xff\xfb" * 5000, status: int = 200) -> MagicMock:
+    resp = MagicMock(spec=requests.Response)
+    resp.status_code = status
+    resp.content = audio_bytes
+    resp.text = ""
+    resp.headers = {}
+    return resp
+
+
+class TestMusicDurationAccuracy:
+    def _run(self, tmp_path: Path, required_duration_seconds: float) -> MusicTrackResult:
+        cfg = _make_config()
+        with patch("hypogeum.elevenlabs.requests.post") as mock_post, \
+             patch("hypogeum.elevenlabs._finance.record_cost") as mock_record_cost:
+            mock_post.return_value = _mock_music_response()
+            result = generate_music_track(
+                category="Mystery",
+                required_duration_seconds=required_duration_seconds,
+                config=cfg,
+                episode_id="ep_001",
+                assets_root=tmp_path,
+            )
+        self.mock_record_cost = mock_record_cost
+        return result
+
+    def test_cost_reflects_clamped_duration_not_requested(self, tmp_path):
+        """Requesting 900s (over the 300s cap) must record cost for the
+        real 300s clip, not the original 900s request."""
+        self._run(tmp_path, required_duration_seconds=900.0)
+
+        clamped_seconds = _MUSIC_MAX_DURATION_MS / 1000.0
+        kwargs = self.mock_record_cost.call_args[1]
+        assert kwargs["cost_usd"] == round(clamped_seconds * _MUSIC_USD_PER_SEC, 6)
+        assert kwargs["tokens_or_credits"] == clamped_seconds
+        # The bug's exact symptom: cost must NOT reflect the 900s request.
+        assert kwargs["cost_usd"] != round(900.0 * _MUSIC_USD_PER_SEC, 6)
+
+    def test_library_metadata_reflects_clamped_duration(self, tmp_path):
+        self._run(tmp_path, required_duration_seconds=900.0)
+
+        library_path = tmp_path / "channel" / "music" / "music-library.json"
+        library = __import__("json").loads(library_path.read_text())
+        entry = library["tracks"][0]
+        assert entry["duration_seconds"] == _MUSIC_MAX_DURATION_MS / 1000.0
+
+    def test_returned_result_duration_reflects_clamped_duration(self, tmp_path):
+        result = self._run(tmp_path, required_duration_seconds=900.0)
+        assert result.duration_seconds == _MUSIC_MAX_DURATION_MS / 1000.0
+
+    def test_duration_under_cap_is_unaffected(self, tmp_path):
+        """Sanity check: a request that never hits the cap must still
+        record its own true duration -- the fix must not always report
+        the cap value regardless of input."""
+        result = self._run(tmp_path, required_duration_seconds=150.0)
+
+        assert result.duration_seconds == 150.0
+        kwargs = self.mock_record_cost.call_args[1]
+        assert kwargs["cost_usd"] == round(150.0 * _MUSIC_USD_PER_SEC, 6)
+
+    def test_duration_clamped_up_to_minimum_floor(self, tmp_path):
+        """Symmetric case: a request below the 3s minimum floor is clamped
+        UP, and cost/metadata must reflect the floor, not the tiny request."""
+        result = self._run(tmp_path, required_duration_seconds=1.0)
+        assert result.duration_seconds == 3.0
+        kwargs = self.mock_record_cost.call_args[1]
+        assert kwargs["cost_usd"] == round(3.0 * _MUSIC_USD_PER_SEC, 6)
+
+
+# ---------------------------------------------------------------------------
+# TestSearchMusicLibraryDurationVerification (2026-07-19)
+#
+# _search_music_library() must never return a cache hit whose REAL file
+# duration (probed via ffprobe) is shorter than required, even when the
+# stored duration_seconds metadata claims otherwise -- this is what makes
+# a false hit from bad metadata structurally impossible, independent of
+# how that metadata became wrong.
+# ---------------------------------------------------------------------------
+
+def _seed_library(tmp_path: Path, tracks: list) -> Path:
+    library_path = tmp_path / "channel" / "music" / "music-library.json"
+    library_path.parent.mkdir(parents=True, exist_ok=True)
+    library_path.write_text(
+        __import__("json").dumps({"schema_version": "1", "last_updated": "", "tracks": tracks}),
+        encoding="utf-8",
+    )
+    return library_path
+
+
+def _make_track_entry(track_id: str, category: str = "Mystery",
+                       duration_seconds: float = 300.0,
+                       path: Optional[str] = None) -> dict:
+    return {
+        "track_id": track_id,
+        "category": category,
+        "path": path or f"channel/music/mystery/mystery_{track_id}",
+        "source": "ai_generated",
+        "provider": "elevenlabs",
+        "model_id": "music_v1",
+        "duration_seconds": duration_seconds,
+        "prompt_used": "test prompt",
+        "generated_at": "2026-07-01T00:00:00+00:00",
+        "usage_count": 0,
+        "last_used_date": None,
+    }
+
+
+class TestSearchMusicLibraryMetadataTrust:
+    """_search_music_library() trusts stored duration_seconds metadata as
+    the source of truth at read time (2026-07-19 decision) -- it must never
+    invoke ffprobe/_probe_audio_duration_seconds() on the lookup path. That
+    verification work belongs solely to repair_music_library_durations()
+    (see TestRepairMusicLibraryDurations below)."""
+
+    def _touch_fake_mp3(self, tmp_path: Path, track_id: str) -> Path:
+        p = tmp_path / "channel" / "music" / "mystery" / f"mystery_{track_id}.mp3"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\xff\xfb" * 100)
+        return p
+
+    def test_cache_hit_when_metadata_satisfies_requirement(self, tmp_path):
+        self._touch_fake_mp3(tmp_path, "t1")
+        library_path = _seed_library(tmp_path, [_make_track_entry("t1", duration_seconds=300.0)])
+
+        result = _search_music_library(
+            library_path=library_path, category="Mystery",
+            required_duration_seconds=200.0, assets_root=tmp_path,
+            log=MagicMock(), episode_id="ep_001",
+        )
+
+        assert result is not None
+        assert result.track_id == "t1"
+
+    def test_cache_miss_when_metadata_understates_requirement(self, tmp_path):
+        self._touch_fake_mp3(tmp_path, "t1")
+        library_path = _seed_library(tmp_path, [_make_track_entry("t1", duration_seconds=100.0)])
+
+        result = _search_music_library(
+            library_path=library_path, category="Mystery",
+            required_duration_seconds=500.0, assets_root=tmp_path,
+            log=MagicMock(), episode_id="ep_001",
+        )
+
+        assert result is None
+
+    def test_lookup_never_probes_real_file_duration(self, tmp_path):
+        """The lookup path must be pure metadata/JSON -- no subprocess call,
+        regardless of whether a real file backs the entry."""
+        self._touch_fake_mp3(tmp_path, "t1")
+        library_path = _seed_library(tmp_path, [_make_track_entry("t1", duration_seconds=900.0)])
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds") as mock_probe:
+            result = _search_music_library(
+                library_path=library_path, category="Mystery",
+                required_duration_seconds=500.0, assets_root=tmp_path,
+                log=MagicMock(), episode_id="ep_001",
+            )
+
+        mock_probe.assert_not_called()
+        assert result is not None
+        assert result.track_id == "t1"
+
+    def test_hit_does_not_require_real_file_to_exist(self, tmp_path):
+        """Metadata trust means the lookup succeeds on JSON alone, even if
+        the on-disk file happens to be missing (a different failure mode,
+        surfaced later at actual playback/render, not at cache lookup)."""
+        library_path = _seed_library(tmp_path, [_make_track_entry("t1", duration_seconds=900.0)])
+        # Deliberately do not create the real mp3 file.
+
+        result = _search_music_library(
+            library_path=library_path, category="Mystery",
+            required_duration_seconds=500.0, assets_root=tmp_path,
+            log=MagicMock(), episode_id="ep_001",
+        )
+
+        assert result is not None
+        assert result.track_id == "t1"
+
+    def test_hit_mutates_usage_stats(self, tmp_path):
+        self._touch_fake_mp3(tmp_path, "t1")
+        library_path = _seed_library(tmp_path, [_make_track_entry("t1", duration_seconds=900.0)])
+
+        _search_music_library(
+            library_path=library_path, category="Mystery",
+            required_duration_seconds=500.0, assets_root=tmp_path,
+            log=MagicMock(), episode_id="ep_001",
+        )
+
+        library = __import__("json").loads(library_path.read_text())
+        assert library["tracks"][0]["usage_count"] == 1
+        assert library["tracks"][0]["last_used_date"] is not None
+
+
+class TestRepairMusicLibraryDurations:
+    """repair_music_library_durations() is the sole ffprobe-verification
+    path for the music library -- a one-time/periodic migration and audit
+    tool, never invoked from the lookup hot path (see
+    TestSearchMusicLibraryMetadataTrust above)."""
+
+    def _write_real_mp3(self, assets_root: Path, asset_id: str) -> Path:
+        p = assets_root / f"{asset_id}.mp3"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\xff\xfb" * 100)
+        return p
+
+    def test_reports_no_mismatch_when_metadata_matches_real_duration(self, tmp_path):
+        asset_id = "channel/music/mystery/mystery_t1"
+        self._write_real_mp3(tmp_path, asset_id)
+        library_path = _seed_library(tmp_path, [
+            _make_track_entry("t1", duration_seconds=300.0, path=asset_id)
+        ])
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds", return_value=300.0):
+            result = repair_music_library_durations(
+                library_path=library_path, assets_root=tmp_path,
+                log=MagicMock(), dry_run=True,
+            )
+
+        assert result["checked"] == 1
+        assert result["mismatched"] == []
+        assert result["unreadable"] == []
+        assert result["repaired"] == 0
+
+    def test_detects_mismatch_beyond_tolerance(self, tmp_path):
+        asset_id = "channel/music/mystery/mystery_t1"
+        self._write_real_mp3(tmp_path, asset_id)
+        library_path = _seed_library(tmp_path, [
+            _make_track_entry("t1", duration_seconds=900.0, path=asset_id)
+        ])
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds", return_value=300.0):
+            result = repair_music_library_durations(
+                library_path=library_path, assets_root=tmp_path,
+                log=MagicMock(), dry_run=True,
+            )
+
+        assert len(result["mismatched"]) == 1
+        entry = result["mismatched"][0]
+        assert entry["track_id"] == "t1"
+        assert entry["claimed_duration_seconds"] == 900.0
+        assert entry["real_duration_seconds"] == 300.0
+
+    def test_within_tolerance_is_not_a_mismatch(self, tmp_path):
+        asset_id = "channel/music/mystery/mystery_t1"
+        self._write_real_mp3(tmp_path, asset_id)
+        library_path = _seed_library(tmp_path, [
+            _make_track_entry("t1", duration_seconds=300.4, path=asset_id)
+        ])
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds", return_value=300.0):
+            result = repair_music_library_durations(
+                library_path=library_path, assets_root=tmp_path,
+                log=MagicMock(), dry_run=True,
+            )
+
+        assert result["mismatched"] == []
+
+    def test_dry_run_does_not_write_corrections(self, tmp_path):
+        asset_id = "channel/music/mystery/mystery_t1"
+        self._write_real_mp3(tmp_path, asset_id)
+        library_path = _seed_library(tmp_path, [
+            _make_track_entry("t1", duration_seconds=900.0, path=asset_id)
+        ])
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds", return_value=300.0):
+            result = repair_music_library_durations(
+                library_path=library_path, assets_root=tmp_path,
+                log=MagicMock(), dry_run=True,
+            )
+
+        assert result["repaired"] == 0
+        library = __import__("json").loads(library_path.read_text())
+        assert library["tracks"][0]["duration_seconds"] == 900.0
+
+    def test_apply_writes_corrected_duration(self, tmp_path):
+        asset_id = "channel/music/mystery/mystery_t1"
+        self._write_real_mp3(tmp_path, asset_id)
+        library_path = _seed_library(tmp_path, [
+            _make_track_entry("t1", duration_seconds=900.0, path=asset_id)
+        ])
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds", return_value=300.0):
+            result = repair_music_library_durations(
+                library_path=library_path, assets_root=tmp_path,
+                log=MagicMock(), dry_run=False,
+            )
+
+        assert result["repaired"] == 1
+        library = __import__("json").loads(library_path.read_text())
+        assert library["tracks"][0]["duration_seconds"] == 300.0
+
+    def test_unreadable_file_is_reported_and_not_repaired(self, tmp_path):
+        asset_id = "channel/music/mystery/mystery_t1"
+        # Deliberately do not create the real mp3 file.
+        library_path = _seed_library(tmp_path, [
+            _make_track_entry("t1", duration_seconds=900.0, path=asset_id)
+        ])
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds", return_value=None):
+            result = repair_music_library_durations(
+                library_path=library_path, assets_root=tmp_path,
+                log=MagicMock(), dry_run=False,
+            )
+
+        assert result["unreadable"] == ["t1"]
+        assert result["mismatched"] == []
+        assert result["repaired"] == 0
+        library = __import__("json").loads(library_path.read_text())
+        assert library["tracks"][0]["duration_seconds"] == 900.0
+
+    def test_multiple_tracks_mixed_outcomes(self, tmp_path):
+        good_id = "channel/music/mystery/mystery_good"
+        bad_id = "channel/music/mystery/mystery_bad"
+        missing_id = "channel/music/mystery/mystery_missing"
+        self._write_real_mp3(tmp_path, good_id)
+        self._write_real_mp3(tmp_path, bad_id)
+        library_path = _seed_library(tmp_path, [
+            _make_track_entry("good", duration_seconds=300.0, path=good_id),
+            _make_track_entry("bad", duration_seconds=900.0, path=bad_id),
+            _make_track_entry("missing", duration_seconds=300.0, path=missing_id),
+        ])
+
+        def _fake_probe(path):
+            if "good" in str(path):
+                return 300.0
+            if "bad" in str(path):
+                return 250.0
+            return None
+
+        with patch("hypogeum.elevenlabs._probe_audio_duration_seconds", side_effect=_fake_probe):
+            result = repair_music_library_durations(
+                library_path=library_path, assets_root=tmp_path,
+                log=MagicMock(), dry_run=False,
+            )
+
+        assert result["checked"] == 3
+        assert [m["track_id"] for m in result["mismatched"]] == ["bad"]
+        assert result["unreadable"] == ["missing"]
+        assert result["repaired"] == 1
+
+
+class TestProbeAudioDurationSeconds:
+    def test_returns_none_for_missing_file(self, tmp_path):
+        assert _probe_audio_duration_seconds(tmp_path / "nope.mp3") is None
+
+    def test_returns_duration_on_success(self, tmp_path):
+        p = tmp_path / "real.mp3"
+        p.write_bytes(b"\xff\xfb" * 100)
+        mock_result = MagicMock(returncode=0, stdout="123.456\n")
+        with patch("hypogeum.elevenlabs.subprocess.run", return_value=mock_result):
+            assert _probe_audio_duration_seconds(p) == 123.456
+
+    def test_returns_none_on_ffprobe_failure(self, tmp_path):
+        p = tmp_path / "real.mp3"
+        p.write_bytes(b"\xff\xfb" * 100)
+        mock_result = MagicMock(returncode=1, stdout="")
+        with patch("hypogeum.elevenlabs.subprocess.run", return_value=mock_result):
+            assert _probe_audio_duration_seconds(p) is None
+
+    def test_returns_none_on_subprocess_exception(self, tmp_path):
+        p = tmp_path / "real.mp3"
+        p.write_bytes(b"\xff\xfb" * 100)
+        with patch("hypogeum.elevenlabs.subprocess.run", side_effect=OSError("no ffprobe")):
+            assert _probe_audio_duration_seconds(p) is None
 
     def test_elevenlabs_quota_exhausted_is_elevenlabs_error(self):
         assert issubclass(ElevenLabsQuotaExhausted, ElevenLabsError)

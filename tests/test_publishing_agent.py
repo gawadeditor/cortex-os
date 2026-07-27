@@ -22,7 +22,7 @@ Tests:
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -153,6 +153,10 @@ def _patch_platforms(
     ig_status="FINISHED",
     ig_media="ig_media_001",
     tiktok_avail=False,
+    tiktok_publish_mode="direct_post",
+    tiktok_mode_exc=None,
+    tiktok_inbox_publish_id="tt_inbox_pub_id",
+    tiktok_inbox_status="SEND_TO_USER_INBOX",
     yt_refresh_exc=None,
     meta_refresh_exc=None,
     yt_upload_exc=None,
@@ -183,31 +187,59 @@ def _patch_platforms(
         mock_staging.stage_file = MagicMock(return_value="https://staged.example.com/f.mp4")
     mock_staging.delete_staged_file = MagicMock()
 
-    with patch(f"{_YT}.refresh_youtube_token",
-               side_effect=yt_refresh_exc if yt_refresh_exc else None,
-               return_value=yt_token if not yt_refresh_exc else None), \
-         patch(f"{_YT}.reset_quota_counter"), \
-         patch(f"{_YT}.upload_video", side_effect=mock_yt_upload), \
-         patch(f"{_YT}.upload_thumbnail", return_value=True), \
-         patch(f"{_YT}.upload_captions", return_value=True), \
-         patch(f"{_YT}.apply_end_screen", return_value=True), \
-         patch(f"{_YT}.search_best_end_screen_videos", return_value=["yt_prior_001", "yt_prior_002"]), \
-         patch(f"{_META}.refresh_meta_token",
-               side_effect=meta_refresh_exc if meta_refresh_exc else None,
-               return_value=meta_token if not meta_refresh_exc else None), \
-         patch(f"{_META}.upload_facebook_video",
-               side_effect=fb_upload_exc if fb_upload_exc else None,
-               return_value=fb_vid if not fb_upload_exc else None), \
-         patch(f"{_META}.create_instagram_container", return_value=ig_container), \
-         patch(f"{_META}.poll_instagram_container", return_value=ig_status), \
-         patch(f"{_META}.publish_instagram_container", return_value=ig_media), \
-         patch(f"{_TT}.refresh_tiktok_token",
-               side_effect=RuntimeError("No active TikTok credential in secret_profiles")), \
-         patch(f"{_TT}.check_tiktok_availability", return_value=tiktok_avail), \
-         patch(f"{_TT}.init_tiktok_upload", return_value=("tt_pub_id", "https://upload.tiktok/abc")), \
-         patch(f"{_TT}.upload_tiktok_chunks"), \
-         patch(f"{_TT}.poll_tiktok_publish", return_value="tt_post_001"), \
-         patch(_STAGING, return_value=mock_staging):
+    # ExitStack, not a single backslash-chained `with` — the platform patch
+    # list has grown past CPython's static nested-block limit for one `with`
+    # statement (hit when adding the TikTok Upload-to-Inbox patches).
+    with ExitStack() as stack:
+        stack.enter_context(patch(
+            f"{_YT}.refresh_youtube_token",
+            side_effect=yt_refresh_exc if yt_refresh_exc else None,
+            return_value=yt_token if not yt_refresh_exc else None,
+        ))
+        stack.enter_context(patch(f"{_YT}.reset_quota_counter"))
+        stack.enter_context(patch(f"{_YT}.upload_video", side_effect=mock_yt_upload))
+        stack.enter_context(patch(f"{_YT}.upload_thumbnail", return_value=True))
+        stack.enter_context(patch(f"{_YT}.upload_captions", return_value=True))
+        stack.enter_context(patch(f"{_YT}.apply_end_screen", return_value=True))
+        stack.enter_context(patch(
+            f"{_YT}.search_best_end_screen_videos",
+            return_value=["yt_prior_001", "yt_prior_002"],
+        ))
+        stack.enter_context(patch(
+            f"{_META}.refresh_meta_token",
+            side_effect=meta_refresh_exc if meta_refresh_exc else None,
+            return_value=meta_token if not meta_refresh_exc else None,
+        ))
+        stack.enter_context(patch(
+            f"{_META}.upload_facebook_video",
+            side_effect=fb_upload_exc if fb_upload_exc else None,
+            return_value=fb_vid if not fb_upload_exc else None,
+        ))
+        stack.enter_context(patch(f"{_META}.create_instagram_container", return_value=ig_container))
+        stack.enter_context(patch(f"{_META}.poll_instagram_container", return_value=ig_status))
+        stack.enter_context(patch(f"{_META}.publish_instagram_container", return_value=ig_media))
+        stack.enter_context(patch(
+            f"{_TT}.refresh_tiktok_token",
+            side_effect=RuntimeError("No active TikTok credential in secret_profiles"),
+        ))
+        stack.enter_context(patch(f"{_TT}.check_tiktok_availability", return_value=tiktok_avail))
+        stack.enter_context(patch(
+            f"{_TT}.resolve_tiktok_publish_mode",
+            side_effect=tiktok_mode_exc if tiktok_mode_exc else None,
+            return_value=tiktok_publish_mode if not tiktok_mode_exc else None,
+        ))
+        stack.enter_context(patch(
+            f"{_TT}.init_tiktok_upload",
+            return_value=("tt_pub_id", "https://upload.tiktok/abc"),
+        ))
+        stack.enter_context(patch(
+            f"{_TT}.init_tiktok_inbox_upload",
+            return_value=(tiktok_inbox_publish_id, "https://upload.tiktok/inbox_abc"),
+        ))
+        stack.enter_context(patch(f"{_TT}.upload_tiktok_chunks"))
+        stack.enter_context(patch(f"{_TT}.poll_tiktok_publish", return_value="tt_post_001"))
+        stack.enter_context(patch(f"{_TT}.poll_tiktok_inbox_status", return_value=tiktok_inbox_status))
+        stack.enter_context(patch(_STAGING, return_value=mock_staging))
         yield
 
 
@@ -640,6 +672,131 @@ class TestSuccessfulFullRun:
         tt_results = [r for r in result["platform_results"] if r["platform"] == "tiktok"]
         assert len(tt_results) == 3
         assert all(r["status"] == "published" for r in tt_results)
+
+    def test_tiktok_retries_transient_failure_and_succeeds(self, tmp_path):
+        """Retry parity with YouTube/Facebook (2026-07-26): a transient
+        SoftFailureError from init_tiktok_upload() on the first attempt
+        must be retried, not treated as an immediate failure."""
+        from hypogeum.publishing.retry import SoftFailureError
+
+        config = _make_config(has_tiktok=True)
+        pkg = _make_final_render_package("ep_tt_retry_001", tmp_path)
+
+        call_count = [0]
+
+        def flaky_init(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise SoftFailureError("HTTP 503 — soft failure (retry eligible)", status_code=503)
+            return ("tt_pub_after_retry", "https://upload.tiktok/retry")
+
+        with _patch_platforms(tiktok_avail=True), \
+             patch(f"{_TT}.init_tiktok_upload", side_effect=flaky_init), \
+             patch("hypogeum.publishing.retry._VIDEO_UPLOAD_INITIAL_DELAY", 0.001):
+            result = _run(pkg, config, "ep_tt_retry_001", tmp_path)
+
+        # First short retried once and succeeded; the other two shorts each
+        # call init once (fresh call_count continuation), so overall this
+        # proves at least one retry occurred without the whole run failing.
+        tt_results = [r for r in result["platform_results"] if r["platform"] == "tiktok"]
+        assert any(r["status"] == "published" for r in tt_results)
+        assert call_count[0] >= 4  # 1 failed + 1 retried-success + 2 more shorts
+
+
+# ---------------------------------------------------------------------------
+# TestTiktokUploadToInboxMode — capability-gated (2026-07-26): a credential
+# with only video.upload (no video.publish) must never attempt Direct Post,
+# and its real outcome (draft delivered to the creator's inbox) must be
+# recorded as uploaded_to_inbox, never published.
+# ---------------------------------------------------------------------------
+
+class TestTiktokUploadToInboxMode:
+    def test_uses_inbox_flow_and_records_uploaded_to_inbox(self, tmp_path):
+        config = _make_config(has_tiktok=True)
+        pkg = _make_final_render_package("ep_tt_inbox_001", tmp_path)
+
+        with _patch_platforms(tiktok_avail=True, tiktok_publish_mode="upload_to_inbox") as _, \
+             patch(f"{_TT}.init_tiktok_upload") as mock_direct_init:
+            result = _run(pkg, config, "ep_tt_inbox_001", tmp_path)
+
+        tt_results = [r for r in result["platform_results"] if r["platform"] == "tiktok"]
+        assert len(tt_results) == 3
+        assert all(r["status"] == "uploaded_to_inbox" for r in tt_results)
+        assert all(r["skipped_reason"] == "awaiting_human_publish" for r in tt_results)
+
+        # The whole point of capability gating: Direct Post must never be
+        # attempted when video.publish is absent.
+        mock_direct_init.assert_not_called()
+
+    def test_uploaded_to_inbox_never_counts_as_published(self, tmp_path):
+        """PublishingRecord's summary/readiness must not treat inbox
+        delivery as a real publish — Section 3 of the platform's own
+        interface contract: this is real progress, not full autonomy."""
+        config = _make_config(has_tiktok=True)
+        pkg = _make_final_render_package("ep_tt_inbox_002", tmp_path)
+
+        with _patch_platforms(tiktok_avail=True, tiktok_publish_mode="upload_to_inbox"):
+            result = _run(pkg, config, "ep_tt_inbox_002", tmp_path)
+
+        assert result["summary"]["total_published"] == 0 or all(
+            r["platform"] != "tiktok"
+            for r in result["platform_results"]
+            if r["status"] == "published"
+        )
+
+    def test_never_attempts_direct_post_when_mode_unresolvable(self, tmp_path):
+        """If the credential's scope contains neither video.publish nor
+        video.upload, resolve_tiktok_publish_mode() raises — TikTok must be
+        treated as unavailable (skipped), never crash the whole run."""
+        config = _make_config(has_tiktok=True)
+        pkg = _make_final_render_package("ep_tt_inbox_003", tmp_path)
+
+        with _patch_platforms(
+            tiktok_avail=True,
+            tiktok_mode_exc=RuntimeError("neither video.publish nor video.upload"),
+        ) as _, patch(f"{_TT}.init_tiktok_upload") as mock_direct_init, \
+             patch(f"{_TT}.init_tiktok_inbox_upload") as mock_inbox_init:
+            result = _run(pkg, config, "ep_tt_inbox_003", tmp_path)
+
+        tt_results = [r for r in result["platform_results"] if r["platform"] == "tiktok"]
+        assert len(tt_results) == 3
+        assert all(r["status"] == "skipped" for r in tt_results)
+        mock_direct_init.assert_not_called()
+        mock_inbox_init.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestTiktokInboxIdempotencyGuard — a rerun after a crash between a
+# successful inbox upload and the run being marked complete must not create
+# a second, duplicate inbox draft.
+# ---------------------------------------------------------------------------
+
+class TestTiktokInboxIdempotencyGuard:
+    def test_skips_reupload_when_already_uploaded_to_inbox(self, tmp_path):
+        from hypogeum.decision_inputs.store import record_publishing_outcome
+
+        config = _make_config(has_tiktok=True)
+        pkg = _make_final_render_package("ep_tt_inbox_idem_001", tmp_path)
+        record_publishing_outcome(
+            "ep_tt_inbox_idem_001", "tiktok", "uploaded_to_inbox",
+            platform_video_id="tt_prior_publish_id",
+            deliverable_id="short_sh_001",
+            db_path=tmp_path / "hypogeum.db",
+        )
+
+        with _patch_platforms(tiktok_avail=True, tiktok_publish_mode="upload_to_inbox") as _, \
+             patch(f"{_TT}.init_tiktok_inbox_upload") as mock_inbox_init:
+            result = _run(pkg, config, "ep_tt_inbox_idem_001", tmp_path)
+
+        # sh_001's prior inbox upload is never redone; sh_002/sh_003 still
+        # attempt normally (2 calls, not 3).
+        assert mock_inbox_init.call_count == 2
+        tt_sh001 = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "tiktok" and r.get("short_id") == "sh_001"
+        )
+        assert tt_sh001["status"] == "uploaded_to_inbox"
+        assert tt_sh001["platform_video_id"] == "tt_prior_publish_id"
 
 
 # ---------------------------------------------------------------------------

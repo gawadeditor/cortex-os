@@ -11,10 +11,17 @@ Tests:
   - poll_tiktok_publish: PUBLISH_COMPLETE returns post_id
   - poll_tiktok_publish: FAILED raises HardFailureError
   - poll_tiktok_publish: timeout raises PollTimeoutError
+  - resolve_tiktok_publish_mode: video.publish -> direct_post,
+    video.upload only -> upload_to_inbox, neither -> RuntimeError
+  - init_tiktok_inbox_upload: success, no post_info in request body
+  - poll_tiktok_inbox_status: SEND_TO_USER_INBOX success, FAILED raises,
+    timeout raises
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,8 +30,11 @@ import requests
 
 from hypogeum.publishing.tiktok import (
     check_tiktok_availability,
+    init_tiktok_inbox_upload,
     init_tiktok_upload,
+    poll_tiktok_inbox_status,
     poll_tiktok_publish,
+    resolve_tiktok_publish_mode,
     upload_tiktok_chunks,
 )
 from hypogeum.publishing.retry import HardFailureError, PollTimeoutError, SoftFailureError
@@ -130,6 +140,40 @@ class TestCheckTiktokAvailability:
 # ---------------------------------------------------------------------------
 
 class TestInitTiktokUpload:
+    def test_small_video_declares_chunk_size_equal_to_file_size(self, tmp_path):
+        """Real bug found 2026-07-26 via a live smoke test: TikTok rejects
+        chunk_size=10MB with total_chunk_count=1 for a video smaller than
+        10MB ("total chunk count is invalid", HTTP 400) — chunk_size must
+        equal the actual file size when there is only one chunk."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 1_783_639)  # real short's actual size
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_small", "upload_url": "https://upload.tiktokapis.com/small"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_upload(config=config, video_path=video_path, title="T")
+
+        body = mock_post.call_args.kwargs.get("json", {})
+        assert body["source_info"]["chunk_size"] == 1_783_639
+        assert body["source_info"]["total_chunk_count"] == 1
+
+    def test_large_video_uses_fixed_chunk_size_with_multiple_chunks(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 21_582_545)  # real main episode's actual size
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_large", "upload_url": "https://upload.tiktokapis.com/large"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_upload(config=config, video_path=video_path, title="T")
+
+        body = mock_post.call_args.kwargs.get("json", {})
+        assert body["source_info"]["chunk_size"] == 10 * 1024 * 1024
+        assert body["source_info"]["total_chunk_count"] == 3
+
     def test_success_returns_publish_id_and_upload_url(self, tmp_path):
         config = _make_config()
         video_path = _fake_video(tmp_path, 200)
@@ -500,3 +544,236 @@ class TestPollTiktokPublish:
 
         # Falls back to publish_id when no post_id in response
         assert post_id == "fallback_publish_id"
+
+
+# ---------------------------------------------------------------------------
+# TestResolveTiktokPublishMode
+# ---------------------------------------------------------------------------
+
+def _seed_tiktok_credential(db_path: Path, scope: str) -> None:
+    from hypogeum.credential_manager import create_secret_profile
+    from hypogeum.db import initialize_schema
+
+    initialize_schema(db_path)
+    create_secret_profile(
+        provider="tiktok",
+        label="test tiktok credential",
+        credential_type="oauth2_token",
+        credential_data=json.dumps({
+            "access_token": "at_123",
+            "refresh_token": "rt_123",
+            "client_key": "ck_123",
+            "client_secret": "cs_123",
+            "scope": scope,
+        }),
+        scope="factory",
+        db_path=db_path,
+    )
+
+
+class TestResolveTiktokPublishMode:
+    def test_video_publish_present_returns_direct_post(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _seed_tiktok_credential(db_path, "video.list,video.publish,video.upload")
+
+        assert resolve_tiktok_publish_mode(db_path=db_path) == "direct_post"
+
+    def test_video_upload_only_returns_upload_to_inbox(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _seed_tiktok_credential(db_path, "video.list,video.upload,user.info.basic")
+
+        assert resolve_tiktok_publish_mode(db_path=db_path) == "upload_to_inbox"
+
+    def test_neither_scope_raises_runtime_error(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _seed_tiktok_credential(db_path, "user.info.basic,user.info.profile")
+
+        with pytest.raises(RuntimeError, match="neither"):
+            resolve_tiktok_publish_mode(db_path=db_path)
+
+    def test_no_active_credential_raises_runtime_error(self, tmp_path):
+        from hypogeum.db import initialize_schema
+
+        db_path = tmp_path / "test.db"
+        initialize_schema(db_path)
+
+        with pytest.raises(RuntimeError, match="No active TikTok credential"):
+            resolve_tiktok_publish_mode(db_path=db_path)
+
+
+# ---------------------------------------------------------------------------
+# TestInitTiktokInboxUpload
+# ---------------------------------------------------------------------------
+
+class TestInitTiktokInboxUpload:
+    def test_small_video_declares_chunk_size_equal_to_file_size(self, tmp_path):
+        """Same real bug as Direct Post (see TestInitTiktokUpload) — this
+        flow shares the same (previously buggy) chunk-size computation."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 1_783_639)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_small_inbox", "upload_url": "https://upload.tiktokapis.com/small"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_inbox_upload(config=config, video_path=video_path)
+
+        body = mock_post.call_args.kwargs.get("json", {})
+        assert body["source_info"]["chunk_size"] == 1_783_639
+        assert body["source_info"]["total_chunk_count"] == 1
+
+    def test_success_returns_publish_id_and_upload_url(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 200)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {
+                "publish_id": "tiktok_inbox_abc123",
+                "upload_url": "https://upload.tiktokapis.com/inbox_abc123",
+            },
+        })
+
+        with patch("requests.post", return_value=mock_resp):
+            publish_id, upload_url = init_tiktok_inbox_upload(
+                config=config,
+                video_path=video_path,
+                episode_id="ep_test",
+            )
+
+        assert publish_id == "tiktok_inbox_abc123"
+        assert upload_url == "https://upload.tiktokapis.com/inbox_abc123"
+
+    def test_request_body_has_no_post_info(self, tmp_path):
+        """Upload-to-Inbox never sets title/privacy_level — the creator sets
+        those manually in-app. Sending post_info here would be a Direct
+        Post request against a credential that isn't authorized for it."""
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_1", "upload_url": "https://upload.tiktokapis.com/1"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_inbox_upload(config=config, video_path=video_path)
+
+        body = mock_post.call_args.kwargs.get("json", {})
+        assert "post_info" not in body
+        assert "source_info" in body
+
+    def test_request_targets_inbox_endpoint(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"publish_id": "pub_1", "upload_url": "https://upload.tiktokapis.com/1"}
+        })
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            init_tiktok_inbox_upload(config=config, video_path=video_path)
+
+        url = mock_post.call_args.args[0] if mock_post.call_args.args else mock_post.call_args.kwargs.get("url")
+        assert url is not None
+        assert "/post/publish/inbox/video/init/" in url
+
+    def test_400_raises_hard_failure(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(400, json_data={"error": {"code": "invalid_params"}})
+
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(HardFailureError):
+                init_tiktok_inbox_upload(config=config, video_path=video_path)
+
+    def test_missing_publish_id_raises_soft_failure(self, tmp_path):
+        config = _make_config()
+        video_path = _fake_video(tmp_path, 100)
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"upload_url": "https://upload.tiktokapis.com/abc"},
+        })
+
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(SoftFailureError):
+                init_tiktok_inbox_upload(config=config, video_path=video_path)
+
+
+# ---------------------------------------------------------------------------
+# TestPollTiktokInboxStatus
+# ---------------------------------------------------------------------------
+
+class TestPollTiktokInboxStatus:
+    def test_send_to_user_inbox_returns_status(self):
+        config = _make_config()
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"status": "SEND_TO_USER_INBOX"}
+        })
+
+        with patch("requests.post", return_value=mock_resp):
+            status = poll_tiktok_inbox_status(
+                config=config,
+                publish_id="tiktok_pub_abc",
+                episode_id="ep_test",
+                _sleep=lambda s: None,
+            )
+
+        assert status == "SEND_TO_USER_INBOX"
+
+    def test_failed_status_raises_hard_failure(self):
+        config = _make_config()
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"status": "FAILED"}
+        })
+
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(HardFailureError) as exc_info:
+                poll_tiktok_inbox_status(
+                    config=config,
+                    publish_id="tiktok_pub_abc",
+                    _sleep=lambda s: None,
+                )
+
+        assert exc_info.value.error_code == "FAILED"
+
+    def test_poll_timeout_raises_poll_timeout_error(self):
+        config = _make_config()
+
+        mock_resp = _make_response(200, json_data={
+            "data": {"status": "PROCESSING_UPLOAD"}
+        })
+
+        with patch("requests.post", return_value=mock_resp):
+            with pytest.raises(PollTimeoutError):
+                poll_tiktok_inbox_status(
+                    config=config,
+                    publish_id="tiktok_pub_abc",
+                    _sleep=lambda s: None,
+                )
+
+    def test_polls_multiple_times_before_terminal(self):
+        config = _make_config()
+
+        processing = _make_response(200, json_data={"data": {"status": "PROCESSING_UPLOAD"}})
+        terminal = _make_response(200, json_data={"data": {"status": "SEND_TO_USER_INBOX"}})
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                return processing
+            return terminal
+
+        with patch("requests.post", side_effect=side_effect):
+            status = poll_tiktok_inbox_status(
+                config=config,
+                publish_id="tiktok_pub_abc",
+                _sleep=lambda s: None,
+            )
+
+        assert status == "SEND_TO_USER_INBOX"
+        assert call_count[0] == 3

@@ -25,7 +25,6 @@ from typing import Optional
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 
-# Must match production_launcher._REQUIRED_ENV_VARS exactly
 _REQUIRED_ENV_VARS = [
     "OPENROUTER_API_KEY",
     "PERPLEXITY_API_KEY",

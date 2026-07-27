@@ -21,7 +21,7 @@ from hypogeum.db import get_connection, initialize_schema
 _PROJECT_ROOT    = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 
-_VALID_STATUSES = frozenset({"success", "failed", "pending", "skipped", "unknown"})
+_VALID_STATUSES = frozenset({"success", "failed", "pending", "skipped", "unknown", "uploaded_to_inbox"})
 
 
 def _resolve_db(db_path: Optional[Path]) -> Path:
@@ -59,7 +59,8 @@ def record_publishing_outcome(
     Args:
         episode_id:        Episode identifier.
         platform:          Platform slug (e.g. 'youtube', 'tiktok').
-        publishing_status: One of 'success', 'failed', 'pending', 'skipped', 'unknown'.
+        publishing_status: One of 'success', 'failed', 'pending', 'skipped',
+                           'unknown', 'uploaded_to_inbox'.
         platform_video_id: Platform's video identifier (e.g. YouTube video_id).
         published_at:      ISO timestamp when the video went live.
         failure_reason:    Human-readable failure description if status='failed'.

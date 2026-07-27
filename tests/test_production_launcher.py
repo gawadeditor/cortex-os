@@ -11,7 +11,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hypogeum.db import initialize_schema
+from hypogeum.db import get_connection, initialize_schema
+from hypogeum.queue import process_next
 
 
 @pytest.fixture()
@@ -123,120 +124,131 @@ class TestBlockedChannel:
 
 
 class TestSuccessfulLaunch:
+    """
+    Manual Queue Submission — as of the Minimum Operational Dashboard
+    Phase 0 correction, launch_episode_from_dashboard() never executes a
+    pipeline directly. It validates the request, then places the episode
+    on the same canonical queue the Scheduler uses:
 
-    def _launch(self, db, extra_patches=None):
-        mock_proc = MagicMock()
-        mock_proc.pid = 12345
-        patches = [
-            patch("shutil.which", return_value="/usr/bin/ffmpeg"),
-            patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()),
-            patch("subprocess.Popen", return_value=mock_proc),
-        ]
-        ctx = [p.__enter__() for p in patches]
-        mock_popen = ctx[2]
-        from hypogeum.production_launcher import launch_episode_from_dashboard
-        result = launch_episode_from_dashboard(
-            "ch_test", "ancient rome", "long_video", "balanced", ["youtube"],
-            db_path=db,
-        )
-        for p in patches:
-            p.__exit__(None, None, None)
-        return result, mock_popen
+        dashboard_control.enqueue_topic() -> queue.enqueue()
+        -> run_worker (poll loop) -> queue.process_next()
+        -> worker_integration (gated executor) -> pipeline.run_pipeline()
 
-    def test_success_calls_popen(self, db, full_env):
-        mock_proc = MagicMock()
-        mock_proc.pid = 12345
+    These tests replace the old subprocess/Popen assertions with direct
+    proof of that queue-injection behavior and its absence of any
+    execution-orchestration side effect.
+    """
+
+    def _launch(self, db):
         with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()), \
-             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()):
             from hypogeum.production_launcher import launch_episode_from_dashboard
-            result = launch_episode_from_dashboard(
-                "ch_test", "my topic", "long_video", "balanced", ["youtube"],
+            return launch_episode_from_dashboard(
+                "ch_test", "ancient rome", "long_video", "balanced", ["youtube"],
                 db_path=db,
             )
+
+    def test_returns_launched_status(self, db, full_env):
+        result = self._launch(db)
         assert result["status"] == "launched"
-        mock_popen.assert_called_once()
 
-    def test_popen_command_contains_run_pipeline(self, db, full_env):
-        mock_proc = MagicMock()
-        mock_proc.pid = 12345
-        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()), \
-             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            from hypogeum.production_launcher import launch_episode_from_dashboard
-            launch_episode_from_dashboard(
-                "ch_test", "my topic", "long_video", "balanced", ["youtube"],
-                db_path=db,
-            )
-        cmd = mock_popen.call_args[0][0]
-        assert any("run_pipeline.py" in str(part) for part in cmd)
+    def test_no_subprocess_popen_invoked(self, db, full_env):
+        """Regression: the entire point of this correction is that no
+        process is ever spawned for a manual submission."""
+        with patch("subprocess.Popen") as mock_popen:
+            self._launch(db)
+        mock_popen.assert_not_called()
 
-    def test_popen_command_contains_topic(self, db, full_env):
-        mock_proc = MagicMock()
-        mock_proc.pid = 1
-        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()), \
-             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            from hypogeum.production_launcher import launch_episode_from_dashboard
-            launch_episode_from_dashboard(
-                "ch_test", "ancient rome", "long_video", "balanced", [],
-                db_path=db,
-            )
-        cmd = mock_popen.call_args[0][0]
-        assert "ancient rome" in cmd
+    def test_no_direct_run_pipeline_invocation(self, db, full_env):
+        """Regression: launch_episode_from_dashboard() must never call
+        hypogeum.pipeline.run_pipeline() itself — only the worker's own
+        process_next() call site may do that, later, once claimed."""
+        import hypogeum.pipeline as _pl
+        with patch.object(
+            _pl, "run_pipeline",
+            side_effect=AssertionError("run_pipeline must not be called by production_launcher"),
+        ):
+            result = self._launch(db)
+        assert result["status"] == "launched"
 
-    def test_popen_command_contains_episode_id(self, db, full_env):
-        mock_proc = MagicMock()
-        mock_proc.pid = 1
-        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()), \
-             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            from hypogeum.production_launcher import launch_episode_from_dashboard
-            result = launch_episode_from_dashboard(
-                "ch_test", "my topic", "long_video", "balanced", [],
-                db_path=db,
-            )
-        cmd = mock_popen.call_args[0][0]
-        assert result["episode_id"] in cmd
+    def test_exactly_one_episode_topics_row_created(self, db, full_env):
+        result = self._launch(db)
+        conn = get_connection(db)
+        try:
+            rows = conn.execute(
+                "SELECT topic_id, episode_id FROM episode_topics WHERE channel_id = ?",
+                ("ch_test",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0]["episode_id"] == result["episode_id"]
 
-    def test_popen_command_contains_channel_id(self, db, full_env):
-        mock_proc = MagicMock()
-        mock_proc.pid = 1
-        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()), \
-             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            from hypogeum.production_launcher import launch_episode_from_dashboard
-            launch_episode_from_dashboard(
-                "ch_test", "my topic", "long_video", "balanced", [],
-                db_path=db,
+    def test_exactly_one_run_queue_row_created(self, db, full_env):
+        result = self._launch(db)
+        conn = get_connection(db)
+        try:
+            rows = conn.execute(
+                "SELECT queue_id, episode_id, channel_id, source, status "
+                "FROM run_queue WHERE channel_id = ?",
+                ("ch_test",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0]["episode_id"] == result["episode_id"]
+        assert rows[0]["channel_id"] == "ch_test"
+        assert rows[0]["source"] == "manual"
+        assert rows[0]["status"] == "queued"
+
+    def test_episode_topics_and_run_queue_linked_by_same_episode_id(self, db, full_env):
+        """The two rows created by the two calls (enqueue_topic +
+        queue.enqueue) must reference the identical episode_id — proving
+        they are the same submission, not two independent/duplicated ones."""
+        result = self._launch(db)
+        conn = get_connection(db)
+        try:
+            topic_row = conn.execute(
+                "SELECT episode_id FROM episode_topics WHERE channel_id = ?",
+                ("ch_test",),
+            ).fetchone()
+            queue_row = conn.execute(
+                "SELECT episode_id FROM run_queue WHERE channel_id = ?",
+                ("ch_test",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert topic_row["episode_id"] == queue_row["episode_id"] == result["episode_id"]
+
+    def test_queued_item_proceeds_only_through_canonical_worker_path(self, db, full_env):
+        """The item this creates is indistinguishable from any other
+        manually-enqueued item once the worker's real process_next() picks
+        it up — proving there is no parallel/special-cased execution path
+        for Create-page submissions."""
+        result = self._launch(db)
+        from hypogeum.calog import set_channel_state
+        set_channel_state("ch_test", "active", db_path=db)
+
+        mock_pipeline = MagicMock()
+        with patch("hypogeum.pipeline.run_pipeline", mock_pipeline):
+            pr = process_next(
+                worker_id="w1", db_path=db, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
             )
-        cmd = mock_popen.call_args[0][0]
-        assert "ch_test" in cmd
+
+        assert pr.status == "completed"
+        mock_pipeline.assert_called_once()
+        _, kwargs = mock_pipeline.call_args
+        assert kwargs.get("episode_id") == result["episode_id"]
+        assert kwargs.get("channel_id") == "ch_test"
+        assert kwargs.get("topic_input") == "ancient rome"
 
     def test_result_contains_episode_id(self, db, full_env):
-        mock_proc = MagicMock()
-        mock_proc.pid = 9
-        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()), \
-             patch("subprocess.Popen", return_value=mock_proc):
-            from hypogeum.production_launcher import launch_episode_from_dashboard
-            result = launch_episode_from_dashboard(
-                "ch_test", "my topic", "long_video", "balanced", [],
-                db_path=db,
-            )
+        result = self._launch(db)
         assert "episode_id" in result
         assert result["episode_id"].startswith("ep_")
 
     def test_no_mock_analytics_created(self, db, full_env):
-        mock_proc = MagicMock()
-        mock_proc.pid = 1
-        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("hypogeum.channel_config.get_channel_profile", return_value=_active_channel()), \
-             patch("subprocess.Popen", return_value=mock_proc), \
-             patch("hypogeum.analytics_store.seed_mock_analytics") as mock_seed:
-            from hypogeum.production_launcher import launch_episode_from_dashboard
-            launch_episode_from_dashboard(
-                "ch_test", "my topic", "long_video", "balanced", [],
-                db_path=db,
-            )
+        with patch("hypogeum.analytics_store.seed_mock_analytics") as mock_seed:
+            self._launch(db)
         mock_seed.assert_not_called()

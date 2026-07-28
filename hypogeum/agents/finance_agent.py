@@ -320,6 +320,7 @@ def run_budget_authorization(
     episode_id: str,
     config: Config,
     output_dir: Optional[Path] = None,
+    db_path: Optional[Path] = None,
 ) -> dict:
     """
     Pre-run budget gate. Called after Script Engine, before VPD.
@@ -333,6 +334,11 @@ def run_budget_authorization(
         config:         Loaded Config instance.
         output_dir:     Directory for finance_authorization_{episode_id}.json.
                         Defaults to .hypogeum-assets/episodes/{episode_id}/.
+        db_path:        Override DB path for the factory-policy ceiling
+                         cascade (see policy_cascade.get_effective_budget_ceiling).
+                         None (default) resolves to the production DB, which
+                         is correct for real pipeline runs; tests must always
+                         pass an isolated path.
 
     Returns:
         finance_record dict (phase="authorization") with one of:
@@ -351,6 +357,7 @@ def run_budget_authorization(
     try:
         ceiling = get_effective_budget_ceiling(
             env_ceiling=config.FINANCE_BUDGET_CEILING_USD,
+            db_path=db_path,
         )
     except Exception:
         ceiling = config.FINANCE_BUDGET_CEILING_USD
@@ -543,6 +550,7 @@ def run_post_vpd_authorization(
     config: Config,
     script_package: Optional[dict] = None,
     output_dir: Optional[Path] = None,
+    db_path: Optional[Path] = None,
 ) -> dict:
     """
     Post-VPD authoritative budget gate. Called after Phase 1 (Claude planning)
@@ -567,6 +575,11 @@ def run_post_vpd_authorization(
         script_package: Script Engine output; used to estimate narration + music cost.
                         If None (resume path), narration/music estimated as $0.00.
         output_dir:     Directory for finance_post_vpd_authorization_{episode_id}.json.
+        db_path:        Override DB path for the factory-policy ceiling
+                         cascade (see policy_cascade.get_effective_budget_ceiling).
+                         None (default) resolves to the production DB, which
+                         is correct for real pipeline runs; tests must always
+                         pass an isolated path.
 
     Returns:
         finance_record dict (phase="post_vpd_authorization") with one of:
@@ -585,6 +598,7 @@ def run_post_vpd_authorization(
     try:
         ceiling = get_effective_budget_ceiling(
             env_ceiling=config.FINANCE_BUDGET_CEILING_USD,
+            db_path=db_path,
         )
     except Exception:
         ceiling = config.FINANCE_BUDGET_CEILING_USD

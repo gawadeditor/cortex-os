@@ -791,6 +791,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            db_path=db_path,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         _current_stage_id = None
@@ -1935,6 +1936,7 @@ def _run_budget_authorization(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    db_path: Optional[Path] = None,
 ) -> dict:
     """
     Finance Agent — budget authorization gate (R50 — implemented).
@@ -1953,6 +1955,7 @@ def _run_budget_authorization(
         episode_id=episode_id,
         config=config,
         output_dir=output_dir,
+        db_path=db_path,
     )
 
 

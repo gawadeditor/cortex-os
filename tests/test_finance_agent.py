@@ -215,13 +215,14 @@ def make_archive_record() -> dict:
 class TestBudgetAuthorizationAuthorized:
     """AUTHORIZED verdict — no ceiling configured."""
 
-    def _run(self, **kw) -> dict:
+    def _run(self, db_path=None, **kw) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
             return run_budget_authorization(
                 script_package=make_script_package(),
                 episode_id="ep_test",
                 config=make_config(**kw),
                 output_dir=Path(tmp),
+                db_path=db_path,
             )
 
     def test_verdict_is_authorized_no_ceiling(self):
@@ -252,8 +253,16 @@ class TestBudgetAuthorizationAuthorized:
         rec = self._run()
         assert len(rec["checks"]) == 4
 
-    def test_ceiling_recorded(self):
-        rec = self._run(ceiling=0.0)
+    def test_ceiling_recorded(self, tmp_path):
+        # Isolated, empty DB — no factories row means the factory-policy
+        # cascade cleanly falls back to the env ceiling (0.0) instead of
+        # reading whatever ceiling happens to be configured on the real
+        # production DB (CLAUDE.md Test Isolation: tests must never touch
+        # .hypogeum-assets/hypogeum.db).
+        from hypogeum.db import initialize_schema
+        db_path = tmp_path / "test.db"
+        initialize_schema(db_path)
+        rec = self._run(ceiling=0.0, db_path=db_path)
         assert rec["budget_ceiling_usd"] == 0.0
 
     def test_estimated_spend_positive(self):
@@ -1399,14 +1408,21 @@ class TestPostVPDAuthorization:
         assert record["verdict"] in ("WARNING", "AUTHORIZED")
         assert record["authorized"] is True
 
-    def test_no_ceiling_always_authorized(self):
+    def test_no_ceiling_always_authorized(self, tmp_path):
         """FINANCE_BUDGET_CEILING_USD=0 (no ceiling) → always AUTHORIZED."""
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
+        from hypogeum.db import initialize_schema
+        # Isolated, empty DB — see test_ceiling_recorded for why this must
+        # never fall back to the real production DB's factory ceiling.
+        db_path = tmp_path / "test.db"
+        initialize_schema(db_path)
         scenes = [self._make_scene(f"s{i:02d}", tier=1) for i in range(50)]
         vpd_plan = self._make_vpd_plan(scenes)
         cfg = self._make_config(ceiling=0.0)
         with tempfile.TemporaryDirectory() as tmpdir:
-            record = run_post_vpd_authorization(vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir))
+            record = run_post_vpd_authorization(
+                vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir), db_path=db_path,
+            )
         assert record["verdict"] == "AUTHORIZED"
 
     def test_narration_cost_included_when_script_package_provided(self):

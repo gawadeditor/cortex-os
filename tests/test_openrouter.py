@@ -7,6 +7,7 @@ Each test class focuses on one concern.
 Test coverage:
   TestSuccessfulPath         — happy-path call_claude() via OpenRouter
   TestRetryBehavior          — 429/5xx triggers retry; exhaustion triggers fallback
+  TestNetworkExceptionRetry  — ReadTimeout/ConnectionError trigger retry+fallback; non-network errors don't
   TestAuthFailureFallback    — 401 triggers immediate Anthropic direct fallback
   TestHardFailures           — 400/402/403/content_filter halt without retry
   TestTruncatedResponse      — finish_reason: length raises TruncatedResponse
@@ -446,6 +447,96 @@ class TestRetryBehavior:
 
         assert len(delays_recorded) == 1
         assert delays_recorded[0] >= 10.0  # floored at Retry-After value
+
+
+# ---------------------------------------------------------------------------
+# TestNetworkExceptionRetry
+#
+# Regression coverage for the exception-classification gap found in the
+# 2026-07-31 production run: a mid-response read timeout surfaced as
+# requests.exceptions.ConnectionError (wrapping the urllib3 read-timeout),
+# not requests.exceptions.Timeout, and slipped past the retry/fallback
+# wrapper entirely because the except clause only listed
+# (_RetryableError, requests.Timeout). Fixed by widening the catch to
+# requests.exceptions.RequestException, the common base for both.
+# ---------------------------------------------------------------------------
+
+class TestNetworkExceptionRetry:
+    def test_read_timeout_triggers_retry(self):
+        """A plain requests.exceptions.ReadTimeout is retried, not fatal."""
+        cfg = make_config()
+        import requests as req_lib
+        responses = [
+            req_lib.exceptions.ReadTimeout("Read timed out. (read timeout=120)"),
+            openrouter_200("recovered"),
+        ]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.content == "recovered"
+        assert mock_post.call_count == 2
+
+    def test_connection_error_wrapping_read_timeout_triggers_retry(self):
+        """
+        requests.exceptions.ConnectionError with a urllib3-style read-timeout
+        message (the exact failure mode observed in production) is retried,
+        not left to escape as a fatal, un-retried episode failure.
+        """
+        cfg = make_config()
+        import requests as req_lib
+        responses = [
+            req_lib.exceptions.ConnectionError(
+                "HTTPSConnectionPool(host='openrouter.ai', port=443): Read timed out."
+            ),
+            openrouter_200("recovered"),
+        ]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.content == "recovered"
+        assert mock_post.call_count == 2
+
+    def test_connection_error_exhaustion_falls_back_to_anthropic(self):
+        """Two consecutive ConnectionErrors (retry budget exhausted) fall back to Anthropic direct — the same behavior _RetryableError already gets."""
+        cfg = make_config()
+        import requests as req_lib
+        with patch.object(
+            openrouter_mod, "_call_openrouter",
+            side_effect=req_lib.exceptions.ConnectionError(
+                "HTTPSConnectionPool(host='openrouter.ai', port=443): Read timed out."
+            ),
+        ):
+            with patch.object(openrouter_mod, "_call_anthropic_direct", return_value=CallResult(
+                content="fallback", usage={}, model_used=SONNET,
+                finish_reason="stop", response_time_ms=0,
+                via_fallback=True, estimated_cost_usd=0.0,
+            )) as mock_ant:
+                with patch("hypogeum.openrouter.time.sleep"):
+                    result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.via_fallback is True
+        assert mock_ant.call_count == 1
+
+    def test_non_network_error_not_retried(self):
+        """
+        A non-network exception (e.g. a bug surfacing as ValueError) must
+        propagate immediately — proves the widened except clause is scoped
+        to requests.exceptions.RequestException and does not turn into a
+        catch-all that retries or falls back on unrelated failures.
+        """
+        cfg = make_config()
+        with patch.object(openrouter_mod, "_call_openrouter", side_effect=ValueError("not a network error")):
+            with patch.object(openrouter_mod, "_call_anthropic_direct") as mock_ant:
+                with pytest.raises(ValueError):
+                    call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_ant.call_count == 0
+
+    def test_hard_failure_still_not_retried(self):
+        """HTTP 400 (HardFailure) is unaffected by the widened network-exception catch — still exactly one POST, no retry."""
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(400)) as mock_post:
+            with pytest.raises(HardFailure):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 1
 
 
 # ---------------------------------------------------------------------------

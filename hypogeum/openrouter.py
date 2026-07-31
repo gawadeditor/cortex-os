@@ -355,7 +355,7 @@ def call_claude(
                 start_ms=start_ms,
             )
 
-        except (_RetryableError, requests.Timeout) as exc:
+        except (_RetryableError, requests.exceptions.RequestException) as exc:
             if attempt >= RETRY_MAX:
                 # Retry budget exhausted — switch to Anthropic direct
                 log.warn(

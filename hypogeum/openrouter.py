@@ -5,17 +5,25 @@ Single integration point for all Claude model calls in the pipeline.
 All 9 agents call Claude through this module — never via requests directly.
 
 Primary path:  OpenRouter chat completions (OpenAI-compatible format)
-Fallback path: Anthropic Messages API direct (triggered by 401 or retry exhaustion)
+Fallback path: config.OPENROUTER_FALLBACK_MODEL, one attempt, through the
+               same OpenRouter endpoint and credential (triggered by primary-
+               model retry exhaustion; see docs/provider-model-director.md
+               §8.3). A 401 (invalid OPENROUTER_API_KEY) does not attempt the
+               fallback model — a different model through the same invalid
+               credential fails identically. Anthropic direct
+               (_call_anthropic_direct) still exists but is never called
+               automatically; it is unreachable dead code from call_claude()
+               unless something else opts back into it deliberately.
 
 External dependency: requests
 
 Logging events emitted:
-  openrouter_request_sent       — info  — before each API call
-  openrouter_response_received  — info  — on successful response
-  openrouter_retry_triggered    — warn  — before each retry attempt
-  openrouter_hard_failure       — error — on 400/402/403/content_filter
-  openrouter_fallback_activated — warn  — when switching to Anthropic direct
-  openrouter_truncated_response — warn  — when finish_reason == "length"
+  openrouter_request_sent            — info  — before each API call
+  openrouter_response_received       — info  — on successful response
+  openrouter_retry_triggered         — warn  — before each retry attempt
+  openrouter_hard_failure            — error — on 400/402/403/content_filter/401
+  openrouter_model_fallback_activated — warn — attempting/resolving OPENROUTER_FALLBACK_MODEL
+  openrouter_truncated_response      — warn  — when finish_reason == "length"
 
 API keys are never logged. Full message content is never logged.
 """
@@ -166,8 +174,15 @@ class TruncatedResponse(OpenRouterError):
 
 class FallbackFailed(OpenRouterError):
     """
-    Anthropic direct fallback also failed — pipeline cannot proceed.
-    No further retry or fallback is attempted.
+    Every OpenRouter-native option is exhausted: the primary model's retry
+    budget ran out and either no OPENROUTER_FALLBACK_MODEL is configured or
+    that fallback model also failed. No Anthropic-direct call is attempted
+    (see docs/provider-model-director.md §8 — the target architecture keeps
+    fallback within OpenRouter's own model routing, not a separate
+    provider/credential). This is not marked FailurePolicy.TERMINAL, so
+    hypogeum.queue's bounded auto-retry / recurring-schedule mechanisms
+    pick the episode back up from its on-disk checkpoint later — the
+    caller does not need to (and must not) retry it inline.
     """
     def __init__(
         self,
@@ -264,7 +279,9 @@ def call_claude(
     agent: Optional[str] = None,
 ) -> CallResult:
     """
-    Call Claude via OpenRouter (primary) or Anthropic direct (fallback).
+    Call Claude via OpenRouter (primary), then config.OPENROUTER_FALLBACK_MODEL
+    through OpenRouter (fallback, one attempt, on primary retry exhaustion).
+    Anthropic direct is never called automatically — see module docstring.
 
     The caller is responsible for passing the correct model_slug for the
     assigned agent (see openrouter-integration.md §5.A). This function does
@@ -289,7 +306,12 @@ def call_claude(
         ContentFiltered    — finish_reason == content_filter
         TruncatedResponse  — finish_reason == length
         EmptyResponse      — empty content field despite HTTP 200
-        FallbackFailed     — OpenRouter failed and Anthropic direct also failed
+        FallbackFailed     — 401 (same-credential fallback would be pointless),
+                             or primary exhausted retries and either no
+                             OPENROUTER_FALLBACK_MODEL is configured or it
+                             also failed. Retry-eligible at the episode/queue
+                             level (FailurePolicy.TRANSIENT by default) —
+                             never falls through to Anthropic direct.
     """
     global _use_anthropic_for_run
     log = get_logger(episode_id=episode_id, agent=agent)
@@ -340,37 +362,39 @@ def call_claude(
             )
 
         except _AuthError:
+            # 401 means the OPENROUTER_API_KEY credential itself is invalid —
+            # every model slug shares that one credential, so trying a
+            # different model through OpenRouter would fail identically.
+            # Fail safely without attempting the OpenRouter fallback model
+            # or Anthropic direct.
             log.warn(
-                "openrouter_fallback_activated",
-                reason="auth_failure_401",
-                fallback_target="anthropic_direct",
+                "openrouter_hard_failure",
+                failure_type="auth_failure_401",
+                http_status=401,
+                action="no_fallback_same_credential",
             )
-            _use_anthropic_for_run = True
-            return _call_anthropic_direct(
-                model_slug=model_slug,
-                messages=cached_messages,
-                max_tokens=max_tokens,
-                config=config,
-                log=log,
-                start_ms=start_ms,
+            raise FallbackFailed(
+                "OpenRouter authentication failed (HTTP 401) — the "
+                "OPENROUTER_API_KEY credential itself is invalid. No "
+                "OpenRouter fallback model was attempted (it would use the "
+                "same invalid credential); no Anthropic-direct fallback is "
+                "attempted by default. Rotate OPENROUTER_API_KEY."
             )
 
         except (_RetryableError, requests.exceptions.RequestException) as exc:
             if attempt >= RETRY_MAX:
-                # Retry budget exhausted — switch to Anthropic direct
-                log.warn(
-                    "openrouter_fallback_activated",
-                    reason="retry_exhausted",
-                    fallback_target="anthropic_direct",
-                )
-                _use_anthropic_for_run = True
-                return _call_anthropic_direct(
-                    model_slug=model_slug,
-                    messages=cached_messages,
+                # Retry budget on the primary model is exhausted — attempt
+                # exactly one OpenRouter-native fallback (same endpoint,
+                # same credential, different model slug) instead of
+                # switching to Anthropic direct.
+                return _try_openrouter_model_fallback(
+                    primary_model=model_slug,
+                    messages=messages,
                     max_tokens=max_tokens,
                     config=config,
                     log=log,
                     start_ms=start_ms,
+                    reason="retry_exhausted",
                 )
 
             retry_after = getattr(exc, "retry_after", None)
@@ -384,6 +408,83 @@ def call_claude(
             )
             time.sleep(delay)
             attempt += 1
+
+
+def _try_openrouter_model_fallback(
+    primary_model: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    config: Config,
+    log: Logger,
+    start_ms: int,
+    reason: str,
+) -> CallResult:
+    """
+    On primary-model retry exhaustion: attempt exactly one call to
+    config.OPENROUTER_FALLBACK_MODEL through the same OpenRouter endpoint
+    and API key — never Anthropic direct (see docs/provider-model-director.md
+    §8.3: fallback stays within OpenRouter's own model routing).
+
+    messages is the original, un-cached message list — prompt caching is
+    re-applied here for the fallback model's own slug, since cache_control
+    is Anthropic-specific and the fallback model may not be an Anthropic
+    model.
+
+    Raises FallbackFailed (FailurePolicy.TRANSIENT by default — retry-
+    eligible at the episode/queue level) if no fallback model is configured
+    or the fallback call also fails. Never falls through to Anthropic
+    direct.
+    """
+    fallback_model = config.OPENROUTER_FALLBACK_MODEL
+
+    if not fallback_model:
+        log.warn(
+            "openrouter_model_fallback_activated",
+            primary_model=primary_model,
+            fallback_model=None,
+            reason=reason,
+            success=False,
+        )
+        raise FallbackFailed(
+            f"OpenRouter primary model '{primary_model}' failed and no "
+            "OPENROUTER_FALLBACK_MODEL is configured. No Anthropic-direct "
+            "fallback is attempted by default — set OPENROUTER_FALLBACK_MODEL "
+            "to an approved OpenRouter model slug to enable a fallback."
+        )
+
+    fallback_messages = _apply_system_prompt_caching(messages, fallback_model)
+
+    try:
+        result = _call_openrouter(
+            model_slug=fallback_model,
+            messages=fallback_messages,
+            max_tokens=max_tokens,
+            config=config,
+            log=log,
+            start_ms=start_ms,
+        )
+    except Exception as exc:
+        log.warn(
+            "openrouter_model_fallback_activated",
+            primary_model=primary_model,
+            fallback_model=fallback_model,
+            reason=reason,
+            success=False,
+        )
+        raise FallbackFailed(
+            f"OpenRouter primary model '{primary_model}' failed and fallback "
+            f"model '{fallback_model}' also failed: {exc}",
+            original_error=exc,
+        ) from exc
+
+    log.warn(
+        "openrouter_model_fallback_activated",
+        primary_model=primary_model,
+        fallback_model=fallback_model,
+        reason=reason,
+        success=True,
+    )
+    return result
 
 
 def check_health(
@@ -561,7 +662,8 @@ def _parse_openrouter_response(
             action="retrying",
         )
         # Transient provider glitch — not a permanent hard failure.
-        # Raise retryable so call_claude() retries once then falls back to Anthropic.
+        # Raise retryable so call_claude() retries once, then falls back to
+        # OPENROUTER_FALLBACK_MODEL if configured (see _try_openrouter_model_fallback()).
         raise _RetryableError(status_code=200)
 
     if finish_reason == "content_filter":

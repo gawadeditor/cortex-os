@@ -395,41 +395,33 @@ class TestRetryBehavior:
                 call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert mock_post.call_count == 2
 
-    def test_retry_exhaustion_calls_anthropic_direct(self):
-        """500 twice (initial + 1 retry) → fallback to Anthropic direct."""
+    def test_retry_exhaustion_calls_openrouter_fallback(self):
+        """500 twice (initial + 1 retry) → fallback to OPENROUTER_FALLBACK_MODEL, not Anthropic direct."""
         cfg = make_config()
-        or_responses = [http_error(500), http_error(500)]
-        ant_response = anthropic_200()
-        with patch("hypogeum.openrouter.requests.post", side_effect=or_responses):
-            with patch("hypogeum.openrouter.time.sleep"):
-                with patch("hypogeum.openrouter.requests.post", side_effect=or_responses + [ant_response]):
-                    # Need to distinguish OpenRouter calls from Anthropic call
-                    pass
-
-        # Simpler approach: mock _call_openrouter and _call_anthropic_direct
         with patch.object(openrouter_mod, "_call_openrouter", side_effect=openrouter_mod._RetryableError(500)) as mock_or:
-            with patch.object(openrouter_mod, "_call_anthropic_direct", return_value=CallResult(
+            with patch.object(openrouter_mod, "_try_openrouter_model_fallback", return_value=CallResult(
                 content="fallback", usage={}, model_used=SONNET,
                 finish_reason="stop", response_time_ms=0,
-                via_fallback=True, estimated_cost_usd=0.0,
-            )) as mock_ant:
+                via_fallback=False, estimated_cost_usd=0.0,
+            )) as mock_fb:
                 with patch("hypogeum.openrouter.time.sleep"):
                     result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        assert result.via_fallback is True
-        assert mock_ant.call_count == 1
+        assert result.content == "fallback"
+        assert result.via_fallback is False
+        assert mock_fb.call_count == 1
 
-    def test_retry_sets_run_fallback_flag_on_exhaustion(self):
-        """After retry exhaustion, subsequent calls should go to Anthropic direct."""
+    def test_retry_exhaustion_does_not_set_anthropic_flag(self):
+        """Exhaustion must not flip the run into Anthropic-direct-for-all-calls mode anymore."""
         cfg = make_config()
         with patch.object(openrouter_mod, "_call_openrouter", side_effect=openrouter_mod._RetryableError(500)):
-            with patch.object(openrouter_mod, "_call_anthropic_direct", return_value=CallResult(
+            with patch.object(openrouter_mod, "_try_openrouter_model_fallback", return_value=CallResult(
                 content="ok", usage={}, model_used=SONNET,
                 finish_reason="stop", response_time_ms=0,
-                via_fallback=True, estimated_cost_usd=0.0,
+                via_fallback=False, estimated_cost_usd=0.0,
             )):
                 with patch("hypogeum.openrouter.time.sleep"):
                     call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        assert openrouter_mod._use_anthropic_for_run is True
+        assert openrouter_mod._use_anthropic_for_run is False
 
     def test_retry_after_header_respected(self):
         """429 with Retry-After: 10 should delay at least 10 seconds."""
@@ -496,8 +488,8 @@ class TestNetworkExceptionRetry:
         assert result.content == "recovered"
         assert mock_post.call_count == 2
 
-    def test_connection_error_exhaustion_falls_back_to_anthropic(self):
-        """Two consecutive ConnectionErrors (retry budget exhausted) fall back to Anthropic direct — the same behavior _RetryableError already gets."""
+    def test_connection_error_exhaustion_falls_back_to_openrouter_fallback_model(self):
+        """Two consecutive ConnectionErrors (retry budget exhausted) fall back to OPENROUTER_FALLBACK_MODEL — the same behavior _RetryableError already gets. Never Anthropic direct (see TestOpenRouterModelFallback)."""
         cfg = make_config()
         import requests as req_lib
         with patch.object(
@@ -506,15 +498,16 @@ class TestNetworkExceptionRetry:
                 "HTTPSConnectionPool(host='openrouter.ai', port=443): Read timed out."
             ),
         ):
-            with patch.object(openrouter_mod, "_call_anthropic_direct", return_value=CallResult(
+            with patch.object(openrouter_mod, "_try_openrouter_model_fallback", return_value=CallResult(
                 content="fallback", usage={}, model_used=SONNET,
                 finish_reason="stop", response_time_ms=0,
-                via_fallback=True, estimated_cost_usd=0.0,
-            )) as mock_ant:
+                via_fallback=False, estimated_cost_usd=0.0,
+            )) as mock_fb:
                 with patch("hypogeum.openrouter.time.sleep"):
                     result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        assert result.via_fallback is True
-        assert mock_ant.call_count == 1
+        assert result.content == "fallback"
+        assert result.via_fallback is False
+        assert mock_fb.call_count == 1
 
     def test_non_network_error_not_retried(self):
         """
@@ -540,43 +533,128 @@ class TestNetworkExceptionRetry:
 
 
 # ---------------------------------------------------------------------------
+# TestOpenRouterModelFallback
+#
+# The fallback target was moved from Anthropic direct to
+# config.OPENROUTER_FALLBACK_MODEL — one attempt, same OpenRouter endpoint
+# and credential, different model slug (docs/provider-model-director.md
+# §8.3). Anthropic direct must never be reached automatically.
+# ---------------------------------------------------------------------------
+
+FALLBACK_MODEL = "openai/gpt-5.5-pro"  # live, non-Anthropic slug already used elsewhere in this repo
+
+
+class TestOpenRouterModelFallback:
+    def test_retry_exhaustion_activates_configured_fallback_model(self):
+        """Primary model exhausts its retry budget; OPENROUTER_FALLBACK_MODEL is attempted through OpenRouter."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        responses = [http_error(500), http_error(500), openrouter_200("from fallback model")]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.content == "from fallback model"
+        assert mock_post.call_count == 3  # primary + 1 retry + 1 fallback-model attempt
+        # Fallback call must hit the same OpenRouter endpoint with the fallback slug
+        last_call = mock_post.call_args_list[-1]
+        assert last_call.args[0] == OPENROUTER_CHAT_URL
+        assert last_call.kwargs["json"]["model"] == FALLBACK_MODEL
+        assert last_call.kwargs["headers"]["Authorization"] == "Bearer sk-or-test"
+
+    def test_fallback_model_success_returns_normal_result(self):
+        """A successful fallback-model call returns a normal CallResult — still OpenRouter, not Anthropic."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        responses = [http_error(500), http_error(500), openrouter_200("recovered")]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses):
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.content == "recovered"
+        assert result.via_fallback is False
+
+    def test_fallback_model_failure_raises_retryable_fallback_failed(self):
+        """If the fallback model also fails: FallbackFailed, not TERMINAL — retry-eligible at the episode/queue level."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        responses = [http_error(500), http_error(500), http_error(500)]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                with pytest.raises(FallbackFailed) as exc_info:
+                    call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 3  # primary + 1 retry + 1 fallback-model attempt, then stop
+        from hypogeum.failure_policy import FailurePolicy
+        assert getattr(exc_info.value, "failure_policy", FailurePolicy.TRANSIENT) == FailurePolicy.TRANSIENT
+
+    def test_missing_fallback_config_fails_safely_without_anthropic(self):
+        """No OPENROUTER_FALLBACK_MODEL configured: fail safely after primary exhaustion, no third call, no Anthropic."""
+        cfg = make_config()  # OPENROUTER_FALLBACK_MODEL intentionally absent
+        responses = [http_error(500), http_error(500)]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                with pytest.raises(FallbackFailed):
+                    call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 2  # primary + 1 retry only — no fallback attempt possible
+        assert ANTHROPIC_MESSAGES_URL not in str(mock_post.call_args_list)
+
+    def test_auth_failure_does_not_attempt_fallback_model(self):
+        """401 must not trigger a second call with a different model through the same invalid credential."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(401)) as mock_post:
+            with pytest.raises(FallbackFailed):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 1  # no fallback-model attempt, no Anthropic
+
+    def test_anthropic_direct_not_called_by_default_on_retry_exhaustion(self):
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        responses = [http_error(500), http_error(500), openrouter_200()]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        for c in mock_post.call_args_list:
+            assert ANTHROPIC_MESSAGES_URL not in str(c)
+        assert openrouter_mod._use_anthropic_for_run is False
+
+    def test_anthropic_direct_not_called_by_default_on_401(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(401)) as mock_post:
+            with pytest.raises(FallbackFailed):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert ANTHROPIC_MESSAGES_URL not in str(mock_post.call_args_list)
+        assert openrouter_mod._use_anthropic_for_run is False
+
+
+# ---------------------------------------------------------------------------
 # TestAuthFailureFallback
 # ---------------------------------------------------------------------------
 
 class TestAuthFailureFallback:
-    def test_401_activates_anthropic_direct(self):
+    def test_401_raises_fallback_failed_not_anthropic(self):
+        """401 no longer activates Anthropic direct — it fails safely instead."""
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
-            result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        assert result.via_fallback is True
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(401)):
+            with pytest.raises(FallbackFailed):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
-    def test_401_does_not_retry_openrouter(self):
-        """After 401, only one POST to OpenRouter; then one POST to Anthropic."""
+    def test_401_makes_exactly_one_call(self):
+        """401 triggers no retry and no fallback-model attempt — exactly one POST."""
         cfg = make_config()
-        call_count = {"or": 0, "ant": 0}
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(401)) as mock_post:
+            with pytest.raises(FallbackFailed):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 1
 
-        def fake_post(url, **kwargs):
-            if "openrouter" in url:
-                call_count["or"] += 1
-                return http_error(401)
-            else:
-                call_count["ant"] += 1
-                return anthropic_200()
-
-        with patch("hypogeum.openrouter.requests.post", side_effect=fake_post):
-            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-
-        assert call_count["or"] == 1
-        assert call_count["ant"] == 1
-
-    def test_401_sets_run_fallback_flag(self):
+    def test_401_does_not_set_run_fallback_flag(self):
+        """401 must not flip the run into Anthropic-direct-for-all-calls mode anymore."""
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]):
-            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        assert openrouter_mod._use_anthropic_for_run is True
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(401)):
+            with pytest.raises(FallbackFailed):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert openrouter_mod._use_anthropic_for_run is False
 
-    def test_subsequent_call_after_401_uses_anthropic_only(self):
-        """Once flag is set, second call should go straight to Anthropic."""
+    def test_health_check_flag_still_routes_to_anthropic_direct(self):
+        """
+        _use_anthropic_for_run is set only by check_health() now (unchanged,
+        out of scope for this fix) — not by call_claude()'s own 401/retry
+        handling anymore. If something else sets it, the top-of-function
+        shortcut must still honor it.
+        """
         cfg = make_config()
         openrouter_mod._use_anthropic_for_run = True
         with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
@@ -693,11 +771,18 @@ class TestEmptyResponse:
 
 class TestMalformedResponse:
     def test_missing_choices_raises_hard_failure(self):
+        """
+        Malformed choices is classified _RetryableError (transient glitch) —
+        it retries once, then hits the fallback path. With no
+        OPENROUTER_FALLBACK_MODEL configured, that now surfaces as
+        FallbackFailed rather than the old auto-Anthropic HardFailure-shaped
+        parse error.
+        """
         cfg = make_config()
         resp = openrouter_200()
         resp.json.return_value = {"id": "x", "model": SONNET}  # no "choices"
         with patch("hypogeum.openrouter.requests.post", return_value=resp):
-            with pytest.raises(HardFailure):
+            with pytest.raises(FallbackFailed):
                 call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
     def test_empty_choices_list_raises(self):
@@ -705,7 +790,7 @@ class TestMalformedResponse:
         resp = openrouter_200()
         resp.json.return_value["choices"] = []
         with patch("hypogeum.openrouter.requests.post", return_value=resp):
-            with pytest.raises(HardFailure):
+            with pytest.raises(FallbackFailed):
                 call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
     def test_missing_message_key_raises(self):
@@ -722,26 +807,37 @@ class TestMalformedResponse:
 # ---------------------------------------------------------------------------
 
 class TestAnthropicFallback:
+    """
+    _call_anthropic_direct() itself is unchanged — these tests exercise its
+    request-building logic directly. What changed is the *trigger*: 401 and
+    retry-exhaustion no longer reach it automatically (see
+    TestAuthFailureFallback / TestOpenRouterModelFallback), so these tests
+    invoke it the same way check_health() would — via _use_anthropic_for_run
+    — matching TestFallbackNoKey's existing pattern. Single call now, not
+    [401, anthropic_200()], since nothing precedes it anymore.
+    """
+
     def test_fallback_uses_anthropic_url(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        # Second call should go to Anthropic URL
-        second_call_url = mock_post.call_args_list[1].args[0]
-        assert second_call_url == ANTHROPIC_MESSAGES_URL
+        assert mock_post.call_args.args[0] == ANTHROPIC_MESSAGES_URL
 
     def test_fallback_translates_slug_sonnet(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         assert body["model"] == "claude-sonnet-4-6"
 
     def test_fallback_translates_slug_opus(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(OPUS, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         assert body["model"] == "claude-opus-4-6"
 
     def test_fallback_extracts_system_message(self):
@@ -752,9 +848,10 @@ class TestAnthropicFallback:
         only the envelope shape changes (see TestSystemPromptCaching).
         """
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         assert body["system"] == [
             {
                 "type": "text",
@@ -766,49 +863,56 @@ class TestAnthropicFallback:
     def test_fallback_user_messages_only_in_messages(self):
         """After system extraction, messages[] should contain only non-system turns."""
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         for m in body["messages"]:
             assert m["role"] != "system"
 
     def test_fallback_uses_x_api_key_header(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        headers = mock_post.call_args_list[1].kwargs["headers"]
+        headers = mock_post.call_args.kwargs["headers"]
         assert headers["x-api-key"] == "sk-ant-test"
 
     def test_fallback_sets_anthropic_version_header(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        headers = mock_post.call_args_list[1].kwargs["headers"]
+        headers = mock_post.call_args.kwargs["headers"]
         assert headers["anthropic-version"] == "2023-06-01"
 
     def test_fallback_normalises_end_turn_to_stop(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200(stop_reason="end_turn")]):
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200(stop_reason="end_turn")):
             result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert result.finish_reason == "stop"
 
     def test_fallback_content_extracted(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200("fallback content")]):
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200("fallback content")):
             result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert result.content == "fallback content"
 
     def test_fallback_via_fallback_true(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]):
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()):
             result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert result.via_fallback is True
 
     def test_fallback_token_accounting(self):
         cfg = make_config()
+        openrouter_mod._use_anthropic_for_run = True
         ant_resp = anthropic_200()
         ant_resp.json.return_value["usage"] = {"input_tokens": 80, "output_tokens": 20}
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), ant_resp]):
+        with patch("hypogeum.openrouter.requests.post", return_value=ant_resp):
             result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert result.usage["prompt_tokens"] == 80
         assert result.usage["completion_tokens"] == 20
@@ -816,8 +920,9 @@ class TestAnthropicFallback:
 
     def test_fallback_truncation_raises(self):
         cfg = make_config()
+        openrouter_mod._use_anthropic_for_run = True
         ant_resp = anthropic_200(stop_reason="max_tokens")
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), ant_resp]):
+        with patch("hypogeum.openrouter.requests.post", return_value=ant_resp):
             with pytest.raises(TruncatedResponse):
                 call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
@@ -828,11 +933,18 @@ class TestAnthropicFallback:
 
 class TestFallbackNoKey:
     def test_raises_fallback_failed_without_key(self):
+        """
+        _call_anthropic_direct() itself is unchanged and still guards on a
+        missing key — but 401/retry-exhaustion no longer reach it
+        automatically (see TestAuthFailureFallback / TestOpenRouterModelFallback),
+        so this exercises it the same way its sibling tests below do: via the
+        _use_anthropic_for_run flag, as check_health() would set it.
+        """
         cfg = make_config()
         cfg.ANTHROPIC_API_KEY = None  # Remove the key
-        with patch("hypogeum.openrouter.requests.post", return_value=http_error(401)):
-            with pytest.raises(FallbackFailed) as exc_info:
-                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        openrouter_mod._use_anthropic_for_run = True
+        with pytest.raises(FallbackFailed) as exc_info:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert "ANTHROPIC_API_KEY" in str(exc_info.value)
 
     def test_fallback_failed_on_network_error(self):
@@ -939,11 +1051,13 @@ class TestRunState:
         reset_run_state()
         assert openrouter_mod._use_anthropic_for_run is False
 
-    def test_flag_set_after_401(self):
+    def test_flag_not_set_after_401(self):
+        """401 fails safely now — it must not flip the run into Anthropic-direct-for-all-calls mode."""
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]):
-            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        assert openrouter_mod._use_anthropic_for_run is True
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(401)):
+            with pytest.raises(FallbackFailed):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert openrouter_mod._use_anthropic_for_run is False
 
     def test_reset_clears_flag_set_by_health_check(self):
         openrouter_mod._use_anthropic_for_run = True
@@ -1007,15 +1121,18 @@ class TestLogging:
         assert "openrouter_hard_failure" in error_events
 
     def test_fallback_activation_logged_at_warn(self):
-        cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]):
-            with patch("hypogeum.openrouter.get_logger") as mock_get_logger:
-                mock_log = MagicMock()
-                mock_get_logger.return_value = mock_log
-                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        """openrouter_model_fallback_activated is logged on retry exhaustion when OPENROUTER_FALLBACK_MODEL is set."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": "openai/gpt-5.5-pro"})
+        responses = [http_error(500), http_error(500), openrouter_200()]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses):
+            with patch("hypogeum.openrouter.time.sleep"):
+                with patch("hypogeum.openrouter.get_logger") as mock_get_logger:
+                    mock_log = MagicMock()
+                    mock_get_logger.return_value = mock_log
+                    call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
         warn_events = [c.args[0] for c in mock_log.warn.call_args_list]
-        assert "openrouter_fallback_activated" in warn_events
+        assert "openrouter_model_fallback_activated" in warn_events
 
     def test_truncated_response_logged_at_warn(self):
         cfg = make_config()
@@ -1157,10 +1274,13 @@ class TestSystemPromptCaching:
         assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
 
     def test_supported_model_receives_cache_control_via_anthropic_fallback(self):
+        """_call_anthropic_direct() unchanged; triggered via the health-check
+        flag now, not a 401 (see TestAnthropicFallback docstring)."""
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
 
     # -- 2. Exact system prompt text remains byte-identical ----------------
@@ -1175,9 +1295,10 @@ class TestSystemPromptCaching:
 
     def test_system_prompt_text_byte_identical_via_anthropic_fallback(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         assert body["system"][0]["text"] == "You are a helpful pipeline agent."
 
     # -- 3. User prompt remains unchanged -----------------------------------
@@ -1192,9 +1313,10 @@ class TestSystemPromptCaching:
 
     def test_user_prompt_unchanged_via_anthropic_fallback(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         assert body["messages"] == [{"role": "user", "content": "Respond with: OK"}]
 
     # -- 4. Unsupported/non-Anthropic models retain the previous request shape
@@ -1209,9 +1331,10 @@ class TestSystemPromptCaching:
 
     def test_unsupported_model_keeps_plain_string_system_via_anthropic_fallback(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(NON_ANTHROPIC_MODEL, MINIMAL_MESSAGES, 512, cfg)
-        body = mock_post.call_args_list[1].kwargs["json"]
+        body = mock_post.call_args.kwargs["json"]
         assert body["system"] == "You are a helpful pipeline agent."
 
     # -- 5. Existing schema/body fields remain unchanged ---------------------
@@ -1242,9 +1365,10 @@ class TestSystemPromptCaching:
 
     def test_anthropic_fallback_headers_unaffected_by_caching(self):
         cfg = make_config()
-        with patch("hypogeum.openrouter.requests.post", side_effect=[http_error(401), anthropic_200()]) as mock_post:
+        openrouter_mod._use_anthropic_for_run = True
+        with patch("hypogeum.openrouter.requests.post", return_value=anthropic_200()) as mock_post:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        headers = mock_post.call_args_list[1].kwargs["headers"]
+        headers = mock_post.call_args.kwargs["headers"]
         assert headers["x-api-key"] == "sk-ant-test"
         assert headers["anthropic-version"] == "2023-06-01"
 
@@ -1265,17 +1389,33 @@ class TestSystemPromptCaching:
             assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
 
     def test_retry_exhaustion_fallback_carries_cache_control(self):
-        """Retry-exhausted requests that fall back to Anthropic direct must
-        still carry the same cache_control block."""
-        cfg = make_config()
-        or_responses = [http_error(500), http_error(500)]
-        ant_response = anthropic_200()
-        with patch("hypogeum.openrouter.requests.post", side_effect=or_responses + [ant_response]) as mock_post:
+        """
+        Retry-exhausted requests that fall back to OPENROUTER_FALLBACK_MODEL
+        (still via OpenRouter) must carry the correct cache_control
+        treatment for the FALLBACK model's own slug — re-applied fresh,
+        not just reusing the primary model's cached_messages.
+        """
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": "anthropic/claude-haiku-4.5"})
+        responses = [http_error(500), http_error(500), openrouter_200()]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
             with patch("hypogeum.openrouter.time.sleep"):
                 result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
-        assert result.via_fallback is True
+        assert result.via_fallback is False  # still OpenRouter, not Anthropic direct
         body = mock_post.call_args_list[-1].kwargs["json"]
-        assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+        system_msg = next(m for m in body["messages"] if m["role"] == "system")
+        assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_retry_exhaustion_fallback_non_anthropic_model_no_cache_control(self):
+        """A non-Anthropic OPENROUTER_FALLBACK_MODEL must not receive the
+        Anthropic-specific cache_control block."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": "openai/gpt-5.5-pro"})
+        responses = [http_error(500), http_error(500), openrouter_200()]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args_list[-1].kwargs["json"]
+        system_msg = next(m for m in body["messages"] if m["role"] == "system")
+        assert isinstance(system_msg["content"], str)  # unchanged plain string, no cache_control block
 
     # -- 8. No agent-level caching code is introduced ------------------------
 

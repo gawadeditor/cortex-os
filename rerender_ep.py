@@ -178,13 +178,19 @@ def main():
 
     print(f"\nTimeline: {len(main_timeline)} scenes  {present_clips} clips present  {total_dur:.2f}s body")
 
-    # Per-scene breakdown
+    # Per-scene breakdown — coverage facts come from coverage_check.py, the
+    # single source of truth also used by the actual render below, so this
+    # printout can never disagree with what render_episode() is about to do.
+    from hypogeum.agents.coverage_check import compute_beat_coverage
     print("\nScene breakdown:")
     for e in main_timeline:
         has = "✓" if (e.clip_path and e.clip_path.exists()) else "✗"
-        hold = max(0.0, e.duration_seconds - e.clip_duration_seconds)
-        trim = max(0.0, e.clip_duration_seconds - e.duration_seconds)
-        flag = f" TRIM={trim:.2f}s" if trim > 0.001 else (f" HOLD={hold:.2f}s" if hold > 0.001 else "")
+        cov = compute_beat_coverage(e)
+        trim = max(0.0, cov.available_duration_seconds - e.duration_seconds)
+        flag = (
+            f" TRIM={trim:.2f}s" if trim > 0.001
+            else (f" DEFICIT={cov.deficit_seconds:.2f}s" if not cov.sufficient else "")
+        )
         print(f"  {has} {e.scene_id:6} beat={e.duration_seconds:.2f}s clip={e.clip_duration_seconds:.2f}s{flag}")
 
     # ------------------------------------------------------------------

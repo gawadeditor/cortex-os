@@ -655,8 +655,11 @@ class TestNoReverseOrPingPong:
         entry = _make_entry(duration_seconds=20.0, clip_duration_seconds=8.0, clip_path=primary)
         entry.extra_clip_paths = [extra1, extra2]
 
+        # Coverage is now computed exclusively by coverage_check.py (per the
+        # 2026-08-01 "single source of truth" refactor) — patch its probe,
+        # not video_renderer's (which no longer probes extras at all).
         with patch(
-            "hypogeum.agents.video_renderer._probe_output_duration",
+            "hypogeum.agents.coverage_check._probe_duration_seconds",
             return_value=8.0,
         ):
             cmd = _build_ffmpeg_concat_command(

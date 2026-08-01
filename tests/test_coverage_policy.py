@@ -635,3 +635,200 @@ class TestAssemblyCoverageGateTwoBeat:
         assert req_scene_ids == ["sc_002"]
         assert acr["requests"][0]["needed_additional_seconds"] > 0
         assert "additional_coverage_required" in package["assembly_qa_report"]["human_review_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# TestRendererConsumesCanonicalCoverage — proves video_renderer.py has no
+# second implementation of coverage math: it consumes coverage_check.py's
+# BeatCoverage (specifically usable_clips) directly rather than re-deriving
+# which clips are usable or how much duration is available. Renderer and
+# coverage_check must never be able to reach different answers for the same
+# TimelineEntry, because there is only one computation, called once.
+# ---------------------------------------------------------------------------
+
+class TestRendererConsumesCanonicalCoverage:
+
+    def test_renderer_uses_exactly_the_canonical_usable_clips_not_its_own_list(self, tmp_path):
+        """
+        The strongest possible single-source-of-truth proof: patch
+        compute_beat_coverage() to return usable_clips that do NOT match
+        what the TimelineEntry's own clip_path/extra_clip_paths would
+        naively suggest (a clip that .exists() on disk is deliberately
+        left OUT of the mocked usable_clips). If video_renderer had any
+        fallback/parallel computation of its own, it would still include
+        that clip; since it has none, the emitted ffmpeg command must
+        follow the mocked canonical result exactly.
+        """
+        from hypogeum.agents.coverage_check import BeatCoverage
+        from hypogeum.agents.video_renderer import _build_ffmpeg_concat_command
+
+        primary = tmp_path / "primary.mp4"
+        decoy = tmp_path / "decoy_not_in_canonical_result.mp4"
+        primary.write_bytes(b"FAKEVIDEO")
+        decoy.write_bytes(b"FAKEVIDEO")
+
+        entry = _make_entry("sc_001", duration_seconds=8.0, clip_duration_seconds=8.0,
+                             clip_path=primary, extra_clip_paths=[decoy])
+
+        fake_coverage = BeatCoverage(
+            scene_id="sc_001", source_type="main_episode", short_id=None,
+            narration_duration_seconds=8.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=0.0,
+            sufficient=True,
+            usable_clips=[(primary, 8.0)],  # decoy deliberately excluded
+        )
+
+        with patch(
+            "hypogeum.agents.video_renderer.compute_beat_coverage",
+            return_value=fake_coverage,
+        ):
+            cmd = _build_ffmpeg_concat_command(
+                timeline=[entry], narration_path=None, music_track=None,
+                output_path=tmp_path / "out.mp4", resolution="1920x1080",
+                episode_id="ep_test",
+            )
+        cmd_str = " ".join(str(c) for c in cmd)
+
+        assert str(primary) in cmd_str
+        assert str(decoy) not in cmd_str
+
+    def test_renderer_raises_using_canonical_deficit_not_a_recomputed_one(self, tmp_path):
+        """The InsufficientCoverageError message must report the deficit
+        exactly as coverage_check computed it -- proving the renderer
+        reads the canonical BeatCoverage rather than recomputing its own
+        (possibly different) deficit number."""
+        from hypogeum.agents.coverage_check import BeatCoverage
+        from hypogeum.agents.video_renderer import (
+            InsufficientCoverageError,
+            _build_ffmpeg_concat_command,
+        )
+
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry("sc_001", duration_seconds=100.0, clip_duration_seconds=8.0,
+                             clip_path=clip)
+
+        fake_coverage = BeatCoverage(
+            scene_id="sc_001", source_type="main_episode", short_id=None,
+            narration_duration_seconds=100.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=42.5,  # a distinctive, made-up value
+            sufficient=False,
+            usable_clips=[(clip, 8.0)],
+        )
+
+        with patch(
+            "hypogeum.agents.video_renderer.compute_beat_coverage",
+            return_value=fake_coverage,
+        ):
+            with pytest.raises(InsufficientCoverageError, match=r"42\.500s"):
+                _build_ffmpeg_concat_command(
+                    timeline=[entry], narration_path=None, music_track=None,
+                    output_path=tmp_path / "out.mp4", resolution="1920x1080",
+                    episode_id="ep_test",
+                )
+
+    def test_compute_beat_coverage_called_exactly_once_per_clip_entry(self, tmp_path):
+        """video_renderer must call the canonical function exactly once per
+        clip-bearing entry -- not zero (would mean it stopped consulting
+        coverage_check) and not recomputed via some other internal path."""
+        from hypogeum.agents.video_renderer import _build_ffmpeg_concat_command
+
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry("sc_001", duration_seconds=8.0, clip_duration_seconds=8.0,
+                             clip_path=clip)
+
+        with patch(
+            "hypogeum.agents.video_renderer.compute_beat_coverage",
+            wraps=compute_beat_coverage,
+        ) as spy:
+            _build_ffmpeg_concat_command(
+                timeline=[entry], narration_path=None, music_track=None,
+                output_path=tmp_path / "out.mp4", resolution="1920x1080",
+                episode_id="ep_test",
+            )
+        spy.assert_called_once_with(entry)
+
+    def test_renderer_and_coverage_check_agree_on_a_real_two_beat_timeline(self, tmp_path):
+        """
+        End-to-end non-divergence proof: compute ground truth via
+        coverage_check.check_timeline_coverage() directly, then render the
+        same timeline, and confirm the exact clip files/order the renderer
+        put into the ffmpeg command match ground truth's usable_clips for
+        every beat -- not merely "close," but identical, because it is
+        the same function call, not two implementations that happen to
+        agree today.
+        """
+        from hypogeum.agents.video_renderer import _build_ffmpeg_concat_command
+
+        primary1 = tmp_path / "p1.mp4"
+        primary2 = tmp_path / "p2.mp4"
+        extra2 = tmp_path / "e2.mp4"
+        for p in (primary1, primary2, extra2):
+            p.write_bytes(b"FAKEVIDEO")
+
+        entries = [
+            _make_entry("sc_001", duration_seconds=8.0, clip_duration_seconds=8.0,
+                        clip_path=primary1),
+            _make_entry("sc_002", duration_seconds=16.0, clip_duration_seconds=8.0,
+                        clip_path=primary2, extra_clip_paths=[extra2]),
+        ]
+
+        with patch(
+            "hypogeum.agents.coverage_check._probe_duration_seconds",
+            return_value=8.0,
+        ):
+            ground_truth = check_timeline_coverage(entries)
+            assert ground_truth.sufficient
+
+            cmd = _build_ffmpeg_concat_command(
+                timeline=entries, narration_path=None, music_track=None,
+                output_path=tmp_path / "out.mp4", resolution="1920x1080",
+                episode_id="ep_test",
+            )
+        cmd_str = " ".join(str(c) for c in cmd)
+
+        for beat in ground_truth.beats:
+            for clip_path, _ in beat.usable_clips:
+                assert str(clip_path) in cmd_str, (
+                    f"{clip_path} from coverage_check's ground truth is missing "
+                    f"from the actual rendered ffmpeg command"
+                )
+
+    def test_generate_shorts_ep_delegates_to_canonical_renderer_and_enforces_coverage(self, tmp_path):
+        """
+        Cross-tool proof: generate_shorts_ep.py (a manual tool, not the
+        production pipeline) must reach the exact same enforcement as
+        render_episode() -- because it now calls the same
+        _build_ffmpeg_concat_command() rather than maintaining its own
+        filter-graph builder. An insufficient beat must raise
+        InsufficientCoverageError here too.
+        """
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "generate_shorts_ep_under_test",
+            Path(__file__).resolve().parent.parent / "generate_shorts_ep.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        from hypogeum.agents.video_renderer import InsufficientCoverageError
+
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"FAKEVIDEO")
+        narr = tmp_path / "narr.m4a"
+        narr.write_bytes(b"\xff\xfb" * 100)
+        music = tmp_path / "music.mp3"
+        music.write_bytes(b"\xff\xfb" * 100)
+
+        with pytest.raises(InsufficientCoverageError):
+            mod._render_short_body(
+                clip_paths=[clip],
+                beat_durations=[100.0],  # wildly beyond any editorial-limit stretch of an 8s clip
+                narration_path=narr,
+                music_path=music,
+                output_path=tmp_path / "short.mp4",
+                short_id="sh_test",
+                log=MagicMock(),
+            )

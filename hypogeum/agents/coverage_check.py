@@ -40,7 +40,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from hypogeum.agents.timeline_builder import TimelineEntry
 
@@ -58,7 +58,19 @@ MAX_EDITORIAL_SPEED_FACTOR = 1.15
 
 @dataclass
 class BeatCoverage:
-    """Coverage facts for one timeline beat (one scene slot)."""
+    """
+    Coverage facts for one timeline beat (one scene slot) — the single
+    canonical result of this module's coverage computation.
+
+    usable_clips is the ordered (path, real_duration_seconds) list of every
+    clip that actually counts toward available_duration_seconds — the
+    beat's primary clip plus any extra_clip_paths, with anything missing,
+    nonexistent, or a dry-run placeholder already excluded. This is not
+    just a diagnostic field: it is the canonical clip list a renderer must
+    consume directly (hypogeum.agents.video_renderer._build_ffmpeg_concat_command)
+    rather than re-deriving its own version of "which clips are real" —
+    that duplication is exactly what let the two ever disagree.
+    """
     scene_id: str
     source_type: str
     short_id: Optional[str]
@@ -67,6 +79,7 @@ class BeatCoverage:
     max_editorial_duration_seconds: float
     deficit_seconds: float
     sufficient: bool
+    usable_clips: List[Tuple[Path, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -95,29 +108,38 @@ def _probe_duration_seconds(path: Path) -> float:
 
 def compute_beat_coverage(entry: TimelineEntry) -> BeatCoverage:
     """
-    Compute coverage facts for one TimelineEntry.
+    Compute coverage facts for one TimelineEntry — the ONLY place in the
+    codebase that decides which clips are usable and how much real
+    duration a beat has. Every other module (Video Renderer, Assembly
+    Agent's pre-render gate) must consume this result, never recompute it.
 
-    Artifact-compatibility policy (2026-08-01): a clip that matches the
-    MUAPI dry-run placeholder signature (hypogeum.artifact_compatibility.
-    is_dry_run_clip()) never counts toward available_duration_seconds,
-    regardless of what clip_duration_seconds claims — a dry-run artifact
-    can never be silently reused for real production. This is the sole
-    extra gate a clip must pass here; a clip that's merely unreadable/
-    missing already contributes 0.0 via the existing entry.clip_path is
-    None / probe-fallback paths. This does not trigger regeneration by
-    itself — check_timeline_coverage()/fill_coverage_deficits() decide
-    that from the resulting deficit, exactly as for a beat with no clip.
+    A clip (primary or extra) counts toward usable_clips/
+    available_duration_seconds only if it exists on disk AND does not
+    match the MUAPI dry-run placeholder signature
+    (hypogeum.artifact_compatibility.is_dry_run_clip()) — a dry-run
+    artifact can never be silently reused for real production. Each clip
+    is evaluated independently: a dry-run or missing PRIMARY clip does not
+    disqualify otherwise-valid extra_clip_paths from counting (they are a
+    real, separate source of coverage), and vice versa.
+
+    This does not trigger regeneration by itself —
+    check_timeline_coverage()/fill_coverage_deficits() decide that from
+    the resulting deficit, exactly as for a beat with no clip at all.
     """
     from hypogeum.artifact_compatibility import is_dry_run_clip  # noqa: PLC0415
 
-    if entry.clip_path is None or is_dry_run_clip(entry.clip_path):
-        available = 0.0
-    else:
-        available = entry.clip_duration_seconds
-        for extra_path in entry.extra_clip_paths:
-            if not is_dry_run_clip(extra_path):
-                available += _probe_duration_seconds(extra_path)
+    usable_clips: List[Tuple[Path, float]] = []
+    if (
+        entry.clip_path is not None
+        and entry.clip_path.exists()
+        and not is_dry_run_clip(entry.clip_path)
+    ):
+        usable_clips.append((entry.clip_path, entry.clip_duration_seconds))
+    for extra_path in entry.extra_clip_paths:
+        if extra_path.exists() and not is_dry_run_clip(extra_path):
+            usable_clips.append((extra_path, _probe_duration_seconds(extra_path)))
 
+    available = sum(duration for _, duration in usable_clips)
     max_editorial = available * MAX_EDITORIAL_SPEED_FACTOR
     deficit = max(0.0, entry.duration_seconds - max_editorial)
 
@@ -130,6 +152,7 @@ def compute_beat_coverage(entry: TimelineEntry) -> BeatCoverage:
         max_editorial_duration_seconds=max_editorial,
         deficit_seconds=deficit,
         sufficient=deficit <= 0.001,
+        usable_clips=usable_clips,
     )
 
 

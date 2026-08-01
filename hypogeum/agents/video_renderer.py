@@ -24,6 +24,14 @@ hypogeum/agents/coverage_check.py and clip_repair_agent.fill_coverage_deficits()
 and this module raises InsufficientCoverageError rather than concealing it
 with tpad/loop/reverse/an uncapped setpts factor.
 
+Single source of truth (2026-08-01): coverage_check.py is the ONLY module
+that computes coverage. This module never re-derives which clips are
+usable or how much duration is available — _build_ffmpeg_concat_command()
+calls coverage_check.compute_beat_coverage() per beat and consumes its
+usable_clips list directly. Video Renderer remains the final enforcement
+point (it still actively checks and raises), but it is never a second
+implementation of the coverage math itself.
+
 Does NOT own:
 - Timeline construction (timeline_builder owns this)
 - Music sourcing (music_agent owns this)
@@ -1081,22 +1089,26 @@ def _build_ffmpeg_concat_command(
 
         for entry in timeline:
             if entry.clip_path and entry.clip_path.exists():
-                beat_clip_paths: List[Path] = [entry.clip_path] + [
-                    p for p in entry.extra_clip_paths if p.exists()
-                ]
-                beat_clip_durations: List[float] = [entry.clip_duration_seconds] + [
-                    _probe_output_duration(p) for p in entry.extra_clip_paths if p.exists()
-                ]
-                total_available = sum(beat_clip_durations)
+                # Coverage is computed ONCE, by coverage_check.py, and consumed here —
+                # not recomputed. usable_clips is the canonical, already-filtered
+                # (missing/dry-run excluded) list of (path, real_duration) pairs;
+                # video_renderer never re-derives which clips are usable or how much
+                # duration is available, it only enforces the decision.
+                beat_coverage = compute_beat_coverage(entry)
 
-                if entry.duration_seconds > total_available * MAX_EDITORIAL_SPEED_FACTOR + 0.001:
+                if not beat_coverage.sufficient:
                     raise InsufficientCoverageError(
-                        f"scene {entry.scene_id}: available {total_available:.3f}s of real "
-                        f"footage ({len(beat_clip_paths)} clip(s)) cannot reach the "
+                        f"scene {entry.scene_id}: available "
+                        f"{beat_coverage.available_duration_seconds:.3f}s of real footage "
+                        f"({len(beat_coverage.usable_clips)} clip(s)) cannot reach the "
                         f"{entry.duration_seconds:.3f}s narration beat even at the maximum "
-                        f"editorial speed factor ({MAX_EDITORIAL_SPEED_FACTOR}x). Assembly "
-                        f"Agent's coverage gate should have blocked this beat before render."
+                        f"editorial speed factor ({MAX_EDITORIAL_SPEED_FACTOR}x) — deficit "
+                        f"{beat_coverage.deficit_seconds:.3f}s. Assembly Agent's coverage "
+                        f"gate should have blocked this beat before render."
                     )
+
+                beat_clip_paths: List[Path] = [p for p, _ in beat_coverage.usable_clips]
+                beat_clip_durations: List[float] = [d for _, d in beat_coverage.usable_clips]
 
                 for i, (clip_path, clip_dur) in enumerate(zip(beat_clip_paths, beat_clip_durations)):
                     inputs += ["-i", str(clip_path)]

@@ -88,7 +88,14 @@ from hypogeum.schemas import SchemaError, validate
 # ---------------------------------------------------------------------------
 
 _AGENT_NAME = "assembly_agent"
-_AGENT_VERSION = "1.0"
+# Bumped 2026-08-01: the coverage-check gate (B1) and the removal of
+# renderer-side tpad/loop/reverse/uncapped-setpts compensation are a policy
+# boundary, not just a bugfix -- a final_render_package written by an older
+# version was produced under different (now-forbidden) assembly rules and
+# must never be trusted as a checkpoint under the current policy, no matter
+# how recent its timestamp is. See hypogeum/artifact_compatibility.py and
+# hypogeum/pipeline.py's _ASSEMBLY_CHECKPOINT.compat_check.
+_AGENT_VERSION = "2.0"
 
 # Asset inventory threshold — assembly halts below this rate.
 # Lowered from 0.80 to 0.60: episodes with ≥60% clips can produce a

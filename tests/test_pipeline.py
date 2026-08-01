@@ -1584,9 +1584,16 @@ class TestVerifiedCheckpoints:
 
     # -- Assembly Agent ---------------------------------------------------
 
-    def _render_pkg(self, production_ready: bool = True) -> dict:
+    def _render_pkg(self, production_ready: bool = True, assembly_agent_version: str = None) -> dict:
+        from hypogeum.agents.assembly_agent import _AGENT_VERSION
         return {
-            "package_metadata": {"render_package_id": "rp_ck", "episode_id": "ep_ck"},
+            "package_metadata": {
+                "render_package_id": "rp_ck",
+                "episode_id": "ep_ck",
+                "assembly_agent_version": (
+                    _AGENT_VERSION if assembly_agent_version is None else assembly_agent_version
+                ),
+            },
             "episode_render": {"video_asset_id": "video/main", "caption_asset_id": "captions/main"},
             "shorts_renders": [
                 {"short_id": "sh_001", "video_asset_id": "video/sh1", "caption_asset_id": "captions/sh1"},
@@ -1619,6 +1626,28 @@ class TestVerifiedCheckpoints:
             result = self._run_assembly(cfg, ep_dir)
         mock_asm.assert_not_called()
         assert result["package_metadata"]["render_package_id"] == "rp_ck"
+
+    def test_assembly_reruns_when_checkpoint_from_older_policy_version(self, tmp_path):
+        """
+        2026-08-01 artifact-compatibility policy: a final_render_package
+        produced by an older assembly_agent version (e.g. before the
+        coverage-check gate / tpad-removal fix) is not a valid checkpoint
+        even though its file is complete and every referenced .mp4 exists
+        on disk -- it was assembled under different, possibly now-forbidden
+        rules. Age/presence alone must not make it reusable.
+        """
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        self._write_json(
+            ep_dir / "final_render_package_ep_ck.json",
+            self._render_pkg(assembly_agent_version="1.0"),
+        )
+        self._write_file(ep_dir / "video" / "main.mp4")
+        self._write_file(ep_dir / "video" / "sh1.mp4")
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_assembly_agent",
+                   return_value=self._render_pkg()) as mock_asm:
+            self._run_assembly(cfg, ep_dir)
+        mock_asm.assert_called_once()
 
     def test_assembly_runs_when_file_missing(self, tmp_path):
         ep_dir = tmp_path / "episodes" / "ep_ck"

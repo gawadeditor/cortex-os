@@ -94,15 +94,29 @@ def _probe_duration_seconds(path: Path) -> float:
 
 
 def compute_beat_coverage(entry: TimelineEntry) -> BeatCoverage:
-    """Compute coverage facts for one TimelineEntry (no I/O beyond probing
-    any extra clips already attached — the primary clip's duration is
-    already known from TimelineEntry.clip_duration_seconds)."""
-    if entry.clip_path is None:
+    """
+    Compute coverage facts for one TimelineEntry.
+
+    Artifact-compatibility policy (2026-08-01): a clip that matches the
+    MUAPI dry-run placeholder signature (hypogeum.artifact_compatibility.
+    is_dry_run_clip()) never counts toward available_duration_seconds,
+    regardless of what clip_duration_seconds claims — a dry-run artifact
+    can never be silently reused for real production. This is the sole
+    extra gate a clip must pass here; a clip that's merely unreadable/
+    missing already contributes 0.0 via the existing entry.clip_path is
+    None / probe-fallback paths. This does not trigger regeneration by
+    itself — check_timeline_coverage()/fill_coverage_deficits() decide
+    that from the resulting deficit, exactly as for a beat with no clip.
+    """
+    from hypogeum.artifact_compatibility import is_dry_run_clip  # noqa: PLC0415
+
+    if entry.clip_path is None or is_dry_run_clip(entry.clip_path):
         available = 0.0
     else:
         available = entry.clip_duration_seconds
         for extra_path in entry.extra_clip_paths:
-            available += _probe_duration_seconds(extra_path)
+            if not is_dry_run_clip(extra_path):
+                available += _probe_duration_seconds(extra_path)
 
     max_editorial = available * MAX_EDITORIAL_SPEED_FACTOR
     deficit = max(0.0, entry.duration_seconds - max_editorial)

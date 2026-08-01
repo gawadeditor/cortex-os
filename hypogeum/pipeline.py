@@ -193,10 +193,21 @@ class _CheckpointSpec:
                   whose files must exist and be non-empty on disk; None
                   means no file check (text-only packages have nothing to
                   verify beyond their own JSON).
+    compat_check: optional predicate over the loaded package deciding
+                  artifact/policy compatibility (2026-08-01 artifact-
+                  compatibility policy — see hypogeum/artifact_compatibility.py).
+                  None means no compatibility check (a stage that hasn't
+                  opted in yet). This is deliberately NOT age/timestamp
+                  based — it must inspect the package's own recorded
+                  provenance (e.g. an agent version field already written
+                  into the package) and return False when that provenance
+                  is no longer compatible with current policy, so a stale
+                  checkpoint is caught even though its file is recent.
     """
     schema_name: str
     is_complete: Optional[Callable[[dict], bool]] = None
     asset_refs: Optional[Callable[[dict], list]] = None
+    compat_check: Optional[Callable[[dict], bool]] = None
 
 
 def _load_verified_checkpoint(
@@ -206,12 +217,21 @@ def _load_verified_checkpoint(
     log,
 ) -> Optional[dict]:
     """
-    Shared checkpoint loader: parse -> completion check -> asset check.
+    Shared checkpoint loader: parse -> completion check -> asset check ->
+    compatibility check.
 
-    Returns the loaded package only if all three pass; otherwise None,
+    Returns the loaded package only if all four pass; otherwise None,
     which callers treat exactly like "no checkpoint" (safe fallback to
     regenerating the stage). Each rejection reason is logged so a
     checkpoint miss is diagnosable, not silent.
+
+    The compatibility check (2026-08-01 artifact-compatibility policy) is
+    intentionally last and separate from the asset-existence check above:
+    a checkpoint can have every file present and still be
+    policy-incompatible (e.g. assembled by an older assembly_agent version
+    under different, now-forbidden rules) — that is a different failure
+    mode than a missing file, and revalidating it here means a resumed run
+    regenerates exactly the incompatible stage, not the whole episode.
     """
     pkg = _load_package(episode_id, spec.schema_name, output_dir)
     if pkg is None:
@@ -238,6 +258,14 @@ def _load_verified_checkpoint(
                 )
                 return None
 
+    if spec.compat_check is not None and not spec.compat_check(pkg):
+        log.info(
+            "pipeline_checkpoint_incompatible",
+            schema=spec.schema_name,
+            reason="policy_version_mismatch",
+        )
+        return None
+
     return pkg
 
 
@@ -253,6 +281,25 @@ _NARRATION_CHECKPOINT = _CheckpointSpec(
     ],
 )
 
+def _assembly_checkpoint_compatible(pkg: dict) -> bool:
+    """
+    Artifact-compatibility policy (2026-08-01): a final_render_package is
+    only a valid checkpoint if it was produced by the CURRENT
+    assembly_agent policy version. An older version assembled the video
+    under different (possibly now-forbidden — tpad/loop/reverse/uncapped
+    setpts) rules; no amount of file presence makes that acceptable to
+    resume from. Rejecting it here regenerates only the Assembly stage —
+    the source video clips it referenced are a separate artifact type,
+    evaluated independently by hypogeum.artifact_compatibility.
+    evaluate_video_clip_compatibility() inside the coverage-check gate, and
+    are not invalidated by this check.
+    """
+    from hypogeum.agents.assembly_agent import _AGENT_VERSION  # noqa: PLC0415
+    from hypogeum.artifact_compatibility import evaluate_render_compatibility  # noqa: PLC0415
+
+    return evaluate_render_compatibility(pkg, _AGENT_VERSION).reusable
+
+
 _ASSEMBLY_CHECKPOINT = _CheckpointSpec(
     schema_name="final_render_package",
     # production_ready (not main_episode_complete) — the same field name
@@ -262,6 +309,7 @@ _ASSEMBLY_CHECKPOINT = _CheckpointSpec(
     is_complete=lambda pkg: bool(
         pkg.get("package_integrity", {}).get("production_ready")
     ),
+    compat_check=_assembly_checkpoint_compatible,
     asset_refs=lambda pkg: [
         (pkg.get("episode_render", {}).get("video_asset_id", ""), ".mp4"),
         *[

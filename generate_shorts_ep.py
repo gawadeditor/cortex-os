@@ -25,7 +25,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from hypogeum.agents.final_output_qa import run_final_output_qa
+from hypogeum.agents.timeline_builder import TimelineEntry
+from hypogeum.agents.video_renderer import _build_ffmpeg_concat_command
 from hypogeum.config import Config
+from hypogeum.elevenlabs import MusicTrackResult
 from hypogeum.logger import get_logger
 
 # ---------------------------------------------------------------------------
@@ -72,7 +75,6 @@ VIDEO_CODEC      = "libx264"
 AUDIO_CODEC      = "aac"
 AUDIO_BITRATE    = "128k"
 CRF              = "23"
-MUSIC_FACTOR     = 0.126   # -18 dB
 END_PAGE_DURATION = 10.0   # shorter end-page for shorts
 FFMPEG_TIMEOUT   = 600
 
@@ -344,121 +346,56 @@ def _render_short_body(
     log,
 ) -> bool:
     """
-    Render the short body (9:16) using ffmpeg.
-
-    Video strategy for each clip:
-    - Clips longer than beat: trim.
-    - Clips shorter than beat by >1s: setpts slow-motion (factor ≤2) or loop (factor >2).
-    - Clips shorter by ≤1s: tpad emergency fallback.
-    - Missing clips: lavfi black fill.
-
-    All clips are center-cropped to 1080x1920 (9:16) from 1920x1080 source.
+    Render the short body (9:16) via the canonical renderer
+    (hypogeum.agents.video_renderer._build_ffmpeg_concat_command) — this
+    script must not maintain its own independent ffmpeg filter-graph
+    builder (2026-08-01 artifact-compatibility policy audit finding: this
+    function previously duplicated video_renderer's per-entry logic,
+    including a real tpad freeze and a forward `loop=loop=-1` filter for
+    factor>2.0 holds, neither of which is permitted anywhere the canonical
+    renderer applies). Building a TimelineEntry per beat and delegating
+    means this script automatically inherits every current and future
+    coverage/compensation rule (bounded editorial-speed stretch only,
+    InsufficientCoverageError instead of a silent freeze/loop) with zero
+    duplicated logic.
     """
-    width, height = SHORT_RESOLUTION.split("x")
     total_duration = sum(beat_durations)
 
-    inputs: list[str] = []
-    filter_parts: list[str] = []
-    tpad_parts: list[str] = []
-    concat_labels: list[str] = []
-
-    clip_idx = 0
+    timeline: list[TimelineEntry] = []
     for i, (clip_path, beat_dur) in enumerate(zip(clip_paths, beat_durations)):
-        if clip_path and clip_path.exists():
-            inputs += ["-i", str(clip_path)]
-            clip_dur = _probe_duration(clip_path)
+        clip_dur = _probe_duration(clip_path) if clip_path and clip_path.exists() else 8.0
+        timeline.append(TimelineEntry(
+            scene_index=i,
+            scene_id=f"{short_id}_b{i:02d}",
+            source_type="short",
+            short_id=short_id,
+            clip_path=clip_path if (clip_path and clip_path.exists()) else None,
+            narration_path=None,
+            start_seconds=sum(beat_durations[:i]),
+            duration_seconds=beat_dur,
+            text_overlays=[],
+            music_section=None,
+            text_safe_zone=None,
+            clip_duration_seconds=clip_dur,
+        ))
 
-            hold = max(0.0, beat_dur - clip_dur)
-            trim_needed = clip_dur > beat_dur + 0.001
-
-            # 9:16 center crop from 16:9 source
-            scale_label = f"[sv{clip_idx}]"
-            tpad_parts.append(
-                f"[{clip_idx}:v]scale={width}:{height}"
-                f":force_original_aspect_ratio=increase,"
-                f"crop={width}:{height},setsar=1{scale_label}"
-            )
-
-            if trim_needed:
-                trim_label = f"[tv{clip_idx}]"
-                tpad_parts.append(
-                    f"{scale_label}trim=duration={beat_dur:.3f},"
-                    f"setpts=PTS-STARTPTS{trim_label}"
-                )
-                concat_labels.append(trim_label)
-            elif hold > 1.0:
-                out_label = f"[pv{clip_idx}]"
-                factor = beat_dur / max(clip_dur, 0.001)
-                if factor <= 2.0:
-                    tpad_parts.append(
-                        f"{scale_label}setpts={factor:.6f}*PTS,"
-                        f"fps=fps={FRAME_RATE}{out_label}"
-                    )
-                else:
-                    tpad_parts.append(
-                        f"{scale_label}loop=loop=-1:size=32767:start=0,"
-                        f"trim=duration={beat_dur:.3f},"
-                        f"setpts=PTS-STARTPTS{out_label}"
-                    )
-                concat_labels.append(out_label)
-            elif hold > 0.001:
-                out_label = f"[pv{clip_idx}]"
-                tpad_parts.append(
-                    f"{scale_label}tpad=stop_mode=clone:stop_duration={hold:.3f}{out_label}"
-                )
-                concat_labels.append(out_label)
-            else:
-                concat_labels.append(scale_label)
-            clip_idx += 1
-        else:
-            # Missing clip: black fill for this beat
-            inputs += [
-                "-f", "lavfi",
-                "-i", f"color=c=black:s={SHORT_RESOLUTION}:r={FRAME_RATE}:d={beat_dur:.3f}",
-            ]
-            blk_label = f"[bv{clip_idx}]"
-            tpad_parts.append(
-                f"[{clip_idx}:v]trim=duration={beat_dur:.3f},"
-                f"setpts=PTS-STARTPTS{blk_label}"
-            )
-            concat_labels.append(blk_label)
-            clip_idx += 1
-
-    clip_count = clip_idx
-    filter_parts.extend(tpad_parts)
-    concat_in = "".join(concat_labels)
-    filter_parts.append(
-        f"{concat_in}concat=n={clip_count}:v=1:a=0[vconcat];"
-        f"[vconcat]trim=0:{total_duration:.6f},"
-        f"setpts=PTS-STARTPTS[vout]"
+    music_track = MusicTrackResult(
+        track_id=f"{short_id}_music",
+        category="Mystery",
+        asset_id=str(music_path.with_suffix("")),
+        local_path=music_path,
+        source="channel_library",
+        duration_seconds=_probe_duration(music_path),
     )
 
-    # Audio
-    narr_idx = clip_idx
-    inputs += ["-i", str(narration_path)]
-    music_idx = narr_idx + 1
-    inputs += ["-i", str(music_path)]
-    filter_parts.append(
-        f"[{narr_idx}:a]atrim=0:{total_duration:.6f},asetpts=PTS-STARTPTS,volume=1.0[narr];"
-        f"[{music_idx}:a]volume={MUSIC_FACTOR}[msc];"
-        f"[narr][msc]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-    )
-
-    cmd = (
-        ["ffmpeg", "-y"]
-        + inputs
-        + ["-filter_complex", ";".join(filter_parts)]
-        + ["-map", "[vout]", "-map", "[aout]"]
-        + [
-            "-c:v", VIDEO_CODEC,
-            "-c:a", AUDIO_CODEC,
-            "-b:a", AUDIO_BITRATE,
-            "-crf", CRF,
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-t", f"{total_duration:.6f}",
-            str(output_path),
-        ]
+    cmd = _build_ffmpeg_concat_command(
+        timeline=timeline,
+        narration_path=narration_path,
+        music_track=music_track,
+        output_path=output_path,
+        resolution=SHORT_RESOLUTION,
+        episode_id=short_id,
+        is_short=True,
     )
 
     log.info("shorts_render_start", short_id=short_id, total_duration=round(total_duration, 3))

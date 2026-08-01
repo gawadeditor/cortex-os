@@ -29,10 +29,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hypogeum.agents.video_renderer import (
     FRAME_RATE,
     MAIN_RESOLUTION,
+    _MUSIC_TAIL_SECONDS,
     _append_end_page,
+    _build_ffmpeg_concat_command,
     render_episode,
 )
 from hypogeum.agents.timeline_builder import TimelineEntry, TimelinePlan
+from hypogeum.elevenlabs import MusicTrackResult
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +83,35 @@ def _ffmpeg_success_side_effect(cmd, capture_output, text, timeout):
     r.stderr = ""
     r.stdout = ""
     return r
+
+
+def _make_music_track(tmp_path: Path, name: str = "music") -> MusicTrackResult:
+    music_path = tmp_path / f"{name}.mp3"
+    music_path.write_bytes(b"\xff\xfb" * 100)
+    return MusicTrackResult(
+        track_id=name,
+        category="Mystery",
+        asset_id=f"channel/music/mystery/{name}",
+        local_path=music_path,
+        source="ai_generated",
+        duration_seconds=120.0,
+    )
+
+
+def _spy_ffmpeg_recording(calls_recorded):
+    """subprocess.run side_effect that records every call and writes a fake
+    output file to the last argument so downstream existence checks pass."""
+    def _side_effect(cmd, capture_output, text, timeout):
+        calls_recorded.append(list(cmd))
+        out = Path(cmd[-1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"FAKEMP4" * 500)
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        r.stdout = ""
+        return r
+    return _side_effect
 
 
 # ---------------------------------------------------------------------------
@@ -436,3 +468,232 @@ class TestRenderEpisodeEndPage:
         main_out_arg = call_args[1].get("main_output_path") or call_args[0][0]
         # Main path starts with "main_"; short paths start with "short_<index>_"
         assert str(main_out_arg.name).startswith("main_")
+
+
+# ---------------------------------------------------------------------------
+# TestEndPageMusicContinuity — regression coverage for the 2026-08-01 fix:
+# the final shot froze on a static frame, and the end page then resumed the
+# music at the wrong position (raw body_duration % usable_dur instead of
+# elapsed-since-segment-start % usable_dur), producing an audible jump under
+# Option B multi-segment music. Root cause: _append_end_page computed the
+# loop offset from t=0 of the whole body, but under multi-segment music the
+# segment actually playing at the end of the body did not start at t=0.
+# ---------------------------------------------------------------------------
+
+class TestEndPageMusicContinuity:
+
+    def test_no_freeze_tail_by_default(self):
+        """_MUSIC_TAIL_SECONDS must be 0 — no static-frame hold before the end
+        page. A non-zero value here reintroduces the freeze-frame regression."""
+        assert _MUSIC_TAIL_SECONDS == 0.0
+
+    def test_body_has_no_tpad_hold_with_default_tail(self, tmp_path):
+        """With the default (zero) music tail, the body's video filtergraph
+        must not hold the last frame — no [vbody]tpad=stop_mode=clone stage,
+        and no silence padding on the narration track."""
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        entry = TimelineEntry(
+            scene_index=0, scene_id="sc_001", source_type="main_episode",
+            short_id=None, clip_path=None, narration_path=None,
+            start_seconds=0.0, duration_seconds=4.5, text_overlays=[],
+            music_section=None, text_safe_zone=None, clip_duration_seconds=8.0,
+        )
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry], narration_path=narration_path, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution=MAIN_RESOLUTION,
+            episode_id="ep_001", music_tail_seconds=_MUSIC_TAIL_SECONDS,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "tpad=stop_mode=clone:stop_duration=" not in fc
+        assert "apad=pad_dur=" not in fc
+
+    def test_legacy_single_track_offset_uses_raw_body_duration(self, tmp_path):
+        """Legacy single-track music plays from t=0 of the body (implicit
+        segment start 0.0) — the offset formula must reduce to the original
+        body_duration % usable_dur when music_segment_start_seconds is left
+        at its default."""
+        episode_dir = tmp_path / "ep_legacy"
+        episode_dir.mkdir()
+        main_mp4 = episode_dir / "main_ep_legacy.mp4"
+        main_mp4.write_bytes(b"FAKEMP4" * 500)
+        end_page_png = tmp_path / "end-page.png"
+        end_page_png.write_bytes(b"FAKEPNG")
+        track = _make_music_track(tmp_path)
+
+        calls = []
+        log = _mock_log()
+        with patch("subprocess.run", side_effect=_spy_ffmpeg_recording(calls)), \
+             patch(
+                 "hypogeum.agents.video_renderer._probe_music_usable_duration",
+                 return_value=100.0,
+             ):
+            result = _append_end_page(
+                main_output_path=main_mp4,
+                end_page_path=end_page_png,
+                duration=20.0,
+                episode_id="ep_legacy",
+                timeout=60,
+                log=log,
+                music_track=track,
+                body_duration=125.0,
+                # music_segment_start_seconds defaults to 0.0
+            )
+
+        assert result is True
+        clip_call = next(c for c in calls if str(track.local_path) in c and "-filter_complex" in c)
+        ss_idx = clip_call.index("-ss")
+        # 125.0 % 100.0 == 25.0
+        assert float(clip_call[ss_idx + 1]) == pytest.approx(25.0)
+
+    def test_multi_segment_offset_is_relative_to_segment_start(self, tmp_path):
+        """The core regression: under Option B multi-segment music, the last
+        segment playing at the end of the body did not start at t=0 of the
+        body. The offset must be computed from elapsed time since that
+        segment's own start, not raw body_duration -- otherwise the end page
+        resumes the same track at the wrong position (an audible jump)."""
+        episode_dir = tmp_path / "ep_multi"
+        episode_dir.mkdir()
+        main_mp4 = episode_dir / "main_ep_multi.mp4"
+        main_mp4.write_bytes(b"FAKEMP4" * 500)
+        end_page_png = tmp_path / "end-page.png"
+        end_page_png.write_bytes(b"FAKEPNG")
+        track = _make_music_track(tmp_path, name="last_segment_track")
+
+        calls = []
+        log = _mock_log()
+        with patch("subprocess.run", side_effect=_spy_ffmpeg_recording(calls)), \
+             patch(
+                 "hypogeum.agents.video_renderer._probe_music_usable_duration",
+                 return_value=120.0,
+             ):
+            result = _append_end_page(
+                main_output_path=main_mp4,
+                end_page_path=end_page_png,
+                duration=20.0,
+                episode_id="ep_multi",
+                timeout=60,
+                log=log,
+                music_track=track,
+                body_duration=702.5,
+                music_segment_start_seconds=500.0,
+            )
+
+        assert result is True
+        clip_call = next(c for c in calls if str(track.local_path) in c and "-filter_complex" in c)
+        ss_idx = clip_call.index("-ss")
+        # Correct: (702.5 - 500.0) % 120.0 == 82.5
+        # Buggy (pre-fix) formula would give 702.5 % 120.0 == 102.5 instead --
+        # a 20s jump to a different position in the same track.
+        offset = float(clip_call[ss_idx + 1])
+        assert offset == pytest.approx(82.5)
+        assert offset != pytest.approx(102.5)
+
+    def test_end_page_reuses_same_track_no_second_input(self, tmp_path):
+        """The end page must continue the SAME music file, not introduce a
+        second/different track -- exactly one -i for the track's path."""
+        episode_dir = tmp_path / "ep_same"
+        episode_dir.mkdir()
+        main_mp4 = episode_dir / "main_ep_same.mp4"
+        main_mp4.write_bytes(b"FAKEMP4" * 500)
+        end_page_png = tmp_path / "end-page.png"
+        end_page_png.write_bytes(b"FAKEPNG")
+        track = _make_music_track(tmp_path)
+
+        calls = []
+        log = _mock_log()
+        with patch("subprocess.run", side_effect=_spy_ffmpeg_recording(calls)), \
+             patch(
+                 "hypogeum.agents.video_renderer._probe_music_usable_duration",
+                 return_value=100.0,
+             ):
+            _append_end_page(
+                main_output_path=main_mp4,
+                end_page_path=end_page_png,
+                duration=20.0,
+                episode_id="ep_same",
+                timeout=60,
+                log=log,
+                music_track=track,
+                body_duration=125.0,
+            )
+
+        clip_call = next(c for c in calls if str(track.local_path) in c and "-filter_complex" in c)
+        assert clip_call.count(str(track.local_path)) == 1
+        assert clip_call.count("-ss") == 1
+
+    def test_end_page_fades_in_with_and_without_music(self, tmp_path):
+        """Expected transition: the end page fades in from the final body
+        frame instead of a hard cut, whether or not music is present."""
+        episode_dir = tmp_path / "ep_fade"
+        episode_dir.mkdir()
+        end_page_png = tmp_path / "end-page.png"
+        end_page_png.write_bytes(b"FAKEPNG")
+        track = _make_music_track(tmp_path)
+
+        for with_music in (True, False):
+            main_mp4 = episode_dir / f"main_{with_music}.mp4"
+            main_mp4.write_bytes(b"FAKEMP4" * 500)
+            calls = []
+            log = _mock_log()
+            with patch("subprocess.run", side_effect=_spy_ffmpeg_recording(calls)), \
+                 patch(
+                     "hypogeum.agents.video_renderer._probe_music_usable_duration",
+                     return_value=100.0,
+                 ):
+                _append_end_page(
+                    main_output_path=main_mp4,
+                    end_page_path=end_page_png,
+                    duration=20.0,
+                    episode_id="ep_fade",
+                    timeout=60,
+                    log=log,
+                    music_track=track if with_music else None,
+                    body_duration=125.0 if with_music else 0.0,
+                )
+            clip_call = next(c for c in calls if str(end_page_png) in c and "-filter_complex" in c)
+            fc = clip_call[clip_call.index("-filter_complex") + 1]
+            assert "fade=t=in:st=0:d=0.500[vout]" in fc, fc
+
+    def test_render_episode_passes_last_segment_start_to_end_page(self, tmp_path):
+        """render_episode() must resolve the LAST multi-segment track's own
+        start_seconds and forward it as music_segment_start_seconds -- this
+        is what _append_end_page needs to compute the correct offset."""
+        episode_dir = tmp_path / "ep_wire"
+        episode_dir.mkdir()
+        plan = _make_plan()
+        log = _mock_log()
+        seg_a = _make_music_track(tmp_path, name="seg_a")
+        seg_b = _make_music_track(tmp_path, name="seg_b")
+        music_segments = [
+            {"start_seconds": 0.0, "end_seconds": 40.0, "track": seg_a},
+            {"start_seconds": 40.0, "end_seconds": 90.0, "track": seg_b},
+        ]
+        end_page_png = tmp_path / "end-page.png"
+        end_page_png.write_bytes(b"FAKEPNG")
+
+        with patch("subprocess.run", side_effect=_ffmpeg_success_side_effect), \
+             patch(
+                 "hypogeum.agents.video_renderer._append_end_page",
+                 return_value=True,
+             ) as mock_append:
+            render_episode(
+                timeline_plan=plan,
+                main_narration_path=None,
+                short_narration_paths={},
+                music_tracks={},
+                clip_availability_rate=1.0,
+                missing_clips=[],
+                sections_without_music=[],
+                episode_dir=episode_dir,
+                episode_id="ep_wire",
+                ffmpeg_timeout=60,
+                log=log,
+                end_page_path=end_page_png,
+                end_page_duration=20.0,
+                music_segments=music_segments,
+            )
+
+        _, kwargs = mock_append.call_args
+        assert kwargs.get("music_segment_start_seconds") == 40.0
+        assert kwargs.get("music_track") is seg_b

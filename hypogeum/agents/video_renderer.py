@@ -66,9 +66,16 @@ _AUDIO_CODEC           = "aac"
 _AUDIO_BITRATE         = "128k"
 _CRF                   = "23"
 _MUSIC_AMPLITUDE_FACTOR = 0.20    # ≈ −14 dB beneath narration (audible background bed)
-_MUSIC_TAIL_SECONDS    = 2.5      # music continues this many seconds after VO ends
+# Was 2.5 — held the last frame on a frozen still while music played over it as an
+# "outro pause" before the end page. Removed 2026-08-01: production review flagged the
+# freeze-frame itself as an unwanted regression, not a designed transition. The final
+# shot must finish normally and cut straight to the end page (see _append_end_page's
+# music-continuity fix); the tpad/apad branches below stay in place, parameterized on
+# this constant, in case a non-zero outro pause is ever reinstated deliberately.
+_MUSIC_TAIL_SECONDS    = 0.0
 _DEFAULT_TIMEOUT        = 600     # seconds
 _CLIP_TAIL_FADE_SECS   = 2 / FRAME_RATE  # 2-frame fade-out at each clip boundary (≈ 67ms)
+_END_PAGE_FADE_IN_SECONDS = 0.5   # end page fades in from the final body frame, no hard cut
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +160,14 @@ def render_episode(
     end_page_music_track = (
         _segments_with_tracks[-1]["track"] if _segments_with_tracks else main_music_track
     )
+    # The offset math in _append_end_page needs time elapsed *since this segment
+    # started* looping, not raw elapsed time since t=0 of the whole body — under
+    # Option B multi-segment music the segment actually playing at the end of the
+    # body is not the one that started at t=0. Legacy single-track music has an
+    # implicit segment start of 0.0 (it plays from t=0 for the whole body).
+    end_page_music_segment_start = (
+        _segments_with_tracks[-1]["start_seconds"] if _segments_with_tracks else 0.0
+    )
 
     main_success = _render_main_episode(
         timeline=main_timeline,
@@ -181,6 +196,7 @@ def render_episode(
             log=log,
             music_track=end_page_music_track,
             body_duration=body_duration,
+            music_segment_start_seconds=end_page_music_segment_start,
         )
         if not end_page_ok:
             # Non-fatal: log the failure but keep the body render as-is.
@@ -1387,13 +1403,18 @@ def _append_end_page(
     log,
     music_track=None,
     body_duration: float = 0.0,
+    music_segment_start_seconds: float = 0.0,
 ) -> bool:
     """
     Append a static end-page PNG card to the main episode video.
 
     When music_track is supplied the end-page clip carries music continuing from
-    where the body left off (offset = body_duration % music_track_duration), so
-    the music bed plays seamlessly through the end page without a cut.
+    where the body left off (offset = elapsed % usable_dur, where elapsed is time
+    since the currently-playing segment started — NOT raw body_duration; under
+    Option B multi-segment music the last segment's own aloop clock starts at
+    music_segment_start_seconds, not t=0 of the body), so the music bed plays
+    seamlessly through the end page without a cut, restart, or jump to a
+    different position in the track.
 
     Two-pass strategy:
       1. Generate a short video clip from the PNG (same codec/resolution as main).
@@ -1408,6 +1429,9 @@ def _append_end_page(
     clip_path  = main_output_path.with_suffix(".endpage.mp4")
     list_path  = main_output_path.with_suffix(".concat.txt")
     width, height = MAIN_RESOLUTION.split("x")
+    # End page fades in from the final body frame rather than hard-cutting — capped
+    # at half the end-page duration so a very short end page can't fade past its own end.
+    _ep_fade_in = min(_END_PAGE_FADE_IN_SECONDS, max(0.01, duration / 2))
 
     try:
         # --- 1. Rename body to temp ---
@@ -1421,11 +1445,18 @@ def _append_end_page(
         )
         if has_ep_music:
             # Music continues seamlessly from where the body ended.
-            # The body uses aloop over [0, usable_dur], so at body_duration the music
-            # is at position (body_duration % usable_dur) within the usable portion.
+            # The playing segment's aloop clock starts at music_segment_start_seconds
+            # (0.0 for legacy single-track music, which plays from t=0 of the body),
+            # not at t=0 of the body itself — so the elapsed time to fold into the
+            # loop is (body_duration - music_segment_start_seconds), matching exactly
+            # how _build_multi_segment_music_filter / the single-track loop in
+            # _build_ffmpeg_concat_command position that segment's own aloop.
+            # _probe_music_usable_duration must be called the same way here as it is
+            # for the body's own loop (no extra fallback) so both sides agree on
+            # exactly the same usable_dur — any divergence reintroduces a jump.
             usable_dur = _probe_music_usable_duration(music_track.local_path)
-            usable_dur = usable_dur if usable_dur > 1.0 else _probe_output_duration(music_track.local_path)
-            music_offset = body_duration % usable_dur if usable_dur > 0 else 0.0
+            elapsed = max(0.0, body_duration - music_segment_start_seconds)
+            music_offset = elapsed % usable_dur if usable_dur > 0 else 0.0
             # For the end page, seek to music_offset within [0, usable_dur] and loop
             # only the usable portion (via aloop) for the end-page duration.
             try:
@@ -1453,7 +1484,8 @@ def _append_end_page(
                 (
                     f"[0:v]scale={width}:{height}"
                     f":force_original_aspect_ratio=decrease,"
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+                    f"fade=t=in:st=0:d={_ep_fade_in:.3f}[vout];"
                     f"[1:a]atrim=0:{ep_remaining:.6f},asetpts=PTS-STARTPTS,"
                     f"aloop=loop=-1:size={ep_usable_samples},"
                     f"atrim=0:{duration:.6f},asetpts=PTS-STARTPTS,"
@@ -1482,7 +1514,8 @@ def _append_end_page(
                 (
                     f"[0:v]scale={width}:{height}"
                     f":force_original_aspect_ratio=decrease,"
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+                    f"fade=t=in:st=0:d={_ep_fade_in:.3f}[vout];"
                     f"[1:a]volume=0.0[aout]"
                 ),
                 "-map", "[vout]",

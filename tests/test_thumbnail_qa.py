@@ -10,6 +10,7 @@ Test coverage:
   TestThumbnailQAPath            — thumbnails/ path, video/ path, other path
   TestThumbnailQATextOverlay     — plan with overlay, plan without overlay, no plan
   TestThumbnailQAOverall         — overall_status computation, ep_smoke_01 scenario
+  TestThumbnailQAPlaceholderDetection — pixel-level near-black/flat placeholder rejection
   TestReferenceImageQADimensions — correct/wrong dimensions, unknown aspect ratio
   TestReferenceImageQAAssetClass — correct class, wrong class, missing
   TestReferenceImageQAPath       — video/ path, thumbnails/ path, other
@@ -40,6 +41,48 @@ def _write_jpeg(path: Path, width: int, height: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     img = Image.new("RGB", (width, height), color=(100, 100, 100))
     img.save(str(path), "JPEG", quality=85)
+
+
+def _write_placeholder_jpeg(path: Path, width: int = 1280, height: int = 720) -> None:
+    """
+    Reproduces hypogeum/muapi.py's dry-run thumbnail fill (20,20,20) plus a
+    sparse brighter patch simulating composited wordmark text strokes (~33%
+    ink coverage within the text bounding box, not a solid block) — matches
+    the measured stats of the actual published placeholder within ~1 point
+    (real: mean_luminance=20.5, stddev=9.3; this fixture: ~20.4 / ~8.4).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", (width, height), color=(20, 20, 20))
+    patch_w, patch_h = width // 6, height // 20
+    x0, y0 = (width - patch_w) // 2, (height - patch_h) // 2
+    for x in range(x0, x0 + patch_w):
+        for y in range(y0, y0 + patch_h):
+            if (x + y) % 3 == 0:
+                img.putpixel((x, y), (200, 180, 120))
+    img.save(str(path), "JPEG", quality=90)
+
+
+def _write_textured_dark_jpeg(path: Path, width: int = 1280, height: int = 720) -> None:
+    """
+    A dark-toned but genuinely textured image — simulates a real
+    photographic thumbnail with dominant_tone='near_black' (a legitimate
+    brand creative choice) that must NOT be flagged as a placeholder.
+    """
+    import random
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rnd = random.Random(42)
+    img = Image.new("RGB", (width, height))
+    pixels = img.load()
+    for x in range(0, width, 4):
+        for y in range(0, height, 4):
+            base = 15 + int(40 * ((x / width) + (y / height)) / 2)
+            noise = rnd.randint(-10, 60)
+            v = max(0, min(255, base + noise))
+            for dx in range(4):
+                for dy in range(4):
+                    if x + dx < width and y + dy < height:
+                        pixels[x + dx, y + dy] = (v, v, v)
+    img.save(str(path), "JPEG", quality=90)
 
 
 def _good_plan() -> dict:
@@ -300,6 +343,71 @@ class TestThumbnailQAOverall:
         assert check_statuses["c_thumbnail_text_overlay"] == "fail"
         assert report["overall_status"] == "fail"
         assert len(report["failures"]) >= 2
+
+
+# ---------------------------------------------------------------------------
+# TestThumbnailQAPlaceholderDetection
+#
+# Regression coverage for the 2026-08-01 quality rejection: a
+# MUAPI_DRY_RUN placeholder (flat near-black fill + composited channel
+# wordmark) was published as episode ep_f3619022's real thumbnail. Every
+# other check (A-I) validates the generation *plan*, not actual pixels,
+# so a placeholder with a fully well-formed plan passed all of them.
+# ---------------------------------------------------------------------------
+
+class TestThumbnailQAPlaceholderDetection:
+
+    def test_flat_near_black_placeholder_fails(self, tmp_path):
+        """The exact dry-run placeholder pattern (measured mean=20.5, stddev=9.3) must fail."""
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _write_placeholder_jpeg(p)
+        report = run_thumbnail_qa(
+            p, aspect_ratio="16:9", asset_class="thumbnail_image", generation_plan=_good_plan(),
+        )
+        check_statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert check_statuses["c_thumbnail_placeholder_detection"] == "fail"
+        assert report["overall_status"] == "fail"
+        assert any("placeholder" in f for f in report["failures"])
+
+    def test_placeholder_fails_even_with_a_fully_well_formed_plan(self, tmp_path):
+        """
+        The exact bug scenario: composition_plan, typography_plan, text_overlay,
+        and ctr_rationale are all present and valid (so checks D-I all pass),
+        but the pixels are a placeholder. Overall status must still be fail.
+        """
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _write_placeholder_jpeg(p)
+        report = run_thumbnail_qa(
+            p, aspect_ratio="16:9", asset_class="thumbnail_image", generation_plan=_good_plan(),
+        )
+        check_statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert check_statuses["c_thumbnail_text_overlay"] == "pass"
+        assert check_statuses["c_thumbnail_composition_plan"] == "pass"
+        assert check_statuses["c_thumbnail_typography_plan"] == "pass"
+        assert check_statuses["c_thumbnail_curiosity_gap"] == "pass"
+        assert check_statuses["c_thumbnail_placeholder_detection"] == "fail"
+        assert report["overall_status"] == "fail"
+
+    def test_genuine_dark_textured_thumbnail_passes(self, tmp_path):
+        """A real, richly-textured dark-toned thumbnail (legitimate near_black
+        brand creative choice) must NOT be flagged as a placeholder."""
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _write_textured_dark_jpeg(p)
+        report = run_thumbnail_qa(
+            p, aspect_ratio="16:9", asset_class="thumbnail_image", generation_plan=_good_plan(),
+        )
+        check_statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert check_statuses["c_thumbnail_placeholder_detection"] == "pass"
+
+    def test_normal_bright_thumbnail_passes(self, tmp_path):
+        """A normal (non-dark) thumbnail is trivially not near-black."""
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _write_jpeg(p, 1280, 720)  # solid mid-gray (100,100,100)
+        report = run_thumbnail_qa(
+            p, aspect_ratio="16:9", asset_class="thumbnail_image", generation_plan=_good_plan(),
+        )
+        check_statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert check_statuses["c_thumbnail_placeholder_detection"] == "pass"
 
 
 # ---------------------------------------------------------------------------

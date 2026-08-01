@@ -333,6 +333,35 @@ def run_thumbnail_qa(
                            f"{sorted(unique_zones)}")
 
     # ------------------------------------------------------------------
+    # Check J — Pixel-level placeholder detection (near-black / logo-only)
+    #
+    # Added after the 2026-08-01 quality rejection: a MUAPI_DRY_RUN
+    # placeholder (a flat (20,20,20) fill with the channel wordmark
+    # composited on top — see hypogeum/muapi.py's dry-run thumbnail path)
+    # was published as a real thumbnail. Checks A-I all validate the
+    # generation *plan* (composition_plan, typography_plan, etc.) — none
+    # of them open the actual pixel data, so a placeholder with a fully
+    # well-formed plan sails through every one of them. This check is the
+    # only one that inspects real pixels.
+    #
+    # A single brightness threshold is not enough: the brand's own
+    # composition_plan can legitimately call for dominant_tone="near_black"
+    # on a real, richly-detailed image. The placeholder is flagged only
+    # when BOTH conditions hold: very low mean brightness AND very low
+    # pixel variance (a flat fill has almost no variance; a real dark
+    # photographic image still has meaningful texture/gradient variance
+    # even when moody).
+    # ------------------------------------------------------------------
+    if thumbnail_local_path.exists():
+        placeholder_reason = _detect_placeholder_image(thumbnail_local_path)
+        if placeholder_reason:
+            _add_check(checks, "c_thumbnail_placeholder_detection", "fail", placeholder_reason)
+            failures.append(f"thumbnail_placeholder_detection: {placeholder_reason}")
+        else:
+            _add_check(checks, "c_thumbnail_placeholder_detection", "pass",
+                       "pixel content is not a flat/near-black placeholder")
+
+    # ------------------------------------------------------------------
     # Overall status
     # ------------------------------------------------------------------
     if failures:
@@ -369,3 +398,42 @@ def _probe_image_dimensions(path: Path) -> tuple[int, int]:
 
 def _add_check(checks: list, check_id: str, status: str, detail: str) -> None:
     checks.append({"check_id": check_id, "status": status, "detail": detail})
+
+
+# Heuristic thresholds — tunable, not exact science. Calibrated against
+# the actual published placeholder (hypogeum/muapi.py's dry-run fill
+# color (20,20,20) plus the small channel wordmark): measured
+# mean_luminance=20.5, stddev=9.3. Real, even very dark, photographic
+# thumbnails have meaningfully more texture variance than a flat fill
+# plus a small logo — both conditions must hold together (see Check J
+# above for why brightness alone is not sufficient), with margin above
+# the measured placeholder values so genuine dark moody thumbnails
+# (real subject detail, lighting gradients) aren't false-flagged.
+_PLACEHOLDER_MAX_MEAN_LUMINANCE = 30.0
+_PLACEHOLDER_MAX_STDDEV = 15.0
+
+
+def _detect_placeholder_image(path: Path) -> Optional[str]:
+    """
+    Return a human-readable rejection reason if `path` looks like a flat
+    near-black placeholder (dry-run fill, logo-only fallback) rather than
+    a real generated thumbnail. Returns None if the image passes (or if
+    it can't be probed — never blocks on a probing failure alone).
+    """
+    try:
+        from PIL import ImageStat, Image
+        with Image.open(path) as img:
+            gray = img.convert("L")
+            stat = ImageStat.Stat(gray)
+            mean = stat.mean[0]
+            stddev = stat.stddev[0]
+    except Exception:
+        return None
+
+    if mean <= _PLACEHOLDER_MAX_MEAN_LUMINANCE and stddev <= _PLACEHOLDER_MAX_STDDEV:
+        return (
+            f"image is near-flat and near-black (mean_luminance={mean:.1f}, "
+            f"stddev={stddev:.1f}) — looks like a dry-run/logo-only placeholder, "
+            "not a real generated thumbnail with subject content"
+        )
+    return None

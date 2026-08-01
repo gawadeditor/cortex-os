@@ -11,6 +11,7 @@ Tests cover the public API surface and critical internal helpers:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -306,9 +307,9 @@ class TestBuildFfmpegConcatCommand:
 
     def test_tpad_applied_when_narration_longer_than_clip(self, tmp_path):
         """
-        Given entry.duration_seconds=20s and clip_duration_seconds=8s, factor=2.5 > 2.0,
-        so the ping-pong loop branch is used (not tpad). The filter_complex includes
-        the reverse+concat+loop chain and the output is labelled [pv0].
+        Given entry.duration_seconds=20s and clip_duration_seconds=8s, factor=2.5 > 1.0,
+        so slow-motion setpts is used (not tpad). No reverse/loop filter is present —
+        ping-pong looping was removed (forbidden: reverses causal motion).
         """
         clip_path = tmp_path / "clip.mp4"
         clip_path.write_bytes(b"FAKEVIDEO")
@@ -325,16 +326,22 @@ class TestBuildFfmpegConcatCommand:
         )
 
         cmd_str = " ".join(str(c) for c in cmd)
-        # factor=2.5 > 2.0 → ping-pong branch (not tpad)
-        assert "reverse" in cmd_str
-        assert "loop=loop=-1" in cmd_str
+        # factor=2.5 → slow-motion setpts branch (not tpad, not reverse/loop)
+        # Precise ffmpeg filter-syntax check (not a bare substring) — pytest's
+        # tmp_path is named after the test function, which itself contains
+        # "reverse", so a bare "reverse" in cmd_str check would false-positive
+        # on the clip's own file path.
+        assert "]reverse[" not in cmd_str
+        assert "loop=loop=-1" not in cmd_str
+        assert "setpts=2.500000*PTS" in cmd_str
         assert "[pv0]" in cmd_str
 
     def test_each_entry_gets_own_hold_before_concat(self, tmp_path):
         """
-        Multiple entries with factor > 2.0 each get their own ping-pong loop before concat.
-        Both entries use clip_duration=8s with beat durations 21s and 23s (factors 2.6 and 2.9).
-        The output labels [pv0] and [pv1] are used as concat inputs.
+        Multiple entries with factor > 2.0 each get their own slow-motion setpts
+        stretch before concat (no reverse/loop). Both entries use clip_duration=8s
+        with beat durations 21s and 23s (factors 2.625 and 2.875). The output
+        labels [pv0] and [pv1] are used as concat inputs.
         """
         clip1 = tmp_path / "clip1.mp4"
         clip2 = tmp_path / "clip2.mp4"
@@ -356,13 +363,18 @@ class TestBuildFfmpegConcatCommand:
         )
 
         cmd_str = " ".join(str(c) for c in cmd)
-        # Both entries use factor > 2.0 → ping-pong branch
-        assert "reverse" in cmd_str
+        # No entry ever uses reverse/loop, regardless of factor size
+        # Precise ffmpeg filter-syntax check (not a bare substring) — pytest's
+        # tmp_path is named after the test function, which itself contains
+        # "reverse", so a bare "reverse" in cmd_str check would false-positive
+        # on the clip's own file path.
+        assert "]reverse[" not in cmd_str
+        assert "loop=loop=-1" not in cmd_str
         assert "[pv0]" in cmd_str
         assert "[pv1]" in cmd_str
-        # Both entries must trim to their respective beat durations
-        assert "trim=duration=21.000" in cmd_str
-        assert "trim=duration=23.000" in cmd_str
+        # Both entries get their own setpts factor: 21/8=2.625, 23/8=2.875
+        assert "setpts=2.625000*PTS" in cmd_str
+        assert "setpts=2.875000*PTS" in cmd_str
 
     def test_t_flag_equals_timeline_duration_not_clip_duration(self, tmp_path):
         """
@@ -443,6 +455,119 @@ class TestBuildFfmpegConcatCommand:
         assert str(narration_path) in cmd_str
         t_idx = cmd.index("-t")
         assert float(cmd[t_idx + 1]) == pytest.approx(22.0)
+
+
+# ---------------------------------------------------------------------------
+# TestNoReverseOrPingPong
+#
+# Regression coverage for the 2026-08-01 quality rejection: the assembled
+# video repeatedly played clips forward -> reverse -> forward -> reverse.
+# ffmpeg's `reverse` filter and any negative-time playback are forbidden —
+# a clip's real motion must only ever play forward, and must never be
+# shown more than once within a single narration segment.
+# ---------------------------------------------------------------------------
+
+class TestNoReverseOrPingPong:
+
+    @pytest.mark.parametrize("hold_factor", [1.5, 2.0, 2.001, 2.5, 3.0, 5.0, 10.0, 50.0])
+    def test_no_reverse_filter_at_any_factor(self, tmp_path, hold_factor):
+        """No `reverse` ffmpeg filter is ever emitted, regardless of how large
+        the narration-to-clip duration factor is."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        clip_duration = 8.0
+        entry = _make_entry(
+            duration_seconds=clip_duration * hold_factor,
+            clip_duration_seconds=clip_duration,
+            clip_path=clip_path,
+        )
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry],
+            narration_path=None,
+            music_track=None,
+            output_path=tmp_path / "out.mp4",
+            resolution="1920x1080",
+            episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        # Precise ffmpeg filter-syntax check (not a bare substring) — pytest's
+        # tmp_path is named after the test function, which itself contains
+        # "reverse", so a bare "reverse" in cmd_str check would false-positive
+        # on the clip's own file path.
+        assert "]reverse[" not in cmd_str
+        assert "split=2" not in cmd_str
+
+    @pytest.mark.parametrize("hold_factor", [1.5, 2.5, 5.0, 20.0])
+    def test_no_negative_time_playback(self, tmp_path, hold_factor):
+        """Every setpts multiplier used for a motion-extension hold must be
+        strictly positive — a negative or zero PTS multiplier is the
+        signature of reversed or frozen (non-causal) playback."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        clip_duration = 8.0
+        entry = _make_entry(
+            duration_seconds=clip_duration * hold_factor,
+            clip_duration_seconds=clip_duration,
+            clip_path=clip_path,
+        )
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry],
+            narration_path=None,
+            music_track=None,
+            output_path=tmp_path / "out.mp4",
+            resolution="1920x1080",
+            episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+
+        setpts_multipliers = re.findall(r"setpts=(-?\d+\.\d+)\*PTS", cmd_str)
+        assert setpts_multipliers, "expected at least one setpts multiplier for a motion-extension hold"
+        for raw in setpts_multipliers:
+            assert float(raw) > 0, f"found non-positive setpts multiplier: {raw}"
+
+    def test_no_loop_filter_for_motion_extension(self, tmp_path):
+        """The ffmpeg `loop` filter (used by both the pre-2a10a34 forward-only
+        loop and the later ping-pong loop) must not appear — motion extension
+        is pure setpts time-stretching with no loop boundary at all."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=80.0, clip_duration_seconds=8.0, clip_path=clip_path)
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry],
+            narration_path=None,
+            music_track=None,
+            output_path=tmp_path / "out.mp4",
+            resolution="1920x1080",
+            episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        assert "loop=" not in cmd_str
+
+    def test_clip_content_never_repeats_within_a_segment(self, tmp_path):
+        """
+        A single motion-extension entry must reference its source clip's
+        content exactly once (one setpts-stretched pass) — never a concat of
+        the same clip with itself, which would be a visible repeat.
+        """
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=40.0, clip_duration_seconds=8.0, clip_path=clip_path)
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry],
+            narration_path=None,
+            music_track=None,
+            output_path=tmp_path / "out.mp4",
+            resolution="1920x1080",
+            episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        # Only one -i for this entry's own clip; no self-concat of the clip stream.
+        assert cmd_str.count(str(clip_path)) == 1
+        assert "concat=n=2:v=1:a=0" not in cmd_str
 
 
 # ---------------------------------------------------------------------------
@@ -877,7 +1002,7 @@ class TestResolutionNormalization:
         assert "concat=n=2" in fc
 
     def test_motion_extension_chains_from_sv_label(self, tmp_path):
-        """When hold > 1.0s with factor > 2.0, the ping-pong branch receives [sv0] input."""
+        """When hold > 1.0s with factor > 2.0, the slow-motion setpts branch receives [sv0] input directly (no split/reverse/loop)."""
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"FAKEVIDEO")
         entry = _make_entry(duration_seconds=20.0, clip_duration_seconds=8.0, clip_path=clip)
@@ -886,8 +1011,9 @@ class TestResolutionNormalization:
             output_path=tmp_path / "out.mp4", resolution="1920x1080", episode_id="ep_t",
         )
         fc = self._fc(cmd)
-        # factor=2.5 > 2.0 → ping-pong branch receives normalized [sv0] input
-        assert "[sv0]split=2" in fc
+        # factor=2.5 → slow-motion setpts branch chains directly off [sv0]
+        assert "[sv0]setpts=" in fc
+        assert "split=2" not in fc
         assert "[pv0]" in fc
 
     def test_short_uses_scale_crop_not_pad(self, tmp_path):

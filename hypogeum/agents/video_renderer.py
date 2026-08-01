@@ -886,37 +886,24 @@ def _build_ffmpeg_concat_command(
                 elif hold_seconds > 1.0:
                     # Motion extension: stretch clip to beat duration.
                     # tpad (freeze last frame) is FORBIDDEN for holds > 1.0s.
-                    # Strategy: slow-motion via setpts (factor ≤ 2.0) or seamless
-                    # loop (factor > 2.0) so the frame plays real motion throughout.
+                    # Strategy: slow-motion via setpts, unconditionally, for every
+                    # factor. Never reverse, never loop/repeat.
+                    # A prior version (commit 2a10a34) split at factor>2.0 into a
+                    # forward+reverse "ping-pong" loop specifically to hide the
+                    # jump-cut of an even earlier forward-only loop=-1 (see that
+                    # commit's own message) — both predecessors are forbidden now
+                    # (reverse motion, and >1 repeat, respectively). Pure setpts
+                    # has no loop boundary and shows the real clip content exactly
+                    # once, so it satisfies both constraints unconditionally
+                    # regardless of how large the factor is.
                     out_label = f"[pv{clip_idx}]"
                     factor = entry.duration_seconds / max(entry.clip_duration_seconds, 0.001)
-                    if factor <= 2.0:
-                        # Slow-motion: each frame's PTS is scaled by factor,
-                        # then fps filter re-samples to FRAME_RATE for the encoder.
-                        # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
-                        _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
-                        tpad_filter_parts.append(
-                            f"{scale_label}setpts={factor:.6f}*PTS,"
-                            f"fps=fps={FRAME_RATE},"
-                            f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
-                        )
-                    else:
-                        # Ping-pong loop: forward then reverse, then loop the combined cycle.
-                        # At each loop boundary the end of "reverse" (frame 0) seamlessly
-                        # matches the start of "forward" (also frame 0), eliminating the
-                        # visible 8-second reset cut that loop=loop=-1 produces.
-                        clip_frames = max(1, round(entry.clip_duration_seconds * FRAME_RATE))
-                        ping_pong_frames = clip_frames * 2
-                        _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
-                        tpad_filter_parts.append(
-                            f"{scale_label}split=2[ff{clip_idx}][rf{clip_idx}];"
-                            f"[rf{clip_idx}]reverse[rv{clip_idx}];"
-                            f"[ff{clip_idx}][rv{clip_idx}]concat=n=2:v=1:a=0[pp{clip_idx}];"
-                            f"[pp{clip_idx}]loop=loop=-1:size={ping_pong_frames}:start=0,"
-                            f"trim=duration={entry.duration_seconds:.3f},"
-                            f"setpts=PTS-STARTPTS,"
-                            f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
-                        )
+                    _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
+                    tpad_filter_parts.append(
+                        f"{scale_label}setpts={factor:.6f}*PTS,"
+                        f"fps=fps={FRAME_RATE},"
+                        f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
+                    )
                     concat_input_labels.append(out_label)
                 elif hold_seconds > 0.001:
                     # Small gap (≤ 1.0s): tpad emergency fallback only.

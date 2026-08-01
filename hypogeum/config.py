@@ -483,6 +483,17 @@ class Config:
         self.CLIP_REPAIR_ENABLED = _get_bool("CLIP_REPAIR_ENABLED", default=True)
         # CLIP_REPAIR_MAX_GENERATED: max extra clips to generate in Strategy B (default 5).
         self.CLIP_REPAIR_MAX_GENERATED = _get_int("CLIP_REPAIR_MAX_GENERATED", default=5)
+        # COVERAGE_CHECK_ENABLED: gate assembly on per-beat visual-duration coverage before
+        # any rendering (default True). See hypogeum/agents/coverage_check.py — approved
+        # production policy (2026-08-01): Video Renderer must never compensate for missing
+        # duration; insufficient beats block assembly and request additional MUAPI coverage.
+        self.COVERAGE_CHECK_ENABLED = _get_bool("COVERAGE_CHECK_ENABLED", default=True)
+        # COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT: cap on additional distinct clips generated
+        # to close one beat's coverage deficit (default 2). Each is a full, real MUAPI spend —
+        # bounded to keep a single stubborn beat from generating unbounded cost.
+        self.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = _get_int(
+            "COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT", default=2
+        )
 
         # --- Higgsfield (comparison only) ---
         self.HF_API_KEY = _get_optional("HF_API_KEY")

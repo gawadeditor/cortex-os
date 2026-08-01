@@ -55,6 +55,10 @@ def _make_config() -> Config:
         "ELEVENLABS_VOICE_ID": "voice-abc",
         # Disable clip repair so existing assembly tests observe raw availability rates.
         "CLIP_REPAIR_ENABLED": "false",
+        # Disable the coverage gate here — these fixtures don't control exact
+        # narration/clip duration alignment and predate the 2026-08-01 coverage
+        # policy. The gate itself is covered by tests/test_coverage_check.py.
+        "COVERAGE_CHECK_ENABLED": "false",
     }
     with patch.dict(os.environ, env, clear=True):
         return Config()
@@ -199,7 +203,11 @@ def _make_narration_package(episode_id="ep_001") -> dict:
                 "source_type": "short",
                 "generation_status": "generated",
                 "audio_asset_id": f"episodes/{episode_id}/narration/sh1b_001",
-                "duration_seconds": 8.0,
+                # Matches the sh_001 scene's production_spec.duration_seconds=5 in
+                # _make_visual_package() — real, forward-only coverage (2026-08-01
+                # policy) means these must not be left mismatched; see
+                # hypogeum/agents/coverage_check.py.
+                "duration_seconds": 5.0,
             },
             {
                 "segment_id": "seg_sh2b_001",
@@ -207,7 +215,7 @@ def _make_narration_package(episode_id="ep_001") -> dict:
                 "source_type": "short",
                 "generation_status": "generated",
                 "audio_asset_id": f"episodes/{episode_id}/narration/sh2b_001",
-                "duration_seconds": 8.0,
+                "duration_seconds": 5.0,
             },
             {
                 "segment_id": "seg_sh3b_001",
@@ -215,7 +223,7 @@ def _make_narration_package(episode_id="ep_001") -> dict:
                 "source_type": "short",
                 "generation_status": "generated",
                 "audio_asset_id": f"episodes/{episode_id}/narration/sh3b_001",
-                "duration_seconds": 8.0,
+                "duration_seconds": 5.0,
             },
         ],
         "stitched_tracks": [

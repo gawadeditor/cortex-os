@@ -64,7 +64,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from hypogeum.agents.final_render_reviewer import run_final_render_reviewer
 from hypogeum.agents.music_agent import run_music_agent
@@ -439,6 +439,84 @@ def run_assembly_agent(
         main_entries=len(main_timeline),
         shorts_count=len(short_ids),
     )
+
+    # ------------------------------------------------------------------
+    # B1. Coverage check (2026-08-01 policy) — before any rendering, verify
+    # every beat (main episode AND every Short — Video Renderer enforces this
+    # uniformly, so the pre-render gate must too) has enough real,
+    # forward-only visual duration for its narration beat. Video Renderer is
+    # not permitted to compensate for missing duration (no tpad/loop/reverse/
+    # uncapped setpts — see hypogeum/agents/video_renderer.py::
+    # InsufficientCoverageError). A short beat first gets a bounded attempt
+    # at additional distinct MUAPI coverage (never regenerating beats that
+    # already have enough); if that still isn't enough, assembly halts here
+    # and returns a structured additional_coverage_required result instead
+    # of proceeding to render.
+    # ------------------------------------------------------------------
+    if getattr(config, "COVERAGE_CHECK_ENABLED", True):
+        from hypogeum.agents.coverage_check import (  # noqa: PLC0415
+            build_additional_coverage_required,
+            check_timeline_coverage,
+        )
+
+        def _all_beat_entries() -> List:
+            _entries = list(main_timeline)
+            for _st in shorts_timelines.values():
+                _entries.extend(_st)
+            return _entries
+
+        def _attach_extra_clips(extra_clips_by_scene: Dict[str, List[Path]]) -> None:
+            for _entry in _all_beat_entries():
+                if _entry.scene_id in extra_clips_by_scene:
+                    _entry.extra_clip_paths = extra_clips_by_scene[_entry.scene_id]
+
+        coverage_result = check_timeline_coverage(_all_beat_entries())
+
+        if not coverage_result.sufficient:
+            log.warn(
+                "assembly_coverage_deficit_detected",
+                episode_id=episode_id,
+                insufficient_beats=[b.scene_id for b in coverage_result.insufficient_beats],
+            )
+            from hypogeum.agents.clip_repair_agent import fill_coverage_deficits  # noqa: PLC0415
+
+            extra_clips_by_scene = fill_coverage_deficits(
+                insufficient_beats=coverage_result.insufficient_beats,
+                visual_package=visual_package,
+                assets_root=assets_root,
+                config=config,
+                episode_id=episode_id,
+                log=log,
+            )
+            _attach_extra_clips(extra_clips_by_scene)
+
+            coverage_result = check_timeline_coverage(_all_beat_entries())
+
+        if not coverage_result.sufficient:
+            acr = build_additional_coverage_required(coverage_result, episode_id)
+            log.error(
+                "assembly_additional_coverage_required",
+                episode_id=episode_id,
+                insufficient_beats=len(coverage_result.insufficient_beats),
+                requests=acr["requests"],
+            )
+            return _build_additional_coverage_required_package(
+                episode_id=episode_id,
+                visual_package=visual_package,
+                narration_package=narration_package,
+                thumbnail_package=thumbnail_package,
+                additional_coverage_required=acr,
+                log=log,
+                episode_dir=episode_dir,
+                topic_brief=topic_brief,
+                source_registry=source_registry,
+            )
+
+        log.info(
+            "assembly_coverage_check_passed",
+            episode_id=episode_id,
+            beats_checked=len(coverage_result.beats),
+        )
 
     # ------------------------------------------------------------------
     # B2. Timeline QA — run immediately after timeline construction.
@@ -1315,6 +1393,158 @@ def _build_failed_package(
         render_status="failed",
         production_ready=False,
         reason=reason,
+        output_path=str(out_path),
+    )
+
+    return package
+
+
+def _build_additional_coverage_required_package(
+    episode_id: str,
+    visual_package: dict,
+    narration_package: dict,
+    thumbnail_package: dict,
+    additional_coverage_required: dict,
+    log,
+    episode_dir: Path,
+    topic_brief: Optional[dict] = None,
+    source_registry: Optional[list] = None,
+) -> dict:
+    """
+    Build a minimal Final Render Package with production_ready=False when
+    assembly halts because one or more beats lack enough real, forward-only
+    visual coverage (2026-08-01 policy — see hypogeum/agents/coverage_check.py).
+
+    Distinct from _build_failed_package's clip_availability_below_threshold:
+    that fires when a scene has NO clip at all; this fires when a clip
+    exists but doesn't run long enough for its narration beat even after
+    the approved editorial speed adjustment, and additional MUAPI
+    generation (hypogeum/agents/clip_repair_agent.py::fill_coverage_deficits())
+    was attempted and still came up short.
+
+    The structured additional_coverage_required result is carried verbatim
+    under that key so a human reviewer or a future automated retry can see
+    exactly which beats need more footage and how much.
+    """
+    pkg_meta = visual_package.get("package_metadata", {})
+    ep_meta  = visual_package.get("episode_metadata", {})
+    _tb = topic_brief or {}
+
+    main_caption_asset_id = _find_caption_asset_id(
+        narration_package.get("captions", []), "main_episode"
+    )
+
+    insufficient_scene_ids = [r["scene_id"] for r in additional_coverage_required["requests"]]
+
+    package = {
+        "package_metadata": {
+            "render_package_id": f"rp_{episode_id}_additional_coverage_required",
+            "visual_package_id": pkg_meta.get("visual_package_id", ""),
+            "narration_package_id": narration_package.get(
+                "package_metadata", {}
+            ).get("narration_package_id", ""),
+            "thumbnail_package_id": thumbnail_package.get("thumbnail_package_id", ""),
+            "episode_id": episode_id,
+            "topic_id": ep_meta.get("topic_id", ""),
+            "assembly_agent_version": _AGENT_VERSION,
+            "rendered_at": datetime.now(timezone.utc).isoformat(),
+            "render_duration_seconds": 0.0,
+        },
+        "episode_render": {
+            "video_asset_id": "",
+            "duration_seconds": 0.0,
+            "resolution": MAIN_RESOLUTION,
+            "frame_rate": FRAME_RATE,
+            "scene_count": 0,
+            "section_count": 0,
+            "caption_asset_id": main_caption_asset_id or "",
+        },
+        "shorts_renders": [
+            {
+                "short_id": f"sh_{i:03d}_placeholder",
+                "video_asset_id": "",
+                "duration_seconds": 0.0,
+                "resolution": SHORT_RESOLUTION,
+                "frame_rate": FRAME_RATE,
+                "scene_count": 0,
+                "caption_asset_id": "",
+                "text_overlays_applied": 0,
+                "text_overlays_skipped": [],
+            }
+            for i in range(3)
+        ],
+        "thumbnail_references": _collect_thumbnail_references(thumbnail_package),
+        "music_log": [],
+        "metadata_source": {
+            "episode_title": ep_meta.get("episode_title") or _tb.get("episode_title", ""),
+            "logline": ep_meta.get("logline") or _tb.get("logline", ""),
+            "description": ep_meta.get("description") or _tb.get("logline", ""),
+            "section_titles": [],
+            "shorts_titles": [],
+            "sources": _format_sources(source_registry or []),
+            "ai_disclosure_text": (
+                "This video was produced with AI assistance."
+            ),
+        },
+        "assembly_qa_report": {
+            "overall_status": "fail",
+            "checks": [
+                {
+                    "check_id": "c_visual_coverage",
+                    "check_type": "visual_coverage",
+                    "status": "fail",
+                    "detail": (
+                        f"{len(insufficient_scene_ids)} beat(s) lack sufficient unique "
+                        f"visual coverage even after the approved editorial speed "
+                        f"adjustment ({additional_coverage_required['max_editorial_speed_factor']}x) "
+                        f"and an additional-generation attempt: {insufficient_scene_ids[:10]}"
+                    ),
+                },
+            ],
+            "text_overlay_shifts": [],
+            "scenes_missing": [],
+            "human_review_recommended": True,
+            "human_review_reasons": ["additional_coverage_required"],
+            "clip_availability_rate": 1.0,
+            "sections_without_music": [],
+        },
+        "additional_coverage_required": additional_coverage_required,
+        "package_integrity": {
+            "input_visual_package_id": pkg_meta.get("visual_package_id", ""),
+            "input_narration_package_id": narration_package.get(
+                "package_metadata", {}
+            ).get("narration_package_id", ""),
+            "input_thumbnail_package_id": thumbnail_package.get("thumbnail_package_id", ""),
+            "scenes_expected": 0,
+            "scenes_rendered": 0,
+            "shorts_complete": False,
+            "captions_included": bool(main_caption_asset_id),
+            "thumbnails_included": bool(
+                _collect_thumbnail_references(thumbnail_package)
+            ),
+            "music_complete": False,
+            "production_ready": False,
+        },
+    }
+
+    try:
+        validate("final_render_package", package)
+    except SchemaError as exc:
+        log.warn("assembly_schema_warn", path=exc.path, reason=exc.reason)
+
+    out_path = episode_dir / f"final_render_package_{episode_id}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(package, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    log.error(
+        "assembly_package_finalized",
+        render_package_id=package["package_metadata"]["render_package_id"],
+        render_status="additional_coverage_required",
+        production_ready=False,
+        reason="additional_coverage_required",
         output_path=str(out_path),
     )
 

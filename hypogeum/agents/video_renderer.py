@@ -6,10 +6,23 @@ Extracted from assembly_agent.py.
 Owns:
 - ffmpeg command construction
 - concat/render execution
-- tpad hold application (Strategy B: freeze last frame for narration hold)
 - audio mix execution (narration 0dB, music −18dB)
 - main/short render file creation
 - render_output_manifest construction
+
+Coverage policy (2026-08-01, supersedes the interim setpts-only fix in
+commit 44ae397): Video Renderer must never compensate for missing visual
+duration. Every beat it renders is concatenated from real, distinct,
+forward-only clips (TimelineEntry.clip_path + .extra_clip_paths), each
+shown exactly once. The only permitted adjustment is a bounded speed
+correction within coverage_check.MAX_EDITORIAL_SPEED_FACTOR (≈15%), applied
+only to smooth a sub-beat mismatch on the last clip in a beat — never to
+fill a real gap. If a beat still doesn't have enough duration at that
+point, that is an upstream contract violation (Assembly Agent's coverage
+gate should have already halted or filled it — see
+hypogeum/agents/coverage_check.py and clip_repair_agent.fill_coverage_deficits())
+and this module raises InsufficientCoverageError rather than concealing it
+with tpad/loop/reverse/an uncapped setpts factor.
 
 Does NOT own:
 - Timeline construction (timeline_builder owns this)
@@ -45,6 +58,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR, compute_beat_coverage
 from hypogeum.agents.timeline_builder import TimelineEntry, TimelinePlan, sum_timeline_duration
 
 
@@ -55,6 +69,22 @@ from hypogeum.agents.timeline_builder import TimelineEntry, TimelinePlan, sum_ti
 MAIN_RESOLUTION  = "1920x1080"
 SHORT_RESOLUTION = "1080x1920"
 FRAME_RATE       = 30
+
+
+class InsufficientCoverageError(Exception):
+    """
+    Raised when a beat reaches the Video Renderer without enough real,
+    forward-only clip coverage to fill its narration duration within the
+    approved editorial speed limit (coverage_check.MAX_EDITORIAL_SPEED_FACTOR).
+
+    This should never happen in normal operation — Assembly Agent's
+    pre-render coverage gate (hypogeum/agents/coverage_check.py) is
+    responsible for catching this before render_episode() is ever called.
+    Reaching this exception means that gate was bypassed. Video Renderer
+    intentionally has no fallback filter (tpad/loop/reverse/uncapped
+    setpts) for this case — per the 2026-08-01 policy, concealing missing
+    footage is not an acceptable renderer behavior.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -252,13 +282,17 @@ def render_episode(
     if render_status == "success" and clip_availability_rate < 1.0:
         render_status = "partial"
 
-    # duration_coverage_gap = aggregate hold time from clips that EXIST but are
-    # shorter than their narration beat. Missing clips are already in missing_clips
-    # and clip_availability_rate — including their time in the gap double-counts.
-    # max_scene_hold_seconds = worst-case single-scene hold for existing clips,
-    # used by the Final Render Reviewer to match the Timeline QA per-scene threshold.
+    # duration_coverage_gap = aggregate deficit from clips that EXIST but don't reach
+    # their narration beat's duration even with any attached extra coverage clips and
+    # the approved editorial speed factor (coverage_check.compute_beat_coverage — the
+    # same math Assembly Agent's pre-render gate uses). Missing clips are already in
+    # missing_clips and clip_availability_rate — including their time here double-counts.
+    # Under the 2026-08-01 coverage policy this should be ~0 for every beat that reached
+    # the renderer at all (a real deficit halts assembly before render_episode() runs).
+    # max_scene_hold_seconds = worst-case single-scene deficit, used by the Final Render
+    # Reviewer to match the Timeline QA per-scene threshold.
     existing_holds = [
-        max(0.0, e.duration_seconds - e.clip_duration_seconds)
+        compute_beat_coverage(e).deficit_seconds
         for e in main_timeline
         if e.clip_path is not None and e.clip_path.exists()
     ]
@@ -1019,14 +1053,23 @@ def _build_ffmpeg_concat_command(
         total_duration = 30.0  # fallback for empty timelines
 
     if has_clips:
-        # Strategy B: per-entry trim+tpad.
-        # 1. When clip_duration > beat_duration: trim the clip to beat_duration.
-        #    Previously the clip played in full (only tpad hold was skipped), which
-        #    caused the concat output to exceed total_duration.
-        # 2. When beat_duration > clip_duration: tpad clones the last frame.
-        # 3. After concat: hard-trim the video stream to total_duration and reset PTS.
-        #    This is a redundant safety guard — in ffmpeg 8.1 with large filter graphs
-        #    (35+ inputs), the -t output flag can fail to limit the rendered body.
+        # Coverage policy (2026-08-01): every beat is concatenated from real,
+        # distinct, forward-only clips — the beat's primary clip plus any
+        # TimelineEntry.extra_clip_paths already attached by Assembly Agent's
+        # pre-render coverage gate (see hypogeum/agents/coverage_check.py and
+        # clip_repair_agent.fill_coverage_deficits()). Every clip is shown
+        # in full, once, forward, at normal-or-near-normal speed:
+        #   - Earlier clips in a beat (if any extras) play at their full
+        #     native length — no trim, no stretch.
+        #   - The LAST clip in a beat absorbs whatever small adjustment is
+        #     needed to land exactly on the beat's duration: trimmed down if
+        #     the clips ran long, or given a bounded speed nudge (capped at
+        #     MAX_EDITORIAL_SPEED_FACTOR, ~15%) if they're still a hair
+        #     short. This is a minor sync correction, never a coverage
+        #     strategy — see InsufficientCoverageError below.
+        # After concat: hard-trim the video stream to total_duration and reset PTS.
+        # This is a redundant safety guard — in ffmpeg 8.1 with large filter graphs
+        # (35+ inputs), the -t output flag can fail to limit the rendered body.
         #
         # Each clip is first normalized to the target resolution so that ffmpeg's
         # concat filter receives matching dimensions regardless of source model output.
@@ -1038,80 +1081,87 @@ def _build_ffmpeg_concat_command(
 
         for entry in timeline:
             if entry.clip_path and entry.clip_path.exists():
-                inputs += ["-i", str(entry.clip_path)]
-                hold_seconds = max(0.0, entry.duration_seconds - entry.clip_duration_seconds)
-                trim_needed = entry.clip_duration_seconds > entry.duration_seconds + 0.001
+                beat_clip_paths: List[Path] = [entry.clip_path] + [
+                    p for p in entry.extra_clip_paths if p.exists()
+                ]
+                beat_clip_durations: List[float] = [entry.clip_duration_seconds] + [
+                    _probe_output_duration(p) for p in entry.extra_clip_paths if p.exists()
+                ]
+                total_available = sum(beat_clip_durations)
 
-                # Normalize resolution — output label [sv{n}]
-                scale_label = f"[sv{clip_idx}]"
-                if is_short:
-                    tpad_filter_parts.append(
-                        f"[{clip_idx}:v]scale={width}:{height}"
-                        f":force_original_aspect_ratio=increase,"
-                        f"crop={width}:{height},setsar=1{scale_label}"
-                    )
-                else:
-                    tpad_filter_parts.append(
-                        f"[{clip_idx}:v]scale={width}:{height}"
-                        f":force_original_aspect_ratio=decrease,"
-                        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black{scale_label}"
+                if entry.duration_seconds > total_available * MAX_EDITORIAL_SPEED_FACTOR + 0.001:
+                    raise InsufficientCoverageError(
+                        f"scene {entry.scene_id}: available {total_available:.3f}s of real "
+                        f"footage ({len(beat_clip_paths)} clip(s)) cannot reach the "
+                        f"{entry.duration_seconds:.3f}s narration beat even at the maximum "
+                        f"editorial speed factor ({MAX_EDITORIAL_SPEED_FACTOR}x). Assembly "
+                        f"Agent's coverage gate should have blocked this beat before render."
                     )
 
-                if trim_needed:
-                    # Clip is longer than beat: trim it to exact beat_duration,
-                    # then reset PTS so the concat filter sees continuous timestamps.
-                    # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
-                    trim_label = f"[tv{clip_idx}]"
-                    _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
-                    tpad_filter_parts.append(
-                        f"{scale_label}trim=duration={entry.duration_seconds:.3f},"
-                        f"setpts=PTS-STARTPTS,"
-                        f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{trim_label}"
-                    )
-                    concat_input_labels.append(trim_label)
-                elif hold_seconds > 1.0:
-                    # Motion extension: stretch clip to beat duration.
-                    # tpad (freeze last frame) is FORBIDDEN for holds > 1.0s.
-                    # Strategy: slow-motion via setpts, unconditionally, for every
-                    # factor. Never reverse, never loop/repeat.
-                    # A prior version (commit 2a10a34) split at factor>2.0 into a
-                    # forward+reverse "ping-pong" loop specifically to hide the
-                    # jump-cut of an even earlier forward-only loop=-1 (see that
-                    # commit's own message) — both predecessors are forbidden now
-                    # (reverse motion, and >1 repeat, respectively). Pure setpts
-                    # has no loop boundary and shows the real clip content exactly
-                    # once, so it satisfies both constraints unconditionally
-                    # regardless of how large the factor is.
-                    out_label = f"[pv{clip_idx}]"
-                    factor = entry.duration_seconds / max(entry.clip_duration_seconds, 0.001)
-                    _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
-                    tpad_filter_parts.append(
-                        f"{scale_label}setpts={factor:.6f}*PTS,"
-                        f"fps=fps={FRAME_RATE},"
-                        f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
-                    )
-                    concat_input_labels.append(out_label)
-                elif hold_seconds > 0.001:
-                    # Small gap (≤ 1.0s): tpad emergency fallback only.
-                    # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
-                    out_label = f"[pv{clip_idx}]"
-                    _fade_st = max(0.0, entry.duration_seconds - _CLIP_TAIL_FADE_SECS)
-                    tpad_filter_parts.append(
-                        f"{scale_label}tpad=stop_mode=clone"
-                        f":stop_duration={hold_seconds:.3f},"
-                        f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
-                    )
-                    concat_input_labels.append(out_label)
-                else:
-                    # Clip duration == beat duration (within tolerance).
-                    # Add a 2-frame tail fade-out to eliminate hard black end-frame artifacts.
-                    exact_label = f"[ev{clip_idx}]"
-                    _fade_st = max(0.0, entry.clip_duration_seconds - _CLIP_TAIL_FADE_SECS)
-                    tpad_filter_parts.append(
-                        f"{scale_label}fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{exact_label}"
-                    )
-                    concat_input_labels.append(exact_label)
-                clip_idx += 1
+                for i, (clip_path, clip_dur) in enumerate(zip(beat_clip_paths, beat_clip_durations)):
+                    inputs += ["-i", str(clip_path)]
+                    is_last = i == len(beat_clip_paths) - 1
+
+                    # Normalize resolution — output label [sv{n}]
+                    scale_label = f"[sv{clip_idx}]"
+                    if is_short:
+                        tpad_filter_parts.append(
+                            f"[{clip_idx}:v]scale={width}:{height}"
+                            f":force_original_aspect_ratio=increase,"
+                            f"crop={width}:{height},setsar=1{scale_label}"
+                        )
+                    else:
+                        tpad_filter_parts.append(
+                            f"[{clip_idx}:v]scale={width}:{height}"
+                            f":force_original_aspect_ratio=decrease,"
+                            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black{scale_label}"
+                        )
+
+                    if not is_last:
+                        # Earlier clip in a multi-clip beat: full native length,
+                        # forward, shown exactly once. Only a 2-frame tail
+                        # micro-fade at its own boundary (same as every other
+                        # clip-to-clip join in the timeline).
+                        out_label = f"[pv{clip_idx}]"
+                        _fade_st = max(0.0, clip_dur - _CLIP_TAIL_FADE_SECS)
+                        tpad_filter_parts.append(
+                            f"{scale_label}fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
+                        )
+                        concat_input_labels.append(out_label)
+                    else:
+                        # Last (or only) clip in the beat: land exactly on the
+                        # beat's remaining duration after the earlier clips.
+                        remaining_for_last = max(
+                            0.05, entry.duration_seconds - sum(beat_clip_durations[:-1])
+                        )
+                        if remaining_for_last <= clip_dur + 0.001:
+                            # Clips ran long (or landed exactly): trim the tail.
+                            # Cutting real excess footage is not "compensating for
+                            # missing duration" — there was never a deficit here.
+                            trim_label = f"[tv{clip_idx}]"
+                            _fade_st = max(0.0, remaining_for_last - _CLIP_TAIL_FADE_SECS)
+                            tpad_filter_parts.append(
+                                f"{scale_label}trim=duration={remaining_for_last:.3f},"
+                                f"setpts=PTS-STARTPTS,"
+                                f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{trim_label}"
+                            )
+                            concat_input_labels.append(trim_label)
+                        else:
+                            # Still a hair short even with every available clip:
+                            # bounded speed nudge only (guaranteed <= MAX_EDITORIAL_
+                            # SPEED_FACTOR by the check above — this is a sync
+                            # correction, not a way to fill a real gap). Never
+                            # reverse, never loop/repeat.
+                            out_label = f"[pv{clip_idx}]"
+                            factor = remaining_for_last / max(clip_dur, 0.001)
+                            _fade_st = max(0.0, remaining_for_last - _CLIP_TAIL_FADE_SECS)
+                            tpad_filter_parts.append(
+                                f"{scale_label}setpts={factor:.6f}*PTS,"
+                                f"fps=fps={FRAME_RATE},"
+                                f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
+                            )
+                            concat_input_labels.append(out_label)
+                    clip_idx += 1
             else:
                 # Missing clip: insert a black-frame lavfi source for the beat duration so the
                 # video timeline stays in sync with the narration. Without this the video stream

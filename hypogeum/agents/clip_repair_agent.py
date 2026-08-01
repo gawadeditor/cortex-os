@@ -335,6 +335,171 @@ def run_clip_repair(
 
 
 # ---------------------------------------------------------------------------
+# Coverage-deficit filling (2026-08-01 policy) — sibling to Strategy B above,
+# but for beats whose clip EXISTS yet doesn't run long enough for its
+# narration beat (a duration deficit), not for scenes with no clip at all.
+# Video Renderer is no longer permitted to compensate for this with tpad/
+# loop/reverse/large setpts (see hypogeum/agents/video_renderer.py and
+# hypogeum/agents/coverage_check.py) — the factory generates more real,
+# distinct, forward-only footage instead.
+# ---------------------------------------------------------------------------
+
+def fill_coverage_deficits(
+    insufficient_beats: list,  # List[coverage_check.BeatCoverage]
+    visual_package: dict,
+    assets_root: Path,
+    config: Config,
+    episode_id: str,
+    log=None,
+) -> Dict[str, List[Path]]:
+    """
+    Request additional distinct clips for beats whose available visual
+    coverage (primary clip + any already-attached extras), even after the
+    approved editorial speed adjustment, falls short of the narration
+    beat's duration.
+
+    Only touches the beats passed in — a beat that already has sufficient
+    coverage is never regenerated (its scene_id simply won't appear in
+    insufficient_beats, since that list is computed by
+    hypogeum.agents.coverage_check.check_timeline_coverage()).
+
+    Each additional clip is a genuinely new MUAPI generation (distinct
+    output file, never a copy or a repeat of an existing clip) requested
+    from the beat's own scene_spec, capped at
+    config.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT attempts per beat so one
+    stubborn beat cannot generate unbounded cost. Stops as soon as the
+    accumulated real duration of the new clips closes the beat's deficit
+    (measured via the same editorial-factor math as coverage_check.py).
+
+    Returns {scene_id: [Path, ...]} — only the NEWLY generated extra clip
+    paths for beats that got at least one. Callers attach these to the
+    corresponding TimelineEntry.extra_clip_paths and re-run
+    check_timeline_coverage() to see whether the deficit is now closed.
+    """
+    from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
+
+    if log is None:
+        log = get_logger(episode_id=episode_id, agent="clip_repair_agent")
+
+    if not insufficient_beats:
+        return {}
+
+    scenes: List[dict] = visual_package.get("scenes", [])
+    scene_by_id: Dict[str, dict] = {s["scene_id"]: s for s in scenes}
+    max_extra_per_beat = max(0, getattr(config, "COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT", 2))
+
+    # Real production convention (matches VPD's Phase 2 caller): output_dir
+    # is the episode root — muapi._scene_file_path() appends "video/" itself.
+    output_dir = assets_root / "episodes" / episode_id
+
+    log.info(
+        "coverage_fill_started",
+        episode_id=episode_id,
+        beats_to_fill=len(insufficient_beats),
+        max_extra_per_beat=max_extra_per_beat,
+    )
+
+    extra_clips_by_scene: Dict[str, List[Path]] = {}
+
+    for beat in insufficient_beats:
+        sid = beat.scene_id
+        scene = scene_by_id.get(sid)
+        if scene is None:
+            log.warn("coverage_fill_skip", episode_id=episode_id, scene_id=sid,
+                      reason="scene_not_found_in_visual_package")
+            continue
+
+        # Raw additional seconds needed so that (available + new) * MAX_FACTOR
+        # covers the narration duration — smaller than the raw deficit itself,
+        # since the newly generated footage also benefits from the same
+        # bounded editorial stretch as the existing clip.
+        remaining = beat.deficit_seconds / MAX_EDITORIAL_SPEED_FACTOR
+        new_paths: List[Path] = []
+
+        for attempt in range(max_extra_per_beat):
+            if remaining <= 0.001:
+                break
+
+            extra_scene_id = f"{sid}__extra{attempt + 1}"
+            extra_scene_spec = dict(scene)
+            extra_scene_spec["scene_id"] = extra_scene_id
+
+            try:
+                from hypogeum.muapi import submit_scene  # noqa: PLC0415
+
+                output_dir.mkdir(parents=True, exist_ok=True)
+                asset_result = submit_scene(
+                    scene_spec=extra_scene_spec,
+                    config=config,
+                    episode_id=episode_id,
+                    output_dir=output_dir,
+                    agent="clip_repair_agent",
+                )
+                status = asset_result.get("generation_status", "generation_failed")
+                extra_path = output_dir / "video" / f"sc_{extra_scene_id}.mp4"
+                if beat.short_id:
+                    extra_path = output_dir / "video" / beat.short_id / f"sc_{extra_scene_id}.mp4"
+
+                if status in ("generated", "reused") and extra_path.exists():
+                    extra_duration = _probe_extra_clip_duration(extra_path)
+                    new_paths.append(extra_path)
+                    remaining -= extra_duration
+                    log.info(
+                        "coverage_fill_clip_generated",
+                        episode_id=episode_id,
+                        scene_id=sid,
+                        extra_scene_id=extra_scene_id,
+                        extra_duration_seconds=round(extra_duration, 3),
+                        remaining_deficit_seconds=round(max(0.0, remaining), 3),
+                    )
+                else:
+                    log.warn(
+                        "coverage_fill_clip_failed",
+                        episode_id=episode_id,
+                        scene_id=sid,
+                        extra_scene_id=extra_scene_id,
+                        generation_status=status,
+                    )
+            except Exception as exc:
+                log.warn(
+                    "coverage_fill_clip_error",
+                    episode_id=episode_id,
+                    scene_id=sid,
+                    extra_scene_id=extra_scene_id,
+                    error=str(exc),
+                )
+
+        if new_paths:
+            extra_clips_by_scene[sid] = new_paths
+
+    log.info(
+        "coverage_fill_done",
+        episode_id=episode_id,
+        beats_with_new_clips=len(extra_clips_by_scene),
+        total_new_clips=sum(len(v) for v in extra_clips_by_scene.values()),
+    )
+
+    return extra_clips_by_scene
+
+
+def _probe_extra_clip_duration(path: Path) -> float:
+    """Real duration of a generated clip via ffprobe. Returns 0.0 on failure."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        val = result.stdout.strip()
+        if result.returncode == 0 and val:
+            return float(val)
+    except Exception:
+        pass
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

@@ -44,7 +44,7 @@ Public API:
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -75,6 +75,13 @@ class TimelineEntry:
     text_safe_zone: Optional[str]
     clip_duration_seconds: float = 8.0  # native clip duration from production_spec
     narration_reference: Optional[str] = None  # beat_reference used to look up narration segment
+    # Additional distinct clips generated to close a coverage deficit for this beat
+    # (2026-08-01 policy: Video Renderer may only concatenate real, forward-only,
+    # once-each clips to reach duration_seconds — never tpad/loop/reverse/large
+    # setpts). Ordered; each path used exactly once. See hypogeum/agents/coverage_check.py
+    # and hypogeum/agents/clip_repair_agent.py::fill_coverage_deficits(). Empty for
+    # every beat that already has sufficient coverage from its primary clip alone.
+    extra_clip_paths: List[Path] = field(default_factory=list)
 
 
 @dataclass

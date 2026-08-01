@@ -4,6 +4,7 @@ tests/test_run_registry.py — Run Registry + RLG State Machine test suite
 Coverage:
     TestRegisterRun      — run_id format, DB row, JSON file, index entry
     TestCompleteRun      — DB update, JSON update, index append
+    TestCompleteRunEpisodeSync — completed run always produces exactly one episodes row
     TestFailRun          — DB update, JSON update, index append
     TestIndexAppend      — append-only semantics, backfill compatibility
     TestRunIdPropagation — run_id returned and usable as FK in DB
@@ -198,6 +199,144 @@ class TestCompleteRun:
         lines = (runs_dir / "index.jsonl").read_text().strip().splitlines()
         statuses = [json.loads(l)["status"] for l in lines]
         assert "completed" in statuses
+
+
+# ---------------------------------------------------------------------------
+# TestCompleteRunEpisodeSync
+#
+# Regression coverage for a latent gap (present since F14 introduced
+# production_launcher.py, never a regression from any later change):
+# insert_episode() was only ever called from the dashboard's manual
+# /create/launch flow. The autonomous scheduler/worker/queue path — which
+# funnels through this exact complete_run() call — never wrote an episodes
+# row, so a scheduler- or auto-retry-originated episode could reach
+# status='completed' in the runs table with no corresponding episodes row
+# at all. Fixed by upserting the episodes row here, using the real run_id.
+# ---------------------------------------------------------------------------
+
+class TestCompleteRunEpisodeSync:
+    def test_completed_run_produces_exactly_one_episodes_row(self, store):
+        """The core regression: a completed pipeline run must leave exactly one episodes row."""
+        db_path, runs_dir = store
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            "SELECT * FROM episodes WHERE episode_id=?", ("ep_000",)
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
+
+    def test_episode_row_carries_the_real_run_id(self, store):
+        """episodes.run_id must point at the actual run that produced it, not a synthetic placeholder."""
+        db_path, runs_dir = store
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT run_id FROM episodes WHERE episode_id=?", ("ep_000",)
+        ).fetchone()
+        conn.close()
+        assert row["run_id"] == run_id
+
+    def test_episode_row_status_is_complete(self, store):
+        db_path, runs_dir = store
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT status FROM episodes WHERE episode_id=?", ("ep_000",)
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "complete"
+
+    def test_topic_pulled_from_episode_topics_when_no_prior_row(self, store):
+        """Scheduler/auto-retry-originated episodes have an episode_topics row but no episodes row yet."""
+        db_path, runs_dir = store
+        conn = get_connection(db_path)
+        now = "2026-08-01T00:00:00+00:00"
+        conn.execute(
+            "INSERT INTO episode_topics (topic_id, channel_id, topic_text, status, priority, created_at, updated_at, episode_id) "
+            "VALUES ('t1', 'hypogeum', 'The Erdstall Tunnels', 'claimed', 0, ?, ?, 'ep_000')",
+            (now, now),
+        )
+        conn.commit()
+        conn.close()
+
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT topic FROM episodes WHERE episode_id=?", ("ep_000",)
+        ).fetchone()
+        conn.close()
+        assert row["topic"] == "The Erdstall Tunnels"
+
+    def test_missing_topic_lookup_does_not_prevent_row_creation(self, store):
+        """No episode_topics row at all (e.g. a rerun) must still produce a row, with topic=None, not an exception."""
+        db_path, runs_dir = store
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT topic FROM episodes WHERE episode_id=?", ("ep_000",)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row["topic"] is None
+
+    def test_pre_existing_dashboard_row_is_refreshed_not_duplicated(self, store):
+        """A row already created by production_launcher.py (status='in_progress', no run_id) is updated in place, not duplicated."""
+        db_path, runs_dir = store
+        conn = get_connection(db_path)
+        conn.execute(
+            "INSERT INTO episodes (episode_id, title, topic, created_at, status, run_id) "
+            "VALUES ('ep_000', NULL, 'Original Topic', '2026-08-01T00:00:00+00:00', 'in_progress', NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            "SELECT * FROM episodes WHERE episode_id=?", ("ep_000",)
+        ).fetchall()
+        row = rows[0]
+        conn.close()
+        assert len(rows) == 1
+        assert row["status"] == "complete"
+        assert row["run_id"] == run_id
+        assert row["topic"] == "Original Topic"  # preserved from the original insert
+        assert row["created_at"] == "2026-08-01T00:00:00+00:00"  # original creation time preserved
+
+    def test_episode_sync_failure_does_not_break_run_completion(self, store):
+        """Best-effort: if the episode upsert itself fails, complete_run() must still mark the run completed."""
+        db_path, runs_dir = store
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        with patch("hypogeum.run_registry.insert_episode", side_effect=RuntimeError("boom")):
+            complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)  # must not raise
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT status FROM runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "completed"
+
+    def test_calling_complete_run_twice_still_yields_exactly_one_row(self, store):
+        """Idempotency under a duplicate/retried complete_run() call — no duplicate episodes rows."""
+        db_path, runs_dir = store
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            "SELECT * FROM episodes WHERE episode_id=?", ("ep_000",)
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
 
 
 # ---------------------------------------------------------------------------

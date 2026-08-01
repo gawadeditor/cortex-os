@@ -71,6 +71,7 @@ from hypogeum.config import Config
 from hypogeum.db import (
     get_connection,
     initialize_schema,
+    insert_episode,
     insert_run,
     insert_run_state_transition,
     get_run_state_transitions,
@@ -603,6 +604,63 @@ def complete_run(
         pass
 
     _append_index(run_id, episode_id, "completed", rdir)
+
+    # Ensure an episodes-table row exists for this episode. Only
+    # hypogeum.production_launcher's dashboard-manual /create/launch flow
+    # ever called insert_episode() — the autonomous scheduler/worker/queue
+    # path never did, so a scheduler- or auto-retry-originated episode
+    # completed with no episodes row at all despite a fully successful run
+    # (confirmed via git history: no commit ever wired insert_episode()
+    # into pipeline.py/queue.py/scheduler.py). insert_episode() is
+    # INSERT OR REPLACE — idempotent, and also refreshes a pre-existing
+    # dashboard-created row (status='in_progress' forever, previously) to
+    # a terminal status with the real run_id. Best-effort: must never
+    # affect the run's own completion, already recorded above.
+    try:
+        _sync_episode_row(run_id, episode_id, completed_at, db_path)
+    except Exception:
+        pass
+
+
+def _sync_episode_row(
+    run_id: str,
+    episode_id: str,
+    completed_at: str,
+    db_path: Optional[Path],
+) -> None:
+    """Upsert the episodes-table row for a just-completed run. See complete_run()."""
+    conn = get_connection(_db_path(db_path))
+    try:
+        existing = conn.execute(
+            "SELECT topic, created_at FROM episodes WHERE episode_id = ?",
+            (episode_id,),
+        ).fetchone()
+        if existing is not None:
+            topic = existing["topic"]
+            created_at = existing["created_at"]
+        else:
+            topic_row = conn.execute(
+                "SELECT topic_text FROM episode_topics WHERE episode_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (episode_id,),
+            ).fetchone()
+            topic = topic_row["topic_text"] if topic_row is not None else None
+            run_row = conn.execute(
+                "SELECT started_at FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            created_at = run_row["started_at"] if run_row is not None else completed_at
+
+        insert_episode(
+            conn,
+            episode_id=episode_id,
+            created_at=created_at,
+            topic=topic,
+            status="complete",
+            run_id=run_id,
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def fail_run(

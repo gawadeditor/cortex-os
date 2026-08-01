@@ -39,6 +39,7 @@ Public constants (imported by assembly_agent for Final Render Package field valu
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,6 +90,7 @@ def render_episode(
     end_page_path: Optional[Path] = None,
     end_page_duration: float = 20.0,
     music_segments: Optional[List[dict]] = None,
+    short_srt_paths: Optional[Dict[str, Optional[Path]]] = None,
 ) -> dict:
     """
     Execute all ffmpeg renders for one episode and return a render_output_manifest.
@@ -119,6 +121,13 @@ def render_episode(
                                 carries a real track, falls back to the
                                 legacy single music_tracks["main_episode"]
                                 track unchanged. Shorts are never affected.
+        short_srt_paths:        Optional {short_id: Path | None}. When a
+                                path is supplied and exists, that Short's
+                                captions are burned into its video pixels
+                                (see _build_subtitles_filter()) instead of
+                                relying solely on platform CC. Main episode
+                                is never affected — burned-in captions are
+                                a Shorts-only requirement.
 
     Returns:
         render_output_manifest dict — factual record of what was produced.
@@ -216,6 +225,7 @@ def render_episode(
             episode_id=episode_id,
             timeout=ffmpeg_timeout,
             log=log,
+            srt_path=(short_srt_paths or {}).get(short_id),
         )
         if not (short_success and short_output_path.exists() and short_output_path.stat().st_size > 0):
             if render_status != "failed":
@@ -669,10 +679,15 @@ def _render_short(
     episode_id: str,
     timeout: int,
     log,
+    srt_path: Optional[Path] = None,
 ) -> bool:
     """
     Render one Short (9:16) using ffmpeg.
     Returns True on success, False on failure.
+
+    srt_path: When supplied and the file exists, captions are burned into
+    the video pixels — see _build_subtitles_filter(). Shorts must not
+    depend on platform CC (2026-08-01 quality rejection).
     """
     if not timeline and not narration_path:
         log.error(
@@ -691,6 +706,7 @@ def _render_short(
         resolution=SHORT_RESOLUTION,
         episode_id=episode_id,
         is_short=True,
+        srt_path=srt_path,
     )
     return _run_ffmpeg(
         cmd=cmd,
@@ -782,6 +798,152 @@ def _build_multi_segment_music_filter(
     return inputs, ";".join(seg_filter_parts), idx
 
 
+# Burned-in caption styling for Shorts (9:16) — high-contrast white fill,
+# black outline, bottom-center, kept clear of the bottom ~14.6% of frame
+# height where TikTok/Reels/Shorts platform UI (username, action buttons,
+# CTA) typically overlaps the video.
+#
+# A plain .srt has no embedded PlayResX/PlayResY, so ffmpeg's subtitles
+# filter (via libass) falls back to an internal default script resolution
+# when converting it. force_style values (FontSize, MarginV, ...) are
+# interpreted in THAT reference space, not the real output resolution —
+# confirmed empirically (2026-08-01): burning a raw .srt with
+# original_size=1080x1920 + force_style still rendered the text gigantic
+# and pinned to the top of frame, because original_size scales for a
+# *mismatched authoring resolution*, it does not establish one for a
+# plain SRT with none. The reliable fix is to convert the SRT to a
+# minimal ASS document with an explicit [Script Info] PlayResX/PlayResY
+# matching the actual render resolution and the style baked into a
+# [V4+ Styles] Style line — the same native libass renderer, just given
+# an unambiguous coordinate system. Verified empirically to render
+# correctly positioned, high-contrast text at the intended size.
+_CAPTION_FONT_SIZE  = 48
+_CAPTION_MARGIN_V   = 280
+_CAPTION_OUTLINE_PX = 3
+
+_SRT_TIME_RE = re.compile(
+    r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
+    r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})"
+)
+
+
+def _srt_timestamp_to_ass(hh: str, mm: str, ss: str, ms: str) -> str:
+    """SRT 'HH:MM:SS,mmm' -> ASS 'H:MM:SS.cc' (centiseconds, single-digit hour)."""
+    centiseconds = int(ms) // 10
+    return f"{int(hh)}:{mm}:{ss}.{centiseconds:02d}"
+
+
+def _parse_srt_cues(srt_text: str) -> List[Tuple[str, str, str]]:
+    """
+    Parse SRT text into a list of (ass_start, ass_end, text) tuples.
+    Multi-line cue text is joined with ASS's \\N line-break escape.
+    Skips malformed blocks rather than raising — a burned-in caption
+    render must never fail the whole assembly over one bad cue.
+    """
+    cues: List[Tuple[str, str, str]] = []
+    blocks = re.split(r"\r?\n\r?\n+", srt_text.strip())
+    for block in blocks:
+        lines = [l for l in block.splitlines() if l.strip() != ""]
+        if len(lines) < 2:
+            continue
+        # First line is the cue index (if numeric) or already the timing line.
+        timing_line_idx = 0
+        if lines[0].strip().isdigit():
+            timing_line_idx = 1
+        if timing_line_idx >= len(lines):
+            continue
+        m = _SRT_TIME_RE.search(lines[timing_line_idx])
+        if not m:
+            continue
+        start = _srt_timestamp_to_ass(*m.groups()[0:4])
+        end = _srt_timestamp_to_ass(*m.groups()[4:8])
+        text_lines = lines[timing_line_idx + 1:]
+        if not text_lines:
+            continue
+        text = "\\N".join(t.strip() for t in text_lines)
+        cues.append((start, end, text))
+    return cues
+
+
+def _build_caption_ass(srt_path: Path, resolution: str, dest_path: Path) -> bool:
+    """
+    Convert srt_path into a minimal ASS file at dest_path with explicit
+    PlayResX/PlayResY matching `resolution` (WxH) and the burned-in
+    caption Style baked in. Returns True on success (dest_path written
+    with at least one cue), False on any failure (missing/empty/
+    unparseable source) — callers must treat False as "no captions to
+    burn", never as a hard error.
+    """
+    try:
+        srt_text = srt_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+    cues = _parse_srt_cues(srt_text)
+    if not cues:
+        return False
+
+    width, height = resolution.split("x")
+    style = (
+        f"Style: Default,Arial,{_CAPTION_FONT_SIZE},"
+        "&H00FFFFFF,"   # PrimaryColour: white fill, opaque
+        "&H000000FF,"   # SecondaryColour (karaoke, unused)
+        "&H00000000,"   # OutlineColour: black, opaque
+        "&H00000000,"   # BackColour (unused, BorderStyle=1 has no box)
+        "1,0,0,0,"       # Bold,Italic,Underline,StrikeOut
+        "100,100,0,0,"   # ScaleX,ScaleY,Spacing,Angle
+        "1,"             # BorderStyle: outline + shadow, not an opaque box
+        f"{_CAPTION_OUTLINE_PX},0,"  # Outline,Shadow
+        "2,"             # Alignment: bottom-center
+        f"40,40,{_CAPTION_MARGIN_V},1"  # MarginL,MarginR,MarginV,Encoding
+    )
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {width}",
+        f"PlayResY: {height}",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding",
+        style,
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    for start, end, text in cues:
+        lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
+def _escape_ffmpeg_filter_path(path: Path) -> str:
+    """
+    Escape a filesystem path for use inside an ffmpeg filtergraph string
+    argument (e.g. subtitles=filename='...'). Per ffmpeg's own documented
+    convention: backslashes and colons must be backslash-escaped, and the
+    whole value is then wrapped in single quotes by the caller — so any
+    literal single quote in the path must also be escaped.
+    """
+    s = str(path)
+    s = s.replace("\\", "\\\\")
+    s = s.replace(":", "\\:")
+    s = s.replace("'", "\\'")
+    return s
+
+
+def _build_subtitles_filter(ass_path: Path) -> str:
+    """Return the `subtitles=...` ffmpeg filter fragment (no leading input label) for burning ass_path in. Style is already baked into ass_path — see _build_caption_ass()."""
+    escaped = _escape_ffmpeg_filter_path(ass_path)
+    return f"subtitles=filename='{escaped}'"
+
+
 def _build_ffmpeg_concat_command(
     timeline: List[TimelineEntry],
     narration_path: Optional[Path],
@@ -792,6 +954,7 @@ def _build_ffmpeg_concat_command(
     is_short: bool = False,
     music_tail_seconds: float = 0.0,
     music_segments: Optional[List[dict]] = None,
+    srt_path: Optional[Path] = None,
 ) -> List[str]:
     """
     Build an ffmpeg command list for concatenating scenes with audio.
@@ -821,6 +984,13 @@ def _build_ffmpeg_concat_command(
     line downstream of [msc] (the narration mix, loudnorm) is unchanged.
     Falls back to the single music_track path when no segment has a track
     (empty/None music_segments, or an older single-key music_track_package).
+
+    srt_path: When supplied and the file exists, burns the SRT captions into
+    the video pixels via ffmpeg's `subtitles` filter — readable without
+    sound and independent of platform CC, which is required for Shorts
+    (2026-08-01 quality rejection: Shorts had platform CC only, no
+    burned-in text). Styled high-contrast (white fill, black outline) and
+    kept clear of the bottom UI-overlap zone on 9:16 delivery.
     """
     width, height = resolution.split("x")
 
@@ -974,6 +1144,14 @@ def _build_ffmpeg_concat_command(
             "-i", f"color=c=black:s={resolution}:r={FRAME_RATE}:d={body_dur:.3f}",
         ]
         video_map = "0:v"
+
+    if srt_path is not None and srt_path.exists():
+        ass_path = srt_path.with_suffix(".ass")
+        if _build_caption_ass(srt_path, resolution, ass_path):
+            filter_parts.append(
+                f"{video_map}{_build_subtitles_filter(ass_path)}[vsub]"
+            )
+            video_map = "[vsub]"
 
     # Audio inputs
     # Count actual -i arguments (not len//2 — lavfi adds "-f lavfi -i" = 4 items for 1 input)

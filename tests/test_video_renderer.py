@@ -26,8 +26,12 @@ from hypogeum.agents.video_renderer import (
     MAIN_RESOLUTION,
     SHORT_RESOLUTION,
     _MUSIC_AMPLITUDE_FACTOR,
+    _build_caption_ass,
     _build_ffmpeg_concat_command,
+    _build_subtitles_filter,
+    _parse_srt_cues,
     _run_ffmpeg,
+    _srt_timestamp_to_ass,
     render_episode,
 )
 from hypogeum.agents.timeline_builder import TimelineEntry, TimelinePlan
@@ -568,6 +572,156 @@ class TestNoReverseOrPingPong:
         # Only one -i for this entry's own clip; no self-concat of the clip stream.
         assert cmd_str.count(str(clip_path)) == 1
         assert "concat=n=2:v=1:a=0" not in cmd_str
+
+
+# ---------------------------------------------------------------------------
+# TestBurnedInCaptions
+#
+# Regression coverage for the 2026-08-01 quality rejection: Shorts had
+# platform CC only, no burned-in on-screen text. The fix burns captions
+# into pixels via ffmpeg's native `subtitles` filter — but a plain .srt
+# has no embedded PlayResX/PlayResY, so libass falls back to an internal
+# default script resolution and force_style values (FontSize, MarginV)
+# get interpreted in THAT space, not the real output resolution —
+# confirmed empirically: text rendered gigantic and pinned to the top of
+# frame instead of a readable bottom-center caption. The fix converts the
+# SRT to a minimal ASS with explicit PlayResX/PlayResY matching the real
+# render resolution. These tests assert on exactly that value being
+# present and correct — the root cause of the original bug.
+# ---------------------------------------------------------------------------
+
+class TestBurnedInCaptions:
+
+    def test_srt_timestamp_to_ass_conversion(self):
+        assert _srt_timestamp_to_ass("00", "00", "01", "602") == "0:00:01.60"
+        assert _srt_timestamp_to_ass("01", "23", "45", "678") == "1:23:45.67"
+        assert _srt_timestamp_to_ass("00", "00", "00", "046") == "0:00:00.04"
+
+    def test_parse_srt_cues_basic(self):
+        srt = (
+            "1\n00:00:00,046 --> 00:00:01,602\nThere is a passage\n\n"
+            "2\n00:00:01,672 --> 00:00:04,331\ncalled a schlupf.\n"
+        )
+        cues = _parse_srt_cues(srt)
+        assert len(cues) == 2
+        assert cues[0] == ("0:00:00.04", "0:00:01.60", "There is a passage")
+        assert cues[1] == ("0:00:01.67", "0:00:04.33", "called a schlupf.")
+
+    def test_parse_srt_cues_multiline_joined_with_ass_linebreak(self):
+        srt = "1\n00:00:00,000 --> 00:00:02,000\nLine one\nLine two\n"
+        cues = _parse_srt_cues(srt)
+        assert cues[0][2] == "Line one\\NLine two"
+
+    def test_parse_srt_cues_skips_malformed_blocks(self):
+        srt = "1\nnot a timing line\ntext\n\n2\n00:00:00,000 --> 00:00:01,000\nreal cue\n"
+        cues = _parse_srt_cues(srt)
+        assert len(cues) == 1
+        assert cues[0][2] == "real cue"
+
+    def test_parse_srt_cues_empty_input_returns_empty_list(self):
+        assert _parse_srt_cues("") == []
+
+    def test_build_caption_ass_sets_correct_playres(self, tmp_path):
+        """The exact root cause of the original bug: PlayResX/PlayResY must
+        match the real render resolution, not be absent or a mismatched default."""
+        srt_path = tmp_path / "cap.srt"
+        srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+        dest = tmp_path / "cap.ass"
+
+        ok = _build_caption_ass(srt_path, "1080x1920", dest)
+
+        assert ok is True
+        content = dest.read_text()
+        assert "PlayResX: 1080" in content
+        assert "PlayResY: 1920" in content
+
+    def test_build_caption_ass_uses_given_resolution_not_a_default(self, tmp_path):
+        """A different resolution (main episode, if ever used) must produce different PlayRes."""
+        srt_path = tmp_path / "cap.srt"
+        srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+        dest = tmp_path / "cap.ass"
+
+        _build_caption_ass(srt_path, "1920x1080", dest)
+
+        content = dest.read_text()
+        assert "PlayResX: 1920" in content
+        assert "PlayResY: 1080" in content
+
+    def test_build_caption_ass_style_is_high_contrast_bottom_center(self, tmp_path):
+        srt_path = tmp_path / "cap.srt"
+        srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+        dest = tmp_path / "cap.ass"
+
+        _build_caption_ass(srt_path, "1080x1920", dest)
+
+        content = dest.read_text()
+        assert "&H00FFFFFF" in content  # white fill, opaque
+        assert "&H00000000" in content  # black outline, opaque
+        style_line = next(l for l in content.splitlines() if l.startswith("Style: Default"))
+        fields = style_line.split(",")
+        assert fields[-5] == "2"  # Alignment: bottom-center
+
+    def test_build_caption_ass_dialogue_lines_present(self, tmp_path):
+        srt_path = tmp_path / "cap.srt"
+        srt_path.write_text("1\n00:00:00,046 --> 00:00:01,602\nThere is a passage\n")
+        dest = tmp_path / "cap.ass"
+
+        _build_caption_ass(srt_path, "1080x1920", dest)
+
+        content = dest.read_text()
+        assert "Dialogue: 0,0:00:00.04,0:00:01.60,Default,,0,0,0,,There is a passage" in content
+
+    def test_build_caption_ass_returns_false_for_missing_file(self, tmp_path):
+        ok = _build_caption_ass(tmp_path / "does_not_exist.srt", "1080x1920", tmp_path / "out.ass")
+        assert ok is False
+        assert not (tmp_path / "out.ass").exists()
+
+    def test_build_caption_ass_returns_false_for_empty_srt(self, tmp_path):
+        srt_path = tmp_path / "empty.srt"
+        srt_path.write_text("")
+        ok = _build_caption_ass(srt_path, "1080x1920", tmp_path / "out.ass")
+        assert ok is False
+
+    def test_build_subtitles_filter_references_ass_path(self, tmp_path):
+        ass_path = tmp_path / "captions" / "sh_short_001.ass"
+        filt = _build_subtitles_filter(ass_path)
+        assert filt.startswith("subtitles=filename='")
+        assert str(ass_path) in filt
+
+    def test_build_subtitles_filter_escapes_colon_in_path(self):
+        # Windows-style drive-letter colon, or any literal colon in a path,
+        # must be backslash-escaped per ffmpeg's filtergraph syntax.
+        filt = _build_subtitles_filter(Path("C:/videos/cap.ass"))
+        assert "C\\:/videos/cap.ass" in filt
+
+    def test_short_render_burns_captions_when_srt_provided(self, tmp_path):
+        """End-to-end command construction: a Short with srt_path produces a
+        subtitles filter chained onto the video output; no subtitle filter
+        appears when srt_path is omitted."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        srt_path = tmp_path / "cap.srt"
+        srt_path.write_text("1\n00:00:00,000 --> 00:00:04,000\nHello world\n")
+        entry = _make_entry(duration_seconds=4.0, clip_duration_seconds=4.0, clip_path=clip_path)
+
+        cmd_with = _build_ffmpeg_concat_command(
+            timeline=[entry], narration_path=None, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution=SHORT_RESOLUTION,
+            episode_id="ep_test", is_short=True, srt_path=srt_path,
+        )
+        cmd_without = _build_ffmpeg_concat_command(
+            timeline=[entry], narration_path=None, music_track=None,
+            output_path=tmp_path / "out2.mp4", resolution=SHORT_RESOLUTION,
+            episode_id="ep_test", is_short=True, srt_path=None,
+        )
+
+        cmd_with_str = " ".join(str(c) for c in cmd_with)
+        cmd_without_str = " ".join(str(c) for c in cmd_without)
+        assert "subtitles=filename=" in cmd_with_str
+        assert "[vsub]" in cmd_with_str
+        assert "subtitles=filename=" not in cmd_without_str
+        # The .ass sidecar file must actually be written alongside the .srt
+        assert (tmp_path / "cap.ass").exists()
 
 
 # ---------------------------------------------------------------------------

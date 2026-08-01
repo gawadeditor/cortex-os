@@ -36,6 +36,7 @@ from hypogeum.agents.assembly_agent import (
     AssemblyAgentError,
     _collect_thumbnail_references,
     _compute_chapter_timestamps,
+    _find_caption_asset_id,
     _find_stitched_track_asset_id,
     _format_sources,
     run_assembly_agent,
@@ -1820,6 +1821,44 @@ class TestInternalHelpers:
         ]
         result = _find_stitched_track_asset_id(tracks, "main_episode")
         assert result == "episodes/ep/narration/main_narration"
+
+    def test_find_caption_asset_id_main_episode(self):
+        """Real caption entries (see narration_package['captions']) never carry
+        a source_type key — only caption_id/srt_asset_id/caption_method/
+        has_content. main_episode lookup falls back to the 'main' substring
+        check in srt_asset_id."""
+        captions = [
+            {"caption_id": "cap_main", "srt_asset_id": "episodes/ep/captions/main"},
+            {"caption_id": "cap_s1", "srt_asset_id": "episodes/ep/captions/sh_short_001"},
+        ]
+        result = _find_caption_asset_id(captions, "main_episode")
+        assert result == "episodes/ep/captions/main"
+
+    def test_find_caption_asset_id_short_resolves_correctly(self):
+        """
+        Regression: 2026-08-01 quality rejection. Against real caption data
+        (no source_type key), this previously returned None for every
+        Short unconditionally — confirmed via a real final_render_package.json
+        where all three Shorts had caption_asset_id="". Burned-in captions
+        (video_renderer._build_caption_ass) depend on this resolving
+        correctly, or no caption ever gets burned in.
+        """
+        captions = [
+            {"caption_id": "cap_main", "srt_asset_id": "episodes/ep/captions/main"},
+            {"caption_id": "cap_s1", "srt_asset_id": "episodes/ep/captions/sh_short_001"},
+            {"caption_id": "cap_s2", "srt_asset_id": "episodes/ep/captions/sh_short_002"},
+            {"caption_id": "cap_s3", "srt_asset_id": "episodes/ep/captions/sh_short_003"},
+        ]
+        assert _find_caption_asset_id(captions, "short", "short_001") == "episodes/ep/captions/sh_short_001"
+        assert _find_caption_asset_id(captions, "short", "short_002") == "episodes/ep/captions/sh_short_002"
+        assert _find_caption_asset_id(captions, "short", "short_003") == "episodes/ep/captions/sh_short_003"
+
+    def test_find_caption_asset_id_unmatched_short_returns_none(self):
+        captions = [{"caption_id": "cap_s1", "srt_asset_id": "episodes/ep/captions/sh_short_001"}]
+        assert _find_caption_asset_id(captions, "short", "short_999") is None
+
+    def test_find_caption_asset_id_empty_list_returns_none(self):
+        assert _find_caption_asset_id([], "short", "short_001") is None
 
 
 # ---------------------------------------------------------------------------

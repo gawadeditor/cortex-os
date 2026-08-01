@@ -590,6 +590,18 @@ def run_assembly_agent(
     _end_page_path = assets_root / "end-page.png"
     _end_page_duration = float(getattr(config, "END_PAGE_DURATION_SECONDS", 20))
 
+    # Shorts burned-in captions (2026-08-01 quality rejection: Shorts had
+    # platform CC only). Reuses the same asset-id lookup already used for
+    # the later caption_asset_id metadata (_find_caption_asset_id below),
+    # resolved to the on-disk .srt path so Video Renderer can burn it in.
+    _captions = narration_package.get("captions", [])
+    short_srt_paths: dict = {}
+    for short_id in short_ids:
+        _srt_asset_id = _find_caption_asset_id(_captions, "short", short_id)
+        short_srt_paths[short_id] = (
+            assets_root / f"{_srt_asset_id}.srt" if _srt_asset_id else None
+        )
+
     render_manifest = render_episode(
         timeline_plan=timeline_plan,
         main_narration_path=main_narration_path,
@@ -605,6 +617,7 @@ def run_assembly_agent(
         end_page_path=_end_page_path if _end_page_path.exists() else None,
         end_page_duration=_end_page_duration,
         music_segments=music_segments,
+        short_srt_paths=short_srt_paths,
     )
     render_status = render_manifest["render_status"]
 
@@ -913,15 +926,29 @@ def _find_caption_asset_id(
     source_type: str,
     short_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Find the srt_asset_id for a caption entry."""
+    """
+    Find the srt_asset_id for a caption entry.
+
+    Real caption entries (see narration_package["captions"]) never carry a
+    "source_type" key — only caption_id/srt_asset_id/caption_method/
+    has_content. The cap.get("source_type") == source_type branch below is
+    therefore dead against real data; matching falls through to the
+    srt_asset_id substring checks for both main_episode and short (fixed
+    2026-08-01 — this previously left short lookups silently returning
+    None: confirmed via a real final_render_package.json where all three
+    Shorts had caption_asset_id="").
+    """
     for cap in captions:
+        srt_id = cap.get("srt_asset_id", "")
         if cap.get("source_type") == source_type or (
-            source_type == "main_episode" and "main" in cap.get("srt_asset_id", "")
+            source_type == "main_episode" and "main" in srt_id
+        ) or (
+            source_type == "short" and short_id and short_id in srt_id
         ):
             if source_type == "main_episode":
-                return cap.get("srt_asset_id")
-            if short_id and short_id in cap.get("srt_asset_id", ""):
-                return cap.get("srt_asset_id")
+                return srt_id
+            if short_id and short_id in srt_id:
+                return srt_id
     return None
 
 

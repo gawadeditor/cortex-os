@@ -51,6 +51,7 @@ _EXPECTED_STAGES = {
     "finance_agent_authorization",
     "thumbnail_strategy",
     "visual_package_director",
+    "source_enhancement",
     "thumbnail_director",
     "audio_agent",
     "assembly_agent",
@@ -157,7 +158,7 @@ def _run_isolated(db_path: Path, **pipeline_kwargs):
 
 class TestStageAuditOnSuccess:
     def test_stage_rows_written_for_all_stages(self, isolated_audit_db):
-        """All 17 expected stage_executions rows exist after a successful run."""
+        """All 18 expected stage_executions rows exist after a successful run."""
         _run_isolated(isolated_audit_db)
         rows = _query_stage_rows(isolated_audit_db, _FAKE_RUN_ID)
         found = {r["stage_name"] for r in rows}
@@ -170,11 +171,12 @@ class TestStageAuditOnSuccess:
         not_completed = [r for r in rows if r["status"] != "completed"]
         assert not_completed == [], f"Rows with non-completed status: {not_completed}"
 
-    def test_stage_row_count_is_17(self, isolated_audit_db):
-        """Row count equals 17 — no duplicates, no missing stages."""
+    def test_stage_row_count_is_18(self, isolated_audit_db):
+        """Row count equals 18 (17 pre-existing + Source Enhancement) — no
+        duplicates, no missing stages."""
         _run_isolated(isolated_audit_db)
         rows = _query_stage_rows(isolated_audit_db, _FAKE_RUN_ID)
-        assert len(rows) == 17
+        assert len(rows) == 18
 
 
 # ---------------------------------------------------------------------------

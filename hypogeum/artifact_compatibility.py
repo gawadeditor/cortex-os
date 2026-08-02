@@ -65,7 +65,7 @@ import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from hypogeum.topic_discovery import _make_canonical_subject
 
@@ -210,6 +210,61 @@ _DRY_RUN_MEAN_LUMINANCE = 33.0
 _DRY_RUN_LUMINANCE_TOLERANCE = 3.0
 _DRY_RUN_MAX_SPREAD = 2.0  # YMAX-YMIN; a flat fill is 0, real footage is tens of units
 
+# Required source resolution (2026-08-02 Production Output Gate policy).
+# Sourced from config.MUAPI_VIDEO_RESOLUTION's intent (the "1080p" already
+# requested in every veo3.1 payload — see hypogeum/muapi.py::_build_job_payload)
+# expressed as literal pixel dimensions, since the provider has been measured
+# to sometimes ignore the requested resolution string entirely (confirmed via
+# ffprobe: ep_f3619022's 29/29 real source clips measured 1280x720 despite
+# every payload requesting "1080p"). A 720p source scaled up to a 1920x1080
+# canvas by Video Renderer's letterbox/pad filter is NOT 1080p compliance —
+# this checks the SOURCE clip's own pixel dimensions, never the final render's.
+REQUIRED_SOURCE_WIDTH = 1920
+REQUIRED_SOURCE_HEIGHT = 1080
+
+
+def probe_resolution(path: Path) -> Tuple[int, int]:
+    """Real (width, height) of a video file's first video stream via
+    ffprobe. Returns (0, 0) on any failure (missing file, corrupted,
+    unreadable) — callers must treat (0, 0) as "resolution unknown," never
+    as "compliant."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split(",")
+            if len(parts) == 2:
+                return int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+    return (0, 0)
+
+
+def is_resolution_compliant_clip(
+    path: Optional[Path],
+    required_width: int = REQUIRED_SOURCE_WIDTH,
+    required_height: int = REQUIRED_SOURCE_HEIGHT,
+) -> bool:
+    """
+    True only when path's actual measured resolution meets or exceeds the
+    required source resolution. Conservative in the OPPOSITE direction from
+    is_dry_run_clip(): an unprovable resolution (probe failure, missing
+    file) is NOT compliant — "never silently upscale and declare
+    compliance" means the burden of proof is on demonstrating the source
+    really is high-resolution, not on disproving it. This deliberately
+    checks strictly >= the requirement (not exact-match) so a provider that
+    returns something larger than required still passes.
+    """
+    if path is None or not path.exists():
+        return False
+    width, height = probe_resolution(path)
+    if width <= 0 or height <= 0:
+        return False
+    return width >= required_width and height >= required_height
+
 
 def _probe_duration_seconds(path: Path) -> float:
     try:
@@ -336,6 +391,16 @@ def evaluate_video_clip_compatibility(clip_path: Optional[Path]) -> ArtifactChec
             CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
             ["matches the MUAPI dry-run placeholder signature (flat 0x141414 fill)"],
         )
+    if not is_resolution_compliant_clip(clip_path):
+        width, height = probe_resolution(clip_path)
+        return ArtifactCheckResult(
+            CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
+            [
+                f"source resolution {width}x{height} is below the required "
+                f"{REQUIRED_SOURCE_WIDTH}x{REQUIRED_SOURCE_HEIGHT} — a low-resolution "
+                f"source scaled up at render time is not compliance"
+            ],
+        )
     return ArtifactCheckResult(
         CompatibilityDecision.VALID_AND_COMPATIBLE,
         [f"real footage, {duration:.2f}s, {size} bytes"],
@@ -345,6 +410,129 @@ def evaluate_video_clip_compatibility(clip_path: Optional[Path]) -> ArtifactChec
 # ---------------------------------------------------------------------------
 # Derived-render (final_render_package) compatibility
 # ---------------------------------------------------------------------------
+
+def evaluate_source_enhancement_compatibility(
+    asset: dict,
+    clip_path: Optional[Path],
+    config,
+) -> ArtifactCheckResult:
+    """
+    Decide whether a previously recorded source_enhancement outcome (see
+    hypogeum/source_enhancement.py) for one asset_manifest entry is still
+    trustworthy under CURRENT policy, or must be redone.
+
+    Four independent provenance dimensions are compared against the asset's
+    recorded `source_enhancement` block — any mismatch makes this ONE
+    asset incompatible; every other asset in the episode is evaluated
+    independently and unaffected (selective regeneration, never a
+    whole-episode restart):
+
+      1. generation model  — the clip's own recorded producing model no
+         longer matches the current tier -> model mapping. The pre-
+         enhancement source itself is stale; re-enhancing it would just
+         polish an outdated clip. (Full regeneration of the base clip is
+         VPD's concern, not this function's — this only reports the
+         mismatch so a caller can route to it; see module note below.)
+      2. enhancement provider  — config.ENHANCEMENT_PROVIDER no longer
+         matches the provider this asset was actually enhanced with.
+      3. enhancement version   — the resolved provider's `.version` no
+         longer matches what was recorded (same provider, bumped internally).
+      4. required source resolution — config.ENHANCEMENT_REQUIRED_WIDTH/
+         HEIGHT no longer matches what this asset was validated against.
+
+    A clip with no source_enhancement record at all is not "incompatible"
+    in the policy-drift sense this function evaluates — it simply hasn't
+    been evaluated yet, which is the ordinary state for a fresh asset. This
+    function only judges EXISTING records, so an absent block is reported
+    as INVALID_OR_INCOMPATIBLE with a distinct reason ("not yet evaluated")
+    the caller should treat identically to "must run source enhancement,"
+    not as an error.
+    """
+    se = (asset or {}).get("source_enhancement")
+    if not se:
+        return ArtifactCheckResult(
+            CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
+            ["no source_enhancement record — not yet evaluated"],
+        )
+
+    reasons: List[str] = []
+
+    recorded_model = asset.get("model") or asset.get("model_used")
+    tier_used = asset.get("tier_used")
+    current_model = _current_tier_model(tier_used, config)
+    if current_model and recorded_model and recorded_model != current_model:
+        reasons.append(
+            f"generation model changed: clip produced by {recorded_model!r}, "
+            f"tier {tier_used} currently maps to {current_model!r}"
+        )
+
+    required_width = getattr(config, "ENHANCEMENT_REQUIRED_WIDTH", REQUIRED_SOURCE_WIDTH)
+    required_height = getattr(config, "ENHANCEMENT_REQUIRED_HEIGHT", REQUIRED_SOURCE_HEIGHT)
+    if se.get("required_width") != required_width or se.get("required_height") != required_height:
+        reasons.append(
+            f"required source resolution policy changed: recorded "
+            f"{se.get('required_width')}x{se.get('required_height')}, "
+            f"current policy requires {required_width}x{required_height}"
+        )
+
+    if se.get("applied"):
+        if se.get("validation_result") != "passed":
+            reasons.append(
+                f"prior enhancement attempt did not pass validation "
+                f"(validation_result={se.get('validation_result')!r})"
+            )
+        else:
+            from hypogeum.providers.enhancement import get_enhancement_provider  # noqa: PLC0415
+
+            current_provider = get_enhancement_provider(config)
+            if se.get("provider") != current_provider.name:
+                reasons.append(
+                    f"enhancement provider changed: recorded {se.get('provider')!r}, "
+                    f"current policy uses {current_provider.name!r}"
+                )
+            elif se.get("model") != current_provider.model:
+                reasons.append(
+                    f"enhancement model changed: recorded {se.get('model')!r}, "
+                    f"current provider uses {current_provider.model!r}"
+                )
+            elif se.get("provider_version") != current_provider.version:
+                reasons.append(
+                    f"enhancement version changed: recorded "
+                    f"{se.get('provider_version')!r}, current provider is "
+                    f"v{current_provider.version}"
+                )
+
+    if reasons:
+        return ArtifactCheckResult(CompatibilityDecision.INVALID_OR_INCOMPATIBLE, reasons)
+
+    if not is_resolution_compliant_clip(clip_path, required_width, required_height):
+        width, height = probe_resolution(clip_path) if clip_path else (0, 0)
+        return ArtifactCheckResult(
+            CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
+            [f"on-disk clip measures {width}x{height}, no longer resolution-compliant"],
+        )
+
+    return ArtifactCheckResult(
+        CompatibilityDecision.VALID_AND_COMPATIBLE,
+        ["prior source_enhancement decision still valid under current policy"],
+    )
+
+
+def _current_tier_model(tier_used: Optional[int], config) -> Optional[str]:
+    """Mirrors hypogeum.muapi._tier_to_model()'s tier->model mapping for
+    text-to-video tiers, without importing hypogeum.muapi (that module
+    imports this one for its own resolution checks — importing it back
+    would be circular). Reference-image (I2V) routing is intentionally
+    not modeled here; this is only used to detect a stale non-I2V tier
+    mapping."""
+    if tier_used == 1:
+        return getattr(config, "MUAPI_T1_MODEL", None)
+    if tier_used == 3:
+        return getattr(config, "MUAPI_T3_MODEL", None)
+    if tier_used == 2:
+        return getattr(config, "MUAPI_T2_MODEL", None)
+    return None
+
 
 def evaluate_render_compatibility(
     final_render_package: dict,

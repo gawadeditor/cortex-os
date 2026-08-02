@@ -916,6 +916,29 @@ def run_pipeline(
             raise PipelineCancelledError(episode_id=episode_id, stage_after="visual_package_director")
 
         # -----------------------------------------------------------------------
+        # 7a. Source Enhancement — provider-agnostic resolution-compliance
+        # stage between Source Generation (above) and Coverage. See
+        # hypogeum/source_enhancement.py for the full architecture.
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="source_enhancement")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "source_enhancement", log,
+            output_schema="visual_package",
+            db_path=db_path,
+        )
+        visual_package = _run_source_enhancement(
+            visual_package=visual_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
+        log.info("pipeline_stage_completed", agent="source_enhancement")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="source_enhancement")
+
+        # -----------------------------------------------------------------------
         # 7b. Thumbnail Director
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="thumbnail_director")
@@ -1761,6 +1784,30 @@ def _run_visual_package_director(
         )
     return run_visual_package_director(
         script_package=script_package,
+        config=config,
+        episode_id=episode_id,
+        output_dir=output_dir,
+    )
+
+
+def _run_source_enhancement(
+    visual_package: dict,
+    config: Config,
+    episode_id: str,
+    output_dir: Optional[Path],
+) -> dict:
+    """
+    Source Enhancement (2026-08-02). Provider-agnostic stage between Source
+    Generation (Visual Package Director Phase 2, above) and Coverage: raises
+    any source clip below the required source resolution via the configured
+    Enhancement Provider (see hypogeum/source_enhancement.py's own docstring
+    for the full pipeline position and fail-closed contract). A clip already
+    at or above the required resolution is reused untouched, at no cost.
+    """
+    from hypogeum.source_enhancement import run_source_enhancement  # noqa: PLC0415
+
+    return run_source_enhancement(
+        visual_package=visual_package,
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,

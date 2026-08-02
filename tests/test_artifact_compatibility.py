@@ -186,6 +186,9 @@ class TestDryRunClipNeverReused:
         ), patch(
             "hypogeum.artifact_compatibility._frame_luminance_stats",
             return_value=(110.0, 42.0),  # textured, mid-brightness -- not a flat fill
+        ), patch(
+            "hypogeum.artifact_compatibility.probe_resolution",
+            return_value=(1920, 1080),
         ):
             assert is_dry_run_clip(clip_path) is False
             result = evaluate_video_clip_compatibility(clip_path)
@@ -267,6 +270,9 @@ class TestInvalidRenderDoesNotInvalidateClips:
         ), patch(
             "hypogeum.artifact_compatibility._frame_luminance_stats",
             return_value=(95.0, 38.0),
+        ), patch(
+            "hypogeum.artifact_compatibility.probe_resolution",
+            return_value=(1920, 1080),
         ):
             clip_result = evaluate_video_clip_compatibility(clip_path)
         assert clip_result.reusable

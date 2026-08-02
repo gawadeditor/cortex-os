@@ -751,7 +751,7 @@ class TestAgentCallOrder:
             assert mock.call_count == 1, f"Expected {name} to be called once"
 
     def test_agents_called_in_frozen_order(self):
-        """Verify the frozen execution order: EP→RD→NA→SE→TS→VPD→TD→Audio→Asm→Pub."""
+        """Verify the frozen execution order: EP→RD→NA→SE→TS→VPD→SrcEnh→TD→Audio→Asm→Pub."""
         call_order = []
         cfg = make_config()
         report = make_startup_report()
@@ -775,6 +775,8 @@ class TestAgentCallOrder:
                        side_effect=make_recorder("ts", MINIMAL_THUMBNAIL_CONCEPT_BRIEF)), \
                  patch("hypogeum.pipeline._run_visual_package_director",
                        side_effect=make_recorder("vpd", MINIMAL_VISUAL_PACKAGE)), \
+                 patch("hypogeum.pipeline._run_source_enhancement",
+                       side_effect=make_recorder("src_enh", MINIMAL_VISUAL_PACKAGE)), \
                  patch("hypogeum.pipeline._run_thumbnail_director",
                        side_effect=make_recorder("td", MINIMAL_THUMBNAIL_PACKAGE)), \
                  patch("hypogeum.pipeline._run_audio_agent",
@@ -785,7 +787,7 @@ class TestAgentCallOrder:
                        side_effect=make_recorder("pub", MINIMAL_PUBLISHING_RECORD)):
                 run_pipeline(topic_input="Test", episode_id="ep_001", config=cfg)
 
-        assert call_order == ["ep", "rd", "na", "se", "ts", "vpd", "td", "audio", "asm", "pub"]
+        assert call_order == ["ep", "rd", "na", "se", "ts", "vpd", "src_enh", "td", "audio", "asm", "pub"]
 
 
 # ---------------------------------------------------------------------------
@@ -923,14 +925,16 @@ class TestLogging:
     def test_stage_started_for_all_agents(self):
         events = self._capture_log_events()
         stage_started = [e for _, e in events if e == "pipeline_stage_started"]
-        # 16 stages (9 original + Thumbnail Strategy + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
-        assert len(stage_started) == 16
+        # 17 stages (9 original + Thumbnail Strategy + Source Enhancement + QA
+        # + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
+        assert len(stage_started) == 17
 
     def test_stage_completed_for_all_agents(self):
         events = self._capture_log_events()
         stage_completed = [e for _, e in events if e == "pipeline_stage_completed"]
-        # 16 stages (9 original + Thumbnail Strategy + QA + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
-        assert len(stage_completed) == 16
+        # 17 stages (9 original + Thumbnail Strategy + Source Enhancement + QA
+        # + Compliance + Archive + Finance Auth + Finance Ledger + Asset Archive)
+        assert len(stage_completed) == 17
 
     def test_started_before_completed(self):
         events = self._capture_log_events()

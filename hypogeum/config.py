@@ -264,6 +264,18 @@ class Config:
     MUAPI_WEBHOOK_URL: Optional[str]
     MUAPI_CREDIT_WARNING_THRESHOLD: Optional[float]  # USD; default: None (off)
 
+    # ------------------------------------------------------------------
+    # Source Enhancement Stage (2026-08-02) — provider-agnostic. Never
+    # reference MUAPI here; hypogeum/source_enhancement.py only ever talks
+    # to hypogeum/providers/enhancement.py's abstraction. Which concrete
+    # provider that resolves to is this ENHANCEMENT_PROVIDER string.
+    # ------------------------------------------------------------------
+    ENHANCEMENT_ENABLED: bool                 # default: true
+    ENHANCEMENT_PROVIDER: str                 # default: muapi_ai_video_upscaler (registry key)
+    ENHANCEMENT_REQUIRED_WIDTH: int           # default: 1920 (source clip pixel requirement)
+    ENHANCEMENT_REQUIRED_HEIGHT: int          # default: 1080
+    ENHANCEMENT_TARGET_RESOLUTION_LABEL: str  # default: 1080p (provider-facing target label)
+
     # M5.6 — Cost guardrails
     MUAPI_EPISODE_BUDGET_CREDITS: float   # 0 = unlimited; default: 0
     MUAPI_SCENE_BUDGET_CREDITS: float     # 0 = unlimited; default: 0
@@ -461,6 +473,17 @@ class Config:
         self.MUAPI_MAX_POLL_ATTEMPTS = _get_int("MUAPI_MAX_POLL_ATTEMPTS", default=24)
         self.MUAPI_WEBHOOK_URL = _get_optional("MUAPI_WEBHOOK_URL")
         self.MUAPI_CREDIT_WARNING_THRESHOLD = _get_float("MUAPI_CREDIT_WARNING_THRESHOLD")
+
+        # --- Source Enhancement Stage (provider-agnostic) ---
+        self.ENHANCEMENT_ENABLED = _get_bool("ENHANCEMENT_ENABLED", default=True)
+        self.ENHANCEMENT_PROVIDER = _get_optional(
+            "ENHANCEMENT_PROVIDER", default="muapi_ai_video_upscaler"
+        )
+        self.ENHANCEMENT_REQUIRED_WIDTH = _get_int("ENHANCEMENT_REQUIRED_WIDTH", default=1920)
+        self.ENHANCEMENT_REQUIRED_HEIGHT = _get_int("ENHANCEMENT_REQUIRED_HEIGHT", default=1080)
+        self.ENHANCEMENT_TARGET_RESOLUTION_LABEL = _get_optional(
+            "ENHANCEMENT_TARGET_RESOLUTION_LABEL", default="1080p"
+        )
 
         # M5.6 — Cost guardrails
         self.MUAPI_EPISODE_BUDGET_CREDITS = _get_float("MUAPI_EPISODE_BUDGET_CREDITS", default=0.0) or 0.0

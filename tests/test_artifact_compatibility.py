@@ -25,6 +25,7 @@ run, no queue/schedule interaction.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -377,3 +378,98 @@ class TestIncrementalCoverageReuse:
         # regeneration -- sc_001's valid clip triggered zero MUAPI calls.
         assert all("sc_001" not in sid for sid in submitted)
         assert all(sid.startswith("sc_002") for sid in submitted)
+
+
+# ---------------------------------------------------------------------------
+# Resolution compliance (2026-08-02 Production Output Gate policy) --
+# "reject 720p source when 1080p source is required," never inferred from
+# the final render's letterboxed/padded canvas size.
+# ---------------------------------------------------------------------------
+
+class TestResolutionCompliance:
+
+    def test_real_720p_clip_is_not_compliant(self, tmp_path):
+        """Generates a REAL 1280x720 clip via local ffmpeg (no network, no
+        MUAPI spend) -- the exact measured resolution of every one of
+        ep_f3619022's 29 real source clips -- and confirms the detector
+        correctly rejects it."""
+        from hypogeum.artifact_compatibility import (
+            is_resolution_compliant_clip,
+            probe_resolution,
+        )
+
+        clip_path = tmp_path / "sc_720p.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=s=1280x720:r=30:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip_path)],
+            capture_output=True, timeout=30,
+        )
+
+        assert probe_resolution(clip_path) == (1280, 720)
+        assert is_resolution_compliant_clip(clip_path) is False
+
+        result = evaluate_video_clip_compatibility(clip_path)
+        assert result.decision == CompatibilityDecision.INVALID_OR_INCOMPATIBLE
+        assert "1280x720" in result.reasons[0]
+
+    def test_real_1080p_clip_is_compliant(self, tmp_path):
+        """Same real-ffmpeg proof at the required resolution."""
+        from hypogeum.artifact_compatibility import is_resolution_compliant_clip
+
+        clip_path = tmp_path / "sc_1080p.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=gray:s=1920x1080:r=30:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip_path)],
+            capture_output=True, timeout=30,
+        )
+
+        assert is_resolution_compliant_clip(clip_path) is True
+
+    def test_unprovable_resolution_is_not_compliant(self, tmp_path):
+        """Burden of proof is on demonstrating compliance -- a file whose
+        resolution can't be probed (missing/corrupted) is never silently
+        treated as compliant, unlike the dry-run check's opposite-direction
+        conservatism."""
+        from hypogeum.artifact_compatibility import is_resolution_compliant_clip
+
+        missing = tmp_path / "does_not_exist.mp4"
+        assert is_resolution_compliant_clip(missing) is False
+
+        corrupted = tmp_path / "corrupted.mp4"
+        corrupted.write_bytes(b"NOT A REAL VIDEO FILE" * 1000)
+        assert is_resolution_compliant_clip(corrupted) is False
+
+    def test_upscaled_final_render_does_not_launder_a_720p_source(self, tmp_path):
+        """The exact concern named in the audit: a 720p source clip scaled
+        up to a 1920x1080 canvas by Video Renderer's letterbox/pad filter
+        must not be mistaken for a compliant 1080p source. This checks the
+        SOURCE clip directly, not the final render, so no amount of
+        upscaling downstream changes the verdict."""
+        from hypogeum.artifact_compatibility import is_resolution_compliant_clip
+
+        source_720p = tmp_path / "source.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=gray:s=1280x720:r=30:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_720p)],
+            capture_output=True, timeout=30,
+        )
+        # Simulate what Assembly's letterbox/pad filter does: scale the same
+        # 720p source up onto a 1920x1080 canvas.
+        upscaled_render = tmp_path / "final_render.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(source_720p),
+             "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,"
+                    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(upscaled_render)],
+            capture_output=True, timeout=30,
+        )
+
+        # The SOURCE is correctly rejected...
+        assert is_resolution_compliant_clip(source_720p) is False
+        # ...even though the derived render now measures 1920x1080 (the
+        # canvas size, not genuine source detail) -- proving the gate must
+        # check the source clip, never infer compliance from the final
+        # render's dimensions.
+        assert is_resolution_compliant_clip(upscaled_render) is True
+        from hypogeum.artifact_compatibility import probe_resolution
+        assert probe_resolution(upscaled_render) == (1920, 1080)

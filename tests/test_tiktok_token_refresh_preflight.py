@@ -153,7 +153,15 @@ def _base_patches(refresh_side_effect=None, refresh_return="refreshed_tt_token",
          patch(f"{_TT}.init_tiktok_upload",        return_value=("pub_id", "https://up.tt/")), \
          patch(f"{_TT}.upload_tiktok_chunks"), \
          patch(f"{_TT}.poll_tiktok_publish",       return_value="tt_post_1"), \
-         patch(_STAGE,                             return_value=None):
+         patch(_STAGE,                             return_value=None), \
+         patch(
+             "hypogeum.agents.publishing_agent.enforce_production_output_gate",
+             return_value=MagicMock(passed=True, checks=[]),
+         ):
+        # Production Output Gate (2026-08-02): this file tests TikTok token
+        # refresh/preflight ordering against in-memory config, not real
+        # on-disk artifacts the gate could inspect -- bypassed here as a
+        # passing no-op, same as test_publishing_agent.py's _patch_platforms().
         captured["mock_tt_refresh"] = mock_tt_refresh
         yield captured
 

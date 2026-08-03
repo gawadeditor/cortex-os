@@ -808,3 +808,86 @@ class TestLayeredThumbnailGuard:
         assert not failures_from_new, (
             f"Layered thumbnail must not fail the new checks: {failures_from_new}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Check K — Embedded headline verification (real pixel evidence via OCR)
+#
+# Canonical home for this check (moved here 2026-08-03 from an initial,
+# duplicated implementation inside the Production Output Gate, per
+# architectural audit: the gate must consume this capability, not
+# reimplement it). Uses a real burned headline (PIL-drawn text in the
+# documented typography zone) and real tesseract OCR — no mocking of the
+# detection itself.
+# ---------------------------------------------------------------------------
+
+def _thumbnail_package_with_headline(headline: str, asset_id: str = "episodes/ep_test/thumbnails/candidate_1") -> dict:
+    return {
+        "main_thumbnail": {"asset_id": asset_id},
+        "candidates": [
+            {"asset_id": asset_id, "typography_plan": {"headline": headline}},
+        ],
+    }
+
+
+def _make_thumbnail_with_burned_headline(tmp_path: Path, headline: str) -> Path:
+    from PIL import ImageDraw
+
+    p = _make_thumbnail(tmp_path)
+    img = Image.open(p).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    # Deterministic typography zone per thumbnail_qa._HEADLINE_ZONE_X/Y_FRACTION
+    # (x 2-42%, y 30-88% of 1280x720): draw a high-contrast box with the
+    # headline so OCR has real, findable text.
+    draw.rectangle((30, 220, 530, 630), fill=(0, 0, 0))
+    draw.text((45, 240), headline, fill=(255, 255, 255))
+    img.save(p)
+    return p
+
+
+class TestCheckKHeadlineEmbedded:
+
+    def test_real_burned_headline_passes_ocr(self, tmp_path):
+        p = _make_thumbnail_with_burned_headline(tmp_path, "ANCIENT SECRETS")
+        report = run_thumbnail_qa(
+            p, thumbnail_package=_thumbnail_package_with_headline("ANCIENT SECRETS"),
+        )
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_headline_embedded")
+        assert check["status"] == "pass", check["detail"]
+
+    def test_no_burned_text_fails_ocr(self, tmp_path):
+        """Metadata claims a headline, but the image has no burned text at
+        all -- OCR must catch this real pixel/metadata mismatch."""
+        p = _make_thumbnail(tmp_path)  # plain textsrc, no text drawn
+        report = run_thumbnail_qa(
+            p, thumbnail_package=_thumbnail_package_with_headline("ANCIENT SECRETS"),
+        )
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_headline_embedded")
+        assert check["status"] == "fail"
+        assert "thumbnail_headline_embedded" in " ".join(report["failures"])
+
+    def test_empty_headline_metadata_fails_without_ocr(self, tmp_path):
+        p = _make_thumbnail_with_burned_headline(tmp_path, "SOMETHING")
+        report = run_thumbnail_qa(
+            p, thumbnail_package=_thumbnail_package_with_headline(""),
+        )
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_headline_embedded")
+        assert check["status"] == "fail"
+        assert "typography_plan.headline" in check["detail"]
+
+    def test_no_thumbnail_package_skips_check_entirely(self, tmp_path):
+        p = _make_thumbnail(tmp_path)
+        report = run_thumbnail_qa(p)  # thumbnail_package=None (default)
+        check = next(
+            (c for c in report["checks"] if c["check_id"] == "c_thumbnail_headline_embedded"), None,
+        )
+        assert check is None
+
+    def test_main_candidate_not_found_warns_not_fails(self, tmp_path):
+        p = _make_thumbnail(tmp_path)
+        pkg = _thumbnail_package_with_headline("X", asset_id="episodes/ep_test/thumbnails/candidate_9")
+        pkg["candidates"][0]["asset_id"] = "episodes/ep_test/thumbnails/candidate_1"  # mismatch
+        report = run_thumbnail_qa(p, thumbnail_package=pkg)
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_headline_embedded")
+        assert check["status"] == "warn"
+        assert not any("c_thumbnail_headline_embedded" in f or "thumbnail_headline_embedded" in f for f in report["failures"])

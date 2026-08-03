@@ -92,6 +92,14 @@ from hypogeum.schemas import SchemaError, validate
 # ---------------------------------------------------------------------------
 
 _AGENT_NAME = "thumbnail_director"
+# Bumped 2026-08-02 (Production Output Gate policy): a thumbnail_package
+# produced by an older version was not necessarily concept-driven and was
+# not necessarily checked by thumbnail_qa.py's pixel-level placeholder
+# detection (Check J) -- both were added after version "1.0". Recorded into
+# generation_metadata.thumbnail_director_version on every package so the
+# pipeline checkpoint (hypogeum/pipeline.py's compat_check) can tell a
+# stale package apart from a current one without inspecting a timestamp.
+_AGENT_VERSION = "2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +427,8 @@ def run_thumbnail_director(
             "fallback_model": config.THUMBNAIL_FALLBACK_MODEL or None,
             "resolution": config.THUMBNAIL_IMAGE_RESOLUTION,
             "quality": config.THUMBNAIL_IMAGE_QUALITY,
+            "thumbnail_director_version": _AGENT_VERSION,
+            "concept_driven": concept_brief is not None,
         },
         "thumbnail_qa_report": thumbnail_qa_report,
         "thumbnail_identity_report": thumbnail_identity_report,

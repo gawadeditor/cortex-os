@@ -499,9 +499,15 @@ class TestThumbnailCheckpoint:
     _THUMBNAIL_PKG = {
         "thumbnail_package_id": "tp_ck_01",
         "episode_id": "ep_td_ck_01",
-        "main_thumbnail": {"asset_id": "thumb_main.jpg"},
+        "main_thumbnail": {"asset_id": "thumb_main"},
         "short_thumbnails": [],
         "package_integrity": {"production_ready": True},
+        # Matches the current thumbnail_director._AGENT_VERSION (2026-08-02
+        # artifact-compatibility policy) -- without this, the checkpoint's
+        # compat_check correctly treats the package as stale and reruns
+        # thumbnail_director, which is exactly what test_runs_td_when_no_package_on_disk
+        # already covers; this fixture is specifically for the skip case.
+        "generation_metadata": {"thumbnail_director_version": "2.0"},
     }
 
     def test_skips_when_package_on_disk(self, tmp_path):
@@ -509,6 +515,7 @@ class TestThumbnailCheckpoint:
         ep_dir = tmp_path / ep_id
         ep_dir.mkdir(parents=True)
         _write_json(ep_dir / f"thumbnail_package_{ep_id}.json", self._THUMBNAIL_PKG)
+        (ep_dir / "thumb_main.jpg").write_bytes(b"FAKEJPEG")
 
         with patch("hypogeum.pipeline.run_thumbnail_director") as mock_td, \
              patch("hypogeum.pipeline.build_thumbnail_handoff_brief"):

@@ -54,6 +54,10 @@ from hypogeum.publishing.retry import (
 )
 from hypogeum.publishing.staging import StagingError, get_staging_provider
 from hypogeum.agents.covered_topics_writer import record_published_topic
+from hypogeum.agents.production_output_gate import (
+    ProductionOutputGateFailure,
+    enforce_production_output_gate,
+)
 from hypogeum.decision_inputs.publishing import get_publishing_outcome
 from hypogeum.decision_inputs.store import record_publishing_outcome
 from hypogeum.schemas import SchemaError, validate
@@ -336,8 +340,6 @@ def run_publishing_agent(
 
     # ------------------------------------------------------------------
     # Runtime status observability: log both fields for operational monitoring.
-    # Publishing agent does NOT gate on these — the QA agent already enforces
-    # production_ready before this agent is called. This is observability only.
     # ------------------------------------------------------------------
     _pkg_integrity = final_render_package.get("package_integrity", {})
     log.info(
@@ -352,6 +354,35 @@ def run_publishing_agent(
             "main_episode_runtime_status", "not_planned"
         ),
     )
+
+    # ------------------------------------------------------------------
+    # PRE-FLIGHT 0: Production Output Gate — the single gate immediately
+    # before Publishing (2026-08-02). production_ready and every other
+    # JSON status field above are NOT trusted on their own — this
+    # re-inspects the real generated outputs (ffprobe resolution, real
+    # pixel content, real rendered frames, real audio continuity) every
+    # time publishing is attempted. Fails closed: any capability failing
+    # halts publishing before any platform upload is attempted. See
+    # hypogeum/agents/production_output_gate.py for what each of the six
+    # capabilities (video, visual playback, thumbnail, Shorts captions,
+    # end-page continuity, artifact compatibility) actually checks.
+    # ------------------------------------------------------------------
+    try:
+        enforce_production_output_gate(
+            episode_id=episode_id, assets_root=assets_root, config=config, log=log,
+        )
+    except ProductionOutputGateFailure as exc:
+        failed = [c.capability for c in exc.result.checks if c.status == "fail"]
+        log.error(
+            "publishing_agent_halted_output_gate_failed",
+            episode_id=episode_id,
+            failed_capabilities=failed,
+        )
+        raise PublishingAgentError(
+            f"Publishing halted: Production Output Gate failed for capabilities "
+            f"{failed}. Episode: {episode_id}. See "
+            f"production_output_gate_{episode_id}.json for full evidence."
+        ) from exc
 
     # ------------------------------------------------------------------
     # PRE-FLIGHT 1: ai_disclosure_text hard gate

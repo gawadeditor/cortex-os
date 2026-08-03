@@ -174,7 +174,15 @@ def _patched_agent(
          patch(f"{_TT_MOD}.init_tiktok_upload",          return_value=("pub_id", "https://upload.tt/")), \
          patch(f"{_TT_MOD}.upload_tiktok_chunks"), \
          patch(f"{_TT_MOD}.poll_tiktok_publish",         return_value="tt_post_1"), \
-         patch(f"{_STAGING}",                            return_value=None):
+         patch(f"{_STAGING}",                            return_value=None), \
+         patch(
+             "hypogeum.agents.publishing_agent.enforce_production_output_gate",
+             return_value=MagicMock(passed=True, checks=[]),
+         ):
+        # Production Output Gate (2026-08-02): this file tests credential/DB
+        # resolution logic against in-memory config, not real on-disk
+        # artifacts the gate could inspect -- bypassed here as a passing
+        # no-op, same as test_publishing_agent.py's _patch_platforms().
         yield captured
 
 

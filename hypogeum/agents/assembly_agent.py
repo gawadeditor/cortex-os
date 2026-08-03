@@ -459,12 +459,23 @@ def run_assembly_agent(
     # already have enough); if that still isn't enough, assembly halts here
     # and returns a structured additional_coverage_required result instead
     # of proceeding to render.
+    #
+    # coverage_result (the final, post-repair CoverageCheckResult) is
+    # persisted below into final_render_package.coverage_check_summary --
+    # the Production Output Gate consumes this canonical result rather than
+    # ever recomputing coverage itself (hypogeum/agents/coverage_check.py's
+    # own stated principle: this module's result is the one every other
+    # module must consume, never re-derive).
     # ------------------------------------------------------------------
+    coverage_result = None
+    _coverage_max_editorial_speed_factor = None
     if getattr(config, "COVERAGE_CHECK_ENABLED", True):
         from hypogeum.agents.coverage_check import (  # noqa: PLC0415
+            MAX_EDITORIAL_SPEED_FACTOR,
             build_additional_coverage_required,
             check_timeline_coverage,
         )
+        _coverage_max_editorial_speed_factor = MAX_EDITORIAL_SPEED_FACTOR
 
         def _all_beat_entries() -> List:
             _entries = list(main_timeline)
@@ -958,6 +969,22 @@ def run_assembly_agent(
             "analytics_runtime_status": "not_planned",
         },
         "timeline_qa_report": timeline_qa_report,
+        # 2026-08-03 Production Output Gate integration: the canonical
+        # coverage_check.py result, persisted so the gate consumes it
+        # instead of recomputing (coverage_result is None only when
+        # COVERAGE_CHECK_ENABLED=false, an explicit opt-out).
+        "coverage_check_summary": (
+            {
+                "sufficient": coverage_result.sufficient,
+                "beats_checked": len(coverage_result.beats),
+                "insufficient_beats": [
+                    b.scene_id for b in coverage_result.insufficient_beats
+                ],
+                "max_editorial_speed_factor": _coverage_max_editorial_speed_factor,
+            }
+            if coverage_result is not None
+            else None
+        ),
     }
 
     try:

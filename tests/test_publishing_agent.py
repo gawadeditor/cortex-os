@@ -240,6 +240,17 @@ def _patch_platforms(
         stack.enter_context(patch(f"{_TT}.poll_tiktok_publish", return_value="tt_post_001"))
         stack.enter_context(patch(f"{_TT}.poll_tiktok_inbox_status", return_value=tiktok_inbox_status))
         stack.enter_context(patch(_STAGING, return_value=mock_staging))
+        # Production Output Gate (2026-08-02): every test in this file exercises
+        # publishing LOGIC (idempotency, multi-platform, scheduling, schema) against
+        # in-memory final_render_package dicts, not real on-disk artifacts the gate
+        # could inspect -- so it's bypassed here as a passing no-op. The gate's own
+        # behavior (fail-closed on a real failure, pass-through on a real pass) is
+        # covered separately in TestProductionOutputGateWiring, which does not use
+        # this helper.
+        stack.enter_context(patch(
+            "hypogeum.agents.publishing_agent.enforce_production_output_gate",
+            return_value=MagicMock(passed=True, checks=[]),
+        ))
         yield
 
 
@@ -1136,7 +1147,11 @@ class TestEnabledPlatformsFilter:
              patch(f"{_YT}.upload_video") as yt_upload_mock, \
              patch(f"{_META}.refresh_meta_token") as meta_refresh_mock, \
              patch(f"{_TT}.refresh_tiktok_token") as tt_refresh_mock, \
-             patch(f"{_TT}.check_tiktok_availability") as tt_avail_mock:
+             patch(f"{_TT}.check_tiktok_availability") as tt_avail_mock, \
+             patch(
+                 "hypogeum.agents.publishing_agent.enforce_production_output_gate",
+                 return_value=MagicMock(passed=True, checks=[]),
+             ):
             result = run_publishing_agent(
                 pkg, config, "ep_filter_empty",
                 output_dir=tmp_path, project_root=tmp_path,

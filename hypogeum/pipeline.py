@@ -320,6 +320,44 @@ _ASSEMBLY_CHECKPOINT = _CheckpointSpec(
     ],
 )
 
+def _thumbnail_checkpoint_compatible(pkg: dict) -> bool:
+    """
+    Artifact-compatibility policy (2026-08-02): a thumbnail_package is only
+    a valid checkpoint if it was produced by the CURRENT thumbnail_director
+    policy version. Before this check existed, _run_thumbnail_director()
+    reused ANY existing thumbnail_package.json unconditionally (presence
+    only -- no completion flag, no asset check, no compatibility check at
+    all) -- confirmed in production: ep_f3619022's published thumbnail
+    measured mean=20.5/stddev=9.3, an exact match for the MUAPI dry-run
+    placeholder signature, with a thumbnail_qa_report on disk that predates
+    Check J (c_thumbnail_placeholder_detection) and was never re-validated
+    on resume. Rejecting an old-version package here forces
+    thumbnail_director to regenerate; deep pixel/placeholder validation of
+    the actual output is the Production Output Gate's job at publish time,
+    not this checkpoint's.
+    """
+    from hypogeum.agents.thumbnail_director import _AGENT_VERSION  # noqa: PLC0415
+
+    produced_version = pkg.get("generation_metadata", {}).get("thumbnail_director_version")
+    return produced_version == _AGENT_VERSION
+
+
+_THUMBNAIL_CHECKPOINT = _CheckpointSpec(
+    schema_name="thumbnail_package",
+    is_complete=lambda pkg: bool(
+        pkg.get("package_integrity", {}).get("production_ready")
+    ),
+    compat_check=_thumbnail_checkpoint_compatible,
+    asset_refs=lambda pkg: [
+        (pkg.get("main_thumbnail", {}).get("asset_id", ""), ".jpg"),
+        *[
+            (s.get("asset_id", ""), ".jpg")
+            for s in pkg.get("short_thumbnails", [])
+            if s.get("asset_id")
+        ],
+    ],
+)
+
 _PUBLISHING_CHECKPOINT = _CheckpointSpec(
     schema_name="publishing_record",
     is_complete=lambda pkg: pkg.get("package_metadata", {}).get(
@@ -1832,11 +1870,18 @@ def _run_thumbnail_director(
     Max tokens: 4,096
     Output schema: thumbnail_package
 
-    Checkpoint: loads existing thumbnail_package from disk if present.
+    Checkpoint: loads existing thumbnail_package from disk if present,
+    production_ready, has every referenced thumbnail file on disk, AND was
+    produced by the current thumbnail_director policy version (see
+    _THUMBNAIL_CHECKPOINT / _thumbnail_checkpoint_compatible — 2026-08-02
+    artifact-compatibility policy; a stale package is never reused by
+    presence alone).
     """
-    pkg = _load_package(episode_id, "thumbnail_package", output_dir)
+    log = get_logger(episode_id=episode_id, agent="pipeline")
+    pkg = _load_verified_checkpoint(
+        episode_id, output_dir, _THUMBNAIL_CHECKPOINT, log,
+    )
     if pkg is not None:
-        log = get_logger(episode_id=episode_id, agent="pipeline")
         log.info("pipeline_stage_skipped", agent="thumbnail_director", reason="existing_output")
         return pkg
     _resolve_output_dir = output_dir or (

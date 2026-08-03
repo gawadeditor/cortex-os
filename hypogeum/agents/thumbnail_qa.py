@@ -28,6 +28,7 @@ Public API:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +41,14 @@ _EXPECTED_DIMS: dict[str, tuple[int, int]] = {
     "16:9": (1280, 720),
     "9:16": (720, 1280),
 }
+
+# Deterministic typography zone (hypogeum.agents.thumbnail_compositor.
+# _render_typography_pil's own documented zone: lower-left, x 2-42%,
+# y 30-88%) — where a headline is burned when CONCEPT_DRIVEN_MODE's PIL
+# compositing path is active. Used by Check K below.
+_HEADLINE_ZONE_X_FRACTION = (0.02, 0.42)
+_HEADLINE_ZONE_Y_FRACTION = (0.30, 0.88)
+_HEADLINE_MIN_OCR_CHARS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +371,51 @@ def run_thumbnail_qa(
                        "pixel content is not a flat/near-black placeholder")
 
     # ------------------------------------------------------------------
+    # Check K — Embedded headline verification (real pixel evidence via OCR)
+    #
+    # Added 2026-08-03 for the Production Output Gate's "embedded headline
+    # requirement" — proving a headline is actually BURNED into the image,
+    # not just planned. Check G above only verifies typography_plan.headline
+    # is non-empty (a plan field); this check crops the deterministic zone
+    # thumbnail_compositor._render_typography_pil burns to and runs OCR over
+    # it, so a plan with a headline that somehow never got rendered (a
+    # different code path, a compositing bug) is caught. Only runs when
+    # thumbnail_package is provided and the main candidate can be located —
+    # degrades to a warning (not a failure) when that data isn't available,
+    # matching this module's existing pattern for optional inputs.
+    # ------------------------------------------------------------------
+    if thumbnail_package is not None and thumbnail_local_path.exists():
+        main_asset_id = thumbnail_package.get("main_thumbnail", {}).get("asset_id", "")
+        main_candidate = next(
+            (c for c in thumbnail_package.get("candidates", []) if c.get("asset_id") == main_asset_id),
+            None,
+        )
+        if main_candidate is None:
+            _add_check(checks, "c_thumbnail_headline_embedded", "warn",
+                       "main candidate not found in thumbnail_package.candidates — headline check skipped")
+            warnings.append("thumbnail_headline_embedded: main candidate not found — cannot verify")
+        else:
+            headline_text = str((main_candidate.get("typography_plan") or {}).get("headline") or "").strip()
+            if not headline_text:
+                _add_check(checks, "c_thumbnail_headline_embedded", "fail",
+                           "main candidate has no typography_plan.headline — embedded headline requirement not met")
+                failures.append(
+                    "thumbnail_headline_embedded: main candidate has no typography_plan.headline"
+                )
+            else:
+                ocr_reason = _verify_headline_pixels(thumbnail_local_path)
+                if ocr_reason:
+                    _add_check(checks, "c_thumbnail_headline_embedded", "fail",
+                               f"headline planned ({headline_text!r}) but not visually detected: {ocr_reason}")
+                    failures.append(
+                        f"thumbnail_headline_embedded: planned headline {headline_text!r} not "
+                        f"detected via OCR in the typography zone ({ocr_reason})"
+                    )
+                else:
+                    _add_check(checks, "c_thumbnail_headline_embedded", "pass",
+                               f"headline {headline_text!r} visually confirmed via OCR in the typography zone")
+
+    # ------------------------------------------------------------------
     # Overall status
     # ------------------------------------------------------------------
     if failures:
@@ -436,4 +490,54 @@ def _detect_placeholder_image(path: Path) -> Optional[str]:
             f"stddev={stddev:.1f}) — looks like a dry-run/logo-only placeholder, "
             "not a real generated thumbnail with subject content"
         )
+    return None
+
+
+def _verify_headline_pixels(thumb_path: Path) -> Optional[str]:
+    """
+    Real pixel evidence for Check K's embedded-headline requirement: crop
+    the deterministic typography zone and run tesseract OCR (CLI, same
+    subprocess-shell-out convention as every ffmpeg/ffprobe call elsewhere
+    in this codebase — no new Python dependency) over it. Returns None if
+    meaningful text was detected, else a human-readable failure reason.
+
+    Scoped to the one deterministic zone hypogeum.agents.thumbnail_
+    compositor._render_typography_pil documents and burns to — this does
+    not attempt whole-image OCR (which would accept incidental unrelated
+    text as a false pass) and does not verify the detected text matches
+    the planned headline word-for-word (OCR against a stylized font over a
+    photographic background is not that precise) — it proves "text-like
+    pixels exist where the headline is supposed to be," not "the headline
+    reads correctly."
+    """
+    import shutil
+
+    if shutil.which("tesseract") is None:
+        return "tesseract OCR binary not available in this environment — cannot prove headline pixels"
+
+    try:
+        from PIL import Image
+
+        img = Image.open(thumb_path)
+        width, height = img.size
+        x0 = int(width * _HEADLINE_ZONE_X_FRACTION[0])
+        x1 = int(width * _HEADLINE_ZONE_X_FRACTION[1])
+        y0 = int(height * _HEADLINE_ZONE_Y_FRACTION[0])
+        y1 = int(height * _HEADLINE_ZONE_Y_FRACTION[1])
+        crop = img.crop((x0, y0, x1, y1))
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            crop_path = Path(tmp) / "headline_zone.png"
+            crop.save(crop_path)
+            result = subprocess.run(
+                ["tesseract", str(crop_path), "stdout"],
+                capture_output=True, text=True, timeout=30,
+            )
+    except Exception as exc:
+        return f"could not extract/OCR headline zone: {exc}"
+
+    detected = (result.stdout or "").strip()
+    if len(detected) < _HEADLINE_MIN_OCR_CHARS:
+        return f"OCR detected no meaningful text in the typography zone (raw output: {detected!r})"
     return None

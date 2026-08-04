@@ -65,6 +65,63 @@ def _make_scene(scene_id: str, asset_id: str = None, source_type: str = "main_ep
     return s
 
 
+def _make_canonical_scene(
+    scene_id: str,
+    asset_id: str = None,
+    source_type: str = "main_episode",
+    short_id: str = None,
+    scene_index: int = 0,
+    description: str = "",
+    aspect_ratio: str = "16:9",
+    duration_seconds: float = 8.0,
+    primary_prompt: str = "a real primary prompt",
+    fallback_prompt: str = "a real fallback prompt",
+    primary_tier: int = 2,
+    fallback_tier: int = 3,
+) -> dict:
+    """
+    A scene fixture matching the REAL canonical VPD output shape (2026-08-04):
+    production_spec.provider_routing.primary_prompt (nested), NOT a flat
+    production_spec.primary_prompt. Confirmed against a real production
+    visual_package.json (ep_f3619022) -- _make_scene() above predates this
+    and never included production_spec at all, which is exactly why the
+    KeyError bug this file's TestScenSpecTranslation class covers went
+    undetected for so long.
+    """
+    s = _make_scene(scene_id, asset_id=asset_id, source_type=source_type,
+                     scene_index=scene_index, description=description)
+    if short_id:
+        s["short_id"] = short_id
+    s["production_spec"] = {
+        "aspect_ratio": aspect_ratio,
+        "duration_seconds": duration_seconds,
+        "provider_routing": {
+            "primary_provider": "muapi",
+            "primary_tier": primary_tier,
+            "primary_prompt": primary_prompt,
+            "fallback_provider": "muapi",
+            "fallback_tier": fallback_tier,
+            "fallback_prompt": fallback_prompt,
+            "routing_rationale": "test fixture",
+        },
+    }
+    return s
+
+
+def _assert_real_submit_scene_contract(scene_spec: dict) -> None:
+    """
+    Performs the EXACT same bracket-access dict reads hypogeum.muapi.
+    submit_scene() itself does at the top of the real function (before any
+    network/dry-run branching) -- raises KeyError if scene_repair_agent's
+    translation is wrong, exactly reproducing the real production failure
+    mode this fix corrects. Never mocked/reimplemented differently from
+    the real function's own contract (see hypogeum/muapi.py:596-604,637-638).
+    """
+    prod_spec = scene_spec.get("production_spec", {})
+    _ = prod_spec["primary_prompt"]
+    _ = prod_spec["fallback_prompt"]
+
+
 def _make_visual_package(scenes: list) -> dict:
     assets = [
         {"asset_id": s["asset_id"]} for s in scenes if s.get("asset_id")
@@ -429,6 +486,296 @@ class TestStrategyB:
 
         assert "sc_002" in result.still_missing
         assert "sc_002" not in result.repaired_by_generation
+
+
+# ---------------------------------------------------------------------------
+# TestSceneSpecTranslation (2026-08-04) — regression coverage for the
+# structural compatibility bug between clip_repair_agent.py and
+# hypogeum.muapi.submit_scene(): a raw VPD scene dict's production_spec.
+# provider_routing.primary_prompt (nested) was being passed straight
+# through as scene_spec, but submit_scene() requires a FLAT
+# production_spec.primary_prompt -- confirmed in real production as
+# KeyError: 'primary_prompt' for every single clip_repair_agent generation
+# attempt. Fixed by reusing hypogeum.agents.provider_router.build_scene_spec()
+# -- the same canonical translator Visual Package Director's own Phase 2
+# generation already uses -- instead of passing the raw scene dict through.
+# ---------------------------------------------------------------------------
+
+class TestSceneSpecTranslation:
+
+    def test_strategy_b_translates_canonical_scene_correctly(self, tmp_path):
+        """Strategy B (run_clip_repair) must pass submit_scene() a scene_spec
+        satisfying its real contract -- proven by performing the exact same
+        bracket-access reads the real function does, not a relaxed mock."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [
+            _make_canonical_scene(
+                "sc_001", asset_id="asset_001", scene_index=0,
+                description="topic A unique", primary_prompt="PROMPT_A",
+                fallback_prompt="FALLBACK_A", primary_tier=1, fallback_tier=2,
+            ),
+            _make_canonical_scene(
+                "sc_002", asset_id="asset_002", scene_index=1,
+                description="topic B unique", primary_prompt="PROMPT_B",
+                fallback_prompt="FALLBACK_B",
+            ),
+        ]
+        _write_clip(assets_root, "asset_001")
+
+        vp = _make_visual_package(scenes)
+        cfg = _make_config(max_generated=5)
+        log = MagicMock()
+
+        captured = {}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            _assert_real_submit_scene_contract(scene_spec)  # raises if wrong
+            captured["scene_spec"] = scene_spec
+            target = output_dir / "asset_002.mp4"
+            target.write_bytes(b"GENERATED")
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_002"],
+                present_clip_ids=["asset_001"],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_translate_01",
+                log=log,
+            )
+
+        assert "sc_002" in result.repaired_by_generation
+        spec = captured["scene_spec"]
+        assert spec["scene_id"] == "sc_002"
+        assert spec["production_spec"]["primary_prompt"] == "PROMPT_B"
+        assert spec["production_spec"]["fallback_prompt"] == "FALLBACK_B"
+        assert spec["production_spec"]["primary_tier"] == 2  # default from _make_canonical_scene
+        assert spec["production_spec"]["fallback_tier"] == 3
+        assert spec["visual_spec"]["aspect_ratio"] == "16:9"
+        assert spec["visual_spec"]["duration_seconds"] == 8.0
+
+    def test_strategy_b_translates_short_scene_correctly(self, tmp_path):
+        """A Short scene's short_id and 9:16 aspect ratio must survive
+        translation unchanged."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [
+            _make_canonical_scene(
+                "sh_short_001_s01", asset_id="asset_short", scene_index=0,
+                source_type="short", short_id="short_001",
+                aspect_ratio="9:16", description="short scene unique",
+                primary_prompt="SHORT_PROMPT",
+            ),
+        ]
+        vp = _make_visual_package(scenes)
+        cfg = _make_config(max_generated=5)
+        log = MagicMock()
+
+        captured = {}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            _assert_real_submit_scene_contract(scene_spec)
+            captured["scene_spec"] = scene_spec
+            (output_dir / "asset_short.mp4").write_bytes(b"GENERATED")
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sh_short_001_s01"],
+                present_clip_ids=[],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_translate_short",
+                log=log,
+            )
+
+        spec = captured["scene_spec"]
+        assert spec["short_id"] == "short_001"
+        assert spec["visual_spec"]["aspect_ratio"] == "9:16"
+        assert spec["production_spec"]["primary_prompt"] == "SHORT_PROMPT"
+
+    def test_legacy_scene_with_no_provider_routing_does_not_crash(self, tmp_path):
+        """A scene predating (or otherwise missing) production_spec/
+        provider_routing must never raise -- build_scene_spec()'s .get()
+        based defaults degrade to an empty prompt rather than crashing,
+        which is a real, defined, safe fallback (never a KeyError) even
+        though it wasn't reachable at all before this fix."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        legacy_scene = _make_scene(  # NOTE: old-style helper, no production_spec at all
+            "sc_legacy", asset_id="asset_legacy", scene_index=0,
+            description="legacy scene unique",
+        )
+        vp = _make_visual_package([legacy_scene])
+        cfg = _make_config(max_generated=5)
+        log = MagicMock()
+
+        captured = {}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            _assert_real_submit_scene_contract(scene_spec)  # must not raise
+            captured["scene_spec"] = scene_spec
+            (output_dir / "asset_legacy.mp4").write_bytes(b"GENERATED")
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_legacy"],
+                present_clip_ids=[],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_legacy",
+                log=log,
+            )
+
+        spec = captured["scene_spec"]
+        assert spec["production_spec"]["primary_prompt"] == ""
+        assert spec["production_spec"]["fallback_prompt"] == ""
+
+
+# ---------------------------------------------------------------------------
+# TestFillCoverageDeficits (2026-08-04) — the second, previously entirely
+# untested call site with the identical bug (coverage-fill "extra clip"
+# generation, distinct from Strategy B's "scene has no clip at all" case).
+# ---------------------------------------------------------------------------
+
+class TestFillCoverageDeficits:
+
+    def _make_beat(self, scene_id, source_type="main_episode", short_id=None,
+                    narration=20.0, available=8.0, deficit=None):
+        from hypogeum.agents.coverage_check import BeatCoverage
+        max_editorial = available * 1.15
+        if deficit is None:
+            deficit = max(0.0, narration - max_editorial)
+        return BeatCoverage(
+            scene_id=scene_id, source_type=source_type, short_id=short_id,
+            narration_duration_seconds=narration, available_duration_seconds=available,
+            max_editorial_duration_seconds=max_editorial, deficit_seconds=deficit,
+            sufficient=deficit <= 0.001, usable_clips=[],
+        )
+
+    def test_coverage_fill_translates_canonical_scene_correctly(self, tmp_path):
+        """The exact real ep_f3619022 scenario: a beat with a real deficit
+        must submit a scene_spec satisfying submit_scene()'s real contract."""
+        from hypogeum.agents.clip_repair_agent import fill_coverage_deficits
+
+        assets_root = tmp_path
+        scene = _make_canonical_scene(
+            "s01", asset_id="episodes/ep_cov/video/sc_s01", scene_index=0,
+            description="main episode beat", primary_prompt="MAIN_PROMPT",
+            fallback_prompt="MAIN_FALLBACK", primary_tier=1,
+        )
+        vp = _make_visual_package([scene])
+        cfg = _make_config(max_generated=5)
+        cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = 1
+        log = MagicMock()
+
+        beat = self._make_beat("s01", narration=24.0, available=8.0)
+
+        captured = {}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            _assert_real_submit_scene_contract(scene_spec)  # raises if wrong
+            captured["scene_spec"] = scene_spec
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"GENERATED")
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=20.0):
+            extra_clips = fill_coverage_deficits(
+                insufficient_beats=[beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_cov",
+                log=log,
+            )
+
+        assert "s01" in extra_clips
+        assert len(extra_clips["s01"]) == 1
+        spec = captured["scene_spec"]
+        assert spec["scene_id"] == "s01__extra1"  # unique per-attempt id preserved
+        assert spec["production_spec"]["primary_prompt"] == "MAIN_PROMPT"
+        assert spec["production_spec"]["fallback_prompt"] == "MAIN_FALLBACK"
+        assert spec["production_spec"]["primary_tier"] == 1
+
+    def test_coverage_fill_translates_short_beat_correctly(self, tmp_path):
+        """A Short beat's short_id must be preserved through translation so
+        the extra clip lands under the correct sh_{short_id}/ directory."""
+        from hypogeum.agents.clip_repair_agent import fill_coverage_deficits
+
+        assets_root = tmp_path
+        scene = _make_canonical_scene(
+            "sh_short_001_s01", asset_id="episodes/ep_cov_short/video/sh_short_001/sc_sh_short_001_s01",
+            source_type="short", short_id="short_001", aspect_ratio="9:16",
+            scene_index=0, description="short beat", primary_prompt="SHORT_MAIN",
+        )
+        vp = _make_visual_package([scene])
+        cfg = _make_config(max_generated=5)
+        cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = 1
+        log = MagicMock()
+
+        beat = self._make_beat("sh_short_001_s01", source_type="short",
+                                short_id="short_001", narration=18.0, available=8.0)
+
+        captured = {}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            _assert_real_submit_scene_contract(scene_spec)
+            captured["scene_spec"] = scene_spec
+            dest = output_dir / "video" / "short_001" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"GENERATED")
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=15.0):
+            extra_clips = fill_coverage_deficits(
+                insufficient_beats=[beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_cov_short",
+                log=log,
+            )
+
+        assert "sh_short_001_s01" in extra_clips
+        spec = captured["scene_spec"]
+        assert spec["short_id"] == "short_001"
+        assert spec["visual_spec"]["aspect_ratio"] == "9:16"
+        assert spec["production_spec"]["primary_prompt"] == "SHORT_MAIN"
+
+    def test_sufficient_beats_never_call_submit_scene(self, tmp_path):
+        """A beat with no deficit must never be passed to fill_coverage_deficits
+        at all -- and if the (empty) insufficient_beats list is passed,
+        nothing is submitted."""
+        from hypogeum.agents.clip_repair_agent import fill_coverage_deficits
+
+        cfg = _make_config()
+        log = MagicMock()
+
+        with patch("hypogeum.muapi.submit_scene") as mock_submit:
+            extra_clips = fill_coverage_deficits(
+                insufficient_beats=[],
+                visual_package=_make_visual_package([]),
+                assets_root=tmp_path,
+                config=cfg,
+                episode_id="ep_cov_none",
+                log=log,
+            )
+
+        mock_submit.assert_not_called()
+        assert extra_clips == {}
 
 
 # ---------------------------------------------------------------------------

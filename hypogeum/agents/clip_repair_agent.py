@@ -284,12 +284,27 @@ def run_clip_repair(
             try:
                 # Import here to avoid circular imports — muapi is a leaf module.
                 from hypogeum.muapi import submit_scene  # noqa: PLC0415
+                from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
 
                 output_dir = target_path.parent
                 output_dir.mkdir(parents=True, exist_ok=True)
 
+                # missing_scene is a raw VPD scene dict: production_spec.
+                # provider_routing.primary_prompt (nested), not the flat
+                # production_spec.primary_prompt submit_scene() requires.
+                # build_scene_spec() is the same canonical translator VPD's
+                # own Phase 2 generation uses — reused here rather than
+                # duplicated (2026-08-04 fix). entity_hosted_urls={}: a
+                # repair/extra clip is requested independently of the
+                # original reference-image generation pass, so I2V entity-
+                # lock conditioning is not available here — the clip is
+                # generated as text-to-video only, a narrow, pre-existing
+                # limitation (this path never worked at all before this
+                # fix), not a new regression.
+                submit_spec = build_scene_spec(missing_scene, entity_hosted_urls={})
+
                 asset_result = submit_scene(
-                    scene_spec=missing_scene,
+                    scene_spec=submit_spec,
                     config=config,
                     episode_id=episode_id,
                     output_dir=output_dir,
@@ -421,11 +436,20 @@ def fill_coverage_deficits(
                 break
 
             extra_scene_id = f"{sid}__extra{attempt + 1}"
-            extra_scene_spec = dict(scene)
-            extra_scene_spec["scene_id"] = extra_scene_id
 
             try:
                 from hypogeum.muapi import submit_scene  # noqa: PLC0415
+                from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
+
+                # scene is a raw VPD scene dict: production_spec.
+                # provider_routing.primary_prompt (nested), not the flat
+                # production_spec.primary_prompt submit_scene() requires —
+                # build_scene_spec() is the same canonical translator VPD's
+                # own Phase 2 generation uses (2026-08-04 fix; see
+                # run_clip_repair()'s Strategy B above for the identical
+                # fix and the entity_hosted_urls={} rationale).
+                extra_scene_spec = build_scene_spec(scene, entity_hosted_urls={})
+                extra_scene_spec["scene_id"] = extra_scene_id
 
                 output_dir.mkdir(parents=True, exist_ok=True)
                 asset_result = submit_scene(

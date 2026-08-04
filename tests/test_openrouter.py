@@ -621,6 +621,130 @@ class TestOpenRouterModelFallback:
 
 
 # ---------------------------------------------------------------------------
+# TestThumbnailDirectorFallbackConfiguration (2026-08-04)
+#
+# Regression coverage for a real production failure: config.OPENROUTER_
+# FALLBACK_MODEL and config.TD_PLANNING_MODEL were BOTH "openai/gpt-5.5-pro"
+# in .env, so Thumbnail Director's "fallback" retried the exact same model
+# through the exact same endpoint -- zero real redundancy. A genuine
+# transport failure (ConnectionResetError, the exact real error observed:
+# ('Connection aborted.', ConnectionResetError(54, 'Connection reset by
+# peer'))) exhausted retries, then the "fallback" attempt failed identically
+# because it was never actually a different model, raising FallbackFailed
+# and halting the whole episode before Assembly/QA/the Production Output
+# Gate/Publishing were ever reached.
+#
+# Fixed by changing OPENROUTER_FALLBACK_MODEL in .env to
+# "anthropic/claude-sonnet-4.6" -- a genuinely distinct, already-proven
+# OpenRouter-routed model (also used by config.EP_MODEL/BGA_PASS1_MODEL in
+# this same file). Still entirely inside OpenRouter (never Anthropic
+# direct); no change to Thumbnail Director's own code, prompts, or
+# max_tokens -- the fix is scoped entirely to this one shared config value.
+# ---------------------------------------------------------------------------
+
+# The real, current .env values this regression suite guards -- not
+# hypothetical. NON_ANTHROPIC_MODEL (module-level, above) already documents
+# TD_PLANNING_MODEL's real default; TD_FALLBACK_MODEL below is the real
+# fixed OPENROUTER_FALLBACK_MODEL value.
+TD_PRIMARY_MODEL = NON_ANTHROPIC_MODEL  # "openai/gpt-5.5-pro" -- config.TD_PLANNING_MODEL
+TD_FALLBACK_MODEL = "anthropic/claude-sonnet-4.6"  # config.OPENROUTER_FALLBACK_MODEL (.env, fixed 2026-08-04)
+
+
+class TestThumbnailDirectorFallbackConfiguration:
+
+    def test_primary_and_fallback_are_configured_distinctly_in_env(self):
+        """
+        Reads the real, committed .env file directly (not through Config()/
+        os.environ, so this never leaks into any other test's environment)
+        and proves TD_PLANNING_MODEL and OPENROUTER_FALLBACK_MODEL are
+        genuinely different values on disk -- the exact regression guard
+        for the bug this suite fixes. A future accidental revert to the
+        same value for both keys fails this test immediately.
+        """
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+        assert env_path.exists(), f"expected .env at {env_path}"
+
+        values: dict[str, str] = {}
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key in ("TD_PLANNING_MODEL", "OPENROUTER_FALLBACK_MODEL"):
+                values[key] = value.strip()
+
+        assert "TD_PLANNING_MODEL" in values, ".env must set TD_PLANNING_MODEL"
+        assert "OPENROUTER_FALLBACK_MODEL" in values, ".env must set OPENROUTER_FALLBACK_MODEL"
+        assert values["TD_PLANNING_MODEL"] != values["OPENROUTER_FALLBACK_MODEL"], (
+            f"TD_PLANNING_MODEL and OPENROUTER_FALLBACK_MODEL must not resolve to the same "
+            f"model -- a 'fallback' that retries the primary model provides zero real "
+            f"redundancy (the exact 2026-08-04 production bug). Got "
+            f"TD_PLANNING_MODEL={values['TD_PLANNING_MODEL']!r}, "
+            f"OPENROUTER_FALLBACK_MODEL={values['OPENROUTER_FALLBACK_MODEL']!r}."
+        )
+
+    def test_primary_transport_timeout_activates_distinct_fallback_model(self):
+        """
+        Reproduces the exact real failure mode: a ConnectionError wrapping
+        a connection reset (matching production's
+        "('Connection aborted.', ConnectionResetError(54, 'Connection
+        reset by peer'))") on TD's real primary model, exhausting retries.
+        The fallback attempt must use a genuinely DIFFERENT model slug
+        through the same OpenRouter endpoint/credential.
+        """
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": TD_FALLBACK_MODEL})
+        import requests as req_lib
+        responses = [
+            req_lib.exceptions.ConnectionError(
+                "('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))"
+            ),
+            req_lib.exceptions.ConnectionError(
+                "('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))"
+            ),
+            openrouter_200("from distinct fallback model"),
+        ]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(TD_PRIMARY_MODEL, MINIMAL_MESSAGES, 32768, cfg)
+
+        assert result.content == "from distinct fallback model"
+        last_call = mock_post.call_args_list[-1]
+        fallback_model_used = last_call.kwargs["json"]["model"]
+        assert fallback_model_used == TD_FALLBACK_MODEL
+        assert fallback_model_used != TD_PRIMARY_MODEL  # the actual regression this proves
+
+    def test_both_models_failing_raises_clean_retryable_failure(self):
+        """
+        If BOTH the primary and the (now genuinely distinct) fallback fail
+        with the same transport error, call_claude() must still fail
+        cleanly: FallbackFailed, retry-eligible at the episode/queue level
+        (FailurePolicy.TRANSIENT), never an unhandled exception, and never
+        a silent fall-through to Anthropic direct.
+        """
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": TD_FALLBACK_MODEL})
+        import requests as req_lib
+        conn_reset = req_lib.exceptions.ConnectionError(
+            "('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))"
+        )
+        responses = [conn_reset, conn_reset, conn_reset]  # primary + 1 retry + 1 fallback attempt
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                with pytest.raises(FallbackFailed) as exc_info:
+                    call_claude(TD_PRIMARY_MODEL, MINIMAL_MESSAGES, 32768, cfg)
+
+        assert mock_post.call_count == 3
+        from hypogeum.failure_policy import FailurePolicy
+        assert getattr(exc_info.value, "failure_policy", FailurePolicy.TRANSIENT) == FailurePolicy.TRANSIENT
+        assert ANTHROPIC_MESSAGES_URL not in str(mock_post.call_args_list)
+        assert openrouter_mod._use_anthropic_for_run is False
+        # The fallback attempt (if it happened) must have used the distinct
+        # model, not silently retried the primary a third time.
+        last_call = mock_post.call_args_list[-1]
+        assert last_call.kwargs["json"]["model"] == TD_FALLBACK_MODEL
+
+
+# ---------------------------------------------------------------------------
 # TestAuthFailureFallback
 # ---------------------------------------------------------------------------
 

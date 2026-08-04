@@ -226,7 +226,12 @@ class Config:
     OPENROUTER_OPUS_MODEL_ID: str      # default: confirmed T0.1 slug
     OPENROUTER_APP_NAME: str
     OPENROUTER_APP_URL: Optional[str]
-    OPENROUTER_FALLBACK_MODEL: Optional[str]
+    OPENROUTER_FALLBACK_MODEL: str      # default: anthropic/claude-sonnet-4.6 (2026-08-04 —
+                                         # must never equal any agent's own primary model; a
+                                         # "fallback" that retries the same model provides zero
+                                         # real redundancy — see openrouter.py's own docstring
+                                         # and tests/test_openrouter.py::
+                                         # TestThumbnailDirectorFallbackConfiguration)
     OPENROUTER_IMAGE_MODEL: str        # default: openai/gpt-5-image-mini (THUMBNAIL_IMAGE_PROVIDER=openrouter)
     ANTHROPIC_API_KEY: Optional[str]  # Required when OpenRouter fallback is triggered
 
@@ -429,7 +434,14 @@ class Config:
             "OPENROUTER_APP_NAME", default="hypogeum-brain"
         )
         self.OPENROUTER_APP_URL = _get_optional("OPENROUTER_APP_URL")
-        self.OPENROUTER_FALLBACK_MODEL = _get_optional("OPENROUTER_FALLBACK_MODEL")
+        # Must never silently resolve to the same slug as an agent's own
+        # primary model (a fresh clone with no .env override, or an .env.example
+        # left blank, must not regress into the 2026-08-04 primary==fallback
+        # bug) — defaults to a genuinely distinct, already-proven OpenRouter
+        # model rather than leaving this unset.
+        self.OPENROUTER_FALLBACK_MODEL = _get_optional(
+            "OPENROUTER_FALLBACK_MODEL", default=_DEFAULT_SONNET_SLUG
+        )
         self.OPENROUTER_IMAGE_MODEL = _get_optional(
             "OPENROUTER_IMAGE_MODEL", default="openai/gpt-5-image-mini"
         )

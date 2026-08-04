@@ -582,9 +582,18 @@ class TestOpenRouterModelFallback:
         from hypogeum.failure_policy import FailurePolicy
         assert getattr(exc_info.value, "failure_policy", FailurePolicy.TRANSIENT) == FailurePolicy.TRANSIENT
 
-    def test_missing_fallback_config_fails_safely_without_anthropic(self):
-        """No OPENROUTER_FALLBACK_MODEL configured: fail safely after primary exhaustion, no third call, no Anthropic."""
-        cfg = make_config()  # OPENROUTER_FALLBACK_MODEL intentionally absent
+    def test_unconfigured_fallback_config_fails_safely_without_anthropic(self):
+        """
+        config.OPENROUTER_FALLBACK_MODEL falsy (defensive edge case — normal
+        Config() construction always yields a real default as of 2026-08-04,
+        see TestThumbnailDirectorFallbackConfiguration; this exercises
+        _try_openrouter_model_fallback()'s own "no fallback model" branch
+        directly, in case a caller ever constructs a Config-like object
+        without going through the real default): fail safely after primary
+        exhaustion, no third call, no Anthropic.
+        """
+        cfg = make_config()
+        cfg.OPENROUTER_FALLBACK_MODEL = None  # force the edge case explicitly
         responses = [http_error(500), http_error(500)]
         with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
             with patch("hypogeum.openrouter.time.sleep"):

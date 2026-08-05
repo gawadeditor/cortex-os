@@ -340,6 +340,17 @@ class TestComputeBeatCoverage:
 # TestFillCoverageDeficits — clip_repair_agent.fill_coverage_deficits()
 # ---------------------------------------------------------------------------
 
+def _mock_qualify_always_pass(asset, clip_path, source_type, config, episode_id, log):
+    """Standin for hypogeum.source_enhancement.qualify_asset() in tests that
+    exercise fill_coverage_deficits()'s deficit-planning/stop-early/retry
+    logic rather than the asset-qualification boundary itself (see
+    tests/test_source_enhancement.py::TestQualifyAsset for that) — the fake
+    clip bytes these tests write are not real, ffprobe-readable video, so
+    without this stub every clip would be rejected as corrupt."""
+    asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
+    return True
+
+
 class TestFillCoverageDeficits:
 
     def _cfg(self, max_extra: int = 2):
@@ -374,6 +385,7 @@ class TestFillCoverageDeficits:
         ]
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
              patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=6.5):
             result = fill_coverage_deficits(
                 insufficient_beats=only_beat2_insufficient,
@@ -414,6 +426,7 @@ class TestFillCoverageDeficits:
         )
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
              patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=6.5):
             result = fill_coverage_deficits(
                 insufficient_beats=[beat],
@@ -450,6 +463,7 @@ class TestFillCoverageDeficits:
         )
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
              patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=5.0):
             result = fill_coverage_deficits(
                 insufficient_beats=[beat],
@@ -468,6 +482,299 @@ class TestFillCoverageDeficits:
         # Content differs per file -- proves each is its own generation, not a copy.
         contents = {p.read_bytes() for p in paths}
         assert len(contents) == len(paths)
+
+    def test_variable_extra_clip_counts_driven_by_deficit(self, tmp_path):
+        """Two beats with different deficits must be planned differently --
+        never the same fixed count for every beat."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+        vp = _two_beat_visual_package("ep_variable")
+
+        call_counts: Dict[str, int] = {}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            base = scene_spec["scene_id"].split("__extra")[0]
+            call_counts[base] = call_counts.get(base, 0) + 1
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(f"CLIP-{scene_spec['scene_id']}".encode())
+            return {"generation_status": "generated"}
+
+        small_deficit_beat = BeatCoverage(
+            scene_id="sc_001", source_type="main_episode", short_id=None,
+            narration_duration_seconds=14.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=4.8,
+            sufficient=False,
+        )
+        large_deficit_beat = BeatCoverage(
+            scene_id="sc_002", source_type="main_episode", short_id=None,
+            narration_duration_seconds=40.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=30.8,
+            sufficient=False,
+        )
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=5.0):
+            result = fill_coverage_deficits(
+                insufficient_beats=[small_deficit_beat, large_deficit_beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=self._cfg(max_extra=10),
+                episode_id="ep_variable",
+                log=MagicMock(),
+            )
+
+        # sc_001 (4.8s raw deficit / 5.0s per clip) needs 1 clip;
+        # sc_002 (30.8s raw deficit / 5.0s per clip) needs many more --
+        # never the same fixed count.
+        assert call_counts["sc_001"] < call_counts["sc_002"]
+        assert len(result["sc_001"]) == 1
+        assert len(result["sc_002"]) > 2
+
+    def test_long_beat_requiring_more_than_two_clips_planned_correctly(self, tmp_path):
+        """A beat far longer than 2 clips can cover (e.g. the real ep_f3619022
+        s29 scenario: ~47s narration) must plan and close correctly once the
+        safety cap is raised high enough to mathematically permit it."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+        vp = _two_beat_visual_package("ep_long_beat")
+
+        submitted: List[str] = []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            submitted.append(scene_spec["scene_id"])
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(f"CLIP-{scene_spec['scene_id']}".encode())
+            return {"generation_status": "generated"}
+
+        # 8s primary * 1.15 = 9.2s covered; needs (46.9 - 9.2) raw-equivalent
+        # closed by 8s clips -- mathematically requires 5 extra clips at
+        # 8s each (5 * 8 = 40 raw, plus the primary's 8 = 48 * 1.15 = 55.2s
+        # >= 46.9s), impossible within the old flat cap of 2.
+        beat = BeatCoverage(
+            scene_id="sc_002", source_type="main_episode", short_id=None,
+            narration_duration_seconds=46.9, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=37.7,
+            sufficient=False,
+        )
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=8.0):
+            result = fill_coverage_deficits(
+                insufficient_beats=[beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=self._cfg(max_extra=10),
+                episode_id="ep_long_beat",
+                log=MagicMock(),
+            )
+
+        assert len(submitted) > 2, "must not be capped at the old fixed policy of 2"
+        assert len(result["sc_002"]) == len(submitted)
+        # Deficit genuinely closed: primary + all extras, stretched by the
+        # editorial factor, now covers the narration duration.
+        total_available = 8.0 + 8.0 * len(submitted)
+        assert total_available * MAX_EDITORIAL_SPEED_FACTOR >= beat.narration_duration_seconds
+
+    def test_existing_generated_short_extra_clip_discovered_and_reused(self, tmp_path):
+        """The Shorts path-bug recovery scenario: a real extra clip already
+        sits on disk at the CORRECT sh_{short_id}/ path (e.g. from a prior
+        run, pre- or post-fix) -- submit_scene()'s own resume-safety reuse
+        must be discovered via the canonical path builder and counted,
+        never regenerated."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+        vp = _two_beat_visual_package("ep_short_reuse")
+        for scene in vp["scenes"]:
+            scene["short_id"] = "short_001"
+            scene["source_type"] = "short"
+
+        # Pre-seed the extra clip exactly where muapi.scene_file_path()
+        # (and therefore the fixed fill_coverage_deficits()) expects it.
+        output_dir = assets_root / "episodes" / "ep_short_reuse"
+        pre_existing = output_dir / "video" / "sh_short_001" / "sc_sc_002__extra1.mp4"
+        pre_existing.parent.mkdir(parents=True, exist_ok=True)
+        pre_existing.write_bytes(b"ALREADY-GENERATED-REAL-CLIP")
+
+        def _mock_submit_reuse(scene_spec, config, episode_id, output_dir, agent):
+            # Mirrors real submit_scene()'s resume-safety behavior: the file
+            # already exists, so it reports "reused" without writing anything new.
+            return {"generation_status": "reused"}
+
+        beat = BeatCoverage(
+            scene_id="sc_002", source_type="short", short_id="short_001",
+            narration_duration_seconds=14.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=4.8,
+            sufficient=False,
+        )
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit_reuse), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=6.5):
+            result = fill_coverage_deficits(
+                insufficient_beats=[beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=self._cfg(),
+                episode_id="ep_short_reuse",
+                log=MagicMock(),
+            )
+
+        assert "sc_002" in result
+        assert result["sc_002"] == [pre_existing]
+
+    def test_transient_provider_failure_retries_the_same_slot(self, tmp_path):
+        """A transient generation failure on the first attempt for a slot
+        must retry that SAME slot (same extra_scene_id) rather than
+        abandoning it or advancing to a new one."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+        vp = _two_beat_visual_package("ep_retry_success")
+
+        attempts: List[str] = []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            attempts.append(scene_spec["scene_id"])
+            if len(attempts) == 1:
+                return {"generation_status": "generation_failed"}  # transient failure
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"CLIP")
+            return {"generation_status": "generated"}
+
+        beat = BeatCoverage(
+            scene_id="sc_002", source_type="main_episode", short_id=None,
+            narration_duration_seconds=14.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=4.8,
+            sufficient=False,
+        )
+        cfg = self._cfg(max_extra=2)
+        cfg.COVERAGE_FILL_MAX_SLOT_RETRIES = 1
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=6.5):
+            result = fill_coverage_deficits(
+                insufficient_beats=[beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_retry_success",
+                log=MagicMock(),
+            )
+
+        # Both attempts targeted the SAME slot (extra1) -- the retry never
+        # advanced to extra2, and the failed attempt was not counted:
+        # exactly one usable clip closes the beat.
+        assert attempts == ["sc_002__extra1", "sc_002__extra1"]
+        assert len(result["sc_002"]) == 1
+
+    def test_exhausted_transient_retries_fail_cleanly(self, tmp_path):
+        """A slot whose every retry fails must give up on that slot cleanly
+        (bounded attempts, no infinite loop) and move on -- with zero
+        clips counted as coverage from it."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+        vp = _two_beat_visual_package("ep_retry_exhausted")
+
+        attempts: List[str] = []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            attempts.append(scene_spec["scene_id"])
+            return {"generation_status": "generation_failed"}  # always fails
+
+        beat = BeatCoverage(
+            scene_id="sc_002", source_type="main_episode", short_id=None,
+            narration_duration_seconds=14.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=4.8,
+            sufficient=False,
+        )
+        cfg = self._cfg(max_extra=2)
+        cfg.COVERAGE_FILL_MAX_SLOT_RETRIES = 1
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=6.5):
+            result = fill_coverage_deficits(
+                insufficient_beats=[beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_retry_exhausted",
+                log=MagicMock(),
+            )
+
+        # Bounded: 2 slots * (1 initial + 1 retry) = exactly 4 attempts,
+        # never more -- no infinite loop.
+        assert len(attempts) == 4
+        assert attempts == [
+            "sc_002__extra1", "sc_002__extra1",
+            "sc_002__extra2", "sc_002__extra2",
+        ]
+        assert "sc_002" not in result  # nothing usable was ever produced
+
+    def test_extra_clip_not_counted_until_qualified(self, tmp_path):
+        """A clip that generates successfully but fails asset qualification
+        (e.g. stays under the required resolution after a failed
+        enhancement attempt) must never be counted toward coverage, and
+        must never reach the caller's extra_clips_by_scene result --
+        exactly the boundary that keeps an unqualified clip out of
+        Assembly's timeline."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+        vp = _two_beat_visual_package("ep_unqualified")
+
+        generated_paths: List[str] = []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"CLIP")
+            generated_paths.append(str(dest))
+            return {"generation_status": "generated"}
+
+        def _mock_qualify_first_fails(asset, clip_path, source_type, config, episode_id, log):
+            # extra1 never qualifies (simulates corrupt/failed enhancement);
+            # extra2 qualifies cleanly.
+            if "extra1" in asset["scene_id"]:
+                asset["source_enhancement"] = {
+                    "validation_result": "failed", "failure_reason": "still_below_target",
+                }
+                return True
+            asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
+            return True
+
+        beat = BeatCoverage(
+            scene_id="sc_002", source_type="main_episode", short_id=None,
+            narration_duration_seconds=14.0, available_duration_seconds=8.0,
+            max_editorial_duration_seconds=9.2, deficit_seconds=4.8,
+            sufficient=False,
+        )
+        cfg = self._cfg(max_extra=2)
+        cfg.COVERAGE_FILL_MAX_SLOT_RETRIES = 0
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_first_fails), \
+             patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=6.5):
+            result = fill_coverage_deficits(
+                insufficient_beats=[beat],
+                visual_package=vp,
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_unqualified",
+                log=MagicMock(),
+            )
+
+        # Both slots were attempted (extra1 unqualified, extra2 qualified),
+        # but only the qualified clip is ever returned to the caller --
+        # this is the boundary that prevents an unqualified clip from ever
+        # reaching Assembly's timeline.
+        assert len(generated_paths) == 2
+        assert len(result["sc_002"]) == 1
+        assert "extra2" in str(result["sc_002"][0])
+        assert not any("extra1" in str(p) for p in result["sc_002"])
 
     def test_skips_beat_whose_scene_is_not_in_visual_package(self, tmp_path):
         """A beat referencing a scene_id absent from the visual package is
@@ -555,6 +862,7 @@ class TestAssemblyCoverageGateTwoBeat:
         with patch("hypogeum.agents.music_agent.generate_music_track",
                    return_value=_make_music_track_result(tmp_path=tmp_path)), \
              patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
              patch("subprocess.run", side_effect=_fake_duration_probe({"extra1": 6.5})):
             package = run_assembly_agent(
                 visual_package=visual,
@@ -609,6 +917,7 @@ class TestAssemblyCoverageGateTwoBeat:
         with patch("hypogeum.agents.music_agent.generate_music_track",
                    return_value=_make_music_track_result(tmp_path=tmp_path)), \
              patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
              patch("hypogeum.agents.assembly_agent.render_episode") as mock_render, \
              patch("subprocess.run", side_effect=_fake_duration_probe({"extra": 6.5})):
             package = run_assembly_agent(

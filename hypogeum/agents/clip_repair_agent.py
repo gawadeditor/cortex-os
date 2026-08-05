@@ -378,20 +378,42 @@ def fill_coverage_deficits(
     insufficient_beats, since that list is computed by
     hypogeum.agents.coverage_check.check_timeline_coverage()).
 
-    Each additional clip is a genuinely new MUAPI generation (distinct
-    output file, never a copy or a repeat of an existing clip) requested
-    from the beat's own scene_spec, capped at
-    config.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT attempts per beat so one
-    stubborn beat cannot generate unbounded cost. Stops as soon as the
-    accumulated real duration of the new clips closes the beat's deficit
-    (measured via the same editorial-factor math as coverage_check.py).
+    Deficit-aware planning (2026-08-05 policy, replacing the prior fixed
+    "always try exactly COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT" behavior,
+    which was mathematically incapable of closing long narration beats):
+    the number of additional clips requested for one beat is driven by
+    that beat's own measured remaining deficit, recalculated after every
+    real clip — never a flat count applied uniformly to every beat.
+    config.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT is now a finite safety
+    cap (stops one stubborn beat from generating unbounded cost), not the
+    assumed target. A beat that cannot close within the cap logs an
+    explicit structured "coverage_fill_beat_unresolvable" reason
+    (required/allowed clip counts, unresolved deficit) rather than
+    silently looping or silently giving up.
 
-    Returns {scene_id: [Path, ...]} — only the NEWLY generated extra clip
-    paths for beats that got at least one. Callers attach these to the
-    corresponding TimelineEntry.extra_clip_paths and re-run
+    Each candidate clip slot gets a bounded retry
+    (config.COVERAGE_FILL_MAX_SLOT_RETRIES) on a transient generation or
+    qualification failure — retrying the SAME slot, never advancing to a
+    new one and never counting a failed attempt as coverage, so one
+    provider-side hiccup doesn't permanently cost a beat one of its
+    mathematically required clips.
+
+    Every new clip is routed through hypogeum.source_enhancement.
+    qualify_asset() — the same canonical asset-qualification boundary VPD
+    primaries use — before its duration counts toward closing the
+    deficit. A clip that fails qualification (corrupt, or still below the
+    required resolution after a failed enhancement attempt) is never
+    counted and never reaches Assembly, regardless of its duration.
+
+    Returns {scene_id: [Path, ...]} — only the NEWLY generated, qualified
+    extra clip paths for beats that got at least one. Callers attach
+    these to the corresponding TimelineEntry.extra_clip_paths and re-run
     check_timeline_coverage() to see whether the deficit is now closed.
     """
+    import math
+
     from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
+    from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
 
     if log is None:
         log = get_logger(episode_id=episode_id, agent="clip_repair_agent")
@@ -402,16 +424,23 @@ def fill_coverage_deficits(
     scenes: List[dict] = visual_package.get("scenes", [])
     scene_by_id: Dict[str, dict] = {s["scene_id"]: s for s in scenes}
     max_extra_per_beat = max(0, getattr(config, "COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT", 2))
+    max_slot_retries = max(0, getattr(config, "COVERAGE_FILL_MAX_SLOT_RETRIES", 1))
+    assumed_clip_duration = max(0.1, getattr(config, "COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS", 8.0))
 
     # Real production convention (matches VPD's Phase 2 caller): output_dir
-    # is the episode root — muapi._scene_file_path() appends "video/" itself.
+    # is the episode root — muapi.scene_file_path() appends "video/" itself.
     output_dir = assets_root / "episodes" / episode_id
+
+    manifest_assets: List[dict] = visual_package.setdefault(
+        "asset_manifest", {}
+    ).setdefault("assets", [])
 
     log.info(
         "coverage_fill_started",
         episode_id=episode_id,
         beats_to_fill=len(insufficient_beats),
         max_extra_per_beat=max_extra_per_beat,
+        max_slot_retries=max_slot_retries,
     )
 
     extra_clips_by_scene: Dict[str, List[Path]] = {}
@@ -431,70 +460,145 @@ def fill_coverage_deficits(
         remaining = beat.deficit_seconds / MAX_EDITORIAL_SPEED_FACTOR
         new_paths: List[Path] = []
 
-        for attempt in range(max_extra_per_beat):
-            if remaining <= 0.001:
-                break
+        # Cost-visibility estimate (planning only — the real stopping
+        # condition is always `remaining`, recalculated from each clip's
+        # measured duration below, never this estimate).
+        effective_coverage_per_clip = assumed_clip_duration * MAX_EDITORIAL_SPEED_FACTOR
+        required_extra_count_estimate = math.ceil(beat.deficit_seconds / effective_coverage_per_clip)
+        log.info(
+            "coverage_fill_beat_planned",
+            episode_id=episode_id,
+            scene_id=sid,
+            deficit_seconds=round(beat.deficit_seconds, 3),
+            required_extra_count_estimate=required_extra_count_estimate,
+            allowed_extra_count=max_extra_per_beat,
+        )
 
-            extra_scene_id = f"{sid}__extra{attempt + 1}"
+        slot_index = 0
+        while remaining > 0.001 and slot_index < max_extra_per_beat:
+            slot_index += 1
+            extra_scene_id = f"{sid}__extra{slot_index}"
 
-            try:
-                from hypogeum.muapi import submit_scene  # noqa: PLC0415
-                from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
+            qualified_path: Optional[Path] = None
+            for retry_num in range(max_slot_retries + 1):
+                try:
+                    from hypogeum.muapi import submit_scene, scene_file_path  # noqa: PLC0415
+                    from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
 
-                # scene is a raw VPD scene dict: production_spec.
-                # provider_routing.primary_prompt (nested), not the flat
-                # production_spec.primary_prompt submit_scene() requires —
-                # build_scene_spec() is the same canonical translator VPD's
-                # own Phase 2 generation uses (2026-08-04 fix; see
-                # run_clip_repair()'s Strategy B above for the identical
-                # fix and the entity_hosted_urls={} rationale).
-                extra_scene_spec = build_scene_spec(scene, entity_hosted_urls={})
-                extra_scene_spec["scene_id"] = extra_scene_id
+                    # scene is a raw VPD scene dict: production_spec.
+                    # provider_routing.primary_prompt (nested), not the flat
+                    # production_spec.primary_prompt submit_scene() requires —
+                    # build_scene_spec() is the same canonical translator VPD's
+                    # own Phase 2 generation uses (2026-08-04 fix; see
+                    # run_clip_repair()'s Strategy B above for the identical
+                    # fix and the entity_hosted_urls={} rationale).
+                    extra_scene_spec = build_scene_spec(scene, entity_hosted_urls={})
+                    extra_scene_spec["scene_id"] = extra_scene_id
 
-                output_dir.mkdir(parents=True, exist_ok=True)
-                asset_result = submit_scene(
-                    scene_spec=extra_scene_spec,
-                    config=config,
-                    episode_id=episode_id,
-                    output_dir=output_dir,
-                    agent="clip_repair_agent",
-                )
-                status = asset_result.get("generation_status", "generation_failed")
-                extra_path = output_dir / "video" / f"sc_{extra_scene_id}.mp4"
-                if beat.short_id:
-                    extra_path = output_dir / "video" / beat.short_id / f"sc_{extra_scene_id}.mp4"
-
-                if status in ("generated", "reused") and extra_path.exists():
-                    extra_duration = _probe_extra_clip_duration(extra_path)
-                    new_paths.append(extra_path)
-                    remaining -= extra_duration
-                    log.info(
-                        "coverage_fill_clip_generated",
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    asset_result = submit_scene(
+                        scene_spec=extra_scene_spec,
+                        config=config,
                         episode_id=episode_id,
-                        scene_id=sid,
-                        extra_scene_id=extra_scene_id,
-                        extra_duration_seconds=round(extra_duration, 3),
-                        remaining_deficit_seconds=round(max(0.0, remaining), 3),
+                        output_dir=output_dir,
+                        agent="clip_repair_agent",
                     )
-                else:
+                    status = asset_result.get("generation_status", "generation_failed")
+                    # Single source of truth (2026-08-05 fix): this used to
+                    # reimplement the "sh_{short_id}/sc_{scene_id}.mp4" pattern
+                    # inline and dropped the "sh_" prefix, so the existence
+                    # check below looked in the wrong directory for every Short
+                    # beat — real, already-generated, already-paid clips were
+                    # misreported as coverage_fill_clip_failed. Always delegate
+                    # to muapi.scene_file_path(), the same function submit_scene()
+                    # itself used to write the file.
+                    extra_path = scene_file_path(output_dir, extra_scene_id, beat.short_id)
+
+                    if status not in ("generated", "reused") or not extra_path.exists():
+                        log.warn(
+                            "coverage_fill_slot_attempt_failed",
+                            episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
+                            retry_num=retry_num, max_slot_retries=max_slot_retries,
+                            generation_status=status,
+                        )
+                        continue  # bounded retry — same slot, does not advance/consume a new one
+
+                    # Quality-gate the new clip before it counts as coverage
+                    # (Part H): reused canonical qualify_asset() boundary,
+                    # never a raw provider clip reaching Assembly. Recorded
+                    # onto the asset_manifest as a new entry so a resumed
+                    # run sees this decision too (2026-08-05).
+                    extra_asset = {
+                        "scene_id": extra_scene_id,
+                        "asset_id": asset_result.get("asset_id"),
+                        "model": asset_result.get("model_used"),
+                        "tier_used": asset_result.get("tier_used"),
+                        "source_enhancement": None,
+                    }
+                    qualify_asset(
+                        extra_asset, extra_path, beat.source_type, config, episode_id, log,
+                    )
+                    se = extra_asset.get("source_enhancement") or {}
+                    qualified = se.get("validation_result") in (
+                        "passed", "skipped_native_resolution",
+                    )
+
+                    if not qualified:
+                        log.warn(
+                            "coverage_fill_clip_unqualified",
+                            episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
+                            retry_num=retry_num, max_slot_retries=max_slot_retries,
+                            validation_result=se.get("validation_result"),
+                            failure_reason=se.get("failure_reason"),
+                        )
+                        continue  # bounded retry — same slot, corrupt/failed candidate already archived by qualify_asset
+
+                    manifest_assets.append(extra_asset)
+                    qualified_path = extra_path
+                    break
+
+                except Exception as exc:
                     log.warn(
-                        "coverage_fill_clip_failed",
-                        episode_id=episode_id,
-                        scene_id=sid,
-                        extra_scene_id=extra_scene_id,
-                        generation_status=status,
+                        "coverage_fill_clip_error",
+                        episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
+                        retry_num=retry_num, max_slot_retries=max_slot_retries,
+                        error=str(exc),
                     )
-            except Exception as exc:
+                    continue  # bounded retry — same slot
+
+            if qualified_path is None:
                 log.warn(
-                    "coverage_fill_clip_error",
-                    episode_id=episode_id,
-                    scene_id=sid,
-                    extra_scene_id=extra_scene_id,
-                    error=str(exc),
+                    "coverage_fill_slot_exhausted",
+                    episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
+                    retries_used=max_slot_retries,
                 )
+                continue  # slot consumed, genuinely could not produce usable coverage this attempt
+
+            extra_duration = _probe_extra_clip_duration(qualified_path)
+            new_paths.append(qualified_path)
+            remaining -= extra_duration
+            log.info(
+                "coverage_fill_clip_generated",
+                episode_id=episode_id,
+                scene_id=sid,
+                extra_scene_id=extra_scene_id,
+                extra_duration_seconds=round(extra_duration, 3),
+                remaining_deficit_seconds=round(max(0.0, remaining), 3),
+            )
 
         if new_paths:
             extra_clips_by_scene[sid] = new_paths
+
+        if remaining > 0.001:
+            log.error(
+                "coverage_fill_beat_unresolvable",
+                episode_id=episode_id,
+                scene_id=sid,
+                required_extra_count_estimate=required_extra_count_estimate,
+                allowed_extra_count=max_extra_per_beat,
+                clips_obtained=len(new_paths),
+                unresolved_deficit_seconds=round(remaining * MAX_EDITORIAL_SPEED_FACTOR, 3),
+            )
 
     log.info(
         "coverage_fill_done",
@@ -589,15 +693,17 @@ def _expected_clip_path(
 
     Priority:
       1. scene["asset_id"] → assets_root / f"{asset_id}.mp4"
-      2. Short scene: assets_root/episodes/{episode_id}/video/{short_id}/{scene_id}.mp4
-      3. Main scene:  assets_root/episodes/{episode_id}/video/{scene_id}.mp4
+      2. Fallback (no asset_id yet, e.g. a scene that never generated a
+         primary clip at all): delegate to muapi.scene_file_path(), the
+         single canonical builder — never reimplement the "sh_{short_id}/
+         sc_{scene_id}.mp4" convention here. A prior inline duplicate
+         dropped the "sh_" prefix for Short scenes (2026-08-05 fix).
     """
+    from hypogeum.muapi import scene_file_path  # noqa: PLC0415
+
     asset_id = scene.get("asset_id")
     if asset_id:
         return assets_root / f"{asset_id}.mp4"
 
     short_id = scene.get("short_id")
-    if short_id:
-        return assets_root / "episodes" / episode_id / "video" / short_id / f"{scene_id}.mp4"
-
-    return assets_root / "episodes" / episode_id / "video" / f"{scene_id}.mp4"
+    return scene_file_path(assets_root / "episodes" / episode_id, scene_id, short_id)

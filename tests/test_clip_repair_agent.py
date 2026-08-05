@@ -49,6 +49,9 @@ def _make_config(max_generated: int = 5, clip_repair_enabled: bool = True):
     cfg = MagicMock()
     cfg.CLIP_REPAIR_ENABLED = clip_repair_enabled
     cfg.CLIP_REPAIR_MAX_GENERATED = max_generated
+    cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = 2
+    cfg.COVERAGE_FILL_MAX_SLOT_RETRIES = 0
+    cfg.COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS = 8.0
     return cfg
 
 
@@ -690,7 +693,15 @@ class TestFillCoverageDeficits:
             dest.write_bytes(b"GENERATED")
             return {"generation_status": "generated"}
 
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+            # This test exercises scene_spec translation, not the asset
+            # qualification boundary itself (see TestQualifyAssetIntegration
+            # for that) — simulate an already-compliant clip.
+            asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
+            return True
+
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify), \
              patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=20.0):
             extra_clips = fill_coverage_deficits(
                 insufficient_beats=[beat],
@@ -733,12 +744,22 @@ class TestFillCoverageDeficits:
         def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
             _assert_real_submit_scene_contract(scene_spec)
             captured["scene_spec"] = scene_spec
-            dest = output_dir / "video" / "short_001" / f"sc_{scene_spec['scene_id']}.mp4"
+            # Real submit_scene() writes via muapi.scene_file_path(), which
+            # prefixes the short_id directory with "sh_" — this mock must
+            # match that real convention, not the pre-2026-08-05 bug where
+            # fill_coverage_deficits()'s own existence check looked in
+            # video/short_001/ instead of video/sh_short_001/.
+            dest = output_dir / "video" / "sh_short_001" / f"sc_{scene_spec['scene_id']}.mp4"
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"GENERATED")
             return {"generation_status": "generated"}
 
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+            asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
+            return True
+
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify), \
              patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=15.0):
             extra_clips = fill_coverage_deficits(
                 insufficient_beats=[beat],

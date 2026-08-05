@@ -523,11 +523,29 @@ class Config:
         # production policy (2026-08-01): Video Renderer must never compensate for missing
         # duration; insufficient beats block assembly and request additional MUAPI coverage.
         self.COVERAGE_CHECK_ENABLED = _get_bool("COVERAGE_CHECK_ENABLED", default=True)
-        # COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT: cap on additional distinct clips generated
-        # to close one beat's coverage deficit (default 2). Each is a full, real MUAPI spend —
-        # bounded to keep a single stubborn beat from generating unbounded cost.
+        # COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT: safety cap (2026-08-05: no longer a fixed
+        # target — clip_repair_agent.fill_coverage_deficits() now plans the number of extra
+        # clips per beat from the beat's own measured deficit, recalculated after each real
+        # clip; this is only the finite ceiling that stops one stubborn beat from generating
+        # unbounded cost when its deficit genuinely can't close within a reasonable spend).
         self.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = _get_int(
             "COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT", default=2
+        )
+        # COVERAGE_FILL_MAX_SLOT_RETRIES: bounded retries of the SAME planned clip slot on a
+        # transient generation failure (default 1 = one retry, two attempts total per slot).
+        # A retry never advances to a new slot and never counts toward
+        # COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT — it exists so one transient MUAPI failure
+        # doesn't permanently cost a beat one of its mathematically required clips.
+        self.COVERAGE_FILL_MAX_SLOT_RETRIES = _get_int(
+            "COVERAGE_FILL_MAX_SLOT_RETRIES", default=1
+        )
+        # COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS: planning-only estimate (default 8.0,
+        # the fixed provider clip length) used purely for the upfront "how many clips will
+        # this beat probably need" cost-visibility estimate logged before submission. Never
+        # the actual stopping condition — that is always the real, ffprobe-measured duration
+        # of each clip as it's generated.
+        self.COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS = _get_float(
+            "COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS", default=8.0
         )
 
         # --- Higgsfield (comparison only) ---

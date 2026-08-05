@@ -180,7 +180,7 @@ def _clip_file_path(episode_id: str, scene_id: str, short_id: Optional[str]) -> 
     """
     Derive the conventional relative file path for a generated scene video clip.
 
-    Mirrors the convention in muapi._scene_file_path():
+    Mirrors the convention in muapi.scene_file_path():
       Main episode: episodes/{episode_id}/video/sc_{scene_id}.mp4
       Short:        episodes/{episode_id}/video/sh_{short_id}/sc_{scene_id}.mp4
 

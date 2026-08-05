@@ -50,7 +50,7 @@ from hypogeum.providers.enhancement import (
     get_enhancement_provider,
     register_provider,
 )
-from hypogeum.source_enhancement import run_source_enhancement
+from hypogeum.source_enhancement import qualify_asset, run_source_enhancement
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ class FakeEnhancementProvider(EnhancementProvider):
 
     def __init__(self, name="fake", model="fake-upscaler", version="1.0",
                  produce_width=1920, produce_height=1080, fail=False,
-                 fail_validation=False, cost=0.05, gen_time=1.0):
+                 fail_validation=False, ignore_target=False, cost=0.05, gen_time=1.0):
         self.name = name
         self.model = model
         self.version = version
@@ -114,6 +114,15 @@ class FakeEnhancementProvider(EnhancementProvider):
         self.produce_height = produce_height
         self.fail = fail
         self.fail_validation = fail_validation  # provider "succeeds" but output stays under-resolution
+        # ignore_target=True models a real provider's actual physical
+        # behavior (e.g. MUAPI's AI Video Upscaler preserving the source's
+        # own aspect ratio): output is whatever produce_width/produce_height
+        # says, regardless of what target_width/target_height was
+        # requested -- our POLICY decides whether that's acceptable,
+        # independent of what we asked for. Default False preserves every
+        # existing test's behavior (obediently produces the requested
+        # target) unchanged.
+        self.ignore_target = ignore_target
         self.cost = cost
         self.gen_time = gen_time
         self.calls = []
@@ -127,8 +136,12 @@ class FakeEnhancementProvider(EnhancementProvider):
                 provider_version=self.version, failure_reason="fake_provider_failure",
                 cost_usd=self.cost, generation_time_s=self.gen_time,
             )
-        out_w = target_width if not self.fail_validation else 1280
-        out_h = target_height if not self.fail_validation else 720
+        if self.fail_validation:
+            out_w, out_h = 1280, 720
+        elif self.ignore_target:
+            out_w, out_h = self.produce_width, self.produce_height
+        else:
+            out_w, out_h = target_width, target_height
         _make_clip(dest_path, out_w, out_h, duration=1.0)
         return EnhancementResult(
             success=True, output_path=dest_path, provider=self.name, model=self.model,
@@ -239,11 +252,17 @@ class TestFailClosed:
         assert se["validation_result"] == "failed"
         assert se["failure_reason"] == "fake_provider_failure"
 
-        # Fail closed: original file byte-for-byte untouched, still 720p.
+        # Fail closed on the SOURCE clip: original file byte-for-byte
+        # untouched, still 720p.
         assert clip_path.read_bytes() == original_bytes
         assert probe_resolution(clip_path) == (1280, 720)
-        # No stray candidate file left behind either.
+        # No candidate file exists in this scenario -- the provider itself
+        # reported failure before ever writing dest_path (see
+        # FakeEnhancementProvider.enhance()'s fail=True branch), so there
+        # was nothing to archive, not "correctly deleted."
         assert not (ep_dir / "video" / "sc_s01.enhanced.mp4").exists()
+        assert se["archived_path"] is None
+        assert se["archived_checksum"] is None
 
         # The second Source Validation pass (already-existing coverage_check
         # machinery) still correctly rejects this clip -- fail-closed
@@ -255,7 +274,10 @@ class TestFailClosed:
     def test_provider_success_but_still_under_resolution_fails_closed(self, tmp_path):
         """A provider that reports success=True but whose actual output
         doesn't meet the resolution requirement must never be trusted --
-        this stage re-probes independently and fails closed anyway."""
+        this stage re-probes independently and fails closed on the SOURCE
+        clip anyway. But the real, paid-for candidate itself must never be
+        deleted (2026-08-04 architecture fix) -- it's quarantined and
+        described in full instead."""
         episode_id = "ep_enh_fail_validate"
         ep_dir = tmp_path
         clip_path = ep_dir / "video" / "sc_s01.mp4"
@@ -275,6 +297,177 @@ class TestFailClosed:
         assert "post-enhancement validation failed" in se["failure_reason"]
         assert clip_path.read_bytes() == original_bytes
         assert probe_resolution(clip_path) == (1280, 720)
+
+        # The generated candidate (real output, real charge) is NEVER
+        # deleted -- it's archived and fully described.
+        candidate_path = ep_dir / "video" / "sc_s01.enhanced.mp4"
+        assert candidate_path.exists()
+        assert se["archived_path"] == str(candidate_path)
+        assert se["archived_checksum"] is not None
+        assert se["archived_at"] is not None
+        assert se["provider"] == "fake"
+        assert se["model"] == "fake-upscaler"
+        assert se["provider_version"] == "1.0"
+        assert se["cost_usd"] == 0.05
+        assert se["generation_time_s"] == 1.0
+        assert se["original_resolution"] == "1280x720"
+
+        import hashlib
+        expected_checksum = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        assert se["archived_checksum"] == expected_checksum
+
+
+# ---------------------------------------------------------------------------
+# 3b. Asset lifecycle: validation failure must never destroy a paid artifact
+# (2026-08-04 architectural fix)
+# ---------------------------------------------------------------------------
+
+class TestAssetLifecyclePreservation:
+    def test_reconsideration_promotes_archived_candidate_at_zero_new_cost(self, tmp_path):
+        """The exact real-world scenario this fix addresses: a candidate
+        failed validation under an old (wrong) required resolution: the
+        SAME real file, re-probed under a corrected policy, must be
+        promoted to canonical without any new provider call."""
+        episode_id = "ep_enh_reconsider"
+        ep_dir = tmp_path
+        clip_path = ep_dir / "video" / "sc_s01.mp4"
+        _make_clip(clip_path, 720, 1280)  # portrait source, e.g. a Short
+
+        # First pass: provider correctly produces 1080x1920 portrait output
+        # regardless of what target it's asked for (ignore_target=True
+        # models MUAPI's real aspect-ratio-preserving physics), but an
+        # (incorrect, landscape) required resolution rejects it -- exactly
+        # the bug found in production.
+        provider = FakeEnhancementProvider(produce_width=1080, produce_height=1920, ignore_target=True)
+        register_provider("fake_reconsider", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_reconsider")
+        vp = {
+            "scenes": [{"scene_id": "s01", "source_type": "short"}],
+            "asset_manifest": {"assets": [{
+                "scene_id": "s01",
+                "asset_id": f"episodes/{episode_id}/video/sc_s01",
+                "model": "veo3.1-lite-text-to-video", "tier_used": 2,
+            }]},
+        }
+
+        with patch.dict(
+            "hypogeum.artifact_compatibility.DELIVERABLE_RESOLUTION_POLICY",
+            {"short": (1920, 1080)},  # simulate the old, wrong (landscape) requirement
+        ):
+            vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        asset = vp["asset_manifest"]["assets"][0]
+        assert asset["source_enhancement"]["validation_result"] == "failed"
+        assert provider.calls == ["s01"]
+        candidate_path = ep_dir / "video" / "sc_s01.enhanced.mp4"
+        assert candidate_path.exists()
+
+        # Second pass: corrected policy (the real, current portrait
+        # requirement for "short"). Must promote the ALREADY-EXISTING
+        # candidate -- zero new provider calls.
+        vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        asset = vp["asset_manifest"]["assets"][0]
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "passed"
+        assert se["enhanced_resolution"] == "1080x1920"
+        assert se["cost_usd"] == 0.05  # unchanged -- the ORIGINAL charge, no new spend
+        assert provider.calls == ["s01"]  # still just the one real call, ever
+        assert probe_resolution(clip_path) == (1080, 1920)
+        assert not candidate_path.exists()  # promoted (moved) onto the canonical path
+
+    def test_reconsideration_refuses_tampered_archive(self, tmp_path):
+        """A checksum mismatch must never be trusted as 'the same paid
+        output' -- refuses to promote, and does NOT silently spend again
+        either (no automatic provider fallback)."""
+        episode_id = "ep_enh_tampered"
+        ep_dir = tmp_path
+        clip_path = ep_dir / "video" / "sc_s01.mp4"
+        _make_clip(clip_path, 1280, 720)
+
+        provider = FakeEnhancementProvider(fail_validation=True)
+        register_provider("fake_tamper", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_tamper")
+        vp = _make_visual_package("s01", f"episodes/{episode_id}/video/sc_s01")
+
+        vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+        candidate_path = ep_dir / "video" / "sc_s01.enhanced.mp4"
+        assert candidate_path.exists()
+
+        # Tamper with the archived candidate after the fact.
+        candidate_path.write_bytes(b"corrupted-not-the-real-file")
+
+        # Even if a future policy correction would have accepted the real
+        # (720p, still-failing) content, a tampered file must never be
+        # silently promoted or silently re-purchased.
+        with patch.dict(
+            "hypogeum.artifact_compatibility.DELIVERABLE_RESOLUTION_POLICY",
+            {"main_episode": (100, 100)},  # trivially satisfiable if trusted
+        ):
+            vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        asset = vp["asset_manifest"]["assets"][0]
+        assert asset["source_enhancement"]["validation_result"] == "failed"
+        assert provider.calls == ["s01"]  # no new spend triggered
+
+    def test_reconsideration_refuses_when_provider_identity_drifted(self, tmp_path):
+        """An archived candidate produced by a since-replaced provider/
+        version must never be blindly promoted under a NEW provider's
+        identity -- a fresh attempt is required, not a free reconsideration
+        (and this test proves no such automatic fresh attempt happens
+        silently either -- that remains a separate, explicit decision)."""
+        episode_id = "ep_enh_drift"
+        ep_dir = tmp_path
+        clip_path = ep_dir / "video" / "sc_s01.mp4"
+        _make_clip(clip_path, 1280, 720)
+
+        old_provider = FakeEnhancementProvider(name="vendor_old", fail_validation=True)
+        register_provider("fake_drift", lambda: old_provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_drift")
+        vp = _make_visual_package("s01", f"episodes/{episode_id}/video/sc_s01")
+
+        vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+        assert vp["asset_manifest"]["assets"][0]["source_enhancement"]["provider"] == "vendor_old"
+
+        new_provider = FakeEnhancementProvider(name="vendor_new", fail_validation=True)
+        register_provider("fake_drift", lambda: new_provider)
+        vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        # A fresh attempt WAS made (new provider, different identity) --
+        # not a free promotion of the old vendor's archived candidate.
+        assert new_provider.calls == ["s01"]
+        assert vp["asset_manifest"]["assets"][0]["source_enhancement"]["provider"] == "vendor_new"
+
+    def test_legacy_failed_record_with_no_archive_still_falls_through_to_real_retry(self, tmp_path):
+        """A failed source_enhancement record written BEFORE this archive
+        architecture existed (no archived_path at all -- its candidate was
+        deleted under the old, now-corrected behavior) must NOT be silently
+        skipped by the no-auto-retry guard. There is nothing to reconsider,
+        so a genuine fresh provider call is the correct fallback -- exactly
+        the real ep_f3619022 situation this fix must handle correctly."""
+        episode_id = "ep_enh_legacy"
+        ep_dir = tmp_path
+        clip_path = ep_dir / "video" / "sc_s01.mp4"
+        _make_clip(clip_path, 1280, 720)
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_legacy", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_legacy")
+        vp = _make_visual_package("s01", f"episodes/{episode_id}/video/sc_s01")
+
+        # Simulate a pre-2026-08-04 failed record: same provider identity,
+        # validation_result="failed", but no archived_path/checksum at all.
+        vp["asset_manifest"]["assets"][0]["source_enhancement"] = {
+            "applied": True, "required": True, "validation_result": "failed",
+            "provider": "fake", "model": "fake-upscaler", "provider_version": "1.0",
+            "required_width": 1920, "required_height": 1080,
+            "archived_path": None, "archived_checksum": None, "archived_at": None,
+        }
+
+        vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        assert provider.calls == ["s01"]  # a genuine fresh attempt was made
+        assert vp["asset_manifest"]["assets"][0]["source_enhancement"]["validation_result"] == "passed"
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +552,12 @@ class TestVersionChange:
         assert vp["asset_manifest"]["assets"][0]["source_enhancement"]["provider_version"] == "2.0"
 
     def test_required_resolution_change_forces_re_enhancement(self, tmp_path):
+        """Required resolution is deliverable-aware (2026-08-03) -- derived
+        from hypogeum.artifact_compatibility.DELIVERABLE_RESOLUTION_POLICY
+        keyed by source_type, not a config field. Simulates a policy change
+        by patching that table directly, proving an already-enhanced clip
+        becomes incompatible and is re-enhanced when the deliverable's own
+        required resolution changes."""
         episode_id = "ep_enh_reqres"
         ep_dir = tmp_path
         clip_path = ep_dir / "video" / "sc_s01.mp4"
@@ -372,17 +571,51 @@ class TestVersionChange:
         vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
         assert provider.calls == ["s01"]
 
-        # Required source resolution policy raised to 4K -- even a
-        # previously-compliant enhanced clip is now incompatible.
+        # Deliverable resolution policy for main_episode raised to 4K --
+        # even a previously-compliant enhanced clip is now incompatible.
         provider_4k = FakeEnhancementProvider(produce_width=3840, produce_height=2160)
         register_provider("fake_reqres", lambda: provider_4k)
-        config_4k = _make_config(
-            ENHANCEMENT_PROVIDER="fake_reqres",
-            ENHANCEMENT_REQUIRED_WIDTH=3840, ENHANCEMENT_REQUIRED_HEIGHT=2160,
-        )
-        vp = run_source_enhancement(vp, config_4k, episode_id, output_dir=ep_dir)
+        config_4k = _make_config(ENHANCEMENT_PROVIDER="fake_reqres")
+        with patch.dict(
+            "hypogeum.artifact_compatibility.DELIVERABLE_RESOLUTION_POLICY",
+            {"main_episode": (3840, 2160)},
+        ):
+            vp = run_source_enhancement(vp, config_4k, episode_id, output_dir=ep_dir)
         assert provider_4k.calls == ["s01"]
         assert probe_resolution(clip_path) == (3840, 2160)
+
+    def test_short_deliverable_uses_portrait_resolution(self, tmp_path):
+        """The bug found in real production: a Short's asset_manifest entry
+        must resolve the portrait (1080x1920) requirement, not the
+        landscape default -- confirmed against a REAL provider output
+        shape (720x1280 -> 1080x1920), matching what MUAPI's AI Video
+        Upscaler actually returned for a Short in ep_f3619022."""
+        episode_id = "ep_enh_short_portrait"
+        ep_dir = tmp_path
+        clip_path = ep_dir / "video" / "sh_short_001" / "sc_sh_short_001_s01.mp4"
+        _make_clip(clip_path, 720, 1280)
+
+        provider = FakeEnhancementProvider(produce_width=1080, produce_height=1920)
+        register_provider("fake_portrait", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_portrait")
+        vp = {
+            "scenes": [{"scene_id": "sh_short_001_s01", "source_type": "short"}],
+            "asset_manifest": {"assets": [{
+                "scene_id": "sh_short_001_s01",
+                "asset_id": f"episodes/{episode_id}/video/sh_short_001/sc_sh_short_001_s01",
+                "model": "veo3.1-lite-text-to-video", "tier_used": 2,
+            }]},
+        }
+
+        result_vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        asset = result_vp["asset_manifest"]["assets"][0]
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "passed"
+        assert se["required_width"] == 1080
+        assert se["required_height"] == 1920
+        assert se["enhanced_resolution"] == "1080x1920"
+        assert probe_resolution(clip_path) == (1080, 1920)
 
 
 # ---------------------------------------------------------------------------
@@ -543,4 +776,118 @@ class TestProviderRegistry:
         config = _make_config(ENHANCEMENT_PROVIDER="muapi_ai_video_upscaler")
         provider = get_enhancement_provider(config)
         assert provider.name == "muapi"
-        assert provider.model == "ai-video-upscaler"
+
+
+# ---------------------------------------------------------------------------
+# TestQualifyAsset (2026-08-05) — the canonical asset-qualification
+# boundary called directly, standalone from run_source_enhancement()'s
+# asset_manifest loop. This is what proves the boundary is genuinely
+# reusable by any caller (VPD primaries via run_source_enhancement(), or
+# clip_repair_agent's coverage-fill extras calling qualify_asset() itself)
+# rather than logic only reachable through one fixed pipeline stage.
+# ---------------------------------------------------------------------------
+
+class TestQualifyAsset:
+    def test_accepts_valid_native_target_resolution_clip(self, tmp_path):
+        """A clip already at or above the required resolution is accepted
+        without any provider call — zero cost, zero enhancement."""
+        clip_path = tmp_path / "sc_x01.mp4"
+        _make_clip(clip_path, 1920, 1080)
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_native", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_native")
+        asset = {"scene_id": "x01", "source_enhancement": None}
+
+        changed = qualify_asset(asset, clip_path, "main_episode", config, "ep_q", MagicMock())
+
+        assert changed is True
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "skipped_native_resolution"
+        assert se["applied"] is False
+        assert provider.calls == []
+
+    def test_enhances_a_valid_below_target_clip(self, tmp_path):
+        """A real, valid clip below the required resolution is sent through
+        the configured provider and promoted on a confirmed pass."""
+        clip_path = tmp_path / "sc_x02.mp4"
+        _make_clip(clip_path, 1280, 720)
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_enhance", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_enhance")
+        asset = {"scene_id": "x02", "source_enhancement": None}
+
+        changed = qualify_asset(asset, clip_path, "main_episode", config, "ep_q", MagicMock())
+
+        assert changed is True
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "passed"
+        assert se["enhanced_resolution"] == "1920x1080"
+        assert provider.calls == ["x02"]
+        assert probe_resolution(clip_path) == (1920, 1080)
+
+    def test_rejects_corrupt_video(self, tmp_path):
+        """An unreadable/corrupt source file must never be silently passed
+        through as usable coverage — it is explicitly marked unusable and
+        the (misconfigured-for-this-test-on-purpose) provider is never
+        invoked, since there is nothing valid to enhance."""
+        clip_path = tmp_path / "sc_x03.mp4"
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        clip_path.write_bytes(b"not a real video file, moov atom not found")
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_corrupt", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_corrupt")
+        asset = {"scene_id": "x03", "source_enhancement": None}
+
+        changed = qualify_asset(asset, clip_path, "main_episode", config, "ep_q", MagicMock())
+
+        assert changed is True
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "rejected_corrupt_source"
+        assert se["applied"] is False
+        assert provider.calls == []
+
+    def test_decision_is_invariant_to_provider_and_model_identity(self, tmp_path):
+        """qualify_asset() must classify two clips identically by measured
+        resolution alone — never by which provider/model produced them.
+        Two below-target clips claiming totally different, unrelated
+        provider/model identities on the asset dict must both be enhanced
+        the same way; two native-resolution clips with different
+        identities must both be skipped the same way."""
+        provider = FakeEnhancementProvider()
+        register_provider("fake_invariant", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_invariant")
+
+        below_a = tmp_path / "sc_below_veo.mp4"
+        _make_clip(below_a, 1280, 720)
+        asset_a = {"scene_id": "below_veo", "model": "veo3-text-to-video", "tier_used": 1,
+                   "source_enhancement": None}
+        qualify_asset(asset_a, below_a, "main_episode", config, "ep_q", MagicMock())
+
+        below_b = tmp_path / "sc_below_runway.mp4"
+        _make_clip(below_b, 1280, 720)
+        asset_b = {"scene_id": "below_runway", "model": "runway-text-to-video", "tier_used": 2,
+                   "source_enhancement": None}
+        qualify_asset(asset_b, below_b, "main_episode", config, "ep_q", MagicMock())
+
+        assert asset_a["source_enhancement"]["validation_result"] == "passed"
+        assert asset_b["source_enhancement"]["validation_result"] == "passed"
+        assert asset_a["source_enhancement"]["enhanced_resolution"] == \
+            asset_b["source_enhancement"]["enhanced_resolution"]
+
+        native_a = tmp_path / "sc_native_veo.mp4"
+        _make_clip(native_a, 1920, 1080)
+        asset_c = {"scene_id": "native_veo", "model": "veo3-text-to-video", "tier_used": 1,
+                   "source_enhancement": None}
+        qualify_asset(asset_c, native_a, "main_episode", config, "ep_q", MagicMock())
+
+        native_b = tmp_path / "sc_native_runway.mp4"
+        _make_clip(native_b, 1920, 1080)
+        asset_d = {"scene_id": "native_runway", "model": "runway-text-to-video", "tier_used": 2,
+                   "source_enhancement": None}
+        qualify_asset(asset_d, native_b, "main_episode", config, "ep_q", MagicMock())
+
+        assert asset_c["source_enhancement"]["validation_result"] == "skipped_native_resolution"
+        assert asset_d["source_enhancement"]["validation_result"] == "skipped_native_resolution"

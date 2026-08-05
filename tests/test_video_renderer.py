@@ -488,6 +488,206 @@ class TestBuildFfmpegConcatCommand:
 
 
 # ---------------------------------------------------------------------------
+# TestCleanCutPolicy (2026-08-06)
+#
+# Regression coverage for the production-review directing rule: the default
+# transition everywhere is a clean cut. No fade=t=out/fade=t=in, no dissolve,
+# no xfade, no dip-to-black may appear at a normal shot boundary. A former
+# 2-frame tail micro-fade (_CLIP_TAIL_FADE_SECS) was removed for exactly
+# this reason — these tests assert its absence from every code path that
+# used to add it: an earlier clip in a multi-clip beat, a trimmed last
+# clip, and a speed-nudged last clip.
+# ---------------------------------------------------------------------------
+
+class TestCleanCutPolicy:
+
+    def _assert_no_fade_or_transition_filters(self, cmd_str: str) -> None:
+        assert "fade=t=out" not in cmd_str
+        assert "fade=t=in" not in cmd_str
+        assert "xfade" not in cmd_str
+        assert "dissolve" not in cmd_str
+
+    def test_single_clip_beat_has_no_fade(self, tmp_path):
+        """The exact-fit single-clip case (no trim, no stretch needed) has
+        never had a reason to fade — confirm it still doesn't."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=8.0, clip_duration_seconds=8.0, clip_path=clip_path)
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry], narration_path=None, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080", episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        self._assert_no_fade_or_transition_filters(cmd_str)
+
+    def test_earlier_clip_in_multi_clip_beat_has_no_fade(self, tmp_path):
+        """The non-last clip in a multi-clip beat (coverage-fill extras) —
+        this was one of the three fade sites removed."""
+        primary = tmp_path / "primary.mp4"
+        extra1 = tmp_path / "extra1.mp4"
+        primary.write_bytes(b"FAKEVIDEO")
+        extra1.write_bytes(b"FAKEVIDEO")
+
+        entry = _make_entry(duration_seconds=16.0, clip_duration_seconds=8.0, clip_path=primary)
+        entry.extra_clip_paths = [extra1]
+
+        with patch("hypogeum.agents.coverage_check._probe_duration_seconds", return_value=8.0):
+            cmd = _build_ffmpeg_concat_command(
+                timeline=[entry], narration_path=None, music_track=None,
+                output_path=tmp_path / "out.mp4", resolution="1920x1080", episode_id="ep_test",
+            )
+        cmd_str = " ".join(str(c) for c in cmd)
+        self._assert_no_fade_or_transition_filters(cmd_str)
+
+    def test_trimmed_last_clip_has_no_fade(self, tmp_path):
+        """Last clip runs long and is trimmed to the beat's remaining
+        duration — trimming real excess footage is not a transition and
+        must not carry a fade."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        # clip_duration 8.0s, beat only needs 5.0s -> trim branch.
+        entry = _make_entry(duration_seconds=5.0, clip_duration_seconds=8.0, clip_path=clip_path)
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry], narration_path=None, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080", episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        self._assert_no_fade_or_transition_filters(cmd_str)
+        assert "trim=duration=5.000" in cmd_str
+
+    def test_speed_nudged_last_clip_has_no_fade(self, tmp_path):
+        """Last clip is a hair short even at full length -- bounded
+        editorial-limit setpts nudge, still no fade."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=8.8, clip_duration_seconds=8.0, clip_path=clip_path)
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry], narration_path=None, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080", episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        self._assert_no_fade_or_transition_filters(cmd_str)
+        assert "setpts=1.100000*PTS" in cmd_str
+
+    def test_no_black_frame_inserted_between_normal_clips(self, tmp_path):
+        """A normal (present) clip must never be replaced by or preceded by
+        a black lavfi source -- that fallback exists only for a genuinely
+        missing clip, a distinct failure mode from a transition."""
+        clip1 = tmp_path / "clip1.mp4"
+        clip2 = tmp_path / "clip2.mp4"
+        clip1.write_bytes(b"FAKEVIDEO")
+        clip2.write_bytes(b"FAKEVIDEO")
+        entries = [
+            _make_entry(scene_index=0, duration_seconds=8.0, clip_duration_seconds=8.0, clip_path=clip1),
+            _make_entry(scene_index=1, scene_id="sc_002", duration_seconds=8.0, clip_duration_seconds=8.0, clip_path=clip2),
+        ]
+        cmd = _build_ffmpeg_concat_command(
+            timeline=entries, narration_path=None, music_track=None,
+            output_path=tmp_path / "out.mp4", resolution="1920x1080", episode_id="ep_test",
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        assert "color=c=black" not in cmd_str
+        self._assert_no_fade_or_transition_filters(cmd_str)
+
+
+# ---------------------------------------------------------------------------
+# TestEndCardTransition (2026-08-06)
+#
+# Regression coverage for the production-review directing rule on the
+# story-to-end-card boundary: clean cut into a visible end card, continuous
+# music across the cut, exactly one natural music fade-out positioned at
+# the end-card entrance (never stacked, never at the tail of the whole
+# file, never paired with a video fade).
+# ---------------------------------------------------------------------------
+
+class TestEndCardTransition:
+
+    def _call_append_end_page(self, tmp_path, music_track=None):
+        from hypogeum.agents.video_renderer import _append_end_page
+
+        main_output = tmp_path / "main.mp4"
+        main_output.write_bytes(b"FAKEBODY")
+        end_page_path = tmp_path / "endpage.png"
+        end_page_path.write_bytes(b"FAKEPNG")
+
+        captured_cmds = []
+
+        def _fake_run_ffmpeg(cmd, output_path, component, episode_id, timeout, log):
+            captured_cmds.append(cmd)
+            Path(output_path).write_bytes(b"FAKEOUT")
+            return True
+
+        with patch("hypogeum.agents.video_renderer._probe_music_usable_duration", return_value=100.0), \
+             patch("hypogeum.agents.video_renderer._run_ffmpeg", side_effect=_fake_run_ffmpeg):
+            ok = _append_end_page(
+                main_output_path=main_output,
+                end_page_path=end_page_path,
+                duration=8.0,
+                episode_id="ep_test",
+                timeout=60,
+                log=MagicMock(),
+                music_track=music_track,
+                body_duration=700.0,
+                music_segment_start_seconds=0.0,
+            )
+        assert ok is True
+        return captured_cmds
+
+    def test_end_card_appears_through_a_clean_cut(self, tmp_path):
+        """Neither the end-page clip's own generation nor the final concat
+        may contain a video fade -- the body's last real frame cuts
+        directly to the end card's first visible frame."""
+        cmds = self._call_append_end_page(tmp_path, music_track=_make_music_track(tmp_path))
+        all_str = " ".join(" ".join(str(c) for c in cmd) for cmd in cmds)
+        assert "fade=t=in" not in all_str
+        assert "fade=t=out:st=" not in all_str.replace("afade=t=out:st=", "")  # video fade only
+        assert "[vc]fade" not in all_str
+        assert "xfade" not in all_str
+        assert "dissolve" not in all_str
+
+    def test_music_continuous_and_exactly_one_fade(self, tmp_path):
+        """Music must continue seamlessly from the body (via the existing
+        offset/aloop continuation) and fade exactly once -- never stacked
+        across the end-page clip AND the final concat."""
+        cmds = self._call_append_end_page(tmp_path, music_track=_make_music_track(tmp_path))
+        all_str = " ".join(" ".join(str(c) for c in cmd) for cmd in cmds)
+        assert all_str.count("afade=t=out") == 1
+        # Continuation mechanism (offset seek + aloop) still present -- not a restart.
+        assert "-ss" in cmds[0]
+        assert "aloop=loop=-1" in all_str
+
+    def test_music_fade_starts_at_end_card_entrance_not_file_tail(self, tmp_path):
+        """The one music fade starts at st=0 of the end-page clip's own
+        timeline -- i.e. exactly when the end card enters -- not at
+        total_duration-2 (the old tail-of-whole-file position)."""
+        cmds = self._call_append_end_page(tmp_path, music_track=_make_music_track(tmp_path))
+        all_str = " ".join(" ".join(str(c) for c in cmd) for cmd in cmds)
+        assert "afade=t=out:st=0.000:d=" in all_str
+
+    def test_no_black_frame_interval_no_music_no_fade_needed(self, tmp_path):
+        """Silent end page (no music track): still no video fade, and no
+        stray audio fade on a track that was never playing."""
+        cmds = self._call_append_end_page(tmp_path, music_track=None)
+        all_str = " ".join(" ".join(str(c) for c in cmd) for cmd in cmds)
+        assert "fade=t=in" not in all_str
+        assert "[vc]fade" not in all_str
+        assert "afade=t=out" not in all_str  # nothing playing -- nothing to fade
+
+    def test_concat_step_has_no_stacked_fade(self, tmp_path):
+        """The final body+endpage concat command specifically must carry no
+        fade filter of its own -- the end-page clip's own single fade
+        (asserted above) is the only one that may exist."""
+        cmds = self._call_append_end_page(tmp_path, music_track=_make_music_track(tmp_path))
+        concat_cmd = cmds[-1]  # concat is always the second/last _run_ffmpeg call
+        concat_str = " ".join(str(c) for c in concat_cmd)
+        assert "fade" not in concat_str
+        assert "concat=n=2:v=1:a=1" in concat_str
+
+
+# ---------------------------------------------------------------------------
 # TestNoReverseOrPingPong
 #
 # Regression coverage for the 2026-08-01 quality rejection: the assembled

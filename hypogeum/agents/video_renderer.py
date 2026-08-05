@@ -104,6 +104,13 @@ _AUDIO_CODEC           = "aac"
 _AUDIO_BITRATE         = "128k"
 _CRF                   = "23"
 _MUSIC_AMPLITUDE_FACTOR = 0.20    # ≈ −14 dB beneath narration (audible background bed)
+# End-card music fade (2026-08-06, production-review directing rule): the ONE
+# natural music fade-out for the whole episode starts exactly when the end
+# card enters (body_duration) and reaches silence within the first few
+# seconds of the end card — never at the tail of the whole file, and never
+# paired with a video fade (see _append_end_page's concat step: video is a
+# clean cut, audio fades independently on its own timeline).
+_END_CARD_MUSIC_FADE_SECONDS = 2.0
 # Was 2.5 — held the last frame on a frozen still while music played over it as an
 # "outro pause" before the end page. Removed 2026-08-01: production review flagged the
 # freeze-frame itself as an unwanted regression, not a designed transition. The final
@@ -112,8 +119,18 @@ _MUSIC_AMPLITUDE_FACTOR = 0.20    # ≈ −14 dB beneath narration (audible back
 # this constant, in case a non-zero outro pause is ever reinstated deliberately.
 _MUSIC_TAIL_SECONDS    = 0.0
 _DEFAULT_TIMEOUT        = 600     # seconds
-_CLIP_TAIL_FADE_SECS   = 2 / FRAME_RATE  # 2-frame fade-out at each clip boundary (≈ 67ms)
-_END_PAGE_FADE_IN_SECONDS = 0.5   # end page fades in from the final body frame, no hard cut
+# Clean-cut policy (2026-08-06, production-review directing rule): the default
+# transition everywhere is a clean cut. No fade=t=out/fade=t=in, no dissolve,
+# no xfade, no dip-to-black may appear at a normal shot boundary or at the
+# entrance to the end card — a visible fade is not a "smoothing" convenience,
+# it is a transition, and the only transition this factory's channel policy
+# permits is a clean cut. Audio smoothing (e.g. the end-card music fade in
+# _append_end_page) is handled entirely independently and must never imply,
+# require, or produce a black video frame. A former 2-frame tail micro-fade
+# (_CLIP_TAIL_FADE_SECS) and end-page fade-in (_END_PAGE_FADE_IN_SECONDS)
+# were removed for exactly this reason — see tests/test_video_renderer.py::
+# TestCleanCutPolicy for the regression coverage proving no fade filter of
+# any kind appears in the constructed filter graph at a normal shot boundary.
 
 
 # ---------------------------------------------------------------------------
@@ -1131,14 +1148,10 @@ def _build_ffmpeg_concat_command(
 
                     if not is_last:
                         # Earlier clip in a multi-clip beat: full native length,
-                        # forward, shown exactly once. Only a 2-frame tail
-                        # micro-fade at its own boundary (same as every other
-                        # clip-to-clip join in the timeline).
+                        # forward, shown exactly once. Clean cut into the next
+                        # clip — no fade of any kind at this boundary.
                         out_label = f"[pv{clip_idx}]"
-                        _fade_st = max(0.0, clip_dur - _CLIP_TAIL_FADE_SECS)
-                        tpad_filter_parts.append(
-                            f"{scale_label}fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
-                        )
+                        tpad_filter_parts.append(f"{scale_label}null{out_label}")
                         concat_input_labels.append(out_label)
                     else:
                         # Last (or only) clip in the beat: land exactly on the
@@ -1150,12 +1163,11 @@ def _build_ffmpeg_concat_command(
                             # Clips ran long (or landed exactly): trim the tail.
                             # Cutting real excess footage is not "compensating for
                             # missing duration" — there was never a deficit here.
+                            # Clean cut at the trim point — no fade.
                             trim_label = f"[tv{clip_idx}]"
-                            _fade_st = max(0.0, remaining_for_last - _CLIP_TAIL_FADE_SECS)
                             tpad_filter_parts.append(
                                 f"{scale_label}trim=duration={remaining_for_last:.3f},"
-                                f"setpts=PTS-STARTPTS,"
-                                f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{trim_label}"
+                                f"setpts=PTS-STARTPTS{trim_label}"
                             )
                             concat_input_labels.append(trim_label)
                         else:
@@ -1163,14 +1175,12 @@ def _build_ffmpeg_concat_command(
                             # bounded speed nudge only (guaranteed <= MAX_EDITORIAL_
                             # SPEED_FACTOR by the check above — this is a sync
                             # correction, not a way to fill a real gap). Never
-                            # reverse, never loop/repeat.
+                            # reverse, never loop/repeat. Clean cut — no fade.
                             out_label = f"[pv{clip_idx}]"
                             factor = remaining_for_last / max(clip_dur, 0.001)
-                            _fade_st = max(0.0, remaining_for_last - _CLIP_TAIL_FADE_SECS)
                             tpad_filter_parts.append(
                                 f"{scale_label}setpts={factor:.6f}*PTS,"
-                                f"fps=fps={FRAME_RATE},"
-                                f"fade=t=out:st={_fade_st:.4f}:d={_CLIP_TAIL_FADE_SECS:.4f}{out_label}"
+                                f"fps=fps={FRAME_RATE}{out_label}"
                             )
                             concat_input_labels.append(out_label)
                     clip_idx += 1
@@ -1491,9 +1501,6 @@ def _append_end_page(
     clip_path  = main_output_path.with_suffix(".endpage.mp4")
     list_path  = main_output_path.with_suffix(".concat.txt")
     width, height = MAIN_RESOLUTION.split("x")
-    # End page fades in from the final body frame rather than hard-cutting — capped
-    # at half the end-page duration so a very short end page can't fade past its own end.
-    _ep_fade_in = min(_END_PAGE_FADE_IN_SECONDS, max(0.01, duration / 2))
 
     try:
         # --- 1. Rename body to temp ---
@@ -1534,6 +1541,12 @@ def _append_end_page(
             ep_remaining = usable_dur - music_offset
             ep_remaining_samples = int(ep_remaining * _ep_sr)
             ep_usable_samples = int(usable_dur * _ep_sr)
+            # The ONE natural music fade-out for the whole episode: starts at
+            # st=0 of this clip, which IS the end-card entrance (this clip's
+            # own timeline begins exactly where the body ends), and reaches
+            # silence well before the end card's own duration is over.
+            # Independent of video — video is a clean cut (no fade=t=in below).
+            _ep_music_fade = min(_END_CARD_MUSIC_FADE_SECONDS, max(0.01, duration))
             ep_cmd = [
                 "ffmpeg", "-y",
                 "-loop", "1",
@@ -1546,12 +1559,12 @@ def _append_end_page(
                 (
                     f"[0:v]scale={width}:{height}"
                     f":force_original_aspect_ratio=decrease,"
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
-                    f"fade=t=in:st=0:d={_ep_fade_in:.3f}[vout];"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
                     f"[1:a]atrim=0:{ep_remaining:.6f},asetpts=PTS-STARTPTS,"
                     f"aloop=loop=-1:size={ep_usable_samples},"
                     f"atrim=0:{duration:.6f},asetpts=PTS-STARTPTS,"
-                    f"volume={_MUSIC_AMPLITUDE_FACTOR}[aout]"
+                    f"volume={_MUSIC_AMPLITUDE_FACTOR},"
+                    f"afade=t=out:st=0.000:d={_ep_music_fade:.3f}[aout]"
                 ),
                 "-map", "[vout]",
                 "-map", "[aout]",
@@ -1576,8 +1589,7 @@ def _append_end_page(
                 (
                     f"[0:v]scale={width}:{height}"
                     f":force_original_aspect_ratio=decrease,"
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
-                    f"fade=t=in:st=0:d={_ep_fade_in:.3f}[vout];"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout];"
                     f"[1:a]volume=0.0[aout]"
                 ),
                 "-map", "[vout]",
@@ -1612,19 +1624,19 @@ def _append_end_page(
         # gives correct frame-accurate timestamps in the re-encoded output.
         #
         # -t cap: prevents audio tail bleed that extended final duration by ~16.6s.
-        # Fade-out: 2s video+audio fade to black at the very end of the episode.
+        # No video or audio fade here (2026-08-06 directing-rule fix): the body
+        # cuts cleanly into the end-page clip (no video fade of any kind), and
+        # the end-page clip already carries its own single music fade-out,
+        # positioned at ITS OWN t=0 (the end-card entrance) in the ep_cmd step
+        # above — adding a second fade here would stack two fades on the same
+        # music bed, which is exactly what this policy forbids.
         total_dur = body_duration + duration
-        fade_start = max(0.0, total_dur - 2.0)
         concat_cmd = [
             "ffmpeg", "-y",
             "-i", str(body_path),
             "-i", str(clip_path),
             "-filter_complex",
-            (
-                "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vc][ac];"
-                f"[vc]fade=t=out:st={fade_start:.3f}:d=2[vout];"
-                f"[ac]afade=t=out:st={fade_start:.3f}:d=2[aout]"
-            ),
+            "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]",
             "-map", "[vout]",
             "-map", "[aout]",
             "-c:v", _VIDEO_CODEC,

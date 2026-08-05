@@ -547,6 +547,25 @@ class Config:
         self.COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS = _get_float(
             "COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS", default=8.0
         )
+        # CINEMATIC_SECONDS_PER_SHOT (2026-08-06 directing-rule): editorial-pacing constant
+        # for hypogeum.agents.cinematic_director.compute_shot_budget() -- how much screen
+        # time one directorial shot idea is expected to comfortably cover before a cut is
+        # warranted. Not a physical clip-length constant (generated clips are a fixed ~8s
+        # regardless); this is what makes the shot budget scale with narration duration
+        # instead of being a fixed "three shots per beat" rule. Channel Package may override.
+        self.CINEMATIC_SECONDS_PER_SHOT = _get_float("CINEMATIC_SECONDS_PER_SHOT", default=10.0)
+        # CINEMATIC_MAX_SHOTS_PER_BEAT: finite safety cap on compute_shot_budget()'s output
+        # so one very long beat cannot request unbounded coverage (default 6).
+        self.CINEMATIC_MAX_SHOTS_PER_BEAT = _get_int("CINEMATIC_MAX_SHOTS_PER_BEAT", default=6)
+        # CINEMATIC_ESTIMATED_WORDS_PER_MINUTE: Cinematic Director runs before Audio Agent
+        # (script_package has raw beat text, not yet ElevenLabs-measured duration), so shot
+        # budgeting uses a word-count estimate. Default 145 WPM calibrated from this
+        # channel's real production narration (ep_f3619022 seg_b_001: 58 words / 24.427s
+        # measured = ~142.5 WPM). Coverage-fill/Assembly still gate on the real measured
+        # duration later — this estimate only drives how many shots get PLANNED upfront.
+        self.CINEMATIC_ESTIMATED_WORDS_PER_MINUTE = _get_float(
+            "CINEMATIC_ESTIMATED_WORDS_PER_MINUTE", default=145.0
+        )
 
         # --- Higgsfield (comparison only) ---
         self.HF_API_KEY = _get_optional("HF_API_KEY")

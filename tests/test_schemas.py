@@ -766,7 +766,7 @@ def _set(d: dict, key: str, value) -> dict:
 
 class TestSchemaRegistry:
     def test_schema_names_has_35_entries(self):
-        assert len(SCHEMA_NAMES) == 35  # +4 for Visual Intelligence V1–V4
+        assert len(SCHEMA_NAMES) == 36  # +4 for Visual Intelligence V1–V4, +1 for Cinematic Director
 
     def test_all_35_names_present(self):
         expected = {
@@ -786,6 +786,8 @@ class TestSchemaRegistry:
             # Visual Intelligence V1–V4
             "vpd_presentation_plan_batch", "vpd_visual_intent_qa_batch",
             "shot_diversity_plan", "editorial_qa_report",
+            # Cinematic Director (2026-08-06 directing-rule fix)
+            "cinematic_coverage_plan",
         }
         assert set(SCHEMA_NAMES) == expected
 

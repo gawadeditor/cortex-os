@@ -4,7 +4,7 @@ hypogeum/schemas.py — Schema validators for all pipeline output packages
 Every agent calls validate(schema_name, package) before sealing its output.
 Validation is fail-fast: the first structural problem raises SchemaError immediately.
 
-Validated schemas (31 total):
+Validated schemas (32 total):
   1.  validation_scorecard          — Executive Producer topic validation result
   2.  topic_brief                   — Executive Producer topic brief
   3.  package_deficiency_report     — PDR issued by any agent
@@ -35,6 +35,7 @@ Validated schemas (31 total):
   28. vpd_visual_intent_qa_batch      — Visual Intent QA: pre-generation binary pass/fail check per scene prompt
   29. shot_diversity_plan             — Shot Diversity Planner: per-scene shot_scale, camera_movement, environment assignments
   30. editorial_qa_report             — Editorial QA: episode-level visual pattern checks; APPROVED/WARNING/REJECTED
+  31. cinematic_coverage_plan         — Cinematic Director: ordered, purposeful 1-N shots per narration beat
 
 Design principles:
   - Stdlib only; no external JSON Schema library
@@ -1247,6 +1248,54 @@ def _validate_shot_diversity_plan(p: dict) -> None:
     _req_numeric(p, s, "diversity_score")
 
 
+_CLEAN_CUT_ONLY = ("clean_cut",)
+
+
+def _validate_cinematic_coverage_plan(p: dict) -> None:
+    """V5 — Cinematic Director output (2026-08-06 directing-rule fix).
+
+    One beat_plan per narration beat; 1-N ordered shots per beat, each with
+    an explicit purpose, narrative function, and full camera/composition
+    design. transition_in/transition_out are validated against a
+    single-value enum ("clean_cut") — this schema itself is one of the
+    enforcement points for the channel's clean-cut-only transition policy,
+    not just a data-shape check.
+    """
+    s = "cinematic_coverage_plan"
+    _req_str(p, s, "episode_id")
+    beat_plans = _req_list(p, s, "beat_plans", min_length=1)
+    for i, bp in enumerate(beat_plans):
+        bpath = f"beat_plans[{i}]"
+        if not isinstance(bp, dict):
+            raise SchemaError(s, bpath, "each beat_plan must be a dict")
+        _req_str(bp, s, "beat_id", path=bpath)
+        _req_numeric(bp, s, "narration_duration_seconds", path=bpath)
+        _req_str(bp, s, "progression_pattern", path=bpath)
+        shots = _req_list(bp, s, "shots", min_length=1, path=bpath)
+        for j, shot in enumerate(shots):
+            spath = f"{bpath}.shots[{j}]"
+            if not isinstance(shot, dict):
+                raise SchemaError(s, spath, "each shot must be a dict")
+            _req_str(shot, s, "shot_id", path=spath)
+            _req_str(shot, s, "parent_beat_id", path=spath)
+            _req(shot, s, "shot_order", int, path=spath)
+            _req_str(shot, s, "shot_purpose", path=spath)
+            _req_str(shot, s, "narrative_function", path=spath)
+            _req_numeric(shot, s, "estimated_usable_duration", path=spath)
+            _req_str(shot, s, "subject", path=spath)
+            _req_str(shot, s, "shot_scale", path=spath)
+            _req_str(shot, s, "camera_angle", path=spath)
+            _req_str(shot, s, "camera_height", path=spath)
+            _req_str(shot, s, "camera_direction", path=spath)
+            _req_str(shot, s, "camera_movement", path=spath)
+            _req_str(shot, s, "composition", path=spath)
+            _req_str(shot, s, "background_depth", path=spath)
+            _req_str(shot, s, "screen_direction", path=spath)
+            _req_str(shot, s, "motion_energy", path=spath)
+            _req_in(shot, s, "transition_in", _CLEAN_CUT_ONLY, path=spath)
+            _req_in(shot, s, "transition_out", _CLEAN_CUT_ONLY, path=spath)
+
+
 def _validate_editorial_qa_report(p: dict) -> None:
     """V4 — Editorial QA report."""
     s = "editorial_qa_report"
@@ -1366,6 +1415,7 @@ _VALIDATORS = {
     "vpd_visual_intent_qa_batch":   _validate_vpd_visual_intent_qa_batch,
     "shot_diversity_plan":          _validate_shot_diversity_plan,
     "editorial_qa_report":          _validate_editorial_qa_report,
+    "cinematic_coverage_plan":      _validate_cinematic_coverage_plan,
 }
 
 # Expose schema names for discovery and testing

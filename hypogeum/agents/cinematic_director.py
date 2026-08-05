@@ -1,0 +1,293 @@
+"""
+hypogeum/agents/cinematic_director.py — Cinematic Director
+
+Production review of the first completed episode found near-identical shots
+generated to cover the same narration beat (e.g. three near-identical rear
+views of the same crawling figure) — a real directorial planning gap, not a
+prompt-wording problem. Root cause: Visual Package Director planned exactly
+one shot per beat (see hypogeum.agents.visual_package_director's Stage A2:
+"plan ONE scene per narration beat... no more, no fewer"), so any additional
+footage a long beat needed was only ever produced reactively, after the fact,
+by clip_repair_agent.fill_coverage_deficits() re-submitting that ONE scene's
+identical prompt again for extra1/extra2/... with no purpose, order, or
+diversity concept at all.
+
+This module introduces the missing planning layer, inserted between Stage A4
+(presentation planning) and Shot Diversity Planner in visual_package_director.
+py's orchestration:
+
+    Narrative Beat → Cinematic Coverage Plan → Ordered Shot Intents →
+    (Shot Diversity Planner, per shot) → (Stage B, one prompt per shot)
+
+For every beat, this module decides:
+  - how many shots the beat needs (duration-aware, never a fixed count —
+    see compute_shot_budget(), the sole deterministic, zero-LLM-call
+    function in this module)
+  - what each shot contributes (shot_purpose, narrative_function)
+  - the ordered visual progression across those shots (progression_pattern)
+  - clean-cut compatibility (transition_in/transition_out are always
+    "clean_cut" per channel directing policy — see hypogeum.channel_config)
+
+Providers are never made aware of this layer. A planned shot becomes, at
+generation time, an ordinary scene-shaped submit_scene() request identical
+in every respect to how VPD's Phase 2 or clip_repair_agent already submit
+one today — this module only decides WHAT to ask for and WHY, never HOW to
+ask a specific provider for it.
+
+Public API:
+    compute_shot_budget(narration_duration_seconds, config) -> int
+    run_cinematic_director(visual_package, narration_package, episode_id,
+                            config, output_dir=None) -> dict
+
+Checkpoint: cinematic_coverage_plan_{episode_id}.json
+
+Logging events:
+    cinematic_director_started      — info
+    cinematic_director_resumed      — info  — checkpoint found, skipping call
+    cinematic_director_completed    — info  — plan written to checkpoint
+    cinematic_director_failed       — error — LLM call failed, pass-through used
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from typing import Optional
+
+from hypogeum.agent import run_agent
+from hypogeum.config import Config
+from hypogeum.logger import get_logger
+from hypogeum.prompt_loader import compose_system_prompt
+
+_AGENT_NAME = "cinematic_director"
+_CLAUDE_SONNET = "anthropic/claude-sonnet-4.6"
+_MAX_TOKENS = 4_096
+
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_PROMPT_FILE = _PROMPTS_DIR / "cinematic_director.txt"
+
+_DEFAULT_ASSETS_ROOT = (
+    Path(__file__).resolve().parent.parent.parent / ".hypogeum-assets"
+)
+
+# Directorial progression vocabulary (Phase 5) — the LLM selects the pattern
+# that fits each beat's narration; this module never mechanically forces the
+# same pattern onto every beat. A single-shot beat has no real progression
+# and always uses "single_shot".
+PROGRESSION_PATTERNS = (
+    "single_shot",
+    "establish_develop_reveal",
+    "environment_character_detail",
+    "wide_medium_close",
+    "mystery_evidence_discovery",
+    "action_reaction_consequence",
+    "exterior_interior_object",
+)
+
+
+def _load_prompt() -> str:
+    return compose_system_prompt(_PROMPT_FILE)
+
+
+SYSTEM_PROMPT: str = _load_prompt()
+
+
+def estimate_beat_duration_seconds(text: str, config: Config) -> float:
+    """
+    Word-count-based narration-duration estimate for one beat's raw text.
+
+    Cinematic Director runs before Audio Agent (Stage order: ... -> VPD ->
+    ... -> Audio -> Assembly), so the real, ElevenLabs-measured narration
+    duration does not exist yet at planning time -- only script_package's
+    raw beat text does. This estimate drives how many shots get PLANNED;
+    it is never treated as authoritative downstream. coverage_check.py and
+    Assembly's coverage gate still measure and enforce the REAL narration
+    duration once Audio Agent has run, exactly as they do today.
+    """
+    wpm = max(1.0, getattr(config, "CINEMATIC_ESTIMATED_WORDS_PER_MINUTE", 145.0))
+    word_count = len((text or "").split())
+    return round((word_count / wpm) * 60.0, 3)
+
+
+def compute_shot_budget(narration_duration_seconds: float, config: Config) -> int:
+    """
+    Deterministic, zero-LLM-call shot-count budget for one beat (Phase 4).
+
+    Never a fixed "three shots per beat" rule — the budget scales with the
+    beat's real narration duration, bounded by a configurable safety cap so
+    a single very long beat cannot request unbounded coverage:
+
+        shots = clamp(ceil(narration_duration_seconds / seconds_per_shot), 1, max_shots)
+
+    `seconds_per_shot` (config.CINEMATIC_SECONDS_PER_SHOT, default 10.0) is
+    an editorial-pacing constant, not a physical clip-length constant (a
+    generated clip is a fixed ~8s regardless) — it expresses how much
+    screen time one *directorial* shot idea is expected to comfortably
+    cover before a cut is warranted, which is why it differs from the
+    provider's own fixed clip duration. A short beat (<=10s) always gets
+    exactly 1 shot; this is what keeps the vast majority of short
+    establishing/transition beats from being over-planned.
+    """
+    seconds_per_shot = max(0.1, getattr(config, "CINEMATIC_SECONDS_PER_SHOT", 10.0))
+    max_shots = max(1, getattr(config, "CINEMATIC_MAX_SHOTS_PER_BEAT", 6))
+    raw_shots = math.ceil(max(0.0, narration_duration_seconds) / seconds_per_shot)
+    return min(max(1, raw_shots), max_shots)
+
+
+def run_cinematic_director(
+    visual_package: dict,
+    beat_texts_by_id: dict,
+    episode_id: str,
+    config: Config,
+    output_dir: Optional[Path] = None,
+) -> dict:
+    """
+    Produce a Cinematic Coverage Plan for every beat in the episode.
+
+    Args:
+        visual_package:    Visual Package dict (after Stage A4 has injected
+                            presentation_plan into each scene).
+        beat_texts_by_id:  {beat_id: raw narration text} — Cinematic Director
+                            runs before Audio Agent, so the real ElevenLabs-
+                            measured duration doesn't exist yet; duration is
+                            estimated from this text (see
+                            estimate_beat_duration_seconds()). Callers
+                            typically already have this from the same
+                            beat-flattening step Stage A2 uses.
+        episode_id:         Episode identifier for logging and file naming.
+        config:             Loaded Config instance.
+        output_dir:         Optional output directory override.
+
+    Returns:
+        cinematic_coverage_plan dict (schema-validated, written to disk).
+        On LLM failure, returns a minimal valid single-shot-per-beat plan
+        (transition_in/out=clean_cut, no invented purpose/progression
+        beyond a safe generic default) so the pipeline can continue.
+    """
+    _resolve_dir: Path = (
+        Path(output_dir) if output_dir is not None
+        else _DEFAULT_ASSETS_ROOT / "episodes" / episode_id
+    )
+    _resolve_dir.mkdir(parents=True, exist_ok=True)
+
+    log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
+    ckpt_path = _resolve_dir / f"cinematic_coverage_plan_{episode_id}.json"
+
+    if ckpt_path.exists():
+        log.info("cinematic_director_resumed", path=str(ckpt_path), episode_id=episode_id)
+        return json.loads(ckpt_path.read_text(encoding="utf-8"))
+
+    scenes = visual_package.get("scenes", [])
+
+    beats_for_director = []
+    for scene in scenes:
+        beat_id = scene.get("narration_reference", "")
+        beat_text = beat_texts_by_id.get(beat_id, "")
+        narration_duration = estimate_beat_duration_seconds(beat_text, config)
+        shot_budget = compute_shot_budget(narration_duration, config)
+        beats_for_director.append({
+            "beat_id": beat_id,
+            "scene_id": scene.get("scene_id"),
+            "source_type": scene.get("source_type"),
+            "narration_duration_seconds": round(narration_duration, 3),
+            "shot_budget": shot_budget,
+            "visual_spec": scene.get("visual_spec", {}),
+            "presentation_plan": scene.get("presentation_plan", {}),
+            "narrative_signals": scene.get("narrative_signals", []),
+        })
+
+    director_input = {
+        "task": "plan_cinematic_coverage",
+        "episode_metadata": {
+            "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
+            "total_beats": len(beats_for_director),
+            "episode_id": episode_id,
+        },
+        "progression_patterns": list(PROGRESSION_PATTERNS),
+        "beats": beats_for_director,
+    }
+
+    log.info(
+        "cinematic_director_started",
+        episode_id=episode_id,
+        beats=len(beats_for_director),
+        total_shot_budget=sum(b["shot_budget"] for b in beats_for_director),
+        max_tokens=_MAX_TOKENS,
+    )
+
+    try:
+        result = run_agent(
+            agent_name=_AGENT_NAME,
+            model_slug=_CLAUDE_SONNET,
+            system_prompt=SYSTEM_PROMPT,
+            input_package=director_input,
+            output_schema="cinematic_coverage_plan",
+            episode_id=episode_id,
+            max_tokens=_MAX_TOKENS,
+            config=config,
+            output_dir=None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            "cinematic_director_failed",
+            episode_id=episode_id,
+            error=str(exc),
+            note="Returning minimal single-shot-per-beat pass-through plan",
+        )
+        result = _minimal_pass_through(episode_id, beats_for_director)
+
+    ckpt_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    log.info(
+        "cinematic_director_completed",
+        episode_id=episode_id,
+        beat_plans=len(result.get("beat_plans", [])),
+        total_shots=sum(len(bp.get("shots", [])) for bp in result.get("beat_plans", [])),
+        path=str(ckpt_path),
+    )
+    return result
+
+
+def _minimal_pass_through(episode_id: str, beats_for_director: list) -> dict:
+    """
+    Minimal valid cinematic_coverage_plan when the LLM call fails: exactly
+    one shot per beat (the same coverage the pre-existing pipeline already
+    provided), so a director-layer outage degrades to today's known-safe
+    behavior rather than blocking the episode.
+    """
+    beat_plans = []
+    for b in beats_for_director:
+        beat_id = b["beat_id"]
+        beat_plans.append({
+            "beat_id": beat_id,
+            "narration_duration_seconds": b["narration_duration_seconds"],
+            "progression_pattern": "single_shot",
+            "shots": [{
+                "shot_id": f"{beat_id}__shot1",
+                "parent_beat_id": beat_id,
+                "shot_order": 1,
+                "shot_purpose": "establish_location",
+                "narrative_function": "primary coverage for this beat",
+                "estimated_usable_duration": 8.0,
+                "subject": b["visual_spec"].get("subject", ""),
+                "action": "",
+                "framing": b["visual_spec"].get("framing", ""),
+                "shot_scale": "medium",
+                "camera_angle": "eye_level",
+                "camera_height": "eye_level",
+                "camera_direction": "frontal",
+                "camera_movement": "slow_push_in",
+                "lens_character": "standard",
+                "composition": "rule_of_thirds_left",
+                "foreground_usage": "none",
+                "background_depth": "shallow",
+                "lighting_direction": b["visual_spec"].get("lighting", ""),
+                "screen_direction": "neutral",
+                "eye_line": "neutral",
+                "motion_energy": "low",
+                "transition_in": "clean_cut",
+                "transition_out": "clean_cut",
+                "diversity_justification": None,
+            }],
+        })
+    return {"episode_id": episode_id, "beat_plans": beat_plans, "notes": ["pass_through_fallback"]}

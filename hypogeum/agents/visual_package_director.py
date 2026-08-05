@@ -772,6 +772,49 @@ def run_visual_package_director(
     assign_setting_and_lighting(visual_package.get("scenes", []))
 
     # ------------------------------------------------------------------
+    # Cinematic Director — plans an ordered, purposeful Cinematic Coverage
+    # Plan (1-N shots, duration-aware) per beat. Must run after A4
+    # (presentation_plan informs shot planning) and before Shot Diversity
+    # Planner, which now assigns diversity per PLANNED SHOT rather than per
+    # scene (2026-08-06 directing-rule fix — see hypogeum.agents.
+    # cinematic_director module docstring for the full rationale).
+    #
+    # beat_texts_by_id is recomputed from input_package (cheap, pure,
+    # available regardless of whether Stage A2 resumed from its own
+    # checkpoint this run) rather than threading the `beats` variable
+    # through — input_package itself is always freshly built above.
+    # ------------------------------------------------------------------
+    from hypogeum.agents.cinematic_director import run_cinematic_director  # noqa: PLC0415
+    _beat_texts_by_id = {
+        b["beat_id"]: b["text"] for b in _flatten_beats_for_a2(input_package)
+    }
+    log.info(
+        "vpd_cinematic_director_started",
+        episode_id=episode_id,
+        scenes=len(visual_package.get("scenes", [])),
+    )
+    coverage_plan = run_cinematic_director(
+        visual_package=visual_package,
+        beat_texts_by_id=_beat_texts_by_id,
+        episode_id=episode_id,
+        config=config,
+        output_dir=_resolve_output_dir,
+    )
+    _coverage_plan_by_beat = {
+        bp["beat_id"]: bp for bp in coverage_plan.get("beat_plans", [])
+    }
+    for scene in visual_package.get("scenes", []):
+        beat_id = scene.get("narration_reference")
+        if beat_id in _coverage_plan_by_beat:
+            scene["cinematic_coverage_plan"] = _coverage_plan_by_beat[beat_id]
+    log.info(
+        "vpd_cinematic_director_completed",
+        episode_id=episode_id,
+        beat_plans=len(_coverage_plan_by_beat),
+        total_shots=sum(len(bp.get("shots", [])) for bp in _coverage_plan_by_beat.values()),
+    )
+
+    # ------------------------------------------------------------------
     # Shot Diversity Planner — distributes visual variety across episode
     # Must run after presentation planning (A4) and before prompt writing (B)
     # so Stage B knows the assigned shot_scale, camera_movement etc.

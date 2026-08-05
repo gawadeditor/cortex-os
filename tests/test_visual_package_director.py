@@ -98,6 +98,47 @@ def make_config() -> Config:
                 os.environ[k] = v
 
 
+def _make_cinematic_coverage_plan_stub() -> dict:
+    """Minimal schema-valid cinematic_coverage_plan for mocking Cinematic
+    Director's run_agent call (2026-08-06) — this module's own run_agent is
+    a SEPARATE import binding from visual_package_director's, so patching
+    "hypogeum.agents.visual_package_director.run_agent" alone does not
+    cover it; see the autouse fixture below."""
+    return {
+        "episode_id": "ep_001",
+        "beat_plans": [{
+            "beat_id": "b_stub",
+            "narration_duration_seconds": 8.0,
+            "progression_pattern": "single_shot",
+            "shots": [{
+                "shot_id": "b_stub__shot1", "parent_beat_id": "b_stub", "shot_order": 1,
+                "shot_purpose": "establish_location", "narrative_function": "stub",
+                "estimated_usable_duration": 8.0, "subject": "stub", "shot_scale": "medium",
+                "camera_angle": "eye_level", "camera_height": "eye_level",
+                "camera_direction": "frontal", "camera_movement": "slow_push_in",
+                "composition": "rule_of_thirds_left", "background_depth": "shallow",
+                "screen_direction": "neutral", "motion_energy": "low",
+                "transition_in": "clean_cut", "transition_out": "clean_cut",
+            }],
+        }],
+    }
+
+
+@pytest.fixture(autouse=True)
+def _no_real_cinematic_director_calls():
+    """This test file's whole contract (see module docstring) is zero real
+    network calls. Cinematic Director (2026-08-06) makes its own run_agent
+    call inside hypogeum.agents.cinematic_director — a module none of these
+    tests otherwise know about or need to exercise — so it is mocked here,
+    once, for every test in this file, rather than requiring each existing
+    test to add its own patch for a stage it isn't testing."""
+    with patch(
+        "hypogeum.agents.cinematic_director.run_agent",
+        return_value=_make_cinematic_coverage_plan_stub(),
+    ):
+        yield
+
+
 def _make_entity(
     entity_id: str = "pharaoh_amenhotep",
     lock_state: str = "final",

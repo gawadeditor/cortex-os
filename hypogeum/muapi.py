@@ -642,7 +642,7 @@ def submit_scene(
     visual_identity.log_palette_injection(log, mode="video_scene", injected=True)
 
     # M5.6 — Resume safety: reuse valid existing file without any paid submission
-    dest_path = _scene_file_path(output_dir, scene_id, short_id)
+    dest_path = scene_file_path(output_dir, scene_id, short_id)
     if dest_path.exists() and dest_path.stat().st_size >= _MIN_VIDEO_BYTES:
         log.info(
             "muapi_scene_reused",
@@ -2045,7 +2045,7 @@ def _attempt_generation(
     # Assembly/QA validate the exact same contract as a real run. See
     # _generate_dry_run_placeholder_clip()'s own docstring for why.
     if request_id.startswith(_DRY_RUN_REQUEST_ID_PREFIX):
-        dest_path = _scene_file_path(output_dir, scene_id, short_id)
+        dest_path = scene_file_path(output_dir, scene_id, short_id)
         _generate_dry_run_placeholder_clip(dest_path, aspect_ratio, requested_duration, log)
         log.info(
             "muapi_dry_run_complete",
@@ -2077,7 +2077,7 @@ def _attempt_generation(
         return None, "missing_video_url_in_result"
 
     # Resolve file destination
-    dest_path = _scene_file_path(output_dir, scene_id, short_id)
+    dest_path = scene_file_path(output_dir, scene_id, short_id)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Download (with 1 retry)
@@ -2868,8 +2868,18 @@ def _build_job_payload(
     return payload
 
 
-def _scene_file_path(output_dir: Path, scene_id: str, short_id: Optional[str]) -> Path:
-    """Compute the destination path for a scene video file."""
+def scene_file_path(output_dir: Path, scene_id: str, short_id: Optional[str]) -> Path:
+    """
+    Compute the destination path for a scene video file.
+
+    The single canonical source of truth for this convention — every other
+    module that needs to locate or predict a scene's video file (clip_repair_
+    agent.py, source_enhancement.py, etc.) must call this function rather
+    than reimplementing the "sh_{short_id}/sc_{scene_id}.mp4" pattern
+    inline. A prior inline duplicate in clip_repair_agent.py silently
+    diverged (missing the "sh_" prefix), causing real generated Shorts
+    repair clips to be misreported as failed (2026-08-05 fix).
+    """
     if short_id:
         return output_dir / "video" / f"sh_{short_id}" / f"sc_{scene_id}.mp4"
     return output_dir / "video" / f"sc_{scene_id}.mp4"

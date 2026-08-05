@@ -34,7 +34,7 @@ Test coverage:
   TestUploadFile                  — upload succeeds, hosted_url returned
   TestUploadFileAuthFailure       — upload gets 401 → MUAPIAuthFailure
   TestInternalHelpers             — _tier_to_model, _build_job_payload, _compute_asset_id,
-                                     _scene_file_path, _mask_url, _retry_delay
+                                     scene_file_path, _mask_url, _retry_delay
   TestExceptionHierarchy          — class inheritance
   TestLogging                     — correct event names at correct levels
 """
@@ -79,7 +79,7 @@ from hypogeum.muapi import (
     _mask_url,
     _normalize_thumbnail,
     _retry_delay,
-    _scene_file_path,
+    scene_file_path,
     _tier_to_model,
     assert_asset_class,
     check_muapi_health,
@@ -1607,14 +1607,14 @@ class TestInternalHelpers:
         result = _compute_asset_id("ep_001", "s02b01", "sh_01")
         assert result == "episodes/ep_001/video/sh_sh_01/sc_s02b01"
 
-    # --- _scene_file_path ---
+    # --- scene_file_path ---
 
     def test_main_scene_path(self, tmp_path):
-        path = _scene_file_path(tmp_path, "s01b01", None)
+        path = scene_file_path(tmp_path, "s01b01", None)
         assert path == tmp_path / "video" / "sc_s01b01.mp4"
 
     def test_short_scene_path(self, tmp_path):
-        path = _scene_file_path(tmp_path, "s02b01", "sh_01")
+        path = scene_file_path(tmp_path, "s02b01", "sh_01")
         assert path == tmp_path / "video" / "sh_sh_01" / "sc_s02b01.mp4"
 
     # --- _mask_url ---

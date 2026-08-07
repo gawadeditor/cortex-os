@@ -800,6 +800,378 @@ class TestFillCoverageDeficits:
 
 
 # ---------------------------------------------------------------------------
+# TestCoverageFillShotDiversity — 2026-08-07 fix regression coverage.
+#
+# Reproduces the real production defect (ep_f3619022 scenes s29 and s11:
+# 5-6 clips covering one beat, all the same static "candle in tunnel"
+# composition) and verifies fill_coverage_deficits() now consumes
+# hypogeum.agents.cinematic_director's Cinematic Coverage Plan to assign
+# each extra clip a distinct, materially different planned shot, and fails
+# closed rather than ever resubmitting an identical/equivalent prompt.
+# ---------------------------------------------------------------------------
+
+def _make_shot(
+    shot_order: int,
+    beat_id: str = "b_029",
+    shot_scale: str = "medium",
+    camera_angle: str = "eye_level",
+    camera_height: str = "eye_level",
+    camera_direction: str = "frontal",
+    camera_movement: str = "slow_push_in",
+    composition: str = "rule_of_thirds_left",
+    background_depth: str = "medium",
+    screen_direction: str = "neutral",
+    subject: str = "the sealed passage",
+    action: str = "",
+    narrative_function: str = "establishes the passage's scale",
+    diversity_justification=None,
+) -> dict:
+    """One planned shot, matching hypogeum.schemas._validate_cinematic_coverage_plan's
+    required field set plus the optional fields cinematic_director.txt asks for."""
+    return {
+        "shot_id": f"{beat_id}__shot{shot_order}",
+        "parent_beat_id": beat_id,
+        "shot_order": shot_order,
+        "shot_purpose": "establish_location",
+        "narrative_function": narrative_function,
+        "estimated_usable_duration": 8.0,
+        "subject": subject,
+        "action": action,
+        "framing": "",
+        "shot_scale": shot_scale,
+        "camera_angle": camera_angle,
+        "camera_height": camera_height,
+        "camera_direction": camera_direction,
+        "camera_movement": camera_movement,
+        "lens_character": "standard",
+        "composition": composition,
+        "foreground_usage": "none",
+        "background_depth": background_depth,
+        "lighting_direction": "",
+        "screen_direction": screen_direction,
+        "eye_line": "neutral",
+        "motion_energy": "low",
+        "transition_in": "clean_cut",
+        "transition_out": "clean_cut",
+        "diversity_justification": diversity_justification,
+    }
+
+
+def _make_s29_style_scene(shots: list, primary_prompt: str = "A sealed medieval tunnel, candlelight.") -> dict:
+    """A scene shaped like the real ep_f3619022 s29 case: one beat whose
+    narration (46.858s) far exceeds its 8s base clip, with a
+    cinematic_coverage_plan already attached (as visual_package_director.py
+    attaches it for every scene, per commit 9ba27e1)."""
+    scene = _make_canonical_scene(
+        "s29", asset_id="episodes/ep_s29/video/sc_s29", scene_index=28,
+        description="the sealed passage", primary_prompt=primary_prompt,
+        fallback_prompt=primary_prompt,
+    )
+    scene["narration_reference"] = "b_029"
+    scene["cinematic_coverage_plan"] = {
+        "beat_id": "b_029",
+        "narration_duration_seconds": 46.858,
+        "progression_pattern": "establish_develop_reveal",
+        "shots": shots,
+    }
+    return scene
+
+
+def _make_s29_beat(deficit_seconds: float = 32.75) -> "object":
+    from hypogeum.agents.coverage_check import BeatCoverage
+    return BeatCoverage(
+        scene_id="s29", source_type="main_episode", short_id=None,
+        narration_duration_seconds=46.858, available_duration_seconds=8.0,
+        max_editorial_duration_seconds=9.2, deficit_seconds=deficit_seconds,
+        sufficient=False,
+    )
+
+
+class TestCoverageFillShotDiversity:
+
+    def _run(self, scene, deficit_seconds, max_extra=5, submit_log=None):
+        from hypogeum.agents.clip_repair_agent import fill_coverage_deficits
+
+        assets_root = None  # unused by the mocked submit_scene below
+        vp = _make_visual_package([scene])
+        cfg = _make_config(max_generated=5)
+        cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = max_extra
+        log = MagicMock()
+        beat = _make_s29_beat(deficit_seconds=deficit_seconds)
+        submitted = submit_log if submit_log is not None else []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            submitted.append(scene_spec)
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(f"CLIP-{scene_spec['scene_id']}".encode())
+            return {"generation_status": "generated"}
+
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+            asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
+            return True
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            assets_root = Path(tmp)
+            with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+                 patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify), \
+                 patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=8.0):
+                result = fill_coverage_deficits(
+                    insufficient_beats=[beat],
+                    visual_package=vp,
+                    assets_root=assets_root,
+                    config=cfg,
+                    episode_id="ep_s29",
+                    log=log,
+                )
+        return result, submitted, log
+
+    def test_s29_case_five_extras_get_five_distinct_planned_shots(self):
+        """Real s29 reproduction: a beat needing 5 extra clips, with a
+        5-shot Cinematic Coverage Plan, must submit 5 materially distinct
+        prompts -- never the same composition repeated."""
+        shots = [
+            _make_shot(1, camera_angle="eye_level", shot_scale="wide_establishing",
+                       composition="rule_of_thirds_left", camera_movement="slow_push_in",
+                       narrative_function="establishes the tunnel's scale"),
+            _make_shot(2, camera_angle="low_angle", shot_scale="medium",
+                       composition="centered_symmetry", camera_movement="lateral_dolly_left",
+                       narrative_function="reveals the ceiling's construction"),
+            _make_shot(3, camera_angle="high_angle", shot_scale="close_up",
+                       composition="negative_space_dominant", camera_movement="overhead_descent",
+                       narrative_function="shows tool marks on the wall"),
+            _make_shot(4, camera_angle="dutch_tilt", shot_scale="medium_close_up",
+                       composition="diagonal_leading_line", camera_movement="handheld_drift",
+                       narrative_function="conveys disorientation in the passage"),
+            _make_shot(5, camera_angle="worms_eye", shot_scale="extreme_close_up",
+                       composition="layered_depth", camera_movement="vertical_ascent",
+                       narrative_function="finds the passage's terminus"),
+        ]
+        scene = _make_s29_style_scene(shots)
+
+        # deficit_seconds chosen so remaining = deficit/1.15 needs exactly
+        # 5 clips at the mocked 8.0s each: 33.0/1.15=~28.7 -> 4 clips would
+        # leave >0.001s remaining, forcing a 5th; 5*8.0 closes it.
+        result, submitted, log = self._run(scene, deficit_seconds=37.95, max_extra=5)
+
+        assert "s29" in result
+        assert len(result["s29"]) == 5
+        assert len(submitted) == 5
+
+        prompts = [s["production_spec"]["primary_prompt"] for s in submitted]
+        # Every extra clip's prompt is unique -- no two slots share text.
+        assert len(set(prompts)) == 5, "each extra clip must get a materially distinct prompt"
+
+        # Continuity preserved: the base scene's own description still
+        # anchors every extra's prompt (narrative meaning is not lost).
+        for p in prompts:
+            assert "A sealed medieval tunnel, candlelight." in p
+
+        # Materially distinct, not superficial wording: each shot's own
+        # camera_angle value appears verbatim in its rendered prompt.
+        for shot, prompt in zip(shots, prompts):
+            assert shot["camera_angle"] in prompt
+            assert shot["composition"] in prompt
+            assert shot["narrative_function"] in prompt
+
+        # No pair of prompts differs by camera language alone while
+        # everything else is identical text -- spot check two prompts are
+        # not near-duplicates of each other by simple containment.
+        assert prompts[0] != prompts[1] != prompts[2] != prompts[3] != prompts[4]
+
+    def test_plan_exhausted_fails_closed_never_resubmits_identical_prompt(self):
+        """A beat needing more extras than its plan has shots for must stop
+        -- never fall back to resubmitting an already-used (or the base)
+        prompt to fill the remaining slots."""
+        shots = [
+            _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left"),
+            _make_shot(2, camera_angle="low_angle", composition="centered_symmetry"),
+        ]
+        scene = _make_s29_style_scene(shots)
+
+        # Deficit large enough to want 5 slots; plan only offers 2.
+        result, submitted, log = self._run(scene, deficit_seconds=32.75, max_extra=5)
+
+        assert len(submitted) == 2, "must stop once the plan runs out of distinct shots"
+        assert result["s29"] and len(result["s29"]) == 2
+
+        events = [c.args[0] for c in log.error.call_args_list]
+        assert "coverage_fill_shot_plan_exhausted" in events
+        assert "coverage_fill_beat_unresolvable" in events
+
+    def test_duplicate_shot_signature_without_justification_fails_closed(self):
+        """Two shots with the identical camera/composition signature and no
+        diversity_justification is a planning defect -- the second must be
+        refused, not submitted as a perceptually repeated clip."""
+        shots = [
+            _make_shot(1, camera_angle="eye_level", shot_scale="medium",
+                       camera_height="eye_level", camera_direction="frontal",
+                       camera_movement="slow_push_in", composition="rule_of_thirds_left",
+                       background_depth="medium", screen_direction="neutral"),
+            _make_shot(2, camera_angle="eye_level", shot_scale="medium",
+                       camera_height="eye_level", camera_direction="frontal",
+                       camera_movement="slow_push_in", composition="rule_of_thirds_left",
+                       background_depth="medium", screen_direction="neutral"),
+            _make_shot(3, camera_angle="overhead", shot_scale="wide_establishing",
+                       composition="layered_depth"),
+        ]
+        scene = _make_s29_style_scene(shots)
+
+        result, submitted, log = self._run(scene, deficit_seconds=32.75, max_extra=5)
+
+        # Shot 1 succeeds; shot 2 (duplicate of shot 1) is refused and the
+        # beat stops there -- shot 3 is never reached even though it is
+        # itself distinct, because the loop fails closed on the first
+        # unresolved slot rather than skipping ahead.
+        assert len(submitted) == 1
+        assert result["s29"] and len(result["s29"]) == 1
+
+        events = [c.args[0] for c in log.error.call_args_list]
+        assert "coverage_fill_shot_plan_duplicate" in events
+
+    def test_duplicate_shot_signature_with_justification_is_allowed(self):
+        """diversity_justification is the documented, explicit escape hatch
+        for an intentional repeat (e.g. a deliberate match-cut) -- it must
+        not be treated as a planning defect."""
+        shots = [
+            _make_shot(1, camera_angle="eye_level", shot_scale="medium",
+                       camera_height="eye_level", camera_direction="frontal",
+                       camera_movement="slow_push_in", composition="rule_of_thirds_left",
+                       background_depth="medium", screen_direction="neutral"),
+            _make_shot(2, camera_angle="eye_level", shot_scale="medium",
+                       camera_height="eye_level", camera_direction="frontal",
+                       camera_movement="slow_push_in", composition="rule_of_thirds_left",
+                       background_depth="medium", screen_direction="neutral",
+                       diversity_justification="deliberate match-cut back to the opening frame"),
+        ]
+        scene = _make_s29_style_scene(shots)
+
+        # deficit_seconds chosen so remaining = deficit/1.15 needs exactly
+        # 2 clips at the mocked 8.0s each.
+        result, submitted, log = self._run(scene, deficit_seconds=16.0, max_extra=5)
+
+        assert len(submitted) == 2
+        assert result["s29"] and len(result["s29"]) == 2
+        events = [c.args[0] for c in log.error.call_args_list]
+        assert "coverage_fill_shot_plan_duplicate" not in events
+
+    def test_no_plan_present_keeps_legacy_single_prompt_behavior(self):
+        """Scope boundary: a scene with no cinematic_coverage_plan attached
+        at all (legacy state) keeps the pre-existing behavior unchanged --
+        this fix wires up the plan when one exists, it does not invent one."""
+        scene = _make_canonical_scene(
+            "s29", asset_id="episodes/ep_s29/video/sc_s29", scene_index=28,
+            primary_prompt="LEGACY_PROMPT", fallback_prompt="LEGACY_FALLBACK",
+        )
+        scene["narration_reference"] = "b_029"
+        assert "cinematic_coverage_plan" not in scene
+
+        result, submitted, log = self._run(scene, deficit_seconds=37.95, max_extra=5)
+
+        assert len(submitted) == 5
+        prompts = {s["production_spec"]["primary_prompt"] for s in submitted}
+        assert prompts == {"LEGACY_PROMPT"}, "legacy no-plan scenes are unchanged by this fix"
+
+    def test_planned_shot_id_recorded_on_manifest_entry_for_traceability(self):
+        """Each qualified extra clip's asset_manifest entry records which
+        planned shot produced it."""
+        shots = [
+            _make_shot(1, camera_angle="eye_level"),
+            _make_shot(2, camera_angle="low_angle"),
+        ]
+        scene = _make_s29_style_scene(shots)
+        vp = _make_visual_package([scene])
+
+        from hypogeum.agents.clip_repair_agent import fill_coverage_deficits
+        cfg = _make_config(max_generated=5)
+        cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = 2
+        log = MagicMock()
+        beat = _make_s29_beat(deficit_seconds=8.0)
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"CLIP")
+            return {"generation_status": "generated"}
+
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+            asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
+            return True
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+                 patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify), \
+                 patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=8.0):
+                fill_coverage_deficits(
+                    insufficient_beats=[beat],
+                    visual_package=vp,
+                    assets_root=Path(tmp),
+                    config=cfg,
+                    episode_id="ep_s29",
+                    log=log,
+                )
+
+        recorded_ids = [
+            a.get("planned_shot_id") for a in vp["asset_manifest"]["assets"]
+            if a.get("scene_id", "").startswith("s29__extra")
+        ]
+        assert recorded_ids == ["b_029__shot1"]
+
+
+class TestShotDiversityHelpers:
+    """Direct unit coverage for the new pure helper functions."""
+
+    def test_shot_diversity_key_differs_for_different_camera_design(self):
+        from hypogeum.agents.clip_repair_agent import _shot_diversity_key
+
+        a = _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left")
+        b = _make_shot(2, camera_angle="low_angle", composition="centered_symmetry")
+        assert _shot_diversity_key(a) != _shot_diversity_key(b)
+
+    def test_shot_diversity_key_matches_for_identical_camera_design(self):
+        from hypogeum.agents.clip_repair_agent import _shot_diversity_key
+
+        a = _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left")
+        b = _make_shot(2, camera_angle="eye_level", composition="rule_of_thirds_left")
+        assert _shot_diversity_key(a) == _shot_diversity_key(b)
+
+    def test_render_shot_directive_contains_distinguishing_fields(self):
+        from hypogeum.agents.clip_repair_agent import _render_shot_directive
+
+        shot = _make_shot(
+            1, camera_angle="worms_eye", shot_scale="extreme_close_up",
+            composition="layered_depth", camera_movement="vertical_ascent",
+            narrative_function="finds the passage's terminus",
+        )
+        text = _render_shot_directive(shot)
+        assert "worms_eye" in text
+        assert "extreme_close_up" in text
+        assert "layered_depth" in text
+        assert "vertical_ascent" in text
+        assert "finds the passage's terminus" in text
+
+    def test_apply_shot_to_scene_preserves_base_and_appends_directive(self):
+        from hypogeum.agents.clip_repair_agent import _apply_shot_to_scene
+
+        scene = _make_canonical_scene(
+            "s01", primary_prompt="BASE_TEXT", fallback_prompt="BASE_FALLBACK",
+        )
+        shot = _make_shot(1, camera_angle="low_angle")
+
+        new_scene = _apply_shot_to_scene(scene, shot)
+        routing = new_scene["production_spec"]["provider_routing"]
+
+        assert routing["primary_prompt"].startswith("BASE_TEXT")
+        assert "low_angle" in routing["primary_prompt"]
+        assert routing["fallback_prompt"].startswith("BASE_FALLBACK")
+
+        # Original scene dict is never mutated.
+        assert scene["production_spec"]["provider_routing"]["primary_prompt"] == "BASE_TEXT"
+
+
+# ---------------------------------------------------------------------------
 # TestRepairResult
 # ---------------------------------------------------------------------------
 

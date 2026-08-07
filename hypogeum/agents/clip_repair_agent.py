@@ -405,6 +405,22 @@ def fill_coverage_deficits(
     required resolution after a failed enhancement attempt) is never
     counted and never reaches Assembly, regardless of its duration.
 
+    Shot diversity (2026-08-07 fix): when the beat's scene carries a
+    scene["cinematic_coverage_plan"] (hypogeum.agents.cinematic_director,
+    wired in by visual_package_director.py — present on every scene VPD
+    plans from this point forward), each extra slot consumes the next
+    distinct planned shot from that plan (see _apply_shot_to_scene() /
+    _shot_diversity_key()) instead of resubmitting the scene's own
+    unmodified prompt. A beat whose plan cannot supply a genuinely
+    distinct shot for a slot — plan exhausted, or the next shot is
+    compositionally equivalent to one already used in this beat with no
+    diversity_justification — fails closed for that slot rather than
+    submitting a perceptually repeated clip; the beat is then reported via
+    the existing "coverage_fill_beat_unresolvable" path below, same as any
+    other unresolvable deficit. Scenes with no plan attached (legacy state
+    only — see the module-level note above _shot_diversity_key()) keep the
+    prior single-prompt behavior unchanged.
+
     Returns {scene_id: [Path, ...]} — only the NEWLY generated, qualified
     extra clip paths for beats that got at least one. Callers attach
     these to the corresponding TimelineEntry.extra_clip_paths and re-run
@@ -460,6 +476,32 @@ def fill_coverage_deficits(
         remaining = beat.deficit_seconds / MAX_EDITORIAL_SPEED_FACTOR
         new_paths: List[Path] = []
 
+        # Shot-diversity wiring (2026-08-07 fix — see module docstring
+        # addendum below and _apply_shot_to_scene()'s docstring for the
+        # full rationale). scene["cinematic_coverage_plan"] is written by
+        # hypogeum.agents.cinematic_director, wired into
+        # visual_package_director.py's orchestration (commit 9ba27e1) —
+        # every beat gets an ordered list of already-distinct planned
+        # shots (real camera_angle/shot_scale/composition/etc. field
+        # values, never a single fixed shot repeated). This loop consumes
+        # that existing plan one shot per extra slot; it does not invent
+        # any new diversity-planning logic of its own.
+        #
+        # Scenes with no plan attached (legacy/pre-9ba27e1 visual
+        # packages, or fixtures that never set one) fall back to the
+        # pre-existing behavior of resubmitting the scene's own baked
+        # prompt unchanged — a deliberate, disclosed scope boundary: every
+        # NEW episode always gets a plan (cinematic_director's own
+        # LLM-failure fallback still produces a minimal single-shot plan),
+        # so this fallback exists only for already-generated legacy state,
+        # not for the normal production path.
+        coverage_plan = scene.get("cinematic_coverage_plan") or {}
+        planned_shots = sorted(
+            coverage_plan.get("shots", []) or [],
+            key=lambda sh: sh.get("shot_order", 0),
+        )
+        used_shot_keys: Set[tuple] = set()
+
         # Cost-visibility estimate (planning only — the real stopping
         # condition is always `remaining`, recalculated from each clip's
         # measured duration below, never this estimate).
@@ -474,10 +516,56 @@ def fill_coverage_deficits(
             allowed_extra_count=max_extra_per_beat,
         )
 
+        # NOTE (2026-08-05): slot numbering always starts at 1 and relies on
+        # submit_scene()'s own resume-safety reuse to correctly account for
+        # any clip that already exists at that slot -- reused() clips still
+        # flow through the same qualify+probe+subtract-from-remaining path
+        # below, so they are counted exactly once. This is only correct
+        # when `beat.deficit_seconds` reflects the CURRENT extra_clip_paths
+        # the caller has attached (empty on a fresh timeline, or whatever
+        # this same process already appended) -- never a deficit that has
+        # been independently pre-netted against on-disk extras through some
+        # other discovery mechanism, which would double-count them here.
         slot_index = 0
         while remaining > 0.001 and slot_index < max_extra_per_beat:
             slot_index += 1
             extra_scene_id = f"{sid}__extra{slot_index}"
+
+            # Fail-closed shot assignment (requirement: coverage must never
+            # be considered satisfied by perceptually/compositionally
+            # equivalent clips). Only engages when a plan is actually
+            # present — see the scope-boundary note above `planned_shots`.
+            scene_for_slot = scene
+            planned_shot: Optional[dict] = None
+            if planned_shots:
+                if slot_index > len(planned_shots):
+                    log.error(
+                        "coverage_fill_shot_plan_exhausted",
+                        episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
+                        planned_shot_count=len(planned_shots), slot_index=slot_index,
+                        reason="no distinct planned shot left for this slot; refusing "
+                               "to reuse an earlier shot assignment as duration "
+                               "compensation",
+                    )
+                    break  # fail-closed — never fall back to an identical prompt
+
+                candidate_shot = planned_shots[slot_index - 1]
+                shot_key = _shot_diversity_key(candidate_shot)
+                if shot_key in used_shot_keys and not candidate_shot.get("diversity_justification"):
+                    log.error(
+                        "coverage_fill_shot_plan_duplicate",
+                        episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
+                        shot_id=candidate_shot.get("shot_id"), slot_index=slot_index,
+                        reason="planned shot is compositionally equivalent to an "
+                               "already-used shot in this beat with no "
+                               "diversity_justification; refusing to submit a "
+                               "perceptually-repeated clip",
+                    )
+                    break  # fail-closed
+
+                used_shot_keys.add(shot_key)
+                planned_shot = candidate_shot
+                scene_for_slot = _apply_shot_to_scene(scene, candidate_shot)
 
             qualified_path: Optional[Path] = None
             for retry_num in range(max_slot_retries + 1):
@@ -485,14 +573,18 @@ def fill_coverage_deficits(
                     from hypogeum.muapi import submit_scene, scene_file_path  # noqa: PLC0415
                     from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
 
-                    # scene is a raw VPD scene dict: production_spec.
+                    # scene_for_slot is a raw VPD scene dict: production_spec.
                     # provider_routing.primary_prompt (nested), not the flat
                     # production_spec.primary_prompt submit_scene() requires —
                     # build_scene_spec() is the same canonical translator VPD's
                     # own Phase 2 generation uses (2026-08-04 fix; see
                     # run_clip_repair()'s Strategy B above for the identical
-                    # fix and the entity_hosted_urls={} rationale).
-                    extra_scene_spec = build_scene_spec(scene, entity_hosted_urls={})
+                    # fix and the entity_hosted_urls={} rationale). When a
+                    # planned_shot was assigned above, scene_for_slot already
+                    # carries that shot's distinct prompt override (2026-08-07
+                    # fix) — never scene itself, which would resubmit the same
+                    # prompt every slot.
+                    extra_scene_spec = build_scene_spec(scene_for_slot, entity_hosted_urls={})
                     extra_scene_spec["scene_id"] = extra_scene_id
 
                     output_dir.mkdir(parents=True, exist_ok=True)
@@ -534,6 +626,10 @@ def fill_coverage_deficits(
                         "model": asset_result.get("model_used"),
                         "tier_used": asset_result.get("tier_used"),
                         "source_enhancement": None,
+                        # Traceability (2026-08-07 fix): which Cinematic
+                        # Coverage Plan shot this clip's prompt was rendered
+                        # from, or None on the legacy no-plan fallback path.
+                        "planned_shot_id": planned_shot.get("shot_id") if planned_shot else None,
                     }
                     qualify_asset(
                         extra_asset, extra_path, beat.source_type, config, episode_id, log,
@@ -625,6 +721,145 @@ def _probe_extra_clip_duration(path: Path) -> float:
     except Exception:
         pass
     return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Shot-diversity wiring (2026-08-07 fix)
+#
+# fill_coverage_deficits() used to call build_scene_spec() with the same
+# unmodified scene dict for every extra slot, so extra1/extra2/extra3...
+# for one beat always carried the identical production_spec.provider_
+# routing.primary_prompt -- byte-distinct generated files that were
+# perceptually/compositionally the same shot repeated for 30-47s, exactly
+# what a real production acceptance review flagged for ep_f3619022's scenes
+# s29 and s11. Root cause and existing capability confirmed by direct
+# investigation: hypogeum.agents.cinematic_director (commit 9ba27e1)
+# already plans an ordered, purposeful, per-beat "Cinematic Coverage Plan"
+# -- 1-N shots, each with a distinct narrative_function and a full camera/
+# composition field set -- and visual_package_director.py already attaches
+# it to every scene as scene["cinematic_coverage_plan"]. That plan was
+# simply never consumed by anything yet ("Shot Diversity Planner" and
+# Stage B consumption were explicitly left as follow-up work in that
+# commit's message). The two helpers below are the coverage-fill path's
+# consumer of that EXISTING plan -- they decide nothing about camera
+# angle, composition, or narrative purpose themselves; that decision was
+# already made, once, by Cinematic Director. This is intentionally not a
+# second/parallel diversity system.
+# ---------------------------------------------------------------------------
+
+# The subset of a planned shot's fields whose repetition, per
+# hypogeum/prompts/cinematic_director.txt's own "WITHIN-BEAT DIVERSITY"
+# rule, makes two shots the same shot in a viewer's eyes. Restricted to the
+# schema-required fields (hypogeum.schemas._validate_cinematic_coverage_plan)
+# so this key is always computable, even against the LLM-failure fallback
+# plan (_minimal_pass_through() in cinematic_director.py).
+_SHOT_DIVERSITY_FIELDS: tuple = (
+    "shot_scale", "camera_angle", "camera_height", "camera_direction",
+    "camera_movement", "composition", "background_depth", "screen_direction",
+)
+
+
+def _shot_diversity_key(shot: dict) -> tuple:
+    """A hashable signature of `shot`'s camera/composition design. Two
+    shots with the same key are the same shot for coverage purposes."""
+    return tuple(shot.get(field) for field in _SHOT_DIVERSITY_FIELDS)
+
+
+def _render_shot_directive(shot: dict) -> str:
+    """
+    Deterministic, template-based rendering of one Cinematic Coverage Plan
+    shot's already-decided structured fields into an explicit prompt
+    override clause.
+
+    This function does not choose what the shot IS — that decision was
+    already made by hypogeum.agents.cinematic_director's Cinematic Coverage
+    Plan, once, during VPD, before any footage exists. It only renders an
+    already-distinct planned shot's field values, verbatim, into prompt
+    text — no synonym generation, no invented camera language — which is
+    exactly what keeps two rendered prompts materially different (real
+    field values differ) rather than superficially different (same
+    content, different wording).
+    """
+    parts: List[str] = [
+        f"SHOT VARIANT ({shot.get('shot_purpose') or 'coverage'}): "
+        f"{shot.get('narrative_function') or ''}".strip()
+    ]
+
+    subject = shot.get("subject")
+    action = shot.get("action")
+    if subject:
+        subject_line = f"Subject: {subject}"
+        if action:
+            subject_line += f" — {action}"
+        parts.append(subject_line + ".")
+
+    framing = shot.get("framing")
+    scale = shot.get("shot_scale")
+    if framing or scale:
+        parts.append(
+            f"Framing: {framing or scale}"
+            + (f", {scale} shot scale." if scale else ".")
+        )
+
+    parts.append(
+        "Camera: "
+        f"{shot.get('camera_angle') or 'eye_level'} angle, "
+        f"{shot.get('camera_height') or 'eye_level'} height, "
+        f"{shot.get('camera_direction') or 'frontal'} direction, "
+        f"{shot.get('camera_movement') or 'locked_off_hold'}."
+    )
+
+    lens = shot.get("lens_character")
+    if lens:
+        parts.append(f"Lens: {lens}.")
+
+    parts.append(
+        "Composition: "
+        f"{shot.get('composition') or 'centered_symmetry'}, "
+        f"{shot.get('background_depth') or 'medium'} background depth, "
+        f"screen direction {shot.get('screen_direction') or 'neutral'}."
+    )
+
+    lighting = shot.get("lighting_direction")
+    if lighting:
+        parts.append(f"Lighting: {lighting}.")
+
+    parts.append(f"Motion energy: {shot.get('motion_energy') or 'low'}.")
+
+    return " ".join(p for p in parts if p)
+
+
+def _apply_shot_to_scene(scene: dict, shot: dict) -> dict:
+    """
+    Return a shallow-copied scene whose production_spec.provider_routing
+    prompts have `shot`'s directive appended after the scene's own base
+    prompt text.
+
+    Appending (never replacing) preserves the setting/subject/period
+    continuity the base prompt already establishes — "preserving scene
+    continuity and narrative meaning" — while the appended camera/
+    composition/action clause makes the submitted prompt materially
+    different from every sibling extra clip's prompt for the same beat,
+    each of which is built from a different planned shot.
+
+    Does not mutate `scene` or its nested dicts — safe to call once per
+    extra slot against the same original scene.
+    """
+    prod_spec = scene.get("production_spec", {}) or {}
+    routing = prod_spec.get("provider_routing", {}) or {}
+    directive = _render_shot_directive(shot)
+
+    new_routing = dict(routing)
+    for key in ("primary_prompt", "fallback_prompt"):
+        base_text = (routing.get(key) or "").strip()
+        new_routing[key] = f"{base_text} {directive}".strip() if base_text else directive
+
+    new_prod_spec = dict(prod_spec)
+    new_prod_spec["provider_routing"] = new_routing
+
+    new_scene = dict(scene)
+    new_scene["production_spec"] = new_prod_spec
+    return new_scene
 
 
 # ---------------------------------------------------------------------------

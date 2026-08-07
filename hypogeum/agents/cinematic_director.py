@@ -38,6 +38,9 @@ Public API:
     compute_shot_budget(narration_duration_seconds, config) -> int
     run_cinematic_director(visual_package, narration_package, episode_id,
                             config, output_dir=None) -> dict
+    shot_diversity_key(shot) -> tuple                            (2026-08-07)
+    validate_coverage_plan_diversity(coverage_plan, episode_id) -> None  (2026-08-07)
+    CoveragePlanDiversityError                                   (2026-08-07)
 
 Checkpoint: cinematic_coverage_plan_{episode_id}.json
 
@@ -46,6 +49,24 @@ Logging events:
     cinematic_director_resumed      — info  — checkpoint found, skipping call
     cinematic_director_completed    — info  — plan written to checkpoint
     cinematic_director_failed       — error — LLM call failed, pass-through used
+
+Ownership addendum (2026-08-07, refactor after the coverage-fill shot-
+diversity fix): this module is the sole owner of "what makes two planned
+shots the same shot" (shot_diversity_key()) and of enforcing its own
+prompt file's WITHIN-BEAT DIVERSITY rule at planning time
+(validate_coverage_plan_diversity(), wired into visual_package_director.py
+immediately after run_cinematic_director() returns — rejects the Visual
+Package before Shot Diversity Planner, Stage B, or any MUAPI/provider call
+runs for that episode). hypogeum.agents.clip_repair_agent imports
+shot_diversity_key() from here for its own (secondary, defense-in-depth)
+fail-closed check rather than reimplementing the rule — this module is the
+single source of truth for it. Rendering a planned shot's structured
+fields into actual prompt text is NOT this module's job — see
+hypogeum.video_prompt_writer.render_coverage_plan_shot_prompts(), called
+by visual_package_director.py right after Stage B writes each scene's own
+base prompt. This module only ever decides shot IDENTITY (what the shot
+is, camera/composition fields, whether it duplicates a sibling) — never
+prompt TEXT.
 """
 
 from __future__ import annotations
@@ -291,3 +312,85 @@ def _minimal_pass_through(episode_id: str, beats_for_director: list) -> dict:
             }],
         })
     return {"episode_id": episode_id, "beat_plans": beat_plans, "notes": ["pass_through_fallback"]}
+
+
+# ---------------------------------------------------------------------------
+# Shot diversity — identity, not text (2026-08-07)
+#
+# This module decides what a shot IS (camera/composition/purpose fields);
+# it never decides what a shot's prompt TEXT says. The fields below are the
+# same set this module's own prompt file (hypogeum/prompts/cinematic_
+# director.txt, "WITHIN-BEAT DIVERSITY") already documents as making two
+# shots the same shot to a viewer. shot_diversity_key() is the single
+# source of truth for that rule — both validate_coverage_plan_diversity()
+# below (planning-stage rejection) and hypogeum.agents.clip_repair_agent's
+# own fail-closed slot-assignment check import it, rather than each
+# encoding the rule independently.
+# ---------------------------------------------------------------------------
+
+SHOT_DIVERSITY_FIELDS: tuple = (
+    "shot_scale", "camera_angle", "camera_height", "camera_direction",
+    "camera_movement", "composition", "background_depth", "screen_direction",
+)
+
+
+def shot_diversity_key(shot: dict) -> tuple:
+    """A hashable signature of `shot`'s camera/composition design. Two
+    shots in the same beat with the same key are the same shot for
+    coverage purposes, unless the later one sets diversity_justification."""
+    return tuple(shot.get(field) for field in SHOT_DIVERSITY_FIELDS)
+
+
+class CoveragePlanDiversityError(Exception):
+    """
+    Raised by validate_coverage_plan_diversity() when a Cinematic Coverage
+    Plan contains two shots in the same beat with an identical
+    shot_diversity_key() and no diversity_justification on the later one —
+    exactly the planning failure this module's own prompt file's "THE
+    CENTRAL RULE" section describes (shots technically different but
+    communicating the same thing).
+
+    A planning-stage rejection: raised before Shot Diversity Planner,
+    Stage B (prompt writing), or any MUAPI/provider call runs for the
+    episode — no generation credit is ever spent on a plan this module
+    itself would already consider a directing failure.
+    """
+
+    def __init__(self, episode_id: str, beat_id: str, shot_id_a: str, shot_id_b: str):
+        self.episode_id = episode_id
+        self.beat_id = beat_id
+        self.shot_id_a = shot_id_a
+        self.shot_id_b = shot_id_b
+        super().__init__(
+            f"Cinematic Coverage Plan rejected for episode {episode_id!r}: "
+            f"beat {beat_id!r} has compositionally equivalent shots "
+            f"{shot_id_a!r} and {shot_id_b!r} (same shot_scale/camera_angle/"
+            "camera_height/camera_direction/camera_movement/composition/"
+            "background_depth/screen_direction) with no diversity_justification."
+        )
+
+
+def validate_coverage_plan_diversity(coverage_plan: dict, episode_id: str) -> None:
+    """
+    Raise CoveragePlanDiversityError if any beat_plan in `coverage_plan`
+    assigns the same shot_diversity_key() to two shots without an explicit
+    diversity_justification on the later one (shot_order-wise).
+
+    Pure validation — never mutates `coverage_plan`. A beat with
+    shot_budget=1 (the overwhelmingly common case, and the whole of
+    _minimal_pass_through()'s LLM-failure fallback) trivially passes: a
+    single shot cannot duplicate a sibling that doesn't exist.
+    """
+    for bp in coverage_plan.get("beat_plans", []):
+        beat_id = bp.get("beat_id")
+        seen: dict = {}
+        for shot in sorted(bp.get("shots", []), key=lambda s: s.get("shot_order", 0)):
+            key = shot_diversity_key(shot)
+            if key in seen and not shot.get("diversity_justification"):
+                raise CoveragePlanDiversityError(
+                    episode_id=episode_id,
+                    beat_id=beat_id,
+                    shot_id_a=seen[key],
+                    shot_id_b=shot.get("shot_id"),
+                )
+            seen[key] = shot.get("shot_id")

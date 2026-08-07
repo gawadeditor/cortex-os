@@ -26,9 +26,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hypogeum.agents.cinematic_director import (
     PROGRESSION_PATTERNS,
+    SHOT_DIVERSITY_FIELDS,
+    CoveragePlanDiversityError,
     compute_shot_budget,
     estimate_beat_duration_seconds,
     run_cinematic_director,
+    shot_diversity_key,
+    validate_coverage_plan_diversity,
 )
 from hypogeum.schemas import validate
 
@@ -228,3 +232,158 @@ class TestRunCinematicDirector:
     def test_progression_patterns_are_documented_vocabulary(self):
         assert "single_shot" in PROGRESSION_PATTERNS
         assert len(PROGRESSION_PATTERNS) >= 5
+
+
+# ---------------------------------------------------------------------------
+# Shot diversity — identity, not text (2026-08-07 refactor)
+#
+# This module decides what a shot IS; shot_diversity_key() and
+# validate_coverage_plan_diversity() are the code enforcement of the
+# prompt file's own "WITHIN-BEAT DIVERSITY" rule, and the shared source of
+# truth hypogeum.agents.clip_repair_agent imports for its own (secondary)
+# fail-closed check. Rendering a shot into prompt TEXT is a different
+# module's job -- see tests/test_video_prompt_writer_coverage_plan.py.
+# ---------------------------------------------------------------------------
+
+def _make_shot(shot_order: int, beat_id: str = "b_001", **overrides) -> dict:
+    shot = {
+        "shot_id": f"{beat_id}__shot{shot_order}",
+        "parent_beat_id": beat_id,
+        "shot_order": shot_order,
+        "shot_purpose": "establish_location",
+        "narrative_function": "test coverage",
+        "estimated_usable_duration": 8.0,
+        "subject": "the passage",
+        "shot_scale": "medium",
+        "camera_angle": "eye_level",
+        "camera_height": "eye_level",
+        "camera_direction": "frontal",
+        "camera_movement": "slow_push_in",
+        "composition": "rule_of_thirds_left",
+        "background_depth": "medium",
+        "screen_direction": "neutral",
+        "motion_energy": "low",
+        "transition_in": "clean_cut",
+        "transition_out": "clean_cut",
+        "diversity_justification": None,
+    }
+    shot.update(overrides)
+    return shot
+
+
+class TestShotDiversityKey:
+
+    def test_key_uses_the_documented_field_set(self):
+        assert SHOT_DIVERSITY_FIELDS == (
+            "shot_scale", "camera_angle", "camera_height", "camera_direction",
+            "camera_movement", "composition", "background_depth", "screen_direction",
+        )
+
+    def test_differs_for_different_camera_design(self):
+        a = _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left")
+        b = _make_shot(2, camera_angle="low_angle", composition="centered_symmetry")
+        assert shot_diversity_key(a) != shot_diversity_key(b)
+
+    def test_matches_for_identical_camera_design(self):
+        a = _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left")
+        b = _make_shot(2, camera_angle="eye_level", composition="rule_of_thirds_left")
+        assert shot_diversity_key(a) == shot_diversity_key(b)
+
+    def test_ignores_fields_outside_the_documented_set(self):
+        """A different subject/narrative_function/shot_purpose alone does
+        not make two shots diverse -- only the camera/composition design
+        does, matching the prompt file's own rule."""
+        a = _make_shot(1, subject="a candle", narrative_function="finds the candle")
+        b = _make_shot(2, subject="a skull", narrative_function="finds the skull")
+        assert shot_diversity_key(a) == shot_diversity_key(b)
+
+
+class TestValidateCoveragePlanDiversity:
+
+    def _plan(self, *beat_plans) -> dict:
+        return {"episode_id": "ep_001", "beat_plans": list(beat_plans)}
+
+    def test_single_shot_beat_always_passes(self):
+        plan = self._plan({
+            "beat_id": "b_001", "narration_duration_seconds": 8.0,
+            "progression_pattern": "single_shot", "shots": [_make_shot(1)],
+        })
+        validate_coverage_plan_diversity(plan, episode_id="ep_001")  # must not raise
+
+    def test_distinct_shots_pass(self):
+        plan = self._plan({
+            "beat_id": "b_001", "narration_duration_seconds": 24.0,
+            "progression_pattern": "wide_medium_close",
+            "shots": [
+                _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left"),
+                _make_shot(2, camera_angle="low_angle", composition="centered_symmetry"),
+                _make_shot(3, camera_angle="high_angle", composition="layered_depth"),
+            ],
+        })
+        validate_coverage_plan_diversity(plan, episode_id="ep_001")  # must not raise
+
+    def test_duplicate_shots_without_justification_raise(self):
+        plan = self._plan({
+            "beat_id": "b_001", "narration_duration_seconds": 16.0,
+            "progression_pattern": "wide_medium_close",
+            "shots": [
+                _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left"),
+                _make_shot(2, camera_angle="eye_level", composition="rule_of_thirds_left"),
+            ],
+        })
+        with pytest.raises(CoveragePlanDiversityError) as exc_info:
+            validate_coverage_plan_diversity(plan, episode_id="ep_001")
+        err = exc_info.value
+        assert err.episode_id == "ep_001"
+        assert err.beat_id == "b_001"
+        assert err.shot_id_a == "b_001__shot1"
+        assert err.shot_id_b == "b_001__shot2"
+
+    def test_duplicate_shots_with_justification_pass(self):
+        plan = self._plan({
+            "beat_id": "b_001", "narration_duration_seconds": 16.0,
+            "progression_pattern": "wide_medium_close",
+            "shots": [
+                _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left"),
+                _make_shot(2, camera_angle="eye_level", composition="rule_of_thirds_left",
+                            diversity_justification="deliberate match-cut"),
+            ],
+        })
+        validate_coverage_plan_diversity(plan, episode_id="ep_001")  # must not raise
+
+    def test_duplicate_in_one_beat_does_not_block_other_beats(self):
+        """A rejection is per-plan (raises on first offending beat found),
+        but distinct beats are independent -- a clean beat elsewhere in the
+        same plan is not itself the problem."""
+        plan = self._plan(
+            {
+                "beat_id": "b_001", "narration_duration_seconds": 8.0,
+                "progression_pattern": "single_shot", "shots": [_make_shot(1, beat_id="b_001")],
+            },
+            {
+                "beat_id": "b_002", "narration_duration_seconds": 16.0,
+                "progression_pattern": "wide_medium_close",
+                "shots": [
+                    _make_shot(1, beat_id="b_002", camera_angle="eye_level"),
+                    _make_shot(2, beat_id="b_002", camera_angle="eye_level"),
+                ],
+            },
+        )
+        with pytest.raises(CoveragePlanDiversityError) as exc_info:
+            validate_coverage_plan_diversity(plan, episode_id="ep_001")
+        assert exc_info.value.beat_id == "b_002"
+
+    def test_llm_failure_pass_through_plan_always_passes(self):
+        """_minimal_pass_through()'s degraded plan (exactly one shot per
+        beat) can never trigger this validation -- a single shot has no
+        sibling to duplicate."""
+        from hypogeum.agents.cinematic_director import _minimal_pass_through
+
+        beats_for_director = [
+            {"beat_id": "b_001", "narration_duration_seconds": 8.0,
+             "visual_spec": {"subject": "a corridor", "framing": "wide", "lighting": "warm"}},
+            {"beat_id": "b_002", "narration_duration_seconds": 40.0,
+             "visual_spec": {"subject": "a chamber", "framing": "medium", "lighting": "cool"}},
+        ]
+        plan = _minimal_pass_through("ep_fallback", beats_for_director)
+        validate_coverage_plan_diversity(plan, episode_id="ep_fallback")  # must not raise

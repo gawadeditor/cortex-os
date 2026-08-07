@@ -825,11 +825,23 @@ def _make_shot(
     action: str = "",
     narrative_function: str = "establishes the passage's scale",
     diversity_justification=None,
+    primary_prompt=None,
+    fallback_prompt=None,
 ) -> dict:
     """One planned shot, matching hypogeum.schemas._validate_cinematic_coverage_plan's
-    required field set plus the optional fields cinematic_director.txt asks for."""
+    required field set plus the optional fields cinematic_director.txt asks for.
+
+    primary_prompt/fallback_prompt default to a distinct, deterministic
+    per-shot string -- standing in for what
+    hypogeum.video_prompt_writer.render_coverage_plan_shot_prompts() would
+    have already written onto this shot during VPD, before Repair ever
+    sees it (2026-08-07 refactor: Repair only SELECTS a pre-rendered
+    prompt, it never renders one -- these tests exercise selection in
+    isolation from rendering, which has its own dedicated tests in
+    tests/test_video_prompt_writer_coverage_plan.py)."""
+    shot_id = f"{beat_id}__shot{shot_order}"
     return {
-        "shot_id": f"{beat_id}__shot{shot_order}",
+        "shot_id": shot_id,
         "parent_beat_id": beat_id,
         "shot_order": shot_order,
         "shot_purpose": "establish_location",
@@ -854,6 +866,14 @@ def _make_shot(
         "transition_in": "clean_cut",
         "transition_out": "clean_cut",
         "diversity_justification": diversity_justification,
+        "primary_prompt": (
+            primary_prompt if primary_prompt is not None
+            else f"RENDERED_PROMPT[{shot_id}]"
+        ),
+        "fallback_prompt": (
+            fallback_prompt if fallback_prompt is not None
+            else f"RENDERED_FALLBACK[{shot_id}]"
+        ),
     }
 
 
@@ -927,26 +947,35 @@ class TestCoverageFillShotDiversity:
                 )
         return result, submitted, log
 
-    def test_s29_case_five_extras_get_five_distinct_planned_shots(self):
+    def test_s29_case_five_extras_select_five_distinct_pre_rendered_prompts(self):
         """Real s29 reproduction: a beat needing 5 extra clips, with a
-        5-shot Cinematic Coverage Plan, must submit 5 materially distinct
-        prompts -- never the same composition repeated."""
+        5-shot Cinematic Coverage Plan whose shots already carry their own
+        rendered prompts (as hypogeum.video_prompt_writer.
+        render_coverage_plan_shot_prompts() would have written during VPD),
+        must submit exactly those 5 prompts, verbatim, one per slot --
+        never the same text repeated, and never text Repair constructed
+        itself (2026-08-07 refactor: Repair only selects)."""
         shots = [
             _make_shot(1, camera_angle="eye_level", shot_scale="wide_establishing",
                        composition="rule_of_thirds_left", camera_movement="slow_push_in",
-                       narrative_function="establishes the tunnel's scale"),
+                       narrative_function="establishes the tunnel's scale",
+                       primary_prompt="SHOT1_PROMPT", fallback_prompt="SHOT1_FALLBACK"),
             _make_shot(2, camera_angle="low_angle", shot_scale="medium",
                        composition="centered_symmetry", camera_movement="lateral_dolly_left",
-                       narrative_function="reveals the ceiling's construction"),
+                       narrative_function="reveals the ceiling's construction",
+                       primary_prompt="SHOT2_PROMPT", fallback_prompt="SHOT2_FALLBACK"),
             _make_shot(3, camera_angle="high_angle", shot_scale="close_up",
                        composition="negative_space_dominant", camera_movement="overhead_descent",
-                       narrative_function="shows tool marks on the wall"),
+                       narrative_function="shows tool marks on the wall",
+                       primary_prompt="SHOT3_PROMPT", fallback_prompt="SHOT3_FALLBACK"),
             _make_shot(4, camera_angle="dutch_tilt", shot_scale="medium_close_up",
                        composition="diagonal_leading_line", camera_movement="handheld_drift",
-                       narrative_function="conveys disorientation in the passage"),
+                       narrative_function="conveys disorientation in the passage",
+                       primary_prompt="SHOT4_PROMPT", fallback_prompt="SHOT4_FALLBACK"),
             _make_shot(5, camera_angle="worms_eye", shot_scale="extreme_close_up",
                        composition="layered_depth", camera_movement="vertical_ascent",
-                       narrative_function="finds the passage's terminus"),
+                       narrative_function="finds the passage's terminus",
+                       primary_prompt="SHOT5_PROMPT", fallback_prompt="SHOT5_FALLBACK"),
         ]
         scene = _make_s29_style_scene(shots)
 
@@ -959,26 +988,28 @@ class TestCoverageFillShotDiversity:
         assert len(result["s29"]) == 5
         assert len(submitted) == 5
 
-        prompts = [s["production_spec"]["primary_prompt"] for s in submitted]
-        # Every extra clip's prompt is unique -- no two slots share text.
-        assert len(set(prompts)) == 5, "each extra clip must get a materially distinct prompt"
+        primary_prompts = [s["production_spec"]["primary_prompt"] for s in submitted]
+        fallback_prompts = [s["production_spec"]["fallback_prompt"] for s in submitted]
 
-        # Continuity preserved: the base scene's own description still
-        # anchors every extra's prompt (narrative meaning is not lost).
-        for p in prompts:
-            assert "A sealed medieval tunnel, candlelight." in p
+        # Exact pass-through, in shot order -- Repair selects, never rewords.
+        assert primary_prompts == [f"SHOT{i}_PROMPT" for i in range(1, 6)]
+        assert fallback_prompts == [f"SHOT{i}_FALLBACK" for i in range(1, 6)]
+        assert len(set(primary_prompts)) == 5, "each extra clip must select a distinct prompt"
 
-        # Materially distinct, not superficial wording: each shot's own
-        # camera_angle value appears verbatim in its rendered prompt.
-        for shot, prompt in zip(shots, prompts):
-            assert shot["camera_angle"] in prompt
-            assert shot["composition"] in prompt
-            assert shot["narrative_function"] in prompt
+    def test_selected_prompt_is_never_constructed_from_scene_base_text(self):
+        """Repair must not append, prefix, or otherwise combine the shot's
+        prompt with the scene's own base prompt -- that continuity/
+        rendering job belongs entirely to VPD (hypogeum.video_prompt_writer.
+        render_coverage_plan_shot_prompts()), not Repair."""
+        shots = [_make_shot(1, primary_prompt="ONLY_THE_SHOT_PROMPT")]
+        scene = _make_s29_style_scene(shots, primary_prompt="THE_SCENE_BASE_PROMPT")
 
-        # No pair of prompts differs by camera language alone while
-        # everything else is identical text -- spot check two prompts are
-        # not near-duplicates of each other by simple containment.
-        assert prompts[0] != prompts[1] != prompts[2] != prompts[3] != prompts[4]
+        result, submitted, log = self._run(scene, deficit_seconds=8.0, max_extra=5)
+
+        assert len(submitted) == 1
+        prompt = submitted[0]["production_spec"]["primary_prompt"]
+        assert prompt == "ONLY_THE_SHOT_PROMPT"
+        assert "THE_SCENE_BASE_PROMPT" not in prompt
 
     def test_plan_exhausted_fails_closed_never_resubmits_identical_prompt(self):
         """A beat needing more extras than its plan has shots for must stop
@@ -1056,6 +1087,29 @@ class TestCoverageFillShotDiversity:
         events = [c.args[0] for c in log.error.call_args_list]
         assert "coverage_fill_shot_plan_duplicate" not in events
 
+    def test_shot_with_no_rendered_prompt_fails_closed(self):
+        """A planned shot that VPD never rendered a prompt for (e.g.
+        render_coverage_plan_shot_prompts() did not run for this scene) is
+        not usable coverage -- Repair must refuse it rather than construct
+        a prompt itself or fall back to the base scene prompt."""
+        shots = [
+            _make_shot(1, camera_angle="eye_level",
+                       primary_prompt="SHOT1_PROMPT", fallback_prompt="SHOT1_FALLBACK"),
+            _make_shot(2, camera_angle="low_angle", primary_prompt=""),  # never rendered
+        ]
+        scene = _make_s29_style_scene(shots)
+
+        result, submitted, log = self._run(scene, deficit_seconds=16.0, max_extra=5)
+
+        # Shot 1 succeeds; shot 2 has no rendered prompt and is refused.
+        assert len(submitted) == 1
+        assert submitted[0]["production_spec"]["primary_prompt"] == "SHOT1_PROMPT"
+        assert result["s29"] and len(result["s29"]) == 1
+
+        events = [c.args[0] for c in log.error.call_args_list]
+        assert "coverage_fill_shot_prompt_missing" in events
+        assert "coverage_fill_beat_unresolvable" in events
+
     def test_no_plan_present_keeps_legacy_single_prompt_behavior(self):
         """Scope boundary: a scene with no cinematic_coverage_plan attached
         at all (legacy state) keeps the pre-existing behavior unchanged --
@@ -1120,55 +1174,44 @@ class TestCoverageFillShotDiversity:
         assert recorded_ids == ["b_029__shot1"]
 
 
-class TestShotDiversityHelpers:
-    """Direct unit coverage for the new pure helper functions."""
+class TestClipRepairAgentDoesNotOwnPrompting:
+    """Architecture-boundary regression coverage (2026-08-07 refactor):
+    clip_repair_agent must not define, import as its own, or otherwise
+    contain prompt-construction logic. shot_diversity_key() (shot IDENTITY)
+    is owned by hypogeum.agents.cinematic_director -- see
+    tests/test_cinematic_director.py for its behavioral coverage and
+    tests/test_video_prompt_writer_coverage_plan.py for
+    render_coverage_plan_shot_prompts()'s (shot TEXT) coverage."""
 
-    def test_shot_diversity_key_differs_for_different_camera_design(self):
-        from hypogeum.agents.clip_repair_agent import _shot_diversity_key
+    def test_clip_repair_agent_has_no_prompt_rendering_functions(self):
+        import hypogeum.agents.clip_repair_agent as cra
 
-        a = _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left")
-        b = _make_shot(2, camera_angle="low_angle", composition="centered_symmetry")
-        assert _shot_diversity_key(a) != _shot_diversity_key(b)
+        assert not hasattr(cra, "_render_shot_directive")
+        assert not hasattr(cra, "_apply_shot_to_scene")
+        assert not hasattr(cra, "_shot_diversity_key")
+        assert not hasattr(cra, "_SHOT_DIVERSITY_FIELDS")
 
-    def test_shot_diversity_key_matches_for_identical_camera_design(self):
-        from hypogeum.agents.clip_repair_agent import _shot_diversity_key
+    def test_clip_repair_agent_source_has_no_prompt_template_strings(self):
+        """A stronger, text-level guarantee: none of this module's own
+        source defines the SHOT VARIANT/Camera:/Composition: template
+        strings that used to live here -- catches a future regression
+        that reintroduces rendering under a different function name."""
+        import inspect
+        import hypogeum.agents.clip_repair_agent as cra
+
+        source = inspect.getsource(cra)
+        for marker in ("SHOT VARIANT (", "Composition: ", "Camera: ", "Motion energy: "):
+            assert marker not in source, f"prompt-template text {marker!r} found in clip_repair_agent"
+
+    def test_shot_diversity_key_imported_from_cinematic_director(self):
+        """clip_repair_agent's own fail-closed duplicate check must use
+        Cinematic Director's shared shot_diversity_key(), not a
+        reimplementation, so the two callers can never silently drift."""
+        from hypogeum.agents.cinematic_director import shot_diversity_key
 
         a = _make_shot(1, camera_angle="eye_level", composition="rule_of_thirds_left")
         b = _make_shot(2, camera_angle="eye_level", composition="rule_of_thirds_left")
-        assert _shot_diversity_key(a) == _shot_diversity_key(b)
-
-    def test_render_shot_directive_contains_distinguishing_fields(self):
-        from hypogeum.agents.clip_repair_agent import _render_shot_directive
-
-        shot = _make_shot(
-            1, camera_angle="worms_eye", shot_scale="extreme_close_up",
-            composition="layered_depth", camera_movement="vertical_ascent",
-            narrative_function="finds the passage's terminus",
-        )
-        text = _render_shot_directive(shot)
-        assert "worms_eye" in text
-        assert "extreme_close_up" in text
-        assert "layered_depth" in text
-        assert "vertical_ascent" in text
-        assert "finds the passage's terminus" in text
-
-    def test_apply_shot_to_scene_preserves_base_and_appends_directive(self):
-        from hypogeum.agents.clip_repair_agent import _apply_shot_to_scene
-
-        scene = _make_canonical_scene(
-            "s01", primary_prompt="BASE_TEXT", fallback_prompt="BASE_FALLBACK",
-        )
-        shot = _make_shot(1, camera_angle="low_angle")
-
-        new_scene = _apply_shot_to_scene(scene, shot)
-        routing = new_scene["production_spec"]["provider_routing"]
-
-        assert routing["primary_prompt"].startswith("BASE_TEXT")
-        assert "low_angle" in routing["primary_prompt"]
-        assert routing["fallback_prompt"].startswith("BASE_FALLBACK")
-
-        # Original scene dict is never mutated.
-        assert scene["production_spec"]["provider_routing"]["primary_prompt"] == "BASE_TEXT"
+        assert shot_diversity_key(a) == shot_diversity_key(b)
 
 
 # ---------------------------------------------------------------------------

@@ -800,6 +800,19 @@ def run_visual_package_director(
         config=config,
         output_dir=_resolve_output_dir,
     )
+
+    # Planning-stage diversity gate (2026-08-07 refactor): reject the
+    # Visual Package here, before Shot Diversity Planner, Stage B, or any
+    # MUAPI/provider call runs, if the plan itself already contains two
+    # compositionally equivalent shots in the same beat with no
+    # diversity_justification — the exact planning failure cinematic_
+    # director.txt's own "THE CENTRAL RULE" describes. See
+    # hypogeum.agents.cinematic_director.validate_coverage_plan_diversity()
+    # for the single source of truth this shares with clip_repair_agent's
+    # own (secondary, defense-in-depth) fail-closed check.
+    from hypogeum.agents.cinematic_director import validate_coverage_plan_diversity  # noqa: PLC0415
+    validate_coverage_plan_diversity(coverage_plan, episode_id=episode_id)
+
     _coverage_plan_by_beat = {
         bp["beat_id"]: bp for bp in coverage_plan.get("beat_plans", [])
     }
@@ -977,6 +990,31 @@ def run_visual_package_director(
         )
         scene_cursor += len(batch)
         batch_idx += 1
+
+    # ------------------------------------------------------------------
+    # Coverage Plan shot prompts (2026-08-07 refactor) — must run after
+    # Stage B (each scene's own base primary_prompt/fallback_prompt is now
+    # final) and before Visual Intent QA / Phase 2 MUAPI execution. Video
+    # Prompt Writer renders every scene["cinematic_coverage_plan"]["shots"]
+    # entry's own primary_prompt/fallback_prompt here, once — the single
+    # place prompt text is ever constructed for a planned shot.
+    # clip_repair_agent only selects from what is written here; it must
+    # never render prompt text itself. Deterministic, no LLM call, safe to
+    # run unconditionally on every VPD execution (resumed or not).
+    # ------------------------------------------------------------------
+    from hypogeum.video_prompt_writer import render_coverage_plan_shot_prompts  # noqa: PLC0415
+    _shots_rendered = 0
+    for scene in visual_package.get("scenes", []):
+        plan = scene.get("cinematic_coverage_plan")
+        if plan:
+            render_coverage_plan_shot_prompts(scene)
+            _shots_rendered += len(plan.get("shots", []))
+    log.info(
+        "vpd_coverage_plan_prompts_rendered",
+        episode_id=episode_id,
+        scenes_with_plan=sum(1 for s in visual_package.get("scenes", []) if s.get("cinematic_coverage_plan")),
+        shots_rendered=_shots_rendered,
+    )
 
     # ------------------------------------------------------------------
     # Visual Intent QA — Pre-generation prompt review

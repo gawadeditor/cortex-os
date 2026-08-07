@@ -2688,3 +2688,105 @@ class TestStaticCameraConflictSanitization:
             "subject, environmental, atmospheric, or lighting motion; static "
             "framing is intentional, rare, and narratively justified"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestVPDCoveragePlanOrchestration — 2026-08-07 refactor
+#
+# Verifies the two new orchestration wiring points in
+# run_visual_package_director(): the planning-stage diversity gate
+# (validate_coverage_plan_diversity(), called immediately after Cinematic
+# Director, before Shot Diversity Planner/Stage B/MUAPI) and Coverage Plan
+# prompt rendering (render_coverage_plan_shot_prompts(), called after
+# Stage B). Behavioral coverage for the functions themselves lives in
+# tests/test_cinematic_director.py and
+# tests/test_video_prompt_writer_coverage_plan.py — this class only checks
+# that VPD's orchestration actually calls them at the right point.
+# ---------------------------------------------------------------------------
+
+def _make_two_shot_plan(beat_id: str = "b_001", *, duplicate: bool = False) -> dict:
+    def _shot(order, camera_angle, justification=None):
+        return {
+            "shot_id": f"{beat_id}__shot{order}", "parent_beat_id": beat_id, "shot_order": order,
+            "shot_purpose": "establish_location", "narrative_function": f"shot {order} purpose",
+            "estimated_usable_duration": 8.0, "subject": "x", "shot_scale": "medium",
+            "camera_angle": camera_angle, "camera_height": "eye_level",
+            "camera_direction": "frontal", "camera_movement": "slow_push_in",
+            "composition": "rule_of_thirds_left", "background_depth": "shallow",
+            "screen_direction": "neutral", "motion_energy": "low",
+            "transition_in": "clean_cut", "transition_out": "clean_cut",
+            "diversity_justification": justification,
+        }
+    second_angle = "eye_level" if duplicate else "low_angle"
+    return {
+        "episode_id": "ep_001",
+        "beat_plans": [{
+            "beat_id": beat_id, "narration_duration_seconds": 16.0,
+            "progression_pattern": "wide_medium_close",
+            "shots": [_shot(1, "eye_level"), _shot(2, second_angle)],
+        }],
+    }
+
+
+class TestVPDCoveragePlanOrchestration:
+
+    def test_duplicate_shots_reject_before_shot_diversity_planner_and_stage_b(self, tmp_path):
+        """A Cinematic Coverage Plan with two compositionally equivalent
+        shots and no diversity_justification must halt the run immediately
+        -- before Shot Diversity Planner, Stage B, or any MUAPI call."""
+        from hypogeum.agents.cinematic_director import CoveragePlanDiversityError
+
+        config = make_config()
+        script_pkg = _make_script_package()
+        plan = _make_visual_package()
+        bad_plan = _make_two_shot_plan(duplicate=True)
+
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=_stage_side_effect(plan)) as mock_ra, \
+             patch("hypogeum.agents.cinematic_director.run_agent", return_value=bad_plan), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result()) as mock_submit:
+
+            with pytest.raises(CoveragePlanDiversityError) as exc_info:
+                run_visual_package_director(script_pkg, config, "ep_001", tmp_path)
+
+        assert exc_info.value.beat_id == "b_001"
+        # Stage A1, A2, and A4 ran (Cinematic Director runs after A4 and
+        # needs its presentation_plan); Stage B and MUAPI generation did
+        # not -- the gate fires between Cinematic Director and Shot
+        # Diversity Planner, before either.
+        assert mock_ra.call_count == 3
+        mock_submit.assert_not_called()
+
+    def test_distinct_shots_pass_and_get_distinct_rendered_prompts(self, tmp_path):
+        """A valid multi-shot plan passes the gate, and by the time VPD
+        returns, every shot in the plan already carries its own distinct,
+        continuity-preserving rendered prompt -- proof
+        render_coverage_plan_shot_prompts() ran after Stage B."""
+        config = make_config()
+        script_pkg = _make_script_package()
+        plan = _make_visual_package()
+        good_plan = _make_two_shot_plan(duplicate=False)
+
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=_stage_side_effect(plan)), \
+             patch("hypogeum.agents.cinematic_director.run_agent", return_value=good_plan), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result()):
+
+            result = run_visual_package_director(script_pkg, config, "ep_001", tmp_path)
+
+        scene = next(s for s in result["scenes"] if s["scene_id"] == "s01")
+        shots = scene["cinematic_coverage_plan"]["shots"]
+        assert len(shots) == 2
+        assert shots[0]["primary_prompt"] and shots[1]["primary_prompt"]
+        assert shots[0]["primary_prompt"] != shots[1]["primary_prompt"]
+
+        base_prompt = scene["production_spec"]["provider_routing"]["primary_prompt"]
+        assert base_prompt  # Stage B ran and wrote the scene's own base prompt
+        assert shots[0]["primary_prompt"].startswith(base_prompt)
+        assert shots[1]["primary_prompt"].startswith(base_prompt)

@@ -153,6 +153,21 @@ Public API:
     apply_provider_adapter(canonical, provider_id, tech_metadata) -> str    # Stage 4
     compile_scene_prompt(scene, provider_id, tech_metadata=None) -> tuple[CanonicalPrompt, str]  # Stage 0-5 driver
     UNRESOLVED_SELECTORS: tuple[str, ...]                  # placeholder-key markers
+    render_coverage_plan_shot_prompts(scene) -> None            # (2026-08-07)
+
+Coverage Plan shot prompts (2026-08-07): render_coverage_plan_shot_prompts()
+is this module's — Video Prompt Writer's — answer to "who renders a
+Cinematic Coverage Plan shot's structured fields (camera_angle, shot_scale,
+composition, etc. — decided once by hypogeum.agents.cinematic_director)
+into actual prompt text." Wired into visual_package_director.py
+immediately after Stage B writes each scene's own base primary_prompt/
+fallback_prompt, so every scene["cinematic_coverage_plan"]["shots"][i]
+leaves VPD already carrying its own fully rendered primary_prompt/
+fallback_prompt. Deterministic, template-based, zero LLM calls — same
+character as this module's existing Stage 0-5 functions above, not a
+second Prompt Writer: hypogeum.agents.clip_repair_agent only ever SELECTS
+one of these already-rendered prompts for an extra clip's scene_spec; it
+must never construct prompt text itself.
 """
 from __future__ import annotations
 
@@ -980,3 +995,123 @@ def assemble_video_scene_prompt(
     forbidden_part = "FORBIDDEN: " + "; ".join(forbidden_items) + "."
 
     return "\n".join(topic_parts + deterministic_parts + [forbidden_part])
+
+
+# ---------------------------------------------------------------------------
+# Coverage Plan shot prompts (2026-08-07)
+#
+# Moved here from hypogeum.agents.clip_repair_agent — Repair must only
+# SELECT a pre-rendered prompt for an extra clip, never construct one.
+# This module (Video Prompt Writer) is the sole owner of turning a planned
+# shot's structured fields (decided once by hypogeum.agents.
+# cinematic_director) into prompt text, exactly as it is already the sole
+# owner of turning a scene's fields into its base prompt text elsewhere in
+# this file. wired into hypogeum.agents.visual_package_director's
+# orchestration right after Stage B populates each scene's own base
+# primary_prompt/fallback_prompt.
+# ---------------------------------------------------------------------------
+
+def _render_shot_directive(shot: dict) -> str:
+    """
+    Deterministic, template-based rendering of one Cinematic Coverage Plan
+    shot's already-decided structured fields into an explicit prompt
+    clause.
+
+    This function does not choose what the shot IS — that decision was
+    already made by hypogeum.agents.cinematic_director's Cinematic Coverage
+    Plan, once, during VPD, before any footage exists. It only renders an
+    already-distinct planned shot's field values, verbatim, into prompt
+    text — no synonym generation, no invented camera language — which is
+    exactly what keeps two rendered prompts materially different (real
+    field values differ) rather than superficially different (same
+    content, different wording).
+    """
+    parts: list[str] = [
+        f"SHOT VARIANT ({shot.get('shot_purpose') or 'coverage'}): "
+        f"{shot.get('narrative_function') or ''}".strip()
+    ]
+
+    subject = shot.get("subject")
+    action = shot.get("action")
+    if subject:
+        subject_line = f"Subject: {subject}"
+        if action:
+            subject_line += f" — {action}"
+        parts.append(subject_line + ".")
+
+    framing = shot.get("framing")
+    scale = shot.get("shot_scale")
+    if framing or scale:
+        parts.append(
+            f"Framing: {framing or scale}"
+            + (f", {scale} shot scale." if scale else ".")
+        )
+
+    parts.append(
+        "Camera: "
+        f"{shot.get('camera_angle') or 'eye_level'} angle, "
+        f"{shot.get('camera_height') or 'eye_level'} height, "
+        f"{shot.get('camera_direction') or 'frontal'} direction, "
+        f"{shot.get('camera_movement') or 'locked_off_hold'}."
+    )
+
+    lens = shot.get("lens_character")
+    if lens:
+        parts.append(f"Lens: {lens}.")
+
+    parts.append(
+        "Composition: "
+        f"{shot.get('composition') or 'centered_symmetry'}, "
+        f"{shot.get('background_depth') or 'medium'} background depth, "
+        f"screen direction {shot.get('screen_direction') or 'neutral'}."
+    )
+
+    lighting = shot.get("lighting_direction")
+    if lighting:
+        parts.append(f"Lighting: {lighting}.")
+
+    parts.append(f"Motion energy: {shot.get('motion_energy') or 'low'}.")
+
+    return " ".join(p for p in parts if p)
+
+
+def render_coverage_plan_shot_prompts(scene: dict) -> None:
+    """
+    Populate primary_prompt/fallback_prompt, in place, on every shot in
+    scene["cinematic_coverage_plan"]["shots"].
+
+    No-op if the scene carries no cinematic_coverage_plan (legacy scenes —
+    see hypogeum.agents.clip_repair_agent's own legacy-compatibility
+    fallback for the consuming side of this same boundary).
+
+    Each shot's prompt is the scene's own Stage-B-written base prompt
+    (production_spec.provider_routing.primary_prompt/fallback_prompt —
+    already final by the time this runs, since it is called after Stage B
+    in visual_package_director.py's orchestration) with that shot's own
+    _render_shot_directive() appended. Appending, never replacing,
+    preserves the subject/setting/period continuity the base prompt
+    already establishes while the appended camera/composition/action
+    clause is what makes every shot's rendered prompt materially different
+    from its siblings in the same beat — real field values differ, not
+    just wording.
+
+    Idempotent and safe to call every VPD run (resumed or not): purely
+    deterministic, no LLM call, so re-rendering costs nothing and always
+    reproduces the same text for the same inputs.
+    """
+    plan = scene.get("cinematic_coverage_plan")
+    if not plan:
+        return
+
+    routing = scene.get("production_spec", {}).get("provider_routing", {}) or {}
+    base_primary = (routing.get("primary_prompt") or "").strip()
+    base_fallback = (routing.get("fallback_prompt") or "").strip()
+
+    for shot in plan.get("shots", []):
+        directive = _render_shot_directive(shot)
+        shot["primary_prompt"] = (
+            f"{base_primary} {directive}".strip() if base_primary else directive
+        )
+        shot["fallback_prompt"] = (
+            f"{base_fallback} {directive}".strip() if base_fallback else directive
+        )

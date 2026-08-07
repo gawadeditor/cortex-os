@@ -376,6 +376,7 @@ def make_result_entry(
     captions_skipped_reason: Optional[str] = None,
     ai_disclosure_included: bool = True,
     end_screen_applied: Optional[bool] = None,
+    end_screen_status: Optional[str] = None,
     visibility: Optional[str] = None,
 ) -> dict:
     """
@@ -408,7 +409,20 @@ def make_result_entry(
         captions_submitted:        Whether captions were submitted
         captions_skipped_reason:   Reason captions were skipped (if applicable)
         ai_disclosure_included:    Whether ai_disclosure_text was included
-        end_screen_applied:        Whether end screen was applied (YouTube only)
+        end_screen_applied:        Legacy bool, derived from end_screen_status when the
+                                    latter is given (True iff "applied") — never pass
+                                    both. Kept for existing readers of this field;
+                                    end_screen_status is the source of truth.
+        end_screen_status:         "applied" | "unsupported" | "failed" | "not_attempted" |
+                                    None (platform doesn't have an End Screen concept —
+                                    non-YouTube deliverables). Ground truth for whether
+                                    the interactive YouTube End Screen was verified
+                                    applied. Must never be omitted for a YouTube
+                                    main_episode deliverable that reached upload —
+                                    an omitted/None status on that deliverable is exactly
+                                    the ep_f3619022 defect (end_screen_applied silently
+                                    persisted as null with no way to tell "not attempted"
+                                    apart from "verified applied").
         visibility:                Optional. The actual delivery visibility/state on
                                     the platform (e.g. "private", "unpublished",
                                     "self_only", "container_only") — distinct from
@@ -418,6 +432,8 @@ def make_result_entry(
     Returns:
         platform_results[] entry dict.
     """
+    if end_screen_status is not None:
+        end_screen_applied = (end_screen_status == "applied")
     return {
         "result_id": f"res_{uuid.uuid4().hex[:12]}",
         "platform": platform,
@@ -439,5 +455,6 @@ def make_result_entry(
             "captions_skipped_reason": captions_skipped_reason,
             "ai_disclosure_included": ai_disclosure_included,
             "end_screen_applied": end_screen_applied,
+            "end_screen_status": end_screen_status,
         },
     }

@@ -200,7 +200,7 @@ def _patch_platforms(
         stack.enter_context(patch(f"{_YT}.upload_video", side_effect=mock_yt_upload))
         stack.enter_context(patch(f"{_YT}.upload_thumbnail", return_value=True))
         stack.enter_context(patch(f"{_YT}.upload_captions", return_value=True))
-        stack.enter_context(patch(f"{_YT}.apply_end_screen", return_value=True))
+        stack.enter_context(patch(f"{_YT}.apply_end_screen", return_value="unsupported"))
         stack.enter_context(patch(
             f"{_YT}.search_best_end_screen_videos",
             return_value=["yt_prior_001", "yt_prior_002"],
@@ -1806,11 +1806,15 @@ class TestPlaceholderShortGuard:
 
 class TestYouTubeEndScreen:
     """
-    Tests for the two-slot YouTube end screen:
-      - search_best_end_screen_videos is called with count=2
-      - apply_end_screen receives video_ids= list (not legacy prior_video_id)
-      - SUBSCRIBE slot logic in apply_end_screen() itself
-      - backward-compat: single prior_video_id still works
+    Tests for the YouTube end screen wiring:
+      - search_best_end_screen_videos is called with count=2 and its
+        results are passed through to apply_end_screen as video_ids=
+      - apply_end_screen() itself makes no network call and always
+        reports "unsupported" -- YouTube Data API v3 has no public
+        endpoint for End Screens (see hypogeum.publishing.youtube.
+        END_SCREEN_UNSUPPORTED_REASON); prior versions of this test class
+        exercised a fabricated `/videos/setEndscreen` POST body that was
+        never a real API call in production
     """
 
     def test_end_screen_uses_two_video_ids(self, tmp_path):
@@ -1821,7 +1825,7 @@ class TestYouTubeEndScreen:
 
         def spy_apply_end_screen(**kwargs):
             captured_kwargs.update(kwargs)
-            return True
+            return "unsupported"
 
         with _patch_platforms():
             with patch(f"{_YT}.apply_end_screen", side_effect=spy_apply_end_screen):
@@ -1830,140 +1834,48 @@ class TestYouTubeEndScreen:
         assert "video_ids" in captured_kwargs, "apply_end_screen must receive video_ids="
         assert len(captured_kwargs["video_ids"]) == 2
 
-    def test_end_screen_left_slot_is_first_video_id(self, tmp_path):
-        """The left slot VIDEO element uses video_ids[0]."""
+    def test_apply_end_screen_makes_no_network_call(self):
+        """The real apply_end_screen() must never hit the network -- there
+        is no real endpoint for it to call. Any requests.post/get call
+        here would prove a fabricated API path has resurfaced."""
         from hypogeum.publishing.youtube import apply_end_screen as _apply
-        import unittest.mock as um
 
         cfg = MagicMock()
-        cfg.YOUTUBE_CHANNEL_ID = "UCtest"
-        posted_body = {}
-
-        def spy_post(url, headers, params, json, timeout):
-            posted_body.update(json)
-            r = MagicMock()
-            r.ok = True
-            r.status_code = 200
-            r.json.return_value = {}
-            return r
-
-        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
-             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
-                   side_effect=lambda fn, **kw: fn()):
-            _apply(
+        with patch("hypogeum.publishing.youtube.requests.post") as mock_post, \
+             patch("hypogeum.publishing.youtube.requests.get") as mock_get:
+            result = _apply(
                 config=cfg,
                 access_token="tok",
                 video_id="vid_new",
                 duration_seconds=300.0,
                 video_ids=["vid_prior_1", "vid_prior_2"],
-                episode_id="ep_es_left",
+                episode_id="ep_es_no_network",
             )
 
-        elements = posted_body.get("endscreen", {}).get("elements", [])
-        video_elements = [e for e in elements if e.get("type") == "VIDEO"]
-        assert len(video_elements) == 2
-        left = next(
-            e for e in video_elements
-            if e["position"]["cornerPosition"] == "TOP_LEFT"
-        )
-        assert left["videoId"] == "vid_prior_1"
+        mock_post.assert_not_called()
+        mock_get.assert_not_called()
+        assert result == "unsupported"
 
-    def test_end_screen_right_slot_is_second_video_id(self, tmp_path):
-        """The right slot VIDEO element uses video_ids[1]."""
+    def test_apply_end_screen_always_returns_unsupported(self):
+        """Regardless of arguments (two video_ids, one, none, legacy
+        prior_video_id), the current integration always reports
+        "unsupported" -- it never fabricates "applied" or "failed" from a
+        call that was never made."""
         from hypogeum.publishing.youtube import apply_end_screen as _apply
 
         cfg = MagicMock()
-        posted_body = {}
-
-        def spy_post(url, headers, params, json, timeout):
-            posted_body.update(json)
-            r = MagicMock()
-            r.ok = True
-            r.status_code = 200
-            r.json.return_value = {}
-            return r
-
-        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
-             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
-                   side_effect=lambda fn, **kw: fn()):
-            _apply(
-                config=cfg,
-                access_token="tok",
-                video_id="vid_new",
-                duration_seconds=300.0,
-                video_ids=["vid_prior_1", "vid_prior_2"],
-                episode_id="ep_es_right",
+        for kwargs in (
+            {"video_ids": ["a", "b"]},
+            {"video_ids": ["a"]},
+            {"video_ids": []},
+            {"prior_video_id": "legacy_vid"},
+            {},
+        ):
+            result = _apply(
+                config=cfg, access_token="tok", video_id="vid_new",
+                duration_seconds=300.0, episode_id="ep_es_unsupported", **kwargs,
             )
-
-        elements = posted_body.get("endscreen", {}).get("elements", [])
-        video_elements = [e for e in elements if e.get("type") == "VIDEO"]
-        right = next(
-            e for e in video_elements
-            if e["position"]["cornerPosition"] == "TOP_RIGHT"
-        )
-        assert right["videoId"] == "vid_prior_2"
-
-    def test_subscribe_moves_to_bottom_right_with_two_video_slots(self, tmp_path):
-        """SUBSCRIBE is placed at BOTTOM_RIGHT when two VIDEO cards are present."""
-        from hypogeum.publishing.youtube import apply_end_screen as _apply
-
-        cfg = MagicMock()
-        posted_body = {}
-
-        def spy_post(url, headers, params, json, timeout):
-            posted_body.update(json)
-            r = MagicMock()
-            r.ok = True
-            r.status_code = 200
-            r.json.return_value = {}
-            return r
-
-        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
-             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
-                   side_effect=lambda fn, **kw: fn()):
-            _apply(
-                config=cfg,
-                access_token="tok",
-                video_id="vid_new",
-                duration_seconds=300.0,
-                video_ids=["vid_a", "vid_b"],
-                episode_id="ep_es_sub",
-            )
-
-        elements = posted_body.get("endscreen", {}).get("elements", [])
-        subscribe = next(e for e in elements if e.get("type") == "SUBSCRIBE")
-        assert subscribe["position"]["cornerPosition"] == "BOTTOM_RIGHT"
-
-    def test_subscribe_stays_top_right_with_single_prior_video_id(self, tmp_path):
-        """Backward-compat: single prior_video_id → SUBSCRIBE at TOP_RIGHT."""
-        from hypogeum.publishing.youtube import apply_end_screen as _apply
-
-        cfg = MagicMock()
-        posted_body = {}
-
-        def spy_post(url, headers, params, json, timeout):
-            posted_body.update(json)
-            r = MagicMock()
-            r.ok = True
-            r.status_code = 200
-            r.json.return_value = {}
-            return r
-
-        with patch("hypogeum.publishing.youtube.requests.post", side_effect=spy_post), \
-             patch("hypogeum.publishing.youtube.retry_thumbnail_caption_publish",
-                   side_effect=lambda fn, **kw: fn()):
-            _apply(
-                config=cfg,
-                access_token="tok",
-                video_id="vid_new",
-                duration_seconds=300.0,
-                prior_video_id="vid_single",  # legacy arg
-                episode_id="ep_es_legacy",
-            )
-
-        elements = posted_body.get("endscreen", {}).get("elements", [])
-        subscribe = next(e for e in elements if e.get("type") == "SUBSCRIBE")
-        assert subscribe["position"]["cornerPosition"] == "TOP_RIGHT"
+            assert result == "unsupported"
 
     def test_search_best_end_screen_videos_returns_list(self, tmp_path):
         """search_best_end_screen_videos() returns up to count video IDs."""
@@ -2007,3 +1919,130 @@ class TestYouTubeEndScreen:
             )
 
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestEndScreenRegressionEpF3619022
+#
+# Regression coverage for the confirmed ep_f3619022 production defect: the
+# published publishing_record showed end_screen_applied=null for the
+# YouTube main episode -- the idempotency-guard "already published" branch
+# (STEP 6) called make_result_entry() without any end_screen kwarg,
+# silently defaulting to None, with no way to tell "never attempted" apart
+# from "verified applied". Root cause was two-fold: (1) that omitted kwarg,
+# and (2) apply_end_screen() itself invoked a fabricated YouTube endpoint
+# (`/videos/setEndscreen`) that does not exist in the real YouTube Data
+# API v3 -- so even a fresh, non-idempotent publish could never have
+# legitimately produced "applied" either.
+# ---------------------------------------------------------------------------
+
+class TestEndScreenRegressionEpF3619022:
+
+    def test_idempotency_guard_records_not_attempted_not_null(self, tmp_path):
+        """The exact ep_f3619022 code path: YouTube main already published
+        in a prior run. end_screen_status must be the explicit string
+        "not_attempted", and the legacy end_screen_applied must be False
+        -- never None/null."""
+        from hypogeum.decision_inputs.store import record_publishing_outcome
+
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_f3619022_regress", tmp_path)
+        record_publishing_outcome(
+            "ep_f3619022_regress", "youtube", "success",
+            platform_video_id="heCS91MkfdE",
+            published_at="2026-08-01T10:13:17+00:00",
+            db_path=tmp_path / "hypogeum.db",
+        )
+
+        with _patch_platforms():
+            with patch(f"{_YT}.upload_video", return_value="unused"):
+                result = _run(pkg, config, "ep_f3619022_regress", tmp_path)
+
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        meta = yt_main["metadata_applied"]
+        assert meta["end_screen_status"] == "not_attempted"
+        assert meta["end_screen_applied"] is False
+        assert meta["end_screen_status"] is not None, (
+            "ep_f3619022 defect: end_screen_status/end_screen_applied must never "
+            "be silently null for a published YouTube main episode"
+        )
+
+    def test_fresh_publish_over_20s_records_unsupported_and_issues_pdr(self, tmp_path):
+        """A genuinely fresh (non-idempotent) publish of a video long enough
+        to carry an end screen must record end_screen_status="unsupported"
+        (never "applied" -- there is no real API path to verify that) and
+        must surface a non-blocking MINOR deficiency so an operator knows
+        to add the End Screen manually in YouTube Studio."""
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_es_unsupported_fresh", tmp_path)
+        assert pkg["episode_render"]["duration_seconds"] > 20
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_es_unsupported_fresh", tmp_path)
+
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        meta = yt_main["metadata_applied"]
+        assert meta["end_screen_status"] == "unsupported"
+        assert meta["end_screen_applied"] is False
+
+        failures = result.get("failures", [])
+        descriptions = [
+            f.get("deficiency_items", [{}])[0].get("description", "") for f in failures
+        ]
+        assert any("End Screen" in d and "YouTube Studio" in d for d in descriptions), (
+            f"expected an operator-facing End Screen deficiency, got: {descriptions}"
+        )
+        end_screen_failure = next(
+            f for f in failures
+            if "End Screen" in f.get("deficiency_items", [{}])[0].get("description", "")
+        )
+        assert end_screen_failure["severity"] == "MINOR", (
+            "End Screen unsupported is a platform limitation, not a publish "
+            "failure -- must not be BLOCKING/MAJOR"
+        )
+
+    def test_short_video_records_not_attempted_without_pdr(self, tmp_path):
+        """A video too short to carry a meaningful end screen (<=20s) must
+        record "not_attempted" (not "unsupported") and must not issue an
+        End Screen deficiency -- there was nothing to attempt."""
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_es_short_video", tmp_path)
+        pkg["episode_render"]["duration_seconds"] = 15.0
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_es_short_video", tmp_path)
+
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        assert yt_main["metadata_applied"]["end_screen_status"] == "not_attempted"
+
+        failures = result.get("failures", [])
+        assert not any(
+            "End Screen" in f.get("deficiency_items", [{}])[0].get("description", "")
+            for f in failures
+        )
+
+    def test_production_ready_unaffected_by_unsupported_end_screen(self, tmp_path):
+        """End Screen being unsupported is a platform limitation, not a
+        publish failure -- the episode must still be production_ready when
+        everything else genuinely published."""
+        config = _make_config(has_youtube=True, has_meta=False, has_tiktok=False)
+        pkg = _make_final_render_package("ep_es_prod_ready", tmp_path)
+
+        with _patch_platforms():
+            result = _run(pkg, config, "ep_es_prod_ready", tmp_path)
+
+        yt_main = next(
+            r for r in result["platform_results"]
+            if r["platform"] == "youtube" and r["deliverable_type"] == "main_episode"
+        )
+        assert yt_main["metadata_applied"]["end_screen_status"] == "unsupported"
+        assert result["package_integrity"]["production_ready"] is True

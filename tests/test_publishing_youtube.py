@@ -6,7 +6,7 @@ Tests:
   - upload_video: success (resumable), 503 retry, quotaExceeded halt
   - upload_thumbnail: success, failure returns False
   - upload_captions: success, failure returns False
-  - apply_end_screen: success, failure returns False
+  - apply_end_screen: always returns "unsupported", makes no network call
   - search_prior_episode: found, not found, network error returns None
   - quota tracking: _quota_used increments correctly
   - reset_quota_counter and get_quota_used
@@ -652,16 +652,21 @@ class TestUploadCaptions:
 
 # ---------------------------------------------------------------------------
 # TestApplyEndScreen
+#
+# YouTube Data API v3 has no public endpoint for creating or verifying
+# interactive End Screen elements (confirmed via Google's own open feature
+# request https://issuetracker.google.com/issues/387277988). A prior
+# implementation POSTed to a fabricated `/videos/setEndscreen` endpoint
+# that does not exist in the real API -- these tests assert the corrected,
+# truthful contract: no network call, always "unsupported".
 # ---------------------------------------------------------------------------
 
 class TestApplyEndScreen:
-    def test_success_returns_true(self):
+    def test_never_makes_a_network_call(self):
         yt.reset_quota_counter()
         config = _make_config()
 
-        mock_resp = _make_response(200, json_data={"id": "vid_123"})
-
-        with patch("requests.post", return_value=mock_resp):
+        with patch("requests.post") as mock_post, patch("requests.get") as mock_get:
             result = yt.apply_end_screen(
                 config=config,
                 access_token="ya29.token",
@@ -670,45 +675,53 @@ class TestApplyEndScreen:
                 episode_id="ep_test",
             )
 
-        assert result is True
+        mock_post.assert_not_called()
+        mock_get.assert_not_called()
+        assert result == "unsupported"
 
-    def test_failure_returns_false(self):
+    def test_returns_unsupported_with_video_ids(self):
+        config = _make_config()
+
+        result = yt.apply_end_screen(
+            config=config,
+            access_token="ya29.token",
+            video_id="vid_123",
+            duration_seconds=120.0,
+            video_ids=["vid_prior_1", "vid_prior_2"],
+            episode_id="ep_test",
+        )
+
+        assert result == "unsupported"
+
+    def test_returns_unsupported_with_legacy_prior_video_id(self):
+        """Backward-compat argument accepted but has no effect on the
+        result -- there is no real call to make with it."""
+        config = _make_config()
+
+        result = yt.apply_end_screen(
+            config=config,
+            access_token="ya29.token",
+            video_id="vid_123",
+            duration_seconds=60.0,
+            prior_video_id="vid_prior_episode",
+        )
+
+        assert result == "unsupported"
+
+    def test_does_not_consume_quota(self):
+        """No network call means no real quota is spent -- must not
+        increment the tracker for an operation that never happened."""
         yt.reset_quota_counter()
         config = _make_config()
 
-        mock_resp = _make_response(403, json_data={"error": {"errors": [{"reason": "forbidden"}]}})
+        yt.apply_end_screen(
+            config=config,
+            access_token="ya29.token",
+            video_id="vid_123",
+            duration_seconds=120.0,
+        )
 
-        with patch("requests.post", return_value=mock_resp):
-            result = yt.apply_end_screen(
-                config=config,
-                access_token="ya29.token",
-                video_id="vid_123",
-                duration_seconds=120.0,
-            )
-
-        assert result is False
-
-    def test_includes_prior_video_id_in_elements(self):
-        yt.reset_quota_counter()
-        config = _make_config()
-
-        mock_resp = _make_response(200, json_data={"id": "vid_123"})
-
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            yt.apply_end_screen(
-                config=config,
-                access_token="ya29.token",
-                video_id="vid_123",
-                duration_seconds=60.0,
-                prior_video_id="vid_prior_episode",
-            )
-
-        call_kwargs = mock_post.call_args
-        json_body = call_kwargs.kwargs.get("json", {})
-        elements = json_body.get("endscreen", {}).get("elements", [])
-        video_elements = [e for e in elements if e.get("type") == "VIDEO"]
-        assert len(video_elements) == 1
-        assert video_elements[0]["videoId"] == "vid_prior_episode"
+        assert yt.get_quota_used() == 0
 
 
 # ---------------------------------------------------------------------------

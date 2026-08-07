@@ -687,6 +687,13 @@ def run_publishing_agent(
             published_at=_existing_yt_outcome.get("published_at"),
             title=get_episode_title(metadata_source),
             ai_disclosure_included=True,
+            # This run made no attempt to apply/verify anything for this
+            # deliverable (video already published in a prior run) -- must
+            # be explicit, never the omitted-kwarg default. Omitting this
+            # is exactly the ep_f3619022 defect: end_screen_applied
+            # persisted as null with no way to distinguish "never
+            # attempted" from "verified applied".
+            end_screen_status="not_attempted",
         )
         record.append_result(entry)
         youtube_main_published = True
@@ -818,9 +825,17 @@ def run_publishing_agent(
                             episode_id=episode_id,
                         )
 
-                # End screen — automatically select best two prior videos for
-                # left and right slots; no manual selection required.
-                end_screen_applied = False
+                # End screen — search for the best two prior videos to
+                # suggest, then ask the platform layer to apply/verify.
+                # apply_end_screen() always returns "unsupported": the
+                # YouTube Data API v3 has no public endpoint for End
+                # Screens (see hypogeum.publishing.youtube.
+                # END_SCREEN_UNSUPPORTED_REASON) — this is a real platform
+                # limitation, not a bug to route around here. Videos too
+                # short to carry a meaningful end screen are marked
+                # "not_attempted" rather than left unset.
+                end_screen_status = "not_attempted"
+                end_screen_video_ids: list[str] = []
                 duration_seconds = ep_render.get("duration_seconds", 0.0)
                 if duration_seconds > 20:
                     end_screen_video_ids = yt_client.search_best_end_screen_videos(
@@ -829,7 +844,7 @@ def run_publishing_agent(
                         episode_id=episode_id,
                         count=2,
                     )
-                    end_screen_applied = yt_client.apply_end_screen(
+                    end_screen_status = yt_client.apply_end_screen(
                         config=config,
                         access_token=youtube_token,
                         video_id=yt_main_id,
@@ -852,9 +867,42 @@ def run_publishing_agent(
                     captions_submitted=captions_submitted,
                     captions_skipped_reason=captions_skipped_reason,
                     ai_disclosure_included=True,
-                    end_screen_applied=end_screen_applied,
+                    end_screen_status=end_screen_status,
                 )
                 record.append_result(entry)
+
+                # End Screen is not a platform capability the API exposes —
+                # this is not a transient failure to retry, it is a
+                # permanent operator-required step. Surface it as a
+                # non-blocking deficiency (MINOR: the video published
+                # successfully) rather than letting it disappear into a
+                # metadata field nobody reviews.
+                if end_screen_status == "unsupported":
+                    end_screen_pdr = _build_pdr(
+                        episode_id=episode_id,
+                        reason=(
+                            "YouTube End Screen was not applied: the YouTube Data "
+                            "API v3 has no public endpoint to create or verify "
+                            "interactive End Screen elements "
+                            "(https://issuetracker.google.com/issues/387277988). "
+                            f"Operator action required: manually add the End Screen "
+                            f"for video {yt_main_id} in YouTube Studio"
+                            + (
+                                f" (suggested prior episodes: {end_screen_video_ids})"
+                                if end_screen_video_ids else ""
+                            )
+                            + "."
+                        ),
+                        severity="MINOR",
+                        item_id="di_end_screen_unsupported",
+                    )
+                    record.add_failure(end_screen_pdr)
+                    log.warn(
+                        "publishing_pdr_issued",
+                        episode_id=episode_id,
+                        reason="end_screen_unsupported",
+                        video_id=yt_main_id,
+                    )
 
                 # Persist to publishing_outcomes so analytics sync can discover it.
                 try:

@@ -496,6 +496,55 @@ class TestMakeResultEntry:
         assert meta["ai_disclosure_included"] is True
         assert meta["end_screen_applied"] is True
 
+    def test_end_screen_status_defaults_to_none_when_omitted(self):
+        """Platforms with no End Screen concept (non-YouTube deliverables,
+        or callers that never touch this field) get None, distinct from
+        the YouTube-specific states."""
+        entry = make_result_entry(
+            platform="facebook", deliverable_type="main_episode", status="published",
+        )
+        meta = entry["metadata_applied"]
+        assert meta["end_screen_status"] is None
+        assert meta["end_screen_applied"] is None
+
+    def test_end_screen_status_applied_derives_true(self):
+        entry = make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            end_screen_status="applied",
+        )
+        meta = entry["metadata_applied"]
+        assert meta["end_screen_status"] == "applied"
+        assert meta["end_screen_applied"] is True
+
+    def test_end_screen_status_unsupported_derives_false_not_null(self):
+        """The ep_f3619022 defect signature: this must be False, not None,
+        once a status is explicitly recorded."""
+        entry = make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            end_screen_status="unsupported",
+        )
+        meta = entry["metadata_applied"]
+        assert meta["end_screen_status"] == "unsupported"
+        assert meta["end_screen_applied"] is False
+
+    def test_end_screen_status_not_attempted_derives_false_not_null(self):
+        entry = make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            end_screen_status="not_attempted",
+        )
+        meta = entry["metadata_applied"]
+        assert meta["end_screen_status"] == "not_attempted"
+        assert meta["end_screen_applied"] is False
+
+    def test_end_screen_status_failed_derives_false_not_null(self):
+        entry = make_result_entry(
+            platform="youtube", deliverable_type="main_episode", status="published",
+            end_screen_status="failed",
+        )
+        meta = entry["metadata_applied"]
+        assert meta["end_screen_status"] == "failed"
+        assert meta["end_screen_applied"] is False
+
     def test_failed_entry(self):
         entry = make_result_entry(
             platform="facebook",

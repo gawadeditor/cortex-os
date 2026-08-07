@@ -14,7 +14,9 @@ Public API:
     upload_video(config, access_token, video_path, metadata) -> str
     upload_thumbnail(config, access_token, video_id, thumb_path) -> bool
     upload_captions(config, access_token, video_id, srt_path) -> bool
-    apply_end_screen(config, access_token, video_id, duration_seconds) -> bool
+    apply_end_screen(config, access_token, video_id, duration_seconds) -> str
+        Always returns "unsupported" — YouTube Data API v3 has no public
+        endpoint for End Screens. See END_SCREEN_UNSUPPORTED_REASON.
     search_prior_episode(config, access_token) -> str | None
 
 Quota tracking:
@@ -64,7 +66,6 @@ _QUOTA_TOKEN_REFRESH = 0
 _QUOTA_VIDEO_UPLOAD = 1600
 _QUOTA_THUMBNAIL = 50
 _QUOTA_CAPTIONS = 400
-_QUOTA_END_SCREEN = 50
 _QUOTA_SEARCH = 100
 
 # Module-level quota counter — tracks usage within a publishing run
@@ -651,6 +652,24 @@ def upload_captions(
         return False
 
 
+# YouTube Data API v3 has no public resource or method for creating,
+# updating, or verifying interactive End Screen elements (VIDEO/PLAYLIST/
+# SUBSCRIBE cards) on a video — confirmed against Google's own open
+# feature request https://issuetracker.google.com/issues/387277988 ("Add
+# Support for End Screens and Cards in YouTube Data API"), unresolved as
+# of this writing. End Screens can only be configured through the YouTube
+# Studio web UI. There is no `videos.setEndscreen` (or equivalent) call to
+# make — any prior implementation that POSTed to one was invoking an
+# endpoint Google does not publish or document, which is not a real
+# integration point and cannot be verified against platform state.
+END_SCREEN_UNSUPPORTED_REASON = (
+    "YouTube Data API v3 has no public endpoint for creating or verifying "
+    "interactive End Screen elements — see "
+    "https://issuetracker.google.com/issues/387277988 (open, unresolved). "
+    "End Screens must be configured manually in YouTube Studio."
+)
+
+
 def apply_end_screen(
     config: Config,
     access_token: str,
@@ -659,113 +678,47 @@ def apply_end_screen(
     prior_video_id: Optional[str] = None,
     episode_id: Optional[str] = None,
     video_ids: Optional[List[str]] = None,
-) -> bool:
+) -> str:
     """
-    Apply a YouTube end screen with subscribe button and up to two video cards.
-    Non-blocking — failure does not affect video published status.
+    Report on interactive YouTube End Screen application.
 
-    Slot assignment (when video_ids is provided):
-      Left slot  (TOP_LEFT):  video_ids[0] — most recent prior episode
-      Right slot (TOP_RIGHT replaced by video_ids[1] — second most recent):
-        The SUBSCRIBE button moves to BOTTOM_RIGHT when two video cards are used.
+    Makes NO network call: there is no real YouTube Data API v3 endpoint to
+    call (see END_SCREEN_UNSUPPORTED_REASON). Always returns "unsupported"
+    for the current API. This function exists (rather than being deleted)
+    so the call site keeps one canonical place to ask "is End Screen
+    application currently possible" — if Google ever ships this capability,
+    a real implementation replaces this body and can legitimately return
+    "applied" or "failed" from platform-verified state, without any caller
+    changes elsewhere.
 
     Args:
-        config:          Config instance.
-        access_token:    Fresh YouTube access token.
-        video_id:        YouTube video ID to apply end screen to.
-        duration_seconds: Video duration in seconds (end screen appears in final 20s).
-        prior_video_id:  Backward-compat: single prior episode video ID (left slot).
-                         Ignored when video_ids is provided.
+        config:          Config instance. Unused today — kept for signature
+                         stability against a future real implementation.
+        access_token:    Fresh YouTube access token. Unused today, same reason.
+        video_id:        YouTube video ID the end screen would apply to.
+        duration_seconds: Video duration in seconds. Unused today, same reason.
+        prior_video_id:  Backward-compat single prior episode video ID. Unused today.
         episode_id:      For log correlation.
-        video_ids:       Up to 2 video IDs for left/right slots. When provided,
-                         overrides prior_video_id.
+        video_ids:       Up to 2 candidate video IDs for left/right slots
+                         (e.g. from search_best_end_screen_videos()) —
+                         logged so an operator has concrete suggestions for
+                         the manual Studio step. Not sent anywhere; there is
+                         nowhere to send it.
 
     Returns:
-        True on success, False on failure (non-blocking).
+        "unsupported" — always, for the current YouTube Data API v3. Never
+        "applied" or "failed": this function makes no platform call, so it
+        has no basis to claim either.
     """
-    global _quota_used
     log = get_logger(episode_id=episode_id, agent="youtube")
-
-    # Resolve video slots: video_ids takes precedence over legacy prior_video_id.
-    _slots: List[str] = []
-    if video_ids:
-        _slots = [v for v in video_ids if v][:2]
-    elif prior_video_id:
-        _slots = [prior_video_id]
-
-    # End screen appears in the last 20 seconds
-    start_offset_ms = max(0, int((duration_seconds - 20) * 1000))
-    end_offset_ms = int(duration_seconds * 1000)
-
-    _corner_positions = ["TOP_LEFT", "TOP_RIGHT"]
-    elements: List[dict] = []
-
-    for i, vid in enumerate(_slots):
-        elements.append({
-            "type": "VIDEO",
-            "position": {"type": "FROM_TOP", "cornerPosition": _corner_positions[i]},
-            "startOffsetMs": start_offset_ms,
-            "endOffsetMs": end_offset_ms,
-            "videoId": vid,
-        })
-
-    # SUBSCRIBE button: BOTTOM_RIGHT when two video cards occupy the top corners,
-    # TOP_RIGHT otherwise.
-    subscribe_corner = "BOTTOM_RIGHT" if len(_slots) >= 2 else "TOP_RIGHT"
-    elements.append({
-        "type": "SUBSCRIBE",
-        "position": {"type": "FROM_TOP", "cornerPosition": subscribe_corner},
-        "startOffsetMs": start_offset_ms,
-        "endOffsetMs": end_offset_ms,
-    })
-
-    body = {
-        "id": video_id,
-        "endscreen": {"elements": elements},
-    }
-
-    def _do_end_screen() -> bool:
-        headers = {
-            **_auth_headers(access_token),
-            "Content-Type": "application/json",
-        }
-        try:
-            resp = requests.post(
-                f"{_YT_API_BASE}/videos/setEndscreen",
-                headers=headers,
-                params={"videoId": video_id, "part": "endscreen"},
-                json=body,
-                timeout=30,
-            )
-        except requests.RequestException as exc:
-            raise SoftFailureError(f"YouTube end screen network error: {exc}") from exc
-
-        _raise_for_status(resp, context="end_screen")
-        return True
-
-    try:
-        result = retry_thumbnail_caption_publish(
-            fn=_do_end_screen,
-            episode_id=episode_id,
-            platform="youtube",
-            operation="end_screen",
-        )
-        _quota_used += _QUOTA_END_SCREEN
-        log.info(
-            "youtube_end_screen_applied",
-            episode_id=episode_id,
-            video_id=video_id,
-            quota_used=_quota_used,
-        )
-        return result
-    except (HardFailureError, SoftFailureError) as exc:
-        log.error(
-            "youtube_end_screen_failed",
-            episode_id=episode_id,
-            video_id=video_id,
-            error=str(exc),
-        )
-        return False
+    log.warn(
+        "youtube_end_screen_unsupported",
+        episode_id=episode_id,
+        video_id=video_id,
+        suggested_video_ids=(video_ids or ([prior_video_id] if prior_video_id else [])),
+        reason=END_SCREEN_UNSUPPORTED_REASON,
+    )
+    return "unsupported"
 
 
 def search_prior_episode(

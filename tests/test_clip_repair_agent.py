@@ -1174,6 +1174,186 @@ class TestCoverageFillShotDiversity:
         assert recorded_ids == ["b_029__shot1"]
 
 
+# ---------------------------------------------------------------------------
+# TestCoverageFillPlanAwareResume — 2026-08-07 (Commit 4)
+#
+# Reproduces the real multi-clip resume scenario: fill_coverage_deficits()
+# invoked again for a beat that already has some extras on the
+# asset_manifest from a prior run (e.g. assembly_agent re-invoked after a
+# crash/interruption, or after COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT was
+# raised and the pipeline re-run). Repair must recognize which planned
+# shots are already represented and continue from the next available one
+# and the next free extra-slot number -- never restart from shot 1 / slot 1,
+# never re-select an already-represented shot, and still fail closed when
+# the (now-reduced) available-shot pool is exhausted.
+# ---------------------------------------------------------------------------
+
+def _seed_existing_extra(vp: dict, sid: str, slot: int, shot_id: str) -> None:
+    """Append an asset_manifest entry exactly as fill_coverage_deficits()
+    itself would have written it on a prior run -- the same
+    planned_shot_id-bearing shape Commit 2 introduced."""
+    vp["asset_manifest"]["assets"].append({
+        "scene_id": f"{sid}__extra{slot}",
+        "asset_id": f"episodes/ep_s29/video/sc_{sid}__extra{slot}",
+        "model": "veo3.1-lite-text-to-video",
+        "tier_used": 2,
+        "source_enhancement": {"validation_result": "skipped_native_resolution"},
+        "planned_shot_id": shot_id,
+    })
+
+
+class TestCoverageFillPlanAwareResume:
+
+    def _five_shot_plan_scene(self):
+        shots = [
+            _make_shot(1, camera_angle="eye_level", shot_scale="wide_establishing",
+                       composition="rule_of_thirds_left", camera_movement="slow_push_in",
+                       primary_prompt="SHOT1_PROMPT", fallback_prompt="SHOT1_FALLBACK"),
+            _make_shot(2, camera_angle="low_angle", shot_scale="medium",
+                       composition="centered_symmetry", camera_movement="lateral_dolly_left",
+                       primary_prompt="SHOT2_PROMPT", fallback_prompt="SHOT2_FALLBACK"),
+            _make_shot(3, camera_angle="high_angle", shot_scale="close_up",
+                       composition="negative_space_dominant", camera_movement="overhead_descent",
+                       primary_prompt="SHOT3_PROMPT", fallback_prompt="SHOT3_FALLBACK"),
+            _make_shot(4, camera_angle="dutch_tilt", shot_scale="medium_close_up",
+                       composition="diagonal_leading_line", camera_movement="handheld_drift",
+                       primary_prompt="SHOT4_PROMPT", fallback_prompt="SHOT4_FALLBACK"),
+            _make_shot(5, camera_angle="worms_eye", shot_scale="extreme_close_up",
+                       composition="layered_depth", camera_movement="vertical_ascent",
+                       primary_prompt="SHOT5_PROMPT", fallback_prompt="SHOT5_FALLBACK"),
+        ]
+        return _make_s29_style_scene(shots), shots
+
+    def _run_with_manifest(self, vp, deficit_seconds, max_extra=5):
+        from hypogeum.agents.clip_repair_agent import fill_coverage_deficits
+
+        cfg = _make_config(max_generated=5)
+        cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = max_extra
+        log = MagicMock()
+        beat = _make_s29_beat(deficit_seconds=deficit_seconds)
+        submitted = []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            submitted.append(scene_spec)
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(f"CLIP-{scene_spec['scene_id']}".encode())
+            return {"generation_status": "generated"}
+
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+            asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
+            return True
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+                 patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify), \
+                 patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=8.0):
+                result = fill_coverage_deficits(
+                    insufficient_beats=[beat],
+                    visual_package=vp,
+                    assets_root=Path(tmp),
+                    config=cfg,
+                    episode_id="ep_s29",
+                    log=log,
+                )
+        return result, submitted, log
+
+    def test_resume_continues_from_next_available_shot_not_shot_one(self):
+        """The real multi-clip resume case: 2 extras already exist (from a
+        prior run) recorded on the asset_manifest as shots 1 and 2. A
+        follow-up call needing exactly 1 more extra must request slot 3
+        using shot 3's prompt -- never re-request slot 1/2 or reselect
+        shot 1/2."""
+        scene, shots = self._five_shot_plan_scene()
+        vp = _make_visual_package([scene])
+        _seed_existing_extra(vp, "s29", 1, shots[0]["shot_id"])
+        _seed_existing_extra(vp, "s29", 2, shots[1]["shot_id"])
+
+        # remaining = deficit/1.15 must need exactly 1 more 8.0s clip.
+        result, submitted, log = self._run_with_manifest(vp, deficit_seconds=8.0, max_extra=5)
+
+        assert len(submitted) == 1, "must not re-request already-represented slots 1 or 2"
+        spec = submitted[0]
+        assert spec["scene_id"] == "s29__extra3", "must continue numbering from the next free slot"
+        assert spec["production_spec"]["primary_prompt"] == "SHOT3_PROMPT"
+        assert result["s29"] and len(result["s29"]) == 1
+
+    def test_resume_does_not_reselect_already_represented_shots(self):
+        """Even with a generous deficit that would need several more
+        clips, shots 1 and 2 (already represented) must never be
+        reselected for a NEW slot -- coverage must come only from
+        not-yet-represented shots 3, 4, 5."""
+        scene, shots = self._five_shot_plan_scene()
+        vp = _make_visual_package([scene])
+        _seed_existing_extra(vp, "s29", 1, shots[0]["shot_id"])
+        _seed_existing_extra(vp, "s29", 2, shots[1]["shot_id"])
+
+        # deficit/1.15 needs exactly 3 more 8.0s clips (shots 3, 4, 5).
+        result, submitted, log = self._run_with_manifest(vp, deficit_seconds=27.6, max_extra=5)
+
+        assert len(submitted) == 3
+        prompts = [s["production_spec"]["primary_prompt"] for s in submitted]
+        assert prompts == ["SHOT3_PROMPT", "SHOT4_PROMPT", "SHOT5_PROMPT"]
+        scene_ids = [s["scene_id"] for s in submitted]
+        assert scene_ids == ["s29__extra3", "s29__extra4", "s29__extra5"]
+
+    def test_resume_fails_closed_when_remaining_pool_exhausted(self):
+        """4 of 5 shots already represented; only 1 remains available. A
+        deficit needing 2 more clips must succeed for the 1 available shot
+        and then fail closed -- never fall back to reselecting an
+        already-represented shot to fill the gap."""
+        scene, shots = self._five_shot_plan_scene()
+        vp = _make_visual_package([scene])
+        for i in range(4):
+            _seed_existing_extra(vp, "s29", i + 1, shots[i]["shot_id"])
+
+        # deficit/1.15 needs 2 more 8.0s clips, but only shot 5 remains.
+        # max_extra=10 so the safety CAP itself never becomes the reason
+        # this stops -- isolates plan exhaustion as the actual cause.
+        result, submitted, log = self._run_with_manifest(vp, deficit_seconds=16.0, max_extra=10)
+
+        assert len(submitted) == 1
+        assert submitted[0]["scene_id"] == "s29__extra5"
+        assert submitted[0]["production_spec"]["primary_prompt"] == "SHOT5_PROMPT"
+        assert result["s29"] and len(result["s29"]) == 1
+
+        events = [c.args[0] for c in log.error.call_args_list]
+        assert "coverage_fill_shot_plan_exhausted" in events
+        assert "coverage_fill_beat_unresolvable" in events
+
+    def test_resume_with_all_shots_already_represented_generates_nothing(self):
+        """All 5 shots already represented -- a resumed call with a
+        residual deficit (e.g. from a slightly different measured
+        duration) must generate nothing new and fail closed immediately,
+        never falling back to repeated coverage."""
+        scene, shots = self._five_shot_plan_scene()
+        vp = _make_visual_package([scene])
+        for i in range(5):
+            _seed_existing_extra(vp, "s29", i + 1, shots[i]["shot_id"])
+
+        result, submitted, log = self._run_with_manifest(vp, deficit_seconds=8.0, max_extra=10)
+
+        assert submitted == []
+        assert "s29" not in result or result.get("s29") == []
+        events = [c.args[0] for c in log.error.call_args_list]
+        assert "coverage_fill_shot_plan_exhausted" in events
+
+    def test_fresh_call_unaffected_by_unrelated_beats_manifest_entries(self):
+        """A different beat's already-represented shots must never affect
+        this beat's own shot selection -- represented-shot lookup is
+        scoped strictly per scene_id prefix."""
+        scene, shots = self._five_shot_plan_scene()
+        vp = _make_visual_package([scene])
+        _seed_existing_extra(vp, "s02", 1, "b_002__shot1")  # unrelated beat
+
+        result, submitted, log = self._run_with_manifest(vp, deficit_seconds=8.0, max_extra=5)
+
+        assert len(submitted) == 1
+        assert submitted[0]["scene_id"] == "s29__extra1"
+        assert submitted[0]["production_spec"]["primary_prompt"] == "SHOT1_PROMPT"
+
+
 class TestClipRepairAgentDoesNotOwnPrompting:
     """Architecture-boundary regression coverage (2026-08-07 refactor):
     clip_repair_agent must not define, import as its own, or otherwise

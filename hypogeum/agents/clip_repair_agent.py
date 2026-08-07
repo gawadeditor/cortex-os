@@ -509,7 +509,44 @@ def fill_coverage_deficits(
             coverage_plan.get("shots", []) or [],
             key=lambda sh: sh.get("shot_order", 0),
         )
-        used_shot_keys: Set[tuple] = set()
+
+        # Plan-aware resume state (2026-08-07): determine which planned
+        # shots are ALREADY represented for this beat and which extra
+        # slot numbers are already occupied, from the asset_manifest —
+        # the same authoritative record planned_shot_id was added to for
+        # exactly this purpose — rather than assuming a fresh call always
+        # starts at slot 1 / shot index 0. A resumed run (assembly_agent
+        # invoked again after a prior partial repair, or manually re-run
+        # after raising COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT) must
+        # continue from the next unrepresented shot and the next free
+        # slot number, never re-walk the plan from the beginning.
+        existing_extra_prefix = f"{sid}__extra"
+        existing_extra_ids = {
+            a.get("scene_id") for a in manifest_assets
+            if (a.get("scene_id") or "").startswith(existing_extra_prefix)
+        }
+        represented_shot_ids = {
+            a.get("planned_shot_id") for a in manifest_assets
+            if (a.get("scene_id") or "").startswith(existing_extra_prefix)
+            and a.get("planned_shot_id")
+        }
+        available_shots = [
+            sh for sh in planned_shots if sh.get("shot_id") not in represented_shot_ids
+        ]
+        used_shot_keys: Set[tuple] = {
+            shot_diversity_key(sh) for sh in planned_shots
+            if sh.get("shot_id") in represented_shot_ids
+        }
+        if represented_shot_ids:
+            log.info(
+                "coverage_fill_beat_resumed",
+                episode_id=episode_id,
+                scene_id=sid,
+                already_represented_shots=len(represented_shot_ids),
+                available_shots=len(available_shots),
+                existing_extra_slots=len(existing_extra_ids),
+            )
+        next_shot_idx = 0  # index into available_shots, not planned_shots
 
         # Cost-visibility estimate (planning only — the real stopping
         # condition is always `remaining`, recalculated from each clip's
@@ -525,17 +562,16 @@ def fill_coverage_deficits(
             allowed_extra_count=max_extra_per_beat,
         )
 
-        # NOTE (2026-08-05): slot numbering always starts at 1 and relies on
-        # submit_scene()'s own resume-safety reuse to correctly account for
-        # any clip that already exists at that slot -- reused() clips still
-        # flow through the same qualify+probe+subtract-from-remaining path
-        # below, so they are counted exactly once. This is only correct
-        # when `beat.deficit_seconds` reflects the CURRENT extra_clip_paths
-        # the caller has attached (empty on a fresh timeline, or whatever
-        # this same process already appended) -- never a deficit that has
-        # been independently pre-netted against on-disk extras through some
-        # other discovery mechanism, which would double-count them here.
-        slot_index = 0
+        # Slot numbering (2026-08-07: plan-aware resume, see above) starts
+        # from however many extra slots this beat already occupies on the
+        # asset_manifest — never from 0 — so a resumed call requests
+        # sc_{sid}__extra{N+1} onward, not a filename already used by a
+        # prior run's clip. submit_scene()'s own resume-safety reuse
+        # (path-exists check) remains a correct, independent safety net
+        # for the case where a slot's file exists but is somehow not yet
+        # reflected in the manifest, but is no longer this function's
+        # PRIMARY mechanism for recognizing already-completed work.
+        slot_index = len(existing_extra_ids)
         while remaining > 0.001 and slot_index < max_extra_per_beat:
             slot_index += 1
             extra_scene_id = f"{sid}__extra{slot_index}"
@@ -546,32 +582,40 @@ def fill_coverage_deficits(
             # present — see the scope-boundary note above `planned_shots`.
             # This block selects which already-rendered shot to use; it
             # never renders prompt text (see module docstring addendum).
+            # Selection is by NEXT AVAILABLE planned shot (available_shots,
+            # already filtered for what this beat has represented before
+            # this call), never by positional slot_index — a beat resuming
+            # mid-plan continues from where it left off, it does not
+            # re-walk planned_shots from index 0.
             planned_shot: Optional[dict] = None
             if planned_shots:
-                if slot_index > len(planned_shots):
+                if next_shot_idx >= len(available_shots):
                     log.error(
                         "coverage_fill_shot_plan_exhausted",
                         episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
-                        planned_shot_count=len(planned_shots), slot_index=slot_index,
-                        reason="no distinct planned shot left for this slot; refusing "
-                               "to reuse an earlier shot assignment as duration "
-                               "compensation",
+                        planned_shot_count=len(planned_shots),
+                        already_represented=len(represented_shot_ids),
+                        available_shot_count=len(available_shots),
+                        reason="no distinct, not-yet-represented planned shot left; "
+                               "refusing to reuse an earlier shot assignment as "
+                               "duration compensation",
                     )
                     break  # fail-closed — never fall back to an identical prompt
 
-                candidate_shot = planned_shots[slot_index - 1]
+                candidate_shot = available_shots[next_shot_idx]
                 shot_key = shot_diversity_key(candidate_shot)
                 if shot_key in used_shot_keys and not candidate_shot.get("diversity_justification"):
                     log.error(
                         "coverage_fill_shot_plan_duplicate",
                         episode_id=episode_id, scene_id=sid, extra_scene_id=extra_scene_id,
-                        shot_id=candidate_shot.get("shot_id"), slot_index=slot_index,
+                        shot_id=candidate_shot.get("shot_id"),
                         reason="planned shot is compositionally equivalent to an "
-                               "already-used shot in this beat with no "
-                               "diversity_justification; refusing to submit a "
-                               "perceptually-repeated clip",
+                               "already-used (this call or a prior run) shot in "
+                               "this beat with no diversity_justification; "
+                               "refusing to submit a perceptually-repeated clip",
                     )
                     break  # fail-closed
+                next_shot_idx += 1
 
                 # The shot must already carry a rendered prompt (written by
                 # hypogeum.video_prompt_writer.render_coverage_plan_shot_prompts()

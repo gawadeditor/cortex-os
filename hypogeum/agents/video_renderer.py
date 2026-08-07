@@ -1049,7 +1049,14 @@ def _build_ffmpeg_concat_command(
     - Narration padded with silence for music_tail_seconds so amix does not cut early.
     - Music input uses -stream_loop -1 so it covers the entire body regardless of length.
     - Music at _MUSIC_AMPLITUDE_FACTOR (≈ −14 dB) — audible background bed under VO.
-    - amix with duration=first; first input is narration padded to body_dur.
+    - amix with duration=longest: the mix runs as long as its longest real
+      input. Music is always looped/atrim'd to body_dur regardless of the
+      source track's length, so it is the side that guarantees full
+      coverage; narration is real, unlooped audio that can legitimately
+      run a little short of its planned atrim endpoint (TTS output timing
+      vs. planned beat duration), and duration=longest lets the mix keep
+      going on music alone for any such shortfall instead of truncating
+      the whole mix early (see the fix note at the call site below).
 
     music_segments (Option B, 2026-07-19, main episode only): when supplied
     and at least one segment carries a real track, the [msc] label is built
@@ -1301,8 +1308,27 @@ def _build_ffmpeg_concat_command(
     # Audio filter: mix narration + music.
     # narration is hard-trimmed to narr_dur (VO content only).
     # When music_tail_seconds > 0: narration is padded with silence to body_dur so
-    # amix does not cut the music early when duration=first. Music plays at full level
-    # through both the VO section and the music tail.
+    # amix does not cut the music early. Music plays at full level through both
+    # the VO section and the music tail.
+    #
+    # duration=longest (not duration=first) in BOTH branches below (2026-08-07
+    # fix): narration's atrim target (narr_dur) is the TIMELINE's beat-duration
+    # sum, not a guarantee about the real stitched narration file's actual
+    # length -- TTS-rendered audio can legitimately come in a little short of
+    # its planned beat duration. atrim cannot manufacture samples that were
+    # never recorded, so when that happens the narration stream ends early,
+    # inside the filtergraph, regardless of its declared atrim endpoint.
+    # duration=first ties the WHOLE mix's length to that (possibly-truncated)
+    # first input, silencing the music bed too for the remainder -- silence
+    # exactly at the body's tail, i.e. exactly at the seam into the end page
+    # (confirmed on ep_f3619022: narration ran ~0.84s short of the video's
+    # frame-accurate body duration). Music is always looped via aloop to
+    # cover the full body_dur regardless of its source length, so it is
+    # never the one that's short; duration=longest lets the mix continue
+    # using music alone for however much of body_dur narration didn't
+    # reach, with no video-timing change and no fade/pad of any kind --
+    # the pre-existing "-t body_dur" cap on the whole command already
+    # bounds the result exactly as before whenever there is no shortfall.
     if has_narration and has_music_any:
         if use_multi_segment_music:
             # msc_filter_str already ends in a [msc] label (see
@@ -1336,7 +1362,7 @@ def _build_ffmpeg_concat_command(
             filter_parts.append(
                 f"[{narration_idx}:a]atrim=0:{narr_dur:.6f},asetpts=PTS-STARTPTS,volume=1.0[narr];"
                 f"{_music_loop_prefix};"
-                f"[narr][msc]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+                f"[narr][msc]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
             )
         audio_map = "[aout]"
     elif has_narration:

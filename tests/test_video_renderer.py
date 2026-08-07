@@ -6,12 +6,15 @@ Tests cover the public API surface and critical internal helpers:
   TestBuildFfmpegConcatCommand  — _build_ffmpeg_concat_command() (tpad, -t, audio)
   TestRunFfmpeg                 — _run_ffmpeg() (success, failure, timeout)
   TestAudioMixingInternals      — audio mix constants and command structure
+  TestNoAudioGapAtBodyTail      — real-ffmpeg regression: narration-shortfall no longer
+                                  silences music / leaves a gap at the body-to-end-page seam
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1149,6 +1152,44 @@ class TestAudioMixingInternals:
         assert "amix" in cmd_str
         assert f"volume={_MUSIC_AMPLITUDE_FACTOR}" in cmd_str
 
+    def test_narration_music_combine_uses_duration_longest_not_first(self, tmp_path):
+        """
+        Regression for the ep_f3619022 body-to-end-page audio gap: with the
+        current production default (music_tail_seconds=0, i.e. no outro
+        pause), the [narr][msc]amix combine step must use duration=longest,
+        never duration=first.
+
+        Root cause: narration's atrim endpoint (narr_dur) is the TIMELINE's
+        planned beat-duration sum, not a guarantee about the real stitched
+        narration file's actual length -- TTS output can legitimately come
+        in a little short. atrim cannot manufacture missing samples, so a
+        short real narration file ends inside the filtergraph before
+        narr_dur is reached. duration=first ties the WHOLE mix's length to
+        that (possibly-truncated) first input, silencing music too for the
+        remainder -- an audio gap exactly at the body's tail, i.e. exactly
+        at the seam into the end page. Music is always looped via aloop to
+        cover the full body_dur regardless of the source track's own
+        length, so duration=longest lets the mix keep going on music alone
+        for whatever narration didn't reach, with no change to video
+        timing and no fade/pad of any kind.
+        """
+        narration_path = tmp_path / "narration.mp3"
+        narration_path.write_bytes(b"\xff\xfb" * 100)
+        music_track = _make_music_track(tmp_path)
+
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[],
+            narration_path=narration_path,
+            music_track=music_track,
+            output_path=tmp_path / "out.mp4",
+            resolution="1920x1080",
+            episode_id="ep_001",
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        narr_msc_step = next(part for part in fc.split(";") if "[narr][msc]amix" in part)
+        assert "duration=longest" in narr_msc_step, narr_msc_step
+        assert "duration=first" not in narr_msc_step, narr_msc_step
+
     def test_short_with_clip_narration_and_music_all_audio_indices_valid(self, tmp_path):
         """Regression test for a real 2026-07-05 production failure: a Short
         with one video clip + narration + music produced a filtergraph
@@ -1193,6 +1234,120 @@ class TestAudioMixingInternals:
                 f"0..{n_inputs - 1}) -- this is the exact 'Invalid file "
                 f"index' failure mode from the 2026-07-05 incident"
             )
+
+
+# ---------------------------------------------------------------------------
+# TestNoAudioGapAtBodyTail — real-ffmpeg regression for the ep_f3619022
+# body-to-end-page audio gap.
+#
+# ep_f3619022's real narration audio (main_narration.mp3) measured
+# 743.220227s while the rendered body's video duration measured
+# 744.060229s -- narration ran ~0.84s short of the timeline's planned beat
+# duration, because a stitched TTS narration file's real length is not
+# guaranteed to hit its planned duration exactly. With the old
+# duration=first combine, that shortfall silenced the WHOLE mix (music
+# included) for the remainder, producing a genuine, measurable audio gap
+# at the exact seam into the end page (confirmed via ffprobe: the output's
+# audio stream was measurably shorter than its video stream). These tests
+# run real ffmpeg (no mocking) to prove the fix closes that specific gap
+# without touching video timing.
+# ---------------------------------------------------------------------------
+
+def _make_real_tone(path: Path, duration: float, frequency: int = 440) -> None:
+    """A real, audible (non-silent) audio file via ffmpeg's lavfi sine source."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration={duration}",
+         "-c:a", "libmp3lame", str(path)],
+        capture_output=True, timeout=30,
+    )
+
+
+def _probe_stream_duration(path: Path, stream_type: str) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", stream_type,
+         "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    return float(result.stdout.strip().splitlines()[0])
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="real ffmpeg required")
+class TestNoAudioGapAtBodyTail:
+
+    def test_short_narration_no_longer_truncates_music_or_leaves_a_gap(self, tmp_path):
+        """
+        Reproduces the ep_f3619022 shortfall proportionally: a real 3.0s
+        narration recording against a 4.0s timeline-planned body duration
+        (a ~25% shortfall, comparable to ep_f3619022's ~0.84s/744.06s
+        ratio), with real (audible) music covering the full body. Asserts
+        the rendered output's audio stream duration exactly matches its
+        video stream duration -- i.e. no gap, real ffmpeg, real files.
+        """
+        narration_path = tmp_path / "narration.mp3"
+        _make_real_tone(narration_path, duration=3.0, frequency=440)
+        music_path = tmp_path / "music.mp3"
+        _make_real_tone(music_path, duration=10.0, frequency=220)
+        music_track = MusicTrackResult(
+            track_id="m", category="Mystery", asset_id="channel/music/mystery/m",
+            local_path=music_path, source="ai_generated", duration_seconds=10.0,
+        )
+        entry = _make_entry(duration_seconds=4.0)  # no clip_path -> black-video body of 4.0s
+
+        output_path = tmp_path / "out.mp4"
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry],
+            narration_path=narration_path,
+            music_track=music_track,
+            output_path=output_path,
+            resolution="1920x1080",
+            episode_id="ep_gap_regress",
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr[-2000:]
+
+        video_dur = _probe_stream_duration(output_path, "v")
+        audio_dur = _probe_stream_duration(output_path, "a")
+        assert audio_dur == pytest.approx(video_dur, abs=0.05), (
+            f"audio stream ({audio_dur}s) does not cover the full video "
+            f"stream ({video_dur}s) -- this is the ep_f3619022 body-to-"
+            f"end-page audio gap: narration ran short and silenced the "
+            f"whole mix for the remainder instead of continuing on music"
+        )
+        assert audio_dur == pytest.approx(4.0, abs=0.05)
+
+    def test_no_shortfall_case_is_unaffected(self, tmp_path):
+        """When real narration content already covers the full planned
+        duration (the common/healthy case, no drift), duration=longest
+        must produce byte-identical timing to the old duration=first --
+        both inputs already reach body_dur, so the combine mode choice is
+        a no-op here. Locks in 'preserve existing behaviour everywhere
+        else' for the fix."""
+        narration_path = tmp_path / "narration.mp3"
+        _make_real_tone(narration_path, duration=4.0, frequency=440)  # matches target exactly
+        music_path = tmp_path / "music.mp3"
+        _make_real_tone(music_path, duration=10.0, frequency=220)
+        music_track = MusicTrackResult(
+            track_id="m", category="Mystery", asset_id="channel/music/mystery/m",
+            local_path=music_path, source="ai_generated", duration_seconds=10.0,
+        )
+        entry = _make_entry(duration_seconds=4.0)
+
+        output_path = tmp_path / "out.mp4"
+        cmd = _build_ffmpeg_concat_command(
+            timeline=[entry],
+            narration_path=narration_path,
+            music_track=music_track,
+            output_path=output_path,
+            resolution="1920x1080",
+            episode_id="ep_no_shortfall",
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr[-2000:]
+
+        video_dur = _probe_stream_duration(output_path, "v")
+        audio_dur = _probe_stream_duration(output_path, "a")
+        assert audio_dur == pytest.approx(video_dur, abs=0.05)
+        assert audio_dur == pytest.approx(4.0, abs=0.05)
 
 
 # ---------------------------------------------------------------------------

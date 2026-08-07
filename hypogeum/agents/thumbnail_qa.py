@@ -11,6 +11,9 @@ Checks:
   C. path_in_thumbnails_dir  — file path must be under …/thumbnails/; fail if under video/
   D. text_overlay_in_plan    — rank-1 main candidate in generation plan must have text_overlay
                                (warn if plan not provided, fail if plan provided but overlay absent)
+  L. feed_scale_legibility   — downscale to feed-thumbnail size; fail if the frame collapses to a
+                               near-black rectangle (or a blown-out flat bright fill) with no
+                               legible focal/text region surviving the downscale
 
 These checks were added to prevent an ep_smoke_01-style scenario where:
   - The thumbnail was 1024×1024 square (looks like a reference image, not a thumbnail)
@@ -416,6 +419,55 @@ def run_thumbnail_qa(
                                f"headline {headline_text!r} visually confirmed via OCR in the typography zone")
 
     # ------------------------------------------------------------------
+    # Check L — Feed-scale exposure & legibility (real pixel evidence)
+    #
+    # Added after the ep_f3619022 exposure rejection: candidate_1.jpg was
+    # structurally correct (right dimensions, on-brand, layered plan valid,
+    # headline OCR-confirmed) but measured mean_luminance≈8.2/255 with ~90%
+    # of pixels below luma 20 and ~80% below luma 8. Check J's placeholder
+    # detector did not fire because this is real, textured photographic
+    # content (stddev≈23.9, well above the placeholder's flat-fill ceiling
+    # of 15) — it is a genuine dark image, not a dry-run fill. But at real
+    # feed/search-result scale (thumbnails render at a small fraction of
+    # their native size), that texture collapses into an indistinguishable
+    # near-black rectangle: no reviewer working from full-resolution pixels
+    # would catch this, because the defect only appears after downscaling.
+    #
+    # This check downsamples to an approximate feed-thumbnail size and
+    # evaluates two independent failure modes on those small-scale pixels:
+    #   1. Near-black collapse: the frame is overwhelmingly below a dark
+    #      threshold AND has no sufficiently large bright region left to
+    #      carry a legible focal subject or text hook. A legitimately dark,
+    #      low-key Hypogeum thumbnail is NOT flagged as long as a real
+    #      bright focal/text region survives the downscale — only a frame
+    #      with no such region (this is the ep_f3619022 signature: a tiny
+    #      <4% highlight sprinkle, not a legible focal area) fails.
+    #   2. Blown-out flat collapse: a bright image with no local contrast
+    #      surviving the downscale also fails — brightness alone is not
+    #      evidence of legibility (a flat overexposed fill is as illegible
+    #      as a flat near-black one). Scoped to genuinely bright means so
+    #      ordinary mid-tone test fixtures are unaffected.
+    # ------------------------------------------------------------------
+    if thumbnail_local_path.exists():
+        feed_scale_metrics = _compute_feed_scale_metrics(thumbnail_local_path)
+        if feed_scale_metrics is None:
+            _add_check(checks, "c_thumbnail_feed_scale_legibility", "warn",
+                       "could not compute feed-scale legibility metrics — PIL unavailable or file corrupt")
+            warnings.append("thumbnail_feed_scale_legibility: could not probe image")
+        else:
+            legibility_reason = _feed_scale_legibility_failure_reason(feed_scale_metrics)
+            if legibility_reason:
+                _add_check(checks, "c_thumbnail_feed_scale_legibility", "fail", legibility_reason)
+                failures.append(f"thumbnail_feed_scale_legibility: {legibility_reason}")
+            else:
+                _add_check(
+                    checks, "c_thumbnail_feed_scale_legibility", "pass",
+                    f"feed-scale legibility OK (dark_fraction="
+                    f"{feed_scale_metrics['dark_fraction']:.2f}, legible_fraction="
+                    f"{feed_scale_metrics['legible_fraction']:.2f}, mean={feed_scale_metrics['mean']:.1f})",
+                )
+
+    # ------------------------------------------------------------------
     # Overall status
     # ------------------------------------------------------------------
     if failures:
@@ -540,4 +592,89 @@ def _verify_headline_pixels(thumb_path: Path) -> Optional[str]:
     detected = (result.stdout or "").strip()
     if len(detected) < _HEADLINE_MIN_OCR_CHARS:
         return f"OCR detected no meaningful text in the typography zone (raw output: {detected!r})"
+    return None
+
+
+# Feed-scale target size approximates a real YouTube search-result /
+# suggested-video thumbnail render — a small fraction of the native
+# 1280x720/720x1280 asset — which is the actual size viewers evaluate a
+# thumbnail at. Orientation is taken from the source image so 9:16 Shorts
+# thumbnails get a portrait target instead of being squashed.
+_FEED_SCALE_LANDSCAPE = (168, 94)
+_FEED_SCALE_PORTRAIT = (94, 168)
+
+# Calibrated against the real ep_f3619022 rejection (measured at native
+# resolution: mean_luminance=8.2, ~90% of pixels below luma 20, ~80% below
+# luma 8; at feed scale: dark_fraction(<20)=0.876, legible_fraction(>=60)
+# =0.032) and against hypogeum/agents/thumbnail_qa.py's own placeholder
+# fixture. A margin is kept above the collapse fraction and below the
+# legible floor so a real, deliberately dark subject/text region is not
+# false-flagged.
+_FEED_SCALE_DARK_LUMA = 20
+_FEED_SCALE_LEGIBLE_LUMA = 60
+_FEED_SCALE_COLLAPSE_DARK_FRACTION = 0.75
+_FEED_SCALE_COLLAPSE_MIN_LEGIBLE_FRACTION = 0.08
+_FEED_SCALE_BLOWN_OUT_MEAN = 180.0
+_FEED_SCALE_BLOWN_OUT_MAX_STDDEV = 10.0
+
+
+def _compute_feed_scale_metrics(path: Path) -> Optional[dict]:
+    """
+    Downscale `path` to an approximate feed-thumbnail size and return its
+    grayscale mean/stddev plus dark/legible pixel fractions. Returns None
+    on any read/probe failure (never blocks the calling check on that
+    alone — matches this module's existing pattern for optional pixel
+    probes).
+    """
+    try:
+        from PIL import Image, ImageStat
+        with Image.open(path) as img:
+            width, height = img.size
+            target = _FEED_SCALE_LANDSCAPE if width >= height else _FEED_SCALE_PORTRAIT
+            small = img.convert("L").resize(target, Image.LANCZOS)
+            stat = ImageStat.Stat(small)
+            histogram = small.histogram()  # 256 grayscale buckets
+    except Exception:
+        return None
+
+    total = sum(histogram) or 1
+    dark_count = sum(histogram[:_FEED_SCALE_DARK_LUMA])
+    legible_count = sum(histogram[_FEED_SCALE_LEGIBLE_LUMA:])
+
+    return {
+        "mean": stat.mean[0],
+        "stddev": stat.stddev[0],
+        "dark_fraction": dark_count / total,
+        "legible_fraction": legible_count / total,
+    }
+
+
+def _feed_scale_legibility_failure_reason(metrics: dict) -> Optional[str]:
+    """
+    Return a human-readable rejection reason if the feed-scale metrics show
+    either failure mode (near-black collapse or blown-out flat collapse),
+    else None.
+    """
+    dark_fraction = metrics["dark_fraction"]
+    legible_fraction = metrics["legible_fraction"]
+    mean = metrics["mean"]
+    stddev = metrics["stddev"]
+
+    if (
+        dark_fraction >= _FEED_SCALE_COLLAPSE_DARK_FRACTION
+        and legible_fraction < _FEED_SCALE_COLLAPSE_MIN_LEGIBLE_FRACTION
+    ):
+        return (
+            f"thumbnail collapses to a near-black rectangle at feed scale "
+            f"({dark_fraction:.0%} of downscaled pixels below luma {_FEED_SCALE_DARK_LUMA}, "
+            f"only {legible_fraction:.0%} reach luma {_FEED_SCALE_LEGIBLE_LUMA}+) — "
+            "focal subject/text will not read at real search/feed size"
+        )
+
+    if mean >= _FEED_SCALE_BLOWN_OUT_MEAN and stddev <= _FEED_SCALE_BLOWN_OUT_MAX_STDDEV:
+        return (
+            f"thumbnail is a flat, blown-out bright fill at feed scale "
+            f"(mean={mean:.1f}, stddev={stddev:.1f}) — no focal contrast survives downscaling"
+        )
+
     return None

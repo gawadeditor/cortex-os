@@ -395,6 +395,28 @@ class TestThumbnailCheck:
         assert check.status == "fail"
         assert "placeholder" in check.reason.lower()
 
+    def test_fails_on_feed_scale_illegible_pixels_via_canonical_qa(self, tmp_path):
+        """The ep_f3619022 exposure defect: real, textured (non-placeholder)
+        pixels that collapse to a near-black rectangle at feed scale. Proves
+        two things at once: (1) the gate fails on the exact defect profile,
+        and (2) it does so purely by re-running run_thumbnail_qa() and
+        surfacing its thumbnail_qa_report in evidence -- the gate has no
+        independent exposure/luminance implementation of its own."""
+        from tests.test_thumbnail_qa import _write_ep_f3619022_darkness_profile_jpeg
+
+        episode_id = "ep_thumb_feed_scale_dark"
+        assets_root, ep_dir = _minimal_episode(tmp_path, episode_id)
+        thumb_path = ep_dir / "thumbnails" / "candidate_1.jpg"
+        _write_ep_f3619022_darkness_profile_jpeg(thumb_path)
+
+        result = run_production_output_gate(episode_id, assets_root, MagicMock(), MagicMock())
+        check = next(c for c in result.checks if c.capability == "C_THUMBNAIL")
+        assert check.status == "fail"
+        assert "feed_scale_legibility" in check.reason.lower() or "feed_scale_legibility" in json.dumps(check.evidence)
+        qa_report = check.evidence["thumbnail_qa_report"]
+        qa_check = next(c for c in qa_report["checks"] if c["check_id"] == "c_thumbnail_feed_scale_legibility")
+        assert qa_check["status"] == "fail"
+
     def test_fails_when_thumbnail_package_predates_current_version(self, tmp_path):
         episode_id = "ep_thumb_stale"
         assets_root, ep_dir = _minimal_episode(tmp_path, episode_id)

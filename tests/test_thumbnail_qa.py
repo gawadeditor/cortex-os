@@ -411,6 +411,155 @@ class TestThumbnailQAPlaceholderDetection:
 
 
 # ---------------------------------------------------------------------------
+# Check L — Feed-scale exposure & legibility
+#
+# Regression coverage for the ep_f3619022 exposure rejection: the
+# published thumbnail measured mean_luminance≈8.2/255 with ~90% of pixels
+# below luma 20 and ~80% below luma 8 -- structurally correct (right
+# dimensions, layered plan, OCR-confirmed headline) but illegible at real
+# feed/search-result scale. It is real, textured photographic content
+# (stddev≈23.9), not a flat placeholder fill, so Check J's placeholder
+# detector (stddev<=15 ceiling) does not fire on it -- these fixtures
+# prove the dedicated feed-scale check catches what full-resolution
+# aesthetic checks cannot.
+# ---------------------------------------------------------------------------
+
+def _write_ep_f3619022_darkness_profile_jpeg(path: Path, width: int = 1280, height: int = 720) -> None:
+    """
+    Reproduces the real ep_f3619022 rejection profile: a per-pixel
+    distribution built directly from the measured percentile breakdown of
+    the actual published file (80% of pixels below luma 8, 90% below luma
+    20, ~1.7% pushed into a bright 100-254 tail) so the dark-pixel
+    fractions match exactly. The bright tail is scattered pixel-by-pixel
+    rather than clustered, matching the real file's sparse highlight
+    speckle -- not a legible focal region, so it should not survive
+    downscaling to feed-thumbnail size.
+    """
+    import random
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rnd = random.Random(7)
+    total = width * height
+    n1, n2, n3 = int(total * 0.80), int(total * 0.10), int(total * 0.083)
+    n4 = total - n1 - n2 - n3
+    values = (
+        [rnd.randint(0, 7) for _ in range(n1)]
+        + [rnd.randint(8, 19) for _ in range(n2)]
+        + [rnd.randint(20, 99) for _ in range(n3)]
+        + [rnd.randint(100, 254) for _ in range(n4)]
+    )
+    rnd.shuffle(values)
+    img = Image.new("L", (width, height))
+    img.putdata(values)
+    img.convert("RGB").save(str(path), "JPEG", quality=90)
+
+
+def _write_dark_but_legible_jpeg(path: Path, width: int = 1280, height: int = 720) -> None:
+    """
+    A deliberately dark (low-key, on-brand) thumbnail with one contiguous
+    bright focal block -- simulating a torch-lit subject or headline zone
+    -- large and bright enough that it remains a legible focal region after
+    downscaling to feed-thumbnail size. Must NOT be flagged: intentional
+    low-key Hypogeum imagery with real legibility is not the defect.
+    """
+    from PIL import ImageDraw
+    import random
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rnd = random.Random(3)
+    img = Image.new("L", (width, height))
+    img.putdata([rnd.randint(0, 15) for _ in range(width * height)])
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((40, int(height * 0.35), int(width * 0.42), int(height * 0.85)), fill=170)
+    img.convert("RGB").save(str(path), "JPEG", quality=90)
+
+
+def _write_blown_out_flat_jpeg(path: Path, width: int = 1280, height: int = 720) -> None:
+    """A flat, overexposed bright fill -- brightness alone must not pass QA."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (width, height), color=(225, 225, 225)).save(str(path), "JPEG", quality=90)
+
+
+class TestFeedScaleLegibility:
+
+    def test_ep_f3619022_darkness_profile_fails(self, tmp_path):
+        p = tmp_path / "thumbnails" / "candidate_1.jpg"
+        _write_ep_f3619022_darkness_profile_jpeg(p)
+        report = run_thumbnail_qa(p)
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_feed_scale_legibility")
+        assert check["status"] == "fail"
+        assert any("thumbnail_feed_scale_legibility" in f for f in report["failures"])
+
+    def test_ep_f3619022_profile_does_not_trip_placeholder_check(self, tmp_path):
+        """The real defect has real texture (stddev well above the flat-fill
+        ceiling), so Check J alone must NOT catch it -- proving the gap the
+        new check closes: full-resolution aesthetic checks pass, only the
+        feed-scale downscale reveals the illegibility."""
+        p = tmp_path / "thumbnails" / "candidate_1.jpg"
+        _write_ep_f3619022_darkness_profile_jpeg(p)
+        report = run_thumbnail_qa(p)
+        check_statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert check_statuses["c_thumbnail_placeholder_detection"] == "pass"
+        assert check_statuses["c_thumbnail_feed_scale_legibility"] == "fail"
+
+    def test_dark_but_legible_thumbnail_passes(self, tmp_path):
+        """Intentional low-key Hypogeum imagery with a real legible focal
+        region must pass -- dark identity is preserved, not penalized."""
+        p = tmp_path / "thumbnails" / "candidate_1.jpg"
+        _write_dark_but_legible_jpeg(p)
+        report = run_thumbnail_qa(p)
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_feed_scale_legibility")
+        assert check["status"] == "pass"
+
+    def test_blown_out_bright_thumbnail_fails(self, tmp_path):
+        """Brightness alone is not legibility -- a flat overexposed fill
+        must fail even though it is nowhere near dark."""
+        p = tmp_path / "thumbnails" / "candidate_1.jpg"
+        _write_blown_out_flat_jpeg(p)
+        report = run_thumbnail_qa(p)
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_feed_scale_legibility")
+        assert check["status"] == "fail"
+        assert any("thumbnail_feed_scale_legibility" in f for f in report["failures"])
+
+    def test_ordinary_flat_midtone_fixture_still_passes(self, tmp_path):
+        """Regression guard: the flat mid-gray (100,100,100) fixture used
+        throughout this suite's other tests must remain unaffected by the
+        new check."""
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _write_jpeg(p, 1280, 720)
+        report = run_thumbnail_qa(p)
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_feed_scale_legibility")
+        assert check["status"] == "pass"
+
+    def test_genuine_dark_textured_fixture_still_passes(self, tmp_path):
+        """The existing genuine-dark-texture fixture (moderate mean, real
+        gradient) must also pass the new check."""
+        p = tmp_path / "thumbnails" / "main.jpg"
+        _write_textured_dark_jpeg(p)
+        report = run_thumbnail_qa(p)
+        check = next(c for c in report["checks"] if c["check_id"] == "c_thumbnail_feed_scale_legibility")
+        assert check["status"] == "pass"
+
+    def test_darkness_profile_fails_overall_status_even_with_good_plan(self, tmp_path):
+        """End-to-end: a fully well-formed layered plan (composition,
+        typography, ctr_rationale, text_overlay all present) must still
+        produce overall_status=fail when the pixels are illegible at feed
+        scale -- exposure is evaluated independently of plan completeness."""
+        p = tmp_path / "thumbnails" / "candidate_1.jpg"
+        _write_ep_f3619022_darkness_profile_jpeg(p)
+        report = run_thumbnail_qa(
+            p, aspect_ratio="16:9", asset_class="thumbnail_image", generation_plan=_good_plan(),
+        )
+        check_statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert check_statuses["c_thumbnail_text_overlay"] == "pass"
+        assert check_statuses["c_thumbnail_composition_plan"] == "pass"
+        assert check_statuses["c_thumbnail_typography_plan"] == "pass"
+        assert check_statuses["c_thumbnail_curiosity_gap"] == "pass"
+        assert check_statuses["c_thumbnail_feed_scale_legibility"] == "fail"
+        assert report["overall_status"] == "fail"
+
+
+# ---------------------------------------------------------------------------
 # TestReferenceImageQADimensions
 # ---------------------------------------------------------------------------
 

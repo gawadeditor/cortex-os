@@ -50,7 +50,7 @@ from hypogeum.providers.enhancement import (
     get_enhancement_provider,
     register_provider,
 )
-from hypogeum.source_enhancement import qualify_asset, run_source_enhancement
+from hypogeum.source_enhancement import _clip_has_black_tail, qualify_asset, run_source_enhancement
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +62,24 @@ def _make_clip(path: Path, width: int, height: int, duration: float = 1.0) -> No
     subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=s={width}x{height}:r=24:d={duration}",
          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
+        capture_output=True, timeout=30,
+    )
+
+
+def _make_black_tail_clip(
+    path: Path, width: int, height: int, real_seconds: float, black_seconds: float,
+) -> None:
+    """A clip that plays real (testsrc) content for `real_seconds` then
+    cuts to pure black for `black_seconds` -- the real ep_f3619022 Short
+    001 defect shape: an 8s provider-generated clip that faded to black
+    4.83s in and never recovered."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y",
+         "-f", "lavfi", "-i", f"testsrc=s={width}x{height}:r=24:d={real_seconds}",
+         "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r=24:d={black_seconds}",
+         "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+         "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
         capture_output=True, timeout=30,
     )
 
@@ -891,3 +909,104 @@ class TestQualifyAsset:
 
         assert asset_c["source_enhancement"]["validation_result"] == "skipped_native_resolution"
         assert asset_d["source_enhancement"]["validation_result"] == "skipped_native_resolution"
+
+
+# ---------------------------------------------------------------------------
+# TestBlackTailDetection / TestQualifyAssetRejectsBlackTail
+# 2026-08-07 — Finding 2 root-cause fix
+#
+# Reproduces the real ep_f3619022 Short 001 defect: an extra coverage clip
+# whose content faded to pure black partway through and stayed black
+# through the end of the file. Confirmed against the real source clip
+# (.hypogeum-assets/episodes/ep_f3619022/video/sh_short_001/
+# sc_sh_short_001_s06__extra1.mp4): blackdetect measured black_start=4.83,
+# black_end=7.96 on an 8.0s clip. hypogeum.agents.video_renderer only
+# trims/stretches the LAST clip in a multi-clip beat, so a black tail on
+# any earlier clip reaches the final render completely unexamined --
+# qualify_asset() is the correct, single boundary to catch it before that
+# can happen, for every caller (VPD primaries and clip_repair_agent extras
+# alike).
+# ---------------------------------------------------------------------------
+
+class TestBlackTailDetection:
+
+    def test_clean_clip_has_no_black_tail(self, tmp_path):
+        clip_path = tmp_path / "clean.mp4"
+        _make_clip(clip_path, 1280, 720, duration=5.0)
+        assert _clip_has_black_tail(clip_path) is False
+
+    def test_real_defect_shape_is_detected(self, tmp_path):
+        """Same proportions as the real defect: ~60% real content, ~40%
+        black tail, on an 8s clip."""
+        clip_path = tmp_path / "black_tail.mp4"
+        _make_black_tail_clip(clip_path, 1080, 1920, real_seconds=4.83, black_seconds=3.17)
+        assert _clip_has_black_tail(clip_path) is True
+
+    def test_black_flash_that_recovers_is_not_a_tail(self, tmp_path):
+        """A brief black region in the MIDDLE of a clip that recovers to
+        real content before the file ends is not this defect -- only a
+        black region touching (or almost touching) the clip's own end
+        counts."""
+        clip_path = tmp_path / "recovers.mp4"
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["ffmpeg", "-y",
+             "-f", "lavfi", "-i", "testsrc=s=1080x1920:r=24:d=3",
+             "-f", "lavfi", "-i", "color=c=black:s=1080x1920:r=24:d=2",
+             "-f", "lavfi", "-i", "testsrc2=s=1080x1920:r=24:d=3",
+             "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+             "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip_path)],
+            capture_output=True, timeout=30,
+        )
+        assert _clip_has_black_tail(clip_path) is False
+
+    def test_corrupt_clip_is_not_flagged_as_black_tail(self, tmp_path):
+        """Corrupt/unreadable files are the corrupt-source check's job, not
+        this one -- must not raise, must return False so qualify_asset()'s
+        own corrupt-source check (which runs first) is the one that
+        classifies it."""
+        clip_path = tmp_path / "corrupt.mp4"
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        clip_path.write_bytes(b"not a real video file")
+        assert _clip_has_black_tail(clip_path) is False
+
+
+class TestQualifyAssetRejectsBlackTail:
+
+    def test_rejects_clip_with_black_tail(self, tmp_path):
+        """The exact real-world shape: an otherwise-valid, correctly-
+        resolved clip whose content goes black 4.83s into an 8s duration
+        and never recovers must be rejected -- and, since there is
+        nothing valid to enhance, the provider must never be called."""
+        clip_path = tmp_path / "sc_black_tail.mp4"
+        _make_black_tail_clip(clip_path, 1920, 1080, real_seconds=4.83, black_seconds=3.17)
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_black_tail", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_black_tail")
+        asset = {"scene_id": "s06__extra1", "source_enhancement": None}
+
+        changed = qualify_asset(asset, clip_path, "short", config, "ep_q", MagicMock())
+
+        assert changed is True
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "rejected_black_tail"
+        assert se["applied"] is False
+        assert provider.calls == []
+
+    def test_clean_clip_at_native_resolution_still_passes(self, tmp_path):
+        """The new check must not introduce any false positive on the
+        existing, already-covered clean/native-resolution path."""
+        clip_path = tmp_path / "sc_clean.mp4"
+        _make_clip(clip_path, 1920, 1080, duration=5.0)
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_black_tail_clean", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_black_tail_clean")
+        asset = {"scene_id": "s01", "source_enhancement": None}
+
+        changed = qualify_asset(asset, clip_path, "main_episode", config, "ep_q", MagicMock())
+
+        assert changed is True
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "skipped_native_resolution"

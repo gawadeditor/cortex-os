@@ -160,6 +160,61 @@ def _probe_video_stream(path: Path) -> Optional[dict]:
         return None
 
 
+_BLACK_TAIL_MIN_BLACK_SECONDS = 0.5   # ffmpeg blackdetect's own minimum run length
+_BLACK_TAIL_END_TOLERANCE_S = 0.2     # a black region ending within this of EOF counts as "the tail"
+
+
+def _clip_has_black_tail(clip_path: Path) -> bool:
+    """
+    True if `clip_path`'s content fades/cuts to black and stays black
+    through (or almost through) the end of the file — the real
+    ep_f3619022 Short 001 defect: an 8s provider-generated clip played
+    real content for ~4.8s then held pure black for its remaining ~3.1s.
+
+    A clip like this is technically valid (decodable, correct resolution,
+    correct duration) so no other check in this module catches it. It
+    matters specifically because hypogeum.agents.video_renderer only
+    trims/stretches the LAST clip in a multi-clip beat — any EARLIER clip
+    is trusted to play in full, so a black tail on a non-last clip reaches
+    the final render completely unexamined.
+
+    Uses ffmpeg's blackdetect filter (the same primitive already used
+    elsewhere in this codebase for pixel-level black-region evidence) and
+    checks only whether the LAST detected black region's end lands at or
+    near the clip's own end — a black flash or dark passage earlier in the
+    clip, or one that recovers to real content before the file ends, is
+    not this defect and is not flagged.
+    """
+    try:
+        probe = _probe_video_stream(clip_path)
+        duration = probe["duration"] if probe else 0.0
+        if duration <= 0:
+            return False  # corrupt/unreadable source — the dedicated check above handles this
+
+        result = subprocess.run(
+            [
+                "ffmpeg", "-i", str(clip_path),
+                "-vf", f"blackdetect=d={_BLACK_TAIL_MIN_BLACK_SECONDS}:pic_th=0.98",
+                "-an", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        stderr = result.stderr or ""
+        last_black_end: Optional[float] = None
+        for line in stderr.splitlines():
+            if "black_end:" not in line:
+                continue
+            try:
+                last_black_end = float(line.split("black_end:", 1)[1].split()[0])
+            except (IndexError, ValueError):
+                continue
+        if last_black_end is None:
+            return False
+        return (duration - last_black_end) <= _BLACK_TAIL_END_TOLERANCE_S
+    except Exception:
+        return False
+
+
 def _sha256_file(path: Path) -> Optional[str]:
     """sha256 of a file's contents, or None if it can't be read. Used to
     prove a quarantined candidate hasn't changed since it was archived
@@ -510,6 +565,25 @@ def qualify_asset(
             required_width=required_width, required_height=required_height,
         )
         log.warn("source_enhancement_rejected_corrupt", scene_id=scene_id, clip_path=str(clip_path))
+        return True
+
+    # --- Trailing black content is never usable coverage (2026-08-07) ---
+    # Real production defect found in ep_f3619022 Short 001: a coverage-
+    # fill extra clip's own generated content faded to pure black 4.83s
+    # into its 8s duration and never recovered. hypogeum.agents.
+    # video_renderer only trims/stretches the LAST clip in a multi-clip
+    # beat -- every earlier clip is trusted to play in full, so a black
+    # tail on a non-last clip reached the final render unexamined. A clip
+    # is technically decodable and correctly resolved here (not corrupt),
+    # so the corrupt-source check above does not catch it; this is a
+    # distinct content-quality defect, checked independently.
+    if _clip_has_black_tail(clip_path):
+        asset["source_enhancement"] = _record(
+            applied=False, required=False,
+            validation_result="rejected_black_tail",
+            required_width=required_width, required_height=required_height,
+        )
+        log.warn("source_enhancement_rejected_black_tail", scene_id=scene_id, clip_path=str(clip_path))
         return True
 
     original_resolution = f"{width}x{height}"

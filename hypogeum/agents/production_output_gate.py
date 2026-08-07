@@ -132,7 +132,7 @@ def run_production_output_gate(
     log,
 ) -> ProductionOutputGateResult:
     """
-    Load every real artifact for episode_id from disk and run all six
+    Load every real artifact for episode_id from disk and run all seven
     capability checks against the actual files. Never trusts a JSON
     status/production_ready field as a substitute for inspecting the real
     output.
@@ -153,6 +153,7 @@ def run_production_output_gate(
     checks.append(_check_visual_playback(final_render_package, episode_dir, episode_id, log))
     checks.append(_check_thumbnail(thumbnail_package, assets_root))
     checks.append(_check_shorts_captions(final_render_package, narration_package, episode_dir, episode_id))
+    checks.append(_check_shorts_visual_coverage(final_render_package, episode_dir, episode_id))
     checks.append(_check_end_page(final_render_package, episode_dir, episode_id, log))
     checks.append(_check_artifact_compatibility(
         final_render_package, thumbnail_package, clip_evidence,
@@ -722,6 +723,169 @@ def _bright_pixel_fraction_in_caption_zone(mp4_path: Path, timestamp_s: float) -
             return None
         bright = sum(1 for p in pixels if p >= _CAPTION_BRIGHT_THRESHOLD)
         return bright / len(pixels)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# G. SHORTS VISUAL COVERAGE (2026-08-07 — Finding 2 root-cause fix)
+#
+# Real production defect found in ep_f3619022 Short 001: a coverage-fill
+# extra clip's provider-generated content faded to pure black partway
+# through (4.83s into an 8s clip, confirmed via blackdetect + frame
+# extraction against the real source files
+# .hypogeum-assets/episodes/ep_f3619022/video/sh_short_001/
+# sc_sh_short_001_s06__extra1.mp4). hypogeum.agents.video_renderer only
+# trims/stretches the LAST clip in a multi-clip beat (see its own
+# _build_ffmpeg_concat_command docstring) — every earlier clip plays in
+# full, unexamined, so that clip's black tail played on screen for ~3
+# seconds while narration and burned captions were still active, ending
+# the Short's rendered file in dead black instead of real content.
+#
+# hypogeum.source_enhancement.qualify_asset() now rejects a clip whose
+# trailing content is black (see that module's own change) BEFORE it can
+# ever be attached to a timeline — but that only prevents the defect for
+# clips generated after that fix exists. This check is the render-time,
+# pixel-level safety net: it inspects the ACTUAL rendered Short file
+# directly, independent of how or when any clip in it was produced, and
+# fails closed whenever real (non-black) visual coverage does not extend
+# through the Short's full caption/narration duration — never trims
+# captions/audio, never freezes/loops/pads with black to paper over a
+# gap; the canonical remedy is requesting additional valid visual
+# coverage and re-rendering.
+# ---------------------------------------------------------------------------
+
+_VISUAL_COVERAGE_BLACK_PIXEL_THRESHOLD = 8     # luma <= this counts as "black" (calibrated
+                                                 # against real ep_f3619022 frames: the
+                                                 # channel's own legitimately dark/moody shots
+                                                 # measure well below this fraction — see
+                                                 # _VISUAL_COVERAGE_MAX_BLACK_FRACTION)
+_VISUAL_COVERAGE_MAX_BLACK_FRACTION = 0.90     # a frame this predominantly black is a dead-air
+                                                 # defect, not a moody shot — real base-clip
+                                                 # frames from this channel's darkest genuine
+                                                 # content measured ~0.73 at the same threshold;
+                                                 # the real defect clip measured 1.00
+_VISUAL_COVERAGE_CHECK_LEAD_S = 0.3            # sample just before the required end, matching
+                                                 # _verify_burned_captions()'s own active_t pattern
+
+
+def _check_shorts_visual_coverage(
+    final_render_package: dict, episode_dir: Path, episode_id: str,
+) -> GateCheckResult:
+    if not final_render_package:
+        return GateCheckResult(
+            capability="G_SHORTS_VISUAL_COVERAGE", status="fail",
+            reason="no final_render_package found",
+            remediation="Run Assembly Agent before evaluating this gate.",
+        )
+    shorts = final_render_package.get("shorts_renders", [])
+    if not shorts:
+        return GateCheckResult(
+            capability="G_SHORTS_VISUAL_COVERAGE", status="pass",
+            reason="no Shorts in this render to check",
+            evidence={}, remediation="",
+        )
+
+    per_short: List[dict] = []
+    failures: List[str] = []
+    for i, short in enumerate(shorts):
+        short_id = short.get("short_id", f"sh_{i:03d}")
+        mp4_path = episode_dir / f"short_{i}_{episode_id}.mp4"
+        srt_asset_id = short.get("caption_asset_id", "")
+        srt_path = (episode_dir.parent.parent / f"{srt_asset_id}.srt") if srt_asset_id else None
+
+        if not mp4_path.exists():
+            failures.append(short_id)
+            per_short.append({"short_id": short_id, "status": "fail", "reason": "rendered file missing"})
+            continue
+        if not srt_path or not srt_path.exists():
+            failures.append(short_id)
+            per_short.append({"short_id": short_id, "status": "fail", "reason": "no caption SRT on disk"})
+            continue
+
+        verdict = _verify_visual_coverage_spans_captions(mp4_path, srt_path)
+        per_short.append({"short_id": short_id, **verdict})
+        if verdict["status"] != "pass":
+            failures.append(short_id)
+
+    if failures:
+        return GateCheckResult(
+            capability="G_SHORTS_VISUAL_COVERAGE",
+            status="fail",
+            reason=(
+                f"{len(failures)}/{len(shorts)} Short(s) show black/dead visual coverage "
+                f"before their required caption duration ends"
+            ),
+            evidence={"per_short": per_short},
+            remediation=(
+                "Request additional valid visual coverage for the affected beat "
+                "(coverage-fill/regeneration) and re-render — never trim audio/"
+                "captions or pad the gap with black, a frozen frame, a loop, or "
+                "reversed/slowed footage."
+            ),
+        )
+    return GateCheckResult(
+        capability="G_SHORTS_VISUAL_COVERAGE", status="pass",
+        reason=f"non-black visual coverage confirmed through the full caption duration on all {len(shorts)} Short(s)",
+        evidence={"per_short": per_short}, remediation="",
+    )
+
+
+def _verify_visual_coverage_spans_captions(mp4_path: Path, srt_path: Path) -> dict:
+    """
+    Real-output proof: the rendered video must still show real (non-black)
+    content at the moment the LAST caption cue is active — not just
+    somewhere earlier in the file. Extracts a frame just before the last
+    cue ends and verifies it is not predominantly black.
+    """
+    from hypogeum.agents.video_renderer import _parse_srt_cues  # noqa: PLC0415
+
+    try:
+        cues = _parse_srt_cues(srt_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"status": "fail", "reason": f"could not parse SRT: {exc}"}
+    if not cues:
+        return {"status": "fail", "reason": "SRT has no cues to verify against"}
+
+    last_end_str = cues[-1][1]  # "H:MM:SS.cc"
+    required_end_s = _ass_time_to_seconds(last_end_str)
+    check_t = max(0.0, required_end_s - _VISUAL_COVERAGE_CHECK_LEAD_S)
+
+    black_frac = _black_pixel_fraction(mp4_path, check_t)
+    if black_frac is None:
+        return {"status": "fail", "reason": "could not extract/inspect the required-coverage frame"}
+
+    passed = black_frac < _VISUAL_COVERAGE_MAX_BLACK_FRACTION
+    return {
+        "status": "pass" if passed else "fail",
+        "reason": (
+            f"black-pixel fraction at required coverage point ({check_t:.2f}s, "
+            f"last caption ends {required_end_s:.2f}s): {black_frac:.4f} "
+            f"(threshold {_VISUAL_COVERAGE_MAX_BLACK_FRACTION})"
+        ),
+        "required_end_s": round(required_end_s, 2),
+        "checked_at_s": round(check_t, 2),
+    }
+
+
+def _black_pixel_fraction(mp4_path: Path, timestamp_s: float) -> Optional[float]:
+    try:
+        from PIL import Image
+        import io
+
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{max(0.0, timestamp_s):.3f}", "-i", str(mp4_path),
+             "-vframes", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        img = Image.open(io.BytesIO(result.stdout)).convert("L")
+        pixels = list(img.getdata())
+        if not pixels:
+            return None
+        black = sum(1 for p in pixels if p <= _VISUAL_COVERAGE_BLACK_PIXEL_THRESHOLD)
+        return black / len(pixels)
     except Exception:
         return None
 

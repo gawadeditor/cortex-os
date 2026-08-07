@@ -552,6 +552,202 @@ class TestShortsCaptionsCheck:
 
 
 # ---------------------------------------------------------------------------
+# G. SHORTS VISUAL COVERAGE (2026-08-07 — Finding 2 root-cause fix)
+#
+# Reproduces the real ep_f3619022 Short 001 defect directly: a beat's
+# non-last coverage clip faded to black partway through and, because
+# video_renderer only trims/stretches the LAST clip in a multi-clip beat,
+# played its black tail in full on screen while narration/captions were
+# still active. Confirmed against the real files: blackdetect measured
+# .hypogeum-assets/episodes/ep_f3619022/video/sh_short_001/
+# sc_sh_short_001_s06__extra1.mp4 going black at 4.83s of its 8s duration,
+# and the real rendered short_0_ep_f3619022.mp4 measured 99.92% black at
+# its required coverage point (0.30s before the last caption ends at
+# 85.50s) versus 39.02%/37.93% for the two unaffected Shorts (002/003).
+# ---------------------------------------------------------------------------
+
+class TestShortsVisualCoverageCheck:
+
+    def _write_srt(self, path: Path, cues: list[tuple[str, str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for i, (start, end, text) in enumerate(cues, start=1):
+            lines.append(f"{i}\n{start} --> {end}\n{text}\n")
+        path.write_text("\n".join(lines))
+
+    def test_passes_when_no_shorts_present(self, tmp_path):
+        assets_root, _ = _minimal_episode(tmp_path, "ep_novisual_shorts")
+        result = run_production_output_gate("ep_novisual_shorts", assets_root, MagicMock(), MagicMock())
+        check = next(c for c in result.checks if c.capability == "G_SHORTS_VISUAL_COVERAGE")
+        assert check.status == "pass"
+
+    def test_fails_when_black_tail_extends_into_required_caption_window(self, tmp_path):
+        """The exact Short 001 tail mismatch: 5s of real content followed
+        by 3s of pure black, with the last caption cue still active at
+        7.5s (well inside the black region) -- must fail."""
+        episode_id = "ep_shorts_black_tail"
+        assets_root, ep_dir = _minimal_episode(tmp_path, episode_id)
+
+        short_mp4 = ep_dir / f"short_0_{episode_id}.mp4"
+        short_mp4.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["ffmpeg", "-y",
+             "-f", "lavfi", "-i", "testsrc=s=1080x1920:r=30:d=5",
+             "-f", "lavfi", "-i", "color=c=black:s=1080x1920:r=30:d=3",
+             "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+             "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(short_mp4)],
+            capture_output=True, timeout=30,
+        )
+
+        srt_path = ep_dir / "captions" / "sh_sh_001.srt"
+        self._write_srt(srt_path, [
+            ("00:00:00,100", "00:00:02,000", "There is a passage in these tunnels"),
+            ("00:00:06,500", "00:00:07,500", "completely silent"),
+        ])
+
+        pkg_path = ep_dir / f"final_render_package_{episode_id}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["shorts_renders"] = [{
+            "short_id": "sh_001",
+            "video_asset_id": f"episodes/{episode_id}/short_0_{episode_id}",
+            "caption_asset_id": f"episodes/{episode_id}/captions/sh_sh_001",
+        }]
+        pkg_path.write_text(json.dumps(pkg))
+
+        result = run_production_output_gate(episode_id, assets_root, MagicMock(), MagicMock())
+        check = next(c for c in result.checks if c.capability == "G_SHORTS_VISUAL_COVERAGE")
+        assert check.status == "fail"
+        assert check.evidence["per_short"][0]["status"] == "fail"
+        assert not result.passed  # single failing capability fails the whole gate
+
+    def test_passes_when_real_content_covers_full_caption_duration(self, tmp_path):
+        """Same caption timing, but real (non-black) content runs the full
+        8s -- no defect, must pass."""
+        episode_id = "ep_shorts_full_coverage"
+        assets_root, ep_dir = _minimal_episode(tmp_path, episode_id)
+
+        short_mp4 = ep_dir / f"short_0_{episode_id}.mp4"
+        _make_clip(short_mp4, 1080, 1920, duration=8.0, source="testsrc")
+
+        srt_path = ep_dir / "captions" / "sh_sh_001.srt"
+        self._write_srt(srt_path, [
+            ("00:00:00,100", "00:00:02,000", "There is a passage in these tunnels"),
+            ("00:00:06,500", "00:00:07,500", "completely silent"),
+        ])
+
+        pkg_path = ep_dir / f"final_render_package_{episode_id}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["shorts_renders"] = [{
+            "short_id": "sh_001",
+            "video_asset_id": f"episodes/{episode_id}/short_0_{episode_id}",
+            "caption_asset_id": f"episodes/{episode_id}/captions/sh_sh_001",
+        }]
+        pkg_path.write_text(json.dumps(pkg))
+
+        result = run_production_output_gate(episode_id, assets_root, MagicMock(), MagicMock())
+        check = next(c for c in result.checks if c.capability == "G_SHORTS_VISUAL_COVERAGE")
+        assert check.status == "pass", check.evidence
+
+    def test_dark_but_not_black_content_is_not_misclassified(self, tmp_path):
+        """Guards against false positives on this channel's own legitimately
+        dark/moody visual identity: a uniform dark-gray frame (luma ~40,
+        well above the near-black threshold) covering the full caption
+        window must not be flagged as a black-tail defect."""
+        episode_id = "ep_shorts_dark_ok"
+        assets_root, ep_dir = _minimal_episode(tmp_path, episode_id)
+
+        short_mp4 = ep_dir / f"short_0_{episode_id}.mp4"
+        short_mp4.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x282828:s=1080x1920:r=30:d=8",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(short_mp4)],
+            capture_output=True, timeout=30,
+        )
+
+        srt_path = ep_dir / "captions" / "sh_sh_001.srt"
+        self._write_srt(srt_path, [
+            ("00:00:00,100", "00:00:02,000", "There is a passage in these tunnels"),
+            ("00:00:06,500", "00:00:07,500", "completely silent"),
+        ])
+
+        pkg_path = ep_dir / f"final_render_package_{episode_id}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["shorts_renders"] = [{
+            "short_id": "sh_001",
+            "video_asset_id": f"episodes/{episode_id}/short_0_{episode_id}",
+            "caption_asset_id": f"episodes/{episode_id}/captions/sh_sh_001",
+        }]
+        pkg_path.write_text(json.dumps(pkg))
+
+        result = run_production_output_gate(episode_id, assets_root, MagicMock(), MagicMock())
+        check = next(c for c in result.checks if c.capability == "G_SHORTS_VISUAL_COVERAGE")
+        assert check.status == "pass", check.evidence
+
+    def test_fails_when_short_file_missing(self, tmp_path):
+        episode_id = "ep_shorts_visual_missing_file"
+        assets_root, ep_dir = _minimal_episode(tmp_path, episode_id)
+
+        srt_path = ep_dir / "captions" / "sh_sh_001.srt"
+        self._write_srt(srt_path, [("00:00:00,100", "00:00:02,000", "text")])
+
+        pkg_path = ep_dir / f"final_render_package_{episode_id}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["shorts_renders"] = [{
+            "short_id": "sh_001",
+            "video_asset_id": f"episodes/{episode_id}/short_0_{episode_id}",
+            "caption_asset_id": f"episodes/{episode_id}/captions/sh_sh_001",
+        }]
+        pkg_path.write_text(json.dumps(pkg))
+
+        result = run_production_output_gate(episode_id, assets_root, MagicMock(), MagicMock())
+        check = next(c for c in result.checks if c.capability == "G_SHORTS_VISUAL_COVERAGE")
+        assert check.status == "fail"
+
+    def test_real_ep_f3619022_short_001_fixture_reproduction(self, tmp_path):
+        """Direct proof against the exact confirmed real-world case, using
+        the same ffprobe-measured timing found during the investigation:
+        a black tail landing exactly where ep_f3619022's own extra1 clip's
+        content went black (4.83s into an 8s clip) with a caption still
+        active until just before the beat ends."""
+        episode_id = "ep_shorts_real_repro"
+        assets_root, ep_dir = _minimal_episode(tmp_path, episode_id)
+
+        short_mp4 = ep_dir / f"short_0_{episode_id}.mp4"
+        short_mp4.parent.mkdir(parents=True, exist_ok=True)
+        # base clip (8s, clean) + extra1-shaped clip (4.83s real, 3.17s black)
+        subprocess.run(
+            ["ffmpeg", "-y",
+             "-f", "lavfi", "-i", "testsrc=s=1080x1920:r=30:d=8",
+             "-f", "lavfi", "-i", "testsrc2=s=1080x1920:r=30:d=4.83",
+             "-f", "lavfi", "-i", "color=c=black:s=1080x1920:r=30:d=3.17",
+             "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+             "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(short_mp4)],
+            capture_output=True, timeout=30,
+        )
+
+        srt_path = ep_dir / "captions" / "sh_sh_001.srt"
+        # Last cue ends at 15.5s -- inside the black tail (8 + 4.83 = 12.83
+        # is where black starts; file ends at 16.0s).
+        self._write_srt(srt_path, [
+            ("00:00:00,100", "00:00:02,000", "There is a passage in these tunnels"),
+            ("00:00:13,300", "00:00:15,500", "completely silent, nobody knows why"),
+        ])
+
+        pkg_path = ep_dir / f"final_render_package_{episode_id}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["shorts_renders"] = [{
+            "short_id": "sh_001",
+            "video_asset_id": f"episodes/{episode_id}/short_0_{episode_id}",
+            "caption_asset_id": f"episodes/{episode_id}/captions/sh_sh_001",
+        }]
+        pkg_path.write_text(json.dumps(pkg))
+
+        result = run_production_output_gate(episode_id, assets_root, MagicMock(), MagicMock())
+        check = next(c for c in result.checks if c.capability == "G_SHORTS_VISUAL_COVERAGE")
+        assert check.status == "fail", check.evidence
+
+
+# ---------------------------------------------------------------------------
 # E. END-PAGE CONTINUITY
 # ---------------------------------------------------------------------------
 
@@ -667,7 +863,7 @@ class TestGateAggregation:
     def test_passes_overall_only_when_every_capability_passes(self, tmp_path):
         assets_root, _ = _minimal_episode(tmp_path, "ep_all_pass")
         result = run_production_output_gate("ep_all_pass", assets_root, MagicMock(), MagicMock())
-        assert len(result.checks) == 6
+        assert len(result.checks) == 7  # A-G, including G_SHORTS_VISUAL_COVERAGE (2026-08-07)
         assert result.passed == all(c.status == "pass" for c in result.checks)
 
     def test_single_failing_capability_fails_the_whole_gate(self, tmp_path):
@@ -703,7 +899,7 @@ class TestGateAggregation:
         assert report_path.exists()
         report = json.loads(report_path.read_text())
         assert "passed" in report
-        assert len(report["checks"]) == 6
+        assert len(report["checks"]) == 7  # A-G, including G_SHORTS_VISUAL_COVERAGE (2026-08-07)
 
         # Also embedded into final_render_package.json.
         render_pkg = json.loads((ep_dir / f"final_render_package_{episode_id}.json").read_text())

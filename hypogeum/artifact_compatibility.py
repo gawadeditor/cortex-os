@@ -65,7 +65,7 @@ import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from hypogeum.topic_discovery import _make_canonical_subject
 
@@ -221,6 +221,30 @@ _DRY_RUN_MAX_SPREAD = 2.0  # YMAX-YMIN; a flat fill is 0, real footage is tens o
 # this checks the SOURCE clip's own pixel dimensions, never the final render's.
 REQUIRED_SOURCE_WIDTH = 1920
 REQUIRED_SOURCE_HEIGHT = 1080
+
+# Deliverable-aware required source resolution. hypogeum.source_enhancement
+# (committed 10ce0b4) imports required_source_resolution() unconditionally
+# at module load time to resolve the correct target per scene's
+# source_type — main_episode is landscape, a Short is portrait (1080x1920),
+# never the landscape default. Keyed by the same source_type string every
+# scene already carries (visual_package.scenes[].source_type —
+# "main_episode" | "short"; see hypogeum/schemas.py's _validate_visual_package).
+DELIVERABLE_RESOLUTION_POLICY: Dict[str, Tuple[int, int]] = {
+    "main_episode": (REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT),
+    "short": (1080, 1920),
+}
+
+
+def required_source_resolution(source_type: Optional[str]) -> Tuple[int, int]:
+    """
+    Canonical (required_width, required_height) for a deliverable, derived
+    from DELIVERABLE_RESOLUTION_POLICY by its source_type. An unrecognized
+    or missing source_type falls back to the policy's own "main_episode"
+    entry, read live from the table rather than a separate literal.
+    """
+    return DELIVERABLE_RESOLUTION_POLICY.get(
+        source_type, DELIVERABLE_RESOLUTION_POLICY["main_episode"]
+    )
 
 
 def probe_resolution(path: Path) -> Tuple[int, int]:
@@ -415,6 +439,7 @@ def evaluate_source_enhancement_compatibility(
     asset: dict,
     clip_path: Optional[Path],
     config,
+    source_type: Optional[str] = None,
 ) -> ArtifactCheckResult:
     """
     Decide whether a previously recorded source_enhancement outcome (see
@@ -437,8 +462,12 @@ def evaluate_source_enhancement_compatibility(
          matches the provider this asset was actually enhanced with.
       3. enhancement version   — the resolved provider's `.version` no
          longer matches what was recorded (same provider, bumped internally).
-      4. required source resolution — config.ENHANCEMENT_REQUIRED_WIDTH/
-         HEIGHT no longer matches what this asset was validated against.
+      4. required source resolution — required_source_resolution(source_type)
+         no longer matches what this asset was validated against (deliverable-
+         aware, not a single global constant — a Short's asset_manifest entry
+         carries no source_type of its own, so the caller must resolve it
+         from the owning scene and pass it in here; source_type=None
+         resolves to the landscape default).
 
     A clip with no source_enhancement record at all is not "incompatible"
     in the policy-drift sense this function evaluates — it simply hasn't
@@ -466,8 +495,7 @@ def evaluate_source_enhancement_compatibility(
             f"tier {tier_used} currently maps to {current_model!r}"
         )
 
-    required_width = getattr(config, "ENHANCEMENT_REQUIRED_WIDTH", REQUIRED_SOURCE_WIDTH)
-    required_height = getattr(config, "ENHANCEMENT_REQUIRED_HEIGHT", REQUIRED_SOURCE_HEIGHT)
+    required_width, required_height = required_source_resolution(source_type)
     if se.get("required_width") != required_width or se.get("required_height") != required_height:
         reasons.append(
             f"required source resolution policy changed: recorded "

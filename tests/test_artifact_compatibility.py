@@ -473,3 +473,99 @@ class TestResolutionCompliance:
         assert is_resolution_compliant_clip(upscaled_render) is True
         from hypogeum.artifact_compatibility import probe_resolution
         assert probe_resolution(upscaled_render) == (1920, 1080)
+
+
+# ---------------------------------------------------------------------------
+# TestRequiredSourceResolution
+#
+# Regression coverage for a release-blocking repository defect: commit
+# 10ce0b4 added an unconditional, module-load-time import of
+# required_source_resolution() to hypogeum/source_enhancement.py, but the
+# function itself was never committed to hypogeum/artifact_compatibility.py
+# -- it existed only in an uncommitted local WIP diff. Any environment that
+# checked out 10ce0b4 (or any later commit) without that WIP present could
+# not even import hypogeum.source_enhancement, let alone run it. Discovered
+# when a controlled regeneration validation stashed all uncommitted WIP to
+# get a HEAD-only environment and hypogeum.source_enhancement failed to
+# import. These tests pin both the symbol's existence and
+# hypogeum.source_enhancement's importability so this exact defect mode
+# (a committed dependency on an uncommitted symbol) cannot silently recur.
+# ---------------------------------------------------------------------------
+
+class TestRequiredSourceResolution:
+
+    def test_source_enhancement_imports_successfully(self):
+        """The exact failure mode this regression guards: hypogeum.
+        source_enhancement's module-level import of required_source_
+        resolution must succeed standalone, with no other module needing
+        to be imported first to populate it as a side effect."""
+        import importlib
+        import hypogeum.source_enhancement as se
+        importlib.reload(se)  # force a fresh top-level import, not a cached module
+
+    def test_required_source_resolution_exists_and_is_callable(self):
+        from hypogeum.artifact_compatibility import required_source_resolution
+        assert callable(required_source_resolution)
+
+    def test_main_episode_resolves_to_landscape(self):
+        from hypogeum.artifact_compatibility import (
+            REQUIRED_SOURCE_HEIGHT,
+            REQUIRED_SOURCE_WIDTH,
+            required_source_resolution,
+        )
+        assert required_source_resolution("main_episode") == (
+            REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT,
+        )
+
+    def test_short_resolves_to_portrait(self):
+        from hypogeum.artifact_compatibility import required_source_resolution
+        assert required_source_resolution("short") == (1080, 1920)
+
+    def test_unrecognized_source_type_falls_back_to_main_episode(self):
+        from hypogeum.artifact_compatibility import (
+            REQUIRED_SOURCE_HEIGHT,
+            REQUIRED_SOURCE_WIDTH,
+            required_source_resolution,
+        )
+        assert required_source_resolution("some_future_deliverable_type") == (
+            REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT,
+        )
+
+    def test_none_source_type_falls_back_to_main_episode(self):
+        from hypogeum.artifact_compatibility import (
+            REQUIRED_SOURCE_HEIGHT,
+            REQUIRED_SOURCE_WIDTH,
+            required_source_resolution,
+        )
+        assert required_source_resolution(None) == (
+            REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT,
+        )
+
+    def test_evaluate_video_clip_compatibility_signature_unchanged(self):
+        """Scope guard: this fix must not touch evaluate_video_clip_
+        compatibility's signature (a separate, unrelated WIP change on the
+        same file) -- it must still take exactly one required argument."""
+        import inspect
+        from hypogeum.artifact_compatibility import evaluate_video_clip_compatibility
+
+        params = inspect.signature(evaluate_video_clip_compatibility).parameters
+        assert list(params.keys()) == ["clip_path"]
+
+    def test_is_resolution_compliant_clip_still_defaults_to_landscape(self, tmp_path):
+        """No unrelated behaviour change: existing callers of
+        is_resolution_compliant_clip() with no explicit width/height still
+        get the original landscape default."""
+        from hypogeum.artifact_compatibility import (
+            REQUIRED_SOURCE_HEIGHT,
+            REQUIRED_SOURCE_WIDTH,
+            is_resolution_compliant_clip,
+        )
+
+        clip_path = tmp_path / "sc_default.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             f"-i", f"color=c=gray:s={REQUIRED_SOURCE_WIDTH}x{REQUIRED_SOURCE_HEIGHT}:r=30:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip_path)],
+            capture_output=True, timeout=30,
+        )
+        assert is_resolution_compliant_clip(clip_path) is True

@@ -36,11 +36,17 @@ from hypogeum.agents.cinematic_director import (
     _COMPACT_ENUM_VOCAB,
     _COMPACT_FREE_TEXT_FIELDS,
     _MAX_TOKENS_REGEN,
+    _STRUCTURED_ENUM_PROPERTY_NAMES,
+    _STRUCTURED_OUTPUT_PROVIDER,
+    _build_structured_response_format,
     _decode_code_part,
     _decode_enum_code,
     _expand_compact_plan,
+    _no_duplicate_keys_object_pairs_hook,
+    _structured_payload_to_compact,
     authoritative_beat_ids,
     authoritative_beat_texts,
+    build_structured_coverage_plan_schema,
     compute_shot_budget,
     estimate_beat_duration_seconds,
     regenerate_cinematic_coverage_plan,
@@ -792,7 +798,10 @@ def _compact_codes(**field_overrides) -> dict:
     vocabulary value by default, with per-field overrides by full schema
     name (e.g. _compact_codes(camera_movement="orbital_arc")). Built from
     the real _COMPACT_CODE_PARTS/_COMPACT_ENUM_VOCAB so these fixtures can
-    never silently drift from the actual decode tables."""
+    never silently drift from the actual decode tables. Used only by
+    TestCompactWireFormat below, which tests _expand_compact_plan() (the
+    compact <-> canonical layer, unchanged by the structured-output work)
+    directly."""
     parts = {}
     for part_key, fields in _COMPACT_CODE_PARTS.items():
         letters = []
@@ -816,28 +825,68 @@ def _compact_shot(**overrides) -> dict:
     return base
 
 
-def _matching_compact_response() -> dict:
-    """Compact wire-format response whose shot counts exactly match the
+def _structured_shot(**overrides) -> dict:
+    """A valid structured-output shot object: the ten enum-coded fields at
+    their vocabulary's first letter by default (built from the real
+    _STRUCTURED_ENUM_PROPERTY_NAMES/_COMPACT_ENUM_VOCAB), plus the required
+    free-text/lens properties using "" as the "not applicable" sentinel.
+    Overrides may use either a full schema field name (e.g.
+    camera_angle="high_angle", resolved to the right property+letter) or a
+    raw structured property key directly (e.g. dep="Z", subj="...") for
+    constructing malformed fixtures."""
+    shot: dict = {}
+    remaining = dict(overrides)
+    for field in _COMPACT_CODE_FIELDS:
+        prop = _STRUCTURED_ENUM_PROPERTY_NAMES[field]
+        if field in remaining:
+            idx = _COMPACT_ENUM_VOCAB[field].index(remaining.pop(field))
+            shot[prop] = chr(65 + idx)
+        else:
+            shot[prop] = "A"
+    shot.update({
+        "func": "distinct contribution this shot alone makes",
+        "subj": "x",
+        "act": "", "fram": "", "light": "", "dup": "", "lens": "A",
+    })
+    shot.update(remaining)
+    return shot
+
+
+def _structured_beat(pattern: str, shots: list) -> dict:
+    """shots is a list of shot dicts; slot keys s01..sNN are assigned by
+    list position, matching regenerate_cinematic_coverage_plan()'s own
+    contract."""
+    return {
+        "pattern": pattern,
+        "shots": {f"s{i:02d}": shot for i, shot in enumerate(shots, start=1)},
+    }
+
+
+def _matching_structured_response() -> dict:
+    """Structured wire-format response whose shot counts exactly match the
     arithmetic _make_small_narration_package() implies (1, 3, 1)."""
-    return {"beats": [
-        {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
-        {"beat_id": "b_002", "pattern": "A", "shots": [
-            _compact_shot(**_compact_codes(camera_angle="eye_level")),
-            _compact_shot(**_compact_codes(camera_angle="low_angle")),
-            _compact_shot(**_compact_codes(camera_angle="high_angle")),
-        ]},
-        {"beat_id": "b_s01", "pattern": "A", "shots": [_compact_shot()]},
-    ]}
+    return {"beats": {
+        "b_001": _structured_beat("A", [_structured_shot()]),
+        "b_002": _structured_beat("A", [
+            _structured_shot(camera_angle="eye_level"),
+            _structured_shot(camera_angle="low_angle"),
+            _structured_shot(camera_angle="high_angle"),
+        ]),
+        "b_s01": _structured_beat("A", [_structured_shot()]),
+    }}
 
 
-def _mismatched_compact_response() -> dict:
+def _mismatched_structured_response() -> dict:
     """Same beats, but b_002 gets only 1 shot instead of the required 3 --
-    an arithmetic mismatch that must be rejected."""
-    return {"beats": [
-        {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
-        {"beat_id": "b_002", "pattern": "A", "shots": [_compact_shot()]},
-        {"beat_id": "b_s01", "pattern": "A", "shots": [_compact_shot()]},
-    ]}
+    an arithmetic mismatch that must be rejected. Strict structured output
+    is contracted by the provider to make this shape unsatisfiable at the
+    API level, but this fixture exercises the defensive fallback check in
+    _structured_payload_to_compact() for the case where it arrives anyway."""
+    return {"beats": {
+        "b_001": _structured_beat("A", [_structured_shot()]),
+        "b_002": _structured_beat("A", [_structured_shot()]),
+        "b_s01": _structured_beat("A", [_structured_shot()]),
+    }}
 
 
 class TestRegenerateCinematicCoveragePlan:
@@ -900,7 +949,7 @@ class TestRegenerateCinematicCoveragePlan:
         vp = _make_small_visual_package()
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_matching_compact_response()))) as mock_cc:
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
@@ -908,24 +957,93 @@ class TestRegenerateCinematicCoveragePlan:
         assert mock_cc.call_count == 1
         assert result["status"] == "installed"
 
-    def test_max_tokens_never_exceeds_16000(self, tmp_path):
-        """The call must request at most _MAX_TOKENS_REGEN (16,000) -- no
-        raising past it, no streaming flag, no batching."""
+    def test_max_tokens_is_24000_with_verified_margin(self, tmp_path):
+        """16,000 was sized for the packed code1/code2 format; the stricter
+        slot-key structured format measures ~19,259 estimated tokens for a
+        representative 130-shot response, so the ceiling for this isolated
+        call was raised to 24,000 (~4,741 tokens of margin) -- verified
+        against OpenRouter endpoint metadata showing every structured-
+        outputs-capable route for this model supports max_completion_tokens
+        of 128,000, far above this ceiling."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
         vp = _make_small_visual_package()
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_matching_compact_response()))) as mock_cc:
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))) as mock_cc:
             regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
 
         assert mock_cc.call_args.kwargs["max_tokens"] == _MAX_TOKENS_REGEN
-        assert _MAX_TOKENS_REGEN <= 16_000
+        assert _MAX_TOKENS_REGEN == 24_000
 
-    def test_invalid_candidate_preserves_old_plan_and_backup(self, tmp_path):
+    def test_response_format_is_strict_json_schema(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        rf = mock_cc.call_args.kwargs["response_format"]
+        assert rf["type"] == "json_schema"
+        assert rf["json_schema"]["strict"] is True
+        assert rf["json_schema"]["name"] == "cinematic_coverage_plan"
+        assert isinstance(rf["json_schema"]["schema"], dict)
+
+    def test_provider_require_parameters_true_no_pinning_or_fallback_override(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        provider = mock_cc.call_args.kwargs["provider"]
+        assert provider == {"require_parameters": True}
+        # No pinning/ordering/allow-listing/deny-listing/fallback-override keys.
+        for forbidden_key in ("order", "only", "ignore", "allow_fallbacks"):
+            assert forbidden_key not in provider
+
+    def test_different_model_fallback_disabled_for_this_call(self, tmp_path):
+        """allow_model_fallback=False must be passed -- a schema built for
+        anthropic/claude-sonnet-4.6 must never silently be sent to a
+        different model via config.OPENROUTER_FALLBACK_MODEL."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_args.kwargs["allow_model_fallback"] is False
+
+    def test_undercounted_beat_preserves_old_plan_and_backup(self, tmp_path):
+        """Under the structured-output slot-key schema, a beat with fewer
+        shots than its authoritative budget (the exact b_014 4-vs-5 failure
+        observed live) is now caught earlier than before: _structured_
+        payload_to_compact()'s own slot-key check rejects it as
+        malformed_output during conversion, before the downstream
+        arithmetic-mismatch check would ever run -- strictly earlier
+        detection of the same defect, not a weaker one. The downstream
+        arithmetic check remains in place (defense in depth for any other
+        code path that might reach it) but is no longer reachable via this
+        specific structured-response shape, since both checks now derive
+        from the same expected_shot_budget_by_beat_id source of truth."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -936,13 +1054,14 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_mismatched_compact_response()))):
+                   return_value=_make_call_result(json.dumps(_mismatched_structured_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
 
         assert result["status"] == "rejected"
-        assert "arithmetic_mismatch" in result["reason"]
+        assert "malformed_output" in result["reason"]
+        assert "slot keys" in result["reason"]
         # Active plan on disk is byte-for-byte the original -- never touched.
         assert json.loads(ckpt.read_text()) == original
         assert result["plan"] == original
@@ -975,8 +1094,7 @@ class TestRegenerateCinematicCoveragePlan:
     def test_truncated_response_preserves_old_plan(self, tmp_path):
         """A TruncatedResponse (finish_reason == 'length') is exactly the
         failure this whole correction exists to prevent for a
-        representative response -- but if it ever happens anyway (a
-        genuinely oversized candidate slipping past the budget), it must
+        representative response -- but if it ever happens anyway, it must
         still fail closed like any other llm_call_failed condition."""
         from hypogeum.openrouter import TruncatedResponse
 
@@ -989,7 +1107,7 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         with patch("hypogeum.openrouter.call_claude",
-                   side_effect=TruncatedResponse(16_000, 16_000)):
+                   side_effect=TruncatedResponse(_MAX_TOKENS_REGEN, _MAX_TOKENS_REGEN)):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
@@ -1018,9 +1136,9 @@ class TestRegenerateCinematicCoveragePlan:
         assert json.loads(ckpt.read_text()) == original
         assert not (tmp_path / "cinematic_coverage_plan_ep_regen.candidate.json").exists()
 
-    def test_invalid_enum_code_preserves_old_plan(self, tmp_path):
-        """A code that decodes to nothing (out of range for its field) is
-        malformed output, not a value this function silently repairs."""
+    def test_duplicate_json_keys_rejected_before_expansion(self, tmp_path):
+        """A raw response containing a duplicate JSON key must be rejected
+        -- never silently collapsed to its last occurrence."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -1029,8 +1147,38 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         ckpt.write_text(json.dumps(original))
 
-        bad_response = _matching_compact_response()
-        bad_response["beats"][0]["shots"][0]["code1"] = "ZZZZZ"  # all out of range
+        raw_with_duplicate_key = (
+            '{"beats": {"b_001": {"pattern": "A", "shots": {"s01": {}}}, '
+            '"b_001": {"pattern": "A", "shots": {"s01": {}}}}}'
+        )
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(raw_with_duplicate_key)):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_invalid_enum_value_preserves_old_plan(self, tmp_path):
+        """The exact real-world failure observed live: an out-of-vocabulary
+        letter for background_depth (only A/B/C are valid). Under strict
+        structured output this specific value is supposed to be
+        unsatisfiable at the API level (background_depth's schema enum is
+        literally ["A","B","C"]), but this fixture proves the defensive
+        fallback check still catches it if it ever arrives anyway."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        bad_response = _matching_structured_response()
+        bad_response["beats"]["b_001"]["shots"]["s01"]["dep"] = "Z"  # out of range
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1042,11 +1190,9 @@ class TestRegenerateCinematicCoveragePlan:
         assert "malformed_output" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
 
-    def test_missing_character_in_code_part_preserves_old_plan(self, tmp_path):
-        """The exact real-world failure this correction exists for: a
-        response with one character dropped from a packed code part (4
-        instead of 5). Must fail closed through the full regeneration path
-        -- never repaired by shifting, padding, defaulting, or inference."""
+    def test_missing_enum_property_preserves_old_plan(self, tmp_path):
+        """A shot missing one of its ten required enum properties entirely
+        -- never defaulted, padded, or inferred."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -1055,8 +1201,8 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         ckpt.write_text(json.dumps(original))
 
-        bad_response = _matching_compact_response()
-        bad_response["beats"][0]["shots"][0]["code2"] = "AAAA"  # one character short
+        bad_response = _matching_structured_response()
+        del bad_response["beats"]["b_001"]["shots"]["s01"]["dep"]
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1067,11 +1213,11 @@ class TestRegenerateCinematicCoveragePlan:
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
-        assert not (tmp_path / "cinematic_coverage_plan_ep_regen.candidate.json").exists()
 
-    def test_missing_code_part_key_preserves_old_plan(self, tmp_path):
-        """Omitting 'code2' entirely (not just shortening it) must also
-        fail closed -- a missing part is never defaulted or inferred."""
+    def test_wrong_slot_keys_preserves_old_plan(self, tmp_path):
+        """A beat whose shots object doesn't have exactly its authoritative
+        s01..sNN slot keys (here: b_001 emitted with zero shots) must fail
+        closed -- never synthesized or defaulted."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -1080,8 +1226,30 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         ckpt.write_text(json.dumps(original))
 
-        bad_response = _matching_compact_response()
-        del bad_response["beats"][0]["shots"][0]["code2"]
+        bad_response = _matching_structured_response()
+        bad_response["beats"]["b_001"]["shots"] = {}
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(bad_response))):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_missing_beat_preserves_old_plan(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        bad_response = _matching_structured_response()
+        del bad_response["beats"]["b_002"]
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1105,8 +1273,8 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         ckpt.write_text(json.dumps(original))
 
-        bad_response = _matching_compact_response()
-        del bad_response["beats"][0]["shots"][0]["subj"]
+        bad_response = _matching_structured_response()
+        del bad_response["beats"]["b_001"]["shots"]["s01"]["subj"]
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1119,6 +1287,8 @@ class TestRegenerateCinematicCoveragePlan:
         assert json.loads(ckpt.read_text()) == original
 
     def test_valid_candidate_atomically_installed(self, tmp_path):
+        """End-to-end proof: a structured response converts deterministically
+        through code1/code2 into the unchanged canonical plan shape."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -1127,8 +1297,8 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         original["notes"] = ["ORIGINAL"]
         ckpt.write_text(json.dumps(original))
-        new_response = _matching_compact_response()
-        new_response["beats"][0]["shots"][0]["subj"] = "REGENERATED_MARKER"
+        new_response = _matching_structured_response()
+        new_response["beats"]["b_001"]["shots"]["s01"]["subj"] = "REGENERATED_MARKER"
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(new_response))):
@@ -1159,7 +1329,7 @@ class TestRegenerateCinematicCoveragePlan:
             raise AssertionError("regenerate_cinematic_coverage_plan must never reach this")
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_matching_compact_response()))), \
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))), \
              patch("hypogeum.agents.shot_diversity_planner.run_shot_diversity_planner",
                    side_effect=_must_not_be_called), \
              patch("hypogeum.muapi.submit_scene", side_effect=_must_not_be_called), \
@@ -1183,7 +1353,7 @@ class TestRegenerateCinematicCoveragePlan:
         vp = _make_small_visual_package()
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
@@ -1198,7 +1368,7 @@ class TestRegenerateCinematicCoveragePlan:
         vp = _make_small_visual_package()
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
                 fixture_verification={
@@ -1225,7 +1395,7 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
                 fixture_verification={"expected_total_shots": 999},
@@ -1236,23 +1406,266 @@ class TestRegenerateCinematicCoveragePlan:
         assert json.loads(ckpt.read_text()) == original
 
     def test_no_temp_dirs_or_video_tree_artifacts(self, tmp_path):
-        """Regeneration must never write anywhere under video/, and (since
-        this correction removed the old tempfile.mkdtemp() redirection
-        entirely -- call_claude() has no disk side effect of its own) must
-        never leave any .coverage_regen_* directory behind either."""
+        """Regeneration must never write anywhere under video/, and must
+        never leave any .coverage_regen_* directory behind."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
         vp = _make_small_visual_package()
 
         with patch("hypogeum.openrouter.call_claude",
-                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
             regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
 
         assert not (tmp_path / "video").exists()
         assert list(tmp_path.glob(".coverage_regen_*")) == []
+
+
+# ---------------------------------------------------------------------------
+# TestStructuredCoverageSchema (2026-08-09)
+#
+# Direct tests of the strict-structured-output JSON Schema generator and the
+# structured <-> compact converter, independent of the full regenerate_
+# cinematic_coverage_plan() mocked-call flow above -- proves the schema
+# itself structurally enforces cardinality/enum correctness, and that a
+# representative response converts and installs correctly.
+# ---------------------------------------------------------------------------
+
+def _representative_47_beat_arithmetic():
+    main_shot_counts = [3, 3, 3, 3, 2, 4, 1, 3, 3, 3, 5, 2, 3, 5, 4,
+                         3, 3, 2, 4, 2, 3, 4, 4, 4, 1, 3, 5, 4, 6]
+    short_shot_counts = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2]
+    authoritative_order = (
+        [f"b_{i:03d}" for i in range(1, len(main_shot_counts) + 1)]
+        + [f"b_s{i:02d}" for i in range(1, len(short_shot_counts) + 1)]
+    )
+    shot_budget_by_beat_id = dict(zip(
+        authoritative_order, main_shot_counts + short_shot_counts,
+    ))
+    return authoritative_order, shot_budget_by_beat_id, len(main_shot_counts)
+
+
+def _walk_schema_objects(node):
+    """Yield every object-typed node (with its own properties/required) in
+    the schema tree, including $defs -- used by several structural tests
+    below."""
+    if isinstance(node, dict):
+        if node.get("type") == "object" and "properties" in node:
+            yield node
+            for sub in node["properties"].values():
+                yield from _walk_schema_objects(sub)
+        for sub in node.get("$defs", {}).values():
+            yield from _walk_schema_objects(sub)
+
+
+class TestStructuredCoverageSchema:
+
+    def test_exactly_47_required_beat_properties_in_authoritative_order(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        assert len(schema["required"]) == 47
+        assert set(schema["properties"].keys()) == set(authoritative_order)
+        assert schema["required"] == authoritative_order
+        assert list(schema["properties"].keys()) == authoritative_order
+
+    def test_schema_never_uses_array_type(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        def assert_no_arrays(node):
+            if isinstance(node, dict):
+                assert node.get("type") != "array", f"found an array-typed node: {node}"
+                for v in node.values():
+                    assert_no_arrays(v)
+            elif isinstance(node, list):
+                for item in node:
+                    assert_no_arrays(item)
+
+        assert_no_arrays(schema)
+
+    def test_b014_style_beat_requires_exactly_s01_through_s05(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        b_014_budget = budget["b_014"]
+        assert b_014_budget == 5  # confirms this is the real b_014 arithmetic
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        shots_schema = schema["properties"]["b_014"]["properties"]["shots"]
+        assert shots_schema["required"] == ["s01", "s02", "s03", "s04", "s05"]
+        assert set(shots_schema["properties"].keys()) == {"s01", "s02", "s03", "s04", "s05"}
+        assert shots_schema["additionalProperties"] is False
+
+    def test_declared_slot_totals_match_95_35_130_arithmetic(self):
+        authoritative_order, budget, n_main = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        main_slots = sum(
+            len(schema["properties"][b]["properties"]["shots"]["required"])
+            for b in authoritative_order[:n_main]
+        )
+        short_slots = sum(
+            len(schema["properties"][b]["properties"]["shots"]["required"])
+            for b in authoritative_order[n_main:]
+        )
+        assert main_slots == 95
+        assert short_slots == 35
+        assert main_slots + short_slots == 130
+
+    def test_zero_optional_properties_anywhere(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        for obj_node in _walk_schema_objects(schema):
+            required = set(obj_node.get("required", []))
+            declared = set(obj_node.get("properties", {}).keys())
+            assert declared == required, f"optional property found: {declared - required}"
+
+    def test_additional_properties_false_everywhere(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        for obj_node in _walk_schema_objects(schema):
+            assert obj_node.get("additionalProperties") is False
+
+    def test_every_enum_position_restricted_to_authoritative_vocabulary(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+        shot_schema = schema["$defs"]["shot"]
+
+        for field, prop in _STRUCTURED_ENUM_PROPERTY_NAMES.items():
+            declared_enum = shot_schema["properties"][prop]["enum"]
+            expected_letters = [chr(65 + i) for i in range(len(_COMPACT_ENUM_VOCAB[field]))]
+            assert declared_enum == expected_letters
+
+    def test_background_depth_enum_excludes_f(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+        shot_schema = schema["$defs"]["shot"]
+        dep_prop = _STRUCTURED_ENUM_PROPERTY_NAMES["background_depth"]
+
+        assert shot_schema["properties"][dep_prop]["enum"] == ["A", "B", "C"]
+        assert "F" not in shot_schema["properties"][dep_prop]["enum"]
+
+    def test_no_unions_anywhere(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        def assert_no_unions(node):
+            if isinstance(node, dict):
+                assert not any(k in node for k in ("anyOf", "oneOf", "allOf"))
+                for v in node.values():
+                    assert_no_unions(v)
+            elif isinstance(node, list):
+                for item in node:
+                    assert_no_unions(item)
+
+        assert_no_unions(schema)
+
+    def test_duplicate_json_keys_rejected_directly(self):
+        with pytest.raises(ValueError):
+            json.loads(
+                '{"a": {"b_001": 1, "b_001": 2}}',
+                object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
+            )
+
+    def test_no_duplicate_keys_hook_is_transparent_for_valid_json(self):
+        parsed = json.loads(
+            '{"a": 1, "b": {"c": 2}}',
+            object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
+        )
+        assert parsed == {"a": 1, "b": {"c": 2}}
+
+    def test_structured_payload_converts_to_compact_shape(self):
+        authoritative = ["b_001"]
+        budget = {"b_001": 2}
+        structured = {"beats": {
+            "b_001": {
+                "pattern": "A",
+                "shots": {
+                    "s01": _structured_shot(subj="first"),
+                    "s02": _structured_shot(subj="second", camera_angle="high_angle"),
+                },
+            },
+        }}
+
+        compact = _structured_payload_to_compact(structured, authoritative, budget)
+
+        assert compact == {"beats": [
+            {"beat_id": "b_001", "pattern": "A", "shots": [
+                {
+                    "code1": "AAAAA", "code2": "AAAAA",
+                    "func": "distinct contribution this shot alone makes",
+                    "subj": "first", "act": "", "fram": "", "light": "",
+                    "dup": "", "lens": "A",
+                },
+                {
+                    # code1 = [shot_purpose, shot_scale, camera_angle,
+                    # camera_height, camera_direction] -- camera_angle is
+                    # position index 2, so "high_angle" (C) lands third.
+                    "code1": "AACAA", "code2": "AAAAA",
+                    "func": "distinct contribution this shot alone makes",
+                    "subj": "second", "act": "", "fram": "", "light": "",
+                    "dup": "", "lens": "A",
+                },
+            ]},
+        ]}
+
+    def test_representative_structured_response_expands_to_exact_95_35_130(self):
+        """Proves the full chain: structured payload -> compact -> the
+        unchanged _expand_compact_plan() -> canonical schema-valid plan,
+        with the real ep_f3619022 95/35/130 arithmetic reproduced exactly."""
+        authoritative_order, budget, n_main = _representative_47_beat_arithmetic()
+
+        beats_obj = {}
+        for beat_id in authoritative_order:
+            n = budget[beat_id]
+            shots_obj = {
+                f"s{i:02d}": _structured_shot() for i in range(1, n + 1)
+            }
+            beats_obj[beat_id] = {"pattern": "B" if n > 1 else "A", "shots": shots_obj}
+        structured_response = {"beats": beats_obj}
+
+        compact = _structured_payload_to_compact(structured_response, authoritative_order, budget)
+        measured_durations = {b: 20.0 for b in authoritative_order}
+        expanded = _expand_compact_plan(
+            compact, "ep_f3619022", authoritative_order, measured_durations, 8.0,
+        )
+        validate("cinematic_coverage_plan", expanded)
+
+        total_shots = sum(len(bp["shots"]) for bp in expanded["beat_plans"])
+        main_shots = sum(len(bp["shots"]) for bp in expanded["beat_plans"][:n_main])
+        short_shots = sum(len(bp["shots"]) for bp in expanded["beat_plans"][n_main:])
+        assert total_shots == 130
+        assert main_shots == 95
+        assert short_shots == 35
+
+    def test_structured_payload_missing_beat_fails_closed(self):
+        authoritative = ["b_001", "b_002"]
+        budget = {"b_001": 1, "b_002": 1}
+        structured = {"beats": {
+            "b_001": {"pattern": "A", "shots": {"s01": _structured_shot()}},
+        }}
+        with pytest.raises(ValueError):
+            _structured_payload_to_compact(structured, authoritative, budget)
+
+    def test_structured_payload_wrong_slot_keys_fails_closed(self):
+        authoritative = ["b_001"]
+        budget = {"b_001": 2}
+        structured = {"beats": {
+            "b_001": {"pattern": "A", "shots": {"s01": _structured_shot()}},  # missing s02
+        }}
+        with pytest.raises(ValueError):
+            _structured_payload_to_compact(structured, authoritative, budget)
+
+    def test_structured_payload_not_a_dict_fails_closed(self):
+        with pytest.raises(ValueError):
+            _structured_payload_to_compact([], ["b_001"], {"b_001": 1})
+        with pytest.raises(ValueError):
+            _structured_payload_to_compact({"beats": []}, ["b_001"], {"b_001": 1})
+
+
 
 
 # ---------------------------------------------------------------------------

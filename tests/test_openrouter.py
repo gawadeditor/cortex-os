@@ -292,6 +292,47 @@ class TestSuccessfulPath:
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert mock_post.call_args.args[0] == OPENROUTER_CHAT_URL
 
+    def test_response_format_omitted_by_default(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        assert "response_format" not in body
+
+    def test_provider_omitted_by_default(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        assert "provider" not in body
+
+    def test_response_format_forwarded_verbatim_when_provided(self):
+        cfg = make_config()
+        rf = {"type": "json_schema", "json_schema": {"name": "x", "strict": True, "schema": {}}}
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg, response_format=rf)
+        body = mock_post.call_args.kwargs["json"]
+        assert body["response_format"] == rf
+
+    def test_provider_forwarded_verbatim_when_provided(self):
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg, provider={"require_parameters": True})
+        body = mock_post.call_args.kwargs["json"]
+        assert body["provider"] == {"require_parameters": True}
+
+    def test_unrelated_caller_request_shape_and_max_tokens_unchanged(self):
+        """A plain call_claude() invocation (no response_format/provider/
+        allow_model_fallback) must still produce exactly the four original
+        keys -- proof this feature is fully additive for every existing
+        caller across the codebase."""
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200()) as mock_post:
+            call_claude(SONNET, MINIMAL_MESSAGES, 4096, cfg)
+        body = mock_post.call_args.kwargs["json"]
+        assert set(body.keys()) == {"model", "messages", "max_tokens", "temperature"}
+        assert body["max_tokens"] == 4096
+
 
 # ---------------------------------------------------------------------------
 # TestTokenAccounting
@@ -627,6 +668,55 @@ class TestOpenRouterModelFallback:
                 call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
         assert ANTHROPIC_MESSAGES_URL not in str(mock_post.call_args_list)
         assert openrouter_mod._use_anthropic_for_run is False
+
+    def test_allow_model_fallback_true_is_the_default_and_preserves_existing_behavior(self):
+        """Every existing caller (none of which passes allow_model_fallback)
+        must keep exactly today's behavior: retry exhaustion attempts the
+        configured different-model fallback."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        responses = [http_error(500), http_error(500), openrouter_200("from fallback model")]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)  # allow_model_fallback omitted
+        assert result.content == "from fallback model"
+        assert mock_post.call_count == 3
+
+    def test_allow_model_fallback_false_disables_different_model_fallback(self):
+        """A caller that opts out (e.g. a request whose response_format
+        schema is model-specific) must never be silently routed to a
+        different model on retry exhaustion — FallbackFailed immediately,
+        no third HTTP call, no different model slug ever sent."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        responses = [http_error(500), http_error(500)]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                with pytest.raises(FallbackFailed):
+                    call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg, allow_model_fallback=False)
+        assert mock_post.call_count == 2  # primary + 1 retry only -- no fallback-model attempt
+        for c in mock_post.call_args_list:
+            assert c.kwargs["json"]["model"] == SONNET  # never the fallback slug
+        assert ANTHROPIC_MESSAGES_URL not in str(mock_post.call_args_list)
+
+    def test_allow_model_fallback_false_does_not_alter_unrelated_calls(self):
+        """allow_model_fallback is per-call, not global -- a subsequent
+        ordinary call (no allow_model_fallback passed) still gets the
+        normal different-model fallback."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+
+        # First call: fallback disabled, fails after retry exhaustion.
+        with patch("hypogeum.openrouter.requests.post",
+                   side_effect=[http_error(500), http_error(500)]):
+            with patch("hypogeum.openrouter.time.sleep"):
+                with pytest.raises(FallbackFailed):
+                    call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg, allow_model_fallback=False)
+
+        # Second, unrelated call: default behavior, fallback model attempted normally.
+        responses = [http_error(500), http_error(500), openrouter_200("from fallback model")]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.content == "from fallback model"
+        assert mock_post.call_count == 3
 
 
 # ---------------------------------------------------------------------------

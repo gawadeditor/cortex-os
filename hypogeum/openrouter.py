@@ -277,11 +277,15 @@ def call_claude(
     config: Config,
     episode_id: Optional[str] = None,
     agent: Optional[str] = None,
+    response_format: Optional[dict] = None,
+    provider: Optional[dict] = None,
+    allow_model_fallback: bool = True,
 ) -> CallResult:
     """
     Call Claude via OpenRouter (primary), then config.OPENROUTER_FALLBACK_MODEL
-    through OpenRouter (fallback, one attempt, on primary retry exhaustion).
-    Anthropic direct is never called automatically — see module docstring.
+    through OpenRouter (fallback, one attempt, on primary retry exhaustion,
+    unless allow_model_fallback=False — see below). Anthropic direct is
+    never called automatically — see module docstring.
 
     The caller is responsible for passing the correct model_slug for the
     assigned agent (see openrouter-integration.md §5.A). This function does
@@ -296,6 +300,29 @@ def call_claude(
         config:      Loaded Config instance — provides API keys, app metadata.
         episode_id:  Current episode identifier for log correlation.
         agent:       Calling agent name for log attribution.
+        response_format: Optional OpenRouter/OpenAI-shaped response_format
+                     dict (e.g. {"type": "json_schema", "json_schema": {...}})
+                     forwarded verbatim into the request body. Omitted from
+                     the body entirely when None (the default) — existing
+                     callers that don't pass this get byte-for-byte the same
+                     request body as before this parameter existed.
+        provider:    Optional OpenRouter "provider" routing-preference dict
+                     (e.g. {"require_parameters": True}) forwarded verbatim
+                     into the request body. Omitted entirely when None.
+        allow_model_fallback: When True (the default — unchanged behavior
+                     for every existing caller), retry exhaustion on the
+                     primary model attempts exactly one call to
+                     config.OPENROUTER_FALLBACK_MODEL (a *different* model
+                     slug) as described above. When False, retry exhaustion
+                     raises FallbackFailed immediately instead — used by
+                     callers that must never silently substitute a
+                     different model (e.g. a request whose response_format
+                     schema was generated specifically for model_slug).
+                     This never disables OpenRouter's own provider-level
+                     routing/failover across compatible endpoints of the
+                     *same* model — that stays fully available via the
+                     `provider` parameter above and is orthogonal to this
+                     flag, which only gates the different-model fallback.
 
     Returns:
         CallResult on success.
@@ -359,6 +386,8 @@ def call_claude(
                 config=config,
                 log=log,
                 start_ms=start_ms,
+                response_format=response_format,
+                provider=provider,
             )
 
         except _AuthError:
@@ -383,6 +412,24 @@ def call_claude(
 
         except (_RetryableError, requests.exceptions.RequestException) as exc:
             if attempt >= RETRY_MAX:
+                if not allow_model_fallback:
+                    log.warn(
+                        "openrouter_model_fallback_activated",
+                        primary_model=model_slug,
+                        fallback_model=None,
+                        reason="retry_exhausted",
+                        success=False,
+                        fallback_disabled_by_caller=True,
+                    )
+                    raise FallbackFailed(
+                        f"OpenRouter primary model '{model_slug}' failed and retry "
+                        "budget is exhausted. Different-model fallback is disabled "
+                        "for this call (allow_model_fallback=False) — "
+                        "OpenRouter's own provider-level routing/failover across "
+                        "compatible endpoints of this same model was already "
+                        "available throughout the attempts above via the "
+                        "`provider` parameter and is now also exhausted."
+                    )
                 # Retry budget on the primary model is exhausted — attempt
                 # exactly one OpenRouter-native fallback (same endpoint,
                 # same credential, different model slug) instead of
@@ -395,6 +442,8 @@ def call_claude(
                     log=log,
                     start_ms=start_ms,
                     reason="retry_exhausted",
+                    response_format=response_format,
+                    provider=provider,
                 )
 
             retry_after = getattr(exc, "retry_after", None)
@@ -418,6 +467,8 @@ def _try_openrouter_model_fallback(
     log: Logger,
     start_ms: int,
     reason: str,
+    response_format: Optional[dict] = None,
+    provider: Optional[dict] = None,
 ) -> CallResult:
     """
     On primary-model retry exhaustion: attempt exactly one call to
@@ -462,6 +513,8 @@ def _try_openrouter_model_fallback(
             config=config,
             log=log,
             start_ms=start_ms,
+            response_format=response_format,
+            provider=provider,
         )
     except Exception as exc:
         log.warn(
@@ -564,6 +617,8 @@ def _call_openrouter(
     config: Config,
     log: Logger,
     start_ms: int,
+    response_format: Optional[dict] = None,
+    provider: Optional[dict] = None,
 ) -> CallResult:
     headers = _build_headers(config)
     body = {
@@ -572,6 +627,13 @@ def _call_openrouter(
         "max_tokens": max_tokens,
         "temperature": 0,
     }
+    # Both omitted entirely (not sent as null) when the caller doesn't pass
+    # them — every existing caller gets byte-for-byte the same body as
+    # before either parameter existed.
+    if response_format is not None:
+        body["response_format"] = response_format
+    if provider is not None:
+        body["provider"] = provider
 
     # Let requests.Timeout propagate — outer loop catches it
     resp = requests.post(

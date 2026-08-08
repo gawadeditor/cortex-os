@@ -86,13 +86,20 @@ _AGENT_NAME = "cinematic_director"
 _CLAUDE_SONNET = "anthropic/claude-sonnet-4.6"
 _MAX_TOKENS = 4_096
 
-# regenerate_cinematic_coverage_plan()'s own output-token ceiling (2026-08-08).
-# Fixed, non-streaming, single-call by design (see that function's docstring
-# for why: no streaming, no raising past 16,000, no per-batch planning). A
-# full-schema 130-shot/47-beat response does not fit this budget -- that is
-# exactly why that function requests the compact wire format below instead
-# of the full per-shot schema run_cinematic_director() uses.
-_MAX_TOKENS_REGEN = 16_000
+# regenerate_cinematic_coverage_plan()'s own output-token ceiling
+# (2026-08-08, raised 16,000 -> 24,000 same day). Fixed, non-streaming,
+# single-call by design (see that function's docstring for why: no
+# streaming, no per-batch planning). 16,000 was an operational budget sized
+# for the packed code1/code2 wire format, not a canonical architecture
+# constraint; it does not fit the stricter, individually-schema-enforced
+# slot-key structured-output format below (measured representative 130-shot
+# response: ~19,259 estimated tokens). 24,000 leaves ~4,741 tokens of
+# estimated margin. Verified (non-inference OpenRouter endpoint metadata,
+# 2026-08-08) that every structured-outputs-capable route behind
+# anthropic/claude-sonnet-4.6 (Anthropic native x2, Amazon Bedrock x2,
+# Azure) declares max_completion_tokens=128,000 -- comfortably above this
+# ceiling on every route provider.require_parameters=true could ever select.
+_MAX_TOKENS_REGEN = 24_000
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _PROMPT_FILE = _PROMPTS_DIR / "cinematic_director.txt"
@@ -1062,6 +1069,328 @@ def _expand_compact_plan(
     return {"episode_id": episode_id, "beat_plans": beat_plans}
 
 
+# ---------------------------------------------------------------------------
+# Structured-output (strict json_schema) wire format for
+# regenerate_cinematic_coverage_plan() (2026-08-08)
+#
+# Three consecutive live isolated-planning attempts against the prompt-only
+# compact format above each failed differently and safely (a dropped
+# packed-code character, an under-count shot array for one beat, an
+# out-of-vocabulary enum letter) -- proving prompt instructions plus
+# post-response validation alone are not reliable enough for this
+# high-cardinality artifact. This section constrains generation itself via
+# OpenRouter/Anthropic strict structured outputs (response_format:
+# {"type": "json_schema", "json_schema": {"strict": true, ...}}), verified
+# against Anthropic's own documented JSON Schema subset
+# (platform.claude.com/docs/en/build-with-claude/structured-outputs,
+# fetched live 2026-08-08) before any of this was written:
+#
+#   Supported:     object, array, string, integer, number, boolean, null;
+#                   enum (strings/numbers/bools/null only); const; anyOf/
+#                   allOf (limited); internal $ref/$def/definitions;
+#                   default; required; additionalProperties (must be
+#                   false); string formats; array minItems (0 or 1 only).
+#   Not supported:  array constraints beyond minItems of 0/1 (no maxItems,
+#                   no exact length at all), external $ref, recursive
+#                   schemas, numeric/string length constraints.
+#
+# Arrays therefore CANNOT enforce "beat b_014 has exactly 5 shots" -- there
+# is no maxItems and no minItems above 1. This module never represents
+# shots as an array. Instead, each beat's shots are an OBJECT with
+# deterministic slot keys ("s01".."sNN", exactly the beat's authoritative
+# shot budget), every slot key REQUIRED, additionalProperties: false. Since
+# JSON Schema requires every declared property to be present and forbids
+# any other property, this makes an incorrect shot count for beats
+# structurally unsatisfiable -- not merely instructed against -- using only
+# the confirmed-supported keywords above (object/properties/required/
+# additionalProperties/string/enum). The same technique makes the 47
+# authoritative beats a required, closed set of named top-level properties
+# (never an array), and makes each of the ten enum-coded shot fields (see
+# _COMPACT_CODE_FIELDS) its own required single-letter `enum`-constrained
+# property -- e.g. background_depth's property can only ever be "A", "B",
+# or "C"; "F" becomes unsatisfiable at the API level, not merely rejected
+# after the fact.
+#
+# The response this produces is a NEW, richer wire shape (slot-keyed
+# objects, one property per enum position) than the packed code1/code2
+# strings above. _structured_payload_to_compact() converts it, by pure
+# reshaping with no guessing or repair, into the exact same compact dict
+# shape (code1/code2/func/subj/act/fram/light/lens/dup) the prompt-only
+# path already produces -- so _expand_compact_plan() below runs completely
+# unmodified on the result, and the installed canonical plan's shape is
+# unaffected by any of this. This is a provider-facing wire-format change
+# only; every existing arithmetic/schema/fixture/atomic-install check still
+# runs, unchanged, on the expanded candidate.
+# ---------------------------------------------------------------------------
+
+# {full_schema_key: short structured-output property name} for the ten
+# enum-coded shot fields, in the same fixed order as _COMPACT_CODE_FIELDS.
+# Kept short because — unlike the schema itself, which is request-side and
+# does not count against the 16,000-token output ceiling — every property
+# NAME in the actual generated response is echoed back and does count.
+_STRUCTURED_ENUM_PROPERTY_NAMES: dict = {
+    "shot_purpose":     "pur",
+    "shot_scale":       "scl",
+    "camera_angle":     "ang",
+    "camera_height":    "hgt",
+    "camera_direction": "dir",
+    "camera_movement":  "mov",
+    "composition":      "cmp",
+    "background_depth": "dep",
+    "screen_direction":  "scr",
+    "motion_energy":    "nrg",
+}
+
+# Reverse lookup used by the converter below.
+_STRUCTURED_PROPERTY_TO_FIELD: dict = {
+    prop: field for field, prop in _STRUCTURED_ENUM_PROPERTY_NAMES.items()
+}
+
+# OpenRouter provider-routing filter for the structured-output request.
+# require_parameters: true tells OpenRouter to route only to endpoints that
+# actually support every parameter the request sends (here: response_format
+# with a json_schema payload) -- of the 7 OpenRouter endpoints behind
+# anthropic/claude-sonnet-4.6 (verified live 2026-08-08), the two Google
+# Vertex routes do not declare structured_outputs support and are excluded
+# by this filter automatically; the other 5 remain eligible, preserving
+# OpenRouter's normal load-balancing/fallback across all of them. No
+# provider is pinned, ordered, allow-listed, or deny-listed -- this is
+# strictly a capability filter, not a routing preference.
+_STRUCTURED_OUTPUT_PROVIDER: dict = {"require_parameters": True}
+
+
+def _structured_shot_schema() -> dict:
+    """JSON Schema (Anthropic strict-structured-outputs subset only) for one
+    shot: the ten enum-coded fields as individually-constrained single-
+    letter string properties (via _STRUCTURED_ENUM_PROPERTY_NAMES), plus the
+    same free-text/lens/dup fields the compact format already carries.
+    Strict mode has no concept of an optional property -- every property
+    below is required, and the free-text fields use "" as the explicit
+    "not applicable" sentinel, which _expand_compact_plan()'s existing
+    `if value not in (None, ""):` check already treats identically to an
+    omitted key. `lens` is always present too (default "A" = standard),
+    which only ever adds an always-populated, schema-optional
+    lens_character to the expanded shot -- never required downstream, so
+    this is a strictly additive, harmless change from the prompt-only
+    path's "omit if standard" convention."""
+    properties: dict = {}
+    required: list = []
+    for field in _COMPACT_CODE_FIELDS:
+        prop = _STRUCTURED_ENUM_PROPERTY_NAMES[field]
+        vocab = _COMPACT_ENUM_VOCAB[field]
+        properties[prop] = {
+            "type": "string",
+            "enum": [chr(65 + i) for i in range(len(vocab))],
+            "description": _format_enum_code_legend(field),
+        }
+        required.append(prop)
+
+    free_text_descriptions = {
+        "func": "narrative_function -- one sentence.",
+        "subj": "subject, terse.",
+        "act": "action, terse. Use \"\" if the shot is static.",
+        "fram": "framing, terse. Use \"\" if not distinct from subject.",
+        "light": "lighting_direction, terse. Use \"\" if none.",
+        "dup": (
+            "diversity_justification -- ONLY when intentionally repeating a "
+            "sibling shot's camera/composition attributes. Use \"\" otherwise."
+        ),
+    }
+    for prop, description in free_text_descriptions.items():
+        properties[prop] = {"type": "string", "description": description}
+        required.append(prop)
+
+    lens_vocab = _COMPACT_ENUM_VOCAB["lens_character"]
+    properties["lens"] = {
+        "type": "string",
+        "enum": [chr(65 + i) for i in range(len(lens_vocab))],
+        "description": (
+            _format_enum_code_legend("lens_character")
+            + " -- use \"A\" (standard) unless a specific lens character is intentional."
+        ),
+    }
+    required.append("lens")
+
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+_STRUCTURED_SHOT_REF = {"$ref": "#/$defs/shot"}
+
+
+def _structured_shots_schema(n_shots: int) -> dict:
+    """Object schema for one beat's shots: deterministic slot keys
+    "s01".."s{n_shots:02d}", every slot REQUIRED, additionalProperties:
+    False. No array, no minItems/maxItems -- exact cardinality is a direct
+    structural consequence of "every declared property is required and no
+    other property is allowed", both confirmed-supported keywords. Every
+    slot references the single shared "#/$defs/shot" definition (internal
+    $ref/$defs is confirmed supported by Anthropic's documented strict-mode
+    subset) rather than repeating the ~17-property shot schema inline at
+    each of up to 130 slots."""
+    slot_keys = [f"s{i:02d}" for i in range(1, n_shots + 1)]
+    return {
+        "type": "object",
+        "properties": {key: _STRUCTURED_SHOT_REF for key in slot_keys},
+        "required": slot_keys,
+        "additionalProperties": False,
+    }
+
+
+def _structured_beat_schema(n_shots: int) -> dict:
+    pattern_vocab = _COMPACT_ENUM_VOCAB["progression_pattern"]
+    return {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "enum": [chr(65 + i) for i in range(len(pattern_vocab))],
+                "description": _format_enum_code_legend("progression_pattern"),
+            },
+            "shots": _structured_shots_schema(n_shots),
+        },
+        "required": ["pattern", "shots"],
+        "additionalProperties": False,
+    }
+
+
+def build_structured_coverage_plan_schema(
+    authoritative_order: list,
+    shot_budget_by_beat_id: dict,
+) -> dict:
+    """Top-level JSON Schema for the structured-output Coverage Plan
+    request: an object whose properties are exactly the 47 authoritative
+    beat_ids (declared, in authoritative order, in `properties`; all listed
+    in `required`; additionalProperties: False), each beat carrying its own
+    exact per-beat shot-slot schema from shot_budget_by_beat_id. No array is
+    used anywhere in this schema -- see the module comment above for why.
+    The single shot schema lives once in $defs.shot; every shot slot at
+    every beat references it via "#/$defs/shot" instead of repeating it."""
+    properties: dict = {}
+    for beat_id in authoritative_order:
+        properties[beat_id] = _structured_beat_schema(shot_budget_by_beat_id[beat_id])
+    return {
+        "$defs": {"shot": _structured_shot_schema()},
+        "type": "object",
+        "properties": properties,
+        "required": list(authoritative_order),
+        "additionalProperties": False,
+    }
+
+
+def _build_structured_response_format(schema: dict) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "cinematic_coverage_plan",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _no_duplicate_keys_object_pairs_hook(pairs: list) -> dict:
+    """json.loads(object_pairs_hook=...) hook that raises ValueError on any
+    repeated key within the same JSON object, instead of silently keeping
+    only the last occurrence (the standard dict-building behavior). A
+    duplicate key is malformed output -- caught here, before it can ever
+    silently collapse into a single value during expansion."""
+    seen: set = set()
+    result: dict = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate JSON key {key!r} in structured response")
+        seen.add(key)
+        result[key] = value
+    return result
+
+
+def _structured_payload_to_compact(
+    structured: dict,
+    authoritative_order: list,
+    shot_budget_by_beat_id: dict,
+) -> dict:
+    """
+    Reshape a structured-output (slot-keyed, per-field-enum) response into
+    the exact compact dict shape _expand_compact_plan() already consumes
+    (code1/code2/func/subj/act/fram/light/lens/dup per shot, a plain list of
+    {"beat_id", "pattern", "shots"} beat dicts) -- pure reshaping, no
+    semantic value is read, altered, guessed, or repaired here.
+
+    Strict structured-output mode is contracted by the provider to make a
+    schema-violating response impossible, but this function does not trust
+    that contract blindly: it independently re-checks that every
+    authoritative beat is present exactly once and that every beat's slot
+    keys are exactly "s01".."s{budget:02d}" with no gaps or extras, raising
+    ValueError otherwise -- caught by the same malformed_output handling as
+    every other failure mode in regenerate_cinematic_coverage_plan().
+    _expand_compact_plan() then re-validates every code/value anyway, so
+    this is defense in depth, not the only check.
+    """
+    if not isinstance(structured, dict):
+        raise ValueError("structured response is not a JSON object")
+    beats_obj = structured.get("beats")
+    if not isinstance(beats_obj, dict):
+        raise ValueError("structured response missing a 'beats' object")
+
+    compact_beats = []
+    for beat_id in authoritative_order:
+        beat = beats_obj.get(beat_id)
+        if not isinstance(beat, dict):
+            raise ValueError(f"structured response missing beat {beat_id!r}")
+
+        shots_obj = beat.get("shots")
+        if not isinstance(shots_obj, dict):
+            raise ValueError(f"beat {beat_id!r} has no shots object")
+
+        expected_budget = shot_budget_by_beat_id[beat_id]
+        expected_slot_keys = [f"s{i:02d}" for i in range(1, expected_budget + 1)]
+        if sorted(shots_obj.keys()) != expected_slot_keys:
+            raise ValueError(
+                f"beat {beat_id!r} has slot keys {sorted(shots_obj.keys())!r}, "
+                f"expected exactly {expected_slot_keys!r}"
+            )
+
+        compact_shots = []
+        for slot_key in expected_slot_keys:
+            s = shots_obj[slot_key]
+            if not isinstance(s, dict):
+                raise ValueError(f"beat {beat_id!r} slot {slot_key!r} is not an object")
+            code1 = "".join(
+                s.get(_STRUCTURED_ENUM_PROPERTY_NAMES[field], "")
+                for field in _COMPACT_CODE_PARTS["code1"]
+            )
+            code2 = "".join(
+                s.get(_STRUCTURED_ENUM_PROPERTY_NAMES[field], "")
+                for field in _COMPACT_CODE_PARTS["code2"]
+            )
+            compact_shot = {"code1": code1, "code2": code2}
+            for key in ("func", "subj", "act", "fram", "light", "dup"):
+                compact_shot[key] = s.get(key, "")
+            compact_shot["lens"] = s.get("lens", "")
+            compact_shots.append(compact_shot)
+
+        compact_beats.append({
+            "beat_id": beat_id,
+            "pattern": beat.get("pattern"),
+            "shots": compact_shots,
+        })
+
+    return {"beats": compact_beats}
+
+
+_STRUCTURED_OUTPUT_CONTENT_NOTE = (
+    "Respond using exactly the JSON Schema provided via response_format -- structure and "
+    "every enum letter are already constrained by that schema; this note only covers "
+    "content. Each field's meaning is documented in its own schema property description. "
+    "Write genuinely differentiated, specific content for func/subj/act/fram/light on every "
+    "shot -- do not reuse the same phrase across shots in a beat."
+)
+
 def regenerate_cinematic_coverage_plan(
     script_package: dict,
     narration_package: Optional[dict],
@@ -1104,13 +1433,20 @@ def regenerate_cinematic_coverage_plan(
       3. Make at most one LLM call, non-streaming, capped at
          _MAX_TOKENS_REGEN (16,000 tokens) -- a full 130-shot/47-beat
          response does not fit that budget in the full per-shot schema
-         run_cinematic_director() uses, so this call requests a compact
-         wire format instead (see the "Compact wire format" module comment
-         above _expand_compact_plan()) and expands the response back to the
-         exact full canonical shape immediately after parsing, before any
-         validation runs. Calls hypogeum.openrouter.call_claude() directly
-         (not run_agent()) specifically so the compact response is never
-         checked against the full-schema validator until after expansion.
+         run_cinematic_director() uses, so this call requests strict
+         structured output instead (response_format: json_schema, strict;
+         provider.require_parameters=true — see the "Structured-output
+         wire format" module comment above _structured_payload_to_compact())
+         constraining generation itself to the exact 47 authoritative beats,
+         each beat's exact shot-slot count, and every enum position's
+         authoritative vocabulary. The response is reshaped by
+         _structured_payload_to_compact() into the same compact dict shape
+         the prompt-only path used to produce directly, then expanded back
+         to the exact full canonical shape by the unchanged
+         _expand_compact_plan(), before any schema validation runs. Calls
+         hypogeum.openrouter.call_claude() directly (not run_agent())
+         specifically so the response is never checked against the
+         full-schema validator until after reshaping and expansion.
          Nothing is written to disk until this function explicitly writes
          the expanded candidate itself, at
          cinematic_coverage_plan_{episode_id}.candidate.json.
@@ -1261,8 +1597,12 @@ def regenerate_cinematic_coverage_plan(
             "narrative_signals": scene.get("narrative_signals", []),
         })
 
+    structured_schema = build_structured_coverage_plan_schema(
+        authoritative, expected_shot_budget_by_beat_id,
+    )
+
     director_input = {
-        "task": "plan_cinematic_coverage_compact",
+        "task": "plan_cinematic_coverage_structured",
         "episode_metadata": {
             "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
             "total_beats": len(beats_for_director),
@@ -1270,17 +1610,29 @@ def regenerate_cinematic_coverage_plan(
         },
         "progression_patterns": list(PROGRESSION_PATTERNS),
         "beats": beats_for_director,
-        "output_format_override": _COMPACT_OUTPUT_INSTRUCTIONS,
+        "output_format_override": _STRUCTURED_OUTPUT_CONTENT_NOTE,
     }
 
-    # Single non-streaming call, compact wire format, fixed 16,000-token
-    # ceiling -- see _MAX_TOKENS_REGEN and the "Compact wire format" module
-    # comment above for why. No retry, no batching, no streaming: exactly
-    # one call_claude() invocation, matching what run_agent() would make,
-    # minus the schema-name-based validation (the compact response cannot
-    # pass hypogeum.schemas.validate("cinematic_coverage_plan", ...)
-    # directly -- it is validated only AFTER _expand_compact_plan() restores
-    # the full shape, a few lines below).
+    # Single non-streaming call, strict structured-output wire format,
+    # fixed _MAX_TOKENS_REGEN (24,000) ceiling -- see that constant and the
+    # "Structured-output" module comment above for why. No retry, no
+    # batching, no streaming: exactly one call_claude() invocation.
+    # response_format constrains generation itself (exact beat set, exact
+    # per-beat shot slots, exact per-position enum letters) via strict
+    # json_schema; provider.require_parameters=true excludes the two
+    # OpenRouter routes for this model that don't declare support for that
+    # parameter, without pinning, ordering, or allow/deny-listing any
+    # provider (see _STRUCTURED_OUTPUT_PROVIDER) -- OpenRouter's own
+    # provider-level routing/failover across the remaining compatible
+    # endpoints of this same model stays fully available.
+    # allow_model_fallback=False specifically disables call_claude()'s
+    # separate different-model fallback (config.OPENROUTER_FALLBACK_MODEL)
+    # for this call only -- a schema built for anthropic/claude-sonnet-4.6
+    # must never silently be sent to a different model. The structured
+    # response still cannot pass
+    # hypogeum.schemas.validate("cinematic_coverage_plan", ...) directly --
+    # it is reshaped by _structured_payload_to_compact() and then expanded
+    # by the unchanged _expand_compact_plan(), a few lines below.
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": json.dumps(director_input, ensure_ascii=False)},
@@ -1293,6 +1645,9 @@ def regenerate_cinematic_coverage_plan(
             config=config,
             episode_id=episode_id,
             agent=_AGENT_NAME,
+            response_format=_build_structured_response_format(structured_schema),
+            provider=_STRUCTURED_OUTPUT_PROVIDER,
+            allow_model_fallback=False,
         )
     except Exception as exc:  # noqa: BLE001 — any LLM/network/truncation failure
         return _rejected(f"llm_call_failed: {type(exc).__name__}: {exc}")
@@ -1307,9 +1662,12 @@ def regenerate_cinematic_coverage_plan(
 
     raw_content = _strip_markdown_fence(result.content)
     try:
-        compact = json.loads(raw_content)
-        if not isinstance(compact, dict):
-            raise ValueError(f"expected a JSON object, got {type(compact).__name__}")
+        structured = json.loads(
+            raw_content, object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
+        )
+        compact = _structured_payload_to_compact(
+            structured, authoritative, expected_shot_budget_by_beat_id,
+        )
         candidate = _expand_compact_plan(
             compact, episode_id, authoritative, measured_durations, provider_clip_duration,
         )

@@ -29,11 +29,13 @@ from hypogeum.agents.cinematic_director import (
     PROGRESSION_PATTERNS,
     SHOT_DIVERSITY_FIELDS,
     CoveragePlanDiversityError,
+    CoverageRegenerationError,
     NarrationCompletenessError,
     authoritative_beat_ids,
     authoritative_beat_texts,
     compute_shot_budget,
     estimate_beat_duration_seconds,
+    regenerate_cinematic_coverage_plan,
     run_cinematic_director,
     shot_diversity_key,
     validate_coverage_plan_diversity,
@@ -694,3 +696,325 @@ class TestValidateNarrationCompleteness:
         with pytest.raises(NarrationCompletenessError) as exc_info:
             validate_narration_completeness(sp, np)
         assert f"invalid_durations=[('{first_beat}'" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# TestRegenerateCinematicCoveragePlan (2026-08-08 isolated planning-only
+# regeneration)
+# ---------------------------------------------------------------------------
+
+def _make_small_script_package() -> dict:
+    """2 main beats + 1 short beat -- small enough to hand-verify the
+    arithmetic (shot budgets) in each test."""
+    return {
+        "sections": [{
+            "section_id": "s_001", "title": "T",
+            "narration_beats": [
+                {"beat_id": "b_001", "text": "one"},
+                {"beat_id": "b_002", "text": "two"},
+            ],
+        }],
+        "shorts_scripts": [{
+            "short_id": "short_001",
+            "narration_beats": [{"beat_id": "b_s01", "text": "three"}],
+        }],
+    }
+
+
+def _make_small_narration_package() -> dict:
+    """durations chosen so, with _make_config()'s defaults (8s clip,
+    MAX_EDITORIAL_SPEED_FACTOR=1.15 -> 9.2s capacity/shot,
+    CINEMATIC_SECONDS_PER_SHOT=10.0): b_001 -> 1 shot, b_002 -> 3 shots
+    (ceil(20/9.2)=3), b_s01 -> 1 shot. main_shots=4, short_shots=1, total=5."""
+    return {"narration_segments": [
+        {"beat_reference": "b_001", "duration_seconds": 8.0},
+        {"beat_reference": "b_002", "duration_seconds": 20.0},
+        {"beat_reference": "b_s01", "duration_seconds": 8.0},
+    ]}
+
+
+def _make_small_visual_package() -> dict:
+    return {
+        "episode_metadata": {"episode_title": "Small Test Episode"},
+        "scenes": [
+            {"scene_id": "s01", "narration_reference": "b_001", "source_type": "main_episode",
+             "visual_spec": {}, "presentation_plan": {}, "narrative_signals": []},
+            {"scene_id": "s02", "narration_reference": "b_002", "source_type": "main_episode",
+             "visual_spec": {}, "presentation_plan": {}, "narrative_signals": []},
+            {"scene_id": "s01", "narration_reference": "b_s01", "source_type": "short",
+             "visual_spec": {}, "presentation_plan": {}, "narrative_signals": []},
+        ],
+    }
+
+
+def _matching_candidate_plan() -> dict:
+    """A cinematic_coverage_plan whose shot counts exactly match the
+    arithmetic _make_small_narration_package() implies (1, 3, 1)."""
+    return {
+        "episode_id": "ep_regen",
+        "beat_plans": [
+            _valid_beat_plan("b_001", 8.0, 1),
+            _valid_beat_plan("b_002", 20.0, 3),
+            _valid_beat_plan("b_s01", 8.0, 1),
+        ],
+    }
+
+
+def _mismatched_candidate_plan() -> dict:
+    """Same beats, but b_002 gets only 1 shot instead of the required 3 --
+    an arithmetic mismatch that must be rejected."""
+    return {
+        "episode_id": "ep_regen",
+        "beat_plans": [
+            _valid_beat_plan("b_001", 8.0, 1),
+            _valid_beat_plan("b_002", 20.0, 1),
+            _valid_beat_plan("b_s01", 8.0, 1),
+        ],
+    }
+
+
+class TestRegenerateCinematicCoveragePlan:
+
+    def test_normal_cached_behavior_unchanged_when_force_false(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        existing = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(existing))
+
+        with patch("hypogeum.agents.cinematic_director.run_agent") as mock_ra:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=False,
+            )
+
+        mock_ra.assert_not_called()
+        assert result["status"] == "cached"
+        assert result["plan"] == existing
+        assert json.loads(ckpt.read_text()) == existing  # untouched on disk
+
+    def test_regeneration_requires_explicit_force(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        # No checkpoint exists at all.
+
+        with patch("hypogeum.agents.cinematic_director.run_agent") as mock_ra:
+            with pytest.raises(CoverageRegenerationError):
+                regenerate_cinematic_coverage_plan(
+                    sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=False,
+                )
+
+        mock_ra.assert_not_called()
+        assert not (tmp_path / "cinematic_coverage_plan_ep_regen.json").exists()
+
+    def test_input_validation_happens_before_llm_call(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        incomplete_np = {"narration_segments": [
+            {"beat_reference": "b_001", "duration_seconds": 8.0},
+        ]}  # b_002 and b_s01 missing
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.agents.cinematic_director.run_agent") as mock_ra:
+            with pytest.raises(NarrationCompletenessError):
+                regenerate_cinematic_coverage_plan(
+                    sp, incomplete_np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+                )
+
+        mock_ra.assert_not_called()
+
+    def test_one_llm_call_maximum(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   return_value=_matching_candidate_plan()) as mock_ra:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_ra.call_count == 1
+        assert result["status"] == "installed"
+
+    def test_invalid_candidate_preserves_old_plan_and_backup(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        original["notes"] = ["ORIGINAL"]
+        ckpt.write_text(json.dumps(original))
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   return_value=_mismatched_candidate_plan()):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "arithmetic_mismatch" in result["reason"]
+        # Active plan on disk is byte-for-byte the original -- never touched.
+        assert json.loads(ckpt.read_text()) == original
+        assert result["plan"] == original
+        # Backup exists and also holds the original.
+        backups = list(tmp_path.glob("cinematic_coverage_plan_ep_regen.backup_*.json"))
+        assert len(backups) == 1
+        assert json.loads(backups[0].read_text()) == original
+        # No leftover candidate file.
+        assert not (tmp_path / "cinematic_coverage_plan_ep_regen.candidate.json").exists()
+
+    def test_llm_failure_preserves_old_plan(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   side_effect=RuntimeError("provider down")):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "llm_call_failed" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_valid_candidate_atomically_installed(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        original["notes"] = ["ORIGINAL"]
+        ckpt.write_text(json.dumps(original))
+        new_plan = _matching_candidate_plan()
+        new_plan["notes"] = ["REGENERATED"]
+
+        with patch("hypogeum.agents.cinematic_director.run_agent", return_value=new_plan):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "installed"
+        on_disk = json.loads(ckpt.read_text())
+        assert on_disk["notes"] == ["REGENERATED"]
+        assert on_disk != original
+        backups = list(tmp_path.glob("cinematic_coverage_plan_ep_regen.backup_*.json"))
+        assert len(backups) == 1
+        assert json.loads(backups[0].read_text()) == original
+        assert result["totals"] == {
+            "main_shots": 4, "short_shots": 1, "total_shots": 5,
+            "sufficient_beats": 3, "insufficient_beats": 0,
+        }
+
+    def test_no_stage_b_provider_assembly_or_publishing_function_reachable(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        def _must_not_be_called(*a, **k):
+            raise AssertionError("regenerate_cinematic_coverage_plan must never reach this")
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   return_value=_matching_candidate_plan()), \
+             patch("hypogeum.agents.shot_diversity_planner.run_shot_diversity_planner",
+                   side_effect=_must_not_be_called), \
+             patch("hypogeum.muapi.submit_scene", side_effect=_must_not_be_called), \
+             patch("hypogeum.agents.assembly_agent.run_assembly_agent",
+                   side_effect=_must_not_be_called), \
+             patch("hypogeum.agents.publishing_agent.run_publishing_agent",
+                   side_effect=_must_not_be_called):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "installed"
+
+    def test_fixture_verification_omitted_by_default_no_hardcoded_check(self, tmp_path):
+        """Without fixture_verification, a valid candidate installs
+        regardless of its actual totals -- proof no episode-specific
+        numbers are baked into the function itself."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   return_value=_matching_candidate_plan()):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "installed"
+        assert result["totals"]["total_shots"] == 5  # real total, never asserted against by the function itself
+
+    def test_fixture_verification_matching_totals_installs(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   return_value=_matching_candidate_plan()):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+                fixture_verification={
+                    "expected_main_shots": 4, "expected_short_shots": 1,
+                    "expected_total_shots": 5, "expected_sufficient_beats": 3,
+                },
+            )
+
+        assert result["status"] == "installed"
+
+    def test_fixture_verification_mismatch_rejects_and_preserves_old_plan(self, tmp_path):
+        """fixture_verification is caller-supplied and episode-specific --
+        a caller asserting the WRONG numbers must reject the candidate,
+        proving the check is real (not a no-op) and driven entirely by
+        what the caller passed in, not by any constant in this module."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   return_value=_matching_candidate_plan()):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+                fixture_verification={"expected_total_shots": 999},
+            )
+
+        assert result["status"] == "rejected"
+        assert "fixture_verification_mismatch" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_temp_and_candidate_artifacts_do_not_leak_into_the_88_clip_video_tree(self, tmp_path):
+        """Regeneration must never write anywhere under video/ -- only
+        cinematic_coverage_plan_*.json variants beside the checkpoint."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.agents.cinematic_director.run_agent",
+                   return_value=_matching_candidate_plan()):
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert not (tmp_path / "video").exists()
+        leftover_temp_dirs = list(tmp_path.glob(".coverage_regen_*"))
+        assert leftover_temp_dirs == []

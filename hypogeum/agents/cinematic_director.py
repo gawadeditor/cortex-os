@@ -625,3 +625,382 @@ def validate_coverage_plan_diversity(coverage_plan: dict, episode_id: str) -> No
                     shot_id_b=shot.get("shot_id"),
                 )
             seen[key] = shot.get("shot_id")
+
+
+# ---------------------------------------------------------------------------
+# Isolated planning-only regeneration (2026-08-08)
+#
+# regenerate_cinematic_coverage_plan() is the narrowest existing callable
+# around run_cinematic_director()'s own generation logic that lets an
+# operator deliberately regenerate an EXISTING Cinematic Coverage Plan under
+# full validation, backup, and atomic-replace discipline -- without ever
+# reaching Shot Diversity Planner, Stage B, any MUAPI/provider call, DB
+# write, Assembly, or Publishing. It is intentionally NOT a call to
+# run_visual_package_director() or run_cinematic_director() themselves:
+# neither of those stops after Cinematic Coverage Planning (VPD continues
+# straight into Shot Diversity Planner/Stage B/MUAPI; run_cinematic_
+# director() writes directly to the canonical checkpoint with no backup, no
+# candidate/temp staging, and falls back to a pass-through plan on LLM
+# failure rather than preserving the prior plan). This function is fully
+# additive -- it does not modify run_cinematic_director() or any of its
+# existing callers/tests, and normal checkpoint-resume behavior (calling
+# run_cinematic_director() itself) is completely unchanged by its presence.
+#
+# It never touches existing generated clips or the asset_manifest -- see
+# the module's own README/commit note: resolving what happens to the 88
+# already-generated clips when a plan changes is an explicitly separate,
+# not-yet-solved problem this function does not attempt.
+# ---------------------------------------------------------------------------
+
+class CoverageRegenerationError(Exception):
+    """
+    Raised by regenerate_cinematic_coverage_plan() for a caller-error/misuse
+    condition -- currently only "force=False and no existing checkpoint to
+    resume" (this entrypoint never generates a plan implicitly). Genuine
+    regeneration-attempt failures (LLM failure, malformed output, arithmetic
+    mismatch, fixture-verification mismatch) are NOT raised as exceptions --
+    see the function's own docstring for why they are reported in the
+    returned result dict instead, with the active plan left untouched.
+    """
+
+
+def _classify_authoritative_beats(script_package: dict) -> dict:
+    """{beat_id: "main" | "short"} for every authoritative beat -- main
+    beats come from script_package["sections"], short beats from
+    script_package["shorts_scripts"]. Used only for the optional, caller-
+    supplied fixture_verification totals (main_shots/short_shots) --
+    regenerate_cinematic_coverage_plan() itself carries no hardcoded
+    per-episode numbers."""
+    classification: dict = {}
+    for sec in script_package.get("sections", []):
+        for beat in sec.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                classification[beat_id] = "main"
+    for sh in script_package.get("shorts_scripts", []):
+        for beat in sh.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                classification[beat_id] = "short"
+    return classification
+
+
+def regenerate_cinematic_coverage_plan(
+    script_package: dict,
+    narration_package: Optional[dict],
+    visual_package: dict,
+    episode_id: str,
+    config: Config,
+    output_dir: Optional[Path] = None,
+    *,
+    force: bool = False,
+    fixture_verification: Optional[dict] = None,
+) -> dict:
+    """
+    Isolated, explicit, planning-only regeneration of one episode's
+    Cinematic Coverage Plan checkpoint.
+
+    Consumes script_package (authoritative beat text/IDs) and
+    narration_package (measured per-beat durations), both validated via
+    validate_narration_completeness() before anything else happens --
+    including before the single LLM call this function may make. Uses
+    visual_package only as read-only creative context (scene_id,
+    visual_spec, presentation_plan, narrative_signals per beat) exactly as
+    run_cinematic_director() does; never mutates it.
+
+    force (required for ANY write):
+      False (default) -- if the checkpoint already exists, returns it
+        unchanged (status="cached", zero cost, identical to
+        run_cinematic_director()'s own resume behavior). If no checkpoint
+        exists, raises CoverageRegenerationError -- this entrypoint never
+        generates a plan implicitly; regeneration always requires an
+        explicit, deliberate force=True.
+      True -- runs the full validate → backup → generate-to-candidate →
+        validate-candidate → atomic-install sequence below.
+
+    On force=True:
+      1. Validate inputs (raises NarrationCompletenessError on failure,
+         before any LLM call -- see requirement above).
+      2. If a checkpoint already exists, copy it unchanged to a timestamped
+         backup path (cinematic_coverage_plan_{episode_id}.backup_{ts}.json)
+         before touching anything else.
+      3. Make at most one LLM call (via run_agent(), the same call
+         run_cinematic_director() makes, same system prompt/model/schema),
+         redirecting run_agent()'s own disk write to a throwaway temp
+         directory (never the canonical checkpoint path) so nothing durable
+         exists until this function explicitly writes the candidate itself,
+         at cinematic_coverage_plan_{episode_id}.candidate.json.
+      4. Validate the candidate completely: every authoritative beat_id
+         present exactly once, each beat_plan's shot count matching the
+         shot_budget this function itself computed and sent as input
+         (arithmetic mismatch otherwise), and -- only when the caller
+         supplies fixture_verification -- the candidate's totals matching
+         the caller-supplied expected values exactly (a caller-specific
+         check; this function has no built-in expectations for any
+         episode).
+      5. Only on full success: atomically replace the active checkpoint
+         with the candidate (Path.replace(), same filesystem, atomic) and
+         return status="installed".
+      6. On ANY failure at step 3-4 (LLM/network error, malformed output,
+         schema-invalid output, arithmetic mismatch, fixture-verification
+         mismatch): leave the active checkpoint exactly as it was, keep the
+         backup from step 2, stop cleanly, and return status="rejected"
+         with a `reason`. Never falls back to a minimal pass-through plan
+         (unlike run_cinematic_director()) -- a rejected regeneration must
+         never silently replace a working plan with a worse one.
+
+    Never calls Shot Diversity Planner, Stage B, MUAPI, any other provider,
+    Assembly, or Publishing, and never writes to the database or the
+    asset_manifest -- this function returns immediately after step 5 or 6
+    above in every case.
+
+    Returns a result dict:
+      status:            "cached" | "installed" | "rejected"
+      reason:            None, or why a "rejected" regeneration failed
+      active_plan_path:  str path to the canonical checkpoint
+      backup_path:       str path to the timestamped backup, or None
+      candidate_path:     str path to the candidate file, or None
+      plan:              the plan now active on disk (unchanged if
+                          "rejected"/"cached", the new one if "installed")
+      totals:            {"main_shots", "short_shots", "total_shots",
+                          "sufficient_beats", "insufficient_beats"} for
+                          whichever plan `plan` refers to, or None if the
+                          checkpoint didn't exist and force=True regenerated
+                          from nothing (still populated once installed)
+
+    Raises:
+      NarrationCompletenessError — see validate_narration_completeness().
+      CoverageRegenerationError  — force=False with no existing checkpoint.
+    """
+    import shutil
+    import tempfile
+    from datetime import datetime, timezone
+
+    from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
+    from hypogeum.muapi import get_requested_clip_duration_seconds  # noqa: PLC0415
+    from hypogeum.schemas import SchemaError  # noqa: PLC0415
+
+    _resolve_dir: Path = (
+        Path(output_dir) if output_dir is not None
+        else _DEFAULT_ASSETS_ROOT / "episodes" / episode_id
+    )
+    _resolve_dir.mkdir(parents=True, exist_ok=True)
+    log = get_logger(episode_id=episode_id, agent="cinematic_director_regen")
+
+    ckpt_path = _resolve_dir / f"cinematic_coverage_plan_{episode_id}.json"
+
+    if not force:
+        if ckpt_path.exists():
+            log.info("coverage_regen_cached", episode_id=episode_id, path=str(ckpt_path))
+            return {
+                "status": "cached",
+                "reason": None,
+                "active_plan_path": str(ckpt_path),
+                "backup_path": None,
+                "candidate_path": None,
+                "plan": json.loads(ckpt_path.read_text(encoding="utf-8")),
+                "totals": None,
+            }
+        raise CoverageRegenerationError(
+            f"no existing coverage plan checkpoint at {ckpt_path} and force=False -- "
+            "this entrypoint never generates a plan implicitly; pass force=True to regenerate"
+        )
+
+    # Step 1 — validate inputs BEFORE the LLM call (and before any backup).
+    measured_durations = validate_narration_completeness(script_package, narration_package)
+    authoritative = list(measured_durations.keys())
+    beat_texts_by_id = authoritative_beat_texts(script_package)
+    beat_classification = _classify_authoritative_beats(script_package)
+
+    provider_clip_duration = get_requested_clip_duration_seconds(config)
+    coverage_capacity_per_shot = max(0.1, provider_clip_duration * MAX_EDITORIAL_SPEED_FACTOR)
+
+    log.info(
+        "coverage_regen_started",
+        episode_id=episode_id,
+        authoritative_beats=len(authoritative),
+        force=True,
+    )
+
+    # Step 2 — preserve the existing plan as a timestamped backup, before
+    # touching anything else.
+    backup_path: Optional[Path] = None
+    if ckpt_path.exists():
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = _resolve_dir / f"cinematic_coverage_plan_{episode_id}.backup_{ts}.json"
+        shutil.copy2(ckpt_path, backup_path)
+        log.info("coverage_regen_backup_written", episode_id=episode_id, path=str(backup_path))
+
+    def _current_active_plan_and_totals() -> tuple:
+        if ckpt_path.exists():
+            active_plan = json.loads(ckpt_path.read_text(encoding="utf-8"))
+            return active_plan, _compute_totals(
+                active_plan, measured_durations, beat_classification, coverage_capacity_per_shot,
+            )
+        return None, None
+
+    def _rejected(reason: str) -> dict:
+        active_plan, totals = _current_active_plan_and_totals()
+        log.error("coverage_regen_rejected", episode_id=episode_id, reason=reason)
+        return {
+            "status": "rejected",
+            "reason": reason,
+            "active_plan_path": str(ckpt_path),
+            "backup_path": str(backup_path) if backup_path else None,
+            "candidate_path": None,
+            "plan": active_plan,
+            "totals": totals,
+        }
+
+    # Step 3 — at most one LLM call. Redirect run_agent()'s own disk write
+    # to a throwaway temp directory so nothing durable exists yet.
+    beats_for_director = []
+    expected_shot_budget_by_beat_id: dict = {}
+    for beat_id in authoritative:
+        duration = measured_durations[beat_id]
+        shot_budget = compute_shot_budget(duration, config)
+        expected_shot_budget_by_beat_id[beat_id] = shot_budget
+        scene = next(
+            (s for s in visual_package.get("scenes", []) if s.get("narration_reference") == beat_id),
+            {},
+        )
+        beats_for_director.append({
+            "beat_id": beat_id,
+            "scene_id": scene.get("scene_id"),
+            "source_type": scene.get("source_type"),
+            "narration_duration_seconds": round(duration, 3),
+            "shot_budget": shot_budget,
+            "visual_spec": scene.get("visual_spec", {}),
+            "presentation_plan": scene.get("presentation_plan", {}),
+            "narrative_signals": scene.get("narrative_signals", []),
+        })
+
+    director_input = {
+        "task": "plan_cinematic_coverage",
+        "episode_metadata": {
+            "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
+            "total_beats": len(beats_for_director),
+            "episode_id": episode_id,
+        },
+        "progression_patterns": list(PROGRESSION_PATTERNS),
+        "beats": beats_for_director,
+    }
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=".coverage_regen_", dir=str(_resolve_dir)))
+    try:
+        try:
+            candidate = run_agent(
+                agent_name=_AGENT_NAME,
+                model_slug=_CLAUDE_SONNET,
+                system_prompt=SYSTEM_PROMPT,
+                input_package=director_input,
+                output_schema="cinematic_coverage_plan",
+                episode_id=episode_id,
+                max_tokens=_MAX_TOKENS,
+                config=config,
+                output_dir=temp_dir,
+            )
+        except SchemaError as exc:
+            return _rejected(f"schema_invalid: {exc}")
+        except Exception as exc:  # noqa: BLE001 — any LLM/network/parse failure
+            return _rejected(f"llm_call_failed: {type(exc).__name__}: {exc}")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Candidate written to its own named, inspectable path (never the
+    # canonical checkpoint) -- this IS the "temporary path" of record.
+    candidate_path = _resolve_dir / f"cinematic_coverage_plan_{episode_id}.candidate.json"
+    candidate_path.write_text(json.dumps(candidate, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Step 4 — validate the candidate completely.
+    candidate_beat_ids = [bp.get("beat_id") for bp in candidate.get("beat_plans", [])]
+    if sorted(candidate_beat_ids) != sorted(authoritative) or len(set(candidate_beat_ids)) != len(candidate_beat_ids):
+        candidate_path.unlink(missing_ok=True)
+        return _rejected(
+            "candidate does not have exactly one beat_plan per authoritative beat "
+            f"(got {len(candidate_beat_ids)} for {len(authoritative)} authoritative beats)"
+        )
+
+    mismatches = []
+    for bp in candidate.get("beat_plans", []):
+        beat_id = bp.get("beat_id")
+        actual = len(bp.get("shots", []))
+        expected = expected_shot_budget_by_beat_id.get(beat_id)
+        if actual != expected:
+            mismatches.append((beat_id, expected, actual))
+    if mismatches:
+        candidate_path.unlink(missing_ok=True)
+        return _rejected(f"arithmetic_mismatch: expected vs actual shot counts {mismatches}")
+
+    totals = _compute_totals(candidate, measured_durations, beat_classification, coverage_capacity_per_shot)
+
+    if fixture_verification is not None:
+        fixture_mismatches = {
+            key: (fixture_verification[key], totals[totals_key])
+            for key, totals_key in (
+                ("expected_main_shots", "main_shots"),
+                ("expected_short_shots", "short_shots"),
+                ("expected_total_shots", "total_shots"),
+                ("expected_sufficient_beats", "sufficient_beats"),
+            )
+            if key in fixture_verification and fixture_verification[key] != totals[totals_key]
+        }
+        if fixture_mismatches:
+            candidate_path.unlink(missing_ok=True)
+            return _rejected(f"fixture_verification_mismatch: {fixture_mismatches}")
+
+    # Step 5 — atomic install. Same directory/filesystem as ckpt_path, so
+    # Path.replace() is an atomic rename, never a partially-written file.
+    candidate_path.replace(ckpt_path)
+    log.info(
+        "coverage_regen_installed",
+        episode_id=episode_id,
+        path=str(ckpt_path),
+        backup_path=str(backup_path) if backup_path else None,
+        **totals,
+    )
+
+    return {
+        "status": "installed",
+        "reason": None,
+        "active_plan_path": str(ckpt_path),
+        "backup_path": str(backup_path) if backup_path else None,
+        "candidate_path": str(ckpt_path),  # candidate_path was renamed onto ckpt_path
+        "plan": candidate,
+        "totals": totals,
+    }
+
+
+def _compute_totals(
+    plan: dict,
+    measured_durations: dict,
+    beat_classification: dict,
+    coverage_capacity_per_shot: float,
+) -> dict:
+    """Generic main/short/total shot counts and sufficient-beat count for
+    `plan` -- no episode-specific numbers live here; the caller compares
+    the result against its own expectations (see fixture_verification in
+    regenerate_cinematic_coverage_plan())."""
+    main_shots = 0
+    short_shots = 0
+    sufficient_beats = 0
+    total_beats = 0
+    for bp in plan.get("beat_plans", []):
+        beat_id = bp.get("beat_id")
+        n_shots = len(bp.get("shots", []))
+        cls = beat_classification.get(beat_id)
+        if cls == "main":
+            main_shots += n_shots
+        elif cls == "short":
+            short_shots += n_shots
+        total_beats += 1
+        duration = measured_durations.get(beat_id, 0.0)
+        if n_shots * coverage_capacity_per_shot >= duration - 1e-9:
+            sufficient_beats += 1
+    return {
+        "main_shots": main_shots,
+        "short_shots": short_shots,
+        "total_shots": main_shots + short_shots,
+        "sufficient_beats": sufficient_beats,
+        "insufficient_beats": total_beats - sufficient_beats,
+    }

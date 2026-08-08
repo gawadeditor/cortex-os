@@ -22,10 +22,17 @@ sequential _record_stage_start() checkpoint names exactly, except
 "topic_selection" — see PIPELINE_STAGE_ORDER docstring below):
   topic_selection (synthetic) -> startup_checks -> executive_producer ->
   research_director -> narrative_architect -> script_engine ->
-  finance_agent_authorization -> thumbnail_strategy ->
-  visual_package_director -> thumbnail_director -> audio_agent ->
+  finance_agent_authorization -> thumbnail_strategy -> audio_agent ->
+  visual_package_director -> thumbnail_director ->
   assembly_agent -> asset_archive -> qa_agent -> compliance_agent ->
   publishing_agent
+
+  (2026-08-08: audio_agent moved before visual_package_director —
+  narration must be measured before Cinematic Coverage Planning can plan
+  shot budgets from real per-beat durations instead of a pre-audio
+  word-count estimate; matches PROJECT_NORTH_STAR.md's "Operating Model"
+  and WORKFLOW_MODEL.md's "Synchronization" example, both already Voice
+  before Visual.)
 
 Timing model (2026-07-21 calibration):
   Every stage's duration is decomposed into four inspectable components —

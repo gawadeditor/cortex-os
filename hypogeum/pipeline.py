@@ -933,73 +933,20 @@ def run_pipeline(
             raise PipelineCancelledError(episode_id=episode_id, stage_after="thumbnail_strategy")
 
         # -----------------------------------------------------------------------
-        # 7. Visual Package Director
-        # -----------------------------------------------------------------------
-        log.info("pipeline_stage_started", agent="visual_package_director")
-        _current_stage_id, _current_stage_t0 = _record_stage_start(
-            run_id, episode_id, "visual_package_director", log,
-            output_schema="visual_package",
-            db_path=db_path,
-        )
-        visual_package = _run_visual_package_director(
-            script_package=script_package,
-            config=config,
-            episode_id=episode_id,
-            output_dir=output_dir,
-        )
-        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
-        _current_stage_id = None
-        log.info("pipeline_stage_completed", agent="visual_package_director")
-        if cancel_check is not None and cancel_check():
-            raise PipelineCancelledError(episode_id=episode_id, stage_after="visual_package_director")
-
-        # -----------------------------------------------------------------------
-        # 7a. Source Enhancement — provider-agnostic resolution-compliance
-        # stage between Source Generation (above) and Coverage. See
-        # hypogeum/source_enhancement.py for the full architecture.
-        # -----------------------------------------------------------------------
-        log.info("pipeline_stage_started", agent="source_enhancement")
-        _current_stage_id, _current_stage_t0 = _record_stage_start(
-            run_id, episode_id, "source_enhancement", log,
-            output_schema="visual_package",
-            db_path=db_path,
-        )
-        visual_package = _run_source_enhancement(
-            visual_package=visual_package,
-            config=config,
-            episode_id=episode_id,
-            output_dir=output_dir,
-        )
-        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
-        _current_stage_id = None
-        log.info("pipeline_stage_completed", agent="source_enhancement")
-        if cancel_check is not None and cancel_check():
-            raise PipelineCancelledError(episode_id=episode_id, stage_after="source_enhancement")
-
-        # -----------------------------------------------------------------------
-        # 7b. Thumbnail Director
-        # -----------------------------------------------------------------------
-        log.info("pipeline_stage_started", agent="thumbnail_director")
-        _current_stage_id, _current_stage_t0 = _record_stage_start(
-            run_id, episode_id, "thumbnail_director", log,
-            model_slug=getattr(config, "TD_PLANNING_MODEL", None),
-            output_schema="thumbnail_package",
-            db_path=db_path,
-        )
-        thumbnail_package = _run_thumbnail_director(
-            visual_package=visual_package,
-            config=config,
-            episode_id=episode_id,
-            output_dir=output_dir,
-        )
-        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
-        _current_stage_id = None
-        log.info("pipeline_stage_completed", agent="thumbnail_director")
-        if cancel_check is not None and cancel_check():
-            raise PipelineCancelledError(episode_id=episode_id, stage_after="thumbnail_director")
-
-        # -----------------------------------------------------------------------
-        # 8. Audio Agent (takes Script Package — parallel path to VPD+TD in M3)
+        # 7. Audio Agent (Voice) — moved before Visual Package Director.
+        # The canonical dependency is script_package -> narration
+        # generation -> validated narration_package with measured
+        # per-beat durations -> Visual Package Director -> Cinematic
+        # Coverage Planning (PROJECT_NORTH_STAR.md "Operating Model",
+        # WORKFLOW_MODEL.md "Synchronization" example, DATA_MODEL.md
+        # "Content produced during execution", and CURRENT_STATE.md
+        # "Production Pipeline" all already list Voice before Visual —
+        # this reorder brings the implementation into compliance with
+        # already-canonical documentation, not a new architectural
+        # position). Only Audio Agent moves: it depends solely on
+        # script_package (verified — see _run_audio_agent()'s signature),
+        # so this is a safe, isolated reorder. Thumbnail Director still
+        # depends on visual_package and stays after Visual Package Director.
         # -----------------------------------------------------------------------
         # Suppress Short narration tracks when dedicated short generation is disabled
         # (default) or when this is an Episode Zero / validation run.
@@ -1028,7 +975,77 @@ def run_pipeline(
             raise PipelineCancelledError(episode_id=episode_id, stage_after="audio_agent")
 
         # -----------------------------------------------------------------------
-        # 9. Assembly Agent
+        # 7a. Visual Package Director — now receives the validated
+        # narration_package so Cinematic Coverage Planning can plan shot
+        # budgets from measured per-beat narration durations instead of a
+        # pre-audio word-count estimate.
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="visual_package_director")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "visual_package_director", log,
+            output_schema="visual_package",
+            db_path=db_path,
+        )
+        visual_package = _run_visual_package_director(
+            script_package=script_package,
+            narration_package=narration_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
+        log.info("pipeline_stage_completed", agent="visual_package_director")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="visual_package_director")
+
+        # -----------------------------------------------------------------------
+        # 7b. Source Enhancement — provider-agnostic resolution-compliance
+        # stage between Source Generation (above) and Coverage. See
+        # hypogeum/source_enhancement.py for the full architecture.
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="source_enhancement")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "source_enhancement", log,
+            output_schema="visual_package",
+            db_path=db_path,
+        )
+        visual_package = _run_source_enhancement(
+            visual_package=visual_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
+        log.info("pipeline_stage_completed", agent="source_enhancement")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="source_enhancement")
+
+        # -----------------------------------------------------------------------
+        # 7c. Thumbnail Director
+        # -----------------------------------------------------------------------
+        log.info("pipeline_stage_started", agent="thumbnail_director")
+        _current_stage_id, _current_stage_t0 = _record_stage_start(
+            run_id, episode_id, "thumbnail_director", log,
+            model_slug=getattr(config, "TD_PLANNING_MODEL", None),
+            output_schema="thumbnail_package",
+            db_path=db_path,
+        )
+        thumbnail_package = _run_thumbnail_director(
+            visual_package=visual_package,
+            config=config,
+            episode_id=episode_id,
+            output_dir=output_dir,
+        )
+        _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        _current_stage_id = None
+        log.info("pipeline_stage_completed", agent="thumbnail_director")
+        if cancel_check is not None and cancel_check():
+            raise PipelineCancelledError(episode_id=episode_id, stage_after="thumbnail_director")
+
+        # -----------------------------------------------------------------------
+        # 8. Assembly Agent
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="assembly_agent")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
@@ -1763,6 +1780,8 @@ def _run_visual_package_director(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    *,
+    narration_package: Optional[dict] = None,
 ) -> dict:
     """
     Visual Package Director (M2.3/M2.4 — implemented).
@@ -1770,6 +1789,17 @@ def _run_visual_package_director(
     Phase 1: Claude Sonnet 4.6 plans scenes, entity lock states, and thumbnail
     candidates. Phase 2: MUAPI generates reference images (final-locked entities)
     then all scene videos. Also extracts and writes Thumbnail Handoff Brief (M2.4).
+
+    narration_package: validated Voice Asset output, now available because
+    Audio Agent runs before Visual Package Director in the canonical fresh
+    workflow — consumed by Cinematic Coverage Planning inside Phase 1 for
+    measured per-beat narration durations. Keyword-only and optional
+    (defaults to {}) so existing direct callers/tests that don't yet pass it
+    keep working, falling back to Cinematic Director's own per-beat
+    word-count estimate exactly as before. Only reaches the fresh-plan
+    branch below; run_visual_package_director_from_plan() resumes Phase 2
+    only, after Phase 1 (including Cinematic Director) already completed,
+    so it has no use for it.
 
     Model: Sonnet 4.6
     Max tokens: 32,768
@@ -1822,6 +1852,7 @@ def _run_visual_package_director(
         )
     return run_visual_package_director(
         script_package=script_package,
+        narration_package=narration_package or {},
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,

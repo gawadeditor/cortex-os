@@ -397,6 +397,8 @@ def run_visual_package_director(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path] = None,
+    *,
+    narration_package: Optional[dict] = None,
 ) -> dict:
     """
     Execute the Visual Package Director end-to-end.
@@ -412,10 +414,21 @@ def run_visual_package_director(
     generation results and re-written to disk.
 
     Args:
-        script_package: Validated script_package dict from the Script Engine.
-        config:         Loaded Config instance.
-        episode_id:     Episode identifier for log correlation and file naming.
-        output_dir:     Optional output directory override (passed to run_agent()).
+        script_package:    Validated script_package dict from the Script Engine.
+        config:            Loaded Config instance.
+        episode_id:        Episode identifier for log correlation and file naming.
+        output_dir:        Optional output directory override (passed to run_agent()).
+        narration_package: Validated narration_package dict from Audio Agent,
+                            keyword-only and optional (defaults to {}). Audio
+                            Agent now runs before Visual Package Director in
+                            the canonical fresh workflow, so real, measured
+                            per-beat narration durations are normally
+                            available here — consumed by Cinematic Coverage
+                            Planning in place of a pre-audio word-count
+                            estimate; see _measured_durations_by_beat_id().
+                            A caller that omits it (e.g. a resumed/legacy
+                            path) falls back to Cinematic Director's own
+                            per-beat estimate exactly as before.
 
     Returns:
         The final Visual Package dict with actual generation results.

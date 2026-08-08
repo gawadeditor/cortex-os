@@ -751,7 +751,16 @@ class TestAgentCallOrder:
             assert mock.call_count == 1, f"Expected {name} to be called once"
 
     def test_agents_called_in_frozen_order(self):
-        """Verify the frozen execution order: EP→RD→NA→SE→TS→VPD→SrcEnh→TD→Audio→Asm→Pub."""
+        """Verify the frozen execution order: EP→RD→NA→SE→TS→Audio→VPD→SrcEnh→TD→Asm→Pub.
+
+        Audio Agent (Voice) runs before Visual Package Director (Visual) —
+        canonical Voice-before-Visual dependency (PROJECT_NORTH_STAR.md
+        "Operating Model", WORKFLOW_MODEL.md "Synchronization" example,
+        DATA_MODEL.md "Content produced during execution", CURRENT_STATE.md
+        "Production Pipeline" all already state this order); Cinematic
+        Coverage Planning inside Visual Package Director needs the
+        validated narration_package's measured per-beat durations.
+        """
         call_order = []
         cfg = make_config()
         report = make_startup_report()
@@ -787,7 +796,10 @@ class TestAgentCallOrder:
                        side_effect=make_recorder("pub", MINIMAL_PUBLISHING_RECORD)):
                 run_pipeline(topic_input="Test", episode_id="ep_001", config=cfg)
 
-        assert call_order == ["ep", "rd", "na", "se", "ts", "vpd", "src_enh", "td", "audio", "asm", "pub"]
+        assert call_order == ["ep", "rd", "na", "se", "ts", "audio", "vpd", "src_enh", "td", "asm", "pub"]
+        assert call_order.index("audio") < call_order.index("vpd"), (
+            "Audio Agent (Voice) must run before Visual Package Director (Visual)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1343,13 @@ class TestEndToEndWiring:
         args, kwargs = mocks["vpd"].call_args
         received = kwargs.get("script_package") or (args[0] if args else None)
         assert received is MINIMAL_SCRIPT_PACKAGE
+
+    def test_vpd_called_with_narration_package(self):
+        """VPD must receive the narration_package produced by Audio Agent,
+        now that Audio Agent runs before Visual Package Director."""
+        _, mocks = run_full(narration_package=MINIMAL_NARRATION_PACKAGE)
+        args, kwargs = mocks["vpd"].call_args
+        assert kwargs.get("narration_package") is MINIMAL_NARRATION_PACKAGE
 
     def test_td_called_with_visual_package(self):
         """TD pipeline stub must receive the visual_package from VPD."""

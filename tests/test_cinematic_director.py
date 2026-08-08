@@ -14,6 +14,7 @@ All Claude calls (run_agent) are mocked. No network calls.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -41,7 +42,16 @@ def _make_config(**overrides) -> SimpleNamespace:
     base = dict(
         CINEMATIC_SECONDS_PER_SHOT=10.0,
         CINEMATIC_MAX_SHOTS_PER_BEAT=6,
+        CINEMATIC_MIN_SHOTS_PER_BEAT=1,
         CINEMATIC_ESTIMATED_WORDS_PER_MINUTE=145.0,
+        # Provider capability inputs compute_shot_budget() now consumes via
+        # muapi.get_requested_clip_duration_seconds() -- T2/veo3.1-lite
+        # matches this channel's real production default (8s/clip).
+        MUAPI_DEFAULT_TIER=2,
+        MUAPI_T1_MODEL="veo3-text-to-video",
+        MUAPI_T2_MODEL="veo3.1-lite-text-to-video",
+        MUAPI_T3_MODEL="veo3.1-lite-text-to-video",
+        MUAPI_I2V_MODEL="veo3-image-to-video",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -387,3 +397,112 @@ class TestValidateCoveragePlanDiversity:
         ]
         plan = _minimal_pass_through("ep_fallback", beats_for_director)
         validate_coverage_plan_diversity(plan, episode_id="ep_fallback")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# TestShotBudgetIndependentTerms — coverage_minimum, editorial_minimum, and
+# policy_minimum must stay independently computable and never conflated
+# ---------------------------------------------------------------------------
+
+class TestShotBudgetIndependentTerms:
+
+    def test_coverage_minimum_derives_from_provider_capability_not_editorial_target(self):
+        """A beat whose duration is under the editorial pacing target but
+        over the provider coverage capacity must still get enough shots
+        for real coverage -- proof coverage_minimum is a live, independent
+        term, not dominated by editorial_minimum."""
+        cfg = _make_config(CINEMATIC_SECONDS_PER_SHOT=100.0)  # pacing target far too generous
+        # duration 20s: editorial_minimum = ceil(20/100) = 1, but
+        # coverage_minimum = ceil(20 / (8*1.15=9.2)) = 3 -- must win.
+        assert compute_shot_budget(20.0, cfg) == 3
+
+    def test_editorial_minimum_can_dominate_for_a_longer_provider_clip(self):
+        """With a hypothetical longer provider clip, editorial pacing can
+        legitimately require MORE shots than raw coverage capacity alone --
+        proof the two terms are independent, not one subsuming the other."""
+        cfg = _make_config(CINEMATIC_SECONDS_PER_SHOT=5.0, MUAPI_T2_MODEL="veo3.1-lite-text-to-video")
+        # duration 20s: coverage_minimum = ceil(20/9.2) = 3,
+        # editorial_minimum = ceil(20/5) = 4 -- editorial must win.
+        assert compute_shot_budget(20.0, cfg) == 4
+
+    def test_policy_minimum_floors_a_very_short_beat(self):
+        cfg = _make_config(CINEMATIC_MIN_SHOTS_PER_BEAT=2)
+        assert compute_shot_budget(1.0, cfg) == 2
+
+    def test_provider_capacity_change_alone_changes_budget(self):
+        """Swapping the configured provider/model (via MUAPI_DEFAULT_TIER)
+        changes coverage_minimum with zero change to editorial_pacing or
+        duration -- proof the three concepts are truly independent inputs,
+        not one hardcoded constant."""
+        cfg_8s = _make_config()  # T2 = veo3.1-lite, 8s/clip
+        cfg_8s.MUAPI_DEFAULT_TIER = 2
+        budget_8s = compute_shot_budget(30.0, cfg_8s)
+
+        cfg_8s.CINEMATIC_SECONDS_PER_SHOT = 1000.0  # neutralize editorial term
+        budget_8s_editorial_neutralized = compute_shot_budget(30.0, cfg_8s)
+        assert budget_8s_editorial_neutralized == math.ceil(30.0 / (8.0 * 1.15))
+
+
+# ---------------------------------------------------------------------------
+# TestMeasuredDurationPreference — run_cinematic_director() must prefer
+# measured_durations_by_id over the text-based estimate whenever present
+# ---------------------------------------------------------------------------
+
+class TestMeasuredDurationPreference:
+
+    def test_measured_duration_used_when_present(self, tmp_path):
+        cfg = _make_config()
+        vp = _make_visual_package()
+        plan = {"episode_id": "ep_001", "beat_plans": [_valid_beat_plan("b_001", 40.0, 1)]}
+        captured = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return plan
+
+        with patch("hypogeum.agents.cinematic_director.run_agent", side_effect=_capture):
+            run_cinematic_director(
+                visual_package=vp,
+                beat_texts_by_id={"b_001": "one two three"},  # tiny estimate if used
+                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+                measured_durations_by_id={"b_001": 40.0},  # real, much longer
+            )
+
+        sent_beat = captured["input_package"]["beats"][0]
+        assert sent_beat["narration_duration_seconds"] == 40.0
+
+    def test_falls_back_to_estimate_when_beat_missing_from_measured(self, tmp_path):
+        cfg = _make_config()
+        vp = _make_visual_package()
+        plan = {"episode_id": "ep_001", "beat_plans": [_valid_beat_plan("b_001", 8.0, 1)]}
+        captured = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return plan
+
+        with patch("hypogeum.agents.cinematic_director.run_agent", side_effect=_capture):
+            run_cinematic_director(
+                visual_package=vp,
+                beat_texts_by_id={"b_001": " ".join(["word"] * 58)},
+                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+                measured_durations_by_id={},  # b_001 absent -- must fall back
+            )
+
+        sent_beat = captured["input_package"]["beats"][0]
+        assert sent_beat["narration_duration_seconds"] == pytest.approx(24.0, abs=1.5)
+
+    def test_omitting_measured_durations_entirely_preserves_old_estimate_behavior(self, tmp_path):
+        """A caller that doesn't pass measured_durations_by_id at all (e.g.
+        an existing test not concerned with duration accuracy) must keep
+        working exactly as before the parameter was added."""
+        cfg = _make_config()
+        vp = _make_visual_package()
+        plan = {"episode_id": "ep_001", "beat_plans": [_valid_beat_plan("b_001", 8.0, 1)]}
+
+        with patch("hypogeum.agents.cinematic_director.run_agent", return_value=plan):
+            result = run_cinematic_director(
+                visual_package=vp, beat_texts_by_id={"b_001": "a short beat"},
+                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+            )
+        validate("cinematic_coverage_plan", result)

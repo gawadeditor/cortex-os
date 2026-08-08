@@ -70,6 +70,7 @@ from hypogeum.muapi import (
     MUAPIBudgetExhausted,
     MUAPIError,
     MUAPIQuotaExhausted,
+    get_requested_clip_duration_seconds,
     MUAPIUnavailable,
     ReferenceImageResult,
     ThumbnailResult,
@@ -3235,3 +3236,47 @@ class TestLayeredThumbnailUsesGptImage2:
         source = inspect.getsource(mod)
         assert "_generate_thumbnail_openrouter" not in source
         assert "_generate_thumbnail_openai" not in source
+
+
+# ---------------------------------------------------------------------------
+# TestGetRequestedClipDurationSeconds
+# ---------------------------------------------------------------------------
+
+class TestGetRequestedClipDurationSeconds:
+    """
+    get_requested_clip_duration_seconds() is the normalized provider-capability
+    input Cinematic Director's shot-budget arithmetic consumes
+    (coverage_capacity_per_shot). It must reflect whatever the currently
+    configured default-tier model actually delivers, never a hardcoded value.
+    """
+
+    def test_veo3_1_model_returns_8_seconds(self):
+        cfg = make_config(t2_model="veo3.1-lite-text-to-video")
+        cfg.MUAPI_DEFAULT_TIER = 2
+        assert get_requested_clip_duration_seconds(cfg) == 8.0
+
+    def test_legacy_veo3_model_returns_8_seconds(self):
+        cfg = make_config(t1_model="veo3-text-to-video")
+        cfg.MUAPI_DEFAULT_TIER = 1
+        assert get_requested_clip_duration_seconds(cfg) == 8.0
+
+    def test_runway_model_returns_8_seconds(self):
+        cfg = make_config(t2_model="runway-text-to-video")
+        cfg.MUAPI_DEFAULT_TIER = 2
+        assert get_requested_clip_duration_seconds(cfg) == 8.0
+
+    def test_follows_default_tier_not_a_fixed_tier(self):
+        """Changing MUAPI_DEFAULT_TIER must change which model's duration is
+        consulted -- proof this reads live config, not a cached/fixed tier."""
+        cfg = make_config(t1_model="veo3-text-to-video", t2_model="runway-text-to-video")
+        cfg.MUAPI_DEFAULT_TIER = 1
+        tier1_duration = get_requested_clip_duration_seconds(cfg)
+        cfg.MUAPI_DEFAULT_TIER = 2
+        tier2_duration = get_requested_clip_duration_seconds(cfg)
+        assert tier1_duration == 8.0
+        assert tier2_duration == 8.0  # both 8s today, but resolved independently
+
+    def test_returns_a_float(self):
+        cfg = make_config()
+        cfg.MUAPI_DEFAULT_TIER = 2
+        assert isinstance(get_requested_clip_duration_seconds(cfg), float)

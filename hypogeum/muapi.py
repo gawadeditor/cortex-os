@@ -2809,6 +2809,32 @@ def _tier_to_model(tier: int, reference_image_url: Optional[str], config: Config
     return config.MUAPI_T2_MODEL  # default and tier 2
 
 
+def get_requested_clip_duration_seconds(config: Config) -> float:
+    """
+    Return the clip duration a fresh generation request will actually
+    receive from the currently configured default-tier provider/model —
+    the normalized provider-capability input Cinematic Director's
+    shot-budget arithmetic needs (coverage_capacity_per_shot).
+
+    Reuses the same model-family membership sets _build_job_payload() uses
+    for the real request, so the two can never silently disagree about what
+    a given model actually delivers. Never branches on a specific model
+    name outside this module — callers only ever get a float back.
+    """
+    model = _tier_to_model(config.MUAPI_DEFAULT_TIER, None, config)
+    if model in _VEO3_1_MODELS:
+        return float(_VEO3_1_DEFAULT_DURATION)
+    if model in _VEO3_MODELS:
+        return 8.0
+    if model in _RUNWAY_MODELS:
+        # Runway's duration enum is 5 or 8, rounded from the requested
+        # value; production always requests the standard 8s scene length
+        # (production_spec.duration_seconds), which rounds to 8 — see
+        # _build_job_payload()'s own Runway branch.
+        return 8.0
+    return 8.0  # unregistered model family — conservative default
+
+
 def _build_job_payload(
     prompt: str,
     model: str,

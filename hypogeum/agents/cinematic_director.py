@@ -36,8 +36,9 @@ ask a specific provider for it.
 
 Public API:
     compute_shot_budget(narration_duration_seconds, config) -> int
-    run_cinematic_director(visual_package, narration_package, episode_id,
-                            config, output_dir=None) -> dict
+    run_cinematic_director(visual_package, beat_texts_by_id, episode_id,
+                            config, output_dir=None, *,
+                            measured_durations_by_id=None) -> dict
     shot_diversity_key(shot) -> tuple                            (2026-08-07)
     validate_coverage_plan_diversity(coverage_plan, episode_id) -> None  (2026-08-07)
     CoveragePlanDiversityError                                   (2026-08-07)
@@ -135,25 +136,51 @@ def compute_shot_budget(narration_duration_seconds: float, config: Config) -> in
     """
     Deterministic, zero-LLM-call shot-count budget for one beat (Phase 4).
 
-    Never a fixed "three shots per beat" rule — the budget scales with the
-    beat's real narration duration, bounded by a configurable safety cap so
-    a single very long beat cannot request unbounded coverage:
+    Three independent terms, kept separate and never conflated:
 
-        shots = clamp(ceil(narration_duration_seconds / seconds_per_shot), 1, max_shots)
+      coverage_minimum  = ceil(duration / coverage_capacity_per_shot)
+        The number of shots physically required for this beat's real
+        footage to reach its narration duration, given what one generated
+        clip actually supplies (the currently selected provider/model's
+        requested clip duration — muapi.get_requested_clip_duration_seconds(),
+        never hardcoded here) stretched by at most the approved editorial
+        speed factor (coverage_check.MAX_EDITORIAL_SPEED_FACTOR — the same
+        ceiling Assembly's own coverage gate enforces, so planning can
+        never under-provision relative to what Assembly will actually
+        require).
 
-    `seconds_per_shot` (config.CINEMATIC_SECONDS_PER_SHOT, default 10.0) is
-    an editorial-pacing constant, not a physical clip-length constant (a
-    generated clip is a fixed ~8s regardless) — it expresses how much
-    screen time one *directorial* shot idea is expected to comfortably
-    cover before a cut is warranted, which is why it differs from the
-    provider's own fixed clip duration. A short beat (<=10s) always gets
-    exactly 1 shot; this is what keeps the vast majority of short
-    establishing/transition beats from being over-planned.
+      editorial_minimum = ceil(duration / editorial_pacing_target)
+        A directorial pacing preference (config.CINEMATIC_SECONDS_PER_SHOT,
+        default 10.0) — how much screen time one shot idea is expected to
+        comfortably cover before a cut is warranted. A style choice,
+        independent of physical clip supply; kept as its own term so a
+        future provider/policy combination where it legitimately dominates
+        (e.g. a provider with much longer clips than today's) is handled
+        correctly without further changes here.
+
+      policy_minimum = config.CINEMATIC_MIN_SHOTS_PER_BEAT (default 1)
+        An explicit, configurable floor, replacing what was previously a
+        hardcoded "at least 1" literal.
+
+    planned_shots = max(coverage_minimum, editorial_minimum, policy_minimum),
+    clamped at config.CINEMATIC_MAX_SHOTS_PER_BEAT as a finite safety cap so
+    a single very long beat cannot request unbounded coverage.
     """
-    seconds_per_shot = max(0.1, getattr(config, "CINEMATIC_SECONDS_PER_SHOT", 10.0))
+    from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
+    from hypogeum.muapi import get_requested_clip_duration_seconds  # noqa: PLC0415
+
+    duration = max(0.0, narration_duration_seconds)
+    editorial_pacing_target = max(0.1, getattr(config, "CINEMATIC_SECONDS_PER_SHOT", 10.0))
     max_shots = max(1, getattr(config, "CINEMATIC_MAX_SHOTS_PER_BEAT", 6))
-    raw_shots = math.ceil(max(0.0, narration_duration_seconds) / seconds_per_shot)
-    return min(max(1, raw_shots), max_shots)
+    policy_minimum = max(1, getattr(config, "CINEMATIC_MIN_SHOTS_PER_BEAT", 1))
+
+    provider_clip_duration = get_requested_clip_duration_seconds(config)
+    coverage_capacity_per_shot = max(0.1, provider_clip_duration * MAX_EDITORIAL_SPEED_FACTOR)
+
+    coverage_minimum = math.ceil(duration / coverage_capacity_per_shot)
+    editorial_minimum = math.ceil(duration / editorial_pacing_target)
+    planned_shots = max(coverage_minimum, editorial_minimum, policy_minimum)
+    return min(planned_shots, max_shots)
 
 
 def run_cinematic_director(
@@ -162,6 +189,8 @@ def run_cinematic_director(
     episode_id: str,
     config: Config,
     output_dir: Optional[Path] = None,
+    *,
+    measured_durations_by_id: Optional[dict] = None,
 ) -> dict:
     """
     Produce a Cinematic Coverage Plan for every beat in the episode.
@@ -169,16 +198,25 @@ def run_cinematic_director(
     Args:
         visual_package:    Visual Package dict (after Stage A4 has injected
                             presentation_plan into each scene).
-        beat_texts_by_id:  {beat_id: raw narration text} — Cinematic Director
-                            runs before Audio Agent, so the real ElevenLabs-
-                            measured duration doesn't exist yet; duration is
-                            estimated from this text (see
-                            estimate_beat_duration_seconds()). Callers
-                            typically already have this from the same
-                            beat-flattening step Stage A2 uses.
+        beat_texts_by_id:  {beat_id: raw narration text}. Used directly only
+                            as a fallback estimate (see
+                            estimate_beat_duration_seconds()) for any
+                            beat_id missing from measured_durations_by_id —
+                            the normal case is that Audio Agent already ran
+                            and every beat has a real measured duration.
         episode_id:         Episode identifier for logging and file naming.
         config:             Loaded Config instance.
         output_dir:         Optional output directory override.
+        measured_durations_by_id: {beat_id: real narration duration in
+                            seconds}, from the validated narration_package
+                            (Audio Agent's output) — the authoritative
+                            temporal planning input, keyword-only and
+                            optional (defaults to {}). Takes precedence over
+                            the text-based estimate whenever present; a
+                            caller that omits it (e.g. an existing test not
+                            concerned with duration accuracy) falls back to
+                            the per-beat word-count estimate exactly as
+                            before.
 
     Returns:
         cinematic_coverage_plan dict (schema-validated, written to disk).
@@ -200,12 +238,23 @@ def run_cinematic_director(
         return json.loads(ckpt_path.read_text(encoding="utf-8"))
 
     scenes = visual_package.get("scenes", [])
+    measured_durations_by_id = measured_durations_by_id or {}
 
     beats_for_director = []
     for scene in scenes:
         beat_id = scene.get("narration_reference", "")
-        beat_text = beat_texts_by_id.get(beat_id, "")
-        narration_duration = estimate_beat_duration_seconds(beat_text, config)
+        measured_duration = measured_durations_by_id.get(beat_id)
+        if measured_duration is not None:
+            narration_duration = float(measured_duration)
+        else:
+            beat_text = beat_texts_by_id.get(beat_id, "")
+            narration_duration = estimate_beat_duration_seconds(beat_text, config)
+            log.warn(
+                "cinematic_director_measured_duration_missing",
+                episode_id=episode_id,
+                beat_id=beat_id,
+                fallback="word_count_estimate",
+            )
         shot_budget = compute_shot_budget(narration_duration, config)
         beats_for_director.append({
             "beat_id": beat_id,

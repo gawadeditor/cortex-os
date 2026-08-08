@@ -557,12 +557,19 @@ class Config:
         # CINEMATIC_MAX_SHOTS_PER_BEAT: finite safety cap on compute_shot_budget()'s output
         # so one very long beat cannot request unbounded coverage (default 6).
         self.CINEMATIC_MAX_SHOTS_PER_BEAT = _get_int("CINEMATIC_MAX_SHOTS_PER_BEAT", default=6)
-        # CINEMATIC_ESTIMATED_WORDS_PER_MINUTE: Cinematic Director runs before Audio Agent
-        # (script_package has raw beat text, not yet ElevenLabs-measured duration), so shot
-        # budgeting uses a word-count estimate. Default 145 WPM calibrated from this
-        # channel's real production narration (ep_f3619022 seg_b_001: 58 words / 24.427s
-        # measured = ~142.5 WPM). Coverage-fill/Assembly still gate on the real measured
-        # duration later — this estimate only drives how many shots get PLANNED upfront.
+        # CINEMATIC_MIN_SHOTS_PER_BEAT (2026-08-08): explicit, configurable floor on
+        # compute_shot_budget()'s output, replacing a previously hardcoded "at least 1"
+        # literal. Independent of coverage_minimum/editorial_minimum — see
+        # cinematic_director.compute_shot_budget()'s own docstring for how the three
+        # terms combine.
+        self.CINEMATIC_MIN_SHOTS_PER_BEAT = _get_int("CINEMATIC_MIN_SHOTS_PER_BEAT", default=1)
+        # CINEMATIC_ESTIMATED_WORDS_PER_MINUTE: Audio Agent now runs before Cinematic
+        # Director (Voice-before-Visual, 2026-08-08), so real, measured per-beat duration
+        # is normally available. This WPM value only feeds the fallback word-count
+        # estimate used for a beat_id genuinely missing from the measured narration
+        # package (see cinematic_director.run_cinematic_director()). Default 145 WPM
+        # calibrated from this channel's real production narration (ep_f3619022
+        # seg_b_001: 58 words / 24.427s measured = ~142.5 WPM).
         self.CINEMATIC_ESTIMATED_WORDS_PER_MINUTE = _get_float(
             "CINEMATIC_ESTIMATED_WORDS_PER_MINUTE", default=145.0
         )

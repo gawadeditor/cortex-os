@@ -799,9 +799,16 @@ def run_visual_package_director(
     # Stage A2's 20-word-per-beat prompt-budget compaction. Cinematic
     # Director's duration estimate needs the real text; see
     # _flatten_beats_full_text_by_id()'s own docstring.
+    #
+    # measured_durations_by_id comes from narration_package (Audio Agent
+    # now runs before this stage) via _measured_durations_by_beat_id() —
+    # the authoritative per-beat duration Cinematic Director's shot-budget
+    # arithmetic consumes. beat_texts_by_id remains the fallback for any
+    # beat_id absent from narration_package (see run_cinematic_director()).
     # ------------------------------------------------------------------
     from hypogeum.agents.cinematic_director import run_cinematic_director  # noqa: PLC0415
     _beat_texts_by_id = _flatten_beats_full_text_by_id(script_package)
+    _measured_durations_by_id = _measured_durations_by_beat_id(narration_package or {})
     log.info(
         "vpd_cinematic_director_started",
         episode_id=episode_id,
@@ -810,6 +817,7 @@ def run_visual_package_director(
     coverage_plan = run_cinematic_director(
         visual_package=visual_package,
         beat_texts_by_id=_beat_texts_by_id,
+        measured_durations_by_id=_measured_durations_by_id,
         episode_id=episode_id,
         config=config,
         output_dir=_resolve_output_dir,
@@ -1221,6 +1229,27 @@ def _flatten_beats_full_text_by_id(script_package: dict) -> dict:
             if beat_id:
                 beat_texts[beat_id] = beat.get("text", "")
     return beat_texts
+
+
+def _measured_durations_by_beat_id(narration_package: dict) -> dict:
+    """
+    Map every beat_id to its real, measured narration duration from the
+    validated narration_package (Audio Agent's output) -- the authoritative
+    temporal planning input Cinematic Director's shot-budget arithmetic
+    consumes, now that Audio Agent runs before Visual Package Director.
+
+    Distinct from _flatten_beats_full_text_by_id(): that function supplies
+    the semantic input (full narration text); this one supplies the
+    temporal input (real measured seconds). The two are independent and
+    both come from the original artifacts, never from a compacted
+    intermediate.
+    """
+    durations: dict = {}
+    for seg in narration_package.get("narration_segments", []):
+        beat_id = seg.get("beat_reference", "")
+        if beat_id:
+            durations[beat_id] = seg.get("duration_seconds", 0.0)
+    return durations
 
 
 # ---------------------------------------------------------------------------

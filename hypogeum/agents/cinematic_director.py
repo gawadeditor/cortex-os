@@ -694,7 +694,8 @@ def _classify_authoritative_beats(script_package: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Compact wire format for regenerate_cinematic_coverage_plan() (2026-08-08)
+# Compact wire format for regenerate_cinematic_coverage_plan() (2026-08-08,
+# split into two position-explicit parts 2026-08-08 same day)
 #
 # A full 130-shot/47-beat cinematic_coverage_plan response (the shape
 # run_cinematic_director() itself uses, and the only shape the SYSTEM_PROMPT's
@@ -726,34 +727,69 @@ def _classify_authoritative_beats(script_package: dict) -> dict:
 #      are untouched -- these are genuine authored content, never compacted.
 #   4. Enum-valued fields (shot_purpose, shot_scale, camera_angle,
 #      camera_height, camera_direction, camera_movement, composition,
-#      background_depth, screen_direction, motion_energy) packed into one
-#      fixed-position 10-character "codes" string, one letter per field, in
-#      place of ten separate JSON key/value pairs. Each enum has a small,
-#      closed vocabulary (3-12 values) already defined in SYSTEM_PROMPT --
-#      the code is a lossless index into that same vocabulary, decoded via
-#      exact lookup in _COMPACT_ENUM_VOCAB immediately after parsing. This is
-#      the single largest reduction: JSON key-name repetition times 10
-#      fields times 130 shots was the dominant cost even after (1)-(3).
-#      lens_character (optional) and progression_pattern (per-beat) use the
-#      same single-letter code scheme against their own small vocabularies.
+#      background_depth, screen_direction, motion_energy) packed into TWO
+#      explicitly-keyed 5-character strings ("code1" = positions 1-5,
+#      "code2" = positions 6-10 of _COMPACT_CODE_FIELDS -- see
+#      _COMPACT_CODE_PARTS), one letter per field, in place of ten separate
+#      JSON key/value pairs. Each enum has a small, closed vocabulary
+#      (3-12 values) already defined in SYSTEM_PROMPT -- the code is a
+#      lossless index into that same vocabulary, decoded via exact lookup in
+#      _COMPACT_ENUM_VOCAB immediately after parsing. This is still the
+#      single largest reduction versus the full per-field schema: JSON
+#      key-name repetition times 10 fields times 130 shots was the dominant
+#      cost even after (1)-(3).
+#
+#      Originally this was ONE 10-character "codes" string. A live
+#      production response (ep_f3619022, 2026-08-08) returned a 9-character
+#      value for one shot -- the model silently dropped a character
+#      somewhere in an unlabeled 10-letter blob, and there is no principled
+#      way to know which position was lost or to recover it: shifting the
+#      remaining letters, padding with a default, or inferring the missing
+#      letter from context would all be guesses about semantic content
+#      (a camera angle, a composition choice) that this module must never
+#      author on the LLM's behalf. Splitting into two independently-keyed,
+#      independently-length-checked 5-character parts does not prevent the
+#      model from dropping a letter, but it makes a drop unambiguous and
+#      cheaply detectable at each half's own boundary (the malformed half is
+#      always exactly identifiable), and it is validated exactly the same
+#      way: any part that is not exactly 5 characters, or contains any
+#      out-of-range letter, fails expansion with ValueError -- reject and
+#      preserve, never repair.
+#
+#      lens_character (optional) and progression_pattern (per-beat) remain
+#      single-letter codes against their own small vocabularies -- neither
+#      is part of the two 5-character packed strings.
 #
 # Every field _render_shot_directive(), shot_diversity_key(), and the schema
 # actually require is still authored by the LLM (as free text or as an
 # unambiguous code) and still ends up, verbatim, in the expanded candidate
 # that gets schema-validated before install -- nothing semantic is lost,
-# only the redundant/derivable/unread/over-verbose bytes are. An invalid or
-# out-of-range code fails expansion with ValueError, which the caller treats
-# exactly like a schema-validation failure (reject, preserve the active
-# plan) -- compaction never weakens the fail-closed contract.
+# only the redundant/derivable/unread/over-verbose bytes are. An invalid,
+# missing, short, or long code part fails expansion with ValueError, which
+# the caller treats exactly like a schema-validation failure (reject,
+# preserve the active plan) -- compaction never weakens the fail-closed
+# contract, and expansion never guesses a missing or malformed value.
 # ---------------------------------------------------------------------------
 
-# Fixed field order for the packed "codes" string -- position i's letter
-# decodes against _COMPACT_ENUM_VOCAB[_COMPACT_CODE_FIELDS[i]].
+# Fixed field order for the two packed code parts -- position i's letter
+# decodes against _COMPACT_ENUM_VOCAB[_COMPACT_CODE_FIELDS[i]]. This order
+# is the single source of truth for both parts; it is never reordered or
+# altered by the split below -- only how it is chunked into JSON keys
+# changed.
 _COMPACT_CODE_FIELDS: list = [
     "shot_purpose", "shot_scale", "camera_angle", "camera_height",
     "camera_direction", "camera_movement", "composition", "background_depth",
     "screen_direction", "motion_energy",
 ]
+
+# {part_key: [fields]} -- "code1" carries positions 1-5 of
+# _COMPACT_CODE_FIELDS, "code2" carries positions 6-10. Each part is always
+# exactly 5 characters; the split point is fixed at the midpoint of the same
+# unchanged 10-field order above, so no enum's meaning or position changes.
+_COMPACT_CODE_PARTS: dict = {
+    "code1": _COMPACT_CODE_FIELDS[:5],
+    "code2": _COMPACT_CODE_FIELDS[5:],
+}
 
 # Canonical vocabulary for every enum-coded field -- single source of truth
 # for both the codes embedded in _COMPACT_OUTPUT_INSTRUCTIONS and the
@@ -835,34 +871,52 @@ def _decode_enum_code(field: str, code: object) -> str:
     return vocab[index]
 
 
-def _decode_codes_string(codes: object) -> dict:
-    """Decode the packed per-shot 'codes' string into
-    {full_schema_key: value} for all ten enum-coded shot fields. Raises
-    ValueError if `codes` is not exactly len(_COMPACT_CODE_FIELDS)
-    characters or contains any out-of-range letter."""
-    if not isinstance(codes, str) or len(codes) != len(_COMPACT_CODE_FIELDS):
+def _decode_code_part(part_key: str, value: object) -> dict:
+    """Decode one 5-character packed code part (part_key is 'code1' or
+    'code2') into {full_schema_key: value} for the five enum-coded shot
+    fields _COMPACT_CODE_PARTS[part_key] assigns to that part.
+
+    Raises ValueError if `value` is not a string, is not exactly 5
+    characters, or contains any out-of-range letter -- a missing, short,
+    long, or invalid part is a malformed-output condition. Never shifts,
+    pads, defaults, or infers a missing character: an ambiguous or
+    incomplete part is rejected whole, exactly like any other
+    schema-validation failure."""
+    fields = _COMPACT_CODE_PARTS[part_key]
+    if not isinstance(value, str) or len(value) != len(fields):
         raise ValueError(
-            f"'codes' must be a {len(_COMPACT_CODE_FIELDS)}-character string, got {codes!r}"
+            f"{part_key!r} must be a {len(fields)}-character string, got {value!r}"
         )
     return {
         field: _decode_enum_code(field, letter)
-        for field, letter in zip(_COMPACT_CODE_FIELDS, codes)
+        for field, letter in zip(fields, value)
     }
 
 
 def _build_compact_output_instructions() -> str:
     """Build the full COMPACT OUTPUT OVERRIDE instruction text from
-    _COMPACT_ENUM_VOCAB/_COMPACT_CODE_FIELDS -- computed once at import time
+    _COMPACT_ENUM_VOCAB/_COMPACT_CODE_PARTS -- computed once at import time
     (see _COMPACT_OUTPUT_INSTRUCTIONS below) so the instructions the LLM
-    receives can never drift from what _decode_codes_string() actually
-    decodes. This text goes in the INPUT (director_input, not the output),
-    so its length never counts against the 16,000-token output ceiling --
-    only per-shot OUTPUT verbosity does, which is what the codes/aliases
-    below actually reduce."""
-    codes_legend = "\n  ".join(
-        f"position {i + 1} - {field}: {_format_enum_code_legend(field)}"
-        for i, field in enumerate(_COMPACT_CODE_FIELDS)
+    receives can never drift from what _decode_code_part() actually decodes.
+    This text goes in the INPUT (director_input, not the output), so its
+    length never counts against the 16,000-token output ceiling -- only
+    per-shot OUTPUT verbosity does, which is what the codes/aliases below
+    actually reduce."""
+    part_legends = []
+    for part_key, fields in _COMPACT_CODE_PARTS.items():
+        offset = _COMPACT_CODE_FIELDS.index(fields[0])
+        lines = "\n    ".join(
+            f"position {i + 1} - {field}: {_format_enum_code_legend(field)}"
+            for i, field in enumerate(fields, start=offset)
+        )
+        part_legends.append(f'"{part_key}" (fields {offset + 1}-{offset + len(fields)}):\n    {lines}')
+    codes_legend = "\n\n  ".join(part_legends)
+
+    example_parts = ", ".join(
+        f'"{part_key}": "{"".join(chr(65) for _ in fields)}"'
+        for part_key, fields in _COMPACT_CODE_PARTS.items()
     )
+
     return f"""COMPACT OUTPUT OVERRIDE (supersedes the OUTPUT FORMAT section above for this task only):
 
 Respond with ONLY this compact JSON -- no prose, no markdown, no code fences. Do not include
@@ -877,7 +931,8 @@ programmatically after parsing and any tokens spent on them are wasted.
       "pattern": "<single letter -- see PATTERN CODE below>",
       "shots": [
         {{
-          "codes": "<exactly {len(_COMPACT_CODE_FIELDS)} letters, one per position below, no separators>",
+          "code1": "<exactly 5 letters, one per position below, no separators>",
+          "code2": "<exactly 5 letters, one per position below, no separators>",
           "func": "<narrative_function -- one sentence>",
           "subj": "<subject, terse>",
           "act": "<action, terse -- omit this key entirely if static>",
@@ -891,10 +946,11 @@ programmatically after parsing and any tokens spent on them are wasted.
   ]
 }}
 
-CODES STRING -- exactly {len(_COMPACT_CODE_FIELDS)} letters, no separators, one letter per position in this fixed order:
+CODE PARTS -- "code1" and "code2" are each EXACTLY 5 letters, no separators. Never combine them
+into one string, never omit either key, never send more or fewer than 5 letters in either part:
   {codes_legend}
 
-Example "codes" value: the letters "{''.join(chr(65) for _ in _COMPACT_CODE_FIELDS)}" would mean
+Example: {example_parts} would mean
 {", ".join(f"{field}={_COMPACT_ENUM_VOCAB[field][0]}" for field in _COMPACT_CODE_FIELDS)}.
 
 PATTERN CODE (per beat, one letter): {_format_enum_code_legend("progression_pattern")}
@@ -904,10 +960,11 @@ LENS CODE (optional, one letter): {_format_enum_code_legend("lens_character")}
 shots[] length must be >=1 and <= that beat's shot_budget. Every code must decode to one of the
 exact vocabulary values already defined earlier in these instructions -- the legends above are
 that same vocabulary, just indexed by letter. Omit an optional key entirely rather than sending
-"" or null for it."""
+"" or null for it. "code1" and "code2" are both mandatory on every shot."""
 
 
 _COMPACT_OUTPUT_INSTRUCTIONS = _build_compact_output_instructions()
+
 
 
 def _expand_compact_plan(
@@ -929,7 +986,7 @@ def _expand_compact_plan(
     "clean_cut" -- fixed channel policy, not a per-shot LLM decision even in
     the full format), each beat's narration_duration_seconds (the
     already-validated measured duration), every enum-coded field (decoded
-    via _decode_codes_string()/_decode_enum_code() against
+    via _decode_code_part()/_decode_enum_code() against _COMPACT_CODE_PARTS/
     _COMPACT_ENUM_VOCAB), and every free-text field (renamed via
     _COMPACT_FREE_TEXT_FIELDS, values untouched). The returned dict is
     byte-for-byte the same shape run_cinematic_director() itself produces;
@@ -980,7 +1037,8 @@ def _expand_compact_plan(
                 "transition_out": "clean_cut",
                 "diversity_justification": cs.get("dup") or None,
             }
-            shot.update(_decode_codes_string(cs.get("codes")))
+            shot.update(_decode_code_part("code1", cs.get("code1")))
+            shot.update(_decode_code_part("code2", cs.get("code2")))
             for compact_key, full_key in _COMPACT_FREE_TEXT_FIELDS.items():
                 value = cs.get(compact_key)
                 if value not in (None, ""):

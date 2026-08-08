@@ -32,10 +32,11 @@ from hypogeum.agents.cinematic_director import (
     CoverageRegenerationError,
     NarrationCompletenessError,
     _COMPACT_CODE_FIELDS,
+    _COMPACT_CODE_PARTS,
     _COMPACT_ENUM_VOCAB,
     _COMPACT_FREE_TEXT_FIELDS,
     _MAX_TOKENS_REGEN,
-    _decode_codes_string,
+    _decode_code_part,
     _decode_enum_code,
     _expand_compact_plan,
     authoritative_beat_ids,
@@ -786,24 +787,28 @@ def _make_call_result(content: str, **overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _compact_codes(**field_overrides) -> str:
-    """A valid packed 'codes' string using each field's first vocabulary
-    value by default, with per-field overrides by full schema name (e.g.
-    _compact_codes(camera_movement="orbital_arc"))."""
-    letters = []
-    for field in _COMPACT_CODE_FIELDS:
-        if field in field_overrides:
-            value = field_overrides[field]
-            idx = _COMPACT_ENUM_VOCAB[field].index(value)
-        else:
-            idx = 0
-        letters.append(chr(65 + idx))
-    return "".join(letters)
+def _compact_codes(**field_overrides) -> dict:
+    """A valid {"code1": ..., "code2": ...} pair using each field's first
+    vocabulary value by default, with per-field overrides by full schema
+    name (e.g. _compact_codes(camera_movement="orbital_arc")). Built from
+    the real _COMPACT_CODE_PARTS/_COMPACT_ENUM_VOCAB so these fixtures can
+    never silently drift from the actual decode tables."""
+    parts = {}
+    for part_key, fields in _COMPACT_CODE_PARTS.items():
+        letters = []
+        for field in fields:
+            if field in field_overrides:
+                idx = _COMPACT_ENUM_VOCAB[field].index(field_overrides[field])
+            else:
+                idx = 0
+            letters.append(chr(65 + idx))
+        parts[part_key] = "".join(letters)
+    return parts
 
 
 def _compact_shot(**overrides) -> dict:
     base = {
-        "codes": _compact_codes(),
+        **_compact_codes(),
         "func": "distinct contribution this shot alone makes",
         "subj": "x",
     }
@@ -817,9 +822,9 @@ def _matching_compact_response() -> dict:
     return {"beats": [
         {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
         {"beat_id": "b_002", "pattern": "A", "shots": [
-            _compact_shot(codes=_compact_codes(camera_angle="eye_level")),
-            _compact_shot(codes=_compact_codes(camera_angle="low_angle")),
-            _compact_shot(codes=_compact_codes(camera_angle="high_angle")),
+            _compact_shot(**_compact_codes(camera_angle="eye_level")),
+            _compact_shot(**_compact_codes(camera_angle="low_angle")),
+            _compact_shot(**_compact_codes(camera_angle="high_angle")),
         ]},
         {"beat_id": "b_s01", "pattern": "A", "shots": [_compact_shot()]},
     ]}
@@ -1025,7 +1030,58 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         bad_response = _matching_compact_response()
-        bad_response["beats"][0]["shots"][0]["codes"] = "ZZZZZZZZZZ"  # all out of range
+        bad_response["beats"][0]["shots"][0]["code1"] = "ZZZZZ"  # all out of range
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(bad_response))):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_missing_character_in_code_part_preserves_old_plan(self, tmp_path):
+        """The exact real-world failure this correction exists for: a
+        response with one character dropped from a packed code part (4
+        instead of 5). Must fail closed through the full regeneration path
+        -- never repaired by shifting, padding, defaulting, or inference."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        bad_response = _matching_compact_response()
+        bad_response["beats"][0]["shots"][0]["code2"] = "AAAA"  # one character short
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(bad_response))):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+        assert not (tmp_path / "cinematic_coverage_plan_ep_regen.candidate.json").exists()
+
+    def test_missing_code_part_key_preserves_old_plan(self, tmp_path):
+        """Omitting 'code2' entirely (not just shortening it) must also
+        fail closed -- a missing part is never defaulted or inferred."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        bad_response = _matching_compact_response()
+        del bad_response["beats"][0]["shots"][0]["code2"]
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1224,18 +1280,49 @@ class TestCompactWireFormat:
         with pytest.raises(ValueError):
             _decode_enum_code("motion_energy", 1)  # not a string
 
-    def test_decode_codes_string_wrong_length_rejected(self):
-        with pytest.raises(ValueError):
-            _decode_codes_string("AAA")  # too short
-        with pytest.raises(ValueError):
-            _decode_codes_string("A" * (len(_COMPACT_CODE_FIELDS) + 1))  # too long
+    def test_decode_code_part_each_part_is_exactly_five_characters(self):
+        for part_key, fields in _COMPACT_CODE_PARTS.items():
+            assert len(fields) == 5, f"{part_key} does not carry exactly 5 fields"
 
-    def test_decode_codes_string_valid_decodes_every_field(self):
-        codes = "".join(chr(65) for _ in _COMPACT_CODE_FIELDS)
-        decoded = _decode_codes_string(codes)
-        assert set(decoded.keys()) == set(_COMPACT_CODE_FIELDS)
-        for field in _COMPACT_CODE_FIELDS:
-            assert decoded[field] == _COMPACT_ENUM_VOCAB[field][0]
+    def test_decode_code_part_missing_character_rejected(self):
+        """The exact real-world failure mode this correction exists for: a
+        4-character value where 5 were required. Never repaired by
+        shifting, padding, defaulting, or inference -- rejected whole."""
+        for part_key in _COMPACT_CODE_PARTS:
+            with pytest.raises(ValueError):
+                _decode_code_part(part_key, "AAAA")  # one character short
+
+    def test_decode_code_part_wrong_length_rejected(self):
+        for part_key in _COMPACT_CODE_PARTS:
+            with pytest.raises(ValueError):
+                _decode_code_part(part_key, "AAA")  # too short
+            with pytest.raises(ValueError):
+                _decode_code_part(part_key, "AAAAAA")  # too long
+            with pytest.raises(ValueError):
+                _decode_code_part(part_key, "")  # empty
+            with pytest.raises(ValueError):
+                _decode_code_part(part_key, None)  # missing entirely
+
+    def test_decode_code_part_invalid_character_rejected(self):
+        for part_key in _COMPACT_CODE_PARTS:
+            with pytest.raises(ValueError):
+                _decode_code_part(part_key, "ZZZZZ")  # out of range for every field
+
+    def test_decode_code_part_valid_decodes_every_field_in_that_part(self):
+        for part_key, fields in _COMPACT_CODE_PARTS.items():
+            value = "".join(chr(65) for _ in fields)
+            decoded = _decode_code_part(part_key, value)
+            assert set(decoded.keys()) == set(fields)
+            for field in fields:
+                assert decoded[field] == _COMPACT_ENUM_VOCAB[field][0]
+
+    def test_decode_code_parts_together_cover_all_ten_fields_in_original_order(self):
+        """The split must not alter which fields exist or their order --
+        only how they're chunked into JSON keys."""
+        all_fields = []
+        for fields in _COMPACT_CODE_PARTS.values():
+            all_fields.extend(fields)
+        assert all_fields == _COMPACT_CODE_FIELDS
 
     def test_expand_compact_plan_round_trip_preserves_all_semantic_fields(self):
         """Every field Stage B / semantic-compatibility classification needs
@@ -1247,7 +1334,7 @@ class TestCompactWireFormat:
             "beat_id": "b_001",
             "pattern": "B",  # establish_develop_reveal
             "shots": [{
-                "codes": _compact_codes(
+                **_compact_codes(
                     composition="diagonal_leading_line",
                     camera_movement="orbital_arc",
                 ),
@@ -1374,7 +1461,7 @@ class TestCompactWireFormat:
             shots = []
             for _ in range(n_shots):
                 shot = _compact_shot(
-                    codes=_compact_codes(),
+                    **_compact_codes(),
                     func=narrative_functions[shot_index % len(narrative_functions)],
                     subj=subjects[shot_index % len(subjects)],
                 )

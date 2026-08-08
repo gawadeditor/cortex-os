@@ -35,14 +35,17 @@ from hypogeum.agents.cinematic_director import (
     _COMPACT_CODE_PARTS,
     _COMPACT_ENUM_VOCAB,
     _COMPACT_FREE_TEXT_FIELDS,
+    _MAX_SLOTS_PER_BATCH,
     _MAX_TOKENS_REGEN,
     _STRUCTURED_ENUM_PROPERTY_NAMES,
     _STRUCTURED_OUTPUT_PROVIDER,
     _build_structured_response_format,
     _decode_code_part,
     _decode_enum_code,
+    _estimate_batch_max_tokens,
     _expand_compact_plan,
     _no_duplicate_keys_object_pairs_hook,
+    _partition_beats_into_batches,
     _structured_payload_to_compact,
     authoritative_beat_ids,
     authoritative_beat_texts,
@@ -957,14 +960,14 @@ class TestRegenerateCinematicCoveragePlan:
         assert mock_cc.call_count == 1
         assert result["status"] == "installed"
 
-    def test_max_tokens_is_24000_with_verified_margin(self, tmp_path):
-        """16,000 was sized for the packed code1/code2 format; the stricter
-        slot-key structured format measures ~19,259 estimated tokens for a
-        representative 130-shot response, so the ceiling for this isolated
-        call was raised to 24,000 (~4,741 tokens of margin) -- verified
-        against OpenRouter endpoint metadata showing every structured-
-        outputs-capable route for this model supports max_completion_tokens
-        of 128,000, far above this ceiling."""
+    def test_max_tokens_is_batch_specific_and_within_model_limit(self, tmp_path):
+        """max_tokens is no longer a blind constant (16,000, then 24,000) --
+        it is computed per batch by _estimate_batch_max_tokens() (2026-08-09
+        batching correction, prompted by a live 'compiled grammar is too
+        large' rejection of the single 47-beat/130-slot request). For this
+        small 3-beat/5-slot fixture, everything fits in exactly one batch,
+        so the computed ceiling is the real _estimate_batch_max_tokens()
+        value for that one batch -- not the old blind _MAX_TOKENS_REGEN."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -976,10 +979,14 @@ class TestRegenerateCinematicCoveragePlan:
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_args.kwargs["max_tokens"] == _MAX_TOKENS_REGEN
-        assert _MAX_TOKENS_REGEN == 24_000
+        expected = _estimate_batch_max_tokens(
+            ["b_001", "b_002", "b_s01"], {"b_001": 1, "b_002": 3, "b_s01": 1},
+        )
+        actual = mock_cc.call_args.kwargs["max_tokens"]
+        assert actual == expected
+        assert actual <= 128_000  # verified model output-limit ceiling
 
-    def test_response_format_is_strict_json_schema(self, tmp_path):
+    def test_response_format_is_strict_json_schema_with_deterministic_batch_name(self, tmp_path):
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -994,7 +1001,7 @@ class TestRegenerateCinematicCoveragePlan:
         rf = mock_cc.call_args.kwargs["response_format"]
         assert rf["type"] == "json_schema"
         assert rf["json_schema"]["strict"] is True
-        assert rf["json_schema"]["name"] == "cinematic_coverage_plan"
+        assert rf["json_schema"]["name"] == "cinematic_coverage_plan_batch_01"
         assert isinstance(rf["json_schema"]["schema"], dict)
 
     def test_provider_require_parameters_true_no_pinning_or_fallback_override(self, tmp_path):
@@ -1686,6 +1693,442 @@ class TestStructuredCoverageSchema:
             _structured_payload_to_compact({"beats": []}, ["b_001"], {"b_001": 1})
 
 
+    def test_batch_scoped_schema_retains_all_strict_closed_properties(self):
+        """A schema generated for a SUBSET of beats (as every batch uses)
+        must retain every structural guarantee the full 47-beat schema
+        does: closed beat set, closed slot set, zero optional properties,
+        additionalProperties:false everywhere, authoritative enum
+        vocabularies, background_depth excluding F."""
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        first_batch = batches[0]
+        batch_budget = {b: budget[b] for b in first_batch}
+        schema = build_structured_coverage_plan_schema(first_batch, batch_budget)
+
+        assert set(schema["properties"].keys()) == set(first_batch)
+        assert schema["required"] == first_batch
+        assert schema["additionalProperties"] is False
+        for obj_node in _walk_schema_objects(schema):
+            required = set(obj_node.get("required", []))
+            declared = set(obj_node.get("properties", {}).keys())
+            assert declared == required  # zero optional properties
+            assert obj_node.get("additionalProperties") is False
+        dep_prop = _STRUCTURED_ENUM_PROPERTY_NAMES["background_depth"]
+        assert schema["$defs"]["shot"]["properties"][dep_prop]["enum"] == ["A", "B", "C"]
+
+
+# ---------------------------------------------------------------------------
+# TestPartitionBeatsIntoBatches / TestEstimateBatchMaxTokens (2026-08-09)
+#
+# Direct tests of the deterministic greedy batch-partitioning and per-batch
+# max_tokens machinery introduced after a live 47-beat/130-slot strict
+# request was rejected by the provider before generation began ("The
+# compiled grammar is too large").
+# ---------------------------------------------------------------------------
+
+class TestPartitionBeatsIntoBatches:
+
+    def test_25_slot_ceiling_never_exceeded(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        for batch in batches:
+            assert sum(budget[b] for b in batch) <= _MAX_SLOTS_PER_BATCH
+
+    def test_no_beat_split_across_batches(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        seen: set = set()
+        for batch in batches:
+            for beat_id in batch:
+                assert beat_id not in seen, f"{beat_id!r} appeared in more than one batch"
+                seen.add(beat_id)
+
+    def test_every_batch_preserves_authoritative_order(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        for batch in batches:
+            assert batch == sorted(batch, key=authoritative_order.index)
+
+    def test_concatenated_batches_reproduce_authoritative_order_exactly(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        concatenated = [beat_id for batch in batches for beat_id in batch]
+        assert concatenated == authoritative_order
+
+    def test_exactly_47_unique_beats_across_all_batches(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        all_beats = [beat_id for batch in batches for beat_id in batch]
+        assert len(all_beats) == 47
+        assert len(set(all_beats)) == 47
+
+    def test_slot_totals_equal_95_35_130(self):
+        authoritative_order, budget, n_main = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        all_beats = [beat_id for batch in batches for beat_id in batch]
+        main_slots = sum(budget[b] for b in all_beats[:n_main])
+        short_slots = sum(budget[b] for b in all_beats[n_main:])
+        assert main_slots == 95
+        assert short_slots == 35
+        assert main_slots + short_slots == 130
+
+    def test_single_beat_exceeding_ceiling_still_gets_its_own_batch(self):
+        """A beat whose own budget exceeds max_slots_per_batch is never
+        silently dropped, truncated, or split -- it gets a batch alone."""
+        batches = _partition_beats_into_batches(["b_001"], {"b_001": 30}, max_slots_per_batch=25)
+        assert batches == [["b_001"]]
+
+    def test_real_ep_f3619022_partition_is_six_batches(self):
+        """The exact real ep_f3619022 arithmetic, computed once and pinned
+        here -- a change in this result would mean the real batch plan
+        changed, which is worth noticing explicitly."""
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        assert len(batches) == 6
+        assert [len(b) for b in batches] == [9, 7, 7, 7, 13, 4]
+        assert [sum(budget[x] for x in b) for b in batches] == [25, 25, 22, 25, 25, 8]
+
+
+class TestEstimateBatchMaxTokens:
+
+    def test_deterministic_for_same_inputs(self):
+        beat_ids = ["b_001", "b_002"]
+        budget = {"b_001": 3, "b_002": 5}
+        assert _estimate_batch_max_tokens(beat_ids, budget) == _estimate_batch_max_tokens(beat_ids, budget)
+
+    def test_scales_with_slot_and_beat_count(self):
+        small = _estimate_batch_max_tokens(["b_001"], {"b_001": 1})
+        large = _estimate_batch_max_tokens(
+            [f"b_{i:03d}" for i in range(1, 10)], {f"b_{i:03d}": 3 for i in range(1, 10)},
+        )
+        assert large > small
+
+    def test_every_representative_batch_ceiling_within_model_limit(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        batches = _partition_beats_into_batches(authoritative_order, budget)
+        for batch in batches:
+            batch_budget = {b: budget[b] for b in batch}
+            max_tokens = _estimate_batch_max_tokens(batch, batch_budget)
+            assert max_tokens <= 128_000  # verified model max_completion_tokens
+            assert max_tokens >= 500  # sane lower bound, never zero or negative
+
+
+# ---------------------------------------------------------------------------
+# TestBatchedRegeneration (2026-08-09)
+#
+# Multi-batch integration tests against the full regenerate_cinematic_
+# coverage_plan() mocked-call flow. Uses a 12-beat fixture with an
+# artificially huge per-beat narration duration (1000.0s) so compute_shot_
+# budget() deterministically returns the configured safety cap
+# (CINEMATIC_MAX_SHOTS_PER_BEAT=6) for every beat regardless of the exact
+# shot-budget formula -- 12 beats x 6 shots = 72 slots, which the 25-slot
+# ceiling partitions into exactly three batches of four beats/24 slots each.
+# ---------------------------------------------------------------------------
+
+def _make_batch_test_script_package(n_beats: int = 12) -> dict:
+    return {
+        "sections": [{
+            "section_id": "s_001", "title": "T",
+            "narration_beats": [
+                {"beat_id": f"b_{i:03d}", "text": f"beat {i}"} for i in range(1, n_beats + 1)
+            ],
+        }],
+        "shorts_scripts": [],
+    }
+
+
+def _make_batch_test_narration_package(n_beats: int = 12) -> dict:
+    return {"narration_segments": [
+        {"beat_reference": f"b_{i:03d}", "duration_seconds": 1000.0} for i in range(1, n_beats + 1)
+    ]}
+
+
+def _make_batch_test_visual_package(n_beats: int = 12) -> dict:
+    return {
+        "episode_metadata": {"episode_title": "Batch Test Episode"},
+        "scenes": [
+            {"scene_id": f"s{i:02d}", "narration_reference": f"b_{i:03d}", "source_type": "main_episode",
+             "visual_spec": {}, "presentation_plan": {}, "narrative_signals": []}
+            for i in range(1, n_beats + 1)
+        ],
+    }
+
+
+_BATCH_TEST_GROUPS = [
+    ["b_001", "b_002", "b_003", "b_004"],
+    ["b_005", "b_006", "b_007", "b_008"],
+    ["b_009", "b_010", "b_011", "b_012"],
+]
+
+
+def _structured_response_for_batch(beat_ids: list, shots_per_beat: int = 6) -> dict:
+    return {"beats": {
+        beat_id: _structured_beat("A", [_structured_shot() for _ in range(shots_per_beat)])
+        for beat_id in beat_ids
+    }}
+
+
+class TestBatchedRegeneration:
+
+    def test_full_12_beat_partition_matches_three_batches_of_four(self):
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        cfg = _make_config()
+        measured = validate_narration_completeness(sp, np)
+        authoritative = list(measured.keys())
+        budget = {b: compute_shot_budget(measured[b], cfg) for b in authoritative}
+        assert all(v == 6 for v in budget.values())  # confirms the safety cap, not a formula guess
+        batches = _partition_beats_into_batches(authoritative, budget)
+        assert batches == _BATCH_TEST_GROUPS
+
+    def test_all_batches_succeed_installs_correct_totals(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        responses = [
+            _make_call_result(json.dumps(_structured_response_for_batch(g))) for g in _BATCH_TEST_GROUPS
+        ]
+
+        with patch("hypogeum.openrouter.call_claude", side_effect=responses) as mock_cc:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_count == 3
+        assert result["status"] == "installed"
+        assert result["totals"]["main_shots"] == 72
+        assert result["totals"]["total_shots"] == 72
+        installed = json.loads((tmp_path / "cinematic_coverage_plan_ep_batch.json").read_text())
+        assert [bp["beat_id"] for bp in installed["beat_plans"]] == [f"b_{i:03d}" for i in range(1, 13)]
+        validate("cinematic_coverage_plan", installed)
+
+    def test_each_batch_makes_exactly_one_call(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        responses = [
+            _make_call_result(json.dumps(_structured_response_for_batch(g))) for g in _BATCH_TEST_GROUPS
+        ]
+
+        with patch("hypogeum.openrouter.call_claude", side_effect=responses) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_count == len(_BATCH_TEST_GROUPS)
+        for call in mock_cc.call_args_list:
+            assert call.kwargs["allow_model_fallback"] is False
+            assert call.kwargs["max_attempts"] == 1
+
+    def test_batch_names_are_deterministic_and_unique(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        responses = [
+            _make_call_result(json.dumps(_structured_response_for_batch(g))) for g in _BATCH_TEST_GROUPS
+        ]
+
+        with patch("hypogeum.openrouter.call_claude", side_effect=responses) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        names = [c.kwargs["response_format"]["json_schema"]["name"] for c in mock_cc.call_args_list]
+        assert names == [
+            "cinematic_coverage_plan_batch_01",
+            "cinematic_coverage_plan_batch_02",
+            "cinematic_coverage_plan_batch_03",
+        ]
+        assert len(set(names)) == len(names)
+
+    def test_each_batch_schema_contains_only_its_assigned_beats(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        responses = [
+            _make_call_result(json.dumps(_structured_response_for_batch(g))) for g in _BATCH_TEST_GROUPS
+        ]
+
+        with patch("hypogeum.openrouter.call_claude", side_effect=responses) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        for call, expected_beats in zip(mock_cc.call_args_list, _BATCH_TEST_GROUPS):
+            schema = call.kwargs["response_format"]["json_schema"]["schema"]
+            assert set(schema["properties"].keys()) == set(expected_beats)
+            assert schema["required"] == expected_beats
+            assert schema["additionalProperties"] is False
+
+    def test_batch_failure_prevents_later_batch_submission(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_batch.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
+        # Only ONE response supplied for the successful batch 1; batch 2
+        # raises. If the code tried to submit a batch 3, side_effect would
+        # raise StopIteration and fail this test loudly.
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=[batch1_response, RuntimeError("batch 2 provider down")]) as mock_cc:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_count == 2  # batch 1 succeeded, batch 2 attempted and failed, no batch 3
+        assert result["status"] == "rejected"
+        assert "llm_call_failed" in result["reason"]
+        assert "batch 2/3" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+        assert not (tmp_path / "cinematic_coverage_plan_ep_batch.candidate.json").exists()
+
+    def test_batch_failure_discards_earlier_successful_batches(self, tmp_path):
+        """The successful batch-1 result must never be installed alone or
+        merged into anything on disk after a later batch fails."""
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        # No pre-existing checkpoint -- nothing to resume from either.
+
+        batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=[batch1_response, RuntimeError("batch 2 down")]):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert not (tmp_path / "cinematic_coverage_plan_ep_batch.json").exists()
+        assert not (tmp_path / "cinematic_coverage_plan_ep_batch.candidate.json").exists()
+
+    def test_malformed_batch_response_preserves_active_plan(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_batch.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
+        batch2_malformed = _make_call_result("{not valid json")
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=[batch1_response, batch2_malformed]) as mock_cc:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_count == 2
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert "batch 2/3" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_duplicate_json_keys_in_a_batch_response_preserve_active_plan(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_batch.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
+        raw_with_duplicate_key = '{"beats": {"b_005": {}, "b_005": {}}}'
+        batch2_duplicate = _make_call_result(raw_with_duplicate_key)
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=[batch1_response, batch2_duplicate]) as mock_cc:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_count == 2
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_invalid_enum_in_a_batch_response_preserves_active_plan(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_batch.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
+        bad_batch2 = _structured_response_for_batch(_BATCH_TEST_GROUPS[1])
+        bad_batch2["beats"]["b_005"]["shots"]["s01"]["dep"] = "Z"
+        batch2_invalid = _make_call_result(json.dumps(bad_batch2))
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=[batch1_response, batch2_invalid]) as mock_cc:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_count == 2
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_missing_beat_in_a_batch_response_preserves_active_plan(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_batch.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        # batch 1 response is missing b_004 entirely.
+        incomplete_batch1 = _structured_response_for_batch(_BATCH_TEST_GROUPS[0])
+        del incomplete_batch1["beats"]["b_004"]
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=[_make_call_result(json.dumps(incomplete_batch1))]) as mock_cc:
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_count == 1  # rejected at batch 1, batch 2/3 never submitted
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert "batch 1/3" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_no_stage_b_provider_assembly_or_publishing_reachable_across_batches(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_batch_test_script_package()
+        np = _make_batch_test_narration_package()
+        vp = _make_batch_test_visual_package()
+
+        def _must_not_be_called(*a, **k):
+            raise AssertionError("regenerate_cinematic_coverage_plan must never reach this")
+
+        responses = [
+            _make_call_result(json.dumps(_structured_response_for_batch(g))) for g in _BATCH_TEST_GROUPS
+        ]
+        with patch("hypogeum.openrouter.call_claude", side_effect=responses), \
+             patch("hypogeum.agents.shot_diversity_planner.run_shot_diversity_planner",
+                   side_effect=_must_not_be_called), \
+             patch("hypogeum.muapi.submit_scene", side_effect=_must_not_be_called), \
+             patch("hypogeum.agents.assembly_agent.run_assembly_agent",
+                   side_effect=_must_not_be_called), \
+             patch("hypogeum.agents.publishing_agent.run_publishing_agent",
+                   side_effect=_must_not_be_called):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "installed"
 
 
 # ---------------------------------------------------------------------------

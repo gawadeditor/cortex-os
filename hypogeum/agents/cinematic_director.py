@@ -1282,11 +1282,16 @@ def build_structured_coverage_plan_schema(
     }
 
 
-def _build_structured_response_format(schema: dict) -> dict:
+def _build_structured_response_format(schema: dict, name: str = "cinematic_coverage_plan") -> dict:
+    """`name` defaults to the single-request schema name (unused by any
+    caller after the 2026-08-09 batching correction, kept as the default so
+    this function's own signature stays backward-compatible) -- the batch
+    loop below always passes its own deterministic, unique
+    "cinematic_coverage_plan_batch_{index:02d}" name instead."""
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "cinematic_coverage_plan",
+            "name": name,
             "strict": True,
             "schema": schema,
         },
@@ -1391,6 +1396,109 @@ _STRUCTURED_OUTPUT_CONTENT_NOTE = (
     "shot -- do not reuse the same phrase across shots in a beat."
 )
 
+# ---------------------------------------------------------------------------
+# Batched strict planning (2026-08-09)
+#
+# A live isolated-planning attempt against the single 47-beat/130-slot
+# structured schema (30,715 bytes, 288 required properties) was rejected by
+# Anthropic before generation began: "The compiled grammar is too large,
+# which would cause performance issues." This is a runtime grammar-
+# compilation cost limit, not a documented JSON-Schema-subset violation --
+# every keyword used was already confirmed supported; the schema was simply
+# too large in aggregate for the provider's strict-mode constrained-decoding
+# engine to compile at 47-beat/130-slot scale. No provider byte threshold
+# was published, so _MAX_SLOTS_PER_BATCH below is a conservative structural
+# reduction against the rejected 130-slot grammar, not a claimed precise
+# limit -- the sole knob to revisit if it ever needs adjusting.
+#
+# Splitting the SAME schema machinery (same slot-key/per-position-enum
+# design, same fail-closed conversion path) into several smaller strict
+# requests, each well under the scale that failed, produces one independent
+# one-request-maximum call per batch (max_attempts=1,
+# allow_model_fallback=False -- the identical contract the single-request
+# design already used). Each batch yields its own compact-shape beat list
+# via the UNCHANGED _structured_payload_to_compact()/_expand_compact_plan()
+# path. Nothing is merged into a canonical plan, nothing is written to disk,
+# and no batch result is treated as resumable state until every batch has
+# succeeded -- a failure at batch N discards every batch already collected
+# in memory and rejects the whole attempt exactly as a single-request
+# failure always has (see regenerate_cinematic_coverage_plan()'s own
+# docstring). This keeps the atomic-installation contract identical to the
+# single-request design: one full-plan validation pass, one atomic
+# Path.replace(), or nothing installed at all.
+# ---------------------------------------------------------------------------
+
+_MAX_SLOTS_PER_BATCH = 25
+
+
+def _partition_beats_into_batches(
+    authoritative_order: list,
+    shot_budget_by_beat_id: dict,
+    max_slots_per_batch: int = _MAX_SLOTS_PER_BATCH,
+) -> list:
+    """Deterministic greedy partition of authoritative_order into batches of
+    at most max_slots_per_batch total shot slots each, filling each batch in
+    authoritative order until the next complete beat would exceed the
+    ceiling. A beat is never split across batches -- if a single beat's own
+    budget exceeds max_slots_per_batch, it still gets its own batch alone
+    (never silently dropped, truncated, or split). Returns a list of
+    beat_id lists; concatenating them in order reproduces
+    authoritative_order exactly, with no overlap and no omission."""
+    batches: list = []
+    current: list = []
+    current_slots = 0
+    for beat_id in authoritative_order:
+        n = shot_budget_by_beat_id[beat_id]
+        if current and current_slots + n > max_slots_per_batch:
+            batches.append(current)
+            current = []
+            current_slots = 0
+        current.append(beat_id)
+        current_slots += n
+    if current:
+        batches.append(current)
+    return batches
+
+
+# Deterministic per-batch max_tokens formula, fitted (with a deliberately
+# generous safety margin) against the representative structured-response
+# measurement used throughout this correction: observed ~144-150 estimated
+# tokens per shot slot plus a small fixed per-beat wrapper overhead
+# (beat_id key, "pattern" property, JSON nesting) -- both coefficients
+# rounded up, plus a flat 2,000-token safety buffer, then rounded up again
+# to the nearest 500 for a clean, auditable ceiling. Verified against every
+# batch of the real ep_f3619022 47-beat/130-slot partition: minimum margin
+# over the measured representative response was 2,295 tokens, maximum
+# per-batch ceiling 6,500 tokens -- far within the 128,000-token
+# max_completion_tokens every structured-outputs-capable route for this
+# model declares (verified via non-inference OpenRouter endpoint metadata).
+_CONSERVATIVE_TOKENS_PER_SLOT = 160
+_CONSERVATIVE_TOKENS_PER_BEAT = 20
+_BATCH_TOKEN_SAFETY_MARGIN = 2_000
+_BATCH_TOKEN_ROUNDING = 500
+
+
+def _estimate_batch_max_tokens(beat_ids: list, shot_budget_by_beat_id: dict) -> int:
+    n_slots = sum(shot_budget_by_beat_id[b] for b in beat_ids)
+    n_beats = len(beat_ids)
+    estimated = (
+        n_slots * _CONSERVATIVE_TOKENS_PER_SLOT
+        + n_beats * _CONSERVATIVE_TOKENS_PER_BEAT
+        + _BATCH_TOKEN_SAFETY_MARGIN
+    )
+    return ((estimated + _BATCH_TOKEN_ROUNDING - 1) // _BATCH_TOKEN_ROUNDING) * _BATCH_TOKEN_ROUNDING
+
+
+def _batch_content_note(batch_index: int, batch_count: int) -> str:
+    return (
+        _STRUCTURED_OUTPUT_CONTENT_NOTE
+        + f" This is batch {batch_index} of {batch_count} of a larger sequential "
+        "Cinematic Coverage Plan regeneration -- respond with structured content for "
+        "ONLY the beats present in this request's schema. Beats outside this batch are "
+        "being planned in separate requests and must not be referenced or repeated here."
+    )
+
+
 def regenerate_cinematic_coverage_plan(
     script_package: dict,
     narration_package: Optional[dict],
@@ -1430,25 +1538,38 @@ def regenerate_cinematic_coverage_plan(
       2. If a checkpoint already exists, copy it unchanged to a timestamped
          backup path (cinematic_coverage_plan_{episode_id}.backup_{ts}.json)
          before touching anything else.
-      3. Make at most one LLM call, non-streaming, capped at
-         _MAX_TOKENS_REGEN (16,000 tokens) -- a full 130-shot/47-beat
-         response does not fit that budget in the full per-shot schema
-         run_cinematic_director() uses, so this call requests strict
-         structured output instead (response_format: json_schema, strict;
-         provider.require_parameters=true — see the "Structured-output
-         wire format" module comment above _structured_payload_to_compact())
-         constraining generation itself to the exact 47 authoritative beats,
-         each beat's exact shot-slot count, and every enum position's
-         authoritative vocabulary. The response is reshaped by
+      3. Make a deterministic, bounded sequence of strict batch LLM calls,
+         non-streaming, one requests.post call maximum per batch (see the
+         "Batched strict planning" module comment above
+         _partition_beats_into_batches() for why: a single 47-beat/130-slot
+         strict-schema request was rejected by the provider before
+         generation began -- "The compiled grammar is too large" -- so the
+         47 authoritative beats are partitioned deterministically, in
+         authoritative order, into batches of at most
+         _MAX_SLOTS_PER_BATCH shot slots each, never splitting one beat
+         across two batches). Each batch requests strict structured output
+         (response_format: json_schema, strict; provider.require_
+         parameters=true; allow_model_fallback=False; max_attempts=1 — see
+         the "Structured-output wire format" module comment above
+         _structured_payload_to_compact()) at a deterministic, batch-sized
+         max_tokens ceiling (_estimate_batch_max_tokens()), constraining
+         generation itself to that batch's exact beat set, each beat's
+         exact shot-slot count, and every enum position's authoritative
+         vocabulary. Each batch's response is reshaped by
          _structured_payload_to_compact() into the same compact dict shape
-         the prompt-only path used to produce directly, then expanded back
-         to the exact full canonical shape by the unchanged
-         _expand_compact_plan(), before any schema validation runs. Calls
+         the prompt-only path used to produce directly, and accumulated
+         purely in memory. A failure at any batch discards every batch
+         already collected and rejects the whole attempt immediately — no
+         later batch is submitted, nothing partial is ever installed, and a
+         later invocation always restarts from batch 1. Only once every
+         batch has succeeded are the merged beats expanded back to the
+         exact full canonical shape by the unchanged _expand_compact_plan(),
+         before any schema validation runs. Calls
          hypogeum.openrouter.call_claude() directly (not run_agent())
-         specifically so the response is never checked against the
+         specifically so each batch response is never checked against the
          full-schema validator until after reshaping and expansion.
          Nothing is written to disk until this function explicitly writes
-         the expanded candidate itself, at
+         the expanded, merged candidate itself, at
          cinematic_coverage_plan_{episode_id}.candidate.json.
       4. Validate the candidate completely: every authoritative beat_id
          present exactly once, each beat_plan's shot count matching the
@@ -1574,115 +1695,157 @@ def regenerate_cinematic_coverage_plan(
             "totals": totals,
         }
 
-    # Step 3 — at most one LLM call. Redirect run_agent()'s own disk write
-    # to a throwaway temp directory so nothing durable exists yet.
-    beats_for_director = []
+    # Step 3 — a deterministic, bounded sequence of strict batch requests
+    # (see the "Batched strict planning" module comment above
+    # _partition_beats_into_batches() for why this replaced a single
+    # 47-beat/130-slot request -- that request was rejected by the provider
+    # before generation began: "The compiled grammar is too large"). Each
+    # batch is its own independent one-request-maximum call; a failure at
+    # any batch discards every batch already collected in memory and
+    # rejects the whole attempt -- nothing is written to disk and no batch
+    # result is treated as resumable state until every batch has succeeded
+    # and the full merged candidate has passed every validator below. A
+    # later invocation always starts again from batch 1.
     expected_shot_budget_by_beat_id: dict = {}
+    scenes_by_beat_id: dict = {}
     for beat_id in authoritative:
         duration = measured_durations[beat_id]
-        shot_budget = compute_shot_budget(duration, config)
-        expected_shot_budget_by_beat_id[beat_id] = shot_budget
-        scene = next(
+        expected_shot_budget_by_beat_id[beat_id] = compute_shot_budget(duration, config)
+        scenes_by_beat_id[beat_id] = next(
             (s for s in visual_package.get("scenes", []) if s.get("narration_reference") == beat_id),
             {},
         )
-        beats_for_director.append({
-            "beat_id": beat_id,
-            "scene_id": scene.get("scene_id"),
-            "source_type": scene.get("source_type"),
-            "narration_duration_seconds": round(duration, 3),
-            "shot_budget": shot_budget,
-            "visual_spec": scene.get("visual_spec", {}),
-            "presentation_plan": scene.get("presentation_plan", {}),
-            "narrative_signals": scene.get("narrative_signals", []),
-        })
 
-    structured_schema = build_structured_coverage_plan_schema(
-        authoritative, expected_shot_budget_by_beat_id,
-    )
+    batches = _partition_beats_into_batches(authoritative, expected_shot_budget_by_beat_id)
 
-    director_input = {
-        "task": "plan_cinematic_coverage_structured",
-        "episode_metadata": {
-            "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
-            "total_beats": len(beats_for_director),
-            "episode_id": episode_id,
-        },
-        "progression_patterns": list(PROGRESSION_PATTERNS),
-        "beats": beats_for_director,
-        "output_format_override": _STRUCTURED_OUTPUT_CONTENT_NOTE,
-    }
+    all_expanded_beat_plans: list = []
+    for batch_index, batch_beat_ids in enumerate(batches, start=1):
+        batch_budget = {b: expected_shot_budget_by_beat_id[b] for b in batch_beat_ids}
 
-    # Single non-streaming call, strict structured-output wire format,
-    # fixed _MAX_TOKENS_REGEN (24,000) ceiling -- see that constant and the
-    # "Structured-output" module comment above for why. No retry, no
-    # batching, no streaming: exactly one call_claude() invocation.
-    # response_format constrains generation itself (exact beat set, exact
-    # per-beat shot slots, exact per-position enum letters) via strict
-    # json_schema; provider.require_parameters=true excludes the two
-    # OpenRouter routes for this model that don't declare support for that
-    # parameter, without pinning, ordering, or allow/deny-listing any
-    # provider (see _STRUCTURED_OUTPUT_PROVIDER) -- OpenRouter's own
-    # provider-level routing/failover across the remaining compatible
-    # endpoints of this same model stays fully available.
-    # allow_model_fallback=False specifically disables call_claude()'s
-    # separate different-model fallback (config.OPENROUTER_FALLBACK_MODEL)
-    # for this call only -- a schema built for anthropic/claude-sonnet-4.6
-    # must never silently be sent to a different model. max_attempts=1
-    # additionally caps this call at exactly one requests.post call against
-    # the primary model itself -- without it, a transient 429/500/502/503
-    # would still trigger call_claude()'s own same-model retry (a second
-    # HTTP request) before allow_model_fallback is ever consulted, which
-    # would leave more than one actual provider request reachable from this
-    # isolated regeneration despite the "no retry" contract. OpenRouter's
-    # own provider-level routing among the compatible endpoints inside that
-    # one submitted request is unaffected -- this only bounds how many
-    # separate requests this function itself submits. The structured
-    # response still cannot pass
-    # hypogeum.schemas.validate("cinematic_coverage_plan", ...) directly --
-    # it is reshaped by _structured_payload_to_compact() and then expanded
-    # by the unchanged _expand_compact_plan(), a few lines below.
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps(director_input, ensure_ascii=False)},
-    ]
+        beats_for_director = []
+        for beat_id in batch_beat_ids:
+            duration = measured_durations[beat_id]
+            scene = scenes_by_beat_id[beat_id]
+            beats_for_director.append({
+                "beat_id": beat_id,
+                "scene_id": scene.get("scene_id"),
+                "source_type": scene.get("source_type"),
+                "narration_duration_seconds": round(duration, 3),
+                "shot_budget": batch_budget[beat_id],
+                "visual_spec": scene.get("visual_spec", {}),
+                "presentation_plan": scene.get("presentation_plan", {}),
+                "narrative_signals": scene.get("narrative_signals", []),
+            })
+
+        batch_schema = build_structured_coverage_plan_schema(batch_beat_ids, batch_budget)
+        batch_max_tokens = _estimate_batch_max_tokens(batch_beat_ids, batch_budget)
+
+        director_input = {
+            "task": "plan_cinematic_coverage_structured_batch",
+            "episode_metadata": {
+                "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
+                "total_beats": len(beats_for_director),
+                "episode_id": episode_id,
+                "batch_index": batch_index,
+                "batch_count": len(batches),
+            },
+            "progression_patterns": list(PROGRESSION_PATTERNS),
+            "beats": beats_for_director,
+            "output_format_override": _batch_content_note(batch_index, len(batches)),
+        }
+
+        # Single non-streaming call per batch, strict structured-output
+        # wire format, deterministic per-batch max_tokens (see
+        # _estimate_batch_max_tokens() above -- _MAX_TOKENS_REGEN, sized
+        # for the single-request design, is never reused blindly here).
+        # response_format/provider/allow_model_fallback/max_attempts carry
+        # exactly the same contract the single-request design established:
+        # strict json_schema, require_parameters routing filter (no
+        # provider pinning), no different-model fallback, no same-model
+        # retry -- one requests.post call maximum per batch. OpenRouter's
+        # own provider-level routing among compatible endpoints inside
+        # that one submitted request remains fully available.
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(director_input, ensure_ascii=False)},
+        ]
+        try:
+            result = call_claude(
+                model_slug=_CLAUDE_SONNET,
+                messages=messages,
+                max_tokens=batch_max_tokens,
+                config=config,
+                episode_id=episode_id,
+                agent=_AGENT_NAME,
+                response_format=_build_structured_response_format(
+                    batch_schema, name=f"cinematic_coverage_plan_batch_{batch_index:02d}",
+                ),
+                provider=_STRUCTURED_OUTPUT_PROVIDER,
+                allow_model_fallback=False,
+                max_attempts=1,
+            )
+        except Exception as exc:  # noqa: BLE001 — any LLM/network/truncation failure
+            return _rejected(
+                f"llm_call_failed: batch {batch_index}/{len(batches)} "
+                f"(beats {batch_beat_ids}): {type(exc).__name__}: {exc}"
+            )
+
+        record_cost(
+            provider="openrouter",
+            model=result.model_used,
+            call_type=_AGENT_NAME,
+            cost_usd=result.estimated_cost_usd,
+            tokens_or_credits=float(result.usage.get("total_tokens", 0)),
+        )
+
+        # Parsed AND fully expanded (decoded, validated) immediately,
+        # scoped to just this batch's beats -- not deferred to a final
+        # merge step. Every per-shot check _expand_compact_plan() already
+        # performs (invalid/out-of-range enum letters via
+        # _decode_code_part(), missing/duplicate/unknown beats within the
+        # batch, empty shots) therefore fails THIS batch immediately,
+        # before any later batch is ever submitted -- exactly matching
+        # "failure in batch N prevents batch N+1 from being submitted" for
+        # every failure class, not only structural ones.
+        raw_content = _strip_markdown_fence(result.content)
+        try:
+            structured = json.loads(
+                raw_content, object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
+            )
+            batch_compact = _structured_payload_to_compact(
+                structured, batch_beat_ids, batch_budget,
+            )
+            batch_measured_durations = {b: measured_durations[b] for b in batch_beat_ids}
+            batch_expanded = _expand_compact_plan(
+                batch_compact, episode_id, batch_beat_ids, batch_measured_durations,
+                provider_clip_duration,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            return _rejected(
+                f"malformed_output: batch {batch_index}/{len(batches)} "
+                f"(beats {batch_beat_ids}): {type(exc).__name__}: {exc}"
+            )
+
+        # In-memory accumulation only -- no disk write, no partial-batch
+        # artifact, until every batch above has succeeded.
+        all_expanded_beat_plans.extend(batch_expanded["beat_plans"])
+
+    # All batches succeeded -- merge in memory (authoritative order is
+    # preserved by construction: batches were built from `authoritative` in
+    # order, and each batch's own expansion preserves its own sub-order)
+    # and run the canonical schema validator once against the fully
+    # assembled candidate, exactly as the single-request design did.
+    merged_beat_ids = [bp["beat_id"] for bp in all_expanded_beat_plans]
+    if merged_beat_ids != authoritative:
+        return _rejected(
+            "batch_merge_order_mismatch: merged beat order does not match "
+            "authoritative order after all batches succeeded"
+        )
+
+    candidate = {"episode_id": episode_id, "beat_plans": all_expanded_beat_plans}
     try:
-        result = call_claude(
-            model_slug=_CLAUDE_SONNET,
-            messages=messages,
-            max_tokens=_MAX_TOKENS_REGEN,
-            config=config,
-            episode_id=episode_id,
-            agent=_AGENT_NAME,
-            response_format=_build_structured_response_format(structured_schema),
-            provider=_STRUCTURED_OUTPUT_PROVIDER,
-            allow_model_fallback=False,
-            max_attempts=1,
-        )
-    except Exception as exc:  # noqa: BLE001 — any LLM/network/truncation failure
-        return _rejected(f"llm_call_failed: {type(exc).__name__}: {exc}")
-
-    record_cost(
-        provider="openrouter",
-        model=result.model_used,
-        call_type=_AGENT_NAME,
-        cost_usd=result.estimated_cost_usd,
-        tokens_or_credits=float(result.usage.get("total_tokens", 0)),
-    )
-
-    raw_content = _strip_markdown_fence(result.content)
-    try:
-        structured = json.loads(
-            raw_content, object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
-        )
-        compact = _structured_payload_to_compact(
-            structured, authoritative, expected_shot_budget_by_beat_id,
-        )
-        candidate = _expand_compact_plan(
-            compact, episode_id, authoritative, measured_durations, provider_clip_duration,
-        )
         validate("cinematic_coverage_plan", candidate)
-    except (json.JSONDecodeError, ValueError, SchemaError) as exc:
+    except SchemaError as exc:
         return _rejected(f"malformed_output: {type(exc).__name__}: {exc}")
 
     # Candidate written to its own named, inspectable path (never the

@@ -718,6 +718,75 @@ class TestOpenRouterModelFallback:
         assert result.content == "from fallback model"
         assert mock_post.call_count == 3
 
+    def test_max_attempts_none_default_preserves_existing_retry_behavior(self):
+        """max_attempts omitted -- every existing caller keeps today's
+        RETRY_MAX-based retry budget unchanged."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        responses = [http_error(500), http_error(500), openrouter_200("recovered")]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)  # max_attempts omitted
+        assert result.content == "recovered"
+        assert mock_post.call_count == 3
+
+    def test_max_attempts_one_causes_exactly_one_request_on_transient_failure(self):
+        """The isolated Coverage Plan call shape: max_attempts=1 combined
+        with allow_model_fallback=False. A provider 500 must produce
+        exactly ONE requests.post call -- no same-model retry, no
+        different-model fallback request. Only one response is supplied to
+        the mock; a second requests.post call would raise StopIteration and
+        fail the test loudly."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        with patch("hypogeum.openrouter.requests.post",
+                   side_effect=[http_error(500)]) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep") as mock_sleep:
+                with pytest.raises(FallbackFailed):
+                    call_claude(
+                        SONNET, MINIMAL_MESSAGES, 512, cfg,
+                        allow_model_fallback=False, max_attempts=1,
+                    )
+        assert mock_post.call_count == 1
+        mock_sleep.assert_not_called()  # no retry delay was ever computed
+        # No request to the same model a second time, and none to the
+        # configured different-model fallback slug either.
+        request_models = [c.kwargs["json"]["model"] for c in mock_post.call_args_list]
+        assert request_models == [SONNET]
+        assert FALLBACK_MODEL not in request_models
+
+    def test_max_attempts_one_successful_call_makes_exactly_one_request(self):
+        """The happy path under the isolated no-retry configuration still
+        makes exactly one HTTP request -- max_attempts=1 changes nothing
+        when the first attempt succeeds."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+        with patch("hypogeum.openrouter.requests.post",
+                   return_value=openrouter_200("ok")) as mock_post:
+            result = call_claude(
+                SONNET, MINIMAL_MESSAGES, 512, cfg,
+                allow_model_fallback=False, max_attempts=1,
+            )
+        assert result.content == "ok"
+        assert mock_post.call_count == 1
+
+    def test_max_attempts_one_does_not_alter_unrelated_calls(self):
+        """max_attempts is per-call, not global -- an unrelated ordinary
+        call (max_attempts omitted) still gets the full retry budget."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL})
+
+        with patch("hypogeum.openrouter.requests.post",
+                   side_effect=[http_error(500)]):
+            with pytest.raises(FallbackFailed):
+                call_claude(
+                    SONNET, MINIMAL_MESSAGES, 512, cfg,
+                    allow_model_fallback=False, max_attempts=1,
+                )
+
+        responses = [http_error(500), http_error(500), openrouter_200("recovered")]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.content == "recovered"
+        assert mock_post.call_count == 3
+
 
 # ---------------------------------------------------------------------------
 # TestThumbnailDirectorFallbackConfiguration (2026-08-04)

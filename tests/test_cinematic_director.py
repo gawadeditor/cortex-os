@@ -1032,6 +1032,26 @@ class TestRegenerateCinematicCoveragePlan:
 
         assert mock_cc.call_args.kwargs["allow_model_fallback"] is False
 
+    def test_max_attempts_is_one_no_same_model_retry(self, tmp_path):
+        """max_attempts=1 must be passed alongside allow_model_fallback=False
+        -- without it, a transient provider error would still trigger
+        call_claude()'s own same-model retry (a second HTTP request) before
+        allow_model_fallback is ever consulted, leaving more than one actual
+        provider request reachable despite the 'no retry' contract."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_args.kwargs["max_attempts"] == 1
+        assert mock_cc.call_args.kwargs["allow_model_fallback"] is False
+
     def test_undercounted_beat_preserves_old_plan_and_backup(self, tmp_path):
         """Under the structured-output slot-key schema, a beat with fewer
         shots than its authoritative budget (the exact b_014 4-vs-5 failure

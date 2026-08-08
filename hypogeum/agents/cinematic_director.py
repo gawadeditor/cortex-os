@@ -1628,7 +1628,16 @@ def regenerate_cinematic_coverage_plan(
     # allow_model_fallback=False specifically disables call_claude()'s
     # separate different-model fallback (config.OPENROUTER_FALLBACK_MODEL)
     # for this call only -- a schema built for anthropic/claude-sonnet-4.6
-    # must never silently be sent to a different model. The structured
+    # must never silently be sent to a different model. max_attempts=1
+    # additionally caps this call at exactly one requests.post call against
+    # the primary model itself -- without it, a transient 429/500/502/503
+    # would still trigger call_claude()'s own same-model retry (a second
+    # HTTP request) before allow_model_fallback is ever consulted, which
+    # would leave more than one actual provider request reachable from this
+    # isolated regeneration despite the "no retry" contract. OpenRouter's
+    # own provider-level routing among the compatible endpoints inside that
+    # one submitted request is unaffected -- this only bounds how many
+    # separate requests this function itself submits. The structured
     # response still cannot pass
     # hypogeum.schemas.validate("cinematic_coverage_plan", ...) directly --
     # it is reshaped by _structured_payload_to_compact() and then expanded
@@ -1648,6 +1657,7 @@ def regenerate_cinematic_coverage_plan(
             response_format=_build_structured_response_format(structured_schema),
             provider=_STRUCTURED_OUTPUT_PROVIDER,
             allow_model_fallback=False,
+            max_attempts=1,
         )
     except Exception as exc:  # noqa: BLE001 — any LLM/network/truncation failure
         return _rejected(f"llm_call_failed: {type(exc).__name__}: {exc}")

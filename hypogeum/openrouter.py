@@ -280,6 +280,7 @@ def call_claude(
     response_format: Optional[dict] = None,
     provider: Optional[dict] = None,
     allow_model_fallback: bool = True,
+    max_attempts: Optional[int] = None,
 ) -> CallResult:
     """
     Call Claude via OpenRouter (primary), then config.OPENROUTER_FALLBACK_MODEL
@@ -323,6 +324,20 @@ def call_claude(
                      *same* model — that stays fully available via the
                      `provider` parameter above and is orthogonal to this
                      flag, which only gates the different-model fallback.
+        max_attempts: When None (the default — unchanged behavior for every
+                     existing caller), transient-error retry uses the
+                     existing RETRY_MAX-derived budget (one initial attempt
+                     plus up to RETRY_MAX retries against the SAME model,
+                     each a separate requests.post call). When set to an
+                     integer, caps the total number of requests.post calls
+                     against the primary model at that many — max_attempts=1
+                     means the first transient failure is treated as
+                     immediately exhausted (zero retries, zero additional
+                     HTTP calls) before whatever allow_model_fallback then
+                     decides. OpenRouter's own provider-level routing among
+                     compatible endpoints inside that one submitted request
+                     is unaffected either way — this parameter only bounds
+                     how many separate requests THIS function submits.
 
     Returns:
         CallResult on success.
@@ -375,7 +390,10 @@ def call_claude(
             start_ms=start_ms,
         )
 
-    # --- OpenRouter path with up to RETRY_MAX retries ---
+    # --- OpenRouter path with up to RETRY_MAX retries (or, when the caller
+    # passes max_attempts, a caller-scoped cap on total requests.post calls
+    # against the primary model instead) ---
+    effective_retry_max = RETRY_MAX if max_attempts is None else max(0, max_attempts - 1)
     attempt = 0
     while True:
         try:
@@ -411,7 +429,7 @@ def call_claude(
             )
 
         except (_RetryableError, requests.exceptions.RequestException) as exc:
-            if attempt >= RETRY_MAX:
+            if attempt >= effective_retry_max:
                 if not allow_model_fallback:
                     log.warn(
                         "openrouter_model_fallback_activated",

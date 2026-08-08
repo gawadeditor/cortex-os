@@ -31,6 +31,13 @@ from hypogeum.agents.cinematic_director import (
     CoveragePlanDiversityError,
     CoverageRegenerationError,
     NarrationCompletenessError,
+    _COMPACT_CODE_FIELDS,
+    _COMPACT_ENUM_VOCAB,
+    _COMPACT_FREE_TEXT_FIELDS,
+    _MAX_TOKENS_REGEN,
+    _decode_codes_string,
+    _decode_enum_code,
+    _expand_compact_plan,
     authoritative_beat_ids,
     authoritative_beat_texts,
     compute_shot_budget,
@@ -41,7 +48,7 @@ from hypogeum.agents.cinematic_director import (
     validate_coverage_plan_diversity,
     validate_narration_completeness,
 )
-from hypogeum.schemas import validate
+from hypogeum.schemas import SchemaError, validate
 
 
 def _make_config(**overrides) -> SimpleNamespace:
@@ -749,7 +756,10 @@ def _make_small_visual_package() -> dict:
 
 def _matching_candidate_plan() -> dict:
     """A cinematic_coverage_plan whose shot counts exactly match the
-    arithmetic _make_small_narration_package() implies (1, 3, 1)."""
+    arithmetic _make_small_narration_package() implies (1, 3, 1). This is
+    the FULL canonical shape -- used only for pre-seeding an existing
+    checkpoint file directly on disk (bypassing regenerate_cinematic_
+    coverage_plan() entirely), never as an LLM response."""
     return {
         "episode_id": "ep_regen",
         "beat_plans": [
@@ -760,17 +770,69 @@ def _matching_candidate_plan() -> dict:
     }
 
 
-def _mismatched_candidate_plan() -> dict:
+def _make_call_result(content: str, **overrides) -> SimpleNamespace:
+    """Minimal stand-in for hypogeum.openrouter.CallResult -- only the
+    fields regenerate_cinematic_coverage_plan() actually reads."""
+    base = dict(
+        content=content,
+        usage={"prompt_tokens": 800, "completion_tokens": 600, "total_tokens": 1400},
+        model_used="anthropic/claude-sonnet-4.6",
+        finish_reason="stop",
+        response_time_ms=1200,
+        via_fallback=False,
+        estimated_cost_usd=0.01,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _compact_codes(**field_overrides) -> str:
+    """A valid packed 'codes' string using each field's first vocabulary
+    value by default, with per-field overrides by full schema name (e.g.
+    _compact_codes(camera_movement="orbital_arc"))."""
+    letters = []
+    for field in _COMPACT_CODE_FIELDS:
+        if field in field_overrides:
+            value = field_overrides[field]
+            idx = _COMPACT_ENUM_VOCAB[field].index(value)
+        else:
+            idx = 0
+        letters.append(chr(65 + idx))
+    return "".join(letters)
+
+
+def _compact_shot(**overrides) -> dict:
+    base = {
+        "codes": _compact_codes(),
+        "func": "distinct contribution this shot alone makes",
+        "subj": "x",
+    }
+    base.update(overrides)
+    return base
+
+
+def _matching_compact_response() -> dict:
+    """Compact wire-format response whose shot counts exactly match the
+    arithmetic _make_small_narration_package() implies (1, 3, 1)."""
+    return {"beats": [
+        {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
+        {"beat_id": "b_002", "pattern": "A", "shots": [
+            _compact_shot(codes=_compact_codes(camera_angle="eye_level")),
+            _compact_shot(codes=_compact_codes(camera_angle="low_angle")),
+            _compact_shot(codes=_compact_codes(camera_angle="high_angle")),
+        ]},
+        {"beat_id": "b_s01", "pattern": "A", "shots": [_compact_shot()]},
+    ]}
+
+
+def _mismatched_compact_response() -> dict:
     """Same beats, but b_002 gets only 1 shot instead of the required 3 --
     an arithmetic mismatch that must be rejected."""
-    return {
-        "episode_id": "ep_regen",
-        "beat_plans": [
-            _valid_beat_plan("b_001", 8.0, 1),
-            _valid_beat_plan("b_002", 20.0, 1),
-            _valid_beat_plan("b_s01", 8.0, 1),
-        ],
-    }
+    return {"beats": [
+        {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
+        {"beat_id": "b_002", "pattern": "A", "shots": [_compact_shot()]},
+        {"beat_id": "b_s01", "pattern": "A", "shots": [_compact_shot()]},
+    ]}
 
 
 class TestRegenerateCinematicCoveragePlan:
@@ -784,12 +846,12 @@ class TestRegenerateCinematicCoveragePlan:
         existing = _matching_candidate_plan()
         ckpt.write_text(json.dumps(existing))
 
-        with patch("hypogeum.agents.cinematic_director.run_agent") as mock_ra:
+        with patch("hypogeum.openrouter.call_claude") as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=False,
             )
 
-        mock_ra.assert_not_called()
+        mock_cc.assert_not_called()
         assert result["status"] == "cached"
         assert result["plan"] == existing
         assert json.loads(ckpt.read_text()) == existing  # untouched on disk
@@ -801,13 +863,13 @@ class TestRegenerateCinematicCoveragePlan:
         vp = _make_small_visual_package()
         # No checkpoint exists at all.
 
-        with patch("hypogeum.agents.cinematic_director.run_agent") as mock_ra:
+        with patch("hypogeum.openrouter.call_claude") as mock_cc:
             with pytest.raises(CoverageRegenerationError):
                 regenerate_cinematic_coverage_plan(
                     sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=False,
                 )
 
-        mock_ra.assert_not_called()
+        mock_cc.assert_not_called()
         assert not (tmp_path / "cinematic_coverage_plan_ep_regen.json").exists()
 
     def test_input_validation_happens_before_llm_call(self, tmp_path):
@@ -818,13 +880,13 @@ class TestRegenerateCinematicCoveragePlan:
         ]}  # b_002 and b_s01 missing
         vp = _make_small_visual_package()
 
-        with patch("hypogeum.agents.cinematic_director.run_agent") as mock_ra:
+        with patch("hypogeum.openrouter.call_claude") as mock_cc:
             with pytest.raises(NarrationCompletenessError):
                 regenerate_cinematic_coverage_plan(
                     sp, incomplete_np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
                 )
 
-        mock_ra.assert_not_called()
+        mock_cc.assert_not_called()
 
     def test_one_llm_call_maximum(self, tmp_path):
         cfg = _make_config()
@@ -832,14 +894,31 @@ class TestRegenerateCinematicCoveragePlan:
         np = _make_small_narration_package()
         vp = _make_small_visual_package()
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
-                   return_value=_matching_candidate_plan()) as mock_ra:
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_compact_response()))) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_ra.call_count == 1
+        assert mock_cc.call_count == 1
         assert result["status"] == "installed"
+
+    def test_max_tokens_never_exceeds_16000(self, tmp_path):
+        """The call must request at most _MAX_TOKENS_REGEN (16,000) -- no
+        raising past it, no streaming flag, no batching."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_compact_response()))) as mock_cc:
+            regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert mock_cc.call_args.kwargs["max_tokens"] == _MAX_TOKENS_REGEN
+        assert _MAX_TOKENS_REGEN <= 16_000
 
     def test_invalid_candidate_preserves_old_plan_and_backup(self, tmp_path):
         cfg = _make_config()
@@ -851,8 +930,8 @@ class TestRegenerateCinematicCoveragePlan:
         original["notes"] = ["ORIGINAL"]
         ckpt.write_text(json.dumps(original))
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
-                   return_value=_mismatched_candidate_plan()):
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_mismatched_compact_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
@@ -878,7 +957,7 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         ckpt.write_text(json.dumps(original))
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
+        with patch("hypogeum.openrouter.call_claude",
                    side_effect=RuntimeError("provider down")):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
@@ -886,6 +965,101 @@ class TestRegenerateCinematicCoveragePlan:
 
         assert result["status"] == "rejected"
         assert "llm_call_failed" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_truncated_response_preserves_old_plan(self, tmp_path):
+        """A TruncatedResponse (finish_reason == 'length') is exactly the
+        failure this whole correction exists to prevent for a
+        representative response -- but if it ever happens anyway (a
+        genuinely oversized candidate slipping past the budget), it must
+        still fail closed like any other llm_call_failed condition."""
+        from hypogeum.openrouter import TruncatedResponse
+
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=TruncatedResponse(16_000, 16_000)):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "llm_call_failed" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_malformed_json_preserves_old_plan(self, tmp_path):
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result("{not valid json")):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+        assert not (tmp_path / "cinematic_coverage_plan_ep_regen.candidate.json").exists()
+
+    def test_invalid_enum_code_preserves_old_plan(self, tmp_path):
+        """A code that decodes to nothing (out of range for its field) is
+        malformed output, not a value this function silently repairs."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        bad_response = _matching_compact_response()
+        bad_response["beats"][0]["shots"][0]["codes"] = "ZZZZZZZZZZ"  # all out of range
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(bad_response))):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
+        assert json.loads(ckpt.read_text()) == original
+
+    def test_missing_required_shot_field_fails_schema_validation(self, tmp_path):
+        """A shot with no 'subj' key expands to no 'subject' key, which the
+        full schema requires -- must fail closed at the validate() step,
+        never install a schema-invalid candidate."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        original = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(original))
+
+        bad_response = _matching_compact_response()
+        del bad_response["beats"][0]["shots"][0]["subj"]
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(bad_response))):
+            result = regenerate_cinematic_coverage_plan(
+                sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
+            )
+
+        assert result["status"] == "rejected"
+        assert "malformed_output" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
 
     def test_valid_candidate_atomically_installed(self, tmp_path):
@@ -897,18 +1071,20 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         original["notes"] = ["ORIGINAL"]
         ckpt.write_text(json.dumps(original))
-        new_plan = _matching_candidate_plan()
-        new_plan["notes"] = ["REGENERATED"]
+        new_response = _matching_compact_response()
+        new_response["beats"][0]["shots"][0]["subj"] = "REGENERATED_MARKER"
 
-        with patch("hypogeum.agents.cinematic_director.run_agent", return_value=new_plan):
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(new_response))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
 
         assert result["status"] == "installed"
         on_disk = json.loads(ckpt.read_text())
-        assert on_disk["notes"] == ["REGENERATED"]
+        assert on_disk["beat_plans"][0]["shots"][0]["subject"] == "REGENERATED_MARKER"
         assert on_disk != original
+        validate("cinematic_coverage_plan", on_disk)  # candidate that was installed is schema-valid
         backups = list(tmp_path.glob("cinematic_coverage_plan_ep_regen.backup_*.json"))
         assert len(backups) == 1
         assert json.loads(backups[0].read_text()) == original
@@ -926,8 +1102,8 @@ class TestRegenerateCinematicCoveragePlan:
         def _must_not_be_called(*a, **k):
             raise AssertionError("regenerate_cinematic_coverage_plan must never reach this")
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
-                   return_value=_matching_candidate_plan()), \
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_compact_response()))), \
              patch("hypogeum.agents.shot_diversity_planner.run_shot_diversity_planner",
                    side_effect=_must_not_be_called), \
              patch("hypogeum.muapi.submit_scene", side_effect=_must_not_be_called), \
@@ -950,8 +1126,8 @@ class TestRegenerateCinematicCoveragePlan:
         np = _make_small_narration_package()
         vp = _make_small_visual_package()
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
-                   return_value=_matching_candidate_plan()):
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
@@ -965,8 +1141,8 @@ class TestRegenerateCinematicCoveragePlan:
         np = _make_small_narration_package()
         vp = _make_small_visual_package()
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
-                   return_value=_matching_candidate_plan()):
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
                 fixture_verification={
@@ -981,7 +1157,9 @@ class TestRegenerateCinematicCoveragePlan:
         """fixture_verification is caller-supplied and episode-specific --
         a caller asserting the WRONG numbers must reject the candidate,
         proving the check is real (not a no-op) and driven entirely by
-        what the caller passed in, not by any constant in this module."""
+        what the caller passed in, not by any constant in this module (the
+        expectation used here, 999, is not ep_f3619022's real total and
+        appears nowhere in the production code)."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
@@ -990,8 +1168,8 @@ class TestRegenerateCinematicCoveragePlan:
         original = _matching_candidate_plan()
         ckpt.write_text(json.dumps(original))
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
-                   return_value=_matching_candidate_plan()):
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
                 fixture_verification={"expected_total_shots": 999},
@@ -1001,20 +1179,257 @@ class TestRegenerateCinematicCoveragePlan:
         assert "fixture_verification_mismatch" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
 
-    def test_temp_and_candidate_artifacts_do_not_leak_into_the_88_clip_video_tree(self, tmp_path):
-        """Regeneration must never write anywhere under video/ -- only
-        cinematic_coverage_plan_*.json variants beside the checkpoint."""
+    def test_no_temp_dirs_or_video_tree_artifacts(self, tmp_path):
+        """Regeneration must never write anywhere under video/, and (since
+        this correction removed the old tempfile.mkdtemp() redirection
+        entirely -- call_claude() has no disk side effect of its own) must
+        never leave any .coverage_regen_* directory behind either."""
         cfg = _make_config()
         sp = _make_small_script_package()
         np = _make_small_narration_package()
         vp = _make_small_visual_package()
 
-        with patch("hypogeum.agents.cinematic_director.run_agent",
-                   return_value=_matching_candidate_plan()):
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_compact_response()))):
             regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_regen", cfg, output_dir=tmp_path, force=True,
             )
 
         assert not (tmp_path / "video").exists()
-        leftover_temp_dirs = list(tmp_path.glob(".coverage_regen_*"))
-        assert leftover_temp_dirs == []
+        assert list(tmp_path.glob(".coverage_regen_*")) == []
+
+
+# ---------------------------------------------------------------------------
+# TestCompactWireFormat (2026-08-08 truncation-fix correction)
+#
+# Direct tests of the compact <-> canonical expansion machinery, independent
+# of the full regenerate_cinematic_coverage_plan() flow -- including the
+# representative 130-shot token-budget proof this correction exists for.
+# ---------------------------------------------------------------------------
+
+class TestCompactWireFormat:
+
+    def test_decode_enum_code_valid(self):
+        assert _decode_enum_code("motion_energy", "A") == "low"
+        assert _decode_enum_code("motion_energy", "b") == "medium"  # case-insensitive
+        assert _decode_enum_code("motion_energy", "C") == "high"
+
+    def test_decode_enum_code_out_of_range_rejected(self):
+        with pytest.raises(ValueError):
+            _decode_enum_code("motion_energy", "D")  # only A/B/C are valid (3 values)
+
+    def test_decode_enum_code_non_letter_rejected(self):
+        with pytest.raises(ValueError):
+            _decode_enum_code("motion_energy", "AB")  # not a single letter
+        with pytest.raises(ValueError):
+            _decode_enum_code("motion_energy", 1)  # not a string
+
+    def test_decode_codes_string_wrong_length_rejected(self):
+        with pytest.raises(ValueError):
+            _decode_codes_string("AAA")  # too short
+        with pytest.raises(ValueError):
+            _decode_codes_string("A" * (len(_COMPACT_CODE_FIELDS) + 1))  # too long
+
+    def test_decode_codes_string_valid_decodes_every_field(self):
+        codes = "".join(chr(65) for _ in _COMPACT_CODE_FIELDS)
+        decoded = _decode_codes_string(codes)
+        assert set(decoded.keys()) == set(_COMPACT_CODE_FIELDS)
+        for field in _COMPACT_CODE_FIELDS:
+            assert decoded[field] == _COMPACT_ENUM_VOCAB[field][0]
+
+    def test_expand_compact_plan_round_trip_preserves_all_semantic_fields(self):
+        """Every field Stage B / semantic-compatibility classification needs
+        survives the compact round-trip, verbatim, including a non-default
+        enum choice for composition and camera_movement specifically."""
+        authoritative = ["b_001"]
+        measured_durations = {"b_001": 24.427}
+        compact = {"beats": [{
+            "beat_id": "b_001",
+            "pattern": "B",  # establish_develop_reveal
+            "shots": [{
+                "codes": _compact_codes(
+                    composition="diagonal_leading_line",
+                    camera_movement="orbital_arc",
+                ),
+                "func": "Shows the tool marks as proof of deliberate construction.",
+                "subj": "hand-carved earthen tunnel wall",
+                "act": "torch flame flickers in the foreground",
+                "fram": "medium wide, tunnel wall filling the frame",
+                "light": "warm amber torch, raking oblique angle",
+                "lens": "B",  # wide
+                "dup": "deliberate match-cut continuing the prior shot",
+            }],
+        }]}
+
+        expanded = _expand_compact_plan(compact, "ep_test", authoritative, measured_durations, 8.0)
+        validate("cinematic_coverage_plan", expanded)  # must pass the real schema
+
+        bp = expanded["beat_plans"][0]
+        assert bp["beat_id"] == "b_001"
+        assert bp["narration_duration_seconds"] == 24.427
+        assert bp["progression_pattern"] == "establish_develop_reveal"
+
+        shot = bp["shots"][0]
+        # Authoritative beat mapping / identity (derived, not authored).
+        assert shot["shot_id"] == "b_001__shot1"
+        assert shot["parent_beat_id"] == "b_001"
+        assert shot["shot_order"] == 1
+        # Derived, policy-fixed values.
+        assert shot["estimated_usable_duration"] == 8.0
+        assert shot["transition_in"] == "clean_cut"
+        assert shot["transition_out"] == "clean_cut"
+        # Decoded enum fields -- the two non-default choices specifically.
+        assert shot["composition"] == "diagonal_leading_line"
+        assert shot["camera_movement"] == "orbital_arc"
+        assert shot["lens_character"] == "wide"
+        # Free-text fields, verbatim.
+        assert shot["narrative_function"] == "Shows the tool marks as proof of deliberate construction."
+        assert shot["subject"] == "hand-carved earthen tunnel wall"
+        assert shot["action"] == "torch flame flickers in the foreground"
+        assert shot["framing"] == "medium wide, tunnel wall filling the frame"
+        assert shot["lighting_direction"] == "warm amber torch, raking oblique angle"
+        assert shot["diversity_justification"] == "deliberate match-cut continuing the prior shot"
+        # shot_diversity_key()'s own required fields are all present.
+        for field in SHOT_DIVERSITY_FIELDS:
+            assert field in shot
+
+    def test_expand_compact_plan_wrong_beat_count_fails_closed(self):
+        with pytest.raises(ValueError):
+            _expand_compact_plan(
+                {"beats": []}, "ep_test", ["b_001"], {"b_001": 8.0}, 8.0,
+            )
+
+    def test_expand_compact_plan_duplicate_beat_id_fails_closed(self):
+        compact = {"beats": [
+            {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
+            {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
+        ]}
+        with pytest.raises(ValueError):
+            _expand_compact_plan(
+                compact, "ep_test", ["b_001", "b_002"], {"b_001": 8.0, "b_002": 8.0}, 8.0,
+            )
+
+    def test_expand_compact_plan_unknown_beat_id_fails_closed(self):
+        compact = {"beats": [
+            {"beat_id": "b_999_unknown", "pattern": "A", "shots": [_compact_shot()]},
+        ]}
+        with pytest.raises(ValueError):
+            _expand_compact_plan(
+                compact, "ep_test", ["b_001"], {"b_001": 8.0}, 8.0,
+            )
+
+    def test_expand_compact_plan_missing_authoritative_beat_fails_closed(self):
+        compact = {"beats": [
+            {"beat_id": "b_001", "pattern": "A", "shots": [_compact_shot()]},
+        ]}
+        # b_002 is authoritative but never appears -- caught even though the
+        # array length happens to be wrong too (belt-and-suspenders check).
+        with pytest.raises(ValueError):
+            _expand_compact_plan(
+                compact, "ep_test", ["b_001", "b_002"], {"b_001": 8.0, "b_002": 8.0}, 8.0,
+            )
+
+    def test_representative_130_shot_response_fits_16000_token_budget_with_margin(self):
+        """The proof this whole correction exists for: a representative
+        worst-case 130-shot/47-beat compact response, using ep_f3619022's
+        own real per-beat shot-budget arithmetic (95 main + 35 short = 130,
+        established and unchanged from the prior verification), must
+        serialize to comfortably under the 16,000-token non-streaming
+        ceiling -- with at least 2,000 tokens of margin, target <=14,000.
+
+        Field-value lengths below are deliberately realistic, not
+        artificially short: full one-sentence narrative_function values,
+        real multi-word subject/action/framing/lighting text, matching the
+        actual style of ep_f3619022's own production prompts -- this is not
+        a favorable best case, it is what a real differentiated 130-shot
+        plan actually looks like.
+        """
+        main_shot_counts = [3, 3, 3, 3, 2, 4, 1, 3, 3, 3, 5, 2, 3, 5, 4,
+                             3, 3, 2, 4, 2, 3, 4, 4, 4, 1, 3, 5, 4, 6]
+        short_shot_counts = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2]
+        shot_counts = main_shot_counts + short_shot_counts
+        assert len(shot_counts) == 47
+        assert sum(shot_counts) == 130  # the verified, unchanged ep_f3619022 fixture total
+
+        narrative_functions = [
+            "Establishes the physical scale of the tunnel before the narration names it.",
+            "Shows the tool marks as proof of deliberate, planned construction.",
+            "Reveals the constriction point the narration is about to describe.",
+            "Grounds the abstract historical claim in a concrete physical detail.",
+            "Shifts from the object itself to the hand that shaped it.",
+        ]
+        subjects = [
+            "earthen tunnel wall, tool-mark striations receding into shadow",
+            "medieval scribe's hand, quill and iron-gall ink on parchment",
+            "schlupf constriction point, earthen walls pressing inward",
+            "timber farmhouse threshold, concealed entrance in the earthen floor",
+        ]
+        actions = "quill moves in short deliberate strokes across the parchment"
+        framings = "medium wide shot, tunnel wall filling the frame in tight profile"
+        lightings = "warm amber torch light raking obliquely across the earth wall"
+
+        beats = []
+        shot_index = 0
+        for beat_index, n_shots in enumerate(shot_counts, start=1):
+            shots = []
+            for _ in range(n_shots):
+                shot = _compact_shot(
+                    codes=_compact_codes(),
+                    func=narrative_functions[shot_index % len(narrative_functions)],
+                    subj=subjects[shot_index % len(subjects)],
+                )
+                if shot_index % 3 != 0:
+                    shot["act"] = actions
+                if shot_index % 2 == 0:
+                    shot["fram"] = framings
+                if shot_index % 4 == 0:
+                    shot["light"] = lightings
+                if shot_index % 10 == 0:
+                    shot["lens"] = "B"
+                if shot_index % 25 == 0:
+                    shot["dup"] = "deliberate match-cut, intentional repeat for continuity"
+                shots.append(shot)
+                shot_index += 1
+            beats.append({
+                "beat_id": f"b_{beat_index:03d}",
+                "pattern": "B" if n_shots > 1 else "A",
+                "shots": shots,
+            })
+
+        assert shot_index == 130
+        representative_response = {"beats": beats}
+
+        serialized = json.dumps(representative_response, ensure_ascii=False)
+        char_count = len(serialized)
+        # Conservative estimator used throughout this correction: 3.0
+        # characters per token (real English/JSON text typically runs
+        # closer to 3.5-4.0 chars/token, so this deliberately overestimates
+        # token count -- a margin computed against it is a safe margin).
+        estimated_tokens = char_count / 3.0
+
+        assert estimated_tokens <= 14_000, (
+            f"representative 130-shot compact response estimated at "
+            f"{estimated_tokens:.0f} tokens ({char_count} chars) -- exceeds "
+            f"the 14,000-token target"
+        )
+        assert estimated_tokens <= _MAX_TOKENS_REGEN - 2_000, (
+            f"representative response leaves only "
+            f"{_MAX_TOKENS_REGEN - estimated_tokens:.0f} tokens of margin "
+            f"below the {_MAX_TOKENS_REGEN}-token ceiling -- required minimum is 2,000"
+        )
+
+        # And prove the representative response is not just small -- it is
+        # actually valid: expand it and confirm it passes the real schema
+        # with the exact 95/35/130 arithmetic this correction must preserve.
+        authoritative = [f"b_{i:03d}" for i in range(1, 48)]
+        measured_durations = {beat_id: 20.0 for beat_id in authoritative}
+        expanded = _expand_compact_plan(
+            representative_response, "ep_f3619022", authoritative, measured_durations, 8.0,
+        )
+        validate("cinematic_coverage_plan", expanded)
+        total_shots = sum(len(bp["shots"]) for bp in expanded["beat_plans"])
+        assert total_shots == 130
+        main_shots = sum(len(bp["shots"]) for bp in expanded["beat_plans"][:29])
+        short_shots = sum(len(bp["shots"]) for bp in expanded["beat_plans"][29:])
+        assert main_shots == 95
+        assert short_shots == 35

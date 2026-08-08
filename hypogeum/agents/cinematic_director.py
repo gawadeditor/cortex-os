@@ -86,6 +86,14 @@ _AGENT_NAME = "cinematic_director"
 _CLAUDE_SONNET = "anthropic/claude-sonnet-4.6"
 _MAX_TOKENS = 4_096
 
+# regenerate_cinematic_coverage_plan()'s own output-token ceiling (2026-08-08).
+# Fixed, non-streaming, single-call by design (see that function's docstring
+# for why: no streaming, no raising past 16,000, no per-batch planning). A
+# full-schema 130-shot/47-beat response does not fit this budget -- that is
+# exactly why that function requests the compact wire format below instead
+# of the full per-shot schema run_cinematic_director() uses.
+_MAX_TOKENS_REGEN = 16_000
+
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _PROMPT_FILE = _PROMPTS_DIR / "cinematic_director.txt"
 
@@ -685,6 +693,317 @@ def _classify_authoritative_beats(script_package: dict) -> dict:
     return classification
 
 
+# ---------------------------------------------------------------------------
+# Compact wire format for regenerate_cinematic_coverage_plan() (2026-08-08)
+#
+# A full 130-shot/47-beat cinematic_coverage_plan response (the shape
+# run_cinematic_director() itself uses, and the only shape the SYSTEM_PROMPT's
+# own OUTPUT FORMAT section requests) measures well past a 16,000-token
+# non-streaming budget. Traced against the actual consumers before compacting
+# anything (hypogeum.video_prompt_writer._render_shot_directive(), the sole
+# Stage-B reader of shot fields; shot_diversity_key() / SHOT_DIVERSITY_FIELDS;
+# hypogeum.schemas._validate_cinematic_coverage_plan()'s _req_* calls;
+# clip_repair_agent.py's planned_shot_id/shot_order bookkeeping): four
+# categories of bytes were pure waste, and none of them are semantic content
+# -- reducing authored verbosity, never authored capability:
+#
+#   1. Values fully DERIVABLE after parsing, never authored by the LLM here:
+#      shot_id/parent_beat_id/shot_order (mechanical function of beat_id +
+#      position in the shots array), estimated_usable_duration (always the
+#      provider's own requested clip duration -- already computed before the
+#      call), transition_in/transition_out (hardcoded "clean_cut" by channel
+#      policy, never actually a per-shot decision even in the full format),
+#      and each beat's narration_duration_seconds (the already-validated
+#      measured duration, known before the call).
+#   2. Fields no consumer reads at all: foreground_usage, eye_line -- absent
+#      from _render_shot_directive()'s reads, absent from
+#      SHOT_DIVERSITY_FIELDS, and not required by the schema's _req_* list.
+#      Dropped entirely, not restored.
+#   3. Free-text field NAMES shortened to short aliases (func, subj, act,
+#      fram, light, dup) -- restored to the exact full key names on
+#      expansion. The free-text VALUES themselves (narrative_function,
+#      subject, action, framing, lighting_direction, diversity_justification)
+#      are untouched -- these are genuine authored content, never compacted.
+#   4. Enum-valued fields (shot_purpose, shot_scale, camera_angle,
+#      camera_height, camera_direction, camera_movement, composition,
+#      background_depth, screen_direction, motion_energy) packed into one
+#      fixed-position 10-character "codes" string, one letter per field, in
+#      place of ten separate JSON key/value pairs. Each enum has a small,
+#      closed vocabulary (3-12 values) already defined in SYSTEM_PROMPT --
+#      the code is a lossless index into that same vocabulary, decoded via
+#      exact lookup in _COMPACT_ENUM_VOCAB immediately after parsing. This is
+#      the single largest reduction: JSON key-name repetition times 10
+#      fields times 130 shots was the dominant cost even after (1)-(3).
+#      lens_character (optional) and progression_pattern (per-beat) use the
+#      same single-letter code scheme against their own small vocabularies.
+#
+# Every field _render_shot_directive(), shot_diversity_key(), and the schema
+# actually require is still authored by the LLM (as free text or as an
+# unambiguous code) and still ends up, verbatim, in the expanded candidate
+# that gets schema-validated before install -- nothing semantic is lost,
+# only the redundant/derivable/unread/over-verbose bytes are. An invalid or
+# out-of-range code fails expansion with ValueError, which the caller treats
+# exactly like a schema-validation failure (reject, preserve the active
+# plan) -- compaction never weakens the fail-closed contract.
+# ---------------------------------------------------------------------------
+
+# Fixed field order for the packed "codes" string -- position i's letter
+# decodes against _COMPACT_ENUM_VOCAB[_COMPACT_CODE_FIELDS[i]].
+_COMPACT_CODE_FIELDS: list = [
+    "shot_purpose", "shot_scale", "camera_angle", "camera_height",
+    "camera_direction", "camera_movement", "composition", "background_depth",
+    "screen_direction", "motion_energy",
+]
+
+# Canonical vocabulary for every enum-coded field -- single source of truth
+# for both the codes embedded in _COMPACT_OUTPUT_INSTRUCTIONS and the
+# decoding in _decode_enum_code(). Values and order match
+# hypogeum/prompts/cinematic_director.txt's own PER-SHOT FIELDS /
+# PROGRESSION PATTERNS vocabulary exactly -- this module never invents a
+# value SYSTEM_PROMPT doesn't already teach.
+_COMPACT_ENUM_VOCAB: dict = {
+    "shot_purpose": [
+        "establish_location", "character_emotion", "object_detail",
+        "action_beat", "transition_beat", "reaction",
+    ],
+    "shot_scale": [
+        "extreme_close_up", "close_up", "medium_close_up", "medium",
+        "medium_wide", "wide_establishing", "overhead", "macro", "low_angle",
+    ],
+    "camera_angle": [
+        "eye_level", "low_angle", "high_angle", "overhead", "dutch_tilt", "worms_eye",
+    ],
+    "camera_height": [
+        "ground_level", "knee_height", "eye_level", "elevated", "overhead",
+    ],
+    "camera_direction": [
+        "frontal", "three_quarter", "profile", "rear", "overhead_down",
+    ],
+    "camera_movement": [
+        "slow_push_in", "controlled_pull_back", "lateral_dolly_left",
+        "lateral_dolly_right", "vertical_descent", "vertical_ascent",
+        "orbital_arc", "overhead_descent", "handheld_drift",
+        "locked_off_hold", "slow_tilt_up", "slow_tilt_down",
+    ],
+    "composition": [
+        "rule_of_thirds_left", "rule_of_thirds_right", "centered_symmetry",
+        "diagonal_leading_line", "foreground_frame", "layered_depth",
+        "negative_space_dominant", "edge_of_frame_subject",
+    ],
+    "background_depth": ["shallow", "medium", "deep_layered"],
+    "screen_direction": [
+        "left_to_right", "right_to_left", "neutral", "toward_camera", "away_from_camera",
+    ],
+    "motion_energy": ["low", "medium", "high"],
+    "lens_character": ["standard", "wide", "macro", "telephoto_compression"],
+    "progression_pattern": list(PROGRESSION_PATTERNS),
+}
+
+# {compact_key: full_schema_key} for the free-text (non-enum-coded) shot
+# fields -- values pass through unchanged, only the JSON key name expands.
+_COMPACT_FREE_TEXT_FIELDS: dict = {
+    "func": "narrative_function",
+    "subj": "subject",
+    "act": "action",
+    "fram": "framing",
+    "light": "lighting_direction",
+}
+
+
+def _format_enum_code_legend(field: str) -> str:
+    """One line of 'A=value B=value ...' for `field`'s vocabulary, used to
+    build _COMPACT_OUTPUT_INSTRUCTIONS from _COMPACT_ENUM_VOCAB -- single
+    source of truth, the instructions text can never drift from the actual
+    decode table."""
+    vocab = _COMPACT_ENUM_VOCAB[field]
+    return " ".join(f"{chr(65 + i)}={value}" for i, value in enumerate(vocab))
+
+
+def _decode_enum_code(field: str, code: object) -> str:
+    """Decode one single-letter code against _COMPACT_ENUM_VOCAB[field].
+    Raises ValueError on anything but an exact, in-range letter -- an
+    invalid/unknown code is a malformed-output condition, not something
+    this function silently repairs."""
+    vocab = _COMPACT_ENUM_VOCAB[field]
+    if not isinstance(code, str) or len(code) != 1:
+        raise ValueError(f"{field} code must be a single letter, got {code!r}")
+    index = ord(code.upper()) - 65
+    if index < 0 or index >= len(vocab):
+        raise ValueError(
+            f"{field} code {code!r} out of range (vocabulary has {len(vocab)} values)"
+        )
+    return vocab[index]
+
+
+def _decode_codes_string(codes: object) -> dict:
+    """Decode the packed per-shot 'codes' string into
+    {full_schema_key: value} for all ten enum-coded shot fields. Raises
+    ValueError if `codes` is not exactly len(_COMPACT_CODE_FIELDS)
+    characters or contains any out-of-range letter."""
+    if not isinstance(codes, str) or len(codes) != len(_COMPACT_CODE_FIELDS):
+        raise ValueError(
+            f"'codes' must be a {len(_COMPACT_CODE_FIELDS)}-character string, got {codes!r}"
+        )
+    return {
+        field: _decode_enum_code(field, letter)
+        for field, letter in zip(_COMPACT_CODE_FIELDS, codes)
+    }
+
+
+def _build_compact_output_instructions() -> str:
+    """Build the full COMPACT OUTPUT OVERRIDE instruction text from
+    _COMPACT_ENUM_VOCAB/_COMPACT_CODE_FIELDS -- computed once at import time
+    (see _COMPACT_OUTPUT_INSTRUCTIONS below) so the instructions the LLM
+    receives can never drift from what _decode_codes_string() actually
+    decodes. This text goes in the INPUT (director_input, not the output),
+    so its length never counts against the 16,000-token output ceiling --
+    only per-shot OUTPUT verbosity does, which is what the codes/aliases
+    below actually reduce."""
+    codes_legend = "\n  ".join(
+        f"position {i + 1} - {field}: {_format_enum_code_legend(field)}"
+        for i, field in enumerate(_COMPACT_CODE_FIELDS)
+    )
+    return f"""COMPACT OUTPUT OVERRIDE (supersedes the OUTPUT FORMAT section above for this task only):
+
+Respond with ONLY this compact JSON -- no prose, no markdown, no code fences. Do not include
+shot_id, parent_beat_id, shot_order, estimated_usable_duration, transition_in, transition_out,
+foreground_usage, eye_line, or narration_duration_seconds anywhere -- all of those are derived
+programmatically after parsing and any tokens spent on them are wasted.
+
+{{
+  "beats": [
+    {{
+      "beat_id": "<beat_id, exactly one entry per input beat, same order as the input beats list>",
+      "pattern": "<single letter -- see PATTERN CODE below>",
+      "shots": [
+        {{
+          "codes": "<exactly {len(_COMPACT_CODE_FIELDS)} letters, one per position below, no separators>",
+          "func": "<narrative_function -- one sentence>",
+          "subj": "<subject, terse>",
+          "act": "<action, terse -- omit this key entirely if static>",
+          "fram": "<framing, terse -- omit if not distinct from subject>",
+          "light": "<lighting_direction, terse -- omit if none>",
+          "lens": "<single letter -- see LENS CODE below; omit entirely if standard>",
+          "dup": "<diversity_justification reason -- ONLY when intentionally repeating a sibling's attributes; omit this key entirely otherwise>"
+        }}
+      ]
+    }}
+  ]
+}}
+
+CODES STRING -- exactly {len(_COMPACT_CODE_FIELDS)} letters, no separators, one letter per position in this fixed order:
+  {codes_legend}
+
+Example "codes" value: the letters "{''.join(chr(65) for _ in _COMPACT_CODE_FIELDS)}" would mean
+{", ".join(f"{field}={_COMPACT_ENUM_VOCAB[field][0]}" for field in _COMPACT_CODE_FIELDS)}.
+
+PATTERN CODE (per beat, one letter): {_format_enum_code_legend("progression_pattern")}
+
+LENS CODE (optional, one letter): {_format_enum_code_legend("lens_character")}
+
+shots[] length must be >=1 and <= that beat's shot_budget. Every code must decode to one of the
+exact vocabulary values already defined earlier in these instructions -- the legends above are
+that same vocabulary, just indexed by letter. Omit an optional key entirely rather than sending
+"" or null for it."""
+
+
+_COMPACT_OUTPUT_INSTRUCTIONS = _build_compact_output_instructions()
+
+
+def _expand_compact_plan(
+    compact: dict,
+    episode_id: str,
+    authoritative: list,
+    measured_durations: dict,
+    provider_clip_duration: float,
+) -> dict:
+    """
+    Expand a compact-wire-format LLM response into the exact full canonical
+    cinematic_coverage_plan shape hypogeum.schemas._validate_cinematic_
+    coverage_plan() requires and every existing Stage B consumer already
+    reads (hypogeum.video_prompt_writer._render_shot_directive(),
+    shot_diversity_key(), clip_repair_agent.py's planned_shot_id
+    bookkeeping) -- restoring shot_id/parent_beat_id/shot_order (from beat_id
+    + array position), estimated_usable_duration (the provider's own
+    requested clip duration), transition_in/transition_out (always
+    "clean_cut" -- fixed channel policy, not a per-shot LLM decision even in
+    the full format), each beat's narration_duration_seconds (the
+    already-validated measured duration), every enum-coded field (decoded
+    via _decode_codes_string()/_decode_enum_code() against
+    _COMPACT_ENUM_VOCAB), and every free-text field (renamed via
+    _COMPACT_FREE_TEXT_FIELDS, values untouched). The returned dict is
+    byte-for-byte the same shape run_cinematic_director() itself produces;
+    nothing downstream can tell the two apart.
+
+    Raises ValueError on any structural problem (wrong beat count, unknown
+    or duplicate beat_id, a beat with no shots, a malformed or out-of-range
+    code) -- the caller treats this identically to a schema-validation
+    failure: reject the candidate, preserve the active plan, stop cleanly.
+    """
+    compact_beats = compact.get("beats")
+    if not isinstance(compact_beats, list):
+        raise ValueError("compact response missing a 'beats' list")
+    if len(compact_beats) != len(authoritative):
+        raise ValueError(
+            f"compact response has {len(compact_beats)} beats, expected {len(authoritative)}"
+        )
+
+    authoritative_set = set(authoritative)
+    seen_beat_ids: set = set()
+    beat_plans = []
+    for cb in compact_beats:
+        if not isinstance(cb, dict):
+            raise ValueError("each compact beat entry must be a dict")
+        beat_id = cb.get("beat_id")
+        if beat_id not in authoritative_set:
+            raise ValueError(f"compact beat_id {beat_id!r} is not an authoritative beat")
+        if beat_id in seen_beat_ids:
+            raise ValueError(f"duplicate compact beat_id {beat_id!r}")
+        seen_beat_ids.add(beat_id)
+
+        compact_shots = cb.get("shots")
+        if not isinstance(compact_shots, list) or not compact_shots:
+            raise ValueError(f"beat {beat_id!r} has no shots")
+
+        progression_pattern = _decode_enum_code("progression_pattern", cb.get("pattern"))
+
+        shots = []
+        for i, cs in enumerate(compact_shots, start=1):
+            if not isinstance(cs, dict):
+                raise ValueError(f"beat {beat_id!r} shot {i} is not a dict")
+            shot = {
+                "shot_id": f"{beat_id}__shot{i}",
+                "parent_beat_id": beat_id,
+                "shot_order": i,
+                "estimated_usable_duration": provider_clip_duration,
+                "transition_in": "clean_cut",
+                "transition_out": "clean_cut",
+                "diversity_justification": cs.get("dup") or None,
+            }
+            shot.update(_decode_codes_string(cs.get("codes")))
+            for compact_key, full_key in _COMPACT_FREE_TEXT_FIELDS.items():
+                value = cs.get(compact_key)
+                if value not in (None, ""):
+                    shot[full_key] = value
+            lens_code = cs.get("lens")
+            if lens_code:
+                shot["lens_character"] = _decode_enum_code("lens_character", lens_code)
+            shots.append(shot)
+
+        beat_plans.append({
+            "beat_id": beat_id,
+            "narration_duration_seconds": round(measured_durations[beat_id], 3),
+            "progression_pattern": progression_pattern,
+            "shots": shots,
+        })
+
+    missing = authoritative_set - seen_beat_ids
+    if missing:
+        raise ValueError(f"compact response missing beats: {sorted(missing)}")
+
+    return {"episode_id": episode_id, "beat_plans": beat_plans}
+
+
 def regenerate_cinematic_coverage_plan(
     script_package: dict,
     narration_package: Optional[dict],
@@ -724,12 +1043,19 @@ def regenerate_cinematic_coverage_plan(
       2. If a checkpoint already exists, copy it unchanged to a timestamped
          backup path (cinematic_coverage_plan_{episode_id}.backup_{ts}.json)
          before touching anything else.
-      3. Make at most one LLM call (via run_agent(), the same call
-         run_cinematic_director() makes, same system prompt/model/schema),
-         redirecting run_agent()'s own disk write to a throwaway temp
-         directory (never the canonical checkpoint path) so nothing durable
-         exists until this function explicitly writes the candidate itself,
-         at cinematic_coverage_plan_{episode_id}.candidate.json.
+      3. Make at most one LLM call, non-streaming, capped at
+         _MAX_TOKENS_REGEN (16,000 tokens) -- a full 130-shot/47-beat
+         response does not fit that budget in the full per-shot schema
+         run_cinematic_director() uses, so this call requests a compact
+         wire format instead (see the "Compact wire format" module comment
+         above _expand_compact_plan()) and expands the response back to the
+         exact full canonical shape immediately after parsing, before any
+         validation runs. Calls hypogeum.openrouter.call_claude() directly
+         (not run_agent()) specifically so the compact response is never
+         checked against the full-schema validator until after expansion.
+         Nothing is written to disk until this function explicitly writes
+         the expanded candidate itself, at
+         cinematic_coverage_plan_{episode_id}.candidate.json.
       4. Validate the candidate completely: every authoritative beat_id
          present exactly once, each beat_plan's shot count matching the
          shot_budget this function itself computed and sent as input
@@ -773,12 +1099,14 @@ def regenerate_cinematic_coverage_plan(
       CoverageRegenerationError  — force=False with no existing checkpoint.
     """
     import shutil
-    import tempfile
     from datetime import datetime, timezone
 
+    from hypogeum.agent import _strip_markdown_fence  # noqa: PLC0415
     from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
+    from hypogeum.finance import record_cost  # noqa: PLC0415
     from hypogeum.muapi import get_requested_clip_duration_seconds  # noqa: PLC0415
-    from hypogeum.schemas import SchemaError  # noqa: PLC0415
+    from hypogeum.openrouter import call_claude  # noqa: PLC0415
+    from hypogeum.schemas import SchemaError, validate  # noqa: PLC0415
 
     _resolve_dir: Path = (
         Path(output_dir) if output_dir is not None
@@ -876,7 +1204,7 @@ def regenerate_cinematic_coverage_plan(
         })
 
     director_input = {
-        "task": "plan_cinematic_coverage",
+        "task": "plan_cinematic_coverage_compact",
         "episode_metadata": {
             "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
             "total_beats": len(beats_for_director),
@@ -884,28 +1212,52 @@ def regenerate_cinematic_coverage_plan(
         },
         "progression_patterns": list(PROGRESSION_PATTERNS),
         "beats": beats_for_director,
+        "output_format_override": _COMPACT_OUTPUT_INSTRUCTIONS,
     }
 
-    temp_dir = Path(tempfile.mkdtemp(prefix=".coverage_regen_", dir=str(_resolve_dir)))
+    # Single non-streaming call, compact wire format, fixed 16,000-token
+    # ceiling -- see _MAX_TOKENS_REGEN and the "Compact wire format" module
+    # comment above for why. No retry, no batching, no streaming: exactly
+    # one call_claude() invocation, matching what run_agent() would make,
+    # minus the schema-name-based validation (the compact response cannot
+    # pass hypogeum.schemas.validate("cinematic_coverage_plan", ...)
+    # directly -- it is validated only AFTER _expand_compact_plan() restores
+    # the full shape, a few lines below).
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(director_input, ensure_ascii=False)},
+    ]
     try:
-        try:
-            candidate = run_agent(
-                agent_name=_AGENT_NAME,
-                model_slug=_CLAUDE_SONNET,
-                system_prompt=SYSTEM_PROMPT,
-                input_package=director_input,
-                output_schema="cinematic_coverage_plan",
-                episode_id=episode_id,
-                max_tokens=_MAX_TOKENS,
-                config=config,
-                output_dir=temp_dir,
-            )
-        except SchemaError as exc:
-            return _rejected(f"schema_invalid: {exc}")
-        except Exception as exc:  # noqa: BLE001 — any LLM/network/parse failure
-            return _rejected(f"llm_call_failed: {type(exc).__name__}: {exc}")
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        result = call_claude(
+            model_slug=_CLAUDE_SONNET,
+            messages=messages,
+            max_tokens=_MAX_TOKENS_REGEN,
+            config=config,
+            episode_id=episode_id,
+            agent=_AGENT_NAME,
+        )
+    except Exception as exc:  # noqa: BLE001 — any LLM/network/truncation failure
+        return _rejected(f"llm_call_failed: {type(exc).__name__}: {exc}")
+
+    record_cost(
+        provider="openrouter",
+        model=result.model_used,
+        call_type=_AGENT_NAME,
+        cost_usd=result.estimated_cost_usd,
+        tokens_or_credits=float(result.usage.get("total_tokens", 0)),
+    )
+
+    raw_content = _strip_markdown_fence(result.content)
+    try:
+        compact = json.loads(raw_content)
+        if not isinstance(compact, dict):
+            raise ValueError(f"expected a JSON object, got {type(compact).__name__}")
+        candidate = _expand_compact_plan(
+            compact, episode_id, authoritative, measured_durations, provider_clip_duration,
+        )
+        validate("cinematic_coverage_plan", candidate)
+    except (json.JSONDecodeError, ValueError, SchemaError) as exc:
+        return _rejected(f"malformed_output: {type(exc).__name__}: {exc}")
 
     # Candidate written to its own named, inspectable path (never the
     # canonical checkpoint) -- this IS the "temporary path" of record.

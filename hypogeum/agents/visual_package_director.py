@@ -779,15 +779,16 @@ def run_visual_package_director(
     # scene (2026-08-06 directing-rule fix — see hypogeum.agents.
     # cinematic_director module docstring for the full rationale).
     #
-    # beat_texts_by_id is recomputed from input_package (cheap, pure,
-    # available regardless of whether Stage A2 resumed from its own
-    # checkpoint this run) rather than threading the `beats` variable
-    # through — input_package itself is always freshly built above.
+    # beat_texts_by_id is recomputed from the original script_package
+    # (cheap, pure, available regardless of whether Stage A2 resumed from
+    # its own checkpoint this run) via _flatten_beats_full_text_by_id() —
+    # deliberately NOT _flatten_beats_for_a2()/input_package, which carries
+    # Stage A2's 20-word-per-beat prompt-budget compaction. Cinematic
+    # Director's duration estimate needs the real text; see
+    # _flatten_beats_full_text_by_id()'s own docstring.
     # ------------------------------------------------------------------
     from hypogeum.agents.cinematic_director import run_cinematic_director  # noqa: PLC0415
-    _beat_texts_by_id = {
-        b["beat_id"]: b["text"] for b in _flatten_beats_for_a2(input_package)
-    }
+    _beat_texts_by_id = _flatten_beats_full_text_by_id(script_package)
     log.info(
         "vpd_cinematic_director_started",
         episode_id=episode_id,
@@ -1176,6 +1177,37 @@ def _flatten_beats_for_a2(input_package: dict) -> list:
                 })
 
     return beats
+
+
+def _flatten_beats_full_text_by_id(script_package: dict) -> dict:
+    """
+    Map every narration beat_id in the original, uncompacted script_package
+    to its complete, untruncated text.
+
+    Deliberately separate from _flatten_beats_for_a2(): that function reads
+    the 20-word-capped script_package built for Stage A2's Claude prompt
+    budget (see scene_planner.compact_beat()), which is the correct
+    fidelity for that one consumer. Cinematic Director's word-count-based
+    duration estimate (estimate_beat_duration_seconds()) needs the real
+    text instead — sharing one flattening path between the two silently
+    truncated every beat over 20 words down to the same estimated duration,
+    collapsing compute_shot_budget() to a single shot regardless of the
+    beat's true length. Keeping the two paths explicit and independent
+    means a future change to either compaction policy or duration fidelity
+    cannot silently leak into the other.
+    """
+    beat_texts: dict = {}
+    for sec in script_package.get("sections", []):
+        for beat in sec.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                beat_texts[beat_id] = beat.get("text", "")
+    for sh in script_package.get("shorts_scripts", []):
+        for beat in sh.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                beat_texts[beat_id] = beat.get("text", "")
+    return beat_texts
 
 
 # ---------------------------------------------------------------------------

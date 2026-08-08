@@ -284,7 +284,29 @@ MINIMAL_NARRATION_PACKAGE = {
             "beat_reference": "b_001",
             "source_type": "main_episode",
             "generation_status": "generated",
-        }
+            "duration_seconds": 8.0,
+        },
+        {
+            "segment_id": "seg_s01",
+            "beat_reference": "b_s01",
+            "source_type": "short",
+            "generation_status": "generated",
+            "duration_seconds": 8.0,
+        },
+        {
+            "segment_id": "seg_s02",
+            "beat_reference": "b_s02",
+            "source_type": "short",
+            "generation_status": "generated",
+            "duration_seconds": 8.0,
+        },
+        {
+            "segment_id": "seg_s03",
+            "beat_reference": "b_s03",
+            "source_type": "short",
+            "generation_status": "generated",
+            "duration_seconds": 8.0,
+        },
     ],
     "stitched_tracks": [
         {"track_id": "t_main", "audio_asset_id": "main.mp3", "source_type": "main_episode"},
@@ -800,6 +822,60 @@ class TestAgentCallOrder:
         assert call_order.index("audio") < call_order.index("vpd"), (
             "Audio Agent (Voice) must run before Visual Package Director (Visual)"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestNarrationCompletenessGate (2026-08-08 fail-closed fix)
+#
+# Canonical fresh production (run_pipeline()) must stop immediately after
+# Audio Agent -- before Visual Package Director, and therefore before
+# run_cinematic_director() -- unless every authoritative beat in
+# script_package has exactly one valid measured duration in the
+# narration_package Audio Agent just produced. Full exhaustive coverage of
+# the validation logic itself lives in tests/test_cinematic_director.py
+# (TestValidateNarrationCompleteness) -- this class only proves run_pipeline()
+# actually calls that gate at the right point and halts before VPD.
+# ---------------------------------------------------------------------------
+
+class TestNarrationCompletenessGate:
+
+    def _incomplete_narration_package(self) -> dict:
+        """Same shape as MINIMAL_NARRATION_PACKAGE but missing 3 of the 4
+        authoritative beats MINIMAL_SCRIPT_PACKAGE declares (b_s01/b_s02/
+        b_s03) -- exactly the "incomplete authoritative beat coverage"
+        condition the gate must reject."""
+        pkg = dict(MINIMAL_NARRATION_PACKAGE)
+        pkg["narration_segments"] = [MINIMAL_NARRATION_PACKAGE["narration_segments"][0]]
+        return pkg
+
+    def test_run_pipeline_halts_before_vpd_on_incomplete_narration(self):
+        from hypogeum.agents.cinematic_director import NarrationCompletenessError
+
+        with pytest.raises(NarrationCompletenessError):
+            run_full(narration_package=self._incomplete_narration_package())
+
+    def test_vpd_never_called_on_incomplete_narration(self):
+        from hypogeum.agents.cinematic_director import NarrationCompletenessError
+
+        cfg = make_config()
+        report = make_startup_report()
+        with patch("hypogeum.pipeline.run_startup_checks", return_value=report):
+            with _all_stubs_context(narration_package=self._incomplete_narration_package()) as mocks:
+                with pytest.raises(NarrationCompletenessError):
+                    run_pipeline(topic_input="Test", episode_id="ep_001", config=cfg)
+        mocks["vpd"].assert_not_called()
+        mocks["audio"].assert_called_once()  # audio itself must still have run
+
+    def test_run_pipeline_proceeds_normally_with_complete_narration(self):
+        """MINIMAL_NARRATION_PACKAGE (fixed 2026-08-08 to cover all 4
+        MINIMAL_SCRIPT_PACKAGE beats with valid durations) must pass the
+        gate and let the pipeline reach every later stage exactly as
+        before this fix -- the baseline run_full() test suite already
+        proves this implicitly, this test asserts it explicitly."""
+        result, mocks = run_full()
+        mocks["vpd"].assert_called_once()
+        mocks["pub"].assert_called_once()
+        assert result is not None
 
 
 # ---------------------------------------------------------------------------

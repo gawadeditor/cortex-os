@@ -59,6 +59,7 @@ from typing import Callable, Optional, Tuple
 from hypogeum.agents.asset_archive_agent import run_asset_archive
 from hypogeum.agents.assembly_agent import run_assembly_agent
 from hypogeum.agents.audio_agent import run_audio_agent
+from hypogeum.agents.cinematic_director import validate_narration_completeness
 from hypogeum.agents.executive_producer import run_executive_producer
 from hypogeum.agents.archive_agent import run_archive_agent
 from hypogeum.agents.compliance_agent import run_compliance_agent
@@ -973,6 +974,20 @@ def run_pipeline(
         log.info("pipeline_stage_completed", agent="audio_agent")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="audio_agent")
+
+        # -----------------------------------------------------------------------
+        # 7a-pre. Fail-closed narration completeness gate (2026-08-08).
+        # Canonical fresh production must stop here -- before Visual Package
+        # Director, and therefore before run_cinematic_director() -- unless
+        # every authoritative beat in script_package has exactly one valid
+        # measured duration in the narration_package Audio Agent just
+        # produced. See hypogeum.agents.cinematic_director.
+        # validate_narration_completeness() for the full rejection list.
+        # This is deliberately a separate call, not a change to VPD or
+        # Cinematic Director themselves -- those keep their existing
+        # word-count-estimate fallback for legacy/direct callers.
+        # -----------------------------------------------------------------------
+        validate_narration_completeness(script_package, narration_package)
 
         # -----------------------------------------------------------------------
         # 7a. Visual Package Director — now receives the validated

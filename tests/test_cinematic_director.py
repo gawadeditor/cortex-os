@@ -29,11 +29,15 @@ from hypogeum.agents.cinematic_director import (
     PROGRESSION_PATTERNS,
     SHOT_DIVERSITY_FIELDS,
     CoveragePlanDiversityError,
+    NarrationCompletenessError,
+    authoritative_beat_ids,
+    authoritative_beat_texts,
     compute_shot_budget,
     estimate_beat_duration_seconds,
     run_cinematic_director,
     shot_diversity_key,
     validate_coverage_plan_diversity,
+    validate_narration_completeness,
 )
 from hypogeum.schemas import validate
 
@@ -506,3 +510,187 @@ class TestMeasuredDurationPreference:
                 episode_id="ep_001", config=cfg, output_dir=tmp_path,
             )
         validate("cinematic_coverage_plan", result)
+
+
+# ---------------------------------------------------------------------------
+# TestValidateNarrationCompleteness (2026-08-08 fail-closed fix)
+# ---------------------------------------------------------------------------
+
+def _make_script_package_47() -> dict:
+    """Same authoritative-beat shape as the real ep_f3619022 episode: 29
+    main beats across 6 sections, 18 short beats across 3 shorts (6 each) --
+    47 total. Used to prove the gate at the same scale it must handle in
+    production, not just a toy 1-beat case."""
+    sections = []
+    beat_n = 1
+    section_beat_counts = [3, 6, 5, 6, 4, 5]  # sums to 29
+    for si, count in enumerate(section_beat_counts, start=1):
+        beats = []
+        for _ in range(count):
+            beats.append({"beat_id": f"b_{beat_n:03d}", "text": f"Narration beat {beat_n}."})
+            beat_n += 1
+        sections.append({
+            "section_id": f"s_{si:03d}", "title": f"Section {si}", "narration_beats": beats,
+        })
+    shorts = []
+    for shi in range(1, 4):
+        beats = []
+        for _ in range(6):
+            beats.append({"beat_id": f"b_{beat_n:03d}", "text": f"Short narration beat {beat_n}."})
+            beat_n += 1
+        shorts.append({"short_id": f"short_{shi:03d}", "narration_beats": beats})
+    return {
+        "episode_metadata": {}, "sections": sections, "shorts_scripts": shorts,
+        "traceability_manifest": {}, "script_integrity": {},
+    }
+
+
+def _make_complete_narration_package_47(script_package: dict) -> dict:
+    """narration_package with exactly one valid segment per authoritative
+    beat in `script_package` -- the valid, 47-beat-style case."""
+    segments = []
+    for i, beat_id in enumerate(authoritative_beat_ids(script_package)):
+        segments.append({
+            "segment_id": f"seg_{beat_id}",
+            "beat_reference": beat_id,
+            "source_type": "main_episode",
+            "generation_status": "generated",
+            "duration_seconds": 10.0 + i,
+        })
+    return {"narration_segments": segments}
+
+
+class TestValidateNarrationCompleteness:
+
+    def test_valid_47_beat_style_case_returns_full_duration_map(self):
+        sp = _make_script_package_47()
+        beat_ids = authoritative_beat_ids(sp)
+        assert len(beat_ids) == 47
+        np = _make_complete_narration_package_47(sp)
+
+        result = validate_narration_completeness(sp, np)
+
+        assert set(result.keys()) == set(beat_ids)
+        assert len(result) == 47
+        assert all(isinstance(v, float) and v > 0 for v in result.values())
+
+    def test_authoritative_beat_texts_covers_every_beat(self):
+        sp = _make_script_package_47()
+        texts = authoritative_beat_texts(sp)
+        assert set(texts.keys()) == set(authoritative_beat_ids(sp))
+        assert all(t for t in texts.values())
+
+    def test_absent_narration_package_rejected(self):
+        sp = _make_script_package_47()
+        with pytest.raises(NarrationCompletenessError, match="absent"):
+            validate_narration_completeness(sp, None)
+
+    def test_empty_narration_package_rejected(self):
+        sp = _make_script_package_47()
+        with pytest.raises(NarrationCompletenessError, match="absent"):
+            validate_narration_completeness(sp, {})
+
+    def test_script_package_with_no_authoritative_beats_rejected(self):
+        with pytest.raises(NarrationCompletenessError, match="no authoritative beat_ids"):
+            validate_narration_completeness(
+                {"sections": [], "shorts_scripts": []},
+                {"narration_segments": []},
+            )
+
+    def test_missing_beat_reference_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["beat_reference"] = ""
+        with pytest.raises(NarrationCompletenessError, match="beats_with_no_valid_segment"):
+            validate_narration_completeness(sp, np)
+
+    def test_unknown_unmatched_beat_reference_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["beat_reference"] = "b_999_does_not_exist"
+        with pytest.raises(NarrationCompletenessError, match="unmatched_beat_references"):
+            validate_narration_completeness(sp, np)
+
+    def test_duplicate_beat_reference_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        dup = dict(np["narration_segments"][0])
+        np["narration_segments"].append(dup)
+        with pytest.raises(NarrationCompletenessError, match="duplicate_beat_references"):
+            validate_narration_completeness(sp, np)
+
+    def test_missing_duration_seconds_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        del np["narration_segments"][0]["duration_seconds"]
+        with pytest.raises(NarrationCompletenessError, match="beats_with_no_valid_segment"):
+            validate_narration_completeness(sp, np)
+
+    def test_zero_duration_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["duration_seconds"] = 0.0
+        with pytest.raises(NarrationCompletenessError, match="invalid_durations"):
+            validate_narration_completeness(sp, np)
+
+    def test_negative_duration_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["duration_seconds"] = -3.5
+        with pytest.raises(NarrationCompletenessError, match="invalid_durations"):
+            validate_narration_completeness(sp, np)
+
+    def test_nan_duration_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["duration_seconds"] = float("nan")
+        with pytest.raises(NarrationCompletenessError, match="invalid_durations"):
+            validate_narration_completeness(sp, np)
+
+    def test_infinity_duration_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["duration_seconds"] = float("inf")
+        with pytest.raises(NarrationCompletenessError, match="invalid_durations"):
+            validate_narration_completeness(sp, np)
+
+    def test_negative_infinity_duration_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["duration_seconds"] = float("-inf")
+        with pytest.raises(NarrationCompletenessError, match="invalid_durations"):
+            validate_narration_completeness(sp, np)
+
+    def test_boolean_duration_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["duration_seconds"] = True
+        with pytest.raises(NarrationCompletenessError, match="invalid_durations"):
+            validate_narration_completeness(sp, np)
+
+    def test_non_numeric_string_duration_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"][0]["duration_seconds"] = "twenty-four seconds"
+        with pytest.raises(NarrationCompletenessError, match="invalid_durations"):
+            validate_narration_completeness(sp, np)
+
+    def test_incomplete_authoritative_beat_coverage_rejected(self):
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        np["narration_segments"] = np["narration_segments"][:-1]  # drop the last beat
+        with pytest.raises(NarrationCompletenessError, match=r"46/47 valid"):
+            validate_narration_completeness(sp, np)
+
+    def test_invalid_value_is_never_coerced_to_zero(self):
+        """A rejected duration must never silently become a usable 0.0 --
+        the beat must be reported as invalid, never fabricated into a
+        zero-duration entry in the returned map (there is no returned map
+        at all on failure -- validate_narration_completeness() raises)."""
+        sp = _make_script_package_47()
+        np = _make_complete_narration_package_47(sp)
+        first_beat = np["narration_segments"][0]["beat_reference"]
+        np["narration_segments"][0]["duration_seconds"] = float("nan")
+        with pytest.raises(NarrationCompletenessError) as exc_info:
+            validate_narration_completeness(sp, np)
+        assert f"invalid_durations=[('{first_beat}'" in str(exc_info.value)

@@ -115,6 +115,188 @@ def _load_prompt() -> str:
 SYSTEM_PROMPT: str = _load_prompt()
 
 
+# ---------------------------------------------------------------------------
+# Fail-closed narration completeness gate (2026-08-08)
+#
+# Canonical fresh production (hypogeum.pipeline.run_pipeline()) must never
+# reach run_cinematic_director() unless every authoritative beat has exactly
+# one valid measured narration duration -- see that module's call to
+# validate_narration_completeness() immediately after Audio Agent completes,
+# before Visual Package Director starts. Deliberately NOT enforced inside
+# run_cinematic_director() or run_visual_package_director() themselves: both
+# functions' own docstrings document that a caller omitting measured
+# durations (existing tests, run_visual_package_director_from_plan()'s
+# resume-only path, any other legacy/direct caller) intentionally falls back
+# to estimate_beat_duration_seconds()'s word-count estimate, and that
+# fallback must keep working for those callers. This module adds a single,
+# separate, opt-in boundary that the canonical pipeline calls explicitly --
+# it never changes what run_cinematic_director() itself does.
+# ---------------------------------------------------------------------------
+
+class NarrationCompletenessError(Exception):
+    """
+    Raised by validate_narration_completeness() when narration_package does
+    not supply exactly one valid measured duration_seconds for every
+    authoritative beat_id in script_package. See the module-level comment
+    above for why this is a separate, opt-in gate rather than a change to
+    run_cinematic_director() itself.
+    """
+
+
+def authoritative_beat_ids(script_package: dict) -> list[str]:
+    """
+    Every beat_id from script_package's sections + shorts_scripts, in
+    original document order -- the single source of truth for "what beats
+    does this episode actually have" that validate_narration_completeness()
+    (and hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_
+    plan()) compare narration_package against. Mirrors visual_package_
+    director.py's own _flatten_beats_full_text_by_id() beat enumeration
+    exactly (same two containers, same order) without importing that module
+    (avoids a cross-agent import edge for a two-line loop).
+    """
+    ids: list[str] = []
+    for sec in script_package.get("sections", []):
+        for beat in sec.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                ids.append(beat_id)
+    for sh in script_package.get("shorts_scripts", []):
+        for beat in sh.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                ids.append(beat_id)
+    return ids
+
+
+def authoritative_beat_texts(script_package: dict) -> dict:
+    """
+    {beat_id: full narration text} for every authoritative beat -- the same
+    full-fidelity text visual_package_director.py's own _flatten_beats_
+    full_text_by_id() supplies to Cinematic Director's word-count fallback
+    (deliberately not the 20-word-capped A2 compaction; see that function's
+    own docstring for why the two must stay independent).
+    """
+    texts: dict = {}
+    for sec in script_package.get("sections", []):
+        for beat in sec.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                texts[beat_id] = beat.get("text", "")
+    for sh in script_package.get("shorts_scripts", []):
+        for beat in sh.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                texts[beat_id] = beat.get("text", "")
+    return texts
+
+
+def _is_valid_measured_duration(value: object) -> bool:
+    """
+    True only for a real, usable positive duration in seconds.
+
+    bool is checked first because Python's bool is an int subclass --
+    isinstance(True, (int, float)) is True -- so an unguarded numeric check
+    would silently accept True/False as 1.0/0.0. Also rejects any
+    non-numeric type, NaN, infinity, zero, and negative values. Never
+    coerces an invalid value to zero -- callers reject it instead.
+    """
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return False
+    return value > 0
+
+
+def validate_narration_completeness(
+    script_package: dict,
+    narration_package: Optional[dict],
+) -> dict:
+    """
+    Fail-closed gate: raise NarrationCompletenessError unless
+    narration_package supplies exactly one valid measured duration_seconds
+    for every authoritative beat_id in script_package. Returns
+    {beat_id: duration_seconds} for every authoritative beat on success --
+    the exact measured-duration mapping callers need for Cinematic Coverage
+    Planning, so a caller that validates first never has to re-derive it.
+
+    Must be called by canonical fresh production BEFORE run_cinematic_
+    director() is ever invoked -- see hypogeum.pipeline.run_pipeline()'s
+    call immediately after Audio Agent completes. See the module-level
+    comment above for why this is not enforced inside run_cinematic_
+    director() or run_visual_package_director() themselves.
+
+    Rejects (never coerces to zero or otherwise silently repairs):
+      - narration_package absent (None or empty)
+      - script_package with no authoritative beats at all
+      - a narration_segments entry with a missing/empty beat_reference
+      - a beat_reference not present in script_package's authoritative beats
+      - more than one narration_segments entry for the same beat_reference
+      - a beat_reference whose duration_seconds is missing, zero, negative,
+        NaN, infinite, a bool, or any other non-numeric value
+      - any authoritative beat_id with no corresponding valid segment at all
+    """
+    authoritative = authoritative_beat_ids(script_package)
+    if not authoritative:
+        raise NarrationCompletenessError(
+            "script_package supplies no authoritative beat_ids -- nothing to validate"
+        )
+    authoritative_set = set(authoritative)
+
+    if not narration_package:
+        raise NarrationCompletenessError(
+            f"narration_package is absent -- {len(authoritative)} authoritative "
+            "beats have no measured narration duration available"
+        )
+
+    segments = narration_package.get("narration_segments", [])
+
+    valid_durations: dict = {}
+    seen_beat_ids: set = set()
+    missing_beat_reference = 0
+    unmatched_beat_references: list = []
+    duplicate_beat_references: list = []
+    invalid_durations: list = []
+
+    for seg in segments:
+        beat_id = seg.get("beat_reference")
+        if not beat_id:
+            missing_beat_reference += 1
+            continue
+        if beat_id not in authoritative_set:
+            unmatched_beat_references.append(beat_id)
+            continue
+        if beat_id in seen_beat_ids:
+            duplicate_beat_references.append(beat_id)
+            continue
+        seen_beat_ids.add(beat_id)
+        duration = seg.get("duration_seconds")
+        if not _is_valid_measured_duration(duration):
+            invalid_durations.append((beat_id, duration))
+            continue
+        valid_durations[beat_id] = float(duration)
+
+    missing_beats = [b for b in authoritative if b not in valid_durations]
+
+    if (
+        missing_beat_reference or unmatched_beat_references
+        or duplicate_beat_references or invalid_durations or missing_beats
+    ):
+        raise NarrationCompletenessError(
+            "narration_package does not supply exactly one valid measured "
+            f"duration for every authoritative beat "
+            f"({len(valid_durations)}/{len(authoritative)} valid). "
+            f"segments_missing_beat_reference={missing_beat_reference}, "
+            f"unmatched_beat_references={unmatched_beat_references}, "
+            f"duplicate_beat_references={duplicate_beat_references}, "
+            f"invalid_durations={invalid_durations}, "
+            f"beats_with_no_valid_segment={missing_beats}"
+        )
+
+    return valid_durations
+
+
 def estimate_beat_duration_seconds(text: str, config: Config) -> float:
     """
     Word-count-based narration-duration estimate for one beat's raw text.

@@ -1397,26 +1397,28 @@ _STRUCTURED_OUTPUT_CONTENT_NOTE = (
 )
 
 # ---------------------------------------------------------------------------
-# Batched strict planning (2026-08-09, ceiling reduced 25 -> 12 same day)
+# Batched strict planning (2026-08-09, ceiling reduced 25 -> 12 -> 6 same day)
 #
 # A live isolated-planning attempt against the single 47-beat/130-slot
 # structured schema (30,715 bytes, 288 required properties) was rejected by
 # Anthropic before generation began: "The compiled grammar is too large,
 # which would cause performance issues." This is a runtime grammar-
 # compilation cost limit, not a documented JSON-Schema-subset violation --
-# every keyword used was already confirmed supported; the schema was simply
-# too large in aggregate for the provider's strict-mode constrained-decoding
-# engine to compile at 47-beat/130-slot scale. A subsequent live probe at
-# the first 25-slot batch alone (9 beats, 8,237 bytes) was ALSO rejected,
-# with a clearer diagnostic this time (see the provider-error-diagnostics
+# every keyword used was already confirmed supported. Two subsequent live
+# probes -- the first 25-slot batch alone (9 beats, 8,237 bytes), then the
+# first 12-slot batch alone (4 beats, 5,312 bytes) -- were ALSO rejected,
+# both with the identical diagnostic (see the provider-error-diagnostics
 # correction): "Schema is too complex for compilation. Try reducing the
-# number of tools or simplifying tool schemas." -- proving 25 slots was
-# still too large. No provider byte/slot threshold has ever been published,
-# so _MAX_SLOTS_PER_BATCH below remains a conservative structural reduction
-# against the two rejections observed so far, not a claimed precise limit
-# -- the sole knob to revisit if it ever needs adjusting again. This is a
-# fixed constant for this checkpoint, not a configurable or adaptive
-# setting -- there is no per-episode or per-provider override.
+# number of tools or simplifying tool schemas." No provider byte/slot
+# threshold has ever been published, and the exact structural driver behind
+# these three rejections is NOT established -- reducing slot count alone
+# has not yet been confirmed sufficient, only tested at three points so
+# far. _MAX_SLOTS_PER_BATCH below remains a conservative structural
+# reduction against the rejections observed so far, not a claimed precise
+# limit or a validated fix -- the sole knob to revisit if it ever needs
+# adjusting again. This is a fixed constant for this checkpoint, not a
+# configurable or adaptive setting -- there is no per-episode or
+# per-provider override.
 #
 # Splitting the SAME schema machinery (same slot-key/per-position-enum
 # design, same fail-closed conversion path) into several smaller strict
@@ -1435,7 +1437,7 @@ _STRUCTURED_OUTPUT_CONTENT_NOTE = (
 # Path.replace(), or nothing installed at all.
 # ---------------------------------------------------------------------------
 
-_MAX_SLOTS_PER_BATCH = 12
+_MAX_SLOTS_PER_BATCH = 6
 
 
 def _partition_beats_into_batches(

@@ -1754,12 +1754,12 @@ class TestStructuredCoverageSchema:
 
 class TestPartitionBeatsIntoBatches:
 
-    def test_production_ceiling_is_twelve(self):
+    def test_production_ceiling_is_six(self):
         """The accepted production ceiling for this checkpoint (reduced
-        from 25, 2026-08-09, after a live 25-slot batch was rejected as
-        'Schema is too complex for compilation') is a fixed constant, not
-        configurable or adaptive."""
-        assert _MAX_SLOTS_PER_BATCH == 12
+        25 -> 12 -> 6, 2026-08-09, after live batches at both 25 and 12
+        slots were each rejected as 'Schema is too complex for
+        compilation') is a fixed constant, not configurable or adaptive."""
+        assert _MAX_SLOTS_PER_BATCH == 6
 
     def test_batch_slot_ceiling_never_exceeded(self):
         authoritative_order, budget, _ = _representative_47_beat_arithmetic()
@@ -1838,25 +1838,30 @@ class TestPartitionBeatsIntoBatches:
             )
 
     def test_ordinary_ep_f3619022_partitioning_unaffected_by_the_invariant(self):
-        """The real ep_f3619022 arithmetic has no beat anywhere near the
-        12-slot ceiling (max single-beat budget is 6) -- the fail-closed
-        check must never fire for ordinary, in-range input."""
+        """The real ep_f3619022 arithmetic has no beat exceeding the 6-slot
+        ceiling (max single-beat budget is exactly 6, at the ceiling but
+        not over it) -- the fail-closed check must never fire for
+        ordinary, in-range input."""
         authoritative_order, budget, _ = _representative_47_beat_arithmetic()
         assert max(budget.values()) <= _MAX_SLOTS_PER_BATCH
         batches = _partition_beats_into_batches(authoritative_order, budget)  # must not raise
-        assert len(batches) == 12
+        assert len(batches) == 25
 
-    def test_real_ep_f3619022_partition_is_twelve_batches(self):
-        """The exact real ep_f3619022 arithmetic under the 12-slot ceiling
-        (reduced from 25, 2026-08-09, after a live 25-slot batch was also
-        rejected as 'too complex for compilation'), computed once and
-        pinned here -- a change in this result would mean the real batch
-        plan changed, which is worth noticing explicitly."""
+    def test_real_ep_f3619022_partition_is_twentyfive_batches(self):
+        """The exact real ep_f3619022 arithmetic under the 6-slot ceiling
+        (reduced 25 -> 12 -> 6, 2026-08-09, after live batches at both 25
+        and 12 slots were each rejected as 'too complex for compilation'),
+        computed once and pinned here -- a change in this result would mean
+        the real batch plan changed, which is worth noticing explicitly."""
         authoritative_order, budget, _ = _representative_47_beat_arithmetic()
         batches = _partition_beats_into_batches(authoritative_order, budget)
-        assert len(batches) == 12
-        assert [len(b) for b in batches] == [4, 4, 3, 3, 4, 3, 3, 3, 3, 6, 6, 5]
-        assert [sum(budget[x] for x in b) for b in batches] == [12, 10, 11, 10, 12, 9, 12, 9, 12, 12, 11, 10]
+        assert len(batches) == 25
+        assert [len(b) for b in batches] == [
+            2, 2, 2, 2, 2, 1, 2, 1, 1, 2, 2, 2, 1, 1, 2, 1, 1, 1, 1, 3, 3, 3, 3, 3, 3,
+        ]
+        assert [sum(budget[x] for x in b) for b in batches] == [
+            6, 6, 6, 4, 6, 5, 5, 5, 4, 6, 6, 5, 4, 4, 5, 3, 5, 4, 6, 6, 6, 6, 5, 6, 6,
+        ]
         assert all(s <= _MAX_SLOTS_PER_BATCH for s in [sum(budget[x] for x in b) for b in batches])
 
 
@@ -1977,182 +1982,150 @@ def _count_schema_properties(node, depth_box, depth=0):
     return req, opt, union
 
 
-# Exact, pinned expected values for every one of the 12 real ep_f3619022
-# batches under the 12-slot ceiling (reduced from 25, 2026-08-09, after a
-# live 25-slot batch was rejected as "Schema is too complex for
-# compilation") -- computed once directly from committed code, verified,
-# locked.
+# Exact, pinned expected values for every one of the 25 real ep_f3619022
+# batches under the 6-slot ceiling (reduced 25 -> 12 -> 6, 2026-08-09,
+# after live batches at both 25 and 12 slots were each rejected as "Schema
+# is too complex for compilation") -- computed once directly from
+# committed code, verified, locked.
 _PINNED_BATCH_MEASUREMENTS = [
+    {"batch_index": 1, "beat_ids": ["b_001", "b_002"],
+     "main_beats": ["b_001", "b_002"], "main_slots": 6,
+     "short_beats": [], "short_slots": 0, "total_slots": 6,
+     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2749,
+     "max_tokens": 3000, "required_props": 29},
+    {"batch_index": 2, "beat_ids": ["b_003", "b_004"],
+     "main_beats": ["b_003", "b_004"], "main_slots": 6,
+     "short_beats": [], "short_slots": 0, "total_slots": 6,
+     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2626,
+     "max_tokens": 3000, "required_props": 29},
+    {"batch_index": 3, "beat_ids": ["b_005", "b_006"],
+     "main_beats": ["b_005", "b_006"], "main_slots": 6,
+     "short_beats": [], "short_slots": 0, "total_slots": 6,
+     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2685,
+     "max_tokens": 3000, "required_props": 29},
+    {"batch_index": 4, "beat_ids": ["b_007", "b_008"],
+     "main_beats": ["b_007", "b_008"], "main_slots": 4,
+     "short_beats": [], "short_slots": 0, "total_slots": 4,
+     "schema_bytes": 4030, "request_bytes": 11981, "resp_chars": 1760,
+     "max_tokens": 3000, "required_props": 27},
+    {"batch_index": 5, "beat_ids": ["b_009", "b_010"],
+     "main_beats": ["b_009", "b_010"], "main_slots": 6,
+     "short_beats": [], "short_slots": 0, "total_slots": 6,
+     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2681,
+     "max_tokens": 3000, "required_props": 29},
+    {"batch_index": 6, "beat_ids": ["b_011"],
+     "main_beats": ["b_011"], "main_slots": 5,
+     "short_beats": [], "short_slots": 0, "total_slots": 5,
+     "schema_bytes": 3589, "request_bytes": 11494, "resp_chars": 2308,
+     "max_tokens": 3000, "required_props": 25},
+    {"batch_index": 7, "beat_ids": ["b_012", "b_013"],
+     "main_beats": ["b_012", "b_013"], "main_slots": 5,
+     "short_beats": [], "short_slots": 0, "total_slots": 5,
+     "schema_bytes": 4070, "request_bytes": 12021, "resp_chars": 2159,
+     "max_tokens": 3000, "required_props": 28},
+    {"batch_index": 8, "beat_ids": ["b_014"],
+     "main_beats": ["b_014"], "main_slots": 5,
+     "short_beats": [], "short_slots": 0, "total_slots": 5,
+     "schema_bytes": 3589, "request_bytes": 11494, "resp_chars": 2182,
+     "max_tokens": 3000, "required_props": 25},
+    {"batch_index": 9, "beat_ids": ["b_015"],
+     "main_beats": ["b_015"], "main_slots": 4,
+     "short_beats": [], "short_slots": 0, "total_slots": 4,
+     "schema_bytes": 3549, "request_bytes": 11454, "resp_chars": 1782,
+     "max_tokens": 3000, "required_props": 24},
+    {"batch_index": 10, "beat_ids": ["b_016", "b_017"],
+     "main_beats": ["b_016", "b_017"], "main_slots": 6,
+     "short_beats": [], "short_slots": 0, "total_slots": 6,
+     "schema_bytes": 4110, "request_bytes": 12062, "resp_chars": 2747,
+     "max_tokens": 3000, "required_props": 29},
+    {"batch_index": 11, "beat_ids": ["b_018", "b_019"],
+     "main_beats": ["b_018", "b_019"], "main_slots": 6,
+     "short_beats": [], "short_slots": 0, "total_slots": 6,
+     "schema_bytes": 4110, "request_bytes": 12062, "resp_chars": 2621,
+     "max_tokens": 3000, "required_props": 29},
+    {"batch_index": 12, "beat_ids": ["b_020", "b_021"],
+     "main_beats": ["b_020", "b_021"], "main_slots": 5,
+     "short_beats": [], "short_slots": 0, "total_slots": 5,
+     "schema_bytes": 4070, "request_bytes": 12022, "resp_chars": 2166,
+     "max_tokens": 3000, "required_props": 28},
+    {"batch_index": 13, "beat_ids": ["b_022"],
+     "main_beats": ["b_022"], "main_slots": 4,
+     "short_beats": [], "short_slots": 0, "total_slots": 4,
+     "schema_bytes": 3549, "request_bytes": 11455, "resp_chars": 1780,
+     "max_tokens": 3000, "required_props": 24},
+    {"batch_index": 14, "beat_ids": ["b_023"],
+     "main_beats": ["b_023"], "main_slots": 4,
+     "short_beats": [], "short_slots": 0, "total_slots": 4,
+     "schema_bytes": 3549, "request_bytes": 11455, "resp_chars": 1782,
+     "max_tokens": 3000, "required_props": 24},
+    {"batch_index": 15, "beat_ids": ["b_024", "b_025"],
+     "main_beats": ["b_024", "b_025"], "main_slots": 5,
+     "short_beats": [], "short_slots": 0, "total_slots": 5,
+     "schema_bytes": 4070, "request_bytes": 12022, "resp_chars": 2341,
+     "max_tokens": 3000, "required_props": 28},
+    {"batch_index": 16, "beat_ids": ["b_026"],
+     "main_beats": ["b_026"], "main_slots": 3,
+     "short_beats": [], "short_slots": 0, "total_slots": 3,
+     "schema_bytes": 3509, "request_bytes": 11415, "resp_chars": 1247,
+     "max_tokens": 2500, "required_props": 23},
+    {"batch_index": 17, "beat_ids": ["b_027"],
+     "main_beats": ["b_027"], "main_slots": 5,
+     "short_beats": [], "short_slots": 0, "total_slots": 5,
+     "schema_bytes": 3589, "request_bytes": 11495, "resp_chars": 2248,
+     "max_tokens": 3000, "required_props": 25},
+    {"batch_index": 18, "beat_ids": ["b_028"],
+     "main_beats": ["b_028"], "main_slots": 4,
+     "short_beats": [], "short_slots": 0, "total_slots": 4,
+     "schema_bytes": 3549, "request_bytes": 11455, "resp_chars": 1791,
+     "max_tokens": 3000, "required_props": 24},
     {
-        "batch_index": 1,
-        "beat_ids": ["b_001", "b_002", "b_003", "b_004"],
-        "main_beats": ["b_001", "b_002", "b_003", "b_004"],
-        "main_slots": 12,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 12,
-        "schema_bytes": 5312,
-        "request_bytes": 13355,
-        "resp_chars": 5364,
-        "max_tokens": 4000,
-        "required_props": 41,
+        # The final main beat -- b_029 alone, 6 slots.
+        "batch_index": 19, "beat_ids": ["b_029"],
+        "main_beats": ["b_029"], "main_slots": 6,
+        "short_beats": [], "short_slots": 0, "total_slots": 6,
+        "schema_bytes": 3629, "request_bytes": 11535, "resp_chars": 2572,
+        "max_tokens": 3000, "required_props": 26,
     },
     {
-        "batch_index": 2,
-        "beat_ids": ["b_005", "b_006", "b_007", "b_008"],
-        "main_beats": ["b_005", "b_006", "b_007", "b_008"],
-        "main_slots": 10,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 10,
-        "schema_bytes": 5232,
-        "request_bytes": 13275,
-        "resp_chars": 4434,
-        "max_tokens": 4000,
-        "required_props": 39,
+        # The main/short split point -- the first short beat (b_030) now
+        # shares a batch with two other short beats, not with any main beat.
+        "batch_index": 20, "beat_ids": ["b_030", "b_031", "b_032"],
+        "main_beats": [], "main_slots": 0,
+        "short_beats": ["b_030", "b_031", "b_032"], "short_slots": 6,
+        "total_slots": 6,
+        "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2794,
+        "max_tokens": 3500, "required_props": 32,
     },
-    {
-        "batch_index": 3,
-        "beat_ids": ["b_009", "b_010", "b_011"],
-        "main_beats": ["b_009", "b_010", "b_011"],
-        "main_slots": 11,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 11,
-        "schema_bytes": 4791,
-        "request_bytes": 12788,
-        "resp_chars": 4978,
-        "max_tokens": 4000,
-        "required_props": 37,
-    },
-    {
-        "batch_index": 4,
-        "beat_ids": ["b_012", "b_013", "b_014"],
-        "main_beats": ["b_012", "b_013", "b_014"],
-        "main_slots": 10,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 10,
-        "schema_bytes": 4751,
-        "request_bytes": 12748,
-        "resp_chars": 4330,
-        "max_tokens": 4000,
-        "required_props": 36,
-    },
-    {
-        "batch_index": 5,
-        "beat_ids": ["b_015", "b_016", "b_017", "b_018"],
-        "main_beats": ["b_015", "b_016", "b_017", "b_018"],
-        "main_slots": 12,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 12,
-        "schema_bytes": 5312,
-        "request_bytes": 13355,
-        "resp_chars": 5348,
-        "max_tokens": 4000,
-        "required_props": 41,
-    },
-    {
-        "batch_index": 6,
-        "beat_ids": ["b_019", "b_020", "b_021"],
-        "main_beats": ["b_019", "b_020", "b_021"],
-        "main_slots": 9,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 9,
-        "schema_bytes": 4711,
-        "request_bytes": 12708,
-        "resp_chars": 3946,
-        "max_tokens": 3500,
-        "required_props": 35,
-    },
-    {
-        "batch_index": 7,
-        "beat_ids": ["b_022", "b_023", "b_024"],
-        "main_beats": ["b_022", "b_023", "b_024"],
-        "main_slots": 12,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 12,
-        "schema_bytes": 4831,
-        "request_bytes": 12828,
-        "resp_chars": 5317,
-        "max_tokens": 4000,
-        "required_props": 38,
-    },
-    {
-        "batch_index": 8,
-        "beat_ids": ["b_025", "b_026", "b_027"],
-        "main_beats": ["b_025", "b_026", "b_027"],
-        "main_slots": 9,
-        "short_beats": [],
-        "short_slots": 0,
-        "total_slots": 9,
-        "schema_bytes": 4711,
-        "request_bytes": 12708,
-        "resp_chars": 4048,
-        "max_tokens": 3500,
-        "required_props": 35,
-    },
-    {
-        # The main/short split point -- 10 main slots, then b_030 (short, 2
-        # slots) -- the boundary now falls inside batch 9, not batch 4.
-        "batch_index": 9,
-        "beat_ids": ["b_028", "b_029", "b_030"],
-        "main_beats": ["b_028", "b_029"],
-        "main_slots": 10,
-        "short_beats": ["b_030"],
-        "short_slots": 2,
-        "total_slots": 12,
-        "schema_bytes": 4831,
-        "request_bytes": 12828,
-        "resp_chars": 5271,
-        "max_tokens": 4000,
-        "required_props": 38,
-    },
-    {
-        "batch_index": 10,
-        "beat_ids": ["b_031", "b_032", "b_033", "b_034", "b_035", "b_036"],
-        "main_beats": [],
-        "main_slots": 0,
-        "short_beats": ["b_031", "b_032", "b_033", "b_034", "b_035", "b_036"],
-        "short_slots": 12,
-        "total_slots": 12,
-        "schema_bytes": 6274,
-        "request_bytes": 14410,
-        "resp_chars": 5433,
-        "max_tokens": 4500,
-        "required_props": 47,
-    },
-    {
-        "batch_index": 11,
-        "beat_ids": ["b_037", "b_038", "b_039", "b_040", "b_041", "b_042"],
-        "main_beats": [],
-        "main_slots": 0,
-        "short_beats": ["b_037", "b_038", "b_039", "b_040", "b_041", "b_042"],
-        "short_slots": 11,
-        "total_slots": 11,
-        "schema_bytes": 6234,
-        "request_bytes": 14370,
-        "resp_chars": 4901,
-        "max_tokens": 4000,
-        "required_props": 46,
-    },
-    {
-        "batch_index": 12,
-        "beat_ids": ["b_043", "b_044", "b_045", "b_046", "b_047"],
-        "main_beats": [],
-        "main_slots": 0,
-        "short_beats": ["b_043", "b_044", "b_045", "b_046", "b_047"],
-        "short_slots": 10,
-        "total_slots": 10,
-        "schema_bytes": 5713,
-        "request_bytes": 13803,
-        "resp_chars": 4527,
-        "max_tokens": 4000,
-        "required_props": 42,
-    },
+    {"batch_index": 21, "beat_ids": ["b_033", "b_034", "b_035"],
+     "main_beats": [], "main_slots": 0,
+     "short_beats": ["b_033", "b_034", "b_035"], "short_slots": 6,
+     "total_slots": 6,
+     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2657,
+     "max_tokens": 3500, "required_props": 32},
+    {"batch_index": 22, "beat_ids": ["b_036", "b_037", "b_038"],
+     "main_beats": [], "main_slots": 0,
+     "short_beats": ["b_036", "b_037", "b_038"], "short_slots": 6,
+     "total_slots": 6,
+     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2730,
+     "max_tokens": 3500, "required_props": 32},
+    {"batch_index": 23, "beat_ids": ["b_039", "b_040", "b_041"],
+     "main_beats": [], "main_slots": 0,
+     "short_beats": ["b_039", "b_040", "b_041"], "short_slots": 5,
+     "total_slots": 5,
+     "schema_bytes": 4551, "request_bytes": 12549, "resp_chars": 2197,
+     "max_tokens": 3000, "required_props": 31},
+    {"batch_index": 24, "beat_ids": ["b_042", "b_043", "b_044"],
+     "main_beats": [], "main_slots": 0,
+     "short_beats": ["b_042", "b_043", "b_044"], "short_slots": 6,
+     "total_slots": 6,
+     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2666,
+     "max_tokens": 3500, "required_props": 32},
+    {"batch_index": 25, "beat_ids": ["b_045", "b_046", "b_047"],
+     "main_beats": [], "main_slots": 0,
+     "short_beats": ["b_045", "b_046", "b_047"], "short_slots": 6,
+     "total_slots": 6,
+     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2769,
+     "max_tokens": 3500, "required_props": 32},
 ]
 
 
@@ -2163,7 +2136,7 @@ class TestPinnedEpF3619022BatchMeasurements:
         classification = {b: ("main" if i < n_main else "short") for i, b in enumerate(authoritative_order)}
         batches = _partition_beats_into_batches(authoritative_order, budget)
 
-        assert len(batches) == len(_PINNED_BATCH_MEASUREMENTS) == 12
+        assert len(batches) == len(_PINNED_BATCH_MEASUREMENTS) == 25
         for batch, expected in zip(batches, _PINNED_BATCH_MEASUREMENTS):
             assert batch == expected["beat_ids"]
             main_beats = [b for b in batch if classification[b] == "main"]
@@ -2194,7 +2167,7 @@ class TestPinnedEpF3619022BatchMeasurements:
         """The documented safety margin is satisfied for every batch --
         each ceiling is verified strictly greater than its own representative
         response's estimated token count, with the minimum margin across
-        all twelve batches reported exactly (2,150.7 tokens, at batch 8)."""
+        all twenty-five batches reported exactly (2,083.7 tokens, at batch 1)."""
         authoritative_order, budget, _ = _real_ep_f3619022_arithmetic()
         batches = _partition_beats_into_batches(authoritative_order, budget)
         margins = []
@@ -2210,7 +2183,7 @@ class TestPinnedEpF3619022BatchMeasurements:
             assert margin > 0
             margins.append(margin)
 
-        assert min(margins) == pytest.approx(2150.7, abs=1.0)
+        assert min(margins) == pytest.approx(2083.7, abs=1.0)
 
     def test_schema_and_request_bytes_match_pinned_values(self):
         authoritative_order, budget, _ = _real_ep_f3619022_arithmetic()
@@ -2229,7 +2202,7 @@ class TestPinnedEpF3619022BatchMeasurements:
                 "episode_metadata": {
                     "episode_title": "The Antikythera Mechanism", "total_beats": len(batch),
                     "episode_id": "ep_f3619022", "batch_index": expected["batch_index"],
-                    "batch_count": 12,
+                    "batch_count": 25,
                 },
                 "progression_patterns": list(PROGRESSION_PATTERNS),
                 "beats": [{"beat_id": b, "shot_budget": batch_budget[b]} for b in batch],
@@ -2271,9 +2244,10 @@ class TestPinnedEpF3619022BatchMeasurements:
 # artificially huge per-beat narration duration (1000.0s) so compute_shot_
 # budget() deterministically returns the configured safety cap
 # (CINEMATIC_MAX_SHOTS_PER_BEAT=6) for every beat regardless of the exact
-# shot-budget formula -- 12 beats x 6 shots = 72 slots, which the 12-slot
-# ceiling (reduced from 25, 2026-08-09) partitions into exactly six batches
-# of two beats/12 slots each.
+# shot-budget formula -- 12 beats x 6 shots = 72 slots, which the 6-slot
+# ceiling (reduced 25 -> 12 -> 6, 2026-08-09) partitions into exactly
+# twelve batches of one beat/6 slots each (each beat's own budget exactly
+# equals the ceiling, so no two beats can ever share a batch).
 # ---------------------------------------------------------------------------
 
 def _make_batch_test_script_package(n_beats: int = 12) -> dict:
@@ -2306,12 +2280,8 @@ def _make_batch_test_visual_package(n_beats: int = 12) -> dict:
 
 
 _BATCH_TEST_GROUPS = [
-    ["b_001", "b_002"],
-    ["b_003", "b_004"],
-    ["b_005", "b_006"],
-    ["b_007", "b_008"],
-    ["b_009", "b_010"],
-    ["b_011", "b_012"],
+    ["b_001"], ["b_002"], ["b_003"], ["b_004"], ["b_005"], ["b_006"],
+    ["b_007"], ["b_008"], ["b_009"], ["b_010"], ["b_011"], ["b_012"],
 ]
 
 
@@ -2438,7 +2408,7 @@ class TestBatchedRegeneration:
         assert mock_cc.call_count == 2  # batch 1 succeeded, batch 2 attempted and failed, no batch 3
         assert result["status"] == "rejected"
         assert "llm_call_failed" in result["reason"]
-        assert "batch 2/6" in result["reason"]
+        assert "batch 2/12" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
         assert not (tmp_path / "cinematic_coverage_plan_ep_batch.candidate.json").exists()
 
@@ -2482,7 +2452,7 @@ class TestBatchedRegeneration:
         assert mock_cc.call_count == 2
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
-        assert "batch 2/6" in result["reason"]
+        assert "batch 2/12" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
 
     def test_duplicate_json_keys_in_a_batch_response_preserve_active_plan(self, tmp_path):
@@ -2550,10 +2520,10 @@ class TestBatchedRegeneration:
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 1  # rejected at batch 1, batch 2/6 never submitted
+        assert mock_cc.call_count == 1  # rejected at batch 1, batch 2/12 never submitted
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
-        assert "batch 1/6" in result["reason"]
+        assert "batch 1/12" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
 
     def test_no_stage_b_provider_assembly_or_publishing_reachable_across_batches(self, tmp_path):
@@ -2664,7 +2634,7 @@ class TestFirstBatchProbe:
         assert mock_cc.call_count == 1
         assert result["status"] == "probe_rejected"
         assert "llm_call_failed" in result["reason"]
-        assert "batch 1/6" in result["reason"]
+        assert "batch 1/12" in result["reason"]
         assert result["probe_batch_index"] == 1
         assert result["probe_batch_count"] == len(_BATCH_TEST_GROUPS)
 

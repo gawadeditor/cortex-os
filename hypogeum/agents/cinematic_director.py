@@ -1439,16 +1439,32 @@ def _partition_beats_into_batches(
     """Deterministic greedy partition of authoritative_order into batches of
     at most max_slots_per_batch total shot slots each, filling each batch in
     authoritative order until the next complete beat would exceed the
-    ceiling. A beat is never split across batches -- if a single beat's own
-    budget exceeds max_slots_per_batch, it still gets its own batch alone
-    (never silently dropped, truncated, or split). Returns a list of
+    ceiling. A beat is never split across batches. Returns a list of
     beat_id lists; concatenating them in order reproduces
-    authoritative_order exactly, with no overlap and no omission."""
+    authoritative_order exactly, with no overlap and no omission -- and
+    every returned batch has at most max_slots_per_batch total slots, with
+    no exception.
+
+    Raises ValueError if any single beat's own shot budget exceeds
+    max_slots_per_batch -- such a beat could only be represented by
+    splitting it across two batches, truncating its budget, or placing it
+    alone in a batch that violates the ceiling invariant; none of those are
+    acceptable, so this is a hard, deterministic validation failure raised
+    before any batch is built and before any provider call becomes
+    reachable, exactly like NarrationCompletenessError is for other
+    input-validation failures."""
     batches: list = []
     current: list = []
     current_slots = 0
     for beat_id in authoritative_order:
         n = shot_budget_by_beat_id[beat_id]
+        if n > max_slots_per_batch:
+            raise ValueError(
+                f"beat {beat_id!r} has a shot budget of {n}, which exceeds "
+                f"max_slots_per_batch={max_slots_per_batch} -- it can never fit "
+                "in any batch without violating the batch-size ceiling; refusing "
+                "to split, truncate, or place it in an oversized batch"
+            )
         if current and current_slots + n > max_slots_per_batch:
             batches.append(current)
             current = []
@@ -1499,6 +1515,145 @@ def _batch_content_note(batch_index: int, batch_count: int) -> str:
     )
 
 
+def _execute_single_batch(
+    batch_index: int,
+    batch_count: int,
+    batch_beat_ids: list,
+    expected_shot_budget_by_beat_id: dict,
+    measured_durations: dict,
+    scenes_by_beat_id: dict,
+    visual_package: dict,
+    episode_id: str,
+    config: Config,
+    provider_clip_duration: float,
+) -> dict:
+    """
+    Execute exactly one batch's LLM request through the production batch
+    schema, prompt envelope, token budget, response_format, provider, and
+    model configuration -- the single shared code path both ordinary
+    batched regeneration (calling this once per batch, sequentially) and
+    the first-batch feasibility probe (calling this exactly once, for
+    batch 1, and never proceeding further) both use. A probe therefore
+    genuinely exercises the exact production request construction, never a
+    parallel or duplicated implementation of it.
+
+    Makes at most one requests.post call: response_format is strict
+    json_schema, provider.require_parameters=true (no pinning),
+    allow_model_fallback=False, max_attempts=1 -- see call_claude()'s own
+    docstring for what each of those guarantees.
+
+    Never raises. Returns one of:
+      {"status": "batch_succeeded", "beat_plans": [...], "result": CallResult}
+      {"status": "batch_failed", "reason": "..."}
+    """
+    from hypogeum.agent import _strip_markdown_fence  # noqa: PLC0415
+    from hypogeum.finance import record_cost  # noqa: PLC0415
+    from hypogeum.openrouter import call_claude  # noqa: PLC0415
+
+    batch_budget = {b: expected_shot_budget_by_beat_id[b] for b in batch_beat_ids}
+
+    beats_for_director = []
+    for beat_id in batch_beat_ids:
+        duration = measured_durations[beat_id]
+        scene = scenes_by_beat_id[beat_id]
+        beats_for_director.append({
+            "beat_id": beat_id,
+            "scene_id": scene.get("scene_id"),
+            "source_type": scene.get("source_type"),
+            "narration_duration_seconds": round(duration, 3),
+            "shot_budget": batch_budget[beat_id],
+            "visual_spec": scene.get("visual_spec", {}),
+            "presentation_plan": scene.get("presentation_plan", {}),
+            "narrative_signals": scene.get("narrative_signals", []),
+        })
+
+    batch_schema = build_structured_coverage_plan_schema(batch_beat_ids, batch_budget)
+    batch_max_tokens = _estimate_batch_max_tokens(batch_beat_ids, batch_budget)
+
+    director_input = {
+        "task": "plan_cinematic_coverage_structured_batch",
+        "episode_metadata": {
+            "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
+            "total_beats": len(beats_for_director),
+            "episode_id": episode_id,
+            "batch_index": batch_index,
+            "batch_count": batch_count,
+        },
+        "progression_patterns": list(PROGRESSION_PATTERNS),
+        "beats": beats_for_director,
+        "output_format_override": _batch_content_note(batch_index, batch_count),
+    }
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(director_input, ensure_ascii=False)},
+    ]
+    try:
+        result = call_claude(
+            model_slug=_CLAUDE_SONNET,
+            messages=messages,
+            max_tokens=batch_max_tokens,
+            config=config,
+            episode_id=episode_id,
+            agent=_AGENT_NAME,
+            response_format=_build_structured_response_format(
+                batch_schema, name=f"cinematic_coverage_plan_batch_{batch_index:02d}",
+            ),
+            provider=_STRUCTURED_OUTPUT_PROVIDER,
+            allow_model_fallback=False,
+            max_attempts=1,
+        )
+    except Exception as exc:  # noqa: BLE001 — any LLM/network/truncation failure
+        return {
+            "status": "batch_failed",
+            "reason": (
+                f"llm_call_failed: batch {batch_index}/{batch_count} "
+                f"(beats {batch_beat_ids}): {type(exc).__name__}: {exc}"
+            ),
+        }
+
+    record_cost(
+        provider="openrouter",
+        model=result.model_used,
+        call_type=_AGENT_NAME,
+        cost_usd=result.estimated_cost_usd,
+        tokens_or_credits=float(result.usage.get("total_tokens", 0)),
+    )
+
+    # Parsed AND fully expanded (decoded, validated) immediately, scoped to
+    # just this batch's beats -- every per-shot check _expand_compact_plan()
+    # performs (invalid/out-of-range enum letters, missing/duplicate/unknown
+    # beats within the batch, empty shots) therefore fails THIS batch
+    # immediately, before any later batch could ever be submitted.
+    raw_content = _strip_markdown_fence(result.content)
+    try:
+        structured = json.loads(
+            raw_content, object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
+        )
+        batch_compact = _structured_payload_to_compact(
+            structured, batch_beat_ids, batch_budget,
+        )
+        batch_measured_durations = {b: measured_durations[b] for b in batch_beat_ids}
+        batch_expanded = _expand_compact_plan(
+            batch_compact, episode_id, batch_beat_ids, batch_measured_durations,
+            provider_clip_duration,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return {
+            "status": "batch_failed",
+            "reason": (
+                f"malformed_output: batch {batch_index}/{batch_count} "
+                f"(beats {batch_beat_ids}): {type(exc).__name__}: {exc}"
+            ),
+        }
+
+    return {
+        "status": "batch_succeeded",
+        "beat_plans": batch_expanded["beat_plans"],
+        "result": result,
+    }
+
+
 def regenerate_cinematic_coverage_plan(
     script_package: dict,
     narration_package: Optional[dict],
@@ -1509,6 +1664,7 @@ def regenerate_cinematic_coverage_plan(
     *,
     force: bool = False,
     fixture_verification: Optional[dict] = None,
+    probe_first_batch: bool = False,
 ) -> dict:
     """
     Isolated, explicit, planning-only regeneration of one episode's
@@ -1595,32 +1751,61 @@ def regenerate_cinematic_coverage_plan(
     asset_manifest -- this function returns immediately after step 5 or 6
     above in every case.
 
+    probe_first_batch (2026-08-09, requires force=True; ignored otherwise):
+      When True, this function computes the exact same deterministic batch
+      partition described above, then submits ONLY batch 1 through
+      _execute_single_batch() -- the identical shared helper ordinary
+      batching itself calls, so a probe genuinely exercises the exact
+      production request construction, never a parallel implementation of
+      it -- and returns immediately with status="probe_succeeded" or
+      status="probe_rejected". Batch 2 is never submitted, no full-plan
+      merge happens, no candidate is ever written, the active checkpoint is
+      never installed or otherwise mutated, and (since nothing is being
+      installed, there is nothing to protect) no active-plan backup is
+      created either -- step 2's backup-writing is skipped entirely for a
+      probe. At most one requests.post call total is reachable. Intended
+      as a cheap, safe, side-effect-free feasibility check before
+      authorizing a full six-batch regeneration attempt.
+
     Returns a result dict:
-      status:            "cached" | "installed" | "rejected"
-      reason:            None, or why a "rejected" regeneration failed
+      status:            "cached" | "installed" | "rejected" |
+                          "probe_succeeded" | "probe_rejected"
+      reason:            None, or why a "rejected"/"probe_rejected"
+                          regeneration failed
       active_plan_path:  str path to the canonical checkpoint
       backup_path:       str path to the timestamped backup, or None
+                          (always None for a probe -- see above)
       candidate_path:     str path to the candidate file, or None
       plan:              the plan now active on disk (unchanged if
-                          "rejected"/"cached", the new one if "installed")
+                          "rejected"/"cached", the new one if "installed",
+                          None for either probe outcome -- a probe never
+                          produces a full canonical plan)
       totals:            {"main_shots", "short_shots", "total_shots",
                           "sufficient_beats", "insufficient_beats"} for
                           whichever plan `plan` refers to, or None if the
                           checkpoint didn't exist and force=True regenerated
-                          from nothing (still populated once installed)
+                          from nothing, or either probe outcome (still
+                          populated once installed)
+      probe_batch_index, probe_batch_count, probe_batch_beat_ids:
+                          only present for "probe_succeeded"/"probe_rejected"
+                          -- which batch was probed, out of how many total,
+                          and its exact beat_id list
 
     Raises:
       NarrationCompletenessError — see validate_narration_completeness().
       CoverageRegenerationError  — force=False with no existing checkpoint.
+      ValueError                 — a single beat's own shot budget exceeds
+                                    _MAX_SLOTS_PER_BATCH (see
+                                    _partition_beats_into_batches()) --
+                                    raised before any backup or provider
+                                    call, exactly like
+                                    NarrationCompletenessError.
     """
     import shutil
     from datetime import datetime, timezone
 
-    from hypogeum.agent import _strip_markdown_fence  # noqa: PLC0415
     from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
-    from hypogeum.finance import record_cost  # noqa: PLC0415
     from hypogeum.muapi import get_requested_clip_duration_seconds  # noqa: PLC0415
-    from hypogeum.openrouter import call_claude  # noqa: PLC0415
     from hypogeum.schemas import SchemaError, validate  # noqa: PLC0415
 
     _resolve_dir: Path = (
@@ -1663,7 +1848,70 @@ def regenerate_cinematic_coverage_plan(
         episode_id=episode_id,
         authoritative_beats=len(authoritative),
         force=True,
+        probe_first_batch=probe_first_batch,
     )
+
+    # Deterministic per-beat shot budgets, scene context, and the batch
+    # partition itself -- computed before any backup or provider call, so
+    # the first-batch feasibility probe below never needs step 2's backup
+    # logic at all (a probe never installs, so there is nothing to protect).
+    expected_shot_budget_by_beat_id: dict = {}
+    scenes_by_beat_id: dict = {}
+    for beat_id in authoritative:
+        duration = measured_durations[beat_id]
+        expected_shot_budget_by_beat_id[beat_id] = compute_shot_budget(duration, config)
+        scenes_by_beat_id[beat_id] = next(
+            (s for s in visual_package.get("scenes", []) if s.get("narration_reference") == beat_id),
+            {},
+        )
+
+    batches = _partition_beats_into_batches(authoritative, expected_shot_budget_by_beat_id)
+
+    if probe_first_batch:
+        # First-batch feasibility probe: exactly one requests.post call
+        # maximum, against batch 1 through _execute_single_batch() -- the
+        # exact same helper ordinary batching itself calls below. Never
+        # batch 2, never a full-plan merge, never a candidate write, never
+        # installation or any active-plan mutation, never an active-plan
+        # backup, never Stage B or any downstream work.
+        probe_outcome = _execute_single_batch(
+            1, len(batches), batches[0], expected_shot_budget_by_beat_id,
+            measured_durations, scenes_by_beat_id, visual_package, episode_id,
+            config, provider_clip_duration,
+        )
+        if probe_outcome["status"] == "batch_failed":
+            log.error(
+                "coverage_regen_probe_rejected", episode_id=episode_id,
+                reason=probe_outcome["reason"],
+            )
+            return {
+                "status": "probe_rejected",
+                "reason": probe_outcome["reason"],
+                "active_plan_path": str(ckpt_path),
+                "backup_path": None,
+                "candidate_path": None,
+                "plan": None,
+                "totals": None,
+                "probe_batch_index": 1,
+                "probe_batch_count": len(batches),
+                "probe_batch_beat_ids": batches[0],
+            }
+        log.info(
+            "coverage_regen_probe_succeeded", episode_id=episode_id,
+            batch_beat_ids=batches[0], batch_count=len(batches),
+        )
+        return {
+            "status": "probe_succeeded",
+            "reason": None,
+            "active_plan_path": str(ckpt_path),
+            "backup_path": None,
+            "candidate_path": None,
+            "plan": None,
+            "totals": None,
+            "probe_batch_index": 1,
+            "probe_batch_count": len(batches),
+            "probe_batch_beat_ids": batches[0],
+        }
 
     # Step 2 — preserve the existing plan as a timestamped backup, before
     # touching anything else.
@@ -1700,135 +1948,28 @@ def regenerate_cinematic_coverage_plan(
     # _partition_beats_into_batches() for why this replaced a single
     # 47-beat/130-slot request -- that request was rejected by the provider
     # before generation began: "The compiled grammar is too large"). Each
-    # batch is its own independent one-request-maximum call; a failure at
-    # any batch discards every batch already collected in memory and
-    # rejects the whole attempt -- nothing is written to disk and no batch
-    # result is treated as resumable state until every batch has succeeded
-    # and the full merged candidate has passed every validator below. A
-    # later invocation always starts again from batch 1.
-    expected_shot_budget_by_beat_id: dict = {}
-    scenes_by_beat_id: dict = {}
-    for beat_id in authoritative:
-        duration = measured_durations[beat_id]
-        expected_shot_budget_by_beat_id[beat_id] = compute_shot_budget(duration, config)
-        scenes_by_beat_id[beat_id] = next(
-            (s for s in visual_package.get("scenes", []) if s.get("narration_reference") == beat_id),
-            {},
-        )
-
-    batches = _partition_beats_into_batches(authoritative, expected_shot_budget_by_beat_id)
-
+    # batch runs through _execute_single_batch() -- the same shared helper
+    # the probe above uses for batch 1 alone -- one independent
+    # one-request-maximum call per batch; a failure at any batch discards
+    # every batch already collected in memory and rejects the whole
+    # attempt -- nothing is written to disk and no batch result is treated
+    # as resumable state until every batch has succeeded and the full
+    # merged candidate has passed every validator below. A later invocation
+    # always starts again from batch 1.
     all_expanded_beat_plans: list = []
     for batch_index, batch_beat_ids in enumerate(batches, start=1):
-        batch_budget = {b: expected_shot_budget_by_beat_id[b] for b in batch_beat_ids}
-
-        beats_for_director = []
-        for beat_id in batch_beat_ids:
-            duration = measured_durations[beat_id]
-            scene = scenes_by_beat_id[beat_id]
-            beats_for_director.append({
-                "beat_id": beat_id,
-                "scene_id": scene.get("scene_id"),
-                "source_type": scene.get("source_type"),
-                "narration_duration_seconds": round(duration, 3),
-                "shot_budget": batch_budget[beat_id],
-                "visual_spec": scene.get("visual_spec", {}),
-                "presentation_plan": scene.get("presentation_plan", {}),
-                "narrative_signals": scene.get("narrative_signals", []),
-            })
-
-        batch_schema = build_structured_coverage_plan_schema(batch_beat_ids, batch_budget)
-        batch_max_tokens = _estimate_batch_max_tokens(batch_beat_ids, batch_budget)
-
-        director_input = {
-            "task": "plan_cinematic_coverage_structured_batch",
-            "episode_metadata": {
-                "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
-                "total_beats": len(beats_for_director),
-                "episode_id": episode_id,
-                "batch_index": batch_index,
-                "batch_count": len(batches),
-            },
-            "progression_patterns": list(PROGRESSION_PATTERNS),
-            "beats": beats_for_director,
-            "output_format_override": _batch_content_note(batch_index, len(batches)),
-        }
-
-        # Single non-streaming call per batch, strict structured-output
-        # wire format, deterministic per-batch max_tokens (see
-        # _estimate_batch_max_tokens() above -- _MAX_TOKENS_REGEN, sized
-        # for the single-request design, is never reused blindly here).
-        # response_format/provider/allow_model_fallback/max_attempts carry
-        # exactly the same contract the single-request design established:
-        # strict json_schema, require_parameters routing filter (no
-        # provider pinning), no different-model fallback, no same-model
-        # retry -- one requests.post call maximum per batch. OpenRouter's
-        # own provider-level routing among compatible endpoints inside
-        # that one submitted request remains fully available.
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(director_input, ensure_ascii=False)},
-        ]
-        try:
-            result = call_claude(
-                model_slug=_CLAUDE_SONNET,
-                messages=messages,
-                max_tokens=batch_max_tokens,
-                config=config,
-                episode_id=episode_id,
-                agent=_AGENT_NAME,
-                response_format=_build_structured_response_format(
-                    batch_schema, name=f"cinematic_coverage_plan_batch_{batch_index:02d}",
-                ),
-                provider=_STRUCTURED_OUTPUT_PROVIDER,
-                allow_model_fallback=False,
-                max_attempts=1,
-            )
-        except Exception as exc:  # noqa: BLE001 — any LLM/network/truncation failure
-            return _rejected(
-                f"llm_call_failed: batch {batch_index}/{len(batches)} "
-                f"(beats {batch_beat_ids}): {type(exc).__name__}: {exc}"
-            )
-
-        record_cost(
-            provider="openrouter",
-            model=result.model_used,
-            call_type=_AGENT_NAME,
-            cost_usd=result.estimated_cost_usd,
-            tokens_or_credits=float(result.usage.get("total_tokens", 0)),
+        outcome = _execute_single_batch(
+            batch_index, len(batches), batch_beat_ids, expected_shot_budget_by_beat_id,
+            measured_durations, scenes_by_beat_id, visual_package, episode_id,
+            config, provider_clip_duration,
         )
-
-        # Parsed AND fully expanded (decoded, validated) immediately,
-        # scoped to just this batch's beats -- not deferred to a final
-        # merge step. Every per-shot check _expand_compact_plan() already
-        # performs (invalid/out-of-range enum letters via
-        # _decode_code_part(), missing/duplicate/unknown beats within the
-        # batch, empty shots) therefore fails THIS batch immediately,
-        # before any later batch is ever submitted -- exactly matching
-        # "failure in batch N prevents batch N+1 from being submitted" for
-        # every failure class, not only structural ones.
-        raw_content = _strip_markdown_fence(result.content)
-        try:
-            structured = json.loads(
-                raw_content, object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
-            )
-            batch_compact = _structured_payload_to_compact(
-                structured, batch_beat_ids, batch_budget,
-            )
-            batch_measured_durations = {b: measured_durations[b] for b in batch_beat_ids}
-            batch_expanded = _expand_compact_plan(
-                batch_compact, episode_id, batch_beat_ids, batch_measured_durations,
-                provider_clip_duration,
-            )
-        except (json.JSONDecodeError, ValueError) as exc:
-            return _rejected(
-                f"malformed_output: batch {batch_index}/{len(batches)} "
-                f"(beats {batch_beat_ids}): {type(exc).__name__}: {exc}"
-            )
+        if outcome["status"] == "batch_failed":
+            return _rejected(outcome["reason"])
 
         # In-memory accumulation only -- no disk write, no partial-batch
         # artifact, until every batch above has succeeded.
-        all_expanded_beat_plans.extend(batch_expanded["beat_plans"])
+        all_expanded_beat_plans.extend(outcome["beat_plans"])
+
 
     # All batches succeeded -- merge in memory (authoritative order is
     # preserved by construction: batches were built from `authoritative` in

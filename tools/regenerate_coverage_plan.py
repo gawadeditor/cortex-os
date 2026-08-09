@@ -31,6 +31,19 @@ Usage:
     # per-episode expectations.
     python3 tools/regenerate_coverage_plan.py --episode-id ep_f3619022 --force \\
         --verify-ep-f3619022-fixture
+
+    # First-batch feasibility probe (2026-08-09): submits at most ONE LLM
+    # call, against batch 1 of the deterministic batch partition only,
+    # through the exact same production request-construction code ordinary
+    # regeneration uses. Never submits batch 2, never merges a full plan,
+    # never writes a candidate, never installs or otherwise mutates the
+    # active checkpoint, and creates no active-plan backup (nothing is
+    # being installed, so there is nothing to protect). Prints
+    # status=probe_succeeded or status=probe_rejected. Use this to cheaply
+    # verify a batch's schema/request is actually accepted by the provider
+    # before authorizing a full six-batch regeneration attempt.
+    python3 tools/regenerate_coverage_plan.py --episode-id ep_f3619022 --force \\
+        --verify-ep-f3619022-fixture --probe-first-batch
 """
 
 from __future__ import annotations
@@ -76,6 +89,13 @@ def main() -> None:
                    help="Enforce the verified ep_f3619022 totals "
                         "(95/35/130, 47/47 sufficient). Only meaningful for "
                         "that specific episode's real data.")
+    p.add_argument("--probe-first-batch", action="store_true",
+                   help="First-batch feasibility probe: at most ONE LLM call, "
+                        "against batch 1 of the deterministic batch partition "
+                        "only, through the exact production request path. "
+                        "Never submits batch 2, never merges/installs/writes "
+                        "a candidate, never creates a backup. Requires "
+                        "--force. Ignored (has no effect) without --force.")
     p.add_argument("--assets-root", default=None,
                    help="Override .hypogeum-assets root (default: repo's own)")
     args = p.parse_args()
@@ -102,12 +122,16 @@ def main() -> None:
             output_dir=episode_dir,
             force=args.force,
             fixture_verification=fixture_verification,
+            probe_first_batch=args.probe_first_batch,
         )
     except NarrationCompletenessError as exc:
         print(f"NARRATION COMPLETENESS GATE FAILED — no LLM call made.\n{exc}", file=sys.stderr)
         sys.exit(1)
     except CoverageRegenerationError as exc:
         print(f"REGENERATION NOT PERFORMED — {exc}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"BATCH PARTITIONING FAILED — {exc}", file=sys.stderr)
         sys.exit(1)
 
     print(f"status:            {result['status']}")
@@ -116,8 +140,11 @@ def main() -> None:
     print(f"backup_path:       {result['backup_path']}")
     print(f"candidate_path:    {result['candidate_path']}")
     print(f"totals:            {result['totals']}")
+    if "probe_batch_index" in result:
+        print(f"probe_batch_index: {result['probe_batch_index']} of {result['probe_batch_count']}")
+        print(f"probe_batch_beats: {result['probe_batch_beat_ids']}")
 
-    if result["status"] == "rejected":
+    if result["status"] in ("rejected", "probe_rejected"):
         sys.exit(1)
 
 

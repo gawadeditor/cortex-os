@@ -868,8 +868,10 @@ def _structured_beat(pattern: str, shots: list) -> dict:
 
 def _matching_structured_response() -> dict:
     """Structured wire-format response whose shot counts exactly match the
-    arithmetic _make_small_narration_package() implies (1, 3, 1)."""
-    return {"beats": {
+    arithmetic _make_small_narration_package() implies (1, 3, 1). Beat_ids
+    are top-level keys directly -- matching build_structured_coverage_plan_
+    schema()'s actual declared contract exactly (no "beats" wrapper)."""
+    return {
         "b_001": _structured_beat("A", [_structured_shot()]),
         "b_002": _structured_beat("A", [
             _structured_shot(camera_angle="eye_level"),
@@ -877,7 +879,7 @@ def _matching_structured_response() -> dict:
             _structured_shot(camera_angle="high_angle"),
         ]),
         "b_s01": _structured_beat("A", [_structured_shot()]),
-    }}
+    }
 
 
 def _mismatched_structured_response() -> dict:
@@ -886,11 +888,11 @@ def _mismatched_structured_response() -> dict:
     is contracted by the provider to make this shape unsatisfiable at the
     API level, but this fixture exercises the defensive fallback check in
     _structured_payload_to_compact() for the case where it arrives anyway."""
-    return {"beats": {
+    return {
         "b_001": _structured_beat("A", [_structured_shot()]),
         "b_002": _structured_beat("A", [_structured_shot()]),
         "b_s01": _structured_beat("A", [_structured_shot()]),
-    }}
+    }
 
 
 class TestRegenerateCinematicCoveragePlan:
@@ -1176,8 +1178,8 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         raw_with_duplicate_key = (
-            '{"beats": {"b_001": {"pattern": "A", "shots": {"s01": {}}}, '
-            '"b_001": {"pattern": "A", "shots": {"s01": {}}}}}'
+            '{"b_001": {"pattern": "A", "shots": {"s01": {}}}, '
+            '"b_001": {"pattern": "A", "shots": {"s01": {}}}}'
         )
 
         with patch("hypogeum.openrouter.call_claude",
@@ -1206,7 +1208,7 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         bad_response = _matching_structured_response()
-        bad_response["beats"]["b_001"]["shots"]["s01"]["dep"] = "Z"  # out of range
+        bad_response["b_001"]["shots"]["s01"]["dep"] = "Z"  # out of range
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1230,7 +1232,7 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         bad_response = _matching_structured_response()
-        del bad_response["beats"]["b_001"]["shots"]["s01"]["dep"]
+        del bad_response["b_001"]["shots"]["s01"]["dep"]
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1255,7 +1257,7 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         bad_response = _matching_structured_response()
-        bad_response["beats"]["b_001"]["shots"] = {}
+        bad_response["b_001"]["shots"] = {}
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1277,7 +1279,7 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         bad_response = _matching_structured_response()
-        del bad_response["beats"]["b_002"]
+        del bad_response["b_002"]
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1302,7 +1304,7 @@ class TestRegenerateCinematicCoveragePlan:
         ckpt.write_text(json.dumps(original))
 
         bad_response = _matching_structured_response()
-        del bad_response["beats"]["b_001"]["shots"]["s01"]["subj"]
+        del bad_response["b_001"]["shots"]["s01"]["subj"]
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(bad_response))):
@@ -1326,7 +1328,7 @@ class TestRegenerateCinematicCoveragePlan:
         original["notes"] = ["ORIGINAL"]
         ckpt.write_text(json.dumps(original))
         new_response = _matching_structured_response()
-        new_response["beats"]["b_001"]["shots"]["s01"]["subj"] = "REGENERATED_MARKER"
+        new_response["b_001"]["shots"]["s01"]["subj"] = "REGENERATED_MARKER"
 
         with patch("hypogeum.openrouter.call_claude",
                    return_value=_make_call_result(json.dumps(new_response))):
@@ -1513,6 +1515,70 @@ def _walk_schema_objects(node):
             yield from _walk_schema_objects(sub)
 
 
+class TestSchemaParserContract:
+    """
+    Contract-regression coverage (2026-08-09): a live probe proved
+    build_structured_coverage_plan_schema() declares beat_ids as top-level
+    required properties directly (no "beats" wrapper), while
+    _structured_payload_to_compact() incorrectly expected a
+    {"beats": {...}} wrapper -- every prior mocked test built the wrapped
+    shape too, so the mismatch validated the parser's own wrong assumption
+    instead of the schema actually sent to the provider. These tests pin
+    the schema and the parser to the same contract directly, so a future
+    change to either one that breaks alignment fails here first.
+    """
+
+    def test_schema_top_level_required_keys_equal_expected_beat_ids(self):
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+        assert set(schema["required"]) == set(authoritative_order)
+        assert set(schema["properties"].keys()) == set(authoritative_order)
+
+    def test_schema_has_no_beats_property(self):
+        """The schema must never declare a "beats" property at any level --
+        proof the wrapper does not exist anywhere in the accepted contract."""
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+        assert "beats" not in schema["properties"]
+        assert "beats" not in schema.get("$defs", {})
+
+    def test_valid_response_built_directly_from_schema_keys_passes_conversion(self):
+        """A response constructed using exactly the schema's own top-level
+        property names (no wrapper) must convert successfully."""
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        response = {}
+        for beat_id in schema["required"]:
+            n = budget[beat_id]
+            response[beat_id] = {
+                "pattern": "A",
+                "shots": {f"s{i:02d}": _structured_shot() for i in range(1, n + 1)},
+            }
+
+        compact = _structured_payload_to_compact(response, authoritative_order, budget)
+        assert [bp["beat_id"] for bp in compact["beats"]] == authoritative_order
+
+    def test_wrapped_beats_payload_fails_against_the_real_schema_keys(self):
+        """A synthetic {"beats": {...}} wrapper, built from the same real
+        schema-derived beats, must fail closed -- it is not a second
+        accepted shape."""
+        authoritative_order, budget, _ = _representative_47_beat_arithmetic()
+        schema = build_structured_coverage_plan_schema(authoritative_order, budget)
+
+        inner = {}
+        for beat_id in schema["required"]:
+            n = budget[beat_id]
+            inner[beat_id] = {
+                "pattern": "A",
+                "shots": {f"s{i:02d}": _structured_shot() for i in range(1, n + 1)},
+            }
+        wrapped = {"beats": inner}
+
+        with pytest.raises(ValueError):
+            _structured_payload_to_compact(wrapped, authoritative_order, budget)
+
+
 class TestStructuredCoverageSchema:
 
     def test_exactly_47_required_beat_properties_in_authoritative_order(self):
@@ -1633,7 +1699,7 @@ class TestStructuredCoverageSchema:
     def test_structured_payload_converts_to_compact_shape(self):
         authoritative = ["b_001"]
         budget = {"b_001": 2}
-        structured = {"beats": {
+        structured = {
             "b_001": {
                 "pattern": "A",
                 "shots": {
@@ -1641,7 +1707,7 @@ class TestStructuredCoverageSchema:
                     "s02": _structured_shot(subj="second", camera_angle="high_angle"),
                 },
             },
-        }}
+        }
 
         compact = _structured_payload_to_compact(structured, authoritative, budget)
 
@@ -1671,14 +1737,13 @@ class TestStructuredCoverageSchema:
         with the real ep_f3619022 95/35/130 arithmetic reproduced exactly."""
         authoritative_order, budget, n_main = _representative_47_beat_arithmetic()
 
-        beats_obj = {}
+        structured_response = {}
         for beat_id in authoritative_order:
             n = budget[beat_id]
             shots_obj = {
                 f"s{i:02d}": _structured_shot() for i in range(1, n + 1)
             }
-            beats_obj[beat_id] = {"pattern": "B" if n > 1 else "A", "shots": shots_obj}
-        structured_response = {"beats": beats_obj}
+            structured_response[beat_id] = {"pattern": "B" if n > 1 else "A", "shots": shots_obj}
 
         compact = _structured_payload_to_compact(structured_response, authoritative_order, budget)
         measured_durations = {b: 20.0 for b in authoritative_order}
@@ -1697,24 +1762,70 @@ class TestStructuredCoverageSchema:
     def test_structured_payload_missing_beat_fails_closed(self):
         authoritative = ["b_001", "b_002"]
         budget = {"b_001": 1, "b_002": 1}
-        structured = {"beats": {
+        structured = {
             "b_001": {"pattern": "A", "shots": {"s01": _structured_shot()}},
-        }}
+        }
         with pytest.raises(ValueError):
+            _structured_payload_to_compact(structured, authoritative, budget)
+
+    def test_structured_payload_unexpected_beat_fails_closed(self):
+        """A top-level key not in the authoritative set must fail closed --
+        never silently ignored."""
+        authoritative = ["b_001"]
+        budget = {"b_001": 1}
+        structured = {
+            "b_001": {"pattern": "A", "shots": {"s01": _structured_shot()}},
+            "b_999_unexpected": {"pattern": "A", "shots": {"s01": _structured_shot()}},
+        }
+        with pytest.raises(ValueError, match="unexpected"):
             _structured_payload_to_compact(structured, authoritative, budget)
 
     def test_structured_payload_wrong_slot_keys_fails_closed(self):
         authoritative = ["b_001"]
         budget = {"b_001": 2}
-        structured = {"beats": {
+        structured = {
             "b_001": {"pattern": "A", "shots": {"s01": _structured_shot()}},  # missing s02
-        }}
+        }
+        with pytest.raises(ValueError):
+            _structured_payload_to_compact(structured, authoritative, budget)
+
+    def test_structured_payload_malformed_beat_fails_closed(self):
+        """A beat value that is not itself an object must fail closed."""
+        authoritative = ["b_001"]
+        budget = {"b_001": 1}
+        structured = {"b_001": "not-an-object"}
+        with pytest.raises(ValueError):
+            _structured_payload_to_compact(structured, authoritative, budget)
+
+    def test_structured_payload_unexpected_shot_slot_fails_closed(self):
+        """An extra slot key beyond the authoritative budget must fail
+        closed -- never silently dropped."""
+        authoritative = ["b_001"]
+        budget = {"b_001": 1}
+        structured = {
+            "b_001": {
+                "pattern": "A",
+                "shots": {"s01": _structured_shot(), "s02": _structured_shot()},
+            },
+        }
         with pytest.raises(ValueError):
             _structured_payload_to_compact(structured, authoritative, budget)
 
     def test_structured_payload_not_a_dict_fails_closed(self):
         with pytest.raises(ValueError):
             _structured_payload_to_compact([], ["b_001"], {"b_001": 1})
+
+    def test_wrapped_beats_payload_fails_closed(self):
+        """The committed schema declares beat_ids as top-level properties
+        directly -- a legacy or synthetic {"beats": {...}} wrapper is not a
+        second accepted shape. It must fail exactly like any other
+        unexpected top-level key set (here: the single top-level key is
+        "beats", which is never itself an authoritative beat_id)."""
+        authoritative = ["b_001"]
+        budget = {"b_001": 1}
+        wrapped = {"beats": {"b_001": {"pattern": "A", "shots": {"s01": _structured_shot()}}}}
+        with pytest.raises(ValueError, match="missing"):
+            _structured_payload_to_compact(wrapped, authoritative, budget)
         with pytest.raises(ValueError):
             _structured_payload_to_compact({"beats": []}, ["b_001"], {"b_001": 1})
 
@@ -2286,10 +2397,13 @@ _BATCH_TEST_GROUPS = [
 
 
 def _structured_response_for_batch(beat_ids: list, shots_per_beat: int = 6) -> dict:
-    return {"beats": {
+    """Beat_ids are top-level keys directly -- matching
+    build_structured_coverage_plan_schema()'s actual declared contract
+    exactly (no "beats" wrapper)."""
+    return {
         beat_id: _structured_beat("A", [_structured_shot() for _ in range(shots_per_beat)])
         for beat_id in beat_ids
-    }}
+    }
 
 
 class TestBatchedRegeneration:
@@ -2465,7 +2579,7 @@ class TestBatchedRegeneration:
         ckpt.write_text(json.dumps(original))
 
         batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
-        raw_with_duplicate_key = '{"beats": {"b_005": {}, "b_005": {}}}'
+        raw_with_duplicate_key = '{"b_005": {}, "b_005": {}}'
         batch2_duplicate = _make_call_result(raw_with_duplicate_key)
         with patch("hypogeum.openrouter.call_claude",
                    side_effect=[batch1_response, batch2_duplicate]) as mock_cc:
@@ -2489,7 +2603,7 @@ class TestBatchedRegeneration:
 
         batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
         bad_batch2 = _structured_response_for_batch(_BATCH_TEST_GROUPS[1])
-        bad_batch2["beats"][_BATCH_TEST_GROUPS[1][0]]["shots"]["s01"]["dep"] = "Z"
+        bad_batch2[_BATCH_TEST_GROUPS[1][0]]["shots"]["s01"]["dep"] = "Z"
         batch2_invalid = _make_call_result(json.dumps(bad_batch2))
         with patch("hypogeum.openrouter.call_claude",
                    side_effect=[batch1_response, batch2_invalid]) as mock_cc:
@@ -2513,7 +2627,7 @@ class TestBatchedRegeneration:
 
         # batch 1 response is missing its last beat entirely.
         incomplete_batch1 = _structured_response_for_batch(_BATCH_TEST_GROUPS[0])
-        del incomplete_batch1["beats"][_BATCH_TEST_GROUPS[0][-1]]
+        del incomplete_batch1[_BATCH_TEST_GROUPS[0][-1]]
         with patch("hypogeum.openrouter.call_claude",
                    side_effect=[_make_call_result(json.dumps(incomplete_batch1))]) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
@@ -2660,7 +2774,7 @@ class TestFirstBatchProbe:
         sp = _make_batch_test_script_package()
         np = _make_batch_test_narration_package()
         vp = _make_batch_test_visual_package()
-        raw_with_duplicate_key = '{"beats": {"b_001": {}, "b_001": {}}}'
+        raw_with_duplicate_key = '{"b_001": {}, "b_001": {}}'
 
         with patch("hypogeum.openrouter.call_claude",
                    side_effect=[_make_call_result(raw_with_duplicate_key)]) as mock_cc:
@@ -2679,7 +2793,7 @@ class TestFirstBatchProbe:
         np = _make_batch_test_narration_package()
         vp = _make_batch_test_visual_package()
         bad_batch1 = _structured_response_for_batch(_BATCH_TEST_GROUPS[0])
-        bad_batch1["beats"]["b_001"]["shots"]["s01"]["dep"] = "Z"
+        bad_batch1["b_001"]["shots"]["s01"]["dep"] = "Z"
 
         with patch("hypogeum.openrouter.call_claude",
                    side_effect=[_make_call_result(json.dumps(bad_batch1))]) as mock_cc:

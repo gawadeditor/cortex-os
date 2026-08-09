@@ -1326,25 +1326,43 @@ def _structured_payload_to_compact(
     {"beat_id", "pattern", "shots"} beat dicts) -- pure reshaping, no
     semantic value is read, altered, guessed, or repaired here.
 
+    The parsed `structured` payload IS the beat mapping itself -- there is
+    no "beats" wrapper key, matching build_structured_coverage_plan_schema()
+    exactly: that schema declares each authoritative beat_id as a required
+    top-level property directly (`{"b_001": {...}, "b_002": {...}}`), with
+    additionalProperties: False, so a compliant response has beat_ids as
+    its own top-level keys. This function supports that one contract only
+    -- a caller-supplied or model-emitted `{"beats": {...}}` wrapper is not
+    a second accepted shape, it fails the top-level key check below like
+    any other unexpected-key response.
+
     Strict structured-output mode is contracted by the provider to make a
     schema-violating response impossible, but this function does not trust
-    that contract blindly: it independently re-checks that every
-    authoritative beat is present exactly once and that every beat's slot
-    keys are exactly "s01".."s{budget:02d}" with no gaps or extras, raising
-    ValueError otherwise -- caught by the same malformed_output handling as
-    every other failure mode in regenerate_cinematic_coverage_plan().
+    that contract blindly: it independently re-checks that the top-level
+    keys are exactly the authoritative beat set (no missing, no
+    unexpected), that every beat's slot keys are exactly
+    "s01".."s{budget:02d}" with no gaps or extras, raising ValueError
+    otherwise -- caught by the same malformed_output handling as every
+    other failure mode in regenerate_cinematic_coverage_plan().
     _expand_compact_plan() then re-validates every code/value anyway, so
     this is defense in depth, not the only check.
     """
     if not isinstance(structured, dict):
         raise ValueError("structured response is not a JSON object")
-    beats_obj = structured.get("beats")
-    if not isinstance(beats_obj, dict):
-        raise ValueError("structured response missing a 'beats' object")
+
+    actual_keys = set(structured.keys())
+    expected_keys = set(authoritative_order)
+    if actual_keys != expected_keys:
+        missing = sorted(expected_keys - actual_keys)
+        unexpected = sorted(actual_keys - expected_keys)
+        raise ValueError(
+            "structured response top-level keys do not match the authoritative "
+            f"beat set (missing={missing!r}, unexpected={unexpected!r})"
+        )
 
     compact_beats = []
     for beat_id in authoritative_order:
-        beat = beats_obj.get(beat_id)
+        beat = structured.get(beat_id)
         if not isinstance(beat, dict):
             raise ValueError(f"structured response missing beat {beat_id!r}")
 

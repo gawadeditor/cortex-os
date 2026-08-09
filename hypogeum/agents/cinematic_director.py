@@ -1397,7 +1397,7 @@ _STRUCTURED_OUTPUT_CONTENT_NOTE = (
 )
 
 # ---------------------------------------------------------------------------
-# Batched strict planning (2026-08-09)
+# Batched strict planning (2026-08-09, ceiling reduced 25 -> 12 same day)
 #
 # A live isolated-planning attempt against the single 47-beat/130-slot
 # structured schema (30,715 bytes, 288 required properties) was rejected by
@@ -1406,10 +1406,17 @@ _STRUCTURED_OUTPUT_CONTENT_NOTE = (
 # compilation cost limit, not a documented JSON-Schema-subset violation --
 # every keyword used was already confirmed supported; the schema was simply
 # too large in aggregate for the provider's strict-mode constrained-decoding
-# engine to compile at 47-beat/130-slot scale. No provider byte threshold
-# was published, so _MAX_SLOTS_PER_BATCH below is a conservative structural
-# reduction against the rejected 130-slot grammar, not a claimed precise
-# limit -- the sole knob to revisit if it ever needs adjusting.
+# engine to compile at 47-beat/130-slot scale. A subsequent live probe at
+# the first 25-slot batch alone (9 beats, 8,237 bytes) was ALSO rejected,
+# with a clearer diagnostic this time (see the provider-error-diagnostics
+# correction): "Schema is too complex for compilation. Try reducing the
+# number of tools or simplifying tool schemas." -- proving 25 slots was
+# still too large. No provider byte/slot threshold has ever been published,
+# so _MAX_SLOTS_PER_BATCH below remains a conservative structural reduction
+# against the two rejections observed so far, not a claimed precise limit
+# -- the sole knob to revisit if it ever needs adjusting again. This is a
+# fixed constant for this checkpoint, not a configurable or adaptive
+# setting -- there is no per-episode or per-provider override.
 #
 # Splitting the SAME schema machinery (same slot-key/per-position-enum
 # design, same fail-closed conversion path) into several smaller strict
@@ -1428,7 +1435,7 @@ _STRUCTURED_OUTPUT_CONTENT_NOTE = (
 # Path.replace(), or nothing installed at all.
 # ---------------------------------------------------------------------------
 
-_MAX_SLOTS_PER_BATCH = 25
+_MAX_SLOTS_PER_BATCH = 12
 
 
 def _partition_beats_into_batches(

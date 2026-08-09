@@ -1754,11 +1754,25 @@ class TestStructuredCoverageSchema:
 
 class TestPartitionBeatsIntoBatches:
 
-    def test_25_slot_ceiling_never_exceeded(self):
+    def test_production_ceiling_is_twelve(self):
+        """The accepted production ceiling for this checkpoint (reduced
+        from 25, 2026-08-09, after a live 25-slot batch was rejected as
+        'Schema is too complex for compilation') is a fixed constant, not
+        configurable or adaptive."""
+        assert _MAX_SLOTS_PER_BATCH == 12
+
+    def test_batch_slot_ceiling_never_exceeded(self):
         authoritative_order, budget, _ = _representative_47_beat_arithmetic()
         batches = _partition_beats_into_batches(authoritative_order, budget)
         for batch in batches:
             assert sum(budget[b] for b in batch) <= _MAX_SLOTS_PER_BATCH
+
+    def test_beat_above_production_ceiling_fails_before_provider_access(self):
+        """Using the actual production default (no explicit override) --
+        a 13-slot beat exceeds the current 12-slot ceiling and must raise
+        before any batch is built."""
+        with pytest.raises(ValueError, match="exceeds max_slots_per_batch"):
+            _partition_beats_into_batches(["b_001"], {"b_001": 13})
 
     def test_no_beat_split_across_batches(self):
         authoritative_order, budget, _ = _representative_47_beat_arithmetic()
@@ -1825,22 +1839,25 @@ class TestPartitionBeatsIntoBatches:
 
     def test_ordinary_ep_f3619022_partitioning_unaffected_by_the_invariant(self):
         """The real ep_f3619022 arithmetic has no beat anywhere near the
-        25-slot ceiling (max single-beat budget is 6) -- the fail-closed
+        12-slot ceiling (max single-beat budget is 6) -- the fail-closed
         check must never fire for ordinary, in-range input."""
         authoritative_order, budget, _ = _representative_47_beat_arithmetic()
         assert max(budget.values()) <= _MAX_SLOTS_PER_BATCH
         batches = _partition_beats_into_batches(authoritative_order, budget)  # must not raise
-        assert len(batches) == 6
+        assert len(batches) == 12
 
-    def test_real_ep_f3619022_partition_is_six_batches(self):
-        """The exact real ep_f3619022 arithmetic, computed once and pinned
-        here -- a change in this result would mean the real batch plan
-        changed, which is worth noticing explicitly."""
+    def test_real_ep_f3619022_partition_is_twelve_batches(self):
+        """The exact real ep_f3619022 arithmetic under the 12-slot ceiling
+        (reduced from 25, 2026-08-09, after a live 25-slot batch was also
+        rejected as 'too complex for compilation'), computed once and
+        pinned here -- a change in this result would mean the real batch
+        plan changed, which is worth noticing explicitly."""
         authoritative_order, budget, _ = _representative_47_beat_arithmetic()
         batches = _partition_beats_into_batches(authoritative_order, budget)
-        assert len(batches) == 6
-        assert [len(b) for b in batches] == [9, 7, 7, 7, 13, 4]
-        assert [sum(budget[x] for x in b) for b in batches] == [25, 25, 22, 25, 25, 8]
+        assert len(batches) == 12
+        assert [len(b) for b in batches] == [4, 4, 3, 3, 4, 3, 3, 3, 3, 6, 6, 5]
+        assert [sum(budget[x] for x in b) for b in batches] == [12, 10, 11, 10, 12, 9, 12, 9, 12, 12, 11, 10]
+        assert all(s <= _MAX_SLOTS_PER_BATCH for s in [sum(budget[x] for x in b) for b in batches])
 
 
 class TestEstimateBatchMaxTokens:
@@ -1960,98 +1977,181 @@ def _count_schema_properties(node, depth_box, depth=0):
     return req, opt, union
 
 
-# Exact, pinned expected values for every one of the 6 real ep_f3619022
-# batches -- computed once directly from committed code, verified, locked.
+# Exact, pinned expected values for every one of the 12 real ep_f3619022
+# batches under the 12-slot ceiling (reduced from 25, 2026-08-09, after a
+# live 25-slot batch was rejected as "Schema is too complex for
+# compilation") -- computed once directly from committed code, verified,
+# locked.
 _PINNED_BATCH_MEASUREMENTS = [
     {
         "batch_index": 1,
-        "beat_ids": ["b_001", "b_002", "b_003", "b_004", "b_005", "b_006", "b_007", "b_008", "b_009"],
-        "main_beats": ["b_001", "b_002", "b_003", "b_004", "b_005", "b_006", "b_007", "b_008", "b_009"],
-        "main_slots": 25,
+        "beat_ids": ["b_001", "b_002", "b_003", "b_004"],
+        "main_beats": ["b_001", "b_002", "b_003", "b_004"],
+        "main_slots": 12,
         "short_beats": [],
         "short_slots": 0,
-        "total_slots": 25,
-        "schema_bytes": 8237,
-        "request_bytes": 16509,
-        "resp_chars": 11150,
-        "max_tokens": 6500,
-        "required_props": 69,
+        "total_slots": 12,
+        "schema_bytes": 5312,
+        "request_bytes": 13355,
+        "resp_chars": 5364,
+        "max_tokens": 4000,
+        "required_props": 41,
     },
     {
         "batch_index": 2,
-        "beat_ids": ["b_010", "b_011", "b_012", "b_013", "b_014", "b_015", "b_016"],
-        "main_beats": ["b_010", "b_011", "b_012", "b_013", "b_014", "b_015", "b_016"],
-        "main_slots": 25,
+        "beat_ids": ["b_005", "b_006", "b_007", "b_008"],
+        "main_beats": ["b_005", "b_006", "b_007", "b_008"],
+        "main_slots": 10,
         "short_beats": [],
         "short_slots": 0,
-        "total_slots": 25,
-        "schema_bytes": 7275,
-        "request_bytes": 15455,
-        "resp_chars": 11007,
-        "max_tokens": 6500,
-        "required_props": 63,
+        "total_slots": 10,
+        "schema_bytes": 5232,
+        "request_bytes": 13275,
+        "resp_chars": 4434,
+        "max_tokens": 4000,
+        "required_props": 39,
     },
     {
         "batch_index": 3,
-        "beat_ids": ["b_017", "b_018", "b_019", "b_020", "b_021", "b_022", "b_023"],
-        "main_beats": ["b_017", "b_018", "b_019", "b_020", "b_021", "b_022", "b_023"],
-        "main_slots": 22,
+        "beat_ids": ["b_009", "b_010", "b_011"],
+        "main_beats": ["b_009", "b_010", "b_011"],
+        "main_slots": 11,
         "short_beats": [],
         "short_slots": 0,
-        "total_slots": 22,
-        "schema_bytes": 7155,
-        "request_bytes": 15335,
-        "resp_chars": 9750,
-        "max_tokens": 6000,
-        "required_props": 60,
+        "total_slots": 11,
+        "schema_bytes": 4791,
+        "request_bytes": 12788,
+        "resp_chars": 4978,
+        "max_tokens": 4000,
+        "required_props": 37,
     },
     {
-        # The main/short split point -- 23 main slots, then b_030 (short, 2
-        # slots) -- proving the split is NOT "the first two beats of batch 5".
         "batch_index": 4,
-        "beat_ids": ["b_024", "b_025", "b_026", "b_027", "b_028", "b_029", "b_030"],
-        "main_beats": ["b_024", "b_025", "b_026", "b_027", "b_028", "b_029"],
-        "main_slots": 23,
-        "short_beats": ["b_030"],
-        "short_slots": 2,
-        "total_slots": 25,
-        "schema_bytes": 7275,
-        "request_bytes": 15455,
-        "resp_chars": 11074,
-        "max_tokens": 6500,
-        "required_props": 63,
+        "beat_ids": ["b_012", "b_013", "b_014"],
+        "main_beats": ["b_012", "b_013", "b_014"],
+        "main_slots": 10,
+        "short_beats": [],
+        "short_slots": 0,
+        "total_slots": 10,
+        "schema_bytes": 4751,
+        "request_bytes": 12748,
+        "resp_chars": 4330,
+        "max_tokens": 4000,
+        "required_props": 36,
     },
     {
-        # Entirely short beats -- batch 5 begins at b_031, one past the
-        # main/short boundary already crossed inside batch 4.
         "batch_index": 5,
-        "beat_ids": ["b_031", "b_032", "b_033", "b_034", "b_035", "b_036", "b_037",
-                     "b_038", "b_039", "b_040", "b_041", "b_042", "b_043"],
-        "main_beats": [],
-        "main_slots": 0,
-        "short_beats": ["b_031", "b_032", "b_033", "b_034", "b_035", "b_036", "b_037",
-                         "b_038", "b_039", "b_040", "b_041", "b_042", "b_043"],
-        "short_slots": 25,
-        "total_slots": 25,
-        "schema_bytes": 10161,
-        "request_bytes": 18618,
-        "resp_chars": 11235,
-        "max_tokens": 6500,
-        "required_props": 81,
+        "beat_ids": ["b_015", "b_016", "b_017", "b_018"],
+        "main_beats": ["b_015", "b_016", "b_017", "b_018"],
+        "main_slots": 12,
+        "short_beats": [],
+        "short_slots": 0,
+        "total_slots": 12,
+        "schema_bytes": 5312,
+        "request_bytes": 13355,
+        "resp_chars": 5348,
+        "max_tokens": 4000,
+        "required_props": 41,
     },
     {
         "batch_index": 6,
-        "beat_ids": ["b_044", "b_045", "b_046", "b_047"],
+        "beat_ids": ["b_019", "b_020", "b_021"],
+        "main_beats": ["b_019", "b_020", "b_021"],
+        "main_slots": 9,
+        "short_beats": [],
+        "short_slots": 0,
+        "total_slots": 9,
+        "schema_bytes": 4711,
+        "request_bytes": 12708,
+        "resp_chars": 3946,
+        "max_tokens": 3500,
+        "required_props": 35,
+    },
+    {
+        "batch_index": 7,
+        "beat_ids": ["b_022", "b_023", "b_024"],
+        "main_beats": ["b_022", "b_023", "b_024"],
+        "main_slots": 12,
+        "short_beats": [],
+        "short_slots": 0,
+        "total_slots": 12,
+        "schema_bytes": 4831,
+        "request_bytes": 12828,
+        "resp_chars": 5317,
+        "max_tokens": 4000,
+        "required_props": 38,
+    },
+    {
+        "batch_index": 8,
+        "beat_ids": ["b_025", "b_026", "b_027"],
+        "main_beats": ["b_025", "b_026", "b_027"],
+        "main_slots": 9,
+        "short_beats": [],
+        "short_slots": 0,
+        "total_slots": 9,
+        "schema_bytes": 4711,
+        "request_bytes": 12708,
+        "resp_chars": 4048,
+        "max_tokens": 3500,
+        "required_props": 35,
+    },
+    {
+        # The main/short split point -- 10 main slots, then b_030 (short, 2
+        # slots) -- the boundary now falls inside batch 9, not batch 4.
+        "batch_index": 9,
+        "beat_ids": ["b_028", "b_029", "b_030"],
+        "main_beats": ["b_028", "b_029"],
+        "main_slots": 10,
+        "short_beats": ["b_030"],
+        "short_slots": 2,
+        "total_slots": 12,
+        "schema_bytes": 4831,
+        "request_bytes": 12828,
+        "resp_chars": 5271,
+        "max_tokens": 4000,
+        "required_props": 38,
+    },
+    {
+        "batch_index": 10,
+        "beat_ids": ["b_031", "b_032", "b_033", "b_034", "b_035", "b_036"],
         "main_beats": [],
         "main_slots": 0,
-        "short_beats": ["b_044", "b_045", "b_046", "b_047"],
-        "short_slots": 8,
-        "total_slots": 8,
-        "schema_bytes": 5152,
-        "request_bytes": 13194,
-        "resp_chars": 3615,
-        "max_tokens": 3500,
-        "required_props": 37,
+        "short_beats": ["b_031", "b_032", "b_033", "b_034", "b_035", "b_036"],
+        "short_slots": 12,
+        "total_slots": 12,
+        "schema_bytes": 6274,
+        "request_bytes": 14410,
+        "resp_chars": 5433,
+        "max_tokens": 4500,
+        "required_props": 47,
+    },
+    {
+        "batch_index": 11,
+        "beat_ids": ["b_037", "b_038", "b_039", "b_040", "b_041", "b_042"],
+        "main_beats": [],
+        "main_slots": 0,
+        "short_beats": ["b_037", "b_038", "b_039", "b_040", "b_041", "b_042"],
+        "short_slots": 11,
+        "total_slots": 11,
+        "schema_bytes": 6234,
+        "request_bytes": 14370,
+        "resp_chars": 4901,
+        "max_tokens": 4000,
+        "required_props": 46,
+    },
+    {
+        "batch_index": 12,
+        "beat_ids": ["b_043", "b_044", "b_045", "b_046", "b_047"],
+        "main_beats": [],
+        "main_slots": 0,
+        "short_beats": ["b_043", "b_044", "b_045", "b_046", "b_047"],
+        "short_slots": 10,
+        "total_slots": 10,
+        "schema_bytes": 5713,
+        "request_bytes": 13803,
+        "resp_chars": 4527,
+        "max_tokens": 4000,
+        "required_props": 42,
     },
 ]
 
@@ -2063,7 +2163,7 @@ class TestPinnedEpF3619022BatchMeasurements:
         classification = {b: ("main" if i < n_main else "short") for i, b in enumerate(authoritative_order)}
         batches = _partition_beats_into_batches(authoritative_order, budget)
 
-        assert len(batches) == len(_PINNED_BATCH_MEASUREMENTS) == 6
+        assert len(batches) == len(_PINNED_BATCH_MEASUREMENTS) == 12
         for batch, expected in zip(batches, _PINNED_BATCH_MEASUREMENTS):
             assert batch == expected["beat_ids"]
             main_beats = [b for b in batch if classification[b] == "main"]
@@ -2094,7 +2194,7 @@ class TestPinnedEpF3619022BatchMeasurements:
         """The documented safety margin is satisfied for every batch --
         each ceiling is verified strictly greater than its own representative
         response's estimated token count, with the minimum margin across
-        all six batches reported exactly (2,295 tokens, at batch 6)."""
+        all twelve batches reported exactly (2,150.7 tokens, at batch 8)."""
         authoritative_order, budget, _ = _real_ep_f3619022_arithmetic()
         batches = _partition_beats_into_batches(authoritative_order, budget)
         margins = []
@@ -2110,7 +2210,7 @@ class TestPinnedEpF3619022BatchMeasurements:
             assert margin > 0
             margins.append(margin)
 
-        assert min(margins) == pytest.approx(2295.0, abs=1.0)
+        assert min(margins) == pytest.approx(2150.7, abs=1.0)
 
     def test_schema_and_request_bytes_match_pinned_values(self):
         authoritative_order, budget, _ = _real_ep_f3619022_arithmetic()
@@ -2129,7 +2229,7 @@ class TestPinnedEpF3619022BatchMeasurements:
                 "episode_metadata": {
                     "episode_title": "The Antikythera Mechanism", "total_beats": len(batch),
                     "episode_id": "ep_f3619022", "batch_index": expected["batch_index"],
-                    "batch_count": 6,
+                    "batch_count": 12,
                 },
                 "progression_patterns": list(PROGRESSION_PATTERNS),
                 "beats": [{"beat_id": b, "shot_budget": batch_budget[b]} for b in batch],
@@ -2171,8 +2271,9 @@ class TestPinnedEpF3619022BatchMeasurements:
 # artificially huge per-beat narration duration (1000.0s) so compute_shot_
 # budget() deterministically returns the configured safety cap
 # (CINEMATIC_MAX_SHOTS_PER_BEAT=6) for every beat regardless of the exact
-# shot-budget formula -- 12 beats x 6 shots = 72 slots, which the 25-slot
-# ceiling partitions into exactly three batches of four beats/24 slots each.
+# shot-budget formula -- 12 beats x 6 shots = 72 slots, which the 12-slot
+# ceiling (reduced from 25, 2026-08-09) partitions into exactly six batches
+# of two beats/12 slots each.
 # ---------------------------------------------------------------------------
 
 def _make_batch_test_script_package(n_beats: int = 12) -> dict:
@@ -2205,9 +2306,12 @@ def _make_batch_test_visual_package(n_beats: int = 12) -> dict:
 
 
 _BATCH_TEST_GROUPS = [
-    ["b_001", "b_002", "b_003", "b_004"],
-    ["b_005", "b_006", "b_007", "b_008"],
-    ["b_009", "b_010", "b_011", "b_012"],
+    ["b_001", "b_002"],
+    ["b_003", "b_004"],
+    ["b_005", "b_006"],
+    ["b_007", "b_008"],
+    ["b_009", "b_010"],
+    ["b_011", "b_012"],
 ]
 
 
@@ -2220,7 +2324,7 @@ def _structured_response_for_batch(beat_ids: list, shots_per_beat: int = 6) -> d
 
 class TestBatchedRegeneration:
 
-    def test_full_12_beat_partition_matches_three_batches_of_four(self):
+    def test_full_12_beat_partition_matches_six_batches_of_two(self):
         sp = _make_batch_test_script_package()
         np = _make_batch_test_narration_package()
         cfg = _make_config()
@@ -2245,7 +2349,7 @@ class TestBatchedRegeneration:
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 3
+        assert mock_cc.call_count == len(_BATCH_TEST_GROUPS)
         assert result["status"] == "installed"
         assert result["totals"]["main_shots"] == 72
         assert result["totals"]["total_shots"] == 72
@@ -2288,9 +2392,7 @@ class TestBatchedRegeneration:
 
         names = [c.kwargs["response_format"]["json_schema"]["name"] for c in mock_cc.call_args_list]
         assert names == [
-            "cinematic_coverage_plan_batch_01",
-            "cinematic_coverage_plan_batch_02",
-            "cinematic_coverage_plan_batch_03",
+            f"cinematic_coverage_plan_batch_{i:02d}" for i in range(1, len(_BATCH_TEST_GROUPS) + 1)
         ]
         assert len(set(names)) == len(names)
 
@@ -2336,7 +2438,7 @@ class TestBatchedRegeneration:
         assert mock_cc.call_count == 2  # batch 1 succeeded, batch 2 attempted and failed, no batch 3
         assert result["status"] == "rejected"
         assert "llm_call_failed" in result["reason"]
-        assert "batch 2/3" in result["reason"]
+        assert "batch 2/6" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
         assert not (tmp_path / "cinematic_coverage_plan_ep_batch.candidate.json").exists()
 
@@ -2380,7 +2482,7 @@ class TestBatchedRegeneration:
         assert mock_cc.call_count == 2
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
-        assert "batch 2/3" in result["reason"]
+        assert "batch 2/6" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
 
     def test_duplicate_json_keys_in_a_batch_response_preserve_active_plan(self, tmp_path):
@@ -2417,7 +2519,7 @@ class TestBatchedRegeneration:
 
         batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
         bad_batch2 = _structured_response_for_batch(_BATCH_TEST_GROUPS[1])
-        bad_batch2["beats"]["b_005"]["shots"]["s01"]["dep"] = "Z"
+        bad_batch2["beats"][_BATCH_TEST_GROUPS[1][0]]["shots"]["s01"]["dep"] = "Z"
         batch2_invalid = _make_call_result(json.dumps(bad_batch2))
         with patch("hypogeum.openrouter.call_claude",
                    side_effect=[batch1_response, batch2_invalid]) as mock_cc:
@@ -2439,19 +2541,19 @@ class TestBatchedRegeneration:
         original = _matching_candidate_plan()
         ckpt.write_text(json.dumps(original))
 
-        # batch 1 response is missing b_004 entirely.
+        # batch 1 response is missing its last beat entirely.
         incomplete_batch1 = _structured_response_for_batch(_BATCH_TEST_GROUPS[0])
-        del incomplete_batch1["beats"]["b_004"]
+        del incomplete_batch1["beats"][_BATCH_TEST_GROUPS[0][-1]]
         with patch("hypogeum.openrouter.call_claude",
                    side_effect=[_make_call_result(json.dumps(incomplete_batch1))]) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 1  # rejected at batch 1, batch 2/3 never submitted
+        assert mock_cc.call_count == 1  # rejected at batch 1, batch 2/6 never submitted
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
-        assert "batch 1/3" in result["reason"]
+        assert "batch 1/6" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
 
     def test_no_stage_b_provider_assembly_or_publishing_reachable_across_batches(self, tmp_path):
@@ -2513,7 +2615,7 @@ class TestFirstBatchProbe:
         assert mock_cc.call_count == 1
         assert result["status"] == "probe_succeeded"
         assert result["probe_batch_index"] == 1
-        assert result["probe_batch_count"] == 3
+        assert result["probe_batch_count"] == len(_BATCH_TEST_GROUPS)
         assert result["probe_batch_beat_ids"] == _BATCH_TEST_GROUPS[0]
 
     def test_probe_uses_the_exact_same_production_request_shape(self, tmp_path):
@@ -2562,9 +2664,9 @@ class TestFirstBatchProbe:
         assert mock_cc.call_count == 1
         assert result["status"] == "probe_rejected"
         assert "llm_call_failed" in result["reason"]
-        assert "batch 1/3" in result["reason"]
+        assert "batch 1/6" in result["reason"]
         assert result["probe_batch_index"] == 1
-        assert result["probe_batch_count"] == 3
+        assert result["probe_batch_count"] == len(_BATCH_TEST_GROUPS)
 
     def test_probe_malformed_json_returns_probe_rejected(self, tmp_path):
         cfg = _make_config()
@@ -2702,7 +2804,7 @@ class TestFirstBatchProbe:
                 # probe_first_batch not passed -- defaults to False
             )
 
-        assert mock_cc.call_count == 3  # all three batches submitted
+        assert mock_cc.call_count == len(_BATCH_TEST_GROUPS)  # every batch submitted
         assert result["status"] == "installed"
         assert (tmp_path / "cinematic_coverage_plan_ep_batch.json").exists()
 

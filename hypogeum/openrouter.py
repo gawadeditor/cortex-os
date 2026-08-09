@@ -30,6 +30,7 @@ API keys are never logged. Full message content is never logged.
 
 from __future__ import annotations
 
+import json
 import random
 import time
 from dataclasses import dataclass
@@ -204,6 +205,153 @@ class _RetryableError(Exception):
 
 class _AuthError(Exception):
     """HTTP 401 — triggers immediate switch to Anthropic direct fallback."""
+
+
+# ---------------------------------------------------------------------------
+# Provider error diagnostics (2026-08-09)
+#
+# OpenRouter sometimes reports a request failure via HTTP 200 with a JSON
+# body shaped {"error": {...}} instead of a valid choices completion (e.g.
+# an underlying provider rejection like Anthropic's "compiled grammar is
+# too large" invalid_request_error, forwarded through OpenRouter's own
+# error envelope rather than surfacing as a non-200 status). Before this
+# correction, _parse_openrouter_response() caught this shape as a generic
+# KeyError("choices"), logged only top_level_keys/has_error_field, and
+# unconditionally raised _RetryableError(200) -- discarding the actual
+# error.code/message/type and misclassifying every such response as
+# retryable regardless of what it actually said.
+#
+# _extract_safe_provider_error() pulls out ONLY a fixed, safe field
+# whitelist (code/message/type, each capped in length, plus the nested
+# provider error's own type/message when OpenRouter's metadata.raw carries
+# one) -- never the request body, headers, Authorization/API-key values,
+# cookies, or prompt/schema content, none of which this function ever
+# reads from `data` in the first place (they were never part of the
+# response body to begin with). _classify_and_raise_provider_error() then
+# raises the SAME existing exception types (_AuthError, CreditsExhausted,
+# HardFailure, _RetryableError) that HTTP-status-code classification
+# already uses, driven now by the extracted fields instead of a blanket
+# assumption -- retry policy, max_attempts, model-fallback policy, and
+# every other caller-facing behavior in call_claude() are unchanged; only
+# what gets classified as retryable vs. hard-failed for THIS specific
+# response shape becomes accurate instead of universal.
+# ---------------------------------------------------------------------------
+
+_MAX_SAFE_ERROR_MESSAGE_LENGTH = 500
+
+
+def _extract_safe_provider_error(data: dict) -> dict:
+    """
+    Extract only safe diagnostic fields from an OpenRouter error body
+    shaped {"error": {"code":..., "message":..., "type":..., "metadata":
+    {"raw": "<json-encoded nested provider error>"}}}. Returns {} if `data`
+    has no dict-shaped "error" field. Every string field is length-capped;
+    nothing beyond code/message/type (top-level and, when present, the
+    nested provider error's own type/message) is ever extracted -- request
+    payload, headers, credentials, and prompt/schema content are never
+    part of this response body and are never read here.
+    """
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return {}
+
+    safe: dict = {}
+    code = error.get("code")
+    if isinstance(code, (int, str)):
+        safe["code"] = code
+    message = error.get("message")
+    if isinstance(message, str):
+        safe["message"] = message[:_MAX_SAFE_ERROR_MESSAGE_LENGTH]
+    error_type = error.get("type")
+    if isinstance(error_type, str):
+        safe["type"] = error_type
+
+    metadata = error.get("metadata")
+    if isinstance(metadata, dict):
+        raw = metadata.get("raw")
+        if isinstance(raw, str):
+            try:
+                nested = json.loads(raw)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                nested = None
+            nested_error = nested.get("error") if isinstance(nested, dict) else None
+            if isinstance(nested_error, dict):
+                nested_type = nested_error.get("type")
+                nested_message = nested_error.get("message")
+                if isinstance(nested_type, str):
+                    safe["provider_error_type"] = nested_type
+                if isinstance(nested_message, str):
+                    safe["provider_error_message"] = nested_message[:_MAX_SAFE_ERROR_MESSAGE_LENGTH]
+
+    return safe
+
+
+# Error types (top-level OpenRouter or nested provider) that are never
+# worth retrying -- a request-shape/parameter/grammar rejection will fail
+# identically on every retry.
+_HARD_FAILURE_ERROR_TYPES = {"invalid_request_error", "permission_error", "not_found_error"}
+# Error types that mean the same transient-glitch handling as a retryable
+# HTTP status code (429/500/502/503).
+_RETRYABLE_ERROR_TYPES = {"rate_limit_error", "overloaded_error", "api_error"}
+
+
+def _classify_and_raise_provider_error(data: dict, log: Logger) -> None:
+    """
+    Raises the appropriate EXISTING exception type (_AuthError,
+    CreditsExhausted, HardFailure, or _RetryableError — the same types
+    HTTP-status-code classification already uses) for an OpenRouter
+    response shaped {"error": {...}} with no valid "choices". Always
+    raises; never returns normally. Logs only the safe fields
+    _extract_safe_provider_error() returns.
+
+    Classification (a top-level OpenRouter error.code takes precedence
+    over error.type where both would apply; the nested provider error's
+    own type, when present, is preferred over OpenRouter's own type for
+    the invalid_request_error/retryable-type checks, since it is the more
+    specific signal):
+      code 401                                   -> _AuthError
+      code 402                                   -> CreditsExhausted
+      code 400 or 403, or type invalid_request_error/permission_error/
+        not_found_error                          -> HardFailure
+      code in RETRYABLE_STATUS_CODES, or type
+        rate_limit_error/overloaded_error/api_error -> _RetryableError
+      anything else (unrecognized shape)         -> _RetryableError
+        (preserves the prior default for genuinely unrecognized errors —
+        this function only replaces a BLANKET retryable assumption with
+        accurate classification for the shapes it recognizes, it does not
+        newly hard-fail shapes nobody has seen before)
+    """
+    safe = _extract_safe_provider_error(data)
+    code = safe.get("code")
+    effective_type = safe.get("provider_error_type") or safe.get("type")
+    message = safe.get("provider_error_message") or safe.get("message") or "OpenRouter returned an error response"
+
+    log.error(
+        "openrouter_provider_error",
+        http_status=200,
+        error_code=code,
+        error_type=safe.get("type"),
+        provider_error_type=safe.get("provider_error_type"),
+        error_message=safe.get("message"),
+        provider_error_message=safe.get("provider_error_message"),
+    )
+
+    if code == 401:
+        raise _AuthError()
+
+    if code == 402:
+        raise CreditsExhausted(f"OpenRouter credits exhausted: {message}", http_status=402)
+
+    if code in (400, 403) or effective_type in _HARD_FAILURE_ERROR_TYPES:
+        raise HardFailure(
+            f"OpenRouter/provider returned an invalid-request error: {message}",
+            http_status=code if isinstance(code, int) else 200,
+        )
+
+    if code in RETRYABLE_STATUS_CODES or effective_type in _RETRYABLE_ERROR_TYPES:
+        raise _RetryableError(status_code=code if isinstance(code, int) else 200)
+
+    raise _RetryableError(status_code=200)
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +876,13 @@ def _parse_openrouter_response(
             "total_tokens":      int(usage_raw.get("total_tokens", 0)),
         }
     except (KeyError, IndexError, TypeError) as exc:
+        # A dict-shaped top-level "error" field means the provider told us
+        # exactly what went wrong -- classify and raise using those real
+        # diagnostic fields (see _classify_and_raise_provider_error()
+        # above) instead of collapsing everything into a blanket retry.
+        if isinstance(data, dict) and isinstance(data.get("error"), dict):
+            _classify_and_raise_provider_error(data, log)
+
         log.error(
             "openrouter_malformed_choices",
             error=str(exc),
@@ -741,8 +896,10 @@ def _parse_openrouter_response(
             has_error_field=bool(data.get("error")),
             action="retrying",
         )
-        # Transient provider glitch — not a permanent hard failure.
-        # Raise retryable so call_claude() retries once, then falls back to
+        # No "error" field at all -- a genuinely unstructured malformed
+        # response (not a provider error we can classify). Transient
+        # provider glitch — not a permanent hard failure. Raise retryable
+        # so call_claude() retries once, then falls back to
         # OPENROUTER_FALLBACK_MODEL if configured (see _try_openrouter_model_fallback()).
         raise _RetryableError(status_code=200)
 

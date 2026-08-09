@@ -56,7 +56,9 @@ from hypogeum.openrouter import (
     TruncatedResponse,
     _apply_system_prompt_caching,
     _cache_control_supported,
+    _classify_and_raise_provider_error,
     _estimate_cost,
+    _extract_safe_provider_error,
     _retry_delay,
     _translate_slug_to_anthropic_id,
     call_claude,
@@ -1092,6 +1094,196 @@ class TestMalformedResponse:
         with patch("hypogeum.openrouter.requests.post", return_value=resp):
             with pytest.raises((HardFailure, EmptyResponse)):
                 call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+
+
+# ---------------------------------------------------------------------------
+# TestProviderErrorDiagnostics (2026-08-09)
+#
+# OpenRouter sometimes reports a request failure via HTTP 200 with a JSON
+# body shaped {"error": {...}} instead of a valid choices completion. Before
+# this correction, that shape was caught as a generic KeyError("choices"),
+# logged with only top_level_keys/has_error_field, and unconditionally
+# treated as retryable -- discarding the real error.code/message/type and
+# misclassifying hard failures (like Anthropic's own "compiled grammar is
+# too large" invalid_request_error, forwarded through OpenRouter's error
+# envelope) as transient glitches worth retrying.
+# ---------------------------------------------------------------------------
+
+def _error_body_response(error: dict) -> MagicMock:
+    """A mock requests.Response shaped like a 200-with-embedded-error
+    OpenRouter response -- {"error": {...}}, no "choices" at all."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"error": error}
+    resp.text = json.dumps({"error": error})
+    return resp
+
+
+# The exact real shape observed live (2026-08-09): OpenRouter's own
+# top-level error wraps the underlying Anthropic invalid_request_error as a
+# JSON-encoded string inside error.metadata.raw.
+_GRAMMAR_TOO_LARGE_ERROR = {
+    "message": "Provider returned error",
+    "code": 400,
+    "metadata": {
+        "raw": json.dumps({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": (
+                    "The compiled grammar is too large, which would cause "
+                    "performance issues. Simplify your tool schemas or "
+                    "reduce the number of strict tools."
+                ),
+            },
+        }),
+    },
+}
+
+
+class TestProviderErrorDiagnostics:
+
+    def test_extracts_top_level_code_message_type(self):
+        safe = _extract_safe_provider_error(
+            {"error": {"code": 429, "message": "rate limited", "type": "rate_limit_error"}},
+        )
+        assert safe == {"code": 429, "message": "rate limited", "type": "rate_limit_error"}
+
+    def test_extracts_nested_provider_error_type_and_message(self):
+        safe = _extract_safe_provider_error({"error": _GRAMMAR_TOO_LARGE_ERROR})
+        assert safe["code"] == 400
+        assert safe["provider_error_type"] == "invalid_request_error"
+        assert "compiled grammar is too large" in safe["provider_error_message"]
+
+    def test_no_error_field_returns_empty_dict(self):
+        assert _extract_safe_provider_error({"id": "x", "model": SONNET}) == {}
+        assert _extract_safe_provider_error({}) == {}
+
+    def test_error_message_is_length_capped(self):
+        huge_message = "x" * 10_000
+        safe = _extract_safe_provider_error({"error": {"message": huge_message}})
+        assert len(safe["message"]) <= 500
+
+    def test_top_level_error_response_preserves_code_message_type_in_log(self):
+        cfg = make_config()
+        resp = _error_body_response({"code": 429, "message": "rate limited", "type": "rate_limit_error"})
+        with patch("hypogeum.openrouter.requests.post", return_value=resp):
+            with patch("hypogeum.openrouter.time.sleep"):
+                with patch("hypogeum.openrouter.get_logger") as mock_get_logger:
+                    mock_log = MagicMock()
+                    mock_get_logger.return_value = mock_log
+                    with pytest.raises(FallbackFailed):
+                        call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+
+        error_calls = [c for c in mock_log.error.call_args_list if c.args[0] == "openrouter_provider_error"]
+        assert len(error_calls) >= 1
+        kwargs = error_calls[0].kwargs
+        assert kwargs["error_code"] == 429
+        assert kwargs["error_type"] == "rate_limit_error"
+        assert kwargs["error_message"] == "rate limited"
+
+    def test_secrets_and_request_content_never_logged(self):
+        cfg = make_config({"OPENROUTER_API_KEY": "sk-or-DEFINITELY-SECRET-VALUE"})
+        resp = _error_body_response(_GRAMMAR_TOO_LARGE_ERROR)
+        with patch("hypogeum.openrouter.requests.post", return_value=resp):
+            with patch("hypogeum.openrouter.get_logger") as mock_get_logger:
+                mock_log = MagicMock()
+                mock_get_logger.return_value = mock_log
+                with pytest.raises(HardFailure):
+                    call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+
+        all_log_text = str(mock_log.error.call_args_list) + str(mock_log.warn.call_args_list) + str(mock_log.info.call_args_list)
+        assert "sk-or-DEFINITELY-SECRET-VALUE" not in all_log_text
+        assert "Authorization" not in all_log_text
+        assert "Bearer" not in all_log_text
+        # The actual request messages content must never appear either.
+        assert MINIMAL_MESSAGES[1]["content"] not in all_log_text
+
+    def test_grammar_size_error_is_hard_failure_not_retried(self):
+        """The exact real-world case: nested invalid_request_error
+        ('compiled grammar is too large') must be a hard failure -- never
+        retried, since retrying an identical request produces an identical
+        rejection."""
+        cfg = make_config()
+        resp = _error_body_response(_GRAMMAR_TOO_LARGE_ERROR)
+        with patch("hypogeum.openrouter.requests.post", return_value=resp) as mock_post:
+            with pytest.raises(HardFailure) as exc_info:
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 1  # no retry
+        assert "compiled grammar is too large" in str(exc_info.value)
+
+    def test_top_level_invalid_request_error_type_is_hard_failure(self):
+        cfg = make_config()
+        resp = _error_body_response({"code": 400, "message": "bad parameter", "type": "invalid_request_error"})
+        with patch("hypogeum.openrouter.requests.post", return_value=resp) as mock_post:
+            with pytest.raises(HardFailure):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 1
+
+    def test_retryable_server_error_type_retries_as_before(self):
+        """A type=api_error (no recognized code) must still retry exactly
+        like an HTTP 500 would -- existing retry behavior preserved."""
+        cfg = make_config()
+        responses = [_error_body_response({"message": "internal error", "type": "api_error"}), openrouter_200()]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 2
+        assert result.content == "Test response."
+
+    def test_code_401_raises_auth_error_path(self):
+        """error.code == 401 must route through the same _AuthError ->
+        FallbackFailed path the HTTP-status 401 case already uses -- no
+        different-model fallback attempted with the same credential."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": "openai/gpt-5.5-pro"})
+        resp = _error_body_response({"code": 401, "message": "invalid credential", "type": "authentication_error"})
+        with patch("hypogeum.openrouter.requests.post", return_value=resp) as mock_post:
+            with pytest.raises(FallbackFailed):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 1  # no fallback-model attempt, same credential
+
+    def test_code_402_raises_credits_exhausted(self):
+        cfg = make_config()
+        resp = _error_body_response({"code": 402, "message": "insufficient credits"})
+        with patch("hypogeum.openrouter.requests.post", return_value=resp) as mock_post:
+            with pytest.raises(CreditsExhausted):
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 1
+
+    def test_unrecognized_error_shape_still_defaults_to_retryable(self):
+        """An error shape with no recognized code/type must preserve the
+        prior default (retryable), not newly hard-fail an unknown shape."""
+        cfg = make_config()
+        responses = [_error_body_response({"message": "something unexpected happened"}), openrouter_200()]
+        with patch("hypogeum.openrouter.requests.post", side_effect=responses) as mock_post:
+            with patch("hypogeum.openrouter.time.sleep"):
+                result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert mock_post.call_count == 2
+        assert result.content == "Test response."
+
+    def test_max_attempts_one_still_exactly_one_request_for_provider_error(self):
+        """The exact probe contract (max_attempts=1, allow_model_fallback=
+        False) must still cap at one requests.post call even for a
+        provider-error-shaped response that would otherwise be retryable."""
+        cfg = make_config({"OPENROUTER_FALLBACK_MODEL": "openai/gpt-5.5-pro"})
+        resp = _error_body_response({"message": "internal error", "type": "api_error"})
+        with patch("hypogeum.openrouter.requests.post", return_value=resp) as mock_post:
+            with pytest.raises(FallbackFailed):
+                call_claude(
+                    SONNET, MINIMAL_MESSAGES, 512, cfg,
+                    allow_model_fallback=False, max_attempts=1,
+                )
+        assert mock_post.call_count == 1
+
+    def test_normal_successful_choices_parsing_unchanged(self):
+        """The new code path is only reached when 'choices' is absent AND
+        parsing fails -- a normal successful response must be completely
+        unaffected."""
+        cfg = make_config()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200("hello")):
+            result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
+        assert result.content == "hello"
+        assert result.finish_reason == "stop"
 
 
 # ---------------------------------------------------------------------------

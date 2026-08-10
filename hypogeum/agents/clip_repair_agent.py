@@ -807,6 +807,69 @@ def _is_billing_contradiction(failure_reason: str) -> bool:
     )
 
 
+def _deliverable_aware_technical_check(
+    clip_path: Path, source_type: Optional[str],
+) -> Dict[str, object]:
+    """
+    hypogeum.artifact_compatibility.evaluate_video_clip_compatibility()
+    always checks resolution against its fixed landscape default,
+    regardless of source_type — correct for a caller that never sees
+    Shorts, but it would wrongly reject a genuinely-compliant Short
+    (1080x1920 fails a ">=1920 width" check) and, symmetrically, wrongly
+    accept an under-resolution long-form clip that happens to be
+    >=1080x1920 tall-but-narrow. This re-derives the resolution portion
+    of that check using the deliverable-specific requirement
+    (required_source_resolution(source_type)) while reusing every other
+    check (existence, size, duration, dry-run detection) unchanged.
+
+    Returns {"technically_valid": bool, "technical_detail": List[str],
+    "basic_integrity_ok": bool}. basic_integrity_ok is True whenever the
+    clip is real, playable, non-corrupt, non-placeholder footage — even
+    if it fails the resolution requirement — since a resolution shortfall
+    alone is exactly what an explicit upscale step exists to fix, not
+    evidence of a broken source. A caller that does not intend to upscale
+    should still gate on technically_valid (both integrity AND
+    resolution), not basic_integrity_ok alone.
+    """
+    from hypogeum.artifact_compatibility import (
+        evaluate_video_clip_compatibility,
+        is_resolution_compliant_clip,
+        probe_resolution,
+        required_source_resolution,
+    )
+
+    tech = evaluate_video_clip_compatibility(clip_path)
+    technically_valid = tech.decision.value == "valid_and_compatible"
+    technical_detail = list(tech.reasons)
+    resolution_only_issue = (
+        not technically_valid
+        and len(tech.reasons) == 1
+        and "resolution" in tech.reasons[0]
+    )
+    basic_integrity_ok = technically_valid or resolution_only_issue
+
+    if resolution_only_issue:
+        required_w, required_h = required_source_resolution(source_type)
+        if is_resolution_compliant_clip(clip_path, required_w, required_h):
+            technically_valid = True
+            technical_detail = [
+                f"real footage, deliverable-specific resolution compliant "
+                f"(source_type={source_type})"
+            ]
+        else:
+            width, height = probe_resolution(clip_path)
+            technical_detail = [
+                f"source resolution {width}x{height} below required "
+                f"{required_w}x{required_h} for source_type={source_type}"
+            ]
+
+    return {
+        "technically_valid": technically_valid,
+        "technical_detail": technical_detail,
+        "basic_integrity_ok": basic_integrity_ok,
+    }
+
+
 def _next_free_extra_slot(
     sid: str,
     short_id: Optional[str],
@@ -889,6 +952,74 @@ def plan_confirmed_shot_allocations(
     return allocations
 
 
+GENERATION_COST_ESTIMATE_USD = 0.39
+"""Per-shot cost for the current default production tier
+(veo3.1-lite-text-to-video, Tier 2/3 — see hypogeum.muapi.
+MODEL_CREDIT_COSTS). Used only for PREFLIGHT authorization math in
+compute_confirmed_shot_costs()/authorize_compliant_shot_generation() —
+real spend always comes from the provider's own returned cost."""
+
+UPSCALE_COST_ESTIMATE_USD = 0.08
+"""Conservative per-clip estimate for the configured explicit AI video
+upscaler (dynamic pricing; measured $0.05-0.08/clip per hypogeum.
+providers.muapi_video_upscaler's own docstring). Used only for PREFLIGHT
+authorization math and as the pre-submission budget check in
+fill_confirmed_missing_shots() — real spend always comes from the
+provider's own returned EnhancementResult.cost_usd."""
+
+
+def compute_confirmed_shot_costs(
+    missing_count: int,
+    generation_cost_per_shot: float = GENERATION_COST_ESTIMATE_USD,
+    upscale_cost_per_shot: float = UPSCALE_COST_ESTIMATE_USD,
+) -> Dict[str, float]:
+    """
+    Pure cost projection for filling `missing_count` confirmed shots — no
+    provider call, no side effects. Distinguishes generation-only cost
+    (what a caller who skips source qualification would spend) from the
+    full compliant cost (generation plus one explicit upscale attempt per
+    shot, worst case) — treating the former as authorization for the
+    latter is exactly the contradiction this policy exists to prevent.
+    """
+    return {
+        "missing_count": missing_count,
+        "generation_cost_per_shot": generation_cost_per_shot,
+        "upscale_cost_per_shot": upscale_cost_per_shot,
+        "generation_only_cost_usd": round(missing_count * generation_cost_per_shot, 2),
+        "compliant_cost_usd": round(
+            missing_count * (generation_cost_per_shot + upscale_cost_per_shot), 2
+        ),
+    }
+
+
+def authorize_compliant_shot_generation(
+    missing_count: int,
+    authorized_budget_credits: float,
+    generation_cost_per_shot: float = GENERATION_COST_ESTIMATE_USD,
+    upscale_cost_per_shot: float = UPSCALE_COST_ESTIMATE_USD,
+) -> Dict[str, object]:
+    """
+    Fail-closed preflight authorization check — no provider call. Compares
+    authorized_budget_credits against the full COMPLIANT projected cost
+    (generation + explicit upscale for every shot), never the
+    generation-only figure, since a budget authorized only for raw
+    generation does not authorize the upscale step this policy requires
+    before any shot may be registered. Callers must check the returned
+    "authorized" flag and stop before any provider submission when False.
+    """
+    costs = compute_confirmed_shot_costs(
+        missing_count, generation_cost_per_shot, upscale_cost_per_shot
+    )
+    authorized = authorized_budget_credits >= costs["compliant_cost_usd"]
+    shortfall = max(0.0, costs["compliant_cost_usd"] - authorized_budget_credits)
+    return {
+        **costs,
+        "authorized_budget_credits": authorized_budget_credits,
+        "authorized": authorized,
+        "shortfall_usd": round(shortfall, 2),
+    }
+
+
 def fill_confirmed_missing_shots(
     missing_shots: List[Dict[str, Optional[str]]],
     visual_package: dict,
@@ -897,6 +1028,8 @@ def fill_confirmed_missing_shots(
     episode_id: str,
     episode_budget_credits: float,
     forced_tier: Optional[int] = None,
+    require_source_qualification: bool = False,
+    upscale_budget_credits: float = 0.0,
     log=None,
 ) -> Dict[str, object]:
     """
@@ -912,44 +1045,87 @@ def fill_confirmed_missing_shots(
     the caller's own compatibility policy (e.g.
     hypogeum.shot_compatibility_policy). This function performs no
     selection, no duration math, and no diversity filtering of its own —
-    it only executes the caller's explicit list, one paid attempt per
-    shot, in order.
+    it only executes the caller's explicit list, one paid generation
+    attempt per shot, in order.
 
-    Reuses the exact same lower-level primitives as fill_coverage_deficits()
-    (build_scene_spec, muapi.submit_scene, muapi.scene_file_path, the
-    sc_{scene_id}__extra{N} naming convention, and the planned_shot_id
-    manifest-traceability field) so both call paths remain interchangeable
-    from Assembly/QA's point of view. Deliberately skips
-    hypogeum.source_enhancement.qualify_asset() — that boundary can itself
-    trigger a second, separately-priced paid provider call per clip, which
-    is out of scope for a caller that authorized only a fixed video-
-    generation budget; technical validity is instead checked for free via
-    hypogeum.artifact_compatibility.evaluate_video_clip_compatibility().
+    require_source_qualification (default False, preserves prior
+    behavior) routes every generated source through
+    hypogeum.source_enhancement.qualify_asset() — the one canonical
+    asset-qualification boundary already used everywhere else in this
+    codebase — before a shot may be registered as usable. qualify_asset()
+    itself: measures the ACTUAL downloaded source's dimensions (never
+    trusts a provider's claimed resolution label or an "upgrade
+    submitted" flag as proof); invokes the configured explicit AI video
+    upscaler ONLY when the measured source is below the deliverable-
+    specific requirement (hypogeum.artifact_compatibility.
+    required_source_resolution(source_type) — correctly distinguishes
+    long-form 1920x1080 from Short 1080x1920); re-probes the upscaled
+    candidate independently before ever trusting it; and fails closed,
+    quarantining (never deleting) any candidate that doesn't pass. A shot
+    whose source is already natively compliant costs nothing extra here
+    — qualify_asset() skips the provider call entirely in that case.
 
-    Budget enforcement is real, not advisory: a muapi.MUAPIBudgetGuard is
-    constructed from episode_budget_credits with max_paid_attempts=1 per
-    scene_id, so neither this function nor submit_scene()'s own internal
-    fallback (already governed separately by config.MUAPI_ALLOW_PAID_
-    FALLBACKS) can spend beyond what the caller authorized. Stops
-    immediately — returning whatever succeeded so far — on
-    MUAPIBudgetExhausted, MUAPIAuthFailure, or MUAPIQuotaExhausted; any
-    other per-shot failure is recorded and the loop continues to the next
-    shot (a single failed generation must not block every other shot in
-    the batch).
+    Regardless of this flag, a shot whose raw generated source fails the
+    existing free technical-validity check
+    (hypogeum.artifact_compatibility.evaluate_video_clip_compatibility)
+    is never registered — this was previously an unconditional-append
+    bug (a corrupt/non-compliant clip could reach the manifest looking
+    identical to a usable one); fixed here as part of the same
+    registration-integrity guarantee this flag exists to provide, not a
+    weakening of any existing threshold.
+
+    Resumability: before generating, checks whether an earlier
+    (possibly interrupted) call already produced a technically-valid
+    source for this exact planned_shot_id that still exists on disk —
+    if so, reuses it and its manifest entry instead of submitting a new
+    paid generation request. This is what lets a source that generated
+    successfully but never completed qualification (process stopped
+    before the upscale step, or the upscale step itself failed and is
+    being retried under corrected policy) be qualified later without
+    paying for generation twice.
+
+    Job-ID and metadata separation: each manifest entry records the
+    GENERATION provider's own request_id as "generation_request_id"
+    (source-side metadata) separately from whatever upscale attempt
+    qualify_asset() records inside "source_enhancement" — including that
+    provider's own "request_id" field — the FINAL-artifact metadata.
+    Never conflated into a single field.
+
+    Budget enforcement is real, not advisory, on both spend streams:
+      - Generation: a muapi.MUAPIBudgetGuard is constructed from
+        episode_budget_credits with max_paid_attempts=1 per scene_id, so
+        neither this function nor submit_scene()'s own internal fallback
+        (governed separately by config.MUAPI_ALLOW_PAID_FALLBACKS) can
+        spend beyond what the caller authorized for generation.
+      - Upscale (only when require_source_qualification=True): before
+        calling qualify_asset() for a shot, checks whether the running
+        upscale total plus one more UPSCALE_COST_ESTIMATE_USD would
+        exceed upscale_budget_credits — stops the whole batch rather
+        than submitting that request if so. Callers should derive
+        upscale_budget_credits from authorize_compliant_shot_generation()
+        rather than reusing episode_budget_credits for both streams.
+    Stops immediately — returning whatever succeeded so far — on
+    MUAPIBudgetExhausted/MUAPIAuthFailure/MUAPIQuotaExhausted, an
+    exhausted upscale budget, or a billing-contradiction pattern
+    (hypogeum.agents.clip_repair_agent._is_billing_contradiction) from
+    EITHER the generation or the upscale provider response — a systemic
+    account-state failure on either stream means every remaining shot
+    would hit the identical wall. Any other per-shot failure is recorded
+    and the loop continues to the next shot.
 
     forced_tier, when given, overrides EVERY shot's own scene-level
     provider_routing tier (which may specify Tier 1 for "hero" scenes at
     $2.50/gen) with this exact tier for both primary and fallback —
     letting a caller whose authorization specifies an exact model/tier
-    (e.g. "use veo3.1-lite-text-to-video for all N shots") guarantee the
-    per-shot cost their budget math assumed, rather than silently
-    inheriting a per-scene routing decision made for a different purpose.
-    None (default) preserves each scene's own configured routing.
+    guarantee the per-shot cost their budget math assumed. None (default)
+    preserves each scene's own configured routing.
 
     Returns {"generated": [...], "failed": [...], "stopped_reason": str|None,
+    "total_generation_cost_usd": float, "total_upscale_cost_usd": float,
     "total_cost_usd": float} — generated/failed are lists of the input
-    missing_shots dicts, annotated with clip_path/cost_usd or
-    failure_reason respectively.
+    missing_shots dicts, annotated with clip_path/cost fields or
+    failure_reason respectively. A shot only appears in "generated" once
+    it has passed every check this call was configured to require.
     """
     from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
     from hypogeum.artifact_compatibility import evaluate_video_clip_compatibility  # noqa: PLC0415
@@ -962,6 +1138,7 @@ def fill_confirmed_missing_shots(
         scene_file_path,
         submit_scene,
     )
+    from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
 
     if log is None:
         log = get_logger(episode_id=episode_id, agent="clip_repair_agent")
@@ -978,6 +1155,9 @@ def fill_confirmed_missing_shots(
     ).setdefault("assets", [])
     manifest_extra_ids_by_scene = _manifest_extra_ids_by_scene(manifest_assets)
     reserved_by_scene: Dict[str, Set[str]] = {}
+    manifest_entry_by_shot_id: Dict[str, dict] = {
+        a["planned_shot_id"]: a for a in manifest_assets if a.get("planned_shot_id")
+    }
 
     guard = MUAPIBudgetGuard(
         episode_budget_credits=episode_budget_credits,
@@ -989,7 +1169,8 @@ def fill_confirmed_missing_shots(
     generated: List[dict] = []
     failed: List[dict] = []
     stopped_reason: Optional[str] = None
-    total_cost_usd = 0.0
+    total_generation_cost_usd = 0.0
+    total_upscale_cost_usd = 0.0
 
     for item in missing_shots:
         beat_id = item["beat_id"]
@@ -1009,58 +1190,185 @@ def fill_confirmed_missing_shots(
             failed.append({**item, "failure_reason": "planned shot has no rendered primary_prompt"})
             continue
 
-        occupied = manifest_extra_ids_by_scene.get(sid, set()) | reserved_by_scene.setdefault(sid, set())
-        extra_scene_id, _predicted_path = _next_free_extra_slot(sid, short_id, output_dir, occupied)
-        reserved_by_scene[sid].add(extra_scene_id)
+        source_type = scene.get("source_type")
 
-        scene_spec = build_scene_spec(scene, entity_hosted_urls={})
-        scene_spec["scene_id"] = extra_scene_id
-        scene_spec["production_spec"]["primary_prompt"] = planned_shot.get("primary_prompt", "")
-        scene_spec["production_spec"]["fallback_prompt"] = (
-            planned_shot.get("fallback_prompt") or planned_shot.get("primary_prompt", "")
-        )
-        if forced_tier is not None:
-            scene_spec["production_spec"]["primary_tier"] = forced_tier
-            scene_spec["production_spec"]["fallback_tier"] = forced_tier
+        # --- Resumability: reuse an existing valid generated source
+        # instead of paying for generation again (see docstring). ---
+        manifest_entry = manifest_entry_by_shot_id.get(shot_id)
+        resumed = False
+        clip_path: Optional[Path] = None
+        extra_scene_id: Optional[str] = None
+        if manifest_entry is not None:
+            prior_path = scene_file_path(output_dir, manifest_entry["scene_id"], short_id)
+            if (
+                manifest_entry.get("generation_status") == "generated"
+                and manifest_entry.get("basic_integrity_ok", manifest_entry.get("technically_valid"))
+                and prior_path.exists()
+            ):
+                clip_path = prior_path
+                extra_scene_id = manifest_entry["scene_id"]
+                resumed = True
+                log.info(
+                    "confirmed_shot_fill_resumed",
+                    episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
+                )
 
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            asset_result = submit_scene(
-                scene_spec=scene_spec,
-                config=config,
-                episode_id=episode_id,
-                output_dir=output_dir,
-                agent="clip_repair_agent",
-                budget_guard=guard,
+        if not resumed:
+            occupied = manifest_extra_ids_by_scene.get(sid, set()) | reserved_by_scene.setdefault(sid, set())
+            extra_scene_id, _predicted_path = _next_free_extra_slot(sid, short_id, output_dir, occupied)
+            reserved_by_scene[sid].add(extra_scene_id)
+
+            scene_spec = build_scene_spec(scene, entity_hosted_urls={})
+            scene_spec["scene_id"] = extra_scene_id
+            scene_spec["production_spec"]["primary_prompt"] = planned_shot.get("primary_prompt", "")
+            scene_spec["production_spec"]["fallback_prompt"] = (
+                planned_shot.get("fallback_prompt") or planned_shot.get("primary_prompt", "")
             )
-        except (MUAPIBudgetExhausted, MUAPIAuthFailure, MUAPIQuotaExhausted) as exc:
-            stopped_reason = f"{type(exc).__name__}: {exc}"
+            if forced_tier is not None:
+                scene_spec["production_spec"]["primary_tier"] = forced_tier
+                scene_spec["production_spec"]["fallback_tier"] = forced_tier
+
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                asset_result = submit_scene(
+                    scene_spec=scene_spec,
+                    config=config,
+                    episode_id=episode_id,
+                    output_dir=output_dir,
+                    agent="clip_repair_agent",
+                    budget_guard=guard,
+                )
+            except (MUAPIBudgetExhausted, MUAPIAuthFailure, MUAPIQuotaExhausted) as exc:
+                stopped_reason = f"{type(exc).__name__}: {exc}"
+                log.error(
+                    "confirmed_shot_fill_stopped",
+                    episode_id=episode_id, shot_id=shot_id, reason=stopped_reason,
+                )
+                break
+
+            status = asset_result.get("generation_status", "generation_failed")
+            clip_path = scene_file_path(output_dir, extra_scene_id, short_id)
+            model_used = asset_result.get("model_used")
+            generation_cost_usd = MODEL_CREDIT_COSTS.get(model_used, 0.0) if status == "generated" else 0.0
+
+            if status != "generated" or not clip_path.exists():
+                reason_text = asset_result.get("failure_reason") or f"status={status}"
+                failed.append({**item, "failure_reason": reason_text})
+                log.warn(
+                    "confirmed_shot_fill_failed",
+                    episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
+                    status=status,
+                )
+                if _is_billing_contradiction(reason_text):
+                    # A provider-reported billing/credit rejection is not a
+                    # shot-specific failure -- every remaining shot would hit
+                    # the identical wall. Stop the whole batch here rather
+                    # than burning through the rest one at a time; the
+                    # per-shot failure above is still recorded so this shot
+                    # isn't silently dropped from the report.
+                    stopped_reason = f"billing_contradiction: {reason_text}"
+                    log.error(
+                        "confirmed_shot_fill_stopped",
+                        episode_id=episode_id, shot_id=shot_id, reason=stopped_reason,
+                    )
+                    break
+                continue
+
+            total_generation_cost_usd += generation_cost_usd
+
+            check = _deliverable_aware_technical_check(clip_path, source_type)
+
+            manifest_entry = {
+                "scene_id": extra_scene_id,
+                "asset_id": asset_result.get("asset_id"),
+                "generation_status": status,
+                "provider": asset_result.get("provider"),
+                "model": model_used,
+                "tier_used": asset_result.get("tier_used"),
+                "prompt_used": asset_result.get("prompt_used"),
+                "fallback_used": asset_result.get("fallback_used", False),
+                "planned_shot_id": shot_id,
+                # Source-side job id, kept separate from any upscale job
+                # id qualify_asset() records inside source_enhancement.
+                "generation_request_id": asset_result.get("request_id"),
+                "technically_valid": check["technically_valid"],
+                "technical_detail": check["technical_detail"],
+                "basic_integrity_ok": check["basic_integrity_ok"],
+                "source_enhancement": None,
+            }
+            manifest_assets.append(manifest_entry)
+            manifest_entry_by_shot_id[shot_id] = manifest_entry
+
+        # --- From here, manifest_entry/clip_path/extra_scene_id are set
+        # whether this shot was freshly generated or resumed. ---
+
+        # A resolution-only shortfall is not corruption -- it's exactly
+        # what require_source_qualification=True's upscale step exists to
+        # fix. Gate on basic_integrity_ok (real, playable, non-corrupt,
+        # non-placeholder) here; the full deliverable-aware
+        # technically_valid check still applies below for the
+        # no-qualification path, and again implicitly via qualify_asset()
+        # for the qualification path.
+        if not manifest_entry.get("basic_integrity_ok", manifest_entry.get("technically_valid")):
+            failed.append({
+                **item,
+                "clip_path": str(clip_path),
+                "failure_reason": "generated source failed technical validation",
+            })
+            continue
+
+        if not require_source_qualification:
+            if not manifest_entry.get("technically_valid"):
+                failed.append({
+                    **item,
+                    "clip_path": str(clip_path),
+                    "failure_reason": (
+                        manifest_entry.get("technical_detail", ["resolution non-compliant"])[0]
+                    ),
+                })
+                continue
+            generated.append({
+                **item,
+                "clip_path": str(clip_path),
+                "technically_valid": True,
+            })
+            log.info(
+                "confirmed_shot_fill_generated",
+                episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
+            )
+            continue
+
+        # --- Explicit source qualification / upscale step ---
+        if total_upscale_cost_usd + UPSCALE_COST_ESTIMATE_USD > upscale_budget_credits:
+            stopped_reason = (
+                f"upscale_budget_would_be_exceeded: "
+                f"{total_upscale_cost_usd + UPSCALE_COST_ESTIMATE_USD:.2f} > {upscale_budget_credits:.2f}"
+            )
             log.error(
                 "confirmed_shot_fill_stopped",
                 episode_id=episode_id, shot_id=shot_id, reason=stopped_reason,
             )
             break
 
-        status = asset_result.get("generation_status", "generation_failed")
-        clip_path = scene_file_path(output_dir, extra_scene_id, short_id)
-        model_used = asset_result.get("model_used")
-        cost_usd = MODEL_CREDIT_COSTS.get(model_used, 0.0) if status == "generated" else 0.0
+        qualify_asset(manifest_entry, clip_path, source_type, config, episode_id, log)
+        se = manifest_entry.get("source_enhancement") or {}
+        if se.get("applied"):
+            total_upscale_cost_usd += se.get("cost_usd") or 0.0
 
-        if status != "generated" or not clip_path.exists():
-            reason_text = asset_result.get("failure_reason") or f"status={status}"
-            failed.append({**item, "failure_reason": reason_text})
+        qualified = se.get("validation_result") in ("passed", "skipped_native_resolution")
+        if not qualified:
+            reason_text = se.get("failure_reason") or se.get("validation_result") or "qualification_failed"
+            failed.append({
+                **item,
+                "clip_path": str(clip_path),
+                "failure_reason": reason_text,
+            })
             log.warn(
-                "confirmed_shot_fill_failed",
+                "confirmed_shot_fill_qualification_failed",
                 episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
-                status=status,
+                reason=reason_text,
             )
-            if _is_billing_contradiction(reason_text):
-                # A provider-reported billing/credit rejection is not a
-                # shot-specific failure -- every remaining shot would hit
-                # the identical wall. Stop the whole batch here rather
-                # than burning through the rest one at a time; the
-                # per-shot failure above is still recorded so this shot
-                # isn't silently dropped from the report.
+            if se.get("applied") and _is_billing_contradiction(reason_text):
                 stopped_reason = f"billing_contradiction: {reason_text}"
                 log.error(
                     "confirmed_shot_fill_stopped",
@@ -1069,42 +1377,27 @@ def fill_confirmed_missing_shots(
                 break
             continue
 
-        tech = evaluate_video_clip_compatibility(clip_path)
-        technically_valid = tech.decision.value == "valid_and_compatible"
-
-        manifest_assets.append({
-            "scene_id": extra_scene_id,
-            "asset_id": asset_result.get("asset_id"),
-            "generation_status": status,
-            "provider": asset_result.get("provider"),
-            "model": model_used,
-            "tier_used": asset_result.get("tier_used"),
-            "prompt_used": asset_result.get("prompt_used"),
-            "fallback_used": asset_result.get("fallback_used", False),
-            "planned_shot_id": shot_id,
-            "technically_valid": technically_valid,
-            "technical_detail": tech.reasons,
-        })
-
-        total_cost_usd += cost_usd
         generated.append({
             **item,
             "clip_path": str(clip_path),
-            "cost_usd": cost_usd,
-            "technically_valid": technically_valid,
+            "technically_valid": True,
+            "qualification": se.get("validation_result"),
         })
         log.info(
             "confirmed_shot_fill_generated",
             episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
-            cost_usd=cost_usd, technically_valid=technically_valid,
+            qualification=se.get("validation_result"),
         )
 
+    total_cost_usd = total_generation_cost_usd + total_upscale_cost_usd
     log.info(
         "confirmed_shot_fill_done",
         episode_id=episode_id,
         requested=len(missing_shots),
         generated=len(generated),
         failed=len(failed),
+        total_generation_cost_usd=round(total_generation_cost_usd, 2),
+        total_upscale_cost_usd=round(total_upscale_cost_usd, 2),
         total_cost_usd=round(total_cost_usd, 2),
         stopped_reason=stopped_reason,
     )
@@ -1113,6 +1406,8 @@ def fill_confirmed_missing_shots(
         "generated": generated,
         "failed": failed,
         "stopped_reason": stopped_reason,
+        "total_generation_cost_usd": total_generation_cost_usd,
+        "total_upscale_cost_usd": total_upscale_cost_usd,
         "total_cost_usd": total_cost_usd,
     }
 

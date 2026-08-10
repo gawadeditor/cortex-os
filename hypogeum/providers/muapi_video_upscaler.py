@@ -153,6 +153,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
         if not request_id:
             return EnhancementResult(
                 success=False,
+                request_id=request_id,
                 provider=self.name, model=self.model, provider_version=self.version,
                 cost_usd=cost_usd,
                 failure_reason="submit_response_missing_request_id",
@@ -188,6 +189,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
         if terminal_body is None:
             return EnhancementResult(
                 success=False,
+                request_id=request_id,
                 provider=self.name, model=self.model, provider_version=self.version,
                 cost_usd=cost_usd,
                 failure_reason="poll_timeout_no_terminal_status",
@@ -199,6 +201,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
             err = terminal_body.get("error") or (terminal_body.get("detail") or {}).get("error")
             return EnhancementResult(
                 success=False,
+                request_id=request_id,
                 provider=self.name, model=self.model, provider_version=self.version,
                 cost_usd=cost_usd,
                 failure_reason=f"provider_failed: {err or status}",
@@ -210,6 +213,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
         if not video_url:
             return EnhancementResult(
                 success=False,
+                request_id=request_id,
                 provider=self.name, model=self.model, provider_version=self.version,
                 cost_usd=cost_usd,
                 failure_reason="completed_with_no_output_url",
@@ -221,6 +225,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
             if dl.status_code != 200:
                 return EnhancementResult(
                     success=False,
+                request_id=request_id,
                     provider=self.name, model=self.model, provider_version=self.version,
                     cost_usd=cost_usd,
                     failure_reason=f"download_http_{dl.status_code}",
@@ -231,6 +236,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
             return EnhancementResult(
                 success=False,
+                request_id=request_id,
                 provider=self.name, model=self.model, provider_version=self.version,
                 cost_usd=cost_usd,
                 failure_reason=f"download_failed: {exc}",
@@ -251,6 +257,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
 
         return EnhancementResult(
             success=True,
+                request_id=request_id,
             output_path=dest_path,
             provider=self.name,
             model=self.model,
@@ -305,6 +312,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
             )
         return EnhancementResult(
             success=True,
+            request_id="dry-run",
             output_path=dest_path,
             provider=self.name,
             model=self.model,

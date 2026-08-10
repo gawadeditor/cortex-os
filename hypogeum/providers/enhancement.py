@@ -56,6 +56,13 @@ class EnhancementResult:
     cost_usd: Optional[float] = None
     generation_time_s: float = 0.0
     failure_reason: Optional[str] = None
+    # The provider's own job/request identifier for this enhancement
+    # attempt, when one was obtained (None if the attempt failed before a
+    # request_id was ever issued). Kept distinct from any generation-side
+    # request_id — an upscale is a separate, separately-billed provider
+    # call from the source generation it enhances, and callers that
+    # persist provenance need to tell the two apart.
+    request_id: Optional[str] = None
 
 
 class EnhancementProvider(ABC):

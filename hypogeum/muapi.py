@@ -2063,6 +2063,7 @@ def _attempt_generation(
             "prompt_used": prompt,
             "fallback_used": is_fallback,
             "failure_reason": None,
+            "request_id": request_id,
         }, None
 
     # Poll until terminal status
@@ -2136,6 +2137,7 @@ def _attempt_generation(
         "prompt_used": prompt,
         "fallback_used": is_fallback,
         "failure_reason": None,
+        "request_id": request_id,
     }, None
 
 

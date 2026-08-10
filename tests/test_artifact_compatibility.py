@@ -474,6 +474,36 @@ class TestResolutionCompliance:
         from hypogeum.artifact_compatibility import probe_resolution
         assert probe_resolution(upscaled_render) == (1920, 1080)
 
+    def test_real_short_720x1280_source_fails_the_short_requirement(self, tmp_path):
+        """Deliverable-specific proof for a Short: a genuine 720x1280
+        portrait source clip (the exact measured dimensions of the
+        recovered ep_f3619022 manual-rerun artifact, request_id
+        edbbf48e-3a31-49be-b4cc-9f0a168e8d89) must fail the Short-specific
+        1080x1920 requirement, using required_source_resolution("short")
+        -- never the landscape default."""
+        from hypogeum.artifact_compatibility import (
+            is_resolution_compliant_clip,
+            probe_resolution,
+            required_source_resolution,
+        )
+
+        clip_path = tmp_path / "short_720x1280.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=s=720x1280:r=24:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip_path)],
+            capture_output=True, timeout=30,
+        )
+
+        assert probe_resolution(clip_path) == (720, 1280)
+        required_w, required_h = required_source_resolution("short")
+        assert (required_w, required_h) == (1080, 1920)
+        assert is_resolution_compliant_clip(clip_path, required_w, required_h) is False
+        # And the same file would be wrongly judged compliant if evaluated
+        # against the landscape default instead of the Short-specific
+        # requirement -- proving the deliverable-aware call is load-bearing,
+        # not redundant with the plain default check.
+        assert is_resolution_compliant_clip(clip_path) is False  # also fails landscape (too narrow)
+
 
 # ---------------------------------------------------------------------------
 # TestRequiredSourceResolution

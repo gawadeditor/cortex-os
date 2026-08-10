@@ -247,6 +247,7 @@ def _record(
     archived_path: Optional[str] = None,
     archived_checksum: Optional[str] = None,
     archived_at: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> dict:
     """The source_enhancement block recorded onto one asset_manifest entry.
     Every field named in the architecture's manifest-recording requirement
@@ -275,6 +276,11 @@ def _record(
         "archived_path": archived_path,
         "archived_checksum": archived_checksum,
         "archived_at": archived_at,
+        # The upscale provider's own job/request id (2026-08-10) — kept
+        # separate from any generation-side request_id on the owning
+        # asset_manifest entry, since the two are distinct, separately
+        # billed provider calls.
+        "request_id": request_id,
     }
 
 
@@ -624,6 +630,7 @@ def qualify_asset(
             original_resolution=original_resolution,
             provider=provider.name, model=provider.model, provider_version=provider.version,
             cost_usd=result.cost_usd, generation_time_s=result.generation_time_s,
+            request_id=result.request_id,
             failure_reason=result.failure_reason,
             required_width=required_width, required_height=required_height,
             archived_path=archived_path, archived_checksum=archived_checksum, archived_at=archived_at,
@@ -669,6 +676,7 @@ def qualify_asset(
             ),
             provider=provider.name, model=provider.model, provider_version=provider.version,
             cost_usd=result.cost_usd, generation_time_s=result.generation_time_s,
+            request_id=result.request_id,
             failure_reason=reason,
             required_width=required_width, required_height=required_height,
             archived_path=archived_path, archived_checksum=archived_checksum, archived_at=archived_at,
@@ -692,6 +700,7 @@ def qualify_asset(
         enhanced_resolution=enhanced_resolution,
         provider=provider.name, model=provider.model, provider_version=provider.version,
         cost_usd=result.cost_usd, generation_time_s=result.generation_time_s,
+            request_id=result.request_id,
         required_width=required_width, required_height=required_height,
     )
     log.info(

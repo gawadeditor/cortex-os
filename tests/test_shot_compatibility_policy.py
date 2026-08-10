@@ -8,7 +8,29 @@ from hypogeum.shot_compatibility_policy import (
     PlannedShot,
     classify_plan,
     evaluate_shot_compatibility,
+    evidence_contains_subject_terms,
 )
+
+
+def test_evidence_contains_subject_terms_true_when_all_terms_present():
+    assert evidence_contains_subject_terms(
+        "erdstall tunnel interior axis stretching into darkness",
+        "A subterranean passage carved by human hands, the erdstall tunnel "
+        "interior axis stretching toward absolute darkness.",
+    )
+
+
+def test_evidence_contains_subject_terms_false_when_one_term_missing():
+    assert not evidence_contains_subject_terms(
+        "parchment manuscript spread with dense latin script",
+        "A subterranean passage carved by human hands, the erdstall tunnel "
+        "interior axis recedes into absolute darkness.",
+    )
+
+
+def test_evidence_contains_subject_terms_false_on_empty_inputs():
+    assert not evidence_contains_subject_terms("", "some evidence text")
+    assert not evidence_contains_subject_terms("some subject", "")
 
 
 def test_authoritative_link_yields_compatible():
@@ -137,6 +159,46 @@ def test_classify_plan_preserves_order_and_count():
     assert results[0].state == CompatibilityState.COMPATIBLE_EXISTING_CLIP
     assert results[1].state == CompatibilityState.AMBIGUOUS_REQUIRES_REJECTION
     assert results[2].state == CompatibilityState.AMBIGUOUS_REQUIRES_REJECTION
+
+
+def test_subject_evidence_confirmed_yields_compatible():
+    shot = PlannedShot(shot_id="b_001__shot1", beat_ref="b_001")
+    clip = ExistingClip(
+        clip_ref="clip_a",
+        beat_ref="b_001",
+        technically_valid=True,
+        has_recorded_evidence=True,
+        subject_evidence_confirmed=True,
+    )
+    result = evaluate_shot_compatibility(shot, [clip])
+    assert result.state == CompatibilityState.COMPATIBLE_EXISTING_CLIP
+    assert result.proposed_clip_ref == "clip_a"
+
+
+def test_subject_evidence_not_confirmed_stays_ambiguous():
+    shot = PlannedShot(shot_id="b_001__shot1", beat_ref="b_001")
+    clip = ExistingClip(
+        clip_ref="clip_a",
+        beat_ref="b_001",
+        technically_valid=True,
+        has_recorded_evidence=True,
+        subject_evidence_confirmed=False,
+    )
+    result = evaluate_shot_compatibility(shot, [clip])
+    assert result.state == CompatibilityState.AMBIGUOUS_REQUIRES_REJECTION
+
+
+def test_subject_evidence_confirmed_but_technically_invalid_is_not_compatible():
+    shot = PlannedShot(shot_id="b_001__shot1", beat_ref="b_001")
+    clip = ExistingClip(
+        clip_ref="clip_a",
+        beat_ref="b_001",
+        technically_valid=False,
+        has_recorded_evidence=True,
+        subject_evidence_confirmed=True,
+    )
+    result = evaluate_shot_compatibility(shot, [clip])
+    assert result.state != CompatibilityState.COMPATIBLE_EXISTING_CLIP
 
 
 def test_two_distinct_shots_can_share_one_clip_only_when_both_explicitly_linked():

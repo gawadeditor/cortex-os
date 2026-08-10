@@ -9,11 +9,22 @@ records below and calls classify_plan(); this module only implements the
 compatibility DECISION, never the data resolution.
 
 Proof standard (fail-closed):
-    A clip is COMPATIBLE_EXISTING_CLIP for a planned shot only when it
-    carries an explicit, authoritative link to that exact shot_id
-    (`linked_shot_id`) — a record written at the time the clip was
-    produced against a specific plan. This is never inferred from text
-    similarity, filename, scene/beat identity, or ordinal position.
+    A clip is COMPATIBLE_EXISTING_CLIP for a planned shot when either:
+
+      1. It carries an explicit, authoritative link to that exact shot_id
+         (`linked_shot_id`) — a record written at the time the clip was
+         produced against a specific plan. Never inferred.
+
+      2. The caller has independently verified and attests
+         (`subject_evidence_confirmed=True`) that this clip's own recorded
+         generation evidence (e.g. its stored prompt text) substantively
+         names the specific shot's distinguishing subject — not merely
+         that the clip belongs to the same beat. This module never
+         performs that comparison itself (it has no access to prompt
+         text or subject fields); it only accepts the caller's already-
+         verified attestation as a second, weaker-than-link but still
+         evidence-based proof. A caller must never set this True from
+         beat identity, filename, or ordinal position alone.
 
     Beat-level (or scene-level) association is necessary to even consider
     a clip a *candidate* for one of that beat's shots (the caller performs
@@ -35,9 +46,42 @@ Three-state classification per planned shot:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
+
+_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or",
+    "with", "into", "onto", "its", "it", "is", "as", "by", "from",
+})
+
+
+def evidence_contains_subject_terms(subject: str, evidence_text: str) -> bool:
+    """
+    Generic, channel-agnostic word-overlap check: True only when every
+    significant word (length > 3, common stopwords excluded) in `subject`
+    appears as a substring somewhere in `evidence_text`. Used by callers to
+    compute ExistingClip.subject_evidence_confirmed — this module never
+    calls it itself and never treats beat/scene identity as a substitute
+    for it (see module docstring's Proof standard, path 2).
+
+    Deliberately strict (requires every term, not a majority) because a
+    False positive here can authorize reusing the wrong clip for real
+    production; a False negative only costs a redundant, safe
+    regeneration. Callers must not lower this bar by pre-filtering
+    `subject` down to a single easy word.
+    """
+    if not subject or not evidence_text:
+        return False
+    terms = [
+        t for t in re.findall(r"[a-zA-Z]+", subject.lower())
+        if len(t) > 3 and t not in _STOPWORDS
+    ]
+    if not terms:
+        return False
+    haystack = evidence_text.lower()
+    return all(t in haystack for t in terms)
 
 
 class CompatibilityState(Enum):
@@ -71,16 +115,22 @@ class ExistingClip:
     compatibility and supplied by the caller (e.g. from
     hypogeum.artifact_compatibility.evaluate_video_clip_compatibility()).
 
-    linked_shot_id is the ONLY field this module treats as proof: an
+    linked_shot_id is the strongest proof this module accepts: an
     explicit, previously recorded association between this exact clip and
     one specific planned shot_id. Absent for every clip that predates the
     plan it is being evaluated against.
+
+    subject_evidence_confirmed is the second, caller-attested proof path
+    (see module docstring's Proof standard, path 2). None/False means no
+    such attestation is made and this path contributes nothing — the
+    clip may still be judged AMBIGUOUS via has_recorded_evidence.
     """
     clip_ref: str
     beat_ref: Optional[str]
     technically_valid: bool
     has_recorded_evidence: bool
     linked_shot_id: Optional[str] = None
+    subject_evidence_confirmed: Optional[bool] = None
 
 
 @dataclass
@@ -132,6 +182,22 @@ def evaluate_shot_compatibility(
             proposed_clip_ref=chosen.clip_ref,
             evidence=[
                 f"authoritative linked_shot_id match on {chosen.clip_ref!r}",
+                "technical validity confirmed",
+            ],
+        )
+
+    subject_confirmed = [
+        c for c in candidate_clips
+        if c.technically_valid and c.subject_evidence_confirmed
+    ]
+    if subject_confirmed:
+        chosen = subject_confirmed[0]
+        return ShotCompatibilityResult(
+            shot_id=planned_shot.shot_id,
+            state=CompatibilityState.COMPATIBLE_EXISTING_CLIP,
+            proposed_clip_ref=chosen.clip_ref,
+            evidence=[
+                f"caller-verified subject-evidence match on {chosen.clip_ref!r}",
                 "technical validity confirmed",
             ],
         )

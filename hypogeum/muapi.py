@@ -2574,7 +2574,13 @@ def _poll_until_complete(
                     consecutive_400s=consecutive_400s,
                     poll_attempt=attempt + 1,
                 )
-                return None, "http_400_persistent"
+                # Carry the provider's own response text through the return
+                # value, not just a generic code — callers that batch many
+                # submissions (e.g. clip_repair_agent.fill_confirmed_missing_
+                # shots) need the real reason to distinguish a systemic
+                # account/billing rejection (which will recur on every
+                # subsequent shot) from a shot-specific content rejection.
+                return None, f"http_400_persistent: {resp.text[:300]}"
             continue
 
         if resp.status_code not in (200, 202):

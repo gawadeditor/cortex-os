@@ -2029,3 +2029,89 @@ class TestForcedTierOverride:
             )
 
         assert seen_tiers == [1], "without forced_tier, the scene's own routing must be preserved"
+
+
+class TestBillingContradictionStopsBatch:
+    """A provider-reported insufficient-credits/billing rejection must stop
+    the whole batch immediately -- it is systemic, not shot-specific, so
+    burning through the remaining shots one at a time would only repeat
+    the same failure at zero value."""
+
+    def _make_vp(self):
+        plan = {
+            "beat_id": "b_001",
+            "shots": [
+                {"shot_id": "b_001__shot1", "shot_order": 1, "primary_prompt": "p1", "fallback_prompt": "f1"},
+                {"shot_id": "b_001__shot2", "shot_order": 2, "primary_prompt": "p2", "fallback_prompt": "f2"},
+                {"shot_id": "b_001__shot3", "shot_order": 3, "primary_prompt": "p3", "fallback_prompt": "f3"},
+            ],
+        }
+        scene = {
+            "scene_id": "s01", "short_id": None, "source_type": "main_episode",
+            "narration_reference": "b_001",
+            "production_spec": {"aspect_ratio": "16:9", "duration_seconds": 8.0},
+            "cinematic_coverage_plan": plan,
+        }
+        return {"scenes": [scene], "asset_manifest": {"assets": []}}
+
+    def test_stops_after_first_billing_failure(self, tmp_path):
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+
+        vp = self._make_vp()
+        missing = [
+            {"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot2", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot3", "scene_id": "s01", "short_id": None},
+        ]
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
+            return {
+                "scene_id": scene_spec["scene_id"], "asset_id": None,
+                "generation_status": "generation_failed", "provider": "muapi",
+                "tier_used": None, "model_used": None, "prompt_used": None,
+                "fallback_used": False,
+                "failure_reason": (
+                    'attempt1=http_400_persistent: {"detail":{"status":"failed",'
+                    '"error":"Your credits are insufficient. Please top up to continue."}}, '
+                    'fallback_disabled'
+                ),
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=MagicMock(), episode_id="ep_test", episode_budget_credits=10.0,
+            )
+
+        assert len(result["failed"]) == 1, "must stop after the first billing failure, not process all 3"
+        assert result["stopped_reason"] is not None
+        assert "billing_contradiction" in result["stopped_reason"]
+
+    def test_non_billing_failure_does_not_stop_batch(self, tmp_path):
+        """A shot-specific rejection (not a billing message) must not
+        abort the remaining shots."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+
+        vp = self._make_vp()
+        missing = [
+            {"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot2", "scene_id": "s01", "short_id": None},
+        ]
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
+            return {
+                "scene_id": scene_spec["scene_id"], "asset_id": None,
+                "generation_status": "generation_failed", "provider": "muapi",
+                "tier_used": None, "model_used": None, "prompt_used": None,
+                "fallback_used": False,
+                "failure_reason": "attempt1=content_policy_violation, fallback_disabled",
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=MagicMock(), episode_id="ep_test", episode_budget_credits=10.0,
+            )
+
+        assert len(result["failed"]) == 2, "non-billing failures must not abort the batch"
+        assert result["stopped_reason"] is None

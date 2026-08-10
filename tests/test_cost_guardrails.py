@@ -722,6 +722,7 @@ class TestHttp400EarlyAbort:
             call_count[0] += 1
             resp = MagicMock()
             resp.status_code = 400
+            resp.text = '{"detail":{"status":"failed","error":"test 400 body"}}'
             return resp
 
         with patch("hypogeum.muapi.requests.get", side_effect=fake_get), \
@@ -729,7 +730,8 @@ class TestHttp400EarlyAbort:
             result, reason = _poll_until_complete("req-abc", config, "s01", log)
 
         assert result is None
-        assert reason == "http_400_persistent"
+        assert reason.startswith("http_400_persistent")
+        assert "test 400 body" in reason
         # Should have aborted at exactly _POLL_400_ABORT_THRESHOLD polls
         assert call_count[0] == _POLL_400_ABORT_THRESHOLD
 

@@ -789,6 +789,24 @@ def fill_coverage_deficits(
     return extra_clips_by_scene
 
 
+def _is_billing_contradiction(failure_reason: str) -> bool:
+    """
+    Generic, provider-agnostic detector for a billing/credit-state
+    rejection embedded in a failure reason string (see muapi.py's
+    _poll_until_complete(), which now carries the provider's own response
+    text through on a persistent-400 abort). Deliberately keyword-based
+    and not tied to any one provider's exact wording, since the same
+    class of failure (account balance) is inherently systemic — every
+    subsequent shot in a batch would hit the identical wall — unlike a
+    shot-specific rejection (e.g. bad prompt content), which is not a
+    reason to stop the whole batch.
+    """
+    text = (failure_reason or "").lower()
+    return "insufficient" in text and any(
+        marker in text for marker in ("credit", "balance", "top up", "top-up", "top_up")
+    )
+
+
 def _next_free_extra_slot(
     sid: str,
     short_id: Optional[str],
@@ -1029,15 +1047,26 @@ def fill_confirmed_missing_shots(
         cost_usd = MODEL_CREDIT_COSTS.get(model_used, 0.0) if status == "generated" else 0.0
 
         if status != "generated" or not clip_path.exists():
-            failed.append({
-                **item,
-                "failure_reason": asset_result.get("failure_reason") or f"status={status}",
-            })
+            reason_text = asset_result.get("failure_reason") or f"status={status}"
+            failed.append({**item, "failure_reason": reason_text})
             log.warn(
                 "confirmed_shot_fill_failed",
                 episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
                 status=status,
             )
+            if _is_billing_contradiction(reason_text):
+                # A provider-reported billing/credit rejection is not a
+                # shot-specific failure -- every remaining shot would hit
+                # the identical wall. Stop the whole batch here rather
+                # than burning through the rest one at a time; the
+                # per-shot failure above is still recorded so this shot
+                # isn't silently dropped from the report.
+                stopped_reason = f"billing_contradiction: {reason_text}"
+                log.error(
+                    "confirmed_shot_fill_stopped",
+                    episode_id=episode_id, shot_id=shot_id, reason=stopped_reason,
+                )
+                break
             continue
 
         tech = evaluate_video_clip_compatibility(clip_path)

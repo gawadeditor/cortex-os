@@ -789,6 +789,217 @@ def fill_coverage_deficits(
     return extra_clips_by_scene
 
 
+def fill_confirmed_missing_shots(
+    missing_shots: List[Dict[str, Optional[str]]],
+    visual_package: dict,
+    assets_root: Path,
+    config: Config,
+    episode_id: str,
+    episode_budget_credits: float,
+    log=None,
+) -> Dict[str, object]:
+    """
+    Generate exactly the caller-confirmed missing planned shots — the
+    sibling of fill_coverage_deficits() for callers that have already
+    determined, by their own bounded reconciliation, precisely which
+    shot_ids need real footage (rather than letting a duration-deficit
+    computation decide). Never used to fill ordinary coverage gaps; never
+    used for a first-pass beat that has no confirmed missing-shot list.
+
+    missing_shots: ordered list of {"beat_id", "shot_id", "scene_id",
+    "short_id"} dicts — exactly the shots to generate, already vetted by
+    the caller's own compatibility policy (e.g.
+    hypogeum.shot_compatibility_policy). This function performs no
+    selection, no duration math, and no diversity filtering of its own —
+    it only executes the caller's explicit list, one paid attempt per
+    shot, in order.
+
+    Reuses the exact same lower-level primitives as fill_coverage_deficits()
+    (build_scene_spec, muapi.submit_scene, muapi.scene_file_path, the
+    sc_{scene_id}__extra{N} naming convention, and the planned_shot_id
+    manifest-traceability field) so both call paths remain interchangeable
+    from Assembly/QA's point of view. Deliberately skips
+    hypogeum.source_enhancement.qualify_asset() — that boundary can itself
+    trigger a second, separately-priced paid provider call per clip, which
+    is out of scope for a caller that authorized only a fixed video-
+    generation budget; technical validity is instead checked for free via
+    hypogeum.artifact_compatibility.evaluate_video_clip_compatibility().
+
+    Budget enforcement is real, not advisory: a muapi.MUAPIBudgetGuard is
+    constructed from episode_budget_credits with max_paid_attempts=1 per
+    scene_id, so neither this function nor submit_scene()'s own internal
+    fallback (already governed separately by config.MUAPI_ALLOW_PAID_
+    FALLBACKS) can spend beyond what the caller authorized. Stops
+    immediately — returning whatever succeeded so far — on
+    MUAPIBudgetExhausted, MUAPIAuthFailure, or MUAPIQuotaExhausted; any
+    other per-shot failure is recorded and the loop continues to the next
+    shot (a single failed generation must not block every other shot in
+    the batch).
+
+    Returns {"generated": [...], "failed": [...], "stopped_reason": str|None,
+    "total_cost_usd": float} — generated/failed are lists of the input
+    missing_shots dicts, annotated with clip_path/cost_usd or
+    failure_reason respectively.
+    """
+    from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
+    from hypogeum.artifact_compatibility import evaluate_video_clip_compatibility  # noqa: PLC0415
+    from hypogeum.muapi import (  # noqa: PLC0415
+        MODEL_CREDIT_COSTS,
+        MUAPIAuthFailure,
+        MUAPIBudgetExhausted,
+        MUAPIBudgetGuard,
+        MUAPIQuotaExhausted,
+        scene_file_path,
+        submit_scene,
+    )
+
+    if log is None:
+        log = get_logger(episode_id=episode_id, agent="clip_repair_agent")
+
+    scenes: List[dict] = visual_package.get("scenes", [])
+    scene_by_id: Dict[str, dict] = {s["scene_id"]: s for s in scenes}
+    plan_by_beat = {
+        s.get("narration_reference"): (s.get("cinematic_coverage_plan") or {})
+        for s in scenes
+    }
+    output_dir = assets_root / "episodes" / episode_id
+    manifest_assets: List[dict] = visual_package.setdefault(
+        "asset_manifest", {}
+    ).setdefault("assets", [])
+    existing_extra_ids_by_scene: Dict[str, Set[str]] = {}
+    for a in manifest_assets:
+        raw_sid = a.get("scene_id") or ""
+        if "__extra" in raw_sid:
+            base_sid = raw_sid.split("__extra", 1)[0]
+            existing_extra_ids_by_scene.setdefault(base_sid, set()).add(raw_sid)
+
+    guard = MUAPIBudgetGuard(
+        episode_budget_credits=episode_budget_credits,
+        scene_budget_credits=0,
+        max_paid_attempts=1,
+        log=log,
+    )
+
+    generated: List[dict] = []
+    failed: List[dict] = []
+    stopped_reason: Optional[str] = None
+    total_cost_usd = 0.0
+
+    for item in missing_shots:
+        beat_id = item["beat_id"]
+        shot_id = item["shot_id"]
+        sid = item["scene_id"]
+        short_id = item.get("short_id")
+
+        scene = scene_by_id.get(sid)
+        plan = plan_by_beat.get(beat_id) or {}
+        planned_shot = next(
+            (sh for sh in plan.get("shots", []) if sh.get("shot_id") == shot_id), None
+        )
+        if scene is None or planned_shot is None:
+            failed.append({**item, "failure_reason": "scene or planned_shot not found"})
+            continue
+        if not (planned_shot.get("primary_prompt") or "").strip():
+            failed.append({**item, "failure_reason": "planned shot has no rendered primary_prompt"})
+            continue
+
+        already = existing_extra_ids_by_scene.setdefault(sid, set())
+        slot_index = len(already) + 1
+        while f"{sid}__extra{slot_index}" in already:
+            slot_index += 1
+        extra_scene_id = f"{sid}__extra{slot_index}"
+        already.add(extra_scene_id)
+
+        scene_spec = build_scene_spec(scene, entity_hosted_urls={})
+        scene_spec["scene_id"] = extra_scene_id
+        scene_spec["production_spec"]["primary_prompt"] = planned_shot.get("primary_prompt", "")
+        scene_spec["production_spec"]["fallback_prompt"] = (
+            planned_shot.get("fallback_prompt") or planned_shot.get("primary_prompt", "")
+        )
+
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            asset_result = submit_scene(
+                scene_spec=scene_spec,
+                config=config,
+                episode_id=episode_id,
+                output_dir=output_dir,
+                agent="clip_repair_agent",
+                budget_guard=guard,
+            )
+        except (MUAPIBudgetExhausted, MUAPIAuthFailure, MUAPIQuotaExhausted) as exc:
+            stopped_reason = f"{type(exc).__name__}: {exc}"
+            log.error(
+                "confirmed_shot_fill_stopped",
+                episode_id=episode_id, shot_id=shot_id, reason=stopped_reason,
+            )
+            break
+
+        status = asset_result.get("generation_status", "generation_failed")
+        clip_path = scene_file_path(output_dir, extra_scene_id, short_id)
+        model_used = asset_result.get("model_used")
+        cost_usd = MODEL_CREDIT_COSTS.get(model_used, 0.0) if status == "generated" else 0.0
+
+        if status != "generated" or not clip_path.exists():
+            failed.append({
+                **item,
+                "failure_reason": asset_result.get("failure_reason") or f"status={status}",
+            })
+            log.warn(
+                "confirmed_shot_fill_failed",
+                episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
+                status=status,
+            )
+            continue
+
+        tech = evaluate_video_clip_compatibility(clip_path)
+        technically_valid = tech.decision.value == "valid_and_compatible"
+
+        manifest_assets.append({
+            "scene_id": extra_scene_id,
+            "asset_id": asset_result.get("asset_id"),
+            "generation_status": status,
+            "provider": asset_result.get("provider"),
+            "model": model_used,
+            "tier_used": asset_result.get("tier_used"),
+            "prompt_used": asset_result.get("prompt_used"),
+            "fallback_used": asset_result.get("fallback_used", False),
+            "planned_shot_id": shot_id,
+            "technically_valid": technically_valid,
+            "technical_detail": tech.reasons,
+        })
+
+        total_cost_usd += cost_usd
+        generated.append({
+            **item,
+            "clip_path": str(clip_path),
+            "cost_usd": cost_usd,
+            "technically_valid": technically_valid,
+        })
+        log.info(
+            "confirmed_shot_fill_generated",
+            episode_id=episode_id, shot_id=shot_id, extra_scene_id=extra_scene_id,
+            cost_usd=cost_usd, technically_valid=technically_valid,
+        )
+
+    log.info(
+        "confirmed_shot_fill_done",
+        episode_id=episode_id,
+        requested=len(missing_shots),
+        generated=len(generated),
+        failed=len(failed),
+        total_cost_usd=round(total_cost_usd, 2),
+        stopped_reason=stopped_reason,
+    )
+
+    return {
+        "generated": generated,
+        "failed": failed,
+        "stopped_reason": stopped_reason,
+        "total_cost_usd": total_cost_usd,
+    }
+
+
 def _probe_extra_clip_duration(path: Path) -> float:
     """Real duration of a generated clip via ffprobe. Returns 0.0 on failure."""
     import subprocess

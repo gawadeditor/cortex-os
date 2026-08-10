@@ -1639,3 +1639,155 @@ class TestQAGateIntegration:
         assert "clip_availability_below_threshold" in review_reasons, (
             "Assembly must reject with clip_availability_below_threshold when repair is exhausted"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestFillConfirmedMissingShots
+# ---------------------------------------------------------------------------
+
+class TestFillConfirmedMissingShots:
+    """Unit tests for fill_confirmed_missing_shots() — the explicit-shot-list
+    sibling of fill_coverage_deficits(), used when a caller has already
+    determined precisely which planned shot_ids need real footage."""
+
+    def _make_vp(self, tmp_path):
+        plan = {
+            "beat_id": "b_001",
+            "shots": [
+                {
+                    "shot_id": "b_001__shot1", "shot_order": 1,
+                    "primary_prompt": "prompt for shot 1", "fallback_prompt": "fallback 1",
+                },
+                {
+                    "shot_id": "b_001__shot2", "shot_order": 2,
+                    "primary_prompt": "prompt for shot 2", "fallback_prompt": "fallback 2",
+                },
+            ],
+        }
+        scene = {
+            "scene_id": "s01", "short_id": None, "source_type": "main_episode",
+            "narration_reference": "b_001",
+            "production_spec": {"aspect_ratio": "16:9", "duration_seconds": 8.0},
+            "cinematic_coverage_plan": plan,
+        }
+        return {"scenes": [scene], "asset_manifest": {"assets": []}}
+
+    def _config(self):
+        cfg = MagicMock()
+        return cfg
+
+    def test_generates_confirmed_shots_and_writes_planned_shot_id(self, tmp_path):
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+
+        vp = self._make_vp(tmp_path)
+        missing = [
+            {"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot2", "scene_id": "s01", "short_id": None},
+        ]
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
+            if budget_guard is not None:
+                budget_guard.check_and_record_attempt(scene_spec["scene_id"], "veo3.1-lite-text-to-video")
+            path = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"0" * 20000)
+            return {
+                "scene_id": scene_spec["scene_id"], "asset_id": f"assets/{scene_spec['scene_id']}",
+                "generation_status": "generated", "provider": "muapi",
+                "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
+                "prompt_used": scene_spec["production_spec"]["primary_prompt"],
+                "fallback_used": False, "failure_reason": None,
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
+            from hypogeum.artifact_compatibility import CompatibilityDecision, ArtifactCheckResult
+            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+            )
+
+        assert len(result["generated"]) == 2
+        assert len(result["failed"]) == 0
+        assert result["stopped_reason"] is None
+        assert result["total_cost_usd"] == pytest.approx(0.78)
+
+        manifest = vp["asset_manifest"]["assets"]
+        assert len(manifest) == 2
+        planned_ids = {m["planned_shot_id"] for m in manifest}
+        assert planned_ids == {"b_001__shot1", "b_001__shot2"}
+        scene_ids = {m["scene_id"] for m in manifest}
+        assert scene_ids == {"s01__extra1", "s01__extra2"}, "must not collide with an existing primary/extra"
+
+    def test_stops_on_budget_exhausted_without_charging_further(self, tmp_path):
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.muapi import MUAPIBudgetExhausted
+
+        vp = self._make_vp(tmp_path)
+        missing = [
+            {"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot2", "scene_id": "s01", "short_id": None},
+        ]
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
+            raise MUAPIBudgetExhausted("episode budget exceeded")
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=0.01,
+            )
+
+        assert result["generated"] == []
+        assert result["stopped_reason"] is not None
+        assert "MUAPIBudgetExhausted" in result["stopped_reason"]
+        assert vp["asset_manifest"]["assets"] == []
+
+    def test_failed_generation_does_not_block_remaining_shots(self, tmp_path):
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+
+        vp = self._make_vp(tmp_path)
+        missing = [
+            {"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot2", "scene_id": "s01", "short_id": None},
+        ]
+
+        calls = {"n": 0}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "scene_id": scene_spec["scene_id"], "asset_id": None,
+                    "generation_status": "generation_failed", "provider": "muapi",
+                    "tier_used": None, "model_used": None, "prompt_used": None,
+                    "fallback_used": False, "failure_reason": "provider_error",
+                }
+            path = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"0" * 20000)
+            return {
+                "scene_id": scene_spec["scene_id"], "asset_id": f"assets/{scene_spec['scene_id']}",
+                "generation_status": "generated", "provider": "muapi",
+                "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
+                "prompt_used": scene_spec["production_spec"]["primary_prompt"],
+                "fallback_used": False, "failure_reason": None,
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
+            from hypogeum.artifact_compatibility import CompatibilityDecision, ArtifactCheckResult
+            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+            )
+
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["shot_id"] == "b_001__shot1"
+        assert len(result["generated"]) == 1
+        assert result["generated"][0]["shot_id"] == "b_001__shot2"
+        assert result["stopped_reason"] is None

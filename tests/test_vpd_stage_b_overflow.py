@@ -382,7 +382,8 @@ class TestStageBAutoRetry:
             if schema == "vpd_skeleton_meta":
                 return meta
             if schema == "vpd_skeleton_scene_batch":
-                return {"scenes": all_scenes}
+                start = kwargs["input_package"]["start_scene_index"]
+                return {"scenes": all_scenes[start: start + len(kwargs["input_package"]["beats"])]}
             if schema == "vpd_scene_prompts_batch":
                 n = len(kwargs["input_package"]["scenes"])
                 batch_sizes.append(n)
@@ -421,7 +422,8 @@ class TestStageBAutoRetry:
             if schema == "vpd_skeleton_meta":
                 return meta
             if schema == "vpd_skeleton_scene_batch":
-                return {"scenes": all_scenes}
+                start = kwargs["input_package"]["start_scene_index"]
+                return {"scenes": all_scenes[start: start + len(kwargs["input_package"]["beats"])]}
             if schema == "vpd_scene_prompts_batch":
                 n = len(kwargs["input_package"]["scenes"])
                 batch_sizes.append(n)

@@ -876,10 +876,14 @@ def plan_confirmed_shot_allocations(
     non-deterministic (which beat does the resulting file really belong
     to), so this must never silently proceed. See hypogeum.scene_identity.
     """
-    from hypogeum.scene_identity import enforce_global_scene_identity  # noqa: PLC0415
+    from hypogeum.scene_identity import (  # noqa: PLC0415
+        enforce_global_scene_identity,
+        enforce_scene_internal_consistency,
+    )
 
     scenes = visual_package.get("scenes", [])
     enforce_global_scene_identity(scenes)
+    enforce_scene_internal_consistency(scenes)
     short_id_by_scene = {s.get("scene_id"): s.get("short_id") for s in scenes}
     manifest_assets = (visual_package.get("asset_manifest") or {}).get("assets", [])
     manifest_extra_ids_by_scene = _manifest_extra_ids_by_scene(manifest_assets)
@@ -1086,7 +1090,10 @@ def fill_confirmed_missing_shots(
         submit_scene,
     )
     from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
-    from hypogeum.scene_identity import enforce_global_scene_identity  # noqa: PLC0415
+    from hypogeum.scene_identity import (  # noqa: PLC0415
+        enforce_global_scene_identity,
+        enforce_scene_internal_consistency,
+    )
 
     if log is None:
         log = get_logger(episode_id=episode_id, agent="clip_repair_agent")
@@ -1098,6 +1105,7 @@ def fill_confirmed_missing_shots(
     # so this must stop the whole batch rather than submit anything
     # against an ambiguous scene. See hypogeum.scene_identity.
     enforce_global_scene_identity(scenes)
+    enforce_scene_internal_consistency(scenes)
     scene_by_id: Dict[str, dict] = {s["scene_id"]: s for s in scenes}
     plan_by_beat = {
         s.get("narration_reference"): (s.get("cinematic_coverage_plan") or {})

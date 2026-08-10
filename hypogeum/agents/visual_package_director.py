@@ -497,6 +497,36 @@ def run_visual_package_director(
     if skeleton_path.exists():
         log.info("vpd_stage_a_resumed", path=str(skeleton_path))
         visual_package = json.loads(skeleton_path.read_text(encoding="utf-8"))
+
+        # Global scene_id uniqueness must be re-checked on this resume
+        # branch too (2026-08-10) — it loads a persisted skeleton
+        # checkpoint directly and skips Stage A2/A3 entirely, so a
+        # checkpoint written by an older pipeline version (before this
+        # guard existed) would otherwise reach Stage A4/Coverage Planning
+        # unvalidated. See hypogeum.scene_identity for the fail-closed
+        # contract.
+        from hypogeum.scene_identity import (  # noqa: PLC0415
+            SceneIdentityConflictError,
+            enforce_global_scene_identity,
+        )
+        try:
+            enforce_global_scene_identity(visual_package.get("scenes", []))
+        except SceneIdentityConflictError as exc:
+            log.error(
+                "vpd_stage_a_resume_scene_identity_conflict",
+                conflicts=[
+                    {
+                        "scene_id": c.scene_id,
+                        "conflicting_beat_ids": c.conflicting_beat_ids,
+                        "conflicting_deliverable_ids": c.conflicting_deliverable_ids,
+                        "failure_code": c.failure_code,
+                    }
+                    for c in exc.result.conflicts
+                ],
+                path=str(skeleton_path),
+                note="resumed skeleton checkpoint failed identity validation — fix the checkpoint before rerunning",
+            )
+            raise
     else:
         # ── Stage A1: non-scene metadata ──────────────────────────────
         # Checkpoint: vpd_a1_meta_{episode_id}.json
@@ -915,6 +945,32 @@ def run_visual_package_director(
         assignments=len(_diversity_map),
         diversity_score=diversity_plan.get("diversity_score", 0.0),
     )
+
+    # Same-scene consistency (2026-08-10): presentation_plan and
+    # diversity_assignment were both injected above by dict-comprehensions
+    # keyed on scene_id at injection time. Confirm every scene's
+    # top-level scene_id (already proven globally unique) is still
+    # echoed by both nested substructures now that both have run. See
+    # hypogeum.scene_identity for the fail-closed contract.
+    from hypogeum.scene_identity import (  # noqa: PLC0415
+        SceneIdentityConflictError,
+        enforce_scene_internal_consistency,
+    )
+    try:
+        enforce_scene_internal_consistency(visual_package.get("scenes", []))
+    except SceneIdentityConflictError as exc:
+        log.error(
+            "vpd_scene_internal_consistency_conflict",
+            conflicts=[
+                {
+                    "scene_id": c.scene_id,
+                    "conflicting_beat_ids": c.conflicting_beat_ids,
+                    "failure_code": c.failure_code,
+                }
+                for c in exc.result.conflicts
+            ],
+        )
+        raise
 
     # ------------------------------------------------------------------
     # Stage B — Cinematic prompts (batched, SCENE_PROMPT_BATCH_SIZE per call)

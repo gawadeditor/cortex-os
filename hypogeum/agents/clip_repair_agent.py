@@ -789,6 +789,88 @@ def fill_coverage_deficits(
     return extra_clips_by_scene
 
 
+def _next_free_extra_slot(
+    sid: str,
+    short_id: Optional[str],
+    output_dir: Path,
+    occupied_extra_ids: Set[str],
+) -> "tuple[str, Path]":
+    """
+    Find the lowest-numbered sc_{sid}__extra{N} slot that is free, checking
+    BOTH the caller-supplied occupied_extra_ids (manifest entries, plus any
+    slot already reserved earlier in the same batch) AND the actual
+    filesystem via muapi.scene_file_path() — the single canonical path
+    builder, never reimplemented here. The filesystem check is
+    authoritative even when a slot is completely absent from the manifest
+    (every clip generated before planned_shot_id traceability existed):
+    a real file on disk always wins over an incomplete manifest record.
+    """
+    from hypogeum.muapi import scene_file_path  # noqa: PLC0415
+
+    slot_index = 1
+    while True:
+        extra_scene_id = f"{sid}__extra{slot_index}"
+        path = scene_file_path(output_dir, extra_scene_id, short_id)
+        if extra_scene_id not in occupied_extra_ids and not path.exists():
+            return extra_scene_id, path
+        slot_index += 1
+
+
+def _manifest_extra_ids_by_scene(manifest_assets: List[dict]) -> Dict[str, Set[str]]:
+    """Group every manifest asset entry whose scene_id encodes an
+    __extraN suffix by its base scene_id — the manifest half of slot
+    occupancy (see _next_free_extra_slot's docstring for why this alone
+    is not sufficient)."""
+    by_scene: Dict[str, Set[str]] = {}
+    for a in manifest_assets:
+        raw_sid = a.get("scene_id") or ""
+        if "__extra" in raw_sid:
+            base_sid = raw_sid.split("__extra", 1)[0]
+            by_scene.setdefault(base_sid, set()).add(raw_sid)
+    return by_scene
+
+
+def plan_confirmed_shot_allocations(
+    missing_shots: List[Dict[str, Optional[str]]],
+    visual_package: dict,
+    assets_root: Path,
+    episode_id: str,
+) -> List[Dict[str, object]]:
+    """
+    Read-only allocation preview for fill_confirmed_missing_shots(): for
+    each requested missing shot, determine the exact extra_scene_id and
+    output path it would receive if generation ran right now — without
+    making any provider call, writing any file, or mutating
+    visual_package. Reuses the identical slot-discovery logic
+    (_next_free_extra_slot, manifest + filesystem, filesystem
+    authoritative) so a dry run and the real run always agree on the
+    same input state.
+
+    Two shots requesting the same scene_id within one call correctly
+    receive two distinct slots (tracked in-memory only, per call) — this
+    is what makes the shot_id -> output_path mapping stable and
+    collision-free within a batch, not just against pre-existing files.
+    """
+    scenes = visual_package.get("scenes", [])
+    short_id_by_scene = {s.get("scene_id"): s.get("short_id") for s in scenes}
+    manifest_assets = (visual_package.get("asset_manifest") or {}).get("assets", [])
+    manifest_extra_ids_by_scene = _manifest_extra_ids_by_scene(manifest_assets)
+
+    output_dir = assets_root / "episodes" / episode_id
+    reserved_by_scene: Dict[str, Set[str]] = {}
+    allocations: List[Dict[str, object]] = []
+
+    for item in missing_shots:
+        sid = item["scene_id"]
+        short_id = item.get("short_id") or short_id_by_scene.get(sid)
+        occupied = manifest_extra_ids_by_scene.get(sid, set()) | reserved_by_scene.setdefault(sid, set())
+        extra_scene_id, path = _next_free_extra_slot(sid, short_id, output_dir, occupied)
+        reserved_by_scene[sid].add(extra_scene_id)
+        allocations.append({**item, "extra_scene_id": extra_scene_id, "output_path": str(path)})
+
+    return allocations
+
+
 def fill_confirmed_missing_shots(
     missing_shots: List[Dict[str, Optional[str]]],
     visual_package: dict,
@@ -866,12 +948,8 @@ def fill_confirmed_missing_shots(
     manifest_assets: List[dict] = visual_package.setdefault(
         "asset_manifest", {}
     ).setdefault("assets", [])
-    existing_extra_ids_by_scene: Dict[str, Set[str]] = {}
-    for a in manifest_assets:
-        raw_sid = a.get("scene_id") or ""
-        if "__extra" in raw_sid:
-            base_sid = raw_sid.split("__extra", 1)[0]
-            existing_extra_ids_by_scene.setdefault(base_sid, set()).add(raw_sid)
+    manifest_extra_ids_by_scene = _manifest_extra_ids_by_scene(manifest_assets)
+    reserved_by_scene: Dict[str, Set[str]] = {}
 
     guard = MUAPIBudgetGuard(
         episode_budget_credits=episode_budget_credits,
@@ -903,12 +981,9 @@ def fill_confirmed_missing_shots(
             failed.append({**item, "failure_reason": "planned shot has no rendered primary_prompt"})
             continue
 
-        already = existing_extra_ids_by_scene.setdefault(sid, set())
-        slot_index = len(already) + 1
-        while f"{sid}__extra{slot_index}" in already:
-            slot_index += 1
-        extra_scene_id = f"{sid}__extra{slot_index}"
-        already.add(extra_scene_id)
+        occupied = manifest_extra_ids_by_scene.get(sid, set()) | reserved_by_scene.setdefault(sid, set())
+        extra_scene_id, _predicted_path = _next_free_extra_slot(sid, short_id, output_dir, occupied)
+        reserved_by_scene[sid].add(extra_scene_id)
 
         scene_spec = build_scene_spec(scene, entity_hosted_urls={})
         scene_spec["scene_id"] = extra_scene_id

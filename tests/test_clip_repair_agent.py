@@ -1791,3 +1791,150 @@ class TestFillConfirmedMissingShots:
         assert len(result["generated"]) == 1
         assert result["generated"][0]["shot_id"] == "b_001__shot2"
         assert result["stopped_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# TestSlotAllocationFilesystemAuthoritative
+# ---------------------------------------------------------------------------
+
+class TestSlotAllocationFilesystemAuthoritative:
+    """Regression coverage for the manifest-only slot bug: physical files
+    on disk must be authoritative for collision prevention even when the
+    manifest never recorded them (true for every clip that predates the
+    planned_shot_id traceability field)."""
+
+    def _make_vp(self, extra_manifest_entries=None):
+        plan = {
+            "beat_id": "b_001",
+            "shots": [
+                {"shot_id": "b_001__shot1", "shot_order": 1, "primary_prompt": "p1", "fallback_prompt": "f1"},
+                {"shot_id": "b_001__shot2", "shot_order": 2, "primary_prompt": "p2", "fallback_prompt": "f2"},
+                {"shot_id": "b_001__shot3", "shot_order": 3, "primary_prompt": "p3", "fallback_prompt": "f3"},
+            ],
+        }
+        scene = {
+            "scene_id": "s01", "short_id": None, "source_type": "main_episode",
+            "narration_reference": "b_001",
+            "production_spec": {"aspect_ratio": "16:9", "duration_seconds": 8.0},
+            "cinematic_coverage_plan": plan,
+        }
+        return {"scenes": [scene], "asset_manifest": {"assets": list(extra_manifest_entries or [])}}
+
+    def test_physical_extra_file_missing_from_manifest_is_still_skipped(self, tmp_path):
+        """A real sc_s01__extra1.mp4 exists on disk but the manifest has no
+        record of it at all -- allocation must not select extra1."""
+        from hypogeum.agents.clip_repair_agent import plan_confirmed_shot_allocations
+
+        vp = self._make_vp(extra_manifest_entries=[])
+        video_dir = tmp_path / "episodes" / "ep_test" / "video"
+        video_dir.mkdir(parents=True)
+        (video_dir / "sc_s01__extra1.mp4").write_bytes(b"0" * 1000)
+
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+        allocations = plan_confirmed_shot_allocations(missing, vp, tmp_path, "ep_test")
+
+        assert allocations[0]["extra_scene_id"] == "s01__extra2"
+        assert not Path(allocations[0]["output_path"]).exists()
+
+    def test_manifest_and_filesystem_slots_combined(self, tmp_path):
+        """Manifest records extra1; filesystem separately has extra2 (e.g.
+        an untracked repair). The next allocation must skip both and land
+        on extra3."""
+        from hypogeum.agents.clip_repair_agent import plan_confirmed_shot_allocations
+
+        vp = self._make_vp(extra_manifest_entries=[
+            {"scene_id": "s01__extra1", "planned_shot_id": None},
+        ])
+        video_dir = tmp_path / "episodes" / "ep_test" / "video"
+        video_dir.mkdir(parents=True)
+        (video_dir / "sc_s01__extra2.mp4").write_bytes(b"0" * 1000)
+
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+        allocations = plan_confirmed_shot_allocations(missing, vp, tmp_path, "ep_test")
+
+        assert allocations[0]["extra_scene_id"] == "s01__extra3"
+
+    def test_allocates_next_genuinely_free_slot_for_multiple_shots_same_scene(self, tmp_path):
+        """Two missing shots in the same beat/scene must receive two
+        distinct, genuinely free slots -- never the same one, and never
+        one already occupied on disk."""
+        from hypogeum.agents.clip_repair_agent import plan_confirmed_shot_allocations
+
+        vp = self._make_vp(extra_manifest_entries=[])
+        video_dir = tmp_path / "episodes" / "ep_test" / "video"
+        video_dir.mkdir(parents=True)
+        (video_dir / "sc_s01__extra1.mp4").write_bytes(b"0" * 1000)
+
+        missing = [
+            {"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot2", "scene_id": "s01", "short_id": None},
+        ]
+        allocations = plan_confirmed_shot_allocations(missing, vp, tmp_path, "ep_test")
+
+        extra_ids = [a["extra_scene_id"] for a in allocations]
+        assert extra_ids == ["s01__extra2", "s01__extra3"]
+        assert len(set(extra_ids)) == 2
+
+    def test_no_overwrite_or_false_reuse_when_generating_for_real(self, tmp_path):
+        """fill_confirmed_missing_shots() must never target a path that
+        already has a real file on it, even though the manifest never
+        recorded that file's existence."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.artifact_compatibility import CompatibilityDecision, ArtifactCheckResult
+
+        vp = self._make_vp(extra_manifest_entries=[])
+        video_dir = tmp_path / "episodes" / "ep_test" / "video"
+        video_dir.mkdir(parents=True)
+        preexisting = video_dir / "sc_s01__extra1.mp4"
+        preexisting.write_bytes(b"ORIGINAL_BYTES_MUST_SURVIVE")
+
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        submitted_scene_ids = []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
+            submitted_scene_ids.append(scene_spec["scene_id"])
+            path = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"0" * 20000)
+            return {
+                "scene_id": scene_spec["scene_id"], "asset_id": f"assets/{scene_spec['scene_id']}",
+                "generation_status": "generated", "provider": "muapi",
+                "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
+                "prompt_used": scene_spec["production_spec"]["primary_prompt"],
+                "fallback_used": False, "failure_reason": None,
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
+            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=MagicMock(), episode_id="ep_test", episode_budget_credits=10.0,
+            )
+
+        assert submitted_scene_ids == ["s01__extra2"], "must never resubmit to the occupied extra1 slot"
+        assert preexisting.read_bytes() == b"ORIGINAL_BYTES_MUST_SURVIVE", "pre-existing file must be untouched"
+        assert len(result["generated"]) == 1
+        assert result["generated"][0]["clip_path"].endswith("sc_s01__extra2.mp4")
+
+    def test_stable_mapping_between_planned_shot_id_and_allocated_path(self, tmp_path):
+        """Calling the dry-run allocator twice with identical inputs must
+        yield the identical shot_id -> output_path mapping (determinism),
+        and every shot_id must map to a distinct path."""
+        from hypogeum.agents.clip_repair_agent import plan_confirmed_shot_allocations
+
+        vp = self._make_vp(extra_manifest_entries=[])
+        missing = [
+            {"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot2", "scene_id": "s01", "short_id": None},
+            {"beat_id": "b_001", "shot_id": "b_001__shot3", "scene_id": "s01", "short_id": None},
+        ]
+
+        first = plan_confirmed_shot_allocations(missing, vp, tmp_path, "ep_test")
+        second = plan_confirmed_shot_allocations(missing, vp, tmp_path, "ep_test")
+
+        first_map = {a["shot_id"]: a["output_path"] for a in first}
+        second_map = {a["shot_id"]: a["output_path"] for a in second}
+        assert first_map == second_map
+        assert len(set(first_map.values())) == 3

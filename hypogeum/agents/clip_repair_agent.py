@@ -878,6 +878,7 @@ def fill_confirmed_missing_shots(
     config: Config,
     episode_id: str,
     episode_budget_credits: float,
+    forced_tier: Optional[int] = None,
     log=None,
 ) -> Dict[str, object]:
     """
@@ -917,6 +918,15 @@ def fill_confirmed_missing_shots(
     other per-shot failure is recorded and the loop continues to the next
     shot (a single failed generation must not block every other shot in
     the batch).
+
+    forced_tier, when given, overrides EVERY shot's own scene-level
+    provider_routing tier (which may specify Tier 1 for "hero" scenes at
+    $2.50/gen) with this exact tier for both primary and fallback —
+    letting a caller whose authorization specifies an exact model/tier
+    (e.g. "use veo3.1-lite-text-to-video for all N shots") guarantee the
+    per-shot cost their budget math assumed, rather than silently
+    inheriting a per-scene routing decision made for a different purpose.
+    None (default) preserves each scene's own configured routing.
 
     Returns {"generated": [...], "failed": [...], "stopped_reason": str|None,
     "total_cost_usd": float} — generated/failed are lists of the input
@@ -991,6 +1001,9 @@ def fill_confirmed_missing_shots(
         scene_spec["production_spec"]["fallback_prompt"] = (
             planned_shot.get("fallback_prompt") or planned_shot.get("primary_prompt", "")
         )
+        if forced_tier is not None:
+            scene_spec["production_spec"]["primary_tier"] = forced_tier
+            scene_spec["production_spec"]["fallback_tier"] = forced_tier
 
         try:
             output_dir.mkdir(parents=True, exist_ok=True)

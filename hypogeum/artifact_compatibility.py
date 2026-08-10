@@ -85,6 +85,18 @@ class CompatibilityDecision(Enum):
 class ArtifactCheckResult:
     decision: CompatibilityDecision
     reasons: List[str] = field(default_factory=list)
+    # Structured fields (2026-08-10) — a caller that needs to distinguish
+    # "corrupt/unreadable/placeholder" from "real footage but under the
+    # required resolution" (e.g. to decide whether an explicit upscale
+    # attempt is worth making) must branch on these, never by parsing
+    # `reasons` text. None means "not evaluated by this check" (e.g. a
+    # non-video-clip decision path that doesn't populate them at all);
+    # only evaluate_video_clip_compatibility() currently sets them.
+    integrity_valid: Optional[bool] = None
+    resolution_valid: Optional[bool] = None
+    measured_resolution: Optional[Tuple[int, int]] = None
+    required_resolution: Optional[Tuple[int, int]] = None
+    failure_codes: List[str] = field(default_factory=list)
 
     @property
     def reusable(self) -> bool:
@@ -376,7 +388,10 @@ def is_dry_run_clip(path: Optional[Path]) -> bool:
     )
 
 
-def evaluate_video_clip_compatibility(clip_path: Optional[Path]) -> ArtifactCheckResult:
+def evaluate_video_clip_compatibility(
+    clip_path: Optional[Path],
+    source_type: Optional[str] = None,
+) -> ArtifactCheckResult:
     """
     Technical validity of one already-generated video clip, independent of
     the render/assembly step that might later consume it. A clip that
@@ -384,50 +399,97 @@ def evaluate_video_clip_compatibility(clip_path: Optional[Path]) -> ArtifactChec
     exactly the kind of artifact the canonical policy says to preserve and
     reuse rather than quarantine by age.
 
+    source_type (2026-08-10), when given, resolves the required source
+    resolution via required_source_resolution(source_type) — long-form
+    vs. Short — instead of this function's fixed landscape default
+    (REQUIRED_SOURCE_WIDTH/HEIGHT). None (default) preserves every
+    existing caller's exact prior behavior. This is the single canonical
+    place deliverable-aware technical validity is decided; a caller must
+    never reimplement its own copy of this logic (e.g. by re-deriving
+    "integrity OK but under-resolution" from the human-readable
+    `reasons` text) — see the structured fields below instead.
+
+    The returned ArtifactCheckResult's structured fields let a caller
+    distinguish genuine corruption from a resolution-only shortfall
+    without ever parsing `reasons`:
+      integrity_valid      — real, playable, non-corrupt, non-placeholder
+                              footage, independent of resolution.
+      resolution_valid     — measured dimensions meet the resolution
+                              requirement (only meaningful when
+                              integrity_valid is True; None otherwise —
+                              resolution was never assessed).
+      measured_resolution  — the clip's actual ffprobe-measured
+                              (width, height); never a provider's claimed
+                              resolution label, which this function never
+                              reads at all.
+      required_resolution  — the (width, height) this evaluation was
+                              judged against.
+      failure_codes        — stable machine-checkable codes (never
+                              free text) for why integrity or resolution
+                              failed; empty on a full pass.
+
     Deliberately does NOT evaluate anything about how the clip is later
     concatenated/stretched — that's the renderer's job (see
     hypogeum.agents.video_renderer.InsufficientCoverageError) and is
     evaluated separately by evaluate_render_compatibility() for the
     DERIVED render, not the source clip.
     """
+    required_width, required_height = (
+        required_source_resolution(source_type)
+        if source_type is not None
+        else (REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT)
+    )
+
     if clip_path is None:
         return ArtifactCheckResult(
             CompatibilityDecision.INVALID_OR_INCOMPATIBLE, ["no clip path"],
+            integrity_valid=False, failure_codes=["no_clip_path"],
         )
     if not clip_path.exists():
         return ArtifactCheckResult(
             CompatibilityDecision.INVALID_OR_INCOMPATIBLE, ["file does not exist"],
+            integrity_valid=False, failure_codes=["file_missing"],
         )
     size = clip_path.stat().st_size
     if size < _MIN_VALID_CLIP_BYTES:
         return ArtifactCheckResult(
             CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
             [f"file too small to be real footage ({size} bytes)"],
+            integrity_valid=False, failure_codes=["file_too_small"],
         )
     duration = _probe_duration_seconds(clip_path)
     if duration <= 0.0:
         return ArtifactCheckResult(
             CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
             ["ffprobe could not read a real duration (corrupted or unreadable)"],
+            integrity_valid=False, failure_codes=["unreadable_duration"],
         )
     if is_dry_run_clip(clip_path):
         return ArtifactCheckResult(
             CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
             ["matches the MUAPI dry-run placeholder signature (flat 0x141414 fill)"],
+            integrity_valid=False, failure_codes=["dry_run_placeholder"],
         )
-    if not is_resolution_compliant_clip(clip_path):
-        width, height = probe_resolution(clip_path)
+
+    measured = probe_resolution(clip_path)
+    if not is_resolution_compliant_clip(clip_path, required_width, required_height):
         return ArtifactCheckResult(
             CompatibilityDecision.INVALID_OR_INCOMPATIBLE,
             [
-                f"source resolution {width}x{height} is below the required "
-                f"{REQUIRED_SOURCE_WIDTH}x{REQUIRED_SOURCE_HEIGHT} — a low-resolution "
+                f"source resolution {measured[0]}x{measured[1]} is below the required "
+                f"{required_width}x{required_height} — a low-resolution "
                 f"source scaled up at render time is not compliance"
             ],
+            integrity_valid=True, resolution_valid=False,
+            measured_resolution=measured, required_resolution=(required_width, required_height),
+            failure_codes=["resolution_below_requirement"],
         )
     return ArtifactCheckResult(
         CompatibilityDecision.VALID_AND_COMPATIBLE,
         [f"real footage, {duration:.2f}s, {size} bytes"],
+        integrity_valid=True, resolution_valid=True,
+        measured_resolution=measured, required_resolution=(required_width, required_height),
+        failure_codes=[],
     )
 
 

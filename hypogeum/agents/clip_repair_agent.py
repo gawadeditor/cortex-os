@@ -807,69 +807,6 @@ def _is_billing_contradiction(failure_reason: str) -> bool:
     )
 
 
-def _deliverable_aware_technical_check(
-    clip_path: Path, source_type: Optional[str],
-) -> Dict[str, object]:
-    """
-    hypogeum.artifact_compatibility.evaluate_video_clip_compatibility()
-    always checks resolution against its fixed landscape default,
-    regardless of source_type — correct for a caller that never sees
-    Shorts, but it would wrongly reject a genuinely-compliant Short
-    (1080x1920 fails a ">=1920 width" check) and, symmetrically, wrongly
-    accept an under-resolution long-form clip that happens to be
-    >=1080x1920 tall-but-narrow. This re-derives the resolution portion
-    of that check using the deliverable-specific requirement
-    (required_source_resolution(source_type)) while reusing every other
-    check (existence, size, duration, dry-run detection) unchanged.
-
-    Returns {"technically_valid": bool, "technical_detail": List[str],
-    "basic_integrity_ok": bool}. basic_integrity_ok is True whenever the
-    clip is real, playable, non-corrupt, non-placeholder footage — even
-    if it fails the resolution requirement — since a resolution shortfall
-    alone is exactly what an explicit upscale step exists to fix, not
-    evidence of a broken source. A caller that does not intend to upscale
-    should still gate on technically_valid (both integrity AND
-    resolution), not basic_integrity_ok alone.
-    """
-    from hypogeum.artifact_compatibility import (
-        evaluate_video_clip_compatibility,
-        is_resolution_compliant_clip,
-        probe_resolution,
-        required_source_resolution,
-    )
-
-    tech = evaluate_video_clip_compatibility(clip_path)
-    technically_valid = tech.decision.value == "valid_and_compatible"
-    technical_detail = list(tech.reasons)
-    resolution_only_issue = (
-        not technically_valid
-        and len(tech.reasons) == 1
-        and "resolution" in tech.reasons[0]
-    )
-    basic_integrity_ok = technically_valid or resolution_only_issue
-
-    if resolution_only_issue:
-        required_w, required_h = required_source_resolution(source_type)
-        if is_resolution_compliant_clip(clip_path, required_w, required_h):
-            technically_valid = True
-            technical_detail = [
-                f"real footage, deliverable-specific resolution compliant "
-                f"(source_type={source_type})"
-            ]
-        else:
-            width, height = probe_resolution(clip_path)
-            technical_detail = [
-                f"source resolution {width}x{height} below required "
-                f"{required_w}x{required_h} for source_type={source_type}"
-            ]
-
-    return {
-        "technically_valid": technically_valid,
-        "technical_detail": technical_detail,
-        "basic_integrity_ok": basic_integrity_ok,
-    }
-
-
 def _next_free_extra_slot(
     sid: str,
     short_id: Optional[str],
@@ -1276,7 +1213,12 @@ def fill_confirmed_missing_shots(
 
             total_generation_cost_usd += generation_cost_usd
 
-            check = _deliverable_aware_technical_check(clip_path, source_type)
+            # Deliverable-aware, structured technical check — the
+            # canonical service itself (hypogeum.artifact_compatibility)
+            # resolves the correct required resolution for source_type
+            # and returns stable structured fields; this module never
+            # re-derives or duplicates that decision from reason text.
+            tech = evaluate_video_clip_compatibility(clip_path, source_type=source_type)
 
             manifest_entry = {
                 "scene_id": extra_scene_id,
@@ -1291,9 +1233,20 @@ def fill_confirmed_missing_shots(
                 # Source-side job id, kept separate from any upscale job
                 # id qualify_asset() records inside source_enhancement.
                 "generation_request_id": asset_result.get("request_id"),
-                "technically_valid": check["technically_valid"],
-                "technical_detail": check["technical_detail"],
-                "basic_integrity_ok": check["basic_integrity_ok"],
+                "technically_valid": tech.decision.value == "valid_and_compatible",
+                "technical_detail": tech.reasons,
+                # basic_integrity_ok is True whenever the source is real,
+                # playable, non-corrupt, non-placeholder footage — even if
+                # it fails the resolution requirement, since a resolution
+                # shortfall alone is exactly what the explicit upscale
+                # step (require_source_qualification=True) exists to fix,
+                # not evidence of a broken source. A caller that does NOT
+                # intend to upscale must still gate on technically_valid
+                # (integrity AND resolution), not this field alone.
+                "basic_integrity_ok": bool(tech.integrity_valid),
+                "measured_resolution": tech.measured_resolution,
+                "required_resolution": tech.required_resolution,
+                "failure_codes": tech.failure_codes,
                 "source_enhancement": None,
             }
             manifest_assets.append(manifest_entry)

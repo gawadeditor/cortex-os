@@ -476,11 +476,9 @@ class TestResolutionCompliance:
 
     def test_real_short_720x1280_source_fails_the_short_requirement(self, tmp_path):
         """Deliverable-specific proof for a Short: a genuine 720x1280
-        portrait source clip (the exact measured dimensions of the
-        recovered ep_f3619022 manual-rerun artifact, request_id
-        edbbf48e-3a31-49be-b4cc-9f0a168e8d89) must fail the Short-specific
-        1080x1920 requirement, using required_source_resolution("short")
-        -- never the landscape default."""
+        portrait source clip must fail the Short-specific 1080x1920
+        requirement, using required_source_resolution("short") -- never
+        the landscape default."""
         from hypogeum.artifact_compatibility import (
             is_resolution_compliant_clip,
             probe_resolution,
@@ -571,15 +569,20 @@ class TestRequiredSourceResolution:
             REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT,
         )
 
-    def test_evaluate_video_clip_compatibility_signature_unchanged(self):
-        """Scope guard: this fix must not touch evaluate_video_clip_
-        compatibility's signature (a separate, unrelated WIP change on the
-        same file) -- it must still take exactly one required argument."""
+    def test_evaluate_video_clip_compatibility_backward_compatible_signature(self):
+        """clip_path remains the only REQUIRED argument -- every existing
+        single-argument caller keeps working unchanged. source_type
+        (2026-08-10) is optional/keyword-defaulting, added specifically so
+        this canonical service can resolve deliverable-aware resolution
+        requirements itself rather than callers duplicating that policy."""
         import inspect
         from hypogeum.artifact_compatibility import evaluate_video_clip_compatibility
 
-        params = inspect.signature(evaluate_video_clip_compatibility).parameters
-        assert list(params.keys()) == ["clip_path"]
+        sig = inspect.signature(evaluate_video_clip_compatibility)
+        params = sig.parameters
+        assert list(params.keys()) == ["clip_path", "source_type"]
+        assert params["clip_path"].default is inspect.Parameter.empty
+        assert params["source_type"].default is None
 
     def test_is_resolution_compliant_clip_still_defaults_to_landscape(self, tmp_path):
         """No unrelated behaviour change: existing callers of

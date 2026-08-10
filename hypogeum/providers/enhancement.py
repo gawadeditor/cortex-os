@@ -63,6 +63,17 @@ class EnhancementResult:
     # call from the source generation it enhances, and callers that
     # persist provenance need to tell the two apart.
     request_id: Optional[str] = None
+    # Some providers report an internal "auto-upgrade" step as part of
+    # their own response (observed on the generation side of a real
+    # recovered artifact: a completed job whose response included
+    # upgrade_submitted=true and a separate upgrade_base_video_url,
+    # while the actually-served output measured no higher than the
+    # un-upgraded source). These are the provider's own CLAIMS about that
+    # internal step and must never substitute for source_enhancement.py's
+    # independent re-probe of output_path — see qualify_asset()'s
+    # docstring. Default False/None: most providers never report this.
+    upgrade_submitted: bool = False
+    upgrade_base_video_url: Optional[str] = None
 
 
 class EnhancementProvider(ABC):

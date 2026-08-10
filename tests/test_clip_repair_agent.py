@@ -1702,7 +1702,10 @@ class TestFillConfirmedMissingShots:
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
              patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
             from hypogeum.artifact_compatibility import CompatibilityDecision, ArtifactCheckResult
-            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+            mock_eval.return_value = ArtifactCheckResult(
+                CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"],
+                integrity_valid=True, resolution_valid=True,
+            )
 
             result = fill_confirmed_missing_shots(
                 missing_shots=missing, visual_package=vp, assets_root=tmp_path,
@@ -1779,7 +1782,10 @@ class TestFillConfirmedMissingShots:
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
              patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
             from hypogeum.artifact_compatibility import CompatibilityDecision, ArtifactCheckResult
-            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+            mock_eval.return_value = ArtifactCheckResult(
+                CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"],
+                integrity_valid=True, resolution_valid=True,
+            )
 
             result = fill_confirmed_missing_shots(
                 missing_shots=missing, visual_package=vp, assets_root=tmp_path,
@@ -1907,7 +1913,10 @@ class TestSlotAllocationFilesystemAuthoritative:
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
              patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
-            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+            mock_eval.return_value = ArtifactCheckResult(
+                CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"],
+                integrity_valid=True, resolution_valid=True,
+            )
             result = fill_confirmed_missing_shots(
                 missing_shots=missing, visual_package=vp, assets_root=tmp_path,
                 config=MagicMock(), episode_id="ep_test", episode_budget_credits=10.0,
@@ -1988,7 +1997,10 @@ class TestForcedTierOverride:
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
              patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
-            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+            mock_eval.return_value = ArtifactCheckResult(
+                CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"],
+                integrity_valid=True, resolution_valid=True,
+            )
             fill_confirmed_missing_shots(
                 missing_shots=missing, visual_package=vp, assets_root=tmp_path,
                 config=MagicMock(), episode_id="ep_test", episode_budget_credits=10.0,
@@ -2022,7 +2034,10 @@ class TestForcedTierOverride:
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
              patch("hypogeum.artifact_compatibility.evaluate_video_clip_compatibility") as mock_eval:
-            mock_eval.return_value = ArtifactCheckResult(CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"])
+            mock_eval.return_value = ArtifactCheckResult(
+                CompatibilityDecision.VALID_AND_COMPATIBLE, ["ok"],
+                integrity_valid=True, resolution_valid=True,
+            )
             fill_confirmed_missing_shots(
                 missing_shots=missing, visual_package=vp, assets_root=tmp_path,
                 config=MagicMock(), episode_id="ep_test", episode_budget_credits=10.0,
@@ -2129,7 +2144,15 @@ class _FakeUpscaleProvider:
     def __init__(self, name="fake_upscaler", model="fake-model", version="1.0",
                  produce_width=1920, produce_height=1080, fail=False,
                  fail_validation=False, request_id="fake-upscale-request-id",
-                 cost=0.06):
+                 # Matches the established real provider route
+                 # (config.ENHANCEMENT_PROVIDER default, hypogeum.
+                 # providers.muapi_video_upscaler) rather than an
+                 # arbitrary test value -- this constant is documentation
+                 # only (fake providers don't feed preflight math, which
+                 # uses hypogeum.agents.clip_repair_agent.
+                 # UPSCALE_COST_ESTIMATE_USD directly), kept consistent so
+                 # nothing here implies a different real-world price.
+                 cost=0.08, claim_upgrade_submitted=False, byte_identical_to_base=False):
         self.name = name
         self.model = model
         self.version = version
@@ -2139,6 +2162,17 @@ class _FakeUpscaleProvider:
         self.fail_validation = fail_validation
         self.request_id = request_id
         self.cost = cost
+        # Models the exact real-world shape observed in the recovered
+        # ep_f3619022 rerun: the provider's raw response claims
+        # upgrade_submitted=true with a distinct upgrade_base_video_url,
+        # while byte_identical_to_base controls whether the bytes this
+        # provider actually WRITES to dest_path are the same as a
+        # separately-written "base" file (the fail case) or genuinely
+        # different/compliant content (the pass case) -- proving the
+        # PASS/FAIL decision is driven by dest_path's real bytes, never
+        # by the claim fields.
+        self.claim_upgrade_submitted = claim_upgrade_submitted
+        self.byte_identical_to_base = byte_identical_to_base
         self.calls = []
 
     def enhance(self, source_path, dest_path, target_width, target_height,
@@ -2154,15 +2188,35 @@ class _FakeUpscaleProvider:
         out_w, out_h = (1280, 720) if self.fail_validation else (self.produce_width, self.produce_height)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         import subprocess
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=s={out_w}x{out_h}:r=24:d=1",
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest_path)],
-            capture_output=True, timeout=30,
-        )
+
+        if self.byte_identical_to_base:
+            # Write a real "base" candidate first, then copy its EXACT
+            # bytes to dest_path -- base and final are provably
+            # byte-identical, matching the real recovered artifact
+            # (outputs[0] and upgrade_base_video_url resolved to the same
+            # sha256 in that investigation).
+            base_path = dest_path.with_name(dest_path.stem + ".base.mp4")
+            subprocess.run(
+                ["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=s={out_w}x{out_h}:r=24:d=1",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", str(base_path)],
+                capture_output=True, timeout=30,
+            )
+            dest_path.write_bytes(base_path.read_bytes())
+            upgrade_base_url = f"file://{base_path}"
+        else:
+            subprocess.run(
+                ["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=s={out_w}x{out_h}:r=24:d=1",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest_path)],
+                capture_output=True, timeout=30,
+            )
+            upgrade_base_url = "https://cdn.example/base.mp4" if self.claim_upgrade_submitted else None
+
         return EnhancementResult(
             success=True, output_path=dest_path, provider=self.name, model=self.model,
             provider_version=self.version, cost_usd=self.cost, generation_time_s=1.0,
             request_id=self.request_id,
+            upgrade_submitted=self.claim_upgrade_submitted or self.byte_identical_to_base,
+            upgrade_base_video_url=upgrade_base_url,
         )
 
 
@@ -2225,7 +2279,15 @@ class TestExplicitUpscaleQualification:
         }
         return {"scenes": [scene], "asset_manifest": {"assets": []}}
 
-    def _mock_submit_at_resolution(self, width, height, request_id="fake-gen-request-id"):
+    def _mock_submit_at_resolution(self, width, height, request_id="fake-gen-request-id", **extra_claims):
+        """extra_claims lets a test inject arbitrary untrusted provider-
+        reported fields (e.g. resolution="1080p", upgrade_submitted=True,
+        upgrade_base_video_url=..., final_output_url=...) into the raw
+        generation result -- modeling exactly the shape of the real
+        recovered ep_f3619022 rerun response -- so a test can prove none
+        of this module's code ever reads them; only the actual downloaded
+        file at `path` (measured via ffprobe downstream) drives any
+        compatibility decision."""
         def _mock_submit(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
             if budget_guard is not None:
                 budget_guard.check_and_record_attempt(scene_spec["scene_id"], "veo3.1-lite-text-to-video")
@@ -2243,41 +2305,70 @@ class TestExplicitUpscaleQualification:
                 "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
                 "prompt_used": scene_spec["production_spec"]["primary_prompt"],
                 "fallback_used": False, "failure_reason": None, "request_id": request_id,
+                **extra_claims,
             }
         return _mock_submit
 
-    def test_resolution_claim_cannot_override_measured_dimensions(self, tmp_path):
-        """A source that claims to be compliant only by way of an unrelated
-        provider-side label must still be judged on ffprobe-measured
-        pixels -- our generation mock never sets any 'resolution' string
-        at all, and qualification must still correctly reject a real
-        1280x720 file regardless of what any label might have claimed."""
+    def test_explicit_1080p_claim_cannot_override_measured_1280x720(self, tmp_path):
+        """The raw provider result EXPLICITLY claims resolution='1080p'
+        while the actual downloaded file is a real 1280x720 long-form
+        clip. Qualification must be driven entirely by the ffprobe-
+        measured pixels: an upscale must still be triggered despite the
+        claim, and the final registered output must be the genuinely
+        compliant upscaled artifact, never the falsely-labeled source."""
         from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
         from hypogeum.providers.enhancement import register_provider
-        provider = _FakeUpscaleProvider(fail=True)
+        provider = _FakeUpscaleProvider(produce_width=1920, produce_height=1080)
         register_provider("fake_qual", lambda: provider)
 
-        vp = self._make_vp()
+        vp = self._make_vp(source_type="main_episode")
         missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
 
-        with patch("hypogeum.muapi.submit_scene", side_effect=self._mock_submit_at_resolution(1280, 720)):
+        mock_submit = self._mock_submit_at_resolution(1280, 720, resolution="1080p")
+        with patch("hypogeum.muapi.submit_scene", side_effect=mock_submit):
             result = fill_confirmed_missing_shots(
                 missing_shots=missing, visual_package=vp, assets_root=tmp_path,
                 config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
                 require_source_qualification=True, upscale_budget_credits=10.0,
             )
 
-        # The provider WAS invoked (since measured pixels, not any label,
-        # triggered the below-requirement path) and then failed --
-        # confirms the decision was driven by real measurement.
+        # The claim was present in the raw result but the measured 1280x720
+        # source still triggered the upscale -- proving the claim was never
+        # read.
         assert provider.calls == ["s01__extra1"]
-        assert len(result["failed"]) == 1
-        assert len(result["generated"]) == 0
+        assert len(result["generated"]) == 1
+        assert result["generated"][0]["qualification"] == "passed"
+
+    def test_explicit_1080p_claim_cannot_override_measured_720x1280(self, tmp_path):
+        """Short-deliverable equivalent: the raw provider result claims
+        resolution='1080p' while the actual downloaded portrait file is a
+        real 720x1280 Short source -- still under the 1080x1920 Short
+        requirement despite the claim, and still correctly upscaled."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(produce_width=1080, produce_height=1920)
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp(source_type="short")
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        mock_submit = self._mock_submit_at_resolution(720, 1280, resolution="1080p")
+        with patch("hypogeum.muapi.submit_scene", side_effect=mock_submit):
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        assert provider.calls == ["s01__extra1"]
+        assert len(result["generated"]) == 1
+        assert result["generated"][0]["qualification"] == "passed"
 
     def test_upgrade_submitted_without_distinct_compliant_output_fails_qualification(self, tmp_path):
         """A provider that 'succeeds' but produces output still below the
-        requirement (models upgrade_submitted=true with no real compliant
-        artifact) must not pass qualification."""
+        requirement must not pass qualification -- independent of the
+        upgrade_submitted claim (see the two dedicated fixture tests
+        below for the explicit base/final URL modeling)."""
         from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
         from hypogeum.providers.enhancement import register_provider
         provider = _FakeUpscaleProvider(fail_validation=True)  # "succeeds" but stays 1280x720
@@ -2296,6 +2387,68 @@ class TestExplicitUpscaleQualification:
         assert len(result["generated"]) == 0
         assert len(result["failed"]) == 1
         assert provider.calls == ["s01__extra1"]
+
+    def test_upgrade_submitted_with_byte_identical_base_and_final_fails(self, tmp_path):
+        """Explicit fixture for the exact real-world shape (recovered
+        ep_f3619022 rerun): the provider response contains
+        upgrade_submitted=true and a real upgrade_base_video_url, and the
+        bytes it writes to output_path (the 'final') are PROVABLY
+        byte-identical to a separately-written 'base' file, both still
+        under-resolution. Qualification must fail -- the upgrade_submitted
+        claim never substitutes for an independently-verified distinct,
+        compliant final artifact."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(fail_validation=True, byte_identical_to_base=True)
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp()
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=self._mock_submit_at_resolution(1280, 720)):
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        entry = vp["asset_manifest"]["assets"][0]
+        se = entry["source_enhancement"]
+        assert se["upgrade_submitted_claim"] is True
+        assert se["upgrade_base_video_url_claim"] is not None
+        assert se["validation_result"] == "failed"
+        assert len(result["generated"]) == 0
+        assert len(result["failed"]) == 1
+
+    def test_upgrade_submitted_with_distinct_compliant_final_passes(self, tmp_path):
+        """Same fixture shape (upgrade_submitted=true, a real
+        upgrade_base_video_url claim present) but this time the actual
+        bytes written to output_path ARE a distinct, genuinely compliant
+        artifact -- qualification may pass. Proves the claim field's
+        presence or absence never itself decides the outcome; only the
+        measured final bytes do."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(
+            produce_width=1920, produce_height=1080, claim_upgrade_submitted=True,
+        )
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp()
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=self._mock_submit_at_resolution(1280, 720)):
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        entry = vp["asset_manifest"]["assets"][0]
+        se = entry["source_enhancement"]
+        assert se["upgrade_submitted_claim"] is True
+        assert se["validation_result"] == "passed"
+        assert len(result["generated"]) == 1
 
     def test_compliant_upscale_output_passes_and_is_registrable(self, tmp_path):
         """A genuinely compliant explicit-upscale output passes
@@ -2320,9 +2473,15 @@ class TestExplicitUpscaleQualification:
         assert result["generated"][0]["qualification"] == "passed"
         assert result["total_upscale_cost_usd"] > 0
 
-    def test_source_and_upscale_job_ids_persisted_separately(self, tmp_path):
-        """generation_request_id (source) and source_enhancement.request_id
-        (upscale) must both be present and distinct on the manifest entry."""
+    def test_source_and_upscale_job_ids_persisted_to_distinct_fields(self, tmp_path):
+        """generation_request_id (source, top-level field) and
+        source_enhancement.request_id (upscale, nested field) must each be
+        recorded in their own field and attributed to the correct
+        provider call. This does NOT assert the two values differ --
+        nothing in the runtime requires two independent providers to
+        return distinct textual IDs (they could coincidentally match);
+        the only real contract is that each field is populated from its
+        own call and never conflated with the other's."""
         from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
         from hypogeum.providers.enhancement import register_provider
         provider = _FakeUpscaleProvider(
@@ -2347,20 +2506,101 @@ class TestExplicitUpscaleQualification:
         entry = manifest[0]
         assert entry["generation_request_id"] == "generation-job-111"
         assert entry["source_enhancement"]["request_id"] == "upscale-job-999"
-        assert entry["generation_request_id"] != entry["source_enhancement"]["request_id"]
 
-    def test_resume_with_valid_but_low_resolution_source(self, tmp_path):
-        """Isolates resumability: a manifest entry already records a
-        technically-valid (but not yet qualified) source whose file still
-        exists on disk -- a subsequent call must reuse it, not regenerate."""
+    def test_generation_request_id_survives_upscale_failure(self, tmp_path):
+        """The source-side job id must remain recorded even when the
+        subsequent upscale attempt fails outright (provider error) --
+        generation succeeded and that fact must not be lost just because
+        qualification later failed."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(fail=True, request_id="upscale-fail-id")
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp()
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=self._mock_submit_at_resolution(
+            1280, 720, request_id="generation-survives-id",
+        )):
+            fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        entry = vp["asset_manifest"]["assets"][0]
+        assert entry["generation_request_id"] == "generation-survives-id"
+        assert entry["source_enhancement"]["request_id"] == "upscale-fail-id"
+        assert entry["source_enhancement"]["validation_result"] == "failed"
+
+    def test_upscale_request_id_survives_final_validation_failure(self, tmp_path):
+        """The upscale provider's own job id must be recorded even when
+        the provider reports success but this module's independent
+        re-probe of the output rejects it (fail_validation=True: the
+        provider "succeeds" yet the actual downloaded bytes stay under
+        the resolution requirement) -- exactly the shape of the real
+        recovered ep_f3619022 rerun."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(fail_validation=True, request_id="upscale-postprobe-fail-id")
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp()
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=self._mock_submit_at_resolution(
+            1280, 720, request_id="generation-id-2",
+        )):
+            fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        entry = vp["asset_manifest"]["assets"][0]
+        assert entry["generation_request_id"] == "generation-id-2"
+        assert entry["source_enhancement"]["request_id"] == "upscale-postprobe-fail-id"
+        assert entry["source_enhancement"]["validation_result"] == "failed"
+
+    def test_missing_job_ids_remain_explicit_none(self, tmp_path):
+        """A generation response that never surfaces a request_id (e.g. an
+        older provider path) must record explicit None, never a
+        substituted value (empty string, the other field's id, or a
+        placeholder) that could be mistaken for a real job identifier."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(fail=True, request_id=None)
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp()
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=self._mock_submit_at_resolution(
+            1280, 720, request_id=None,
+        )):
+            fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        entry = vp["asset_manifest"]["assets"][0]
+        assert entry["generation_request_id"] is None
+        assert entry["source_enhancement"]["request_id"] is None
+
+    def test_resume_with_native_resolution_source_skips_upscale(self, tmp_path):
+        """Resumability, already-compliant case: a manifest entry already
+        records a technically-valid, native-resolution source whose file
+        still exists on disk -- a subsequent call must reuse it (never
+        regenerate) and qualify_asset() must skip the provider call
+        entirely (zero upscale cost) since nothing needs enhancing."""
         from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
         from hypogeum.providers.enhancement import register_provider
         provider = _FakeUpscaleProvider(produce_width=1920, produce_height=1080)
         register_provider("fake_qual", lambda: provider)
 
         vp = self._make_vp()
-        # Pre-seed a manifest entry + real on-disk file simulating an
-        # earlier successful (but not yet qualified) generation.
         video_dir = tmp_path / "episodes" / "ep_test" / "video"
         video_dir.mkdir(parents=True)
         existing_path = video_dir / "sc_s01__extra1.mp4"
@@ -2376,7 +2616,7 @@ class TestExplicitUpscaleQualification:
             "tier_used": 2, "prompt_used": "p1", "fallback_used": False,
             "planned_shot_id": "b_001__shot1", "generation_request_id": "gen-earlier",
             "technically_valid": True, "technical_detail": ["real footage"],
-            "source_enhancement": None,
+            "basic_integrity_ok": True, "source_enhancement": None,
         })
 
         missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
@@ -2390,10 +2630,152 @@ class TestExplicitUpscaleQualification:
 
         mock_submit.assert_not_called()
         assert len(result["generated"]) == 1
-        # Already-native 1920x1080 -- qualify_asset() must skip the provider
-        # call entirely (zero cost), not invoke the upscaler needlessly.
         assert provider.calls == []
         assert result["total_generation_cost_usd"] == 0.0
+        assert result["total_upscale_cost_usd"] == 0.0
+
+    def test_resume_with_low_resolution_long_form_source_runs_upscale_exactly_once(self, tmp_path):
+        """Genuine low-resolution resumability: a manifest entry already
+        records a REAL, PLAYABLE, NON-CORRUPT 1280x720 long-form source
+        (technically real footage, just under the 1920x1080 requirement)
+        with no source_enhancement recorded yet -- a subsequent call with
+        qualification enabled must:
+          - never call submit_scene() (no regeneration, no second charge);
+          - call the explicit upscaler exactly once;
+          - register the final compliant output;
+          - charge zero for generation and only the upscale cost.
+        """
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(produce_width=1920, produce_height=1080)
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp(source_type="main_episode")
+        video_dir = tmp_path / "episodes" / "ep_test" / "video"
+        video_dir.mkdir(parents=True)
+        existing_path = video_dir / "sc_s01__extra1.mp4"
+        import subprocess
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=s=1280x720:r=24:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(existing_path)],
+            capture_output=True, timeout=30,
+        )
+        vp["asset_manifest"]["assets"].append({
+            "scene_id": "s01__extra1", "asset_id": "assets/s01__extra1",
+            "generation_status": "generated", "provider": "muapi", "model": "veo3.1-lite-text-to-video",
+            "tier_used": 2, "prompt_used": "p1", "fallback_used": False,
+            "planned_shot_id": "b_001__shot1", "generation_request_id": "gen-earlier-longform",
+            # A real, non-corrupt source that is merely under-resolution:
+            # technically_valid is False (resolution fails), but
+            # basic_integrity_ok is True (real playable footage) -- this
+            # is exactly the combination resumability must recognize.
+            "technically_valid": False,
+            "technical_detail": ["source resolution 1280x720 below required 1920x1080"],
+            "basic_integrity_ok": True, "source_enhancement": None,
+        })
+
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene") as mock_submit:
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        mock_submit.assert_not_called()
+        assert len(provider.calls) == 1
+        assert len(result["generated"]) == 1
+        assert result["generated"][0]["qualification"] == "passed"
+        assert result["total_generation_cost_usd"] == 0.0
+        assert result["total_upscale_cost_usd"] > 0.0
+
+    def test_resume_with_low_resolution_short_source_runs_upscale_exactly_once(self, tmp_path):
+        """Short-deliverable equivalent of the long-form resumability
+        proof above: a real 720x1280 portrait source (correct aspect
+        ratio, under the 1080x1920 Short resolution requirement) resumes
+        into exactly one upscale call and a registered compliant final
+        output, with zero regeneration cost."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(produce_width=1080, produce_height=1920)
+        register_provider("fake_qual", lambda: provider)
+
+        vp = self._make_vp(source_type="short")
+        video_dir = tmp_path / "episodes" / "ep_test" / "video"
+        video_dir.mkdir(parents=True)
+        existing_path = video_dir / "sc_s01__extra1.mp4"
+        import subprocess
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=s=720x1280:r=24:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(existing_path)],
+            capture_output=True, timeout=30,
+        )
+        vp["asset_manifest"]["assets"].append({
+            "scene_id": "s01__extra1", "asset_id": "assets/s01__extra1",
+            "generation_status": "generated", "provider": "muapi", "model": "veo3.1-lite-text-to-video",
+            "tier_used": 3, "prompt_used": "p1", "fallback_used": False,
+            "planned_shot_id": "b_001__shot1", "generation_request_id": "gen-earlier-short",
+            "technically_valid": False,
+            "technical_detail": ["source resolution 720x1280 below required 1080x1920"],
+            "basic_integrity_ok": True, "source_enhancement": None,
+        })
+
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene") as mock_submit:
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        mock_submit.assert_not_called()
+        assert len(provider.calls) == 1
+        assert len(result["generated"]) == 1
+        assert result["generated"][0]["qualification"] == "passed"
+        assert result["total_generation_cost_usd"] == 0.0
+        assert result["total_upscale_cost_usd"] > 0.0
+
+    def test_corrupt_source_never_reaches_upscale(self, tmp_path):
+        """A generated source that is corrupt/unreadable (integrity_valid
+        False) must be rejected before qualify_asset() ever runs -- the
+        explicit upscaler must never be invoked on genuinely broken
+        footage, only on real footage that merely falls short on
+        resolution."""
+        from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots
+        from hypogeum.providers.enhancement import register_provider
+        provider = _FakeUpscaleProvider(produce_width=1920, produce_height=1080)
+        register_provider("fake_qual", lambda: provider)
+
+        def _mock_submit_corrupt(scene_spec, config, episode_id, output_dir, agent, budget_guard=None):
+            if budget_guard is not None:
+                budget_guard.check_and_record_attempt(scene_spec["scene_id"], "veo3.1-lite-text-to-video")
+            path = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"NOT A REAL VIDEO FILE" * 1000)  # passes size floor, fails ffprobe
+            return {
+                "scene_id": scene_spec["scene_id"], "asset_id": f"assets/{scene_spec['scene_id']}",
+                "generation_status": "generated", "provider": "muapi",
+                "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
+                "prompt_used": scene_spec["production_spec"]["primary_prompt"],
+                "fallback_used": False, "failure_reason": None, "request_id": "gen-corrupt",
+            }
+
+        vp = self._make_vp()
+        missing = [{"beat_id": "b_001", "shot_id": "b_001__shot1", "scene_id": "s01", "short_id": None}]
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit_corrupt):
+            result = fill_confirmed_missing_shots(
+                missing_shots=missing, visual_package=vp, assets_root=tmp_path,
+                config=self._config(), episode_id="ep_test", episode_budget_credits=10.0,
+                require_source_qualification=True, upscale_budget_credits=10.0,
+            )
+
+        assert provider.calls == [], "the upscaler must never be called on a corrupt source"
+        assert len(result["generated"]) == 0
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["failure_reason"] == "generated source failed technical validation"
 
     def test_registration_blocked_when_upscale_fails(self, tmp_path):
         from hypogeum.agents.clip_repair_agent import fill_confirmed_missing_shots

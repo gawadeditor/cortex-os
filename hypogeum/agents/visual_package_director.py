@@ -617,6 +617,40 @@ def run_visual_package_director(
                 f"Stage A3 merged package failed validation: {exc.reason}. "
                 f"A1/A2 checkpoints preserved for debugging.",
             )
+
+        # Global scene_id uniqueness (2026-08-10) — every downstream stage
+        # (Cinematic Coverage Plan, Stage B prompts, per-shot allocation,
+        # provider submission) trusts scene_id as an already-unique key;
+        # nothing checked that assumption until now. Stage A2 batches are
+        # planned independently (each batch call has no visibility into
+        # what a different batch already named), so a collision across
+        # two batches is structurally possible and must be caught here,
+        # before Stage A4/Coverage Planning ever runs — not diagnosed
+        # later from downstream symptoms. See hypogeum.scene_identity for
+        # the fail-closed contract; A1/A2 checkpoints are preserved for
+        # debugging exactly like the schema-validation failure above.
+        from hypogeum.scene_identity import (  # noqa: PLC0415
+            SceneIdentityConflictError,
+            enforce_global_scene_identity,
+        )
+        try:
+            enforce_global_scene_identity(visual_package.get("scenes", []))
+        except SceneIdentityConflictError as exc:
+            log.error(
+                "vpd_stage_a3_scene_identity_conflict",
+                conflicts=[
+                    {
+                        "scene_id": c.scene_id,
+                        "conflicting_beat_ids": c.conflicting_beat_ids,
+                        "conflicting_deliverable_ids": c.conflicting_deliverable_ids,
+                        "failure_code": c.failure_code,
+                    }
+                    for c in exc.result.conflicts
+                ],
+                note="A1/A2 checkpoint files preserved — fix and rerun",
+            )
+            raise
+
         skeleton_path.write_text(
             json.dumps(visual_package, indent=2, ensure_ascii=False), encoding="utf-8"
         )

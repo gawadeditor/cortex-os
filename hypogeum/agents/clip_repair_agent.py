@@ -868,8 +868,18 @@ def plan_confirmed_shot_allocations(
     receive two distinct slots (tracked in-memory only, per call) — this
     is what makes the shot_id -> output_path mapping stable and
     collision-free within a batch, not just against pre-existing files.
+
+    Fail-closed on scene identity (2026-08-10): raises
+    SceneIdentityConflictError before computing any allocation if
+    visual_package's own scenes contain a duplicate scene_id — allocating
+    a destination path derived from a non-unique scene_id would be
+    non-deterministic (which beat does the resulting file really belong
+    to), so this must never silently proceed. See hypogeum.scene_identity.
     """
+    from hypogeum.scene_identity import enforce_global_scene_identity  # noqa: PLC0415
+
     scenes = visual_package.get("scenes", [])
+    enforce_global_scene_identity(scenes)
     short_id_by_scene = {s.get("scene_id"): s.get("short_id") for s in scenes}
     manifest_assets = (visual_package.get("asset_manifest") or {}).get("assets", [])
     manifest_extra_ids_by_scene = _manifest_extra_ids_by_scene(manifest_assets)
@@ -1076,11 +1086,18 @@ def fill_confirmed_missing_shots(
         submit_scene,
     )
     from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
+    from hypogeum.scene_identity import enforce_global_scene_identity  # noqa: PLC0415
 
     if log is None:
         log = get_logger(episode_id=episode_id, agent="clip_repair_agent")
 
     scenes: List[dict] = visual_package.get("scenes", [])
+    # Fail-closed on scene identity (2026-08-10), before any provider
+    # submission: a duplicate scene_id makes the generation destination
+    # non-deterministic (which beat does the resulting file belong to),
+    # so this must stop the whole batch rather than submit anything
+    # against an ambiguous scene. See hypogeum.scene_identity.
+    enforce_global_scene_identity(scenes)
     scene_by_id: Dict[str, dict] = {s["scene_id"]: s for s in scenes}
     plan_by_beat = {
         s.get("narration_reference"): (s.get("cinematic_coverage_plan") or {})

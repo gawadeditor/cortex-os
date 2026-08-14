@@ -173,6 +173,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
@@ -1236,6 +1237,352 @@ def compile_shot_prompt(scene: dict, shot: dict) -> dict:
         "prompt_checksum": checksum,
         "compiled_fields": list(REQUIRED_SHOT_FIELDS),
         "base_prompt_source": "scene_stage_b" if base_primary else "none",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shot-construction conflict guard (2026-08-14)
+#
+# A scene's Stage-B base prompt (production_spec.provider_routing.
+# primary_prompt) was written once, as a complete single-shot cinematic
+# description, before the Coverage Plan ever expanded that beat into
+# multiple shots. It legitimately carries two different kinds of content
+# mixed together in free text: SCENE INVARIANTS (location, period,
+# materials, environmental identity — true for every shot in the beat) and
+# a specific camera/composition/movement staging (true only for whichever
+# shot the base was originally written for). When a second, differently-
+# staged shot is compiled against that same base, its own directive is
+# appended afterward — but appending is not overriding: a longer, more
+# detailed base narrative can dominate a shorter appended clause in the
+# actual generated output, producing footage that matches the base's
+# staging regardless of what the shot's own structured fields say.
+#
+# This section adds a generic, schema-driven (not vocabulary-hardcoded)
+# detector for exactly that conflict, a deterministic neutralizer that
+# removes the conflicting sentences before compiling, and a fail-closed
+# guard for cases neutralization can't safely resolve. None of this reads
+# or writes anything specific to a channel, episode, or beat — every value
+# it compares comes from the shots' own structured fields.
+# ---------------------------------------------------------------------------
+
+# The shot-variable fields this guard checks. Each has a small, closed
+# vocabulary of enum-style values already used across a real Coverage Plan
+# (e.g. "centered_symmetry", "slow_push_in") — the guard tokenizes those
+# values themselves rather than maintaining any separate keyword list, so
+# it automatically covers whatever vocabulary a channel's own plan uses.
+CONSTRUCTION_CONFLICT_FIELDS: tuple[str, ...] = (
+    "shot_scale", "camera_angle", "camera_direction", "camera_movement", "composition",
+)
+
+# Fraction of a foreign (sibling) value's tokens that must appear in a base
+# sentence for that sentence to count as describing the foreign
+# construction. Two-word-or-fewer values need every token present (e.g.
+# "slow_push_in" -> {"slow","push","in"} needs "push" and something
+# unambiguous nearby); this ratio keeps a single common word from
+# triggering a false conflict on its own.
+_CONFLICT_TOKEN_MATCH_RATIO = 0.6
+_CONFLICT_MIN_TOKEN_LEN = 4   # ignore tokens too short to be meaningful signals
+_CONFLICT_STEM_LEN = 4        # compare token prefixes at this length, not
+                              # exact words, so "centered" (enum value)
+                              # still matches "center"/"centering" (base
+                              # prose) -- a plain stopword-free prefix
+                              # stem, not a hardcoded synonym list. Equal
+                              # to _CONFLICT_MIN_TOKEN_LEN so every token
+                              # that survives the length filter is
+                              # truncated to the same width regardless of
+                              # its natural length ("slow" and "slowly"
+                              # both -> "slow"; a longer stem would let a
+                              # short word and a long word's differing
+                              # tails desync the match).
+_STOPWORDS = frozenset({
+    # Generic English function words only -- nothing subject-, channel-,
+    # or episode-specific belongs in this set.
+    "the", "and", "with", "from", "into", "through", "over", "under",
+    "this", "that", "then", "than", "onto", "near", "along", "across",
+    "toward", "towards", "beyond", "above", "below", "against",
+})
+
+# General-purpose cinematography verb families, not tied to any channel,
+# episode, or subject matter -- these are the standard English verbs prose
+# uses for camera-movement concepts regardless of which enum word names
+# the concept. Free text describing a "push_in" movement routinely says
+# "approaches"/"advances"/"creeps forward" rather than the literal word
+# "push"; without this table those sentences are lexically invisible to
+# the conflict detector even though they describe the same construction.
+# Every key/value here is a generic film-grammar term, kept intentionally
+# small and reviewable.
+_MOVEMENT_VERB_SYNONYMS: dict = {
+    "push": {"approach", "advance", "creep", "near"},
+    "pull": {"retreat", "withdraw", "recede"},
+    "hold": {"halt", "stop", "lock", "still", "pause", "settl"},
+    "dolli": {"track", "glide", "slide"},  # "dolly" stemmed
+    "drift": {"wander", "sway"},
+    "descen": {"drop", "lower", "sink"},   # "descent"/"descend" stemmed
+    "ascen": {"rise", "climb"},            # "ascent"/"ascend" stemmed
+}
+
+
+# Precomputed, stemmed, bidirectional: every family's key AND its synonym
+# values map to the *same* full stemmed family set, so a token matching
+# any member (key or synonym) expands to every other member.
+_MOVEMENT_FAMILY_STEMS: dict = {}
+for _key, _synonyms in _MOVEMENT_VERB_SYNONYMS.items():
+    _family = {_key[:_CONFLICT_STEM_LEN]} | {s[:_CONFLICT_STEM_LEN] for s in _synonyms}
+    for _member_stem in _family:
+        _MOVEMENT_FAMILY_STEMS.setdefault(_member_stem, set()).update(_family)
+del _key, _synonyms, _family, _member_stem
+
+
+def _expand_movement_synonyms(tokens: set) -> set:
+    expanded = set(tokens)
+    for tok in tokens:
+        expanded |= _MOVEMENT_FAMILY_STEMS.get(tok, set())
+    return expanded
+
+
+class ShotConstructionConflictError(Exception):
+    """Raised when a scene's base prompt independently specifies a
+    shot-variable construction (composition, camera angle/direction/
+    movement, or shot scale) that conflicts with a sibling shot's own
+    declared value for that same field, AND that conflict could not be
+    resolved by deterministic sentence-level neutralization. Carries the
+    unresolved conflicts for inspection."""
+
+    def __init__(self, shot_id: str, conflicts: list):
+        self.shot_id = shot_id
+        self.conflicts = conflicts
+        detail = "; ".join(
+            f"{c['field']}: base sentence {c['sentence']!r} matches sibling "
+            f"{c['conflicting_shot_id']}'s value {c['conflicting_value']!r}, "
+            f"not this shot's own {c['own_value']!r}"
+            for c in conflicts
+        )
+        super().__init__(f"shot {shot_id!r}: unresolved base-prompt construction conflict(s): {detail}")
+
+
+def _tokenize_enum_value(value: str) -> set[str]:
+    """Tokenize into comparison stems: lowercase, split on non-letters,
+    drop stopwords and short tokens, truncate to a fixed prefix length so
+    word-form variants ("centered"/"center"/"centering",
+    "symmetry"/"symmetrical") collide on the same stem without a
+    hardcoded synonym table."""
+    if not value:
+        return set()
+    words = re.split(r"[^a-z]+", value.lower())
+    return {
+        w[:_CONFLICT_STEM_LEN] for w in words
+        if len(w) >= _CONFLICT_MIN_TOKEN_LEN and w not in _STOPWORDS
+    }
+
+
+def _split_sentences(text: str) -> list[str]:
+    # Deterministic, punctuation-based split. Good enough for this
+    # module's own generated prose (short declarative sentences,
+    # standard '.' terminators) without pulling in an NLP dependency.
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    return [p for p in parts if p.strip()]
+
+
+def detect_shot_construction_conflicts(shot: dict, base_prompt: str, sibling_shots: list) -> list:
+    """
+    Generic, schema-driven conflict detector. For each field in
+    CONSTRUCTION_CONFLICT_FIELDS, compares this shot's own declared value
+    against every sibling shot's value for the same field (sibling =
+    another shot in shot['parent_beat_id'], excluding this shot itself).
+    Where a sibling's value differs from this shot's own, scans
+    base_prompt's sentences for strong token overlap with the sibling's
+    (foreign) value — evidence the base prose independently describes that
+    foreign construction rather than this shot's own.
+
+    Returns a list of conflict dicts: {field, sentence, conflicting_shot_id,
+    conflicting_value, own_value}. Empty list means no conflict detected.
+    """
+    conflicts = []
+    sentences = _split_sentences(base_prompt)
+
+    for field in CONSTRUCTION_CONFLICT_FIELDS:
+        own_value = shot.get(field)
+        if not own_value:
+            continue
+        own_tokens = _tokenize_enum_value(own_value)
+
+        seen_foreign_values = set()
+        for sibling in sibling_shots:
+            if sibling.get("shot_id") == shot.get("shot_id"):
+                continue
+            foreign_value = sibling.get(field)
+            if not foreign_value or foreign_value == own_value or foreign_value in seen_foreign_values:
+                continue
+            seen_foreign_values.add(foreign_value)
+            foreign_tokens = _tokenize_enum_value(foreign_value)
+            if not foreign_tokens or foreign_tokens <= own_tokens:
+                continue  # foreign value's tokens are a subset of our own -- not a real conflict signal
+
+            # A short (<=2-token) enum value like "centered_symmetry" often
+            # only has one of its two concept words actually echoed in free
+            # prose ("...occupies the center of the frame" without ever
+            # saying "symmetry"/"symmetrical"). Requiring a ratio there
+            # would miss a real, specific match. Longer values keep the
+            # ratio requirement so a single common word can't trigger a
+            # false positive on its own.
+            required = 1 if len(foreign_tokens) <= 2 else max(2, round(len(foreign_tokens) * _CONFLICT_TOKEN_MATCH_RATIO))
+
+            for sentence in sentences:
+                sentence_tokens = _tokenize_enum_value(sentence)
+                if field == "camera_movement":
+                    # Prose almost never uses the literal enum verb root
+                    # ("push") -- it says "approaches"/"creeps forward".
+                    sentence_tokens = _expand_movement_synonyms(sentence_tokens)
+                overlap = foreign_tokens & sentence_tokens
+                if len(overlap) >= required:
+                    # Don't flag a sentence whose match against OUR OWN
+                    # value is at least as strong as its match against the
+                    # foreign one -- that's this shot's own construction
+                    # being described, not evidence of the foreign one. A
+                    # compound sentence that clearly names the foreign
+                    # construction too (e.g. an approach *and* a hold in
+                    # one clause) still gets flagged; only a sentence more
+                    # about our own value than the foreign one is spared.
+                    own_overlap = own_tokens & sentence_tokens
+                    if len(own_overlap) > len(overlap):
+                        continue
+                    conflicts.append({
+                        "field": field, "sentence": sentence.strip(),
+                        "conflicting_shot_id": sibling.get("shot_id"),
+                        "conflicting_value": foreign_value, "own_value": own_value,
+                    })
+
+    # Lighting placement (requirement: a shot-variable instruction that
+    # must be authoritative per-shot). lighting_direction is free text, not
+    # a controlled enum, so it can't use the same sibling-value comparison
+    # as the fields above. What IS generically detectable without any
+    # hardcoded vocabulary: an explicit negation in *this* shot's own
+    # lighting_direction ("no visible flame", "without a torch") naming a
+    # light-source noun that the shared base prompt independently affirms
+    # as present. That is a direct, self-contradictory conflict regardless
+    # of what the noun is.
+    own_lighting = shot.get("lighting_direction") or ""
+    own_lighting_lower = own_lighting.lower()
+    negated_nouns = set()
+    for clause_match in re.finditer(
+        r"\bno(?:t|ne)?\s+(?:visible\s+|the\s+)?([a-z][a-z\s,]*?)(?=[;.,]|$)"
+        r"|\bwithout\s+(?:a\s+|an\s+|the\s+)?([a-z][a-z\s,]*?)(?=[;.,]|$)",
+        own_lighting_lower,
+    ):
+        clause = clause_match.group(1) or clause_match.group(2) or ""
+        for phrase in re.split(r"\s+or\s+|\s+and\s+|,", clause):
+            # Every word in the noun phrase is a candidate, not just the
+            # head noun -- "torch source" should flag both "torch" and
+            # "source" as absent, since either word appearing affirmed
+            # elsewhere is evidence of the negated construction.
+            for word in phrase.strip().split(" "):
+                if word:
+                    negated_nouns.add(word)
+    negated_nouns -= _STOPWORDS
+    negated_nouns = {n for n in negated_nouns if len(n) >= _CONFLICT_MIN_TOKEN_LEN}
+    if negated_nouns:
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            for noun in negated_nouns:
+                if noun in sentence_lower and not re.search(rf"\b(no|without|not)\b[^.]*\b{re.escape(noun)}", sentence_lower):
+                    conflicts.append({
+                        "field": "lighting_direction", "sentence": sentence.strip(),
+                        "conflicting_shot_id": "scene_base", "conflicting_value": noun,
+                        "own_value": own_lighting,
+                    })
+                    break
+    return conflicts
+
+
+def compile_authoritative_shot_prompt(scene: dict, shot: dict, sibling_shots: Optional[list] = None) -> dict:
+    """
+    Compile one planned shot's prompt with shot-variable direction
+    authoritative over the scene's shared base prompt.
+
+    Unlike compile_shot_prompt() (which blindly concatenates base + shot
+    directive), this function:
+      1. Detects base-prompt sentences that independently describe a
+         sibling shot's construction (detect_shot_construction_conflicts).
+      2. Neutralizes them by removing those specific sentences from a
+         working copy of the base prompt -- never the base prompt actually
+         stored on the scene, which still owns the record of what shot1
+         (or whichever shot the base was authored for) actually used.
+      3. Re-checks for conflicts against the neutralized text. If any
+         remain, raises ShotConstructionConflictError (fail-closed) rather
+         than silently compiling a still-conflicted prompt.
+      4. Assembles the final prompt as two explicitly labeled, precedence-
+         ordered sections: scene continuity, then this shot's own
+         authoritative direction.
+
+    sibling_shots defaults to every other shot in
+    scene["cinematic_coverage_plan"]["shots"] sharing this shot's
+    parent_beat_id, when not given explicitly.
+
+    Returns the same shape as compile_shot_prompt(), plus:
+        "neutralized_sentences": [str, ...]  -- base sentences removed
+        "conflicts_detected": int
+    """
+    missing = [f for f in REQUIRED_SHOT_FIELDS if not str(shot.get(f, "")).strip()
+               and shot.get(f) not in (0, 0.0)]
+    if missing:
+        raise CoveragePlanSyncError(
+            f"shot {shot.get('shot_id')!r} is missing required field(s) "
+            f"{missing} — refusing to compile an incomplete prompt"
+        )
+
+    if sibling_shots is None:
+        plan = scene.get("cinematic_coverage_plan") or {}
+        sibling_shots = [
+            sh for sh in plan.get("shots", [])
+            if sh.get("parent_beat_id") == shot.get("parent_beat_id")
+        ]
+
+    routing = (scene.get("production_spec", {}) or {}).get("provider_routing", {}) or {}
+    base_primary = (routing.get("primary_prompt") or "").strip()
+    base_fallback = (routing.get("fallback_prompt") or "").strip()
+
+    def _neutralize(base_text: str) -> tuple:
+        conflicts = detect_shot_construction_conflicts(shot, base_text, sibling_shots)
+        removed = sorted({c["sentence"] for c in conflicts}, key=len, reverse=True)
+        neutralized = base_text
+        for sentence in removed:
+            neutralized = neutralized.replace(sentence, "").strip()
+        neutralized = " ".join(neutralized.split())  # collapse whitespace left by removal
+        remaining_conflicts = detect_shot_construction_conflicts(shot, neutralized, sibling_shots)
+        if remaining_conflicts:
+            raise ShotConstructionConflictError(shot["shot_id"], remaining_conflicts)
+        return neutralized, removed, len(conflicts)
+
+    neutralized_primary, removed_primary, n_conflicts = _neutralize(base_primary) if base_primary else ("", [], 0)
+    neutralized_fallback, removed_fallback, _ = _neutralize(base_fallback) if base_fallback else ("", [], 0)
+
+    directive = _render_shot_directive(shot)
+    authoritative_directive = (
+        f"SHOT-SPECIFIC DIRECTION FOR {shot['shot_id']} "
+        f"(AUTHORITATIVE — supersedes any conflicting camera angle, shot scale, "
+        f"composition, subject placement, or movement described above): {directive}"
+    )
+
+    if neutralized_primary:
+        primary_prompt = f"SCENE CONTINUITY (setting, period, materials — not authoritative for camera, composition, or movement): {neutralized_primary} {authoritative_directive}"
+    else:
+        primary_prompt = authoritative_directive
+    if neutralized_fallback:
+        fallback_prompt = f"SCENE CONTINUITY (setting, period, materials — not authoritative for camera, composition, or movement): {neutralized_fallback} {authoritative_directive}"
+    else:
+        fallback_prompt = authoritative_directive
+
+    checksum = hashlib.sha256(primary_prompt.encode("utf-8")).hexdigest()
+
+    return {
+        "shot_id": shot["shot_id"],
+        "primary_prompt": primary_prompt,
+        "fallback_prompt": fallback_prompt,
+        "prompt_checksum": checksum,
+        "compiled_fields": list(REQUIRED_SHOT_FIELDS),
+        "base_prompt_source": "scene_stage_b" if base_primary else "none",
+        "neutralized_sentences": removed_primary,
+        "conflicts_detected": n_conflicts,
     }
 
 

@@ -82,6 +82,7 @@ import random
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar, Optional
 
@@ -94,6 +95,8 @@ import hypogeum.finance as _finance
 from hypogeum.brand import visual_identity
 from hypogeum import video_dna
 from hypogeum import video_prompt_writer
+from hypogeum import shadow_observation as _shadow_observation
+from hypogeum.execution_envelope import GenerationExecutionEnvelope
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +582,7 @@ def submit_scene(
     episode_id_for_asset: Optional[str] = None,
     agent: Optional[str] = None,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    shadow_evidence: Optional["_shadow_observation.ShadowEvidence"] = None,
 ) -> dict:
     """
     Generate a video clip for one scene and return the asset manifest entry.
@@ -621,6 +625,25 @@ def submit_scene(
       MUAPIAuthFailure    — HTTP 401 anywhere in the call chain.
       MUAPIQuotaExhausted — HTTP 402 anywhere in the call chain.
       MUAPIBudgetExhausted — episode/scene budget limit reached (M5.6).
+
+    shadow_evidence (Commit 4, 2026-08-15): optional
+    hypogeum.shadow_observation.ShadowEvidence bundle. Every attempt this
+    call makes is *automatically* evaluated by the non-mutating shared
+    submission gate (hypogeum.shadow_observation.evaluate_shadow())
+    immediately before the real HTTP submission -- this happens whether
+    or not shadow_evidence is supplied at all, matching the Core
+    Shadow-Mode Rule ("every MUAPI provider-bound operation must
+    automatically produce a gate observation"). Omitting shadow_evidence
+    entirely (the default, and every existing caller's current calling
+    convention, unchanged) simply means every check evaluates with no
+    envelope and no other evidence, producing one UNVERIFIABLE decision
+    per attempt with blocker "missing_generation_execution_envelope" --
+    this is expected and correct for a legacy call, not an error. The
+    decision is durably recorded via a hypogeum.shadow_observation.
+    ShadowObservationStore rooted at this call's own output_dir (or
+    shadow_evidence.shadow_store, if the caller supplied one). This
+    NEVER blocks, delays, retries, or otherwise changes this call's real
+    behavior in any way -- shadow mode is observation only.
     """
     scene_id = scene_spec["scene_id"]
     short_id = scene_spec.get("short_id")
@@ -698,6 +721,7 @@ def submit_scene(
         log=log,
         is_fallback=False,
         budget_guard=budget_guard,
+        shadow_evidence=shadow_evidence,
     )
     if manifest is not None:
         return manifest
@@ -753,6 +777,7 @@ def submit_scene(
         log=log,
         is_fallback=True,
         budget_guard=budget_guard,
+        shadow_evidence=shadow_evidence,
     )
     if manifest is not None:
         return manifest
@@ -1999,6 +2024,81 @@ def _generate_dry_run_placeholder_clip(
     )
 
 
+def _run_shadow_observation(
+    *,
+    envelope: Optional[GenerationExecutionEnvelope],
+    shadow_evidence: Optional["_shadow_observation.ShadowEvidence"],
+    output_dir: Path,
+    episode_id: str,
+    short_id: Optional[str],
+    prompt: str,
+    model: str,
+    aspect_ratio: str,
+    requested_duration: float,
+    scene_id: str,
+    log,
+) -> None:
+    """
+    The one place hypogeum.muapi calls into hypogeum.shadow_observation.
+    Always runs, always non-mutating, and never allowed to affect the
+    real generation attempt that follows it -- every exception this
+    function's own body could raise is caught here, at the outermost
+    level, and turned into a structured error log event
+    (muapi_shadow_observation_failed) rather than propagating. This is
+    what makes "Shadow logging failure must be visible as structured
+    evidence... never silently ignored" (Part 3 requirement 9) hold
+    without also making shadow-mode instrumentation itself capable of
+    breaking a real (or dry-run) generation call.
+
+    Dominance-leak validation: if envelope.channel_id == "hypogeum" and
+    the caller did not already supply a dominance_leak_validator, this
+    function loads hypogeum.hypogeum_channel_validators's Hypogeum-
+    specific validator -- never inlined here, and never imported by
+    hypogeum.shadow_observation or hypogeum.submission_gate (Factory
+    Core stays channel-agnostic; only this integration layer knows
+    Hypogeum exists).
+    """
+    try:
+        evidence = shadow_evidence or _shadow_observation.ShadowEvidence()
+        dominance_validator = evidence.dominance_leak_validator
+        if dominance_validator is None and envelope is not None and envelope.channel_id == "hypogeum":
+            sibling_prompts = evidence.sibling_prompts
+
+            def dominance_validator(env, _siblings=sibling_prompts):  # noqa: PLC0415
+                from hypogeum import hypogeum_channel_validators  # noqa: PLC0415
+                loaded = hypogeum_channel_validators.load_dominance_leak_validator(
+                    env.channel_id, sibling_prompts=_siblings,
+                )
+                return loaded(env)
+
+        decision = _shadow_observation.evaluate_shadow(
+            envelope, at=datetime.now(timezone.utc).isoformat(),
+            execution_id=episode_id, deliverable=short_id,
+            actual_provider_bound_content=prompt, actual_provider="muapi", actual_model=model,
+            actual_provider_operation="video.text_to_video",
+            live_sources=evidence.live_sources, authorization=evidence.authorization,
+            lease_conn=evidence.lease_conn, lease_owner_id=evidence.lease_owner_id,
+            lease_fencing_token=evidence.lease_fencing_token,
+            receipt_store=evidence.receipt_store, budget_scopes=evidence.budget_scopes,
+            dominance_leak_validator=dominance_validator,
+            expected_aspect_ratio=aspect_ratio,
+            expected_deterministic_output_path=str(scene_file_path(output_dir, scene_id, short_id)),
+            output_already_exists=False,
+        )
+        store = evidence.shadow_store or _shadow_observation.ShadowObservationStore(output_dir)
+        store.record(decision)
+        log.info(
+            "muapi_shadow_observation_recorded",
+            scene_id=scene_id, decision_id=decision.decision_id, verdict=decision.verdict,
+            first_failing_check=decision.first_failing_check,
+        )
+    except Exception as exc:  # noqa: BLE001 — must be visible, must never break real generation
+        log.error(
+            "muapi_shadow_observation_failed",
+            scene_id=scene_id, error=f"{type(exc).__name__}: {exc}",
+        )
+
+
 def _attempt_generation(
     prompt: str,
     tier: int,
@@ -2013,6 +2113,7 @@ def _attempt_generation(
     log,
     is_fallback: bool,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    shadow_evidence: Optional["_shadow_observation.ShadowEvidence"] = None,
 ) -> tuple[Optional[dict], Optional[str]]:
     """
     Execute one generation attempt: submit → poll → download → validate.
@@ -2033,6 +2134,23 @@ def _attempt_generation(
     # M5.6 — Budget check before paid submission (skipped in dry-run — no real cost)
     if budget_guard is not None and not config.MUAPI_DRY_RUN:
         budget_guard.check_and_record_attempt(scene_id, model)
+
+    # --- Commit 4 (2026-08-15): non-mutating shadow-mode gate observation.
+    # Runs unconditionally, on every attempt, immediately before the real
+    # network boundary -- the Core Shadow-Mode Rule requires this happen
+    # "automatically", never opt-in. Never blocks, delays, retries, or
+    # changes anything about the actual submission below: this entire
+    # block only evaluates and records; a failure inside it is itself
+    # caught and logged, never allowed to affect generation. See
+    # hypogeum.shadow_observation.evaluate_shadow()'s own docstring for
+    # why an evaluation exception becomes a structured UNVERIFIABLE
+    # decision rather than propagating.
+    _run_shadow_observation(
+        envelope=shadow_evidence.envelope if shadow_evidence else None,
+        shadow_evidence=shadow_evidence, output_dir=output_dir, episode_id=episode_id,
+        short_id=short_id, prompt=prompt, model=model, aspect_ratio=aspect_ratio,
+        requested_duration=requested_duration, scene_id=scene_id, log=log,
+    )
 
     # Submit (with HTTP retry on transient errors)
     request_id, failure_reason = _submit_http(endpoint, payload, config, scene_id, log)

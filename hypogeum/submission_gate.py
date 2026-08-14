@@ -59,6 +59,8 @@ __all__ = [
     "GateResult",
     "GATE_CHECK_ORDER",
     "submit",
+    "CheckOutcome",
+    "run_shadow_checks",
 ]
 
 # Recovery states a retry attempt may safely resume from -- only a
@@ -737,3 +739,117 @@ def _mint_capability(
     import dataclasses
     checksum = compute_capability_checksum(capability)
     return dataclasses.replace(capability, capability_checksum=checksum)
+
+
+# ---------------------------------------------------------------------------
+# Non-mutating shadow evaluation (Commit 4 / Part 1)
+#
+# run_shadow_checks() reuses the exact same private check functions
+# submit() itself calls -- never a second, independently-maintained
+# checklist -- but never proceeds past check evaluation: no budget
+# reservation, no write-ahead persistence, no capability minting, no
+# adapter call, no lease/breaker mutation. Missing evidence for a given
+# check (e.g. no AuthorizationRecord supplied) is reported as
+# "unverifiable" for that check, never silently skipped as "pass".
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CheckOutcome:
+    check: str
+    status: str  # "pass" | "fail" | "unverifiable"
+    detail: Optional[str] = None
+
+
+def run_shadow_checks(
+    envelope: Optional[GenerationExecutionEnvelope],
+    *,
+    live_sources: Optional[LiveSources] = None,
+    required_provider: Optional[str] = None,
+    required_model: Optional[str] = None,
+    dominance_leak_validator=None,
+    expected_duration_seconds: Optional[Decimal] = None,
+    expected_aspect_ratio: Optional[str] = None,
+    expected_seed: Optional[int] = None,
+    expected_output_identity: Optional[str] = None,
+    expected_deterministic_output_path: Optional[str] = None,
+    output_already_exists: Optional[bool] = None,
+    authorization: Optional[AuthorizationRecord] = None,
+    lease_conn=None,
+    lease_owner_id: Optional[str] = None,
+    lease_fencing_token: Optional[int] = None,
+    receipt_store=None,
+    execution_id: Optional[str] = None,
+    retry_context: Optional[RetryContext] = None,
+    fallback_context: Optional[FallbackContext] = None,
+    budget_scopes: Optional[Sequence[bs.ScopeRequest]] = None,
+    at: str,
+) -> Sequence[CheckOutcome]:
+    """
+    Runs GATE_CHECK_ORDER's checks against whatever evidence was
+    supplied, in the same order submit() evaluates them, and returns one
+    CheckOutcome per check -- "unverifiable" (never "pass") for any check
+    whose required evidence was not supplied. Never mutates anything:
+    no DB write, no file write, no adapter call.
+
+    A caller (e.g. hypogeum.shadow_observation.evaluate_shadow()) is
+    responsible for turning this list into a final verdict and for
+    catching any exception this function itself might raise (a
+    malformed input can still raise here -- the caller's job is to
+    convert that into structured UNVERIFIABLE evidence, per Part 1
+    requirement 8; this function does not swallow exceptions itself,
+    so callers always see the real failure).
+    """
+    outcomes: list = []
+
+    if envelope is None:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[0], "unverifiable", "missing_generation_execution_envelope"))
+        return tuple(outcomes)
+
+    if live_sources is None:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[5], "unverifiable", "no live_sources supplied -- cannot verify dependency freshness"))
+    else:
+        denial = _validate_envelope_and_sources(envelope, live_sources, required_model, required_provider, dominance_leak_validator)
+        if denial:
+            outcomes.append(CheckOutcome(denial.check, "fail", denial.reason))
+        else:
+            outcomes.append(CheckOutcome("01-16_envelope_sources_binding", "pass"))
+
+    binding_denial = _validate_execution_binding(
+        envelope, expected_duration_seconds, expected_aspect_ratio, expected_seed,
+        expected_output_identity, expected_deterministic_output_path, bool(output_already_exists),
+    )
+    if binding_denial:
+        outcomes.append(CheckOutcome(binding_denial.check, "fail", binding_denial.reason))
+    else:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[14], "pass"))
+
+    if authorization is None:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[2], "unverifiable", "no authorization record supplied"))
+    else:
+        denial = _validate_authorization(envelope, authorization, at)
+        outcomes.append(CheckOutcome(denial.check, "fail", denial.reason) if denial else CheckOutcome(GATE_CHECK_ORDER[2], "pass"))
+
+    if lease_conn is None or lease_owner_id is None or lease_fencing_token is None:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[18], "unverifiable", "no lease evidence supplied"))
+    else:
+        denial = _validate_lease(lease_conn, envelope, lease_owner_id, lease_fencing_token, at)
+        outcomes.append(CheckOutcome(denial.check, "fail", denial.reason) if denial else CheckOutcome(GATE_CHECK_ORDER[18], "pass"))
+
+    if receipt_store is None or execution_id is None:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[4], "unverifiable", "no receipt store/execution_id supplied -- cannot verify recovery/idempotency state"))
+    else:
+        denial, _state = _validate_recovery_state(receipt_store, execution_id, envelope, retry_context)
+        outcomes.append(CheckOutcome(denial.check, "fail", denial.reason) if denial else CheckOutcome(GATE_CHECK_ORDER[4], "pass"))
+
+    retry_fallback_denial = _validate_retry_fallback_authorization(envelope, retry_context, fallback_context)
+    if retry_fallback_denial:
+        outcomes.append(CheckOutcome(retry_fallback_denial.check, "fail", retry_fallback_denial.reason))
+    else:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[17], "pass"))
+
+    if not budget_scopes:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[16], "unverifiable", "no budget scopes supplied"))
+    else:
+        outcomes.append(CheckOutcome(GATE_CHECK_ORDER[16], "pass", "scope configuration present (no reservation attempted in shadow mode)"))
+
+    return tuple(outcomes)

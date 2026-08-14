@@ -65,6 +65,73 @@ def check_provenance(entry: dict) -> dict:
     return prov
 
 
+def is_entry_active(entry: dict) -> tuple[bool, Optional[str]]:
+    """Returns (is_active, inconsistency_reason). An entry is active iff
+    every terminal-state field on it (if present) says "active"; absence
+    of a field means "active" -- the exact default the single-shot canary
+    gate (_resolve_authorization's own check) uses:
+    entry.get("canary_status", "active"). If two such fields disagree,
+    that is a state inconsistency a caller must not silently resolve."""
+    statuses = {}
+    for field in ("canary_status", "authorization_status"):
+        if field in entry:
+            statuses[field] = entry[field]
+    values = set(statuses.values())
+    if len(values) > 1:
+        return False, f"conflicting state fields: {statuses}"
+    if values and next(iter(values)) != "active":
+        return False, None
+    return True, None
+
+
+def resolve_active_entries(manifest: dict) -> tuple[list, list]:
+    """Splits manifest["entries"] into (active, inactive) using
+    is_entry_active(). Never trusts any top-level summary field
+    (active_entry_count, etc.) -- callers must always recompute from the
+    entries themselves. Each returned active entry is a shallow copy
+    carrying an extra "_state_inconsistency" key; callers must treat a
+    non-None value as a blocker, never silently resolve it."""
+    active, inactive = [], []
+    for entry in manifest.get("entries", []):
+        active_flag, inconsistency = is_entry_active(entry)
+        entry = dict(entry)  # never mutate the caller's manifest dict
+        entry["_state_inconsistency"] = inconsistency
+        (active if active_flag else inactive).append(entry)
+    return active, inactive
+
+
+def scene_by_beat(scenes: list) -> tuple[dict, set]:
+    """Maps beat_id -> scene via scene["narration_reference"], the exact
+    lookup key hypogeum.agents.clip_repair_agent.fill_confirmed_missing_
+    shots() uses (plan_by_beat) to find a shot's real embedded coverage
+    plan. Returns (by_beat, duplicate_beats) -- a beat mapping to more
+    than one scene is a structural conflict, never silently resolved by
+    picking one."""
+    by_beat: dict = {}
+    dupes: set = set()
+    for s in scenes:
+        beat = s.get("narration_reference")
+        if beat is None:
+            continue
+        if beat in by_beat:
+            dupes.add(beat)
+        by_beat.setdefault(beat, s)
+    return by_beat, dupes
+
+
+def find_planned_shot(scene: dict, shot_id: str) -> tuple[Optional[dict], int]:
+    """Finds shot_id in scene["cinematic_coverage_plan"]["shots"] -- the
+    only copy hypogeum.agents.clip_repair_agent ever reads, and the exact
+    canonical embedded/live production source real submission resolves a
+    planned shot from. Returns (shot_or_None, match_count) so a caller can
+    distinguish "not found" from "found more than once"."""
+    plan = scene.get("cinematic_coverage_plan") or {}
+    matches = [sh for sh in plan.get("shots", []) if sh.get("shot_id") == shot_id]
+    if not matches:
+        return None, 0
+    return matches[0], len(matches)
+
+
 def resolve_model_and_cost(config: Config, tier: int, required_model: str, max_charge_usd: float) -> tuple[str, float]:
     """Resolves the model a given tier would actually receive from the
     current Config, verifies it matches required_model, and verifies its

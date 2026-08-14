@@ -71,7 +71,11 @@ from hypogeum.agents.clip_repair_agent import (                             # no
 from hypogeum.canary_preflight import (                                     # noqa: E402
     check_prompt_checksum,
     check_provenance,
+    find_planned_shot,
+    is_entry_active,
+    resolve_active_entries,
     resolve_model_and_cost,
+    scene_by_beat,
     sha256_text,
 )
 from hypogeum.canary_preflight import CanaryPreflightError as _CheckError   # noqa: E402
@@ -115,46 +119,6 @@ def _episode_dir(assets_root: Path, episode_id: str) -> Path:
     return assets_root / "episodes" / episode_id
 
 
-def _is_entry_active(entry: dict) -> tuple[bool, Optional[str]]:
-    """Returns (is_active, inconsistency_reason). An entry is active iff
-    every terminal-state field on it (if present) says "active"; absence
-    of a field means "active" (matches the exact default
-    tools/muapi_canary_submit.py's own authorization_active gate uses:
-    entry.get("canary_status", "active")). If two such fields disagree,
-    that is a state inconsistency the batch must not silently resolve."""
-    statuses = {}
-    for field in ("canary_status", "authorization_status"):
-        if field in entry:
-            statuses[field] = entry[field]
-    values = set(statuses.values())
-    if len(values) > 1:
-        return False, f"conflicting state fields: {statuses}"
-    if values and next(iter(values)) != "active":
-        return False, None
-    return True, None
-
-
-def _scene_by_beat(scenes: list) -> dict:
-    by_beat: dict = {}
-    dupes: set = set()
-    for s in scenes:
-        beat = s.get("narration_reference")
-        if beat is None:
-            continue
-        if beat in by_beat:
-            dupes.add(beat)
-        by_beat.setdefault(beat, s)
-    return by_beat, dupes
-
-
-def _find_planned_shot(scene: dict, shot_id: str) -> tuple[Optional[dict], int]:
-    plan = scene.get("cinematic_coverage_plan") or {}
-    matches = [sh for sh in plan.get("shots", []) if sh.get("shot_id") == shot_id]
-    if not matches:
-        return None, 0
-    return matches[0], len(matches)
-
-
 def _already_registered_shot_ids(visual_package: dict, output_dir: Path) -> set:
     """Shot IDs whose planned_shot_id already has a generated, on-disk,
     registered clip in asset_manifest -- the same resumability signal
@@ -192,19 +156,6 @@ def _has_authoritative_marker(prompt: str, shot_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Core resolution
 # ---------------------------------------------------------------------------
-
-def resolve_active_entries(manifest: dict) -> tuple[list, list]:
-    """Splits manifest["entries"] into (active, inactive). Never trusts
-    any top-level summary field (active_entry_count, etc.) -- always
-    recomputed from the entries themselves."""
-    active, inactive = [], []
-    for entry in manifest.get("entries", []):
-        is_active, inconsistency = _is_entry_active(entry)
-        entry = dict(entry)  # never mutate the caller's manifest dict
-        entry["_state_inconsistency"] = inconsistency
-        (active if is_active else inactive).append(entry)
-    return active, inactive
-
 
 def run_batch_preflight(args: argparse.Namespace) -> dict:
     """Runs every fail-closed check against every active manifest entry.
@@ -281,7 +232,7 @@ def run_batch_preflight(args: argparse.Namespace) -> dict:
                 "reason": entry["_state_inconsistency"],
             })
 
-    scene_by_beat, duplicate_beats = _scene_by_beat(scenes)
+    beat_to_scene, duplicate_beats = scene_by_beat(scenes)
     for beat in duplicate_beats:
         blockers.append({
             "check": "beat_maps_to_multiple_scenes",
@@ -316,7 +267,7 @@ def run_batch_preflight(args: argparse.Namespace) -> dict:
             per_entry.append(result)
             continue
 
-        scene = scene_by_beat.get(beat_id)
+        scene = beat_to_scene.get(beat_id)
         if scene is None:
             blockers.append({
                 "check": "no_exact_canonical_shot_match",
@@ -327,7 +278,7 @@ def run_batch_preflight(args: argparse.Namespace) -> dict:
             per_entry.append(result)
             continue
 
-        planned_shot, match_count = _find_planned_shot(scene, shot_id)
+        planned_shot, match_count = find_planned_shot(scene, shot_id)
         if match_count == 0:
             blockers.append({
                 "check": "no_exact_canonical_shot_match",

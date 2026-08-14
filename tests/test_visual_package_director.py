@@ -2763,8 +2763,10 @@ class TestVPDCoveragePlanOrchestration:
     def test_distinct_shots_pass_and_get_distinct_rendered_prompts(self, tmp_path):
         """A valid multi-shot plan passes the gate, and by the time VPD
         returns, every shot in the plan already carries its own distinct,
-        continuity-preserving rendered prompt -- proof
-        render_coverage_plan_shot_prompts() ran after Stage B."""
+        continuity-preserving rendered prompt with its own direction
+        authoritative over the scene's shared base -- proof
+        render_coverage_plan_shot_prompts() ran after Stage B through the
+        current compile_authoritative_shot_prompt() compiler."""
         config = make_config()
         script_pkg = _make_script_package()
         plan = _make_visual_package()
@@ -2788,5 +2790,9 @@ class TestVPDCoveragePlanOrchestration:
 
         base_prompt = scene["production_spec"]["provider_routing"]["primary_prompt"]
         assert base_prompt  # Stage B ran and wrote the scene's own base prompt
-        assert shots[0]["primary_prompt"].startswith(base_prompt)
-        assert shots[1]["primary_prompt"].startswith(base_prompt)
+        assert "SCENE CONTINUITY" in shots[0]["primary_prompt"]
+        assert "SCENE CONTINUITY" in shots[1]["primary_prompt"]
+        assert f"SHOT-SPECIFIC DIRECTION FOR {shots[0]['shot_id']}" in shots[0]["primary_prompt"]
+        assert f"SHOT-SPECIFIC DIRECTION FOR {shots[1]['shot_id']}" in shots[1]["primary_prompt"]
+        assert "AUTHORITATIVE" in shots[0]["primary_prompt"]
+        assert "AUTHORITATIVE" in shots[1]["primary_prompt"]

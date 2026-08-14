@@ -171,6 +171,8 @@ must never construct prompt text itself.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
@@ -1115,3 +1117,236 @@ def render_coverage_plan_shot_prompts(scene: dict) -> None:
         shot["fallback_prompt"] = (
             f"{base_fallback} {directive}".strip() if base_fallback else directive
         )
+
+
+# ---------------------------------------------------------------------------
+# Standalone-plan → embedded-plan shot sync (2026-08-14)
+#
+# The Cinematic Coverage Plan exists in two places that must stay in sync
+# but have no automatic mechanism to do so: the standalone per-episode
+# document (episodes/{id}/cinematic_coverage_plan_{id}.json, the shot-design
+# source of record — beat_id/shot_order/subject/camera fields/etc, no
+# rendered prompt text) and each scene's own embedded copy inside
+# visual_package["scenes"][i]["cinematic_coverage_plan"] (what
+# render_coverage_plan_shot_prompts() above actually writes prompts onto,
+# and the only copy hypogeum.agents.clip_repair_agent ever reads).
+#
+# Normal VPD execution builds both together in one pass, so they start in
+# sync. There was previously no supported way to add shots to the
+# standalone plan after that initial pass (a plan amendment, a coverage-
+# deficit fix, a hand-authored beat revision) and have those shots ever
+# reach clip_repair_agent — the embedded copy simply wouldn't know they
+# exist, and repair would fail closed on a shot it can't find, or worse,
+# on a shot it finds by shot_id in the standalone plan but never in the
+# copy it actually iterates. This function is that missing bridge: merge
+# any shot present in the standalone plan but absent from a scene's
+# embedded copy, then re-run render_coverage_plan_shot_prompts() so the
+# newly merged shots get their own prompt text — never a copy of another
+# shot's, never the bare scene-level base prompt on its own.
+# ---------------------------------------------------------------------------
+
+class CoveragePlanSyncError(Exception):
+    """Raised when a standalone-plan shot cannot be safely synced.
+
+    Covers both "incomplete" (missing a field render_coverage_plan_shot_prompts
+    or the schema requires) and "contradictory" (same shot_id already exists
+    in the embedded copy with different structured content) inputs. Never
+    raised for a shot that is simply new — that is the normal case this
+    function exists to handle.
+    """
+
+
+# The structured fields render_coverage_plan_shot_prompts()/_render_shot_directive()
+# actually read, plus the identity/schema fields every shot must carry
+# (mirrors hypogeum.schemas._validate_cinematic_coverage_plan's own
+# required-field list for a shot — kept as a literal tuple here rather than
+# imported, since schemas.py is a generic validator with no reason to know
+# about this sync boundary).
+REQUIRED_SHOT_FIELDS: tuple[str, ...] = (
+    "shot_id", "parent_beat_id", "shot_order", "shot_purpose",
+    "narrative_function", "estimated_usable_duration", "subject",
+    "shot_scale", "camera_angle", "camera_height", "camera_direction",
+    "camera_movement", "composition", "background_depth",
+    "screen_direction", "motion_energy", "transition_in", "transition_out",
+)
+
+# Fields compared to detect a contradictory (not merely re-declared) shot:
+# a shot with a shot_id that already exists in the embedded copy is only
+# a "conflict" if one of these actually differs — prompt-text fields
+# (primary_prompt/fallback_prompt) are deliberately excluded, since the
+# embedded copy legitimately has those rendered and the standalone plan
+# legitimately does not.
+_CONTRADICTION_FIELDS: tuple[str, ...] = REQUIRED_SHOT_FIELDS + (
+    "action", "subject", "lighting_direction", "framing",
+)
+
+
+def _shot_identity_conflicts(existing: dict, incoming: dict) -> list[str]:
+    diffs = []
+    for field in _CONTRADICTION_FIELDS:
+        if field not in existing and field not in incoming:
+            continue
+        if existing.get(field) != incoming.get(field):
+            diffs.append(field)
+    return diffs
+
+
+def compile_shot_prompt(scene: dict, shot: dict) -> dict:
+    """
+    Compile exactly one planned shot's generation-ready prompt and return
+    structured evidence of the compilation, without mutating `shot`.
+
+    Deterministic: identical (scene, shot) input always produces identical
+    output. Raises CoveragePlanSyncError if `shot` is missing any field in
+    REQUIRED_SHOT_FIELDS — this function never silently falls back to the
+    scene's bare base prompt for an incomplete shot.
+
+    Returns:
+        {
+            "shot_id": str,
+            "primary_prompt": str,
+            "fallback_prompt": str,
+            "prompt_checksum": str,       # sha256 of primary_prompt
+            "compiled_fields": [str, ...], # REQUIRED_SHOT_FIELDS, in order
+            "base_prompt_source": "scene_stage_b" | "none",
+        }
+    """
+    missing = [f for f in REQUIRED_SHOT_FIELDS if not str(shot.get(f, "")).strip()
+               and shot.get(f) not in (0, 0.0)]
+    if missing:
+        raise CoveragePlanSyncError(
+            f"shot {shot.get('shot_id')!r} is missing required field(s) "
+            f"{missing} — refusing to compile an incomplete prompt"
+        )
+
+    routing = (scene.get("production_spec", {}) or {}).get("provider_routing", {}) or {}
+    base_primary = (routing.get("primary_prompt") or "").strip()
+    base_fallback = (routing.get("fallback_prompt") or "").strip()
+
+    directive = _render_shot_directive(shot)
+    primary_prompt = f"{base_primary} {directive}".strip() if base_primary else directive
+    fallback_prompt = f"{base_fallback} {directive}".strip() if base_fallback else directive
+
+    checksum = hashlib.sha256(primary_prompt.encode("utf-8")).hexdigest()
+
+    return {
+        "shot_id": shot["shot_id"],
+        "primary_prompt": primary_prompt,
+        "fallback_prompt": fallback_prompt,
+        "prompt_checksum": checksum,
+        "compiled_fields": list(REQUIRED_SHOT_FIELDS),
+        "base_prompt_source": "scene_stage_b" if base_primary else "none",
+    }
+
+
+def sync_coverage_plan_shots_from_standalone_plan(
+    visual_package: dict,
+    standalone_plan: dict,
+    *,
+    beat_ids: Optional[set] = None,
+) -> dict:
+    """
+    Merge shots present in a standalone Cinematic Coverage Plan document
+    but absent from visual_package's embedded per-scene copies, then render
+    prompts for every newly merged shot via render_coverage_plan_shot_prompts().
+
+    This is the generic bridge between the shot-design document
+    (cinematic_coverage_plan_{episode_id}.json) and the prompt-rendering /
+    coverage-repair-consuming document (visual_package's embedded copies).
+    It never regenerates or reinterprets a shot's creative fields — those
+    were already decided once, either by the original VPD run or by a
+    later plan amendment — it only (a) copies newly-added shots across,
+    verbatim, and (b) compiles the prompt text those fields imply.
+
+    Args:
+        visual_package: the episode's visual_package dict; mutated in place.
+        standalone_plan: the standalone cinematic_coverage_plan dict (the
+            "beat_plans" document), read-only.
+        beat_ids: if given, restrict syncing to only these beat_ids (used
+            to scope a run to exactly an authorization manifest's active
+            entries, never touching unauthorized shots).
+
+    Returns structured evidence:
+        {
+            "scenes_touched": [scene_id, ...],
+            "shots_merged": [shot_id, ...],
+            "shots_rendered": {shot_id: prompt_checksum, ...},
+        }
+
+    Raises CoveragePlanSyncError if:
+        - a beat in the standalone plan has no corresponding scene
+          (matched by scene["narration_reference"] == beat_id);
+        - an incoming shot is missing a required field;
+        - a shot_id already present in the embedded copy has
+          contradictory structured content in the standalone plan.
+    """
+    scene_by_beat = {
+        s.get("narration_reference"): s for s in visual_package.get("scenes", [])
+    }
+
+    evidence = {"scenes_touched": [], "shots_merged": [], "shots_rendered": {}}
+
+    for beat_plan in standalone_plan.get("beat_plans", []):
+        beat_id = beat_plan.get("beat_id")
+        if beat_ids is not None and beat_id not in beat_ids:
+            continue
+
+        scene = scene_by_beat.get(beat_id)
+        if scene is None:
+            raise CoveragePlanSyncError(
+                f"beat {beat_id!r} in the standalone plan has no matching "
+                f"scene (narration_reference) in visual_package — cannot sync"
+            )
+
+        embedded_plan = scene.setdefault(
+            "cinematic_coverage_plan",
+            {"beat_id": beat_id,
+             "narration_duration_seconds": beat_plan.get("narration_duration_seconds"),
+             "progression_pattern": beat_plan.get("progression_pattern"),
+             "shots": []},
+        )
+        embedded_shots_by_id = {s["shot_id"]: s for s in embedded_plan.get("shots", [])}
+
+        touched_this_beat = False
+        for shot in beat_plan.get("shots", []):
+            shot_id = shot.get("shot_id")
+            existing = embedded_shots_by_id.get(shot_id)
+            if existing is not None:
+                conflicts = _shot_identity_conflicts(existing, shot)
+                if conflicts:
+                    raise CoveragePlanSyncError(
+                        f"shot {shot_id!r} already exists in the embedded plan "
+                        f"with different content in field(s) {conflicts} — "
+                        f"refusing to overwrite a contradictory shot"
+                    )
+                continue  # already present and consistent — nothing to merge
+
+            missing = [f for f in REQUIRED_SHOT_FIELDS
+                       if not str(shot.get(f, "")).strip() and shot.get(f) not in (0, 0.0)]
+            if missing:
+                raise CoveragePlanSyncError(
+                    f"shot {shot_id!r} is missing required field(s) {missing} "
+                    f"— refusing to merge an incomplete shot"
+                )
+
+            merged_shot = copy.deepcopy(shot)
+            merged_shot.pop("primary_prompt", None)
+            merged_shot.pop("fallback_prompt", None)
+            embedded_plan["shots"].append(merged_shot)
+            embedded_shots_by_id[shot_id] = merged_shot
+            evidence["shots_merged"].append(shot_id)
+            touched_this_beat = True
+
+        if touched_this_beat:
+            evidence["scenes_touched"].append(scene["scene_id"])
+
+    for scene_id in evidence["scenes_touched"]:
+        scene = next(s for s in visual_package["scenes"] if s["scene_id"] == scene_id)
+        render_coverage_plan_shot_prompts(scene)
+        for shot in scene["cinematic_coverage_plan"]["shots"]:
+            if shot["shot_id"] in evidence["shots_merged"]:
+                evidence["shots_rendered"][shot["shot_id"]] = hashlib.sha256(
+                    shot["primary_prompt"].encode("utf-8")
+                ).hexdigest()
+
+    return evidence

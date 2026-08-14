@@ -71,6 +71,13 @@ Public API:
     get_episode_topic(...)                 -> Optional[dict]
     list_episode_topics(...)               -> list[sqlite3.Row]
 
+    Runtime lease helpers (Authorized Generation Envelope Commit 2):
+    acquire_lease(...)                     -> Optional[dict]
+    renew_lease(...)                       -> bool
+    release_lease(...)                     -> bool
+    get_lease(...)                         -> Optional[dict]
+    validate_lease(...)                    -> bool
+
 All write functions accept an open sqlite3.Connection. Callers are
 responsible for commit() and close(). Use get_connection() to obtain
 a properly configured connection.
@@ -2816,3 +2823,175 @@ def abort_queue_item(
         conn.commit()
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# runtime_leases — fencing-token lease mechanism (Authorized Generation
+# Envelope Commit 2 / Part 3). See schema.sql's runtime_leases table
+# comment for the full rationale. Every function here takes an already-
+# open conn (matching claim_next_queue_item()'s convention) rather than a
+# db_path, since lease checks are typically one step inside a larger
+# caller-owned transaction (e.g. hypogeum/provider_receipt.py validating
+# a lease before an append). All timestamps are caller-supplied strings
+# — no function here reads the wall clock.
+# ---------------------------------------------------------------------------
+
+def acquire_lease(
+    conn: sqlite3.Connection,
+    resource_id: str,
+    owner_id: str,
+    *,
+    acquired_at: str,
+    expires_at: str,
+    metadata_json: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Atomically acquire a lease on resource_id for owner_id.
+
+    Two paths, both fail-closed on concurrent contention:
+      1. No row exists yet for resource_id -> plain INSERT. If a second
+         connection races to INSERT the same resource_id first, this
+         connection's INSERT raises sqlite3.IntegrityError (PRIMARY KEY
+         violation) -- caught here and treated as "someone else already
+         holds it," falling through to path 2.
+      2. A row already exists -> only a conditional UPDATE that requires
+         the existing row to be 'released' OR 'active' but already
+         expired (expires_at <= acquired_at, using the caller's own
+         "now" for determinism) succeeds. A row that is 'active' and NOT
+         expired leaves rowcount=0 -- acquisition fails closed, exactly
+         mirroring claim_next_queue_item()'s conditional-UPDATE pattern.
+         A successful takeover increments fencing_token, which is what
+         invalidates any earlier owner's copy of the token (see
+         validate_lease()).
+
+    Returns the acquired lease row as a dict, or None if acquisition
+    failed (the resource is actively, non-expired held by someone else).
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO runtime_leases
+                (resource_id, owner_id, fencing_token, status, acquired_at, expires_at, metadata_json)
+            VALUES (?, ?, 1, 'active', ?, ?, ?)
+            """,
+            (resource_id, owner_id, acquired_at, expires_at, metadata_json),
+        )
+        conn.commit()
+        return get_lease(conn, resource_id)
+    except sqlite3.IntegrityError:
+        pass  # row already exists -- fall through to the takeover path
+
+    cursor = conn.execute(
+        """
+        UPDATE runtime_leases
+        SET owner_id = ?, fencing_token = fencing_token + 1, status = 'active',
+            acquired_at = ?, expires_at = ?, released_at = NULL, metadata_json = ?
+        WHERE resource_id = ?
+          AND (status = 'released' OR (status = 'active' AND expires_at <= ?))
+        """,
+        (owner_id, acquired_at, expires_at, metadata_json, resource_id, acquired_at),
+    )
+    conn.commit()
+    if cursor.rowcount == 0:
+        return None
+    return get_lease(conn, resource_id)
+
+
+def renew_lease(
+    conn: sqlite3.Connection,
+    resource_id: str,
+    owner_id: str,
+    fencing_token: int,
+    *,
+    renewed_at: str,
+    new_expires_at: str,
+) -> bool:
+    """
+    Extend an active lease's expiry. Requires the caller to supply both
+    the current owner_id AND the current fencing_token -- a stale owner
+    (whose fencing_token was invalidated by a takeover) cannot renew,
+    even if it doesn't yet know it lost the lease. Also requires the
+    lease to not already be expired as of renewed_at (an expired lease
+    must go through acquire_lease()'s takeover path, never a "renewal").
+
+    Returns True if the renewal succeeded, False otherwise.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE runtime_leases
+        SET expires_at = ?
+        WHERE resource_id = ? AND owner_id = ? AND fencing_token = ?
+          AND status = 'active' AND expires_at > ?
+        """,
+        (new_expires_at, resource_id, owner_id, fencing_token, renewed_at),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def release_lease(
+    conn: sqlite3.Connection,
+    resource_id: str,
+    owner_id: str,
+    fencing_token: int,
+    *,
+    released_at: str,
+) -> bool:
+    """
+    Voluntarily release an active lease. Requires the current owner_id
+    and fencing_token, exactly like renew_lease() -- a stale owner
+    cannot release a lease it no longer holds (and does not need to:
+    takeover already transitioned the row to a new active lease under a
+    new fencing_token; a stale owner's release attempt simply fails
+    closed, rowcount=0).
+
+    The row is never deleted: status becomes 'released' and released_at
+    is recorded, so the row itself remains as an auditable record of
+    when and by whom the lease was released. Returns True on success.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE runtime_leases
+        SET status = 'released', released_at = ?
+        WHERE resource_id = ? AND owner_id = ? AND fencing_token = ? AND status = 'active'
+        """,
+        (released_at, resource_id, owner_id, fencing_token),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def get_lease(conn: sqlite3.Connection, resource_id: str) -> Optional[dict]:
+    """Returns the current runtime_leases row for resource_id, or None
+    if no lease has ever been acquired for it."""
+    row = conn.execute(
+        "SELECT * FROM runtime_leases WHERE resource_id = ?", (resource_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def validate_lease(
+    conn: sqlite3.Connection,
+    resource_id: str,
+    owner_id: str,
+    fencing_token: int,
+    *,
+    at: str,
+) -> bool:
+    """
+    Read-only check: does (owner_id, fencing_token) currently hold an
+    active, non-expired lease on resource_id as of `at`? Used by callers
+    (e.g. hypogeum/provider_receipt.py before appending protected
+    write-ahead attempt evidence) to refuse an operation from a stale
+    owner without themselves needing to understand the lease table's
+    schema.
+    """
+    row = conn.execute(
+        """
+        SELECT 1 FROM runtime_leases
+        WHERE resource_id = ? AND owner_id = ? AND fencing_token = ?
+          AND status = 'active' AND expires_at > ?
+        """,
+        (resource_id, owner_id, fencing_token, at),
+    ).fetchone()
+    return row is not None

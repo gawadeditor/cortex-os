@@ -1635,3 +1635,37 @@ CREATE INDEX IF NOT EXISTS idx_audit_entity
 
 CREATE INDEX IF NOT EXISTS idx_audit_occurred_at
     ON audit_records(occurred_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- runtime_leases
+-- Generic Factory Core fencing-token lease table (docs/architecture/
+-- AUTHORIZED_GENERATION_ENVELOPE.md Phase 5 gate check 19; implementation
+-- blueprint Commit 2 / Part 3). Protects exactly one resource_id (an
+-- envelope_id or authorization_id) per row: only the current owner_id
+-- holding the current fencing_token may append protected write-ahead
+-- attempt evidence for that resource (hypogeum/provider_receipt.py calls
+-- hypogeum/db.py::validate_lease() before every append). A stale owner's
+-- fencing_token no longer matches after takeover, so it fails closed
+-- automatically -- see hypogeum/db.py::acquire_lease()/renew_lease()/
+-- release_lease() for the exact atomic-conditional-UPDATE mechanics
+-- (same pattern as run_queue's claim_next_queue_item()). Rows are never
+-- deleted: a released or superseded lease stays as its own audit trail.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS runtime_leases (
+    resource_id     TEXT NOT NULL PRIMARY KEY,
+    owner_id        TEXT NOT NULL,
+    fencing_token   INTEGER NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'active'
+                         CHECK(status IN ('active','released','expired')),
+    acquired_at     TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+    released_at     TEXT,
+    metadata_json   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_leases_status
+    ON runtime_leases(status);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_leases_expires_at
+    ON runtime_leases(expires_at);

@@ -56,6 +56,13 @@ from typing import Optional
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+from hypogeum.canary_preflight import (                                     # noqa: E402
+    CanaryPreflightError,
+    check_prompt_checksum,
+    check_provenance,
+    resolve_model_and_cost,
+    sha256_text,
+)
 from hypogeum.config import Config                                          # noqa: E402
 from hypogeum.muapi import (                                                # noqa: E402
     MODEL_CREDIT_COSTS,
@@ -71,18 +78,8 @@ from hypogeum.muapi import (                                                # no
 _CANARY_TOOL_VERSION = "muapi_canary_submit.py@1"
 
 
-class CanaryPreflightError(Exception):
-    """One fail-closed preflight check failed. Carries the exact check name
-    so a caller (or a test) can assert on which of the 13 gates blocked."""
-
-    def __init__(self, check: str, reason: str):
-        self.check = check
-        self.reason = reason
-        super().__init__(f"[{check}] {reason}")
-
-
 def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sha256_text(text)
 
 
 def _load_json(path: Path) -> dict:
@@ -171,41 +168,16 @@ def _resolve_planned_shot(visual_package: dict, args: argparse.Namespace) -> dic
 
 
 def _check_prompt_checksum(shot: dict, entry: dict) -> str:
-    computed = _sha256(shot["primary_prompt"])
-    expected = entry.get("primary_prompt_checksum")
-    if not expected:
-        raise CanaryPreflightError("prompt_checksum_present", "manifest entry has no primary_prompt_checksum")
-    if computed != expected:
-        raise CanaryPreflightError(
-            "prompt_checksum_match",
-            f"recomputed sha256 {computed} != manifest checksum {expected}",
-        )
-    return computed
+    return check_prompt_checksum(shot["primary_prompt"], entry.get("primary_prompt_checksum"))
 
 
 def _check_provenance(entry: dict) -> dict:
-    prov = entry.get("prompt_provenance")
-    if not prov or not prov.get("compiler") or not prov.get("source_shot_id"):
-        raise CanaryPreflightError("prompt_provenance_present", "manifest entry has no valid prompt_provenance")
-    return prov
+    return check_provenance(entry)
 
 
 def _resolve_model(config: Config, args: argparse.Namespace) -> str:
     """Checks 8-9: tier resolves to the required model; cost within cap."""
-    model = _tier_to_model(args.tier, None, config)
-    if model != args.model:
-        raise CanaryPreflightError(
-            "model_matches_required",
-            f"tier {args.tier} resolves to {model!r}, required {args.model!r}",
-        )
-    cost = MODEL_CREDIT_COSTS.get(model)
-    if cost is None:
-        raise CanaryPreflightError("cost_known", f"no known credit cost for model {model!r}")
-    if cost > args.max_charge_usd:
-        raise CanaryPreflightError(
-            "cost_within_cap",
-            f"model {model!r} costs ${cost}, exceeds --max-charge-usd {args.max_charge_usd}",
-        )
+    model, _cost = resolve_model_and_cost(config, args.tier, args.model, args.max_charge_usd)
     return model
 
 

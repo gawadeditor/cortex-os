@@ -2995,3 +2995,269 @@ def validate_lease(
         (resource_id, owner_id, fencing_token, at),
     ).fetchone()
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# budget_reservations — exact-Decimal budget ledger (Authorized Generation
+# Envelope Commit 3 / Part 2). Amounts are passed and returned as plain
+# strings here (the exact Decimal string representation) -- hypogeum.
+# budget_scopes owns the Decimal <-> str conversion; this module never
+# imports decimal.Decimal so it stays a thin, generic persistence layer.
+# ---------------------------------------------------------------------------
+
+def reserve_budget(
+    conn: sqlite3.Connection,
+    reservation_id: str,
+    scope_kind: str,
+    scope_ref: str,
+    idempotency_key: str,
+    reserved_amount: str,
+    currency: str,
+    ceiling: str,
+    *,
+    created_at: str,
+) -> tuple:
+    """
+    Atomically reserves reserved_amount against (scope_kind, scope_ref),
+    denying if doing so would push the sum of that scope's non-released
+    reservations over ceiling.
+
+    Runs inside one BEGIN IMMEDIATE transaction: SQLite acquires the
+    write lock for the whole read-sum-then-insert sequence, so two
+    concurrent connections can never both observe room under the ceiling
+    and both succeed (Part 2 requirement 12) -- the loser's transaction
+    is serialized after the winner's and sees the updated sum.
+
+    Idempotent: a second reservation with the exact same (scope_kind,
+    scope_ref, idempotency_key) returns the already-existing row rather
+    than creating a duplicate or re-checking the ceiling (the UNIQUE
+    constraint is what guarantees this is safe -- the amount was already
+    validated and counted the first time).
+
+    Returns (accepted: bool, row: dict | None). accepted=False means the
+    reservation was denied (would exceed ceiling); row is then the
+    current scope sum's context is not returned -- callers needing the
+    current sum should call sum_reserved_and_committed() directly.
+
+    Amounts (reserved_amount, currency, ceiling) are compared as plain
+    Decimal-shaped strings by the caller (hypogeum.budget_scopes) before
+    this function is invoked -- this function only performs the atomic
+    sum-and-insert; it does not itself parse Decimal.
+    """
+    from decimal import Decimal  # local import: only this function needs numeric comparison
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing = conn.execute(
+            """
+            SELECT * FROM budget_reservations
+            WHERE scope_kind = ? AND scope_ref = ? AND idempotency_key = ?
+            """,
+            (scope_kind, scope_ref, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            conn.commit()
+            return True, dict(existing)
+
+        # SQLite has no native Decimal SUM; sum the rows in Python instead
+        # of trusting SQL's floating-point SUM() on cast text.
+        rows = conn.execute(
+            """
+            SELECT reserved_amount FROM budget_reservations
+            WHERE scope_kind = ? AND scope_ref = ? AND status IN ('reserved','committed')
+            """,
+            (scope_kind, scope_ref),
+        ).fetchall()
+        total = sum((Decimal(r[0]) for r in rows), Decimal("0"))
+
+        if total + Decimal(reserved_amount) > Decimal(ceiling):
+            conn.rollback()
+            return False, None
+
+        conn.execute(
+            """
+            INSERT INTO budget_reservations
+                (reservation_id, scope_kind, scope_ref, idempotency_key,
+                 reserved_amount, currency, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?)
+            """,
+            (reservation_id, scope_kind, scope_ref, idempotency_key, reserved_amount, currency, created_at),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    row = conn.execute(
+        "SELECT * FROM budget_reservations WHERE reservation_id = ?", (reservation_id,)
+    ).fetchone()
+    return True, dict(row)
+
+
+def commit_budget_reservation(
+    conn: sqlite3.Connection, reservation_id: str, committed_amount: str, *, at: str,
+) -> str:
+    """
+    Transitions a 'reserved' row to 'committed', recording the actual
+    provider-charged amount. Only ever called from durable provider
+    acknowledgement evidence (never speculatively) -- see
+    hypogeum.budget_scopes.
+
+    Idempotent for an exact repeat (same committed_amount): returns
+    "already_committed_same" without re-writing. A repeat with a
+    *different* committed_amount returns "already_committed_conflict"
+    without mutating the stored row -- the original committed evidence is
+    never overwritten; the caller (hypogeum.budget_scopes) is responsible
+    for treating that as overcharge/conflict evidence and tripping the
+    appropriate circuit breaker.
+
+    Returns one of: "committed", "already_committed_same",
+    "already_committed_conflict", "not_reserved".
+    """
+    row = conn.execute(
+        "SELECT * FROM budget_reservations WHERE reservation_id = ?", (reservation_id,)
+    ).fetchone()
+    if row is None:
+        return "not_reserved"
+    row = dict(row)
+    if row["status"] == "committed":
+        return "already_committed_same" if row["committed_amount"] == committed_amount else "already_committed_conflict"
+    if row["status"] != "reserved":
+        return "not_reserved"
+
+    cursor = conn.execute(
+        """
+        UPDATE budget_reservations
+        SET status = 'committed', committed_amount = ?, resolved_at = ?
+        WHERE reservation_id = ? AND status = 'reserved'
+        """,
+        (committed_amount, at, reservation_id),
+    )
+    conn.commit()
+    return "committed" if cursor.rowcount == 1 else "not_reserved"
+
+
+def release_budget_reservation(conn: sqlite3.Connection, reservation_id: str, *, at: str) -> bool:
+    """Releases a 'reserved' (never a 'committed') reservation -- e.g. a
+    pre-boundary failure per Part 2 requirement 8 ("a denied or
+    pre-boundary-failed operation must not become committed spend"). The
+    row remains as an audit trail with status='released'."""
+    cursor = conn.execute(
+        """
+        UPDATE budget_reservations
+        SET status = 'released', resolved_at = ?
+        WHERE reservation_id = ? AND status = 'reserved'
+        """,
+        (at, reservation_id),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def get_budget_reservation(conn: sqlite3.Connection, reservation_id: str) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM budget_reservations WHERE reservation_id = ?", (reservation_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def sum_reserved_and_committed(conn: sqlite3.Connection, scope_kind: str, scope_ref: str) -> str:
+    """Returns the exact Decimal-string sum of every non-released
+    reservation for (scope_kind, scope_ref)."""
+    from decimal import Decimal
+    rows = conn.execute(
+        """
+        SELECT reserved_amount FROM budget_reservations
+        WHERE scope_kind = ? AND scope_ref = ? AND status IN ('reserved','committed')
+        """,
+        (scope_kind, scope_ref),
+    ).fetchall()
+    total = sum((Decimal(r[0]) for r in rows), Decimal("0"))
+    return str(total)
+
+
+# ---------------------------------------------------------------------------
+# circuit_breakers — persistent, restart-surviving breaker evidence
+# (Authorized Generation Envelope Commit 3 / Part 3).
+# ---------------------------------------------------------------------------
+
+def record_breaker_evidence(
+    conn: sqlite3.Connection,
+    breaker_id: str,
+    *,
+    breaker_type: str,
+    scope_kind: str,
+    scope_ref: str,
+    observed_value: str,
+    configured_limit: str,
+    tripped: bool,
+    triggering_attempt_id: Optional[str],
+    evidence_json: str,
+    at: str,
+) -> dict:
+    """
+    Upserts breaker_id's evidence row. tripped is monotonic: if the
+    stored row is already tripped=1, this call can update
+    observed_value/evidence but can never set tripped back to 0 -- only
+    reset_breaker() does that, and only when explicitly called. A fresh
+    breaker_id (no existing row) is created with whatever tripped value
+    this call passes.
+    """
+    existing = conn.execute(
+        "SELECT tripped FROM circuit_breakers WHERE breaker_id = ?", (breaker_id,)
+    ).fetchone()
+    effective_tripped = 1 if (tripped or (existing is not None and existing[0])) else 0
+    tripped_at = at if effective_tripped else None
+
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO circuit_breakers
+                (breaker_id, breaker_type, scope_kind, scope_ref, observed_value,
+                 configured_limit, tripped, triggering_attempt_id, tripped_at,
+                 evidence_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (breaker_id, breaker_type, scope_kind, scope_ref, observed_value,
+             configured_limit, effective_tripped, triggering_attempt_id, tripped_at,
+             evidence_json, at),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE circuit_breakers
+            SET observed_value = ?, configured_limit = ?, tripped = ?,
+                triggering_attempt_id = COALESCE(?, triggering_attempt_id),
+                tripped_at = COALESCE(tripped_at, ?),
+                evidence_json = ?, updated_at = ?
+            WHERE breaker_id = ?
+            """,
+            (observed_value, configured_limit, effective_tripped, triggering_attempt_id,
+             tripped_at, evidence_json, at, breaker_id),
+        )
+    conn.commit()
+    return get_breaker(conn, breaker_id)
+
+
+def get_breaker(conn: sqlite3.Connection, breaker_id: str) -> Optional[dict]:
+    row = conn.execute("SELECT * FROM circuit_breakers WHERE breaker_id = ?", (breaker_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def is_breaker_tripped(conn: sqlite3.Connection, breaker_id: str) -> bool:
+    row = get_breaker(conn, breaker_id)
+    return bool(row and row["tripped"])
+
+
+def reset_breaker(conn: sqlite3.Connection, breaker_id: str, *, reset_by: str, at: str) -> bool:
+    """The one explicit, documented way to clear a tripped breaker.
+    Never called by record_breaker_evidence() or any automatic path."""
+    cursor = conn.execute(
+        """
+        UPDATE circuit_breakers
+        SET tripped = 0, tripped_at = NULL, reset_at = ?, reset_by = ?, updated_at = ?
+        WHERE breaker_id = ?
+        """,
+        (at, reset_by, at, breaker_id),
+    )
+    conn.commit()
+    return cursor.rowcount == 1

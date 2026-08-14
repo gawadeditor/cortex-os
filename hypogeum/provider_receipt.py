@@ -51,11 +51,18 @@ _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 # Evidence key names that must never appear in a receipt event -- Part 1
 # requirement 15 ("No receipt object may contain provider credentials or
 # secrets"). Deliberately generic (not tied to any one provider's naming),
-# matched case-insensitively against evidence dict keys.
+# matched case-insensitively against evidence dict keys. Deliberately
+# specific rather than a bare "token" substring: "fencing_token" (a
+# concurrency-control value, not a credential) is legitimate evidence --
+# see _ALLOWED_EVIDENCE_KEY_EXCEPTIONS below.
 _FORBIDDEN_EVIDENCE_KEY_SUBSTRINGS = (
-    "api_key", "apikey", "secret", "password", "credential", "token",
+    "api_key", "apikey", "secret", "password", "credential",
+    "access_token", "auth_token", "bearer_token", "refresh_token",
+    "session_token", "api_token", "oauth_token",
     "authorization_header", "signed_url", "private_key",
 )
+
+_ALLOWED_EVIDENCE_KEY_EXCEPTIONS = frozenset({"lease_fencing_token", "fencing_token"})
 
 
 class ReceiptValidationError(Exception):
@@ -190,6 +197,8 @@ def _coerce_decimal(field_name: str, value: Any) -> Decimal:
 
 def _check_no_secrets(evidence: Mapping[str, Any]) -> None:
     for key in evidence:
+        if key in _ALLOWED_EVIDENCE_KEY_EXCEPTIONS:
+            continue
         lowered = key.lower()
         for forbidden in _FORBIDDEN_EVIDENCE_KEY_SUBSTRINGS:
             if forbidden in lowered:

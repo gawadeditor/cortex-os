@@ -1669,3 +1669,77 @@ CREATE INDEX IF NOT EXISTS idx_runtime_leases_status
 
 CREATE INDEX IF NOT EXISTS idx_runtime_leases_expires_at
     ON runtime_leases(expires_at);
+
+-- ---------------------------------------------------------------------------
+-- budget_reservations
+-- Generic Factory Core budget ledger (docs/architecture/
+-- AUTHORIZED_GENERATION_ENVELOPE.md Phase 7; implementation blueprint
+-- Commit 3 / Part 2). One row per (scope_kind, scope_ref, idempotency_key)
+-- reservation. Exact monetary values stored as TEXT (Decimal string
+-- representation), never a SQLite REAL/float column -- see
+-- hypogeum/budget_scopes.py for the Decimal round-trip. Reservation is a
+-- check-then-insert performed inside one BEGIN IMMEDIATE transaction
+-- (hypogeum/db.py::reserve_budget()), the same atomicity technique
+-- runtime_leases's conditional-UPDATE pattern provides for leases --
+-- BEGIN IMMEDIATE acquires SQLite's write lock for the whole transaction,
+-- so two concurrent workers can never both observe room under the
+-- ceiling and both insert; the loser's transaction is serialized after
+-- the winner's and sees the updated sum. The UNIQUE constraint makes a
+-- repeated reservation attempt for the same identity an idempotent
+-- replay (returns the existing row) rather than a duplicate reservation.
+-- Rows are never deleted: 'released' and 'committed' are terminal
+-- statuses that remain as their own audit trail.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS budget_reservations (
+    reservation_id    TEXT NOT NULL PRIMARY KEY,
+    scope_kind        TEXT NOT NULL
+                           CHECK(scope_kind IN ('call','run','episode','organization','retry','fallback')),
+    scope_ref         TEXT NOT NULL,
+    idempotency_key   TEXT NOT NULL,
+    reserved_amount   TEXT NOT NULL,
+    currency          TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'reserved'
+                           CHECK(status IN ('reserved','committed','released')),
+    committed_amount  TEXT,
+    created_at        TEXT NOT NULL,
+    resolved_at       TEXT,
+    UNIQUE(scope_kind, scope_ref, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_reservations_scope
+    ON budget_reservations(scope_kind, scope_ref, status);
+
+-- ---------------------------------------------------------------------------
+-- circuit_breakers
+-- Generic Factory Core circuit-breaker evidence table (architecture
+-- Phase 7.2; blueprint Commit 3 / Part 3). One row per breaker_id (a
+-- caller-defined composite key, e.g. "max_provider_calls:run:run_1").
+-- tripped is monotonic: once 1, a later record_breaker_evidence() call
+-- can update observed_value/evidence but can never silently flip it back
+-- to 0 -- only hypogeum/db.py::reset_breaker() (a distinct, explicit
+-- function; never called automatically by this schema or by
+-- record_breaker_evidence()) may clear it, matching the architecture's
+-- "reset must never happen automatically" rule. Surviving as a normal
+-- table row is what lets breaker state be reconstructed identically
+-- after a process restart, rather than depending on in-memory state.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS circuit_breakers (
+    breaker_id              TEXT NOT NULL PRIMARY KEY,
+    breaker_type            TEXT NOT NULL,
+    scope_kind              TEXT NOT NULL,
+    scope_ref               TEXT NOT NULL,
+    observed_value          TEXT,
+    configured_limit        TEXT,
+    tripped                 INTEGER NOT NULL DEFAULT 0,
+    triggering_attempt_id   TEXT,
+    tripped_at              TEXT,
+    reset_at                TEXT,
+    reset_by                TEXT,
+    evidence_json           TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_circuit_breakers_tripped
+    ON circuit_breakers(tripped);

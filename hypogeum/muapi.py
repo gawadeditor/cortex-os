@@ -583,6 +583,7 @@ def submit_scene(
     agent: Optional[str] = None,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
     shadow_evidence: Optional["_shadow_observation.ShadowEvidence"] = None,
+    observation_only: bool = False,
 ) -> dict:
     """
     Generate a video clip for one scene and return the asset manifest entry.
@@ -644,6 +645,18 @@ def submit_scene(
     shadow_evidence.shadow_store, if the caller supplied one). This
     NEVER blocks, delays, retries, or otherwise changes this call's real
     behavior in any way -- shadow mode is observation only.
+
+    observation_only (added after Commit 4, 2026-08-15): when True,
+    every attempt this call makes stops immediately after the shadow
+    decision above is persisted -- _submit_http() (the real network
+    boundary) is never reached, no budget_guard state is mutated, no
+    media file is written, and the returned dict's generation_status is
+    "observation_only", never "generated"/"reused"/"generation_failed".
+    This is the ONLY way to collect a genuine zero-provider-call shadow
+    observation from a real production call path; shadow_evidence=...
+    alone (the default False here) still reaches the real network call
+    exactly as it always has. Defaults to False so every existing
+    caller's behavior is byte-for-byte unchanged.
     """
     scene_id = scene_spec["scene_id"]
     short_id = scene_spec.get("short_id")
@@ -722,6 +735,7 @@ def submit_scene(
         is_fallback=False,
         budget_guard=budget_guard,
         shadow_evidence=shadow_evidence,
+        observation_only=observation_only,
     )
     if manifest is not None:
         return manifest
@@ -778,6 +792,7 @@ def submit_scene(
         is_fallback=True,
         budget_guard=budget_guard,
         shadow_evidence=shadow_evidence,
+        observation_only=observation_only,
     )
     if manifest is not None:
         return manifest
@@ -2037,6 +2052,7 @@ def _run_shadow_observation(
     requested_duration: float,
     scene_id: str,
     log,
+    observation_only: bool = False,
 ) -> None:
     """
     The one place hypogeum.muapi calls into hypogeum.shadow_observation.
@@ -2057,6 +2073,15 @@ def _run_shadow_observation(
     hypogeum.shadow_observation or hypogeum.submission_gate (Factory
     Core stays channel-agnostic; only this integration layer knows
     Hypogeum exists).
+
+    observation_only: forwarded to evaluate_shadow() as
+    mode="shadow_observation_only" (vs. the default "shadow") so the
+    persisted ShadowDecision is auditable evidence of which execution
+    context produced it -- a genuine zero-provider-call observation
+    versus ordinary shadow instrumentation that accompanied a real (or
+    dry-run) attempt. This function's own behavior is otherwise
+    identical in both modes; the actual network-call skip happens in
+    the caller (_attempt_generation()), not here.
     """
     try:
         evidence = shadow_evidence or _shadow_observation.ShadowEvidence()
@@ -2084,6 +2109,7 @@ def _run_shadow_observation(
             expected_aspect_ratio=aspect_ratio,
             expected_deterministic_output_path=str(scene_file_path(output_dir, scene_id, short_id)),
             output_already_exists=False,
+            mode="shadow_observation_only" if observation_only else "shadow",
         )
         store = evidence.shadow_store or _shadow_observation.ShadowObservationStore(output_dir)
         store.record(decision)
@@ -2114,6 +2140,7 @@ def _attempt_generation(
     is_fallback: bool,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
     shadow_evidence: Optional["_shadow_observation.ShadowEvidence"] = None,
+    observation_only: bool = False,
 ) -> tuple[Optional[dict], Optional[str]]:
     """
     Execute one generation attempt: submit → poll → download → validate.
@@ -2123,6 +2150,13 @@ def _attempt_generation(
 
     Raises MUAPIAuthFailure / MUAPIQuotaExhausted on halt conditions.
     Raises MUAPIBudgetExhausted if budget_guard blocks this attempt (M5.6).
+
+    observation_only: when True, this attempt terminates immediately
+    after the shadow decision below is persisted -- see the early
+    return statement placed between the shadow-observation call and
+    the real HTTP submission further down. No budget_guard state is
+    mutated, no network call is made, no file is written. Defaults to
+    False (unchanged prior behavior).
     """
     model = _tier_to_model(tier, reference_image_url, config)
     endpoint = f"{config.MUAPI_BASE_URL}/{model}"
@@ -2131,8 +2165,12 @@ def _attempt_generation(
         video_resolution=config.MUAPI_VIDEO_RESOLUTION,
     )
 
-    # M5.6 — Budget check before paid submission (skipped in dry-run — no real cost)
-    if budget_guard is not None and not config.MUAPI_DRY_RUN:
+    # M5.6 — Budget check before paid submission (skipped in dry-run — no
+    # real cost -- and skipped in observation_only mode, for the same
+    # reason: no submission is about to happen, so recording an attempt/
+    # estimated spend against budget_guard's in-memory counters would
+    # misrepresent spend that never occurred).
+    if budget_guard is not None and not config.MUAPI_DRY_RUN and not observation_only:
         budget_guard.check_and_record_attempt(scene_id, model)
 
     # --- Commit 4 (2026-08-15): non-mutating shadow-mode gate observation.
@@ -2150,7 +2188,32 @@ def _attempt_generation(
         shadow_evidence=shadow_evidence, output_dir=output_dir, episode_id=episode_id,
         short_id=short_id, prompt=prompt, model=model, aspect_ratio=aspect_ratio,
         requested_duration=requested_duration, scene_id=scene_id, log=log,
+        observation_only=observation_only,
     )
+
+    # --- Observation-only interception (post-Commit-4, 2026-08-15).
+    # Structurally the ONLY statement between the shadow-decision write
+    # above and the real network boundary below: when observation_only
+    # is True, this attempt returns here, unconditionally, before
+    # endpoint/payload are ever handed to _submit_http(). No exception,
+    # retry, fallback, or adapter path exists that can reach the network
+    # call from this branch -- the function returns control to its
+    # caller on this line. See tests/test_muapi_submission_gate_shadow.py
+    # for the AST-level proof that this statement precedes every
+    # _submit_http() call reachable from this function.
+    if observation_only:
+        log.info("muapi_observation_only_terminated", scene_id=scene_id, model=model)
+        return {
+            "scene_id": scene_id,
+            "asset_id": None,
+            "generation_status": "observation_only",
+            "provider": "muapi",
+            "tier_used": tier,
+            "model_used": model,
+            "prompt_used": None,
+            "fallback_used": is_fallback,
+            "failure_reason": None,
+        }, None
 
     # Submit (with HTTP retry on transient errors)
     request_id, failure_reason = _submit_http(endpoint, payload, config, scene_id, log)

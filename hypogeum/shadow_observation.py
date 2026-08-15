@@ -160,11 +160,16 @@ class ShadowDecision:
         return cls(**payload)
 
 
-def _compute_decision_id(envelope_id, execution_id, idempotency_key, at, check_results) -> str:
+def _compute_decision_id(envelope_id, execution_id, idempotency_key, at, check_results, mode="shadow") -> str:
+    # mode is part of the identity payload (not just a display field) so
+    # that an ordinary shadow decision and a shadow_observation_only
+    # decision computed from otherwise-identical inputs never collide on
+    # decision_id -- see ShadowObservationStore.record()'s conflict check,
+    # which compares stored bytes under this same identity.
     payload = {
         "envelope_id": envelope_id, "execution_id": execution_id,
         "idempotency_key": idempotency_key, "evaluated_at": at,
-        "check_results": list(check_results),
+        "check_results": list(check_results), "mode": mode,
     }
     return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
 
@@ -221,6 +226,7 @@ def evaluate_shadow(
     expected_output_identity=None,
     expected_deterministic_output_path=None,
     output_already_exists=None,
+    mode: str = "shadow",
 ) -> ShadowDecision:
     """
     The one non-mutating shadow entry point. Never raises for an
@@ -229,6 +235,17 @@ def evaluate_shadow(
     ShadowDecision with verdict WOULD_DENY or UNVERIFIABLE. This
     function itself may only raise for a genuine programming error in
     its own control flow, never as a way of reporting a policy result.
+
+    mode identifies which execution context produced this decision.
+    Defaults to "shadow" (an ordinary shadow-mode observation recorded
+    alongside a real -- or dry-run -- generation attempt), matching
+    every existing caller's behavior exactly. A caller performing
+    zero-provider-call observation-only evaluation (see
+    hypogeum.muapi._attempt_generation()'s observation_only parameter)
+    must pass mode="shadow_observation_only" so the persisted
+    ShadowDecision is auditable evidence of which execution context
+    produced it -- this value is part of the decision's content-address
+    (see _compute_decision_id()), never just a display label.
     """
     try:
         outcomes: List[sg.CheckOutcome] = list(sg.run_shadow_checks(
@@ -280,11 +297,11 @@ def evaluate_shadow(
 
         decision_id = _compute_decision_id(
             envelope.envelope_id if envelope else None, execution_id,
-            envelope.idempotency_key if envelope else None, at, check_results,
+            envelope.idempotency_key if envelope else None, at, check_results, mode,
         )
 
         return ShadowDecision(
-            decision_id=decision_id, mode="shadow", evaluated_at=at,
+            decision_id=decision_id, mode=mode, evaluated_at=at,
             envelope_id=envelope.envelope_id if envelope else None,
             authorization_id=envelope.authorization_id if envelope else None,
             authorization_version=envelope.authorization_version if envelope else None,
@@ -302,10 +319,10 @@ def evaluate_shadow(
         check_results = [{"check": "evaluation", "status": "unverifiable", "detail": f"{type(exc).__name__}: {exc}"}]
         decision_id = _compute_decision_id(
             getattr(envelope, "envelope_id", None), execution_id,
-            getattr(envelope, "idempotency_key", None), at, check_results,
+            getattr(envelope, "idempotency_key", None), at, check_results, mode,
         )
         return ShadowDecision(
-            decision_id=decision_id, mode="shadow", evaluated_at=at,
+            decision_id=decision_id, mode=mode, evaluated_at=at,
             envelope_id=getattr(envelope, "envelope_id", None),
             authorization_id=getattr(envelope, "authorization_id", None),
             authorization_version=getattr(envelope, "authorization_version", None),

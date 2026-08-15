@@ -97,6 +97,7 @@ from hypogeum.workflow_executor import (
     StageOrderVerifier,
     WorkflowArtifactUnreadableError,
     WorkflowDriftError,
+    resolve_workflow_binding,
     verify_and_load_workflow,
 )
 
@@ -739,9 +740,11 @@ def run_pipeline(
     # a few lines above.
     # -----------------------------------------------------------------------
     _stage_verifier: Optional[StageOrderVerifier] = None
+    _workflow_binding: Optional[dict] = None
     if channel_id is not None:
         _workflow_definition = verify_and_load_workflow(channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION, registry_db_path=db_path)
         _stage_verifier = StageOrderVerifier(_workflow_definition["stage_order"])
+        _workflow_binding = resolve_workflow_binding(channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION, registry_db_path=db_path)
 
     def _advance_stage_order(stage_name: str) -> None:
         """Real-time proof that this stage starting now is exactly the
@@ -767,7 +770,7 @@ def run_pipeline(
     _current_stage_id: Optional[str] = None
     _current_stage_t0: str = ""
     try:
-        run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id)
+        run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id, workflow_binding=_workflow_binding)
         set_run_context(run_id=run_id, episode_id=episode_id)
         log.info("pipeline_run_registered", run_id=run_id, channel_id=channel_id)
 

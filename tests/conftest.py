@@ -315,7 +315,20 @@ def _isolate_pipeline_workflow_verification():
         live_bytes = load_workflow_artifact_bytes(channel_id, workflow_id, packages_root=packages_root)
         return parse_workflow_definition(live_bytes)
 
+    def _guarded_binding(channel_id, workflow_id, workflow_version, *, registry_db_path=None, packages_root=None):
+        # Same isolation for resolve_workflow_binding() -- a fake but
+        # internally-consistent identity dict, never a DB lookup.
+        return {
+            "workflow_id": workflow_id,
+            "workflow_version": workflow_version,
+            "workflow_checksum": "test-isolated-checksum",
+            "registry_definition_schema_version": "1.0",
+            "registration_identity": "test-isolated-registration",
+            "evaluation_timestamp": "2026-01-01T00:00:00+00:00",
+        }
+
     with _patch("hypogeum.pipeline.verify_and_load_workflow", new=_guarded):
-        yield
+        with _patch("hypogeum.pipeline.resolve_workflow_binding", new=_guarded_binding):
+            yield
 
 

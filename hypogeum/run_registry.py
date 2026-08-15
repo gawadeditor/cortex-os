@@ -473,6 +473,7 @@ def register_run(
     db_path: Optional[Path] = None,
     runs_dir: Optional[Path] = None,
     channel_id: Optional[str] = None,
+    workflow_binding: Optional[dict] = None,
 ) -> str:
     """
     Register a new pipeline execution. Must be called before any agent runs.
@@ -489,6 +490,17 @@ def register_run(
         db_path:     Override SQLite path (tests use tmp_path).
         runs_dir:    Override JSON/index directory (tests use tmp_path).
         channel_id:  Optional channel identifier. Recorded in the run row.
+        workflow_binding: Optional dict -- the complete, immutable Workflow
+            Registry identity this run is bound to (workflow_id,
+            workflow_version, workflow_checksum,
+            registry_definition_schema_version, registration_identity,
+            evaluation_timestamp). This module has no knowledge of any
+            specific channel's workflow -- the caller (hypogeum.pipeline,
+            which already resolved and verified this identity via
+            hypogeum.workflow_executor before calling register_run())
+            supplies the exact dict to persist verbatim. Written once at
+            registration time and never rewritten afterward -- there is no
+            update_run_workflow_binding() function, by design.
 
     Returns:
         run_id: UUID4 string. Pass to complete_run or fail_run.
@@ -515,6 +527,11 @@ def register_run(
             conn.execute(
                 "UPDATE runs SET channel_id = ? WHERE run_id = ?",
                 (channel_id, run_id),
+            )
+        if workflow_binding is not None:
+            conn.execute(
+                "UPDATE runs SET workflow_binding_json = ? WHERE run_id = ?",
+                (json.dumps(workflow_binding, sort_keys=True, separators=(",", ":")), run_id),
             )
         conn.commit()
     finally:
@@ -544,10 +561,33 @@ def register_run(
     }
     if channel_id is not None:
         record["channel_id"] = channel_id
+    if workflow_binding is not None:
+        record["workflow_binding"] = workflow_binding
     _write_run_json(run_id, record, _runs_dir(runs_dir))
     _append_index(run_id, episode_id, "running", _runs_dir(runs_dir))
 
     return run_id
+
+
+def get_run_workflow_binding(run_id: str, db_path: Optional[Path] = None) -> Optional[dict]:
+    """
+    Read-only lookup of the immutable Workflow Registry identity a run
+    was bound to at registration time. Returns None if the run has no
+    binding recorded (e.g. registered with channel_id=None) or does not
+    exist. Never mutates -- there is no corresponding setter beyond
+    register_run()'s own one-time write.
+    """
+    conn = get_connection(_db_path(db_path))
+    try:
+        row = conn.execute(
+            "SELECT workflow_binding_json FROM runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or row["workflow_binding_json"] is None:
+        return None
+    return json.loads(row["workflow_binding_json"])
 
 
 def complete_run(

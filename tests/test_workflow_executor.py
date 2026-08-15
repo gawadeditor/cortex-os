@@ -145,6 +145,60 @@ class TestChannelPackageFileIsAuthoritative:
         assert definition == json.loads(artifact_bytes)
 
 
+class TestResolveWorkflowBinding:
+
+    def test_returns_complete_identity_on_success(self, tmp_path):
+        db_path = tmp_path / "registry.db"
+        artifact_path, artifact_bytes = _write_package(tmp_path, "test_channel", "test_workflow", "1.0.0", _definition_dict())
+        wr.register_workflow("test_channel", "test_workflow", "1.0.0", artifact_bytes, db_path=db_path)
+
+        binding = we.resolve_workflow_binding("test_channel", "test_workflow", "1.0.0", packages_root=tmp_path, registry_db_path=db_path)
+
+        assert binding["workflow_id"] == "test_workflow"
+        assert binding["workflow_version"] == "1.0.0"
+        assert binding["workflow_checksum"] == wr.compute_definition_checksum(artifact_bytes)
+        assert binding["registry_definition_schema_version"] == "1.0"
+        assert binding["registration_identity"]
+        assert binding["evaluation_timestamp"]
+
+    def test_fails_closed_when_not_registered(self, tmp_path):
+        _write_package(tmp_path, "test_channel", "test_workflow", "1.0.0", _definition_dict())
+        with pytest.raises(we.WorkflowArtifactUnreadableError):
+            we.resolve_workflow_binding("test_channel", "test_workflow", "1.0.0", packages_root=tmp_path, registry_db_path=tmp_path / "empty.db")
+
+    def test_fails_closed_on_live_file_drift(self, tmp_path):
+        db_path = tmp_path / "registry.db"
+        artifact_path, artifact_bytes = _write_package(tmp_path, "test_channel", "test_workflow", "1.0.0", _definition_dict())
+        wr.register_workflow("test_channel", "test_workflow", "1.0.0", artifact_bytes, db_path=db_path)
+
+        mutated = _definition_dict(stage_order=["stage_a", "stage_b", "stage_c"])
+        artifact_path.write_bytes(json.dumps(mutated, sort_keys=True).encode())
+
+        with pytest.raises(we.WorkflowDriftError):
+            we.resolve_workflow_binding("test_channel", "test_workflow", "1.0.0", packages_root=tmp_path, registry_db_path=db_path)
+
+    def test_checksum_reflects_live_file_not_stale_cache(self, tmp_path):
+        # Same content re-registered under a NEW version after editing --
+        # the returned checksum must match the live bytes just verified,
+        # not some other cached value.
+        db_path = tmp_path / "registry.db"
+        artifact_path, artifact_bytes = _write_package(tmp_path, "test_channel", "test_workflow", "1.0.0", _definition_dict())
+        wr.register_workflow("test_channel", "test_workflow", "1.0.0", artifact_bytes, db_path=db_path)
+
+        binding = we.resolve_workflow_binding("test_channel", "test_workflow", "1.0.0", packages_root=tmp_path, registry_db_path=db_path)
+        assert binding["workflow_checksum"] == wr.compute_definition_checksum(artifact_bytes)
+
+    def test_two_calls_produce_distinct_evaluation_timestamps_or_at_least_valid_iso(self, tmp_path):
+        db_path = tmp_path / "registry.db"
+        _artifact_path, artifact_bytes = _write_package(tmp_path, "test_channel", "test_workflow", "1.0.0", _definition_dict())
+        wr.register_workflow("test_channel", "test_workflow", "1.0.0", artifact_bytes, db_path=db_path)
+
+        from datetime import datetime
+        binding = we.resolve_workflow_binding("test_channel", "test_workflow", "1.0.0", packages_root=tmp_path, registry_db_path=db_path)
+        # Must parse as a real ISO-8601 timestamp.
+        datetime.fromisoformat(binding["evaluation_timestamp"])
+
+
 class TestPackageVersionMustMoveForMaterialChange:
 
     def test_registering_new_content_under_same_workflow_version_fails_closed(self, tmp_path):

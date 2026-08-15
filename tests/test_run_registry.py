@@ -29,6 +29,7 @@ from hypogeum.run_registry import (
     fail_run,
     get_run_state,
     get_run_transition_history,
+    get_run_workflow_binding,
     pause_run,
     register_run,
     resume_run,
@@ -156,6 +157,94 @@ class TestRegisterRun:
         # Must not raise even without prior initialize_schema()
         run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
         assert run_id
+
+
+# ---------------------------------------------------------------------------
+# TestWorkflowBinding — immutable run workflow binding (Commit D)
+# ---------------------------------------------------------------------------
+
+class TestWorkflowBinding:
+    _BINDING = {
+        "workflow_id": "hypogeum_main_production",
+        "workflow_version": "1.0.0",
+        "workflow_checksum": "test-checksum-abc123",
+        "registry_definition_schema_version": "1.0",
+        "registration_identity": "test-registration-id",
+        "evaluation_timestamp": "2026-01-01T00:00:00+00:00",
+    }
+
+    def test_binding_persisted_and_retrievable(self, store):
+        db_path, runs_dir = store
+        run_id = register_run(
+            "ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir,
+            channel_id="hypogeum", workflow_binding=self._BINDING,
+        )
+        retrieved = get_run_workflow_binding(run_id, db_path=db_path)
+        assert retrieved == self._BINDING
+
+    def test_binding_persisted_in_db_column(self, store):
+        db_path, runs_dir = store
+        run_id = register_run(
+            "ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir,
+            channel_id="hypogeum", workflow_binding=self._BINDING,
+        )
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT workflow_binding_json FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        conn.close()
+        assert row["workflow_binding_json"] is not None
+        assert json.loads(row["workflow_binding_json"]) == self._BINDING
+
+    def test_binding_written_to_json_record(self, store):
+        db_path, runs_dir = store
+        run_id = register_run(
+            "ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir,
+            channel_id="hypogeum", workflow_binding=self._BINDING,
+        )
+        record_path = runs_dir / f"{run_id}.json"
+        record = json.loads(record_path.read_text())
+        assert record["workflow_binding"] == self._BINDING
+
+    def test_omitted_binding_leaves_column_null(self, store):
+        db_path, runs_dir = store
+        run_id = register_run("ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir)
+        assert get_run_workflow_binding(run_id, db_path=db_path) is None
+
+    def test_none_binding_leaves_column_null(self, store):
+        db_path, runs_dir = store
+        run_id = register_run(
+            "ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir,
+            workflow_binding=None,
+        )
+        assert get_run_workflow_binding(run_id, db_path=db_path) is None
+
+    def test_lookup_of_nonexistent_run_returns_none(self, store):
+        db_path, runs_dir = store
+        assert get_run_workflow_binding("nonexistent-run-id", db_path=db_path) is None
+
+    def test_binding_unchanged_by_complete_run(self, store):
+        db_path, runs_dir = store
+        run_id = register_run(
+            "ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir,
+            channel_id="hypogeum", workflow_binding=self._BINDING,
+        )
+        complete_run(run_id, "ep_000", db_path=db_path, runs_dir=runs_dir)
+        assert get_run_workflow_binding(run_id, db_path=db_path) == self._BINDING
+
+    def test_binding_unchanged_by_fail_run(self, store):
+        db_path, runs_dir = store
+        run_id = register_run(
+            "ep_000", _make_config(), db_path=db_path, runs_dir=runs_dir,
+            channel_id="hypogeum", workflow_binding=self._BINDING,
+        )
+        fail_run(run_id, "ep_000", "test error", db_path=db_path, runs_dir=runs_dir)
+        assert get_run_workflow_binding(run_id, db_path=db_path) == self._BINDING
+
+    def test_no_setter_exists_beyond_register_run(self):
+        import hypogeum.run_registry as rr
+        assert not hasattr(rr, "update_run_workflow_binding")
+        assert not hasattr(rr, "set_run_workflow_binding")
 
 
 # ---------------------------------------------------------------------------

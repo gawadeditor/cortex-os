@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,7 @@ __all__ = [
     "load_workflow_artifact_bytes",
     "compute_channel_package_directory_checksum",
     "verify_and_load_workflow",
+    "resolve_workflow_binding",
 ]
 
 _PACKAGES_ROOT = Path(__file__).resolve().parent.parent / "channel_packages"
@@ -167,6 +169,59 @@ def verify_and_load_workflow(
         )
 
     return _workflow_registry.parse_workflow_definition(live_bytes)
+
+
+def resolve_workflow_binding(
+    channel_id: str,
+    workflow_id: str,
+    workflow_version: str,
+    *,
+    packages_root: Optional[Path] = None,
+    registry_db_path: Optional[Path] = None,
+) -> dict:
+    """
+    Returns the complete, immutable Workflow Registry identity a caller
+    (e.g. hypogeum.pipeline.run_pipeline(), before calling
+    hypogeum.run_registry.register_run()) should persist verbatim for
+    this execution: workflow_id, workflow_version, workflow_checksum,
+    registry_definition_schema_version, registration_identity,
+    evaluation_timestamp.
+
+    Runs the exact same reload-and-verify sequence as
+    verify_and_load_workflow() (fails closed identically -- this
+    function does not weaken that guarantee, it only returns different
+    output: identity metadata instead of stage content) so a caller
+    never records a binding for a workflow that didn't actually verify.
+    """
+    live_bytes = load_workflow_artifact_bytes(channel_id, workflow_id, packages_root=packages_root)
+    live_checksum = _workflow_registry.compute_definition_checksum(live_bytes)
+
+    registered = _workflow_registry.resolve_workflow_version(
+        channel_id, workflow_id, workflow_version, db_path=registry_db_path,
+    )
+    if registered is None:
+        raise WorkflowArtifactUnreadableError(
+            f"no registered workflow found for {channel_id!r}/{workflow_id!r}@{workflow_version!r}"
+        )
+    if registered.workflow_checksum != live_checksum:
+        raise WorkflowDriftError(
+            f"live artifact checksum {live_checksum!r} no longer matches registered checksum "
+            f"{registered.workflow_checksum!r} for {channel_id!r}/{workflow_id!r}@{workflow_version!r}"
+        )
+
+    parsed = _workflow_registry.parse_workflow_definition(live_bytes)
+    return {
+        "workflow_id": workflow_id,
+        "workflow_version": workflow_version,
+        "workflow_checksum": live_checksum,
+        "registry_definition_schema_version": parsed.get("canonical_serialization_version"),
+        "registration_identity": registered.registration_id,
+        "evaluation_timestamp": _now_iso(),
+    }
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class StageOrderVerifier:

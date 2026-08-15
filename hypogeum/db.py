@@ -145,6 +145,12 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         # Runtime decoupling: independent per-deliverable status columns.
         ("main_episode_runtime_status", "TEXT DEFAULT 'not_planned'"),
         ("shorts_runtime_status",       "TEXT DEFAULT 'not_planned'"),
+        # Workflow Registry program: the complete, immutable identity this
+        # run was bound to at registration time (workflow_id, workflow_version,
+        # workflow_checksum, registry_definition_schema_version,
+        # registration_identity, evaluation_timestamp -- canonical JSON, set
+        # once at INSERT time via register_run(), never rewritten afterward).
+        ("workflow_binding_json",     "TEXT"),
     ],
     "episodes": [
         ("youtube_video_id",  "TEXT"),

@@ -523,12 +523,12 @@ def _compile_one_entry(
         except Exception as exc:  # noqa: BLE001 -- any compiler failure is a hard block, never silently skipped
             result.envelope_fields_reasons.append(f"compiler_error: {type(exc).__name__}: {exc}")
 
-    provider_bound_content = None
-    provider_bound_content_sha256 = None
+    operation_payload_content = None
+    operation_payload_sha256 = None
     if stored_prompt and not result.envelope_fields_reasons:
-        provider_bound_content = assemble_video_scene_prompt(stored_prompt)
-        provider_bound_content_sha256 = _sha256_bytes(provider_bound_content.encode("utf-8"))
-        result.checksums["provider_bound_content_sha256"] = provider_bound_content_sha256
+        operation_payload_content = assemble_video_scene_prompt(stored_prompt)
+        operation_payload_sha256 = _sha256_bytes(operation_payload_content.encode("utf-8"))
+        result.checksums["operation_payload_sha256"] = operation_payload_sha256
 
     # Authorized binding -- from the manifest, never from the live scene.
     authorized_model = manifest.get("model_tier_planned")
@@ -642,8 +642,9 @@ def _compile_one_entry(
                 structured_spec_checksum=structured_spec_checksum,
                 compiler_identity=_COMPILER_IDENTITY,
                 compiler_version=provenance.get("compiler_version") if provenance else None,
-                provider_bound_content=provider_bound_content,
-                provider_bound_content_sha256=provider_bound_content_sha256,
+                operation_payload_content=operation_payload_content,
+                operation_payload_sha256=operation_payload_sha256,
+                operation_payload_schema_version=f"{_PROVIDER_OPERATION}/1.0",
                 content_provenance={
                     "compiler": provenance.get("compiler") if provenance else None,
                     "compiler_version": provenance.get("compiler_version") if provenance else None,

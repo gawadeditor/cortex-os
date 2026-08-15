@@ -263,14 +263,14 @@ def evaluate_shadow(
 
         if envelope is not None:
             if actual_provider_bound_content is not None:
-                if actual_provider_bound_content != envelope.provider_bound_content:
+                if actual_provider_bound_content != envelope.operation_payload_content:
                     outcomes.append(sg.CheckOutcome(
                         "10_prompt_checksum_match", "fail",
-                        "actual outgoing provider-bound content differs from envelope.provider_bound_content byte-for-byte",
+                        "actual outgoing content differs from envelope.operation_payload_content byte-for-byte",
                     ))
                 else:
                     recomputed = hashlib.sha256(actual_provider_bound_content.encode("utf-8")).hexdigest()
-                    if recomputed != envelope.provider_bound_content_sha256:
+                    if recomputed != envelope.operation_payload_sha256:
                         outcomes.append(sg.CheckOutcome("10_prompt_checksum_match", "fail", "recomputed checksum of actual outgoing content does not match envelope"))
                     else:
                         outcomes.append(sg.CheckOutcome("10_prompt_checksum_match", "pass"))
@@ -311,7 +311,7 @@ def evaluate_shadow(
             model=envelope.model if envelope else actual_model,
             provider_operation=envelope.provider_operation if envelope else actual_provider_operation,
             idempotency_key=envelope.idempotency_key if envelope else None,
-            prompt_checksum=envelope.provider_bound_content_sha256 if envelope else None,
+            prompt_checksum=envelope.operation_payload_sha256 if envelope else None,
             check_results=tuple(check_results), first_failing_check=first_failing_check,
             blockers=tuple(blockers), warnings=(), verdict=verdict, policy_version=POLICY_VERSION,
         )
@@ -332,7 +332,7 @@ def evaluate_shadow(
             model=getattr(envelope, "model", actual_model),
             provider_operation=getattr(envelope, "provider_operation", actual_provider_operation),
             idempotency_key=getattr(envelope, "idempotency_key", None),
-            prompt_checksum=getattr(envelope, "provider_bound_content_sha256", None),
+            prompt_checksum=getattr(envelope, "operation_payload_sha256", None),
             check_results=tuple(check_results), first_failing_check="evaluation",
             blockers=(f"evaluation_exception: {type(exc).__name__}: {exc}",), warnings=(),
             verdict="UNVERIFIABLE", policy_version=POLICY_VERSION,

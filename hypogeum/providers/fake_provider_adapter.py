@@ -70,6 +70,8 @@ class CapabilityAlreadyConsumedError(FakeProviderAdapterError):
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
+    if isinstance(value, bytes):
+        return value.hex()
     if is_dataclass(value):
         return {f.name: _to_jsonable(getattr(value, f.name)) for f in fields(value)}
     if isinstance(value, Mapping):
@@ -88,7 +90,7 @@ class AdapterInvocationCapability:
       - attempt_id / idempotency_key
       - lease_owner_id / lease_fencing_token
       - provider / model / provider_operation
-      - provider_bound_content / provider_bound_content_sha256
+      - operation_payload_bytes / operation_payload_sha256 / operation_payload_schema_version
       - max_cost_per_call / currency
       - budget_reservation_ids
       - issued_at / expires_at
@@ -114,8 +116,9 @@ class AdapterInvocationCapability:
     provider: str
     model: str
     provider_operation: str
-    provider_bound_content: str
-    provider_bound_content_sha256: str
+    operation_payload_bytes: bytes
+    operation_payload_sha256: str
+    operation_payload_schema_version: str
     max_cost_per_call: Decimal
     currency: str
     budget_reservation_ids: Sequence[str]

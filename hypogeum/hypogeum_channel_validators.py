@@ -77,7 +77,7 @@ def hypogeum_dominance_leak_validator(
     muapi.py's shadow wiring) is responsible for gathering these from
     the live coverage plan; this function performs no file I/O itself.
     """
-    prompt = envelope.provider_bound_content
+    prompt = envelope.operation_payload_content
     shot_id = envelope.planned_shot_id
 
     has_marker = f"SHOT-SPECIFIC DIRECTION FOR {shot_id}" in prompt and "AUTHORITATIVE" in prompt
@@ -97,7 +97,7 @@ def hypogeum_dominance_leak_validator(
         validator_identity=VALIDATOR_IDENTITY, validator_version=VALIDATOR_VERSION,
         channel_package_checksum=envelope.channel_package_checksum,
         planned_shot_id=shot_id,
-        provider_bound_prompt_checksum=envelope.provider_bound_content_sha256,
+        provider_bound_prompt_checksum=envelope.operation_payload_sha256,
         structured_spec_checksum=envelope.structured_spec_checksum,
         scene_prompt_checksum=None,
         leak_detected=leak_detected, reason=reason,

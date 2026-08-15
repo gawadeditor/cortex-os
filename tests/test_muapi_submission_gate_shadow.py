@@ -57,7 +57,7 @@ def _assembled_prompt(raw: str) -> str:
 
 
 def _make_matching_env(spec: dict, config, *, shot_id: str, **overrides) -> GenerationExecutionEnvelope:
-    """Builds an envelope whose provider_bound_content/provider/model/
+    """Builds an envelope whose operation_payload_content/provider/model/
     aspect_ratio/output_path all match exactly what submit_scene() would
     actually construct and send for `spec` -- the "clean" fixture used
     for WOULD_ALLOW-capable tests. Uses spec['production_spec']
@@ -66,7 +66,7 @@ def _make_matching_env(spec: dict, config, *, shot_id: str, **overrides) -> Gene
     assemble_video_scene_prompt() -- any tests that need the Hypogeum
     per-shot AUTHORITATIVE marker present must bake it into
     make_scene_spec(primary_prompt=...) themselves so the "actual
-    outgoing content" and this envelope's provider_bound_content stay
+    outgoing content" and this envelope's operation_payload_content stay
     byte-identical."""
     from hypogeum.muapi import _tier_to_model, scene_file_path
 
@@ -81,7 +81,8 @@ def _make_matching_env(spec: dict, config, *, shot_id: str, **overrides) -> Gene
         execution_id="ep_001", workflow_version="1.0", plan_version="1.0", plan_checksum="b" * 64,
         planned_shot_id=shot_id, structured_spec_checksum="c" * 64,
         compiler_identity="hypogeum.video_prompt_writer.compile_authoritative_shot_prompt", compiler_version="v1",
-        provider_bound_content=compiled, provider_bound_content_sha256=_sha(compiled),
+        operation_payload_content=compiled, operation_payload_sha256=_sha(compiled),
+        operation_payload_schema_version="video.text_to_video/1.0",
         content_provenance={
             "compiler": "hypogeum.video_prompt_writer.compile_authoritative_shot_prompt", "compiler_version": "v1",
             "source_work_item_id": shot_id, "rendered_at": AT,
@@ -214,11 +215,11 @@ class TestDominanceLeakValidatorLoading:
         shared_prompt = _assembled_prompt("the exact same old scene-level prompt, never per-shot")
         env_shot1 = _make_matching_env(
             spec, config, shot_id="s01b01__shot1", output_dir=tmp_path,
-            provider_bound_content=shared_prompt, provider_bound_content_sha256=_sha(shared_prompt),
+            operation_payload_content=shared_prompt, operation_payload_sha256=_sha(shared_prompt),
         )
         env_shot2 = _make_matching_env(
             spec, config, shot_id="s01b01__shot2", output_dir=tmp_path,
-            provider_bound_content=shared_prompt, provider_bound_content_sha256=_sha(shared_prompt),
+            operation_payload_content=shared_prompt, operation_payload_sha256=_sha(shared_prompt),
             idempotency_key="idem_shot2",
         )
         for env in (env_shot1, env_shot2):
@@ -249,7 +250,7 @@ class TestBindingMismatchesProduceWouldDeny:
         config = make_config()
         spec = make_scene_spec(scene_id="s01b01")
         env = self._base(tmp_path, config, spec)
-        tampered_content = env.provider_bound_content + "!"
+        tampered_content = env.operation_payload_content + "!"
         # a real outgoing prompt (what the muapi adapter actually sends)
         # will legitimately differ from this deliberately-mismatched envelope
         decision = evaluate_shadow(
@@ -416,7 +417,7 @@ class TestMissingEvidenceProducesUnverifiableNotPass:
                 authorization_version=1, attempt_id="attempt_1", idempotency_key=env.idempotency_key,
                 event_type=EventType.ABOUT_TO_SUBMIT, event_seq=0, at=AT,
                 provider=env.provider, model=env.model, provider_operation=env.provider_operation,
-                provider_bound_content_sha256=env.provider_bound_content_sha256,
+                provider_bound_content_sha256=env.operation_payload_sha256,
                 max_cost_per_call=env.max_cost_per_call, currency=env.currency, evidence={},
             ),
             execution_id="ep_001",
@@ -427,7 +428,7 @@ class TestMissingEvidenceProducesUnverifiableNotPass:
                 authorization_version=1, attempt_id="attempt_1", idempotency_key=env.idempotency_key,
                 event_type=EventType.UNKNOWN_ACCEPTANCE, event_seq=1, at=AT,
                 provider=env.provider, model=env.model, provider_operation=env.provider_operation,
-                provider_bound_content_sha256=env.provider_bound_content_sha256,
+                provider_bound_content_sha256=env.operation_payload_sha256,
                 max_cost_per_call=env.max_cost_per_call, currency=env.currency, evidence={"reason": "test"},
             ),
             execution_id="ep_001",

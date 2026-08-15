@@ -30,7 +30,7 @@ def _sha256(text: str) -> str:
 
 
 def _base_kwargs(**overrides) -> dict:
-    prompt = overrides.pop("provider_bound_content", "a fully compiled prompt string")
+    prompt = overrides.pop("operation_payload_content", "a fully compiled prompt string")
     kwargs = dict(
         envelope_schema_version="1.0",
         envelope_version=1,
@@ -45,8 +45,9 @@ def _base_kwargs(**overrides) -> dict:
         structured_spec_checksum="c" * 64,
         compiler_identity="pkg.module.compile_fn",
         compiler_version="deadbeefcafe",
-        provider_bound_content=prompt,
-        provider_bound_content_sha256=_sha256(prompt),
+        operation_payload_content=prompt,
+        operation_payload_sha256=_sha256(prompt),
+        operation_payload_schema_version=overrides.pop("operation_payload_schema_version", "video.text_to_video/1.0"),
         content_provenance={
             "compiler": "pkg.module.compile_fn", "compiler_version": "deadbeefcafe",
             "source_work_item_id": "work_item_1", "rendered_at": "2026-01-01T00:00:00Z",
@@ -98,9 +99,9 @@ class TestDeterministicIdentity:
 
     def test_prompt_change_changes_checksum_and_id(self):
         env_a = _make()
-        prompt_b = env_a.provider_bound_content + "!"
-        env_b = _make(provider_bound_content=prompt_b, provider_bound_content_sha256=_sha256(prompt_b))
-        assert env_a.provider_bound_content_sha256 != env_b.provider_bound_content_sha256
+        prompt_b = env_a.operation_payload_content + "!"
+        env_b = _make(operation_payload_content=prompt_b, operation_payload_sha256=_sha256(prompt_b))
+        assert env_a.operation_payload_sha256 != env_b.operation_payload_sha256
         assert env_a.envelope_id != env_b.envelope_id
 
     def test_plan_checksum_change_changes_id(self):
@@ -153,28 +154,28 @@ class TestPromptIntegrity:
 
     def test_prompt_bytes_survive_round_trip_exactly(self):
         prompt = "SCENE CONTINUITY: exact bytes\nwith a newline\tand a tab — em dash too."
-        env = _make(provider_bound_content=prompt, provider_bound_content_sha256=_sha256(prompt))
+        env = _make(operation_payload_content=prompt, operation_payload_sha256=_sha256(prompt))
         d = env.to_dict()
         restored = GenerationExecutionEnvelope.from_dict(d)
-        assert restored.provider_bound_content == prompt
+        assert restored.operation_payload_content == prompt
 
     def test_empty_prompt_fails_integrity_validation(self):
         with pytest.raises(EnvelopeSchemaError) as exc:
-            _make(provider_bound_content="", provider_bound_content_sha256=_sha256(""))
-        assert exc.value.field_name == "provider_bound_content"
+            _make(operation_payload_content="", operation_payload_sha256=_sha256(""))
+        assert exc.value.field_name == "operation_payload_content"
 
     def test_prompt_checksum_mismatch_fails_integrity_validation(self):
         with pytest.raises(EnvelopeIntegrityError) as exc:
-            _make(provider_bound_content_sha256="0" * 64)
-        assert exc.value.check == "provider_bound_content_sha256"
+            _make(operation_payload_sha256="0" * 64)
+        assert exc.value.check == "operation_payload_sha256"
 
     def test_provider_adapter_cannot_reconstruct_prompt(self):
         """The canonical serialization never normalizes/trims/rewrites
-        the prompt -- to_dict()'s provider_bound_content is byte-for-byte
+        the prompt -- to_dict()'s operation_payload_content is byte-for-byte
         what was submitted at construction time."""
         prompt = "  leading and trailing whitespace preserved  "
-        env = _make(provider_bound_content=prompt, provider_bound_content_sha256=_sha256(prompt))
-        assert env.to_dict()["provider_bound_content"] == prompt
+        env = _make(operation_payload_content=prompt, operation_payload_sha256=_sha256(prompt))
+        assert env.to_dict()["operation_payload_content"] == prompt
 
 
 class TestFailClosedConstruction:

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import hypogeum.adapter_registry as adapter_registry
 import hypogeum.budget_scopes as bs
 import hypogeum.db as db
 import hypogeum.submission_gate as sg
@@ -37,14 +38,15 @@ def _sha(text: str) -> str:
 
 
 def _make_env(**overrides) -> GenerationExecutionEnvelope:
-    prompt = overrides.pop("provider_bound_content", "a fully compiled prompt")
+    prompt = overrides.pop("operation_payload_content", "a fully compiled prompt")
     kwargs = dict(
         envelope_schema_version="1.0", envelope_version=1,
         channel_id="test_channel", channel_package_version="1.0", channel_package_checksum="a" * 64,
         execution_id=EXEC_ID, workflow_version="1.0", plan_version="1.0", plan_checksum="b" * 64,
         planned_shot_id="shot_1", structured_spec_checksum="c" * 64,
         compiler_identity="pkg.compile", compiler_version="v1",
-        provider_bound_content=prompt, provider_bound_content_sha256=_sha(prompt),
+        operation_payload_content=prompt, operation_payload_sha256=_sha(prompt),
+        operation_payload_schema_version=overrides.pop("operation_payload_schema_version", "video.text_to_video/1.0"),
         content_provenance={
             "compiler": "pkg.compile", "compiler_version": "v1",
             "source_work_item_id": "shot_1", "rendered_at": AT,
@@ -103,7 +105,17 @@ class GateHarness:
         db.initialize_schema(db_path)
         self.conn = db.get_connection(db_path)
         self.store = WriteAheadReceiptStore(tmp_path)
-        self.adapter = FakeProviderAdapter()
+        # submit() resolves its adapter internally via the Adapter
+        # Registry, keyed by the envelope's own (provider, model,
+        # provider_operation) -- register the fake adapter under the
+        # exact key _make_env()'s defaults produce ("fake", "fake-model",
+        # "video.text_to_video"), against the SAME db_path self.conn
+        # points to, so submit()'s internal lookup (via lease_conn) finds it.
+        adapter_registry.reset_adapter_instance_cache()
+        adapter_registry.register_adapter(
+            "fake", "fake-model", "video.text_to_video", "1.0", FakeProviderAdapter, db_path=db_path,
+        )
+        self.adapter = adapter_registry.get_or_create_adapter_instance(FakeProviderAdapter)
 
     def acquire_lease(self, envelope, owner="worker_a", token_expires="2026-01-01T01:00:00Z"):
         return db.acquire_lease(self.conn, envelope.envelope_id, owner, acquired_at=AT, expires_at=token_expires)
@@ -115,7 +127,7 @@ class GateHarness:
             lease_conn=self.conn, lease_owner_id="worker_a", lease_fencing_token=1,
             receipt_store=self.store, execution_id=EXEC_ID, attempt_id="attempt_1",
             budget_scopes=_default_scopes(envelope),
-            adapter=self.adapter, adapter_mode="success", at=AT,
+            adapter_mode="success", at=AT,
             expected_deterministic_output_path=envelope.deterministic_output_path,
         )
         kwargs.update(overrides)
@@ -143,6 +155,42 @@ class TestHappyPath:
 
 
 # ---------------------------------------------------------------------------
+# Adapter resolution -- no caller-supplied adapter; resolved internally
+# via the Adapter Registry, keyed by the envelope's own (provider,
+# model, provider_operation).
+# ---------------------------------------------------------------------------
+
+class TestAdapterResolutionDenials:
+
+    def test_unregistered_provider_model_operation_blocks_with_zero_calls(self, harness):
+        env = _make_env(provider="nobody-registered-this-provider")
+        harness.acquire_lease(env)
+        result = harness.submit(env)
+        assert result.approved is False
+        assert harness.adapter.invocation_count == 0
+        assert "14_model_provider_operation_match" in result.denied_at_check
+
+    def test_adapter_implementation_drift_blocks_with_zero_calls(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        # Simulate "the adapter's source changed after registration" --
+        # the DB row still holds the checksum computed at registration
+        # time, but the live class's checksum (recomputed by submit() on
+        # every call) no longer matches it.
+        harness.conn.execute(
+            "UPDATE adapter_registrations SET adapter_implementation_checksum = ? "
+            "WHERE provider = 'fake' AND model = 'fake-model' AND provider_operation = 'video.text_to_video'",
+            ("stale" * 16,),
+        )
+        harness.conn.commit()
+        result = harness.submit(env)
+        assert result.approved is False
+        assert harness.adapter.invocation_count == 0
+        assert "14_model_provider_operation_match" in result.denied_at_check
+        assert "drift" in result.reason
+
+
+# ---------------------------------------------------------------------------
 # 2-21. Individual denial checks -- each must produce zero adapter calls
 # ---------------------------------------------------------------------------
 
@@ -151,7 +199,7 @@ class TestEnvelopeAndSourceDenials:
     def test_prompt_mutation_blocks_with_zero_calls(self, harness):
         env = _make_env()
         harness.acquire_lease(env)
-        tampered = dataclasses.replace(env, provider_bound_content=env.provider_bound_content + "!")
+        tampered = dataclasses.replace(env, operation_payload_content=env.operation_payload_content + "!")
         result = harness.submit(tampered)
         assert result.approved is False
         assert harness.adapter.invocation_count == 0
@@ -413,7 +461,7 @@ class TestRecoveryIdempotencyDenials:
                 authorization_version=1, attempt_id="preexisting", idempotency_key=env.idempotency_key,
                 event_type=EventType.ABOUT_TO_SUBMIT, event_seq=0, at=AT,
                 provider=env.provider, model=env.model, provider_operation=env.provider_operation,
-                provider_bound_content_sha256=env.provider_bound_content_sha256,
+                provider_bound_content_sha256=env.operation_payload_sha256,
                 max_cost_per_call=env.max_cost_per_call, currency=env.currency, evidence={"note": "pre-existing"},
             ),
             execution_id=EXEC_ID,
@@ -462,20 +510,25 @@ class TestExactRequestPreservation:
 
     def test_validated_request_preserves_prompt_bytes(self, harness):
         prompt = "SCENE CONTINUITY: exact bytes\nwith a newline"
-        env = _make_env(provider_bound_content=prompt, provider_bound_content_sha256=_sha(prompt))
+        env = _make_env(operation_payload_content=prompt, operation_payload_sha256=_sha(prompt))
         harness.acquire_lease(env)
         harness.submit(env)
         capability = harness.adapter.received_capabilities[0]
-        assert capability.provider_bound_content == prompt
+        assert capability.operation_payload_bytes == prompt.encode("utf-8")
 
     def test_caller_cannot_override_provider_bound_fields(self, harness):
         """submit()'s public signature has no parameter that lets a
         caller inject a different provider/model/prompt into the
-        capability after gate validation -- the capability is always
-        minted from the envelope's own already-validated fields."""
+        capability after gate validation, and no parameter that lets a
+        caller select or supply an adapter -- the capability is always
+        minted from the envelope's own already-validated fields, and the
+        adapter is always resolved internally via the Adapter Registry."""
         import inspect
         sig = inspect.signature(sg.submit)
-        forbidden_override_params = {"capability_provider", "capability_model", "capability_prompt", "override_provider_bound_content"}
+        forbidden_override_params = {
+            "capability_provider", "capability_model", "capability_prompt",
+            "override_operation_payload_content", "adapter",
+        }
         assert not (forbidden_override_params & set(sig.parameters))
 
 

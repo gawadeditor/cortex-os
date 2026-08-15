@@ -68,8 +68,8 @@ class EnvelopeIntegrityError(Exception):
     """Raised when an already-constructed envelope's own claims about
     itself do not hold: a stored envelope_id that does not match the
     recomputed content-addressed identity, or a stored
-    provider_bound_content_sha256 that does not match the actual prompt
-    bytes. Distinct from EnvelopeSchemaError because this is a check
+    operation_payload_sha256 that does not match the actual operation
+    payload bytes. Distinct from EnvelopeSchemaError because this is a check
     performed *after* the shape is otherwise valid — the difference
     between "this isn't even a well-formed envelope" and "this claims to
     be an envelope but its own identity doesn't check out"."""
@@ -187,11 +187,19 @@ class GenerationExecutionEnvelope:
     planned_shot_id: str
     structured_spec_checksum: str
 
-    # Compiled content
+    # Compiled content -- operation-neutral: a canonical serialization of
+    # a domain-typed payload (video: prompt text; voice/music: voice id +
+    # duration + format; text/research: messages/query; upscale: source
+    # identity + scale -- never assumed to be a video/image prompt by
+    # this module). operation_payload_schema_version names which typed
+    # shape operation_payload_content was serialized from (e.g.
+    # "video.text_to_video/1.0"), so a consumer can decode it correctly
+    # without this module ever needing to understand any domain's shape.
     compiler_identity: str
     compiler_version: str
-    provider_bound_content: str
-    provider_bound_content_sha256: str
+    operation_payload_content: str
+    operation_payload_sha256: str
+    operation_payload_schema_version: str
     content_provenance: ContentProvenance
 
     # Provider binding
@@ -319,8 +327,9 @@ class GenerationExecutionEnvelope:
             "structured_spec_checksum": self.structured_spec_checksum,
             "compiler_identity": self.compiler_identity,
             "compiler_version": self.compiler_version,
-            "provider_bound_content": self.provider_bound_content,
-            "provider_bound_content_sha256": self.provider_bound_content_sha256,
+            "operation_payload_content": self.operation_payload_content,
+            "operation_payload_sha256": self.operation_payload_sha256,
+            "operation_payload_schema_version": self.operation_payload_schema_version,
             "content_provenance": {
                 "compiler": cp.compiler,
                 "compiler_version": cp.compiler_version,
@@ -386,14 +395,14 @@ class GenerationExecutionEnvelope:
                 "envelope_id",
                 f"stored envelope_id {self.envelope_id!r} != recomputed {recomputed_id!r}",
             )
-        recomputed_prompt_checksum = hashlib.sha256(
-            self.provider_bound_content.encode("utf-8")
+        recomputed_payload_checksum = hashlib.sha256(
+            self.operation_payload_content.encode("utf-8")
         ).hexdigest()
-        if recomputed_prompt_checksum != self.provider_bound_content_sha256:
+        if recomputed_payload_checksum != self.operation_payload_sha256:
             raise EnvelopeIntegrityError(
-                "provider_bound_content_sha256",
-                f"stored checksum {self.provider_bound_content_sha256!r} != "
-                f"recomputed {recomputed_prompt_checksum!r} of the exact provider_bound_content bytes",
+                "operation_payload_sha256",
+                f"stored checksum {self.operation_payload_sha256!r} != "
+                f"recomputed {recomputed_payload_checksum!r} of the exact operation_payload_content bytes",
             )
 
     # ------------------------------------------------------------------
@@ -434,7 +443,7 @@ _REQUIRED_FIELDS = (
     "channel_package_version", "channel_package_checksum", "execution_id",
     "workflow_version", "plan_version", "plan_checksum", "planned_shot_id",
     "structured_spec_checksum", "compiler_identity", "compiler_version",
-    "provider_bound_content", "provider_bound_content_sha256",
+    "operation_payload_content", "operation_payload_sha256", "operation_payload_schema_version",
     "content_provenance", "provider", "model", "provider_operation",
     "deterministic_output_path", "expected_output_identity",
     "authorization_id", "authorization_version", "max_cost_per_call",
@@ -483,9 +492,10 @@ def _validate_field_contents(env: "GenerationExecutionEnvelope") -> None:
     _require_nonempty_str("idempotency_key", env.idempotency_key)
     _require_nonempty_str("created_at", env.created_at)
 
-    if not env.provider_bound_content:
-        raise EnvelopeSchemaError("provider_bound_content", "must not be empty")
-    _require_sha256("provider_bound_content_sha256", env.provider_bound_content_sha256)
+    if not env.operation_payload_content:
+        raise EnvelopeSchemaError("operation_payload_content", "must not be empty")
+    _require_sha256("operation_payload_sha256", env.operation_payload_sha256)
+    _require_nonempty_str("operation_payload_schema_version", env.operation_payload_schema_version)
     _require_sha256("plan_checksum", env.plan_checksum)
     _require_sha256("structured_spec_checksum", env.structured_spec_checksum)
     _require_sha256("channel_package_checksum", env.channel_package_checksum)

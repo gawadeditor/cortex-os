@@ -10,15 +10,24 @@ to the exact boundary sequence this commit's task defines.
 `submit()` is the ONLY function in Factory Core authorized to invoke a
 provider adapter (Part 5 requirement 1). Every other module that wants to
 spend constructs a GenerationExecutionEnvelope and calls this function --
-never a provider adapter directly, never with a raw prompt. This module
-mints a short-lived, integrity-checksummed, single-use
-AdapterInvocationCapability only after every check below has passed, and
-that capability is the only thing an adapter's invoke() will accept (see
+never a provider adapter directly, never with a raw prompt, and never by
+selecting or supplying an adapter instance. This module mints a short-
+lived, integrity-checksummed, single-use AdapterInvocationCapability only
+after every check below has passed, and that capability is the only
+thing an adapter's invoke() will accept (see
 hypogeum.providers.fake_provider_adapter).
 
-This commit wires only hypogeum.providers.fake_provider_adapter.
-FakeProviderAdapter -- a structurally network-incapable test double. No
-real provider is imported or reachable from this module.
+submit()'s public signature carries no adapter parameter at all. The
+exact adapter class is resolved internally, immediately before minting a
+capability, via hypogeum.adapter_registry.resolve_adapter_via_conn() --
+keyed by the envelope's own (provider, model, provider_operation) -- and
+instantiated only inside this function. No caller ever imports,
+constructs, selects, or invokes a real adapter class, or receives a
+capability. Only hypogeum.providers.fake_provider_adapter.
+FakeProviderAdapter is registered as of this commit -- a structurally
+network-incapable test double -- so no real provider is reachable yet;
+later commits register real per-domain adapters through the same
+registry with no change to this module's resolution logic.
 
 Default-deny: every check function below returns None on success and
 returns a GateDenial on failure. submit() runs them in the exact order
@@ -32,6 +41,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Sequence
 
+import hypogeum.adapter_registry as adapter_registry
 import hypogeum.budget_scopes as bs
 import hypogeum.db as db
 from hypogeum.authorization_lifecycle import AuthorizationRecord, AuthorizationState
@@ -39,7 +49,6 @@ from hypogeum.execution_envelope import GenerationExecutionEnvelope
 from hypogeum.providers.fake_provider_adapter import (
     AdapterInvocationCapability,
     AdapterResult,
-    FakeProviderAdapter,
     compute_capability_checksum,
 )
 from hypogeum.provider_receipt import (
@@ -209,9 +218,9 @@ def _validate_envelope_and_sources(
         )
 
     import hashlib
-    recomputed_prompt_checksum = hashlib.sha256(envelope.provider_bound_content.encode("utf-8")).hexdigest()
-    if recomputed_prompt_checksum != envelope.provider_bound_content_sha256:
-        return GateDenial(GATE_CHECK_ORDER[9], "provider_bound_content_sha256 does not match the exact prompt bytes")
+    recomputed_payload_checksum = hashlib.sha256(envelope.operation_payload_content.encode("utf-8")).hexdigest()
+    if recomputed_payload_checksum != envelope.operation_payload_sha256:
+        return GateDenial(GATE_CHECK_ORDER[9], "operation_payload_sha256 does not match the exact operation_payload_content bytes")
 
     cp = envelope.content_provenance
     if not cp.compiler or not cp.source_work_item_id:
@@ -429,6 +438,56 @@ def _reset_counter_breaker_observed_value(conn, kind: str, limits: Optional[Brea
 
 
 # ---------------------------------------------------------------------------
+# Adapter resolution -- the only place a real adapter class is ever
+# located and loaded. No caller supplies one.
+# ---------------------------------------------------------------------------
+
+def _resolve_adapter_binding(lease_conn, envelope: GenerationExecutionEnvelope) -> "tuple[Optional[GateDenial], Optional[type]]":
+    """
+    Resolves the exact adapter class bound to this envelope's
+    (provider, model, provider_operation) via the generic Adapter
+    Registry (hypogeum.adapter_registry) -- the only way submit() ever
+    discovers which class to instantiate. Reuses lease_conn (the same
+    connection every other check in submit() already uses) rather than
+    opening a separate connection, so production resolves against the
+    real database and tests resolve against whatever isolated database
+    their lease_conn already points to, with no separate adapter-
+    registry parameter on submit()'s own public signature.
+
+    Fails closed if no active registration exists, or if the resolved
+    binding's recorded adapter_implementation_checksum no longer
+    matches the live adapter class's current module-source checksum
+    (implementation drift -- the adapter changed without a new
+    registration).
+    """
+    try:
+        binding = adapter_registry.resolve_adapter_via_conn(
+            lease_conn, envelope.provider, envelope.model, envelope.provider_operation,
+        )
+    except adapter_registry.UnregisteredAdapterError as exc:
+        return GateDenial(GATE_CHECK_ORDER[13], f"no adapter registered: {exc}"), None
+
+    try:
+        adapter_class = adapter_registry.load_adapter_class(binding.adapter_qualified_name)
+    except Exception as exc:  # noqa: BLE001 -- an unimportable registered class is itself a fail-closed condition
+        return GateDenial(
+            GATE_CHECK_ORDER[13],
+            f"registered adapter class {binding.adapter_qualified_name!r} could not be loaded: {exc}",
+        ), None
+
+    live_checksum = adapter_registry.compute_adapter_implementation_checksum(adapter_class)
+    if live_checksum != binding.adapter_implementation_checksum:
+        return GateDenial(
+            GATE_CHECK_ORDER[13],
+            f"adapter implementation drift: registered checksum {binding.adapter_implementation_checksum!r} "
+            f"!= live checksum {live_checksum!r} for {binding.adapter_qualified_name!r} -- "
+            "the adapter's implementation changed without a new registration",
+        ), None
+
+    return None, adapter_class
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -444,7 +503,6 @@ def submit(
     execution_id: str,
     attempt_id: str,
     budget_scopes: Sequence[bs.ScopeRequest],
-    adapter: FakeProviderAdapter,
     adapter_mode: str = "success",
     at: str,
     dominance_leak_validator=None,
@@ -466,15 +524,20 @@ def submit(
     The one function in Factory Core authorized to invoke a provider
     adapter. Runs every check in GATE_CHECK_ORDER; on the first denial,
     returns a GateResult(approved=False, ...) with adapter_invoked=False
-    and performs no further action -- in particular, nothing about the
-    fake adapter is touched at all until step 9 completes durably.
+    and performs no further action -- in particular, nothing about a
+    real adapter is touched at all until step 9 completes durably. No
+    caller supplies an adapter: the exact class is resolved internally
+    via hypogeum.adapter_registry, keyed by the envelope's own
+    (provider, model, provider_operation) -- see
+    _resolve_adapter_binding().
 
-    `adapter_mode` is a test-control knob forwarded to the fake adapter's
-    invoke() (see FakeProviderAdapter.invoke() for the vocabulary:
-    "success", "unknown_acceptance", "rejected", "overcharge",
-    "duplicate_acknowledgement"). A production adapter (Commit 4+) would
-    not have this parameter; it exists here because this commit wires
-    only the fake adapter.
+    `adapter_mode` is a test-control knob forwarded to whichever
+    resolved adapter's invoke() accepts it (see
+    FakeProviderAdapter.invoke() for the vocabulary: "success",
+    "unknown_acceptance", "rejected", "overcharge",
+    "duplicate_acknowledgement"). Only the fake adapter is registered as
+    of this commit; later commits' real per-domain adapters are expected
+    to ignore or ultimately retire this parameter.
     """
     # ---- Step 1: validate envelope and sources ----
     denial = _validate_envelope_and_sources(envelope, live_sources, required_model, required_provider, dominance_leak_validator)
@@ -485,6 +548,11 @@ def submit(
         envelope, expected_duration_seconds, expected_aspect_ratio, expected_seed,
         expected_output_identity, expected_deterministic_output_path, output_already_exists,
     )
+    if denial:
+        return _denial(denial.check, denial.reason)
+
+    # ---- Resolve the adapter internally -- no caller-supplied adapter ----
+    denial, adapter_class = _resolve_adapter_binding(lease_conn, envelope)
     if denial:
         return _denial(denial.check, denial.reason)
 
@@ -535,7 +603,7 @@ def submit(
         attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
         event_type=EventType.ABOUT_TO_SUBMIT, event_seq=0, at=at,
         provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
-        provider_bound_content_sha256=envelope.provider_bound_content_sha256,
+        provider_bound_content_sha256=envelope.operation_payload_sha256,
         max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
         evidence={"reservation_ids": list(reservation_ids)},
     )
@@ -563,7 +631,7 @@ def submit(
         attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
         event_type=EventType.SUBMISSION_ATTEMPT_STARTED, event_seq=1, at=at,
         provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
-        provider_bound_content_sha256=envelope.provider_bound_content_sha256,
+        provider_bound_content_sha256=envelope.operation_payload_sha256,
         max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
         evidence={"lease_owner_id": lease_owner_id, "lease_fencing_token": lease_fencing_token},
     )
@@ -579,10 +647,11 @@ def submit(
     # (checked at step 5 of that later call).
     _increment_counter_breaker(lease_conn, "provider_calls", "max_provider_calls", breaker_limits, at=at, attempt_id=attempt_id)
 
-    # ---- Step 10: invoke the fake adapter exactly once ----
+    # ---- Step 10: instantiate the resolved adapter and invoke it exactly once ----
     capability = _mint_capability(envelope, attempt_id, lease_owner_id, lease_fencing_token, reservation_ids, at, capability_expires_at or at)
     try:
-        adapter_result = adapter.invoke(capability, mode=adapter_mode)
+        adapter_instance = adapter_registry.get_or_create_adapter_instance(adapter_class)
+        adapter_result = adapter_instance.invoke(capability, mode=adapter_mode)
         outcome = adapter_result.outcome
     except Exception as exc:  # noqa: BLE001 -- a crash *during* invocation is exactly "possible acceptance, no ack"
         adapter_result = None
@@ -625,7 +694,7 @@ def submit(
                 attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
                 event_type=EventType.REJECTED, event_seq=2, at=at,
                 provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
-                provider_bound_content_sha256=envelope.provider_bound_content_sha256,
+                provider_bound_content_sha256=envelope.operation_payload_sha256,
                 max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
                 evidence=dict(adapter_result.evidence),
             ),
@@ -650,7 +719,7 @@ def submit(
             attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
             event_type=EventType.ACCEPTED, event_seq=2, at=at,
             provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
-            provider_bound_content_sha256=envelope.provider_bound_content_sha256,
+            provider_bound_content_sha256=envelope.operation_payload_sha256,
             max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
             evidence={"provider_job_id": adapter_result.provider_job_id, "provider_request_id": adapter_result.provider_request_id},
         ),
@@ -707,7 +776,7 @@ def _persist_unknown_acceptance(receipt_store, envelope, execution_id, attempt_i
             attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
             event_type=EventType.UNKNOWN_ACCEPTANCE, event_seq=2, at=at,
             provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
-            provider_bound_content_sha256=envelope.provider_bound_content_sha256,
+            provider_bound_content_sha256=envelope.operation_payload_sha256,
             max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
             evidence={"detected_by": "submission_gate", "reason": reason},
         ),
@@ -730,8 +799,9 @@ def _mint_capability(
         attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
         lease_owner_id=lease_owner_id, lease_fencing_token=lease_fencing_token,
         provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
-        provider_bound_content=envelope.provider_bound_content,
-        provider_bound_content_sha256=envelope.provider_bound_content_sha256,
+        operation_payload_bytes=envelope.operation_payload_content.encode("utf-8"),
+        operation_payload_sha256=envelope.operation_payload_sha256,
+        operation_payload_schema_version=envelope.operation_payload_schema_version,
         max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
         budget_reservation_ids=tuple(reservation_ids), issued_at=issued_at, expires_at=expires_at,
         capability_checksum="",

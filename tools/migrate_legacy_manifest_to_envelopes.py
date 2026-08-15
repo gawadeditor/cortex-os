@@ -118,7 +118,7 @@ import argparse
 import hashlib
 import json
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -138,7 +138,7 @@ from hypogeum.canary_preflight import (  # noqa: E402
     scene_by_beat,
     sha256_text,
 )
-from hypogeum.channel_config import load_channel_config  # noqa: E402
+from hypogeum.channel_config import compute_channel_package_identity, load_channel_config  # noqa: E402
 from hypogeum.config import Config  # noqa: E402
 from hypogeum.execution_envelope import (  # noqa: E402
     EnvelopeIntegrityError,
@@ -232,45 +232,12 @@ def compute_workflow_identity() -> dict:
     }
 
 
-def compute_channel_package_identity(channel_id: str, db_path: Optional[Path] = None) -> dict:
-    """
-    Reads the real, already-bootstrapped Channel Package for channel_id
-    from hypogeum.channel_config's DB-backed profile tables (channel_
-    profiles joined with brand_profiles/publishing_profiles/
-    model_profiles via load_channel_config()) -- this IS the canonical
-    compiled Channel Package this repository has today, not a document.
-
-    Returns {"available": bool, "checksum": Optional[str],
-    "version": Optional[str], "reason": Optional[str]}.
-
-    checksum is sha256 of the canonical JSON of all four joined profile
-    dataclasses (asdict()), so any change to brand/publishing/model
-    configuration for this channel changes the checksum -- exactly the
-    staleness signal gate check 6 needs. version is the profile rows'
-    own stored metadata_version field (their storage-schema version,
-    the only "version"-labeled field that actually exists here; content
-    freshness is what the checksum verifies, not this field -- disclosed
-    explicitly rather than presented as more than it is).
-    """
-    try:
-        channel_config = load_channel_config(channel_id, db_path=db_path)
-    except Exception as exc:  # noqa: BLE001 -- any lookup failure is UNVERIFIABLE, never a crash
-        return {"available": False, "checksum": None, "version": None,
-                "reason": f"channel config lookup failed: {type(exc).__name__}: {exc}"}
-
-    if channel_config is None or channel_config.channel is None:
-        return {"available": False, "checksum": None, "version": None,
-                "reason": f"no channel_profiles row found for channel_id={channel_id!r}"}
-
-    payload = {
-        "channel": asdict(channel_config.channel),
-        "brand": asdict(channel_config.brand) if channel_config.brand else None,
-        "publishing": asdict(channel_config.publishing) if channel_config.publishing else None,
-        "models": asdict(channel_config.models) if channel_config.models else None,
-    }
-    checksum = _sha256_bytes(_canonical_json_bytes(payload))
-    version = channel_config.channel.metadata_version
-    return {"available": True, "checksum": checksum, "version": version, "reason": None}
+# compute_channel_package_identity() moved to hypogeum.channel_config
+# (Commit C of the Workflow Registry program) so it is a real, reusable
+# Factory-Core-adjacent function any caller can use, not something only
+# this diagnostic tool could compute -- imported above. It now also
+# folds in the versioned Channel Package directory (channel_packages/
+# {channel_id}/), not just the DB-backed profiles.
 
 
 @dataclass

@@ -30,6 +30,16 @@ Three known contamination vectors are patched here:
    Fix: _isolate_pipeline_run_registry (function, autouse) patches register_run,
    set_run_context, fail_run, complete_run, write_episode_rollup, and
    clear_run_context in the pipeline module namespace.
+
+4. Workflow Registry live-DB contamination — run_pipeline() calls
+   hypogeum.workflow_executor.verify_and_load_workflow() without an
+   explicit registry_db_path when the caller's own db_path is None,
+   which would resolve against the production DB and fail every test
+   with WorkflowArtifactUnreadableError unless that workflow happens to
+   already be registered there.
+   Fix: _isolate_pipeline_workflow_verification (function, autouse)
+   patches verify_and_load_workflow in the pipeline module namespace to
+   read the real artifact file directly, skipping only the DB lookup.
 """
 
 from __future__ import annotations
@@ -273,5 +283,39 @@ def _isolate_ois_emit_signal():
     with _patch("hypogeum.ois.emit_signal", new=_guarded):
         with _patch("hypogeum.signals.emit_signal", new=_guarded):
             yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_workflow_verification():
+    """
+    Prevent run_pipeline()'s Workflow Registry verification
+    (hypogeum.workflow_executor.verify_and_load_workflow(), called
+    without an explicit registry_db_path when the caller's own db_path
+    is None) from resolving against the production database.
+
+    The guard reads the REAL, live channel_packages/hypogeum/workflow/
+    hypogeum_main_production.json artifact file (never a fabricated
+    stage list) and returns its parsed content directly, skipping only
+    the hypogeum.workflow_registry DB lookup/checksum-comparison step --
+    so existing pipeline tests still get a real, working
+    StageOrderVerifier that would genuinely catch an execution-order
+    regression, without any test needing to first register a workflow
+    into a database.
+
+    Mirrors _isolate_pipeline_run_registry's pattern: patches the name
+    in the hypogeum.pipeline module namespace, not the defining module,
+    so tests that want the real, unpatched, DB-verifying behavior can
+    still get it by calling hypogeum.workflow_executor functions
+    directly with their own db_path.
+    """
+    from hypogeum.workflow_executor import load_workflow_artifact_bytes
+    from hypogeum.workflow_registry import parse_workflow_definition
+
+    def _guarded(channel_id, workflow_id, workflow_version, *, registry_db_path=None, packages_root=None):
+        live_bytes = load_workflow_artifact_bytes(channel_id, workflow_id, packages_root=packages_root)
+        return parse_workflow_definition(live_bytes)
+
+    with _patch("hypogeum.pipeline.verify_and_load_workflow", new=_guarded):
+        yield
 
 

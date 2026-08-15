@@ -1,0 +1,13 @@
+{
+  "channel_id": "hypogeum",
+  "package_version": "1.0.0",
+  "artifacts": [
+    {
+      "path": "workflow/hypogeum_main_production.json",
+      "role": "workflow_definition",
+      "workflow_id": "hypogeum_main_production",
+      "workflow_version": "1.0.0",
+      "sha256": "1ad2f646d875afa056a581683c3a4d2a095db17b18d0c0eb206a6a9fe4de2776"
+    }
+  ]
+}

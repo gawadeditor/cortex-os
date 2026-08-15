@@ -93,6 +93,20 @@ from hypogeum.production_metadata import write_analytics_pending, write_producti
 from hypogeum.logger import get_logger
 from hypogeum.run_registry import cancel_run, complete_run, fail_run, register_run, transition_run_state
 from hypogeum.startup import StartupReport, run_startup_checks
+from hypogeum.workflow_executor import (
+    StageOrderVerifier,
+    WorkflowArtifactUnreadableError,
+    WorkflowDriftError,
+    verify_and_load_workflow,
+)
+
+# The registered Workflow this module's own stage sequence must match --
+# see channel_packages/hypogeum/workflow/hypogeum_main_production.json
+# (the authoritative source) and scripts/register_hypogeum_workflow.py
+# (which indexes it). Bumping this string is only valid alongside a
+# corresponding new registration of that file's content.
+_HYPOGEUM_WORKFLOW_ID = "hypogeum_main_production"
+_HYPOGEUM_WORKFLOW_VERSION = "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +727,30 @@ def run_pipeline(
     # -----------------------------------------------------------------------
     require_full_production_authorized(config, log=log)
 
+    # -----------------------------------------------------------------------
+    # -0.3. Workflow Registry verification — before any agent, before run
+    # registration. Proves this exact stage sequence matches the registered,
+    # versioned Channel Package workflow artifact (channel_packages/{channel_id}/
+    # workflow/*.json) before dispatching stage 1. Fails closed
+    # (WorkflowArtifactUnreadableError / WorkflowDriftError) on any mismatch,
+    # missing registration, or unreadable/corrupt artifact file -- never a
+    # warning, never a silent continuation. Skipped only when channel_id is
+    # explicitly None, mirroring the existing "bypass channel loading" contract
+    # a few lines above.
+    # -----------------------------------------------------------------------
+    _stage_verifier: Optional[StageOrderVerifier] = None
+    if channel_id is not None:
+        _workflow_definition = verify_and_load_workflow(channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION, registry_db_path=db_path)
+        _stage_verifier = StageOrderVerifier(_workflow_definition["stage_order"])
+
+    def _advance_stage_order(stage_name: str) -> None:
+        """Real-time proof that this stage starting now is exactly the
+        next one the verified, registered workflow definition expects --
+        see hypogeum.workflow_executor.StageOrderVerifier. No-op when
+        _stage_verifier is None (channel_id was explicitly bypassed)."""
+        if _stage_verifier is not None:
+            _stage_verifier.advance(stage_name)
+
     log.info(
         "pipeline_run_started",
         episode_id=episode_id,
@@ -736,6 +774,7 @@ def run_pipeline(
         # -----------------------------------------------------------------------
         # 1. Startup verification — fail-fast before any agent is called
         # -----------------------------------------------------------------------
+        _advance_stage_order("startup_checks")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "startup_checks", log,
             db_path=db_path,
@@ -755,6 +794,7 @@ def run_pipeline(
         # 2. Executive Producer
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="executive_producer")
+        _advance_stage_order("executive_producer")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "executive_producer", log,
             model_slug=getattr(config, "EP_MODEL", None),
@@ -793,6 +833,7 @@ def run_pipeline(
         # 3. Research Director
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="research_director")
+        _advance_stage_order("research_director")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "research_director", log,
             model_slug=getattr(config, "RD_MODEL", None),
@@ -826,6 +867,7 @@ def run_pipeline(
         # 4. Narrative Architect
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="narrative_architect")
+        _advance_stage_order("narrative_architect")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "narrative_architect", log,
             output_schema="narrative_package",
@@ -847,6 +889,7 @@ def run_pipeline(
         # 5. Script Engine
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="script_engine")
+        _advance_stage_order("script_engine")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "script_engine", log,
             output_schema="script_package",
@@ -868,6 +911,7 @@ def run_pipeline(
         # 6. Finance Agent — budget authorization gate (pre-generation spend)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="finance_agent_authorization")
+        _advance_stage_order("finance_agent_authorization")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "finance_agent_authorization", log,
             output_schema="finance_authorization",
@@ -911,6 +955,7 @@ def run_pipeline(
         # the finance gate so a BLOCKED verdict skips even this small spend.
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="thumbnail_strategy")
+        _advance_stage_order("thumbnail_strategy")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "thumbnail_strategy", log,
             output_schema="thumbnail_concept_brief",
@@ -957,6 +1002,7 @@ def run_pipeline(
             or not config.ENABLE_DEDICATED_SHORT_GENERATION
         )
         log.info("pipeline_stage_started", agent="audio_agent")
+        _advance_stage_order("audio_agent")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "audio_agent", log,
             output_schema="narration_package",
@@ -996,6 +1042,7 @@ def run_pipeline(
         # pre-audio word-count estimate.
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="visual_package_director")
+        _advance_stage_order("visual_package_director")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "visual_package_director", log,
             output_schema="visual_package",
@@ -1020,6 +1067,7 @@ def run_pipeline(
         # hypogeum/source_enhancement.py for the full architecture.
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="source_enhancement")
+        _advance_stage_order("source_enhancement")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "source_enhancement", log,
             output_schema="visual_package",
@@ -1041,6 +1089,7 @@ def run_pipeline(
         # 7c. Thumbnail Director
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="thumbnail_director")
+        _advance_stage_order("thumbnail_director")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "thumbnail_director", log,
             model_slug=getattr(config, "TD_PLANNING_MODEL", None),
@@ -1063,6 +1112,7 @@ def run_pipeline(
         # 8. Assembly Agent
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="assembly_agent")
+        _advance_stage_order("assembly_agent")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "assembly_agent", log,
             output_schema="final_render_package",
@@ -1089,6 +1139,7 @@ def run_pipeline(
         # 9b. Asset Archive — catalog all generated assets (non-blocking)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="asset_archive")
+        _advance_stage_order("asset_archive")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "asset_archive", log,
             db_path=db_path,
@@ -1115,6 +1166,7 @@ def run_pipeline(
         # 10. QA Agent — pre-publish gate
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="qa_agent")
+        _advance_stage_order("qa_agent")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "qa_agent", log,
             output_schema="qa_approval_report",
@@ -1151,6 +1203,7 @@ def run_pipeline(
         # 11. Rights & Compliance Agent
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="compliance_agent")
+        _advance_stage_order("compliance_agent")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "compliance_agent", log,
             output_schema="compliance_report",
@@ -1255,6 +1308,7 @@ def run_pipeline(
         # 12. Publishing Agent
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="publishing_agent")
+        _advance_stage_order("publishing_agent")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "publishing_agent", log,
             output_schema="publishing_record",
@@ -1281,6 +1335,7 @@ def run_pipeline(
         # 13. Archive Agent — post-publish audit record (non-blocking)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="archive_agent")
+        _advance_stage_order("archive_agent")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "archive_agent", log,
             db_path=db_path,
@@ -1305,6 +1360,7 @@ def run_pipeline(
         # 14. Finance Agent — cost ledger record (post-run, non-blocking)
         # -----------------------------------------------------------------------
         log.info("pipeline_stage_started", agent="finance_agent_ledger")
+        _advance_stage_order("finance_agent_ledger")
         _current_stage_id, _current_stage_t0 = _record_stage_start(
             run_id, episode_id, "finance_agent_ledger", log,
             db_path=db_path,

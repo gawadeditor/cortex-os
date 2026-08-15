@@ -88,9 +88,10 @@ Channel config dict shape (for bootstrap_channel):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -1598,3 +1599,64 @@ def load_channel_config(
         )
     except Exception:
         return None
+
+
+def _canonical_json_bytes(payload: Any) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
+
+
+def compute_channel_package_identity(channel_id: str, db_path: Optional[Path] = None) -> dict:
+    """
+    The canonical, generic Channel Package identity for channel_id --
+    a real content-addressed checksum of the DB-backed brand/publishing/
+    model/channel profiles (via load_channel_config()) folded together
+    with the versioned Channel Package directory on disk (channel_packages/
+    {channel_id}/, if present -- its manifest plus every artifact file it
+    lists, e.g. a registered workflow definition). Neither half is
+    optional once a package directory exists: a change to either the DB
+    profiles or the on-disk artifacts changes this checksum.
+
+    Returns {"available": bool, "checksum": Optional[str],
+    "version": Optional[str], "reason": Optional[str]}.
+
+    "available" requires the channel_profiles row to exist; the package
+    directory folding in is best-effort (a channel with no
+    channel_packages/{channel_id}/ directory yet -- e.g. a
+    Channel-Package-file migration still pending -- still resolves
+    "available": True from the DB profiles alone, since that half is
+    real, already-bootstrapped evidence on its own).
+
+    version is the profile rows' own stored metadata_version field
+    (their storage-schema version, the only "version"-labeled field
+    that actually exists here; content freshness is what the checksum
+    verifies, not this field -- disclosed explicitly, never presented as
+    more than it is).
+    """
+    try:
+        channel_config = load_channel_config(channel_id, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001 -- any lookup failure is UNVERIFIABLE, never a crash
+        return {"available": False, "checksum": None, "version": None,
+                "reason": f"channel config lookup failed: {type(exc).__name__}: {exc}"}
+
+    if channel_config is None or channel_config.channel is None:
+        return {"available": False, "checksum": None, "version": None,
+                "reason": f"no channel_profiles row found for channel_id={channel_id!r}"}
+
+    payload = {
+        "channel": asdict(channel_config.channel),
+        "brand": asdict(channel_config.brand) if channel_config.brand else None,
+        "publishing": asdict(channel_config.publishing) if channel_config.publishing else None,
+        "models": asdict(channel_config.models) if channel_config.models else None,
+    }
+
+    package_dir_checksum = None
+    try:
+        from hypogeum.workflow_executor import compute_channel_package_directory_checksum  # noqa: PLC0415 -- avoid a module-load-order cycle
+        package_dir_checksum = compute_channel_package_directory_checksum(channel_id)
+    except Exception:  # noqa: BLE001 -- no package directory yet is not an error, just nothing to fold in
+        pass
+    payload["channel_package_directory_checksum"] = package_dir_checksum
+
+    checksum = hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+    version = channel_config.channel.metadata_version
+    return {"available": True, "checksum": checksum, "version": version, "reason": None}

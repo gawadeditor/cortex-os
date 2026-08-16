@@ -1537,13 +1537,7 @@ def persist_authorization_proposal(conn: sqlite3.Connection, proposal: Authoriza
     conn.commit()
 
 
-def get_authorization_proposal(conn: sqlite3.Connection, proposal_id: str) -> Optional[AuthorizationProposal]:
-    ensure_tables(conn)
-    row = conn.execute(
-        "SELECT * FROM authorization_proposals WHERE proposal_id = ?", (proposal_id,),
-    ).fetchone()
-    if row is None:
-        return None
+def _row_to_proposal(row: sqlite3.Row) -> AuthorizationProposal:
     return AuthorizationProposal(
         proposal_id=row["proposal_id"], channel_id=row["channel_id"], episode_id=row["episode_id"],
         proposed_version=row["proposed_version"], superseded_version=row["superseded_version"],
@@ -1555,6 +1549,27 @@ def get_authorization_proposal(conn: sqlite3.Connection, proposal_id: str) -> Op
         max_total_spend=_str_to_decimal(row["max_total_spend_usd"]), currency=row["currency"],
         created_at=row["created_at"], proposal_checksum=row["proposal_checksum"],
     )
+
+
+def get_authorization_proposal(conn: sqlite3.Connection, proposal_id: str) -> Optional[AuthorizationProposal]:
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT * FROM authorization_proposals WHERE proposal_id = ?", (proposal_id,),
+    ).fetchone()
+    return _row_to_proposal(row) if row is not None else None
+
+
+def get_authorization_proposal_by_checksum(conn: sqlite3.Connection, proposal_checksum: str) -> Optional[AuthorizationProposal]:
+    """Generic lookup by the proposal's own content-addressed checksum
+    -- the exact identity an ApprovalArtifact's subject_checksum binds
+    to for approval_type="authorization_proposal" batch activation
+    (see hypogeum.authorization_authority.activate_authorization_
+    proposal())."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT * FROM authorization_proposals WHERE proposal_checksum = ?", (proposal_checksum,),
+    ).fetchone()
+    return _row_to_proposal(row) if row is not None else None
 
 
 # ---------------------------------------------------------------------------

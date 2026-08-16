@@ -369,3 +369,203 @@ class TestIssueAuthorizationFromExplicitApproval:
         artifact = sign_approval_artifact(fields, private_key=priv)
         with pytest.raises(authority.ApprovalSubjectMismatchError):
             authority.issue_authorization_from_explicit_approval(env, approval_artifact=artifact, at=AT, db_path=db_path)
+
+
+class TestActivateAuthorizationProposal:
+    """activate_authorization_proposal() -- the missing bulk activator
+    for an already-compiled, already-proposed batch (AWAITING_EXPLICIT_
+    AUTHORIZATION -> AUTHORIZED), given one verified ApprovalArtifact
+    bound to the proposal's own checksum."""
+
+    def _make_awaiting_explicit_record(self, db_path, authorization_id, env):
+        import hypogeum.db as db
+        conn = db.get_connection(db_path)
+        try:
+            store.ensure_tables(conn)
+            rec = authority.AuthorizationRecord.create(
+                authorization_id=authorization_id, envelope_id=env.envelope_id, envelope_version=env.envelope_version,
+            )
+            rec = rec.transition(authority.AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at=AT)
+            rec = rec.transition(authority.AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at=AT)
+            rec = rec.transition(
+                authority.AuthorizationState.AWAITING_EXPLICIT_AUTHORIZATION,
+                evidence={"observation_only_pass_count": 1, "observation_only_total_count": 1, "proposal_artifact_checksum": "z" * 64},
+                at=AT,
+            )
+            store.persist_execution_envelope(conn, env)
+            store.persist_authorization_record(conn, rec)
+            conn.commit()
+        finally:
+            conn.close()
+        return rec
+
+    def _make_proposal_fixture(self, db_path, *, n=3, proposed_version=2):
+        envs = [self._make_env_n(i) for i in range(n)]
+        for i, env in enumerate(envs):
+            self._make_awaiting_explicit_record(db_path, f"auth_{i}", env)
+        authorization_ids = [f"auth_{i}" for i in range(n)]
+        bindings = [("fake", "fake-model", "video.text_to_video")]
+        checksum = store.compute_proposal_checksum(
+            channel_id="test_channel", episode_id="ep_test", proposed_version=proposed_version, superseded_version=1,
+            workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            channel_package_version="1.0", channel_package_checksum="b" * 64,
+            authorization_ids=authorization_ids, provider_model_operation_bindings=bindings,
+            max_cost_per_call_ceiling=Decimal("0.39"), max_total_spend=Decimal("0.39") * n, currency="USD",
+        )
+        proposal = store.AuthorizationProposal(
+            proposal_id=f"proposal_ep_test_v{proposed_version}", channel_id="test_channel", episode_id="ep_test",
+            proposed_version=proposed_version, superseded_version=1, workflow_id="wf", workflow_version="1.0.0",
+            workflow_checksum="a" * 64, channel_package_version="1.0", channel_package_checksum="b" * 64,
+            authorization_ids=authorization_ids, provider_model_operation_bindings=bindings,
+            max_cost_per_call_ceiling=Decimal("0.39"), max_total_spend=Decimal("0.39") * n, currency="USD",
+            created_at=AT, proposal_checksum=checksum,
+        )
+        import hypogeum.db as db
+        conn = db.get_connection(db_path)
+        try:
+            store.persist_authorization_proposal(conn, proposal)
+            conn.commit()
+        finally:
+            conn.close()
+        return checksum, authorization_ids
+
+    def _make_env_n(self, i):
+        return _make_env(idem_key=f"idem_{i}", authorization_id=f"auth_{i}")
+
+    def _sign_proposal_artifact(self, priv, checksum, *, approval_id="proposal_appr_1", nonce="nonce_prop_1"):
+        fields = dict(
+            approval_id=approval_id, approval_version=1, approval_type="authorization_proposal",
+            subject_checksum=checksum, channel_id="test_channel", scope_id="ep_test",
+            workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            channel_package_version="1.0", channel_package_checksum="b" * 64, allowed_bindings=(),
+            currency="USD", max_cost_per_call=Decimal("0.39"), max_total_spend=Decimal("100"), max_calls=100,
+            retry_authorized=False, fallback_authorized=False, issued_at=AT, expires_at="2099-01-01T00:00:00Z",
+            approver_identity="human_operator", nonce=nonce,
+        )
+        return sign_approval_artifact(fields, private_key=priv)
+
+    def test_valid_activation_authorizes_the_whole_named_set(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        checksum, authorization_ids = self._make_proposal_fixture(db_path, n=3)
+        artifact = self._sign_proposal_artifact(priv, checksum)
+
+        records = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+        assert len(records) == 3
+        assert all(r.current_state == authority.AuthorizationState.AUTHORIZED for r in records)
+        for r in records:
+            ev = r.history[-1].evidence
+            assert ev["authorization_method"] == "explicit_human_approval_proposal_batch"
+            assert ev["approval_artifact_id"] == "proposal_appr_1"
+            assert ev["approval_subject_checksum"] == checksum
+
+    def test_invalid_signature_rejected_with_zero_mutation(self, tmp_path, monkeypatch):
+        priv = Ed25519PrivateKey.generate()
+        wrong_pub = Ed25519PrivateKey.generate().public_key()
+        monkeypatch.setattr(authority, "_load_trusted_public_key", lambda: wrong_pub)
+        db_path = tmp_path / "auth.db"
+        checksum, authorization_ids = self._make_proposal_fixture(db_path, n=2)
+        artifact = self._sign_proposal_artifact(priv, checksum)
+
+        with pytest.raises(authority.InvalidApprovalSignatureError):
+            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+
+        import hypogeum.db as db
+        conn = db.get_connection(db_path)
+        try:
+            for aid in authorization_ids:
+                rec = store.get_authorization_record(conn, aid)
+                assert rec.current_state == authority.AuthorizationState.AWAITING_EXPLICIT_AUTHORIZATION
+        finally:
+            conn.close()
+
+    def test_checksum_mismatch_rejected(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        checksum, _ = self._make_proposal_fixture(db_path, n=2)
+        artifact = self._sign_proposal_artifact(priv, "0" * 64)  # signed for a DIFFERENT checksum
+
+        with pytest.raises(authority.ApprovalSubjectMismatchError):
+            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+
+    def test_unknown_proposal_checksum_fails_closed(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        self._make_proposal_fixture(db_path, n=2)
+        artifact = self._sign_proposal_artifact(priv, "f" * 64)
+
+        with pytest.raises(store.AuthorizationRecordNotFoundError):
+            authority.activate_authorization_proposal("f" * 64, approval_artifact=artifact, at=AT, db_path=db_path)
+
+    def test_one_record_in_wrong_state_blocks_entire_batch(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        checksum, authorization_ids = self._make_proposal_fixture(db_path, n=3)
+
+        import hypogeum.db as db
+        conn = db.get_connection(db_path)
+        try:
+            rec = store.get_authorization_record(conn, authorization_ids[1])
+            rec2 = rec.transition(
+                authority.AuthorizationState.INVALIDATED_SOURCE_CHANGED,
+                evidence={"changed_dependency": "x", "old_checksum": "y", "new_checksum": "z"}, at=AT,
+            )
+            store.persist_authorization_record(conn, rec2)
+            conn.commit()
+        finally:
+            conn.close()
+
+        artifact = self._sign_proposal_artifact(priv, checksum)
+        with pytest.raises(store.ProposalReconciliationConflictError):
+            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+
+        conn = db.get_connection(db_path)
+        try:
+            for i, aid in enumerate(authorization_ids):
+                rec = store.get_authorization_record(conn, aid)
+                if i == 1:
+                    assert rec.current_state == authority.AuthorizationState.INVALIDATED_SOURCE_CHANGED
+                else:
+                    assert rec.current_state == authority.AuthorizationState.AWAITING_EXPLICIT_AUTHORIZATION
+        finally:
+            conn.close()
+
+    def test_missing_named_authorization_id_fails_closed(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        checksum, authorization_ids = self._make_proposal_fixture(db_path, n=2)
+
+        import hypogeum.db as db
+        conn = db.get_connection(db_path)
+        try:
+            conn.execute("DELETE FROM authorization_records WHERE authorization_id = ?", (authorization_ids[0],))
+            conn.commit()
+        finally:
+            conn.close()
+
+        artifact = self._sign_proposal_artifact(priv, checksum)
+        with pytest.raises(store.AuthorizationRecordNotFoundError):
+            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+
+    def test_replay_with_same_artifact_is_idempotent(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        checksum, authorization_ids = self._make_proposal_fixture(db_path, n=3)
+        artifact = self._sign_proposal_artifact(priv, checksum)
+
+        first = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+        second = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+        assert [r.current_state for r in first] == [r.current_state for r in second]
+        for f, s in zip(first, second):
+            assert len(f.history) == len(s.history)
+
+    def test_replay_with_different_approval_id_fails_closed(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        checksum, authorization_ids = self._make_proposal_fixture(db_path, n=2)
+        artifact1 = self._sign_proposal_artifact(priv, checksum, approval_id="approval_A", nonce="nonce_A")
+        authority.activate_authorization_proposal(checksum, approval_artifact=artifact1, at=AT, db_path=db_path)
+
+        artifact2 = self._sign_proposal_artifact(priv, checksum, approval_id="approval_B", nonce="nonce_B")
+        with pytest.raises(store.ProposalReconciliationConflictError):
+            authority.activate_authorization_proposal(checksum, approval_artifact=artifact2, at=AT, db_path=db_path)

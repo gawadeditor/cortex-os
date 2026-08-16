@@ -56,6 +56,7 @@ __all__ = [
     "resolve_active_grant",
     "issue_child_authorization",
     "issue_authorization_from_explicit_approval",
+    "activate_authorization_proposal",
     "get_authorization",
     "revoke_grant",
 ]
@@ -474,6 +475,115 @@ def issue_authorization_from_explicit_approval(
             store.persist_authorization_record(conn, record)
             conn.commit()
             return record
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
+
+
+def activate_authorization_proposal(
+    proposal_checksum: str, *, approval_artifact: ApprovalArtifact, at: str, db_path: Optional[Path] = None,
+) -> "list[AuthorizationRecord]":
+    """
+    Generic, atomic, idempotent bulk activation of an already-compiled,
+    already-proposed batch (hypogeum.authorization_store.
+    AuthorizationProposal, produced by scripts.propose_current_episode_
+    authorization) from AWAITING_EXPLICIT_AUTHORIZATION to AUTHORIZED,
+    given one verified ApprovalArtifact bound to the proposal's own
+    checksum.
+
+    The missing counterpart to issue_authorization_from_explicit_
+    approval(): that function only ever constructs a BRAND NEW record
+    when none exists yet at its authorization_id, and silently returns
+    an EXISTING record unchanged otherwise -- structurally unable to
+    activate a batch that has already reached AWAITING_EXPLICIT_
+    AUTHORIZATION. This function's target state transition
+    (AWAITING_EXPLICIT_AUTHORIZATION -> AUTHORIZED) and its required
+    evidence (authorized_by, authorization_method, approval_artifact_id,
+    approval_subject_checksum) are unchanged from authorization_
+    lifecycle.py's own existing, already-defined edge -- no new
+    lifecycle state or transition is introduced.
+
+    Fails closed, before mutating anything, if: no AuthorizationProposal
+    exists with this exact proposal_checksum; any one of the proposal's
+    own named authorization_ids is missing; or any one is in a state
+    other than AWAITING_EXPLICIT_AUTHORIZATION or (for idempotent
+    replay only) already AUTHORIZED under this exact approval_id.
+    Validates the ENTIRE named set before transitioning ANY of them --
+    all-or-nothing, one BEGIN IMMEDIATE transaction.
+
+    Idempotent replay: if every named authorization_id is already
+    AUTHORIZED with approval_artifact_id == this artifact's own
+    approval_id, returns the existing records unchanged -- no
+    re-transition, no duplicate approval_artifacts row. A record
+    already AUTHORIZED under a DIFFERENT approval_id fails closed
+    (never silently re-approves under a different signature).
+    """
+    _require_verified(approval_artifact, approval_type="authorization_proposal", subject_checksum=proposal_checksum)
+
+    conn = get_connection(db_path)
+    try:
+        store.ensure_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            proposal = store.get_authorization_proposal_by_checksum(conn, proposal_checksum)
+            if proposal is None:
+                raise store.AuthorizationRecordNotFoundError(
+                    f"no AuthorizationProposal found with proposal_checksum={proposal_checksum!r}"
+                )
+
+            records: dict = {}
+            already_authorized_under_this_approval = True
+            for authorization_id in proposal.authorization_ids:
+                record = store.get_authorization_record(conn, authorization_id)
+                if record is None:
+                    raise store.AuthorizationRecordNotFoundError(authorization_id)
+                if record.current_state == AuthorizationState.AUTHORIZED:
+                    approved_evidence = next(
+                        (h.evidence for h in record.history if h.to_state == AuthorizationState.AUTHORIZED), {},
+                    )
+                    if approved_evidence.get("approval_artifact_id") != approval_artifact.approval_id:
+                        raise store.ProposalReconciliationConflictError(
+                            f"authorization {authorization_id!r} is already AUTHORIZED under a DIFFERENT "
+                            f"approval_artifact_id ({approved_evidence.get('approval_artifact_id')!r}), cannot "
+                            f"re-approve under {approval_artifact.approval_id!r}"
+                        )
+                    records[authorization_id] = record
+                    continue
+                already_authorized_under_this_approval = False
+                if record.current_state != AuthorizationState.AWAITING_EXPLICIT_AUTHORIZATION:
+                    raise store.ProposalReconciliationConflictError(
+                        f"authorization {authorization_id!r} is at {record.current_state.value!r}, "
+                        "not 'awaiting_explicit_authorization' -- not eligible for bulk activation"
+                    )
+                records[authorization_id] = record
+
+            if already_authorized_under_this_approval:
+                conn.commit()
+                return [records[aid] for aid in proposal.authorization_ids]
+
+            store.persist_approval_artifact(conn, approval_artifact, consumed_by_authorization_id=proposal.proposal_id)
+
+            activated = []
+            for authorization_id in proposal.authorization_ids:
+                record = records[authorization_id]
+                if record.current_state != AuthorizationState.AUTHORIZED:
+                    record = record.transition(
+                        AuthorizationState.AUTHORIZED,
+                        evidence={
+                            "authorized_by": approval_artifact.approver_identity,
+                            "authorization_method": "explicit_human_approval_proposal_batch",
+                            "approval_artifact_id": approval_artifact.approval_id,
+                            "approval_subject_checksum": approval_artifact.subject_checksum,
+                        },
+                        at=at,
+                    )
+                    store.persist_authorization_record(conn, record)
+                activated.append(record)
+
+            conn.commit()
+            return activated
         except Exception:
             conn.rollback()
             raise

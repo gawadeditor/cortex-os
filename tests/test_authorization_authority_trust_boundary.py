@@ -164,6 +164,7 @@ class TestOnlyAuthorizationAuthorityMintsOrActivates:
             "hypogeum/elevenlabs.py",  # Commit G: voice/music domain closure
             "hypogeum/openrouter.py",  # Commit H: text/LLM domain closure
             "hypogeum/perplexity.py",  # Commit I: research domain closure
+            "hypogeum/providers/muapi_video_upscaler.py",  # Commit J: upscale domain closure
         }
         unexpected = [o for o in offenders if o not in allowed]
         assert unexpected == [], f"unexpected child-issuance caller(s) outside the reviewed domain-closure list: {unexpected}"

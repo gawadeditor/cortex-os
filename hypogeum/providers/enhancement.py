@@ -106,10 +106,23 @@ class EnhancementProvider(ABC):
         episode_id: str,
         scene_id: str,
         log,
+        channel_id: Optional[str] = None,
     ) -> EnhancementResult:
         """
         Enhance source_path to at least target_width x target_height and
         write the result to dest_path.
+
+        channel_id (added for the Authorization Authority gate path,
+        plan §5.5/§6 Commit J -- mirrors hypogeum.muapi.submit_scene()'s
+        own channel_id parameter exactly): optional. A concrete provider
+        that supports the gate path resolves an active grant for
+        (channel_id, episode_id) and, when one exists, routes through
+        hypogeum.authorization_authority + hypogeum.submission_gate
+        instead of its own direct provider call. Every existing caller
+        omits channel_id and is completely unaffected. A gate denial
+        must still honor this method's own no-raise contract below --
+        it surfaces as EnhancementResult(success=False, failure_reason=...),
+        never an exception.
 
         The provider only produces a CANDIDATE file at dest_path — it does
         not decide whether that candidate is acceptable. hypogeum/source_

@@ -34,11 +34,15 @@ import json
 import random
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, Optional
 
 import requests
 
 from hypogeum.config import Config
+from hypogeum.execution_envelope import GenerationExecutionEnvelope
 from hypogeum.logger import Logger, get_logger
 
 
@@ -418,6 +422,311 @@ def _apply_system_prompt_caching(
 # Public API
 # ---------------------------------------------------------------------------
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ASSETS_ROOT = _PROJECT_ROOT / ".hypogeum-assets"
+
+_HYPOGEUM_WORKFLOW_ID = "hypogeum_main_production"
+_HYPOGEUM_WORKFLOW_VERSION = "1.0.0"
+_TEXT_PROVIDER = "openrouter"
+_TEXT_PROVIDER_OPERATION = "text.completion"
+_TEXT_COMPILER_IDENTITY = "hypogeum.openrouter.call_claude"
+_TEXT_ENVELOPE_SCHEMA_VERSION = "1.0"
+
+# Conservative per-token rate used to pre-estimate a max_cost_per_call
+# ceiling BEFORE the real usage is known (unlike _estimate_cost(), which
+# runs AFTER a response and uses the model's own _COST_TABLE entry).
+# Unknown/unlisted model_slugs get the most expensive rate on file
+# (Opus-tier) rather than 0.0, so an unrecognized model gets a safe,
+# generous ceiling instead of one that would reject any real spend.
+_UNKNOWN_MODEL_CEILING_RATE = {"prompt": 15e-6, "completion": 75e-6}
+
+
+def _canonical_json_bytes(payload: dict) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _estimate_max_cost_ceiling(model_slug: str, messages: list, max_tokens: int) -> Decimal:
+    rates = _COST_TABLE.get(model_slug, _UNKNOWN_MODEL_CEILING_RATE)
+    prompt_chars = sum(len(m.get("content", "")) for m in messages)
+    prompt_tokens_estimate = max(1, prompt_chars // 4)
+    ceiling = prompt_tokens_estimate * rates["prompt"] + max_tokens * rates["completion"]
+    return Decimal(str(round(ceiling, 6)))
+
+
+def _call_openrouter_via_gate(
+    *, channel_id: str, grant, model_slug: str, messages: list[dict[str, Any]], max_tokens: int,
+    config: Config, log: Logger, episode_id: str, agent: Optional[str],
+    response_format: Optional[dict], provider: Optional[dict], attempt_label: str,
+) -> CallResult:
+    """
+    The grant-derived gate path for ONE OpenRouter dispatch -- mirrors
+    hypogeum.elevenlabs._generate_narration_via_gate()'s structure
+    (which itself mirrors hypogeum.muapi._submit_scene_via_gate()).
+    Never reached unless a real, verified grant already resolves for
+    (channel_id, episode_id). Called once per attempt (primary
+    attempt N, or the one-shot different-model fallback) by
+    _call_claude_via_gate()/_try_openrouter_model_fallback_via_gate()
+    below -- each attempt is its own envelope/authorization/gate
+    submission with its own idempotency_key, per the plan's §5.5
+    "Retries and fallbacks" rule.
+
+    On gate approval, reconstructs and returns a CallResult from the
+    adapter's evidence. On denial, reconstructs and raises the EXACT
+    same exception type hypogeum.providers.openrouter_text_adapter.
+    OpenrouterTextAdapter classified internally (see that module's own
+    docstring), so the caller's retry/fallback decision logic sees
+    identical exception types to the legacy _call_openrouter() path.
+    A genuine gate-level denial (grant/authorization/lease failure, or
+    a truly unclassified unknown_acceptance) raises FallbackFailed --
+    retry-eligible at the episode/queue level, matching call_claude()'s
+    own contract for "every OpenRouter-native option is exhausted."
+    """
+    import hashlib
+    from datetime import timedelta
+
+    import hypogeum.adapter_registry as adapter_registry
+    import hypogeum.authorization_authority as authority
+    import hypogeum.budget_scopes as bs
+    import hypogeum.channel_config as channel_config
+    import hypogeum.db as db
+    import hypogeum.submission_gate as submission_gate
+    import hypogeum.workflow_executor as workflow_executor
+    from hypogeum.providers.openrouter_text_adapter import (
+        SCHEMA_VERSION as _TEXT_SCHEMA_VERSION, OpenrouterTextAdapter, encode_text_payload,
+    )
+    from hypogeum.provider_receipt import WriteAheadReceiptStore
+
+    at = datetime.now(timezone.utc).isoformat()
+
+    package_identity = channel_config.compute_channel_package_identity(channel_id)
+    if not package_identity.get("available"):
+        raise FallbackFailed(f"channel_package_identity_unavailable for {attempt_label!r}")
+    workflow_binding = workflow_executor.resolve_workflow_binding(
+        channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
+    )
+
+    plan_checksum = hashlib.sha256(_canonical_json_bytes({"agent": agent, "attempt_label": attempt_label})).hexdigest()
+    structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({"model_slug": model_slug, "max_tokens": max_tokens})).hexdigest()
+
+    operation_payload_bytes = encode_text_payload(
+        messages=messages, model_slug=model_slug, max_tokens=max_tokens,
+        response_format=response_format, provider=provider,
+    )
+    operation_payload_content = operation_payload_bytes.decode("utf-8")
+    operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
+
+    expected_output_identity = f"episodes/{episode_id}/text/{attempt_label}"
+    deterministic_output_path = f".hypogeum-assets/episodes/{episode_id}/text/{attempt_label}.json"
+    max_cost = _estimate_max_cost_ceiling(model_slug, messages, max_tokens)
+    authorization_id = f"{episode_id}:{agent or 'text'}:{attempt_label}"
+
+    try:
+        envelope = GenerationExecutionEnvelope.create(
+            envelope_schema_version=_TEXT_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=attempt_label,
+            structured_spec_checksum=structured_spec_checksum, compiler_identity=_TEXT_COMPILER_IDENTITY,
+            compiler_version="1", operation_payload_content=operation_payload_content,
+            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_TEXT_SCHEMA_VERSION,
+            content_provenance={
+                "compiler": _TEXT_COMPILER_IDENTITY, "compiler_version": "1",
+                "source_work_item_id": attempt_label, "rendered_at": at,
+            },
+            provider=_TEXT_PROVIDER, model=model_slug, provider_operation=_TEXT_PROVIDER_OPERATION,
+            deterministic_output_path=deterministic_output_path, expected_output_identity=expected_output_identity,
+            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+            retry_authorized=False, fallback_authorized=False, idempotency_key=authorization_id,
+            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+            dependency_checksums={
+                "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_TEXT_COMPILER_IDENTITY.encode()).hexdigest(),
+            },
+        )
+        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+        raise FallbackFailed(f"Text gate authorization failed for {attempt_label!r}: {exc}") from exc
+
+    conn = db.get_connection()
+    try:
+        adapter_registry.register_adapter(_TEXT_PROVIDER, model_slug, _TEXT_PROVIDER_OPERATION, "1.0", OpenrouterTextAdapter)
+        lease_owner_id = f"openrouter_text_adapter:{attempt_label}"
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
+        if lease is None:
+            raise FallbackFailed(f"Text gate lease unavailable for {attempt_label!r}")
+
+        receipt_store = WriteAheadReceiptStore(_ASSETS_ROOT / "episodes" / episode_id)
+        live_sources = submission_gate.LiveSources(
+            channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
+            structured_spec_checksum=structured_spec_checksum, compiler_version="1",
+        )
+        scopes = [
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, attempt_label, max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
+        ]
+        result = submission_gate.submit(
+            envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,
+            lease_owner_id=lease_owner_id, lease_fencing_token=lease["fencing_token"], receipt_store=receipt_store,
+            execution_id=episode_id, attempt_id=authorization_id, budget_scopes=scopes,
+            required_provider=_TEXT_PROVIDER, required_model=model_slug, at=at,
+            expected_output_identity=expected_output_identity, expected_deterministic_output_path=deterministic_output_path,
+            output_already_exists=False,
+        )
+    finally:
+        conn.close()
+
+    if not result.approved:
+        evidence = result.adapter_result.evidence if result.adapter_result else {}
+        exc_class = evidence.get("exception_class")
+        message = evidence.get("message", result.reason)
+        if exc_class == "_AuthError":
+            raise _AuthError()
+        if exc_class == "_RetryableError":
+            raise _RetryableError(evidence.get("status_code"), evidence.get("retry_after"))
+        if exc_class == "RequestException":
+            raise requests.exceptions.RequestException(message)
+        if exc_class == "CreditsExhausted":
+            raise CreditsExhausted(message, http_status=evidence.get("http_status"))
+        if exc_class == "ContentFiltered":
+            raise ContentFiltered(message, http_status=evidence.get("http_status"))
+        if exc_class == "EmptyResponse":
+            raise EmptyResponse(message, http_status=evidence.get("http_status"))
+        if exc_class == "TruncatedResponse":
+            raise TruncatedResponse(evidence.get("completion_tokens", 0), evidence.get("max_tokens_set", max_tokens))
+        if exc_class == "HardFailure":
+            raise HardFailure(message, http_status=evidence.get("http_status"))
+        raise FallbackFailed(f"Text gate denied for {attempt_label!r}: [{result.denied_at_check}] {result.reason}")
+
+    evidence = result.adapter_result.evidence
+    return CallResult(
+        content=evidence["content"], usage=evidence["usage"], model_used=evidence["model_used"],
+        finish_reason=evidence["finish_reason"], response_time_ms=evidence["response_time_ms"],
+        via_fallback=False, estimated_cost_usd=evidence["estimated_cost_usd"],
+    )
+
+
+def _try_openrouter_model_fallback_via_gate(
+    *, channel_id: str, grant, primary_model: str, messages: list[dict[str, Any]], max_tokens: int,
+    config: Config, log: Logger, episode_id: str, agent: Optional[str],
+    response_format: Optional[dict], provider: Optional[dict],
+) -> CallResult:
+    """Gate-path counterpart to _try_openrouter_model_fallback() -- one
+    attempt at config.OPENROUTER_FALLBACK_MODEL, its own gated
+    envelope/authorization/submission, never Anthropic direct."""
+    fallback_model = config.OPENROUTER_FALLBACK_MODEL
+
+    if not fallback_model:
+        log.warn(
+            "openrouter_model_fallback_activated", primary_model=primary_model, fallback_model=None,
+            reason="retry_exhausted", success=False, via_gate=True,
+        )
+        raise FallbackFailed(
+            f"OpenRouter primary model '{primary_model}' failed via the gate path and no "
+            "OPENROUTER_FALLBACK_MODEL is configured."
+        )
+
+    fallback_messages = _apply_system_prompt_caching(messages, fallback_model)
+
+    try:
+        result = _call_openrouter_via_gate(
+            channel_id=channel_id, grant=grant, model_slug=fallback_model, messages=fallback_messages,
+            max_tokens=max_tokens, config=config, log=log, episode_id=episode_id, agent=agent,
+            response_format=response_format, provider=provider, attempt_label=f"{agent or 'text'}_fallback",
+        )
+    except Exception as exc:
+        log.warn(
+            "openrouter_model_fallback_activated", primary_model=primary_model, fallback_model=fallback_model,
+            reason="retry_exhausted", success=False, via_gate=True,
+        )
+        raise FallbackFailed(
+            f"OpenRouter primary model '{primary_model}' failed via the gate path and fallback "
+            f"model '{fallback_model}' also failed: {exc}",
+            original_error=exc,
+        ) from exc
+
+    log.warn(
+        "openrouter_model_fallback_activated", primary_model=primary_model, fallback_model=fallback_model,
+        reason="retry_exhausted", success=True, via_gate=True,
+    )
+    return result
+
+
+def _call_claude_via_gate(
+    *, channel_id: str, grant, model_slug: str, messages: list[dict[str, str]], max_tokens: int,
+    config: Config, episode_id: str, agent: Optional[str], response_format: Optional[dict],
+    provider: Optional[dict], allow_model_fallback: bool, max_attempts: Optional[int],
+) -> CallResult:
+    """
+    The grant-derived gate path for call_claude() -- mirrors that
+    function's own retry+model-fallback loop exactly (same
+    RETRY_MAX-derived budget, same allow_model_fallback/max_attempts
+    semantics), except each individual OpenRouter dispatch (each retry
+    of the primary model, and the one-shot different-model fallback)
+    is its own gated attempt via _call_openrouter_via_gate()/
+    _try_openrouter_model_fallback_via_gate() instead of a direct
+    _call_openrouter() call. Never reached unless a real, verified
+    grant already resolves for (channel_id, episode_id); the dormant
+    Anthropic-direct fallback (_use_anthropic_for_run) is intentionally
+    NOT gated here -- it is unreachable dead code today (see module
+    docstring) and stays exactly as unreachable via this path as via
+    the legacy one.
+    """
+    log = get_logger(episode_id=episode_id, agent=agent)
+    cached_messages = _apply_system_prompt_caching(messages, model_slug)
+
+    effective_retry_max = RETRY_MAX if max_attempts is None else max(0, max_attempts - 1)
+    attempt = 0
+    while True:
+        try:
+            return _call_openrouter_via_gate(
+                channel_id=channel_id, grant=grant, model_slug=model_slug, messages=cached_messages,
+                max_tokens=max_tokens, config=config, log=log, episode_id=episode_id, agent=agent,
+                response_format=response_format, provider=provider,
+                attempt_label=f"{agent or 'text'}_primary_{attempt}",
+            )
+
+        except _AuthError:
+            log.warn(
+                "openrouter_hard_failure", failure_type="auth_failure_401", http_status=401,
+                action="no_fallback_same_credential", via_gate=True,
+            )
+            raise FallbackFailed(
+                "OpenRouter authentication failed (HTTP 401) via the gate path -- the "
+                "OPENROUTER_API_KEY credential itself is invalid. No fallback model was "
+                "attempted (it would use the same invalid credential)."
+            )
+
+        except (_RetryableError, requests.exceptions.RequestException) as exc:
+            if attempt >= effective_retry_max:
+                if not allow_model_fallback:
+                    log.warn(
+                        "openrouter_model_fallback_activated", primary_model=model_slug, fallback_model=None,
+                        reason="retry_exhausted", success=False, fallback_disabled_by_caller=True, via_gate=True,
+                    )
+                    raise FallbackFailed(
+                        f"OpenRouter primary model '{model_slug}' failed via the gate path and retry "
+                        "budget is exhausted. Different-model fallback is disabled for this call "
+                        "(allow_model_fallback=False)."
+                    )
+                return _try_openrouter_model_fallback_via_gate(
+                    channel_id=channel_id, grant=grant, primary_model=model_slug, messages=messages,
+                    max_tokens=max_tokens, config=config, log=log, episode_id=episode_id, agent=agent,
+                    response_format=response_format, provider=provider,
+                )
+
+            retry_after = getattr(exc, "retry_after", None)
+            status_code = getattr(exc, "status_code", "timeout")
+            delay = _retry_delay(attempt, retry_after)
+            log.warn(
+                "openrouter_retry_triggered", attempt_number=attempt + 1, trigger_status_code=status_code,
+                delay_ms=int(delay * 1000), via_gate=True,
+            )
+            time.sleep(delay)
+            attempt += 1
+
+
 def call_claude(
     model_slug: str,
     messages: list[dict[str, str]],
@@ -429,6 +738,7 @@ def call_claude(
     provider: Optional[dict] = None,
     allow_model_fallback: bool = True,
     max_attempts: Optional[int] = None,
+    channel_id: Optional[str] = None,
 ) -> CallResult:
     """
     Call Claude via OpenRouter (primary), then config.OPENROUTER_FALLBACK_MODEL
@@ -458,6 +768,17 @@ def call_claude(
         provider:    Optional OpenRouter "provider" routing-preference dict
                      (e.g. {"require_parameters": True}) forwarded verbatim
                      into the request body. Omitted entirely when None.
+        channel_id:  Optional (added for the Authorization Authority gate
+                     path, plan §5.5/§6 Commit H -- mirrors hypogeum.muapi.
+                     submit_scene()'s own channel_id parameter exactly).
+                     When supplied AND a real, verified RunAuthorizationGrant
+                     already resolves for (channel_id, episode_id), the call
+                     routes through hypogeum.authorization_authority +
+                     hypogeum.submission_gate instead of the legacy path
+                     below. Every existing caller omits channel_id and is
+                     completely unaffected; even a caller that supplies it
+                     falls straight through to the unchanged legacy path
+                     whenever no real grant exists.
         allow_model_fallback: When True (the default — unchanged behavior
                      for every existing caller), retry exhaustion on the
                      primary model attempts exactly one call to
@@ -505,6 +826,25 @@ def call_claude(
     """
     global _use_anthropic_for_run
     log = get_logger(episode_id=episode_id, agent=agent)
+
+    # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
+    # muapi.submit_scene()'s own branch exactly. Only reached when
+    # channel_id is supplied AND a real, verified grant already
+    # resolves for (channel_id, episode_id). Every existing caller
+    # (none of which pass channel_id today) is completely unaffected.
+    # Even a caller that DOES pass channel_id falls straight through
+    # to the legacy path below whenever no real grant exists.
+    if channel_id is not None:
+        import hypogeum.authorization_authority as _authority
+        _eid = episode_id or "unknown_episode"
+        grant = _authority.resolve_active_grant(channel_id, _eid, at=datetime.now(timezone.utc).isoformat())
+        if grant is not None:
+            return _call_claude_via_gate(
+                channel_id=channel_id, grant=grant, model_slug=model_slug, messages=messages,
+                max_tokens=max_tokens, config=config, episode_id=_eid, agent=agent,
+                response_format=response_format, provider=provider,
+                allow_model_fallback=allow_model_fallback, max_attempts=max_attempts,
+            )
 
     # Estimate prompt size for pre-call log (actual count comes from response)
     prompt_chars = sum(len(m.get("content", "")) for m in messages)

@@ -156,6 +156,7 @@ def run_agent(
     max_tokens: int,
     config: Config,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute one agent invocation end-to-end.
@@ -181,6 +182,9 @@ def run_agent(
         output_dir:    Directory where the output JSON file is written.
                        Defaults to .hypogeum-assets/episodes/{episode_id}/.
                        Override in tests to redirect output to a temp directory.
+        channel_id:    Optional -- forwarded unchanged to call_claude()'s own
+                       channel_id parameter (plan §5.5/§6 Commit H). Every
+                       existing caller omits it and is completely unaffected.
 
     Returns:
         The validated output package as a dict.
@@ -219,6 +223,7 @@ def run_agent(
         config=config,
         episode_id=episode_id,
         agent=agent_name,
+        channel_id=channel_id,
     )
 
     # Record cost against active run context (non-blocking; silently skipped if

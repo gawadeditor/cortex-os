@@ -235,7 +235,8 @@ class TestDeterministicAllocation:
 def _make_submitted_record(conn, authorization_id, envelope) -> AuthorizationRecord:
     astore.persist_execution_envelope(conn, envelope)
     rec = AuthorizationRecord.create(
-        authorization_id=authorization_id, envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
+        authorization_id=authorization_id, authorization_version=envelope.authorization_version,
+        envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
     )
     rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
     rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
@@ -261,7 +262,8 @@ def _make_qualified_allocated_record(conn, authorization_id, envelope, *, checks
 
 def _make_awaiting_explicit_record(conn, authorization_id, envelope) -> AuthorizationRecord:
     rec = AuthorizationRecord.create(
-        authorization_id=authorization_id, envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
+        authorization_id=authorization_id, authorization_version=envelope.authorization_version,
+        envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
     )
     rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
     rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
@@ -304,7 +306,8 @@ class TestFulfilledProposalReconciliation:
         fulfilling_env = _make_env(authorization_id="canary_1", planned_shot_id="b_002__shot2", beat_id="b_002")
 
         rec = AuthorizationRecord.create(
-            authorization_id="proposal_1", envelope_id=obsolete_env.envelope_id, envelope_version=obsolete_env.envelope_version,
+            authorization_id="proposal_1", authorization_version=obsolete_env.authorization_version,
+            envelope_id=obsolete_env.envelope_id, envelope_version=obsolete_env.envelope_version,
         )
         rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")

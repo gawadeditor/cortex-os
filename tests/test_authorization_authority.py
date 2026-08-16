@@ -383,7 +383,8 @@ class TestActivateAuthorizationProposal:
         try:
             store.ensure_tables(conn)
             rec = authority.AuthorizationRecord.create(
-                authorization_id=authorization_id, envelope_id=env.envelope_id, envelope_version=env.envelope_version,
+                authorization_id=authorization_id, authorization_version=env.authorization_version,
+                envelope_id=env.envelope_id, envelope_version=env.envelope_version,
             )
             rec = rec.transition(authority.AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at=AT)
             rec = rec.transition(authority.AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at=AT)

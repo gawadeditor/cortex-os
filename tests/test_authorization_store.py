@@ -313,7 +313,7 @@ class TestApprovalArtifactReplayDefense:
 class TestAuthorizationRecordPersistence:
 
     def test_round_trip_preserves_history(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth1", authorization_version=1, envelope_id="env1", envelope_version=1)
         rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         store.persist_authorization_record(conn, rec)
         reloaded = store.get_authorization_record(conn, "auth1")
@@ -321,7 +321,7 @@ class TestAuthorizationRecordPersistence:
         assert len(reloaded.history) == 1
 
     def test_repeated_persist_upserts_latest_state(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth1", authorization_version=1, envelope_id="env1", envelope_version=1)
         store.persist_authorization_record(conn, rec)
         rec2 = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         store.persist_authorization_record(conn, rec2)
@@ -333,7 +333,7 @@ class TestAuthorizationRecordPersistence:
 
 
 def _make_submitted_record(conn, authorization_id="auth1", *, at="t1") -> AuthorizationRecord:
-    rec = AuthorizationRecord.create(authorization_id=authorization_id, envelope_id="env1", envelope_version=1)
+    rec = AuthorizationRecord.create(authorization_id=authorization_id, authorization_version=1, envelope_id="env1", envelope_version=1)
     rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at=at)
     rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at=at)
     rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at=at)
@@ -391,7 +391,7 @@ class TestAdvanceToPendingEditorialReview:
         assert replayed.current_state == AuthorizationState.QUALIFIED, "must not regress a QUALIFIED record"
 
     def test_fails_closed_when_not_yet_submitted(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth2", authorization_version=1, envelope_id="env2", envelope_version=1)
         store.persist_authorization_record(conn, rec)
         with pytest.raises(store.AuthorizationNotYetSubmittedError):
             store.advance_to_pending_editorial_review(
@@ -426,7 +426,7 @@ class TestAdvanceToTechnicalValidationFailed:
         assert len(second.history) == len(first.history)
 
     def test_fails_closed_when_not_yet_submitted(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth2", authorization_version=1, envelope_id="env2", envelope_version=1)
         store.persist_authorization_record(conn, rec)
         with pytest.raises(store.AuthorizationNotYetSubmittedError):
             store.advance_to_technical_validation_failed(
@@ -526,7 +526,7 @@ class TestAllocateQualifiedAsset:
             store.allocate_qualified_asset(conn, "auth1", allocated_to="shot_y", at="t5")
 
     def test_fails_closed_when_not_yet_qualified(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth2", authorization_version=1, envelope_id="env2", envelope_version=1)
         store.persist_authorization_record(conn, rec)
         with pytest.raises(store.AuthorizationNotYetSubmittedError):
             store.allocate_qualified_asset(conn, "auth2", allocated_to="shot_x", at="t4")
@@ -557,7 +557,7 @@ class TestRecordSubmissionOutcome:
     mechanism existed."""
 
     def test_accepted_outcome_advances_authorized_to_submitted(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth1", authorization_version=1, envelope_id="env1", envelope_version=1)
         rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
         rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
@@ -574,7 +574,7 @@ class TestRecordSubmissionOutcome:
         assert submitted_event.evidence["provider_job_id"] == "job_1"
 
     def test_rejected_outcome_advances_only_to_submitting(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth1", authorization_version=1, envelope_id="env1", envelope_version=1)
         rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
         rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
@@ -584,7 +584,7 @@ class TestRecordSubmissionOutcome:
         assert result.current_state == AuthorizationState.SUBMITTING
 
     def test_unknown_acceptance_advances_only_to_submitting(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth1", authorization_version=1, envelope_id="env1", envelope_version=1)
         rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
         rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
@@ -598,7 +598,7 @@ class TestRecordSubmissionOutcome:
         first recorded a non-accepted outcome and only later learns of
         acceptance (e.g. reconciliation of a previously-unknown
         acceptance)."""
-        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth1", authorization_version=1, envelope_id="env1", envelope_version=1)
         rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
         rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
@@ -622,7 +622,7 @@ class TestRecordSubmissionOutcome:
         assert submitting_count == 1
 
     def test_fails_closed_when_not_yet_authorized(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth2", authorization_version=1, envelope_id="env2", envelope_version=1)
         store.persist_authorization_record(conn, rec)
         with pytest.raises(store.AuthorizationNotYetSubmittedError):
             store.record_submission_outcome(conn, "auth2", outcome="accepted", submitting_at="t1", submitted_at="t2", provider_job_id="job_1")
@@ -637,7 +637,7 @@ class TestRecordSubmissionOutcome:
             store.record_submission_outcome(conn, "auth1", outcome="maybe", submitting_at="t1")
 
     def test_accepted_requires_provider_job_id_and_submitted_at(self, conn):
-        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = AuthorizationRecord.create(authorization_id="auth1", authorization_version=1, envelope_id="env1", envelope_version=1)
         rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
         rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
         rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")

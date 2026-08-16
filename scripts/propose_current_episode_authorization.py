@@ -281,7 +281,8 @@ def propose_current_episode_authorization(
         records: list = []
         for env in envelopes:
             rec = AuthorizationRecord.create(
-                authorization_id=env.authorization_id, envelope_id=env.envelope_id, envelope_version=env.envelope_version,
+                authorization_id=env.authorization_id, authorization_version=env.authorization_version,
+                envelope_id=env.envelope_id, envelope_version=env.envelope_version,
             )
             rec = rec.transition(
                 AuthorizationState.COMPILED,

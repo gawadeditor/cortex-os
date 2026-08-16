@@ -72,7 +72,8 @@ def register_existing_qualified_asset(
     existing = astore.get_authorization_record(conn, new_authorization_id)
     if existing is None:
         rec = AuthorizationRecord.create(
-            authorization_id=new_authorization_id, envelope_id=env.envelope_id, envelope_version=env.envelope_version,
+            authorization_id=new_authorization_id, authorization_version=env.authorization_version,
+            envelope_id=env.envelope_id, envelope_version=env.envelope_version,
         )
         rec = rec.transition(
             AuthorizationState.COMPILED,

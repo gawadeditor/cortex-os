@@ -31,7 +31,7 @@ FIXED_TIME = "2026-01-01T00:00:00Z"
 
 
 def _new_record() -> AuthorizationRecord:
-    return AuthorizationRecord.create(authorization_id="auth_1", envelope_id="env_1", envelope_version=1)
+    return AuthorizationRecord.create(authorization_id="auth_1", authorization_version=1, envelope_id="env_1", envelope_version=1)
 
 
 def _advance(record: AuthorizationRecord, to_state: AuthorizationState, **evidence_overrides) -> AuthorizationRecord:
@@ -151,7 +151,7 @@ class TestSourceChangeInvalidation:
         old_record = _advance(old_record, S.COMPILED)
 
         updated_old, new_record = create_superseding_authorization(
-            old_record, new_authorization_id="auth_2", new_envelope_id="env_2",
+            old_record, new_authorization_id="auth_2", new_authorization_version=1, new_envelope_id="env_2",
             new_envelope_version=1, at=FIXED_TIME, evidence={"reason": "recompiled before authorization"},
         )
 

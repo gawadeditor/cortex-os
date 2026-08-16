@@ -370,8 +370,8 @@ def issue_child_authorization(
                 return existing_record
 
             record = AuthorizationRecord.create(
-                authorization_id=authorization_id, envelope_id=envelope.envelope_id,
-                envelope_version=envelope.envelope_version,
+                authorization_id=authorization_id, authorization_version=envelope.authorization_version,
+                envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
             )
             record = record.transition(
                 AuthorizationState.COMPILED,
@@ -449,8 +449,8 @@ def issue_authorization_from_explicit_approval(
                 return existing_record
 
             record = AuthorizationRecord.create(
-                authorization_id=authorization_id, envelope_id=envelope.envelope_id,
-                envelope_version=envelope.envelope_version,
+                authorization_id=authorization_id, authorization_version=envelope.authorization_version,
+                envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
             )
             record = record.transition(
                 AuthorizationState.COMPILED,

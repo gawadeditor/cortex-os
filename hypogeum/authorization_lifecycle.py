@@ -251,15 +251,26 @@ class AuthorizationRecord:
 
     @classmethod
     def create(
-        cls, *, authorization_id: str, envelope_id: str, envelope_version: int,
+        cls, *, authorization_id: str, authorization_version: int, envelope_id: str, envelope_version: int,
         superseded_authorization_id: Optional[str] = None,
     ) -> "AuthorizationRecord":
         """A brand-new authorization record, starting in `draft` with an
         empty history. Does not itself constitute a transition -- the
-        first real transition (draft -> compiled) is a separate call."""
+        first real transition (draft -> compiled) is a separate call.
+
+        authorization_version is REQUIRED, never defaulted: a record's
+        own authorization_version must always be the exact value the
+        matching GenerationExecutionEnvelope.authorization_version
+        already carries (it is part of that envelope's own identity
+        payload) -- hypogeum.submission_gate.submit()'s
+        04_authorization_version_match check compares the two exactly
+        and denies on any mismatch. A silent default here previously
+        let every caller accidentally build version-1 records for
+        version-N envelopes; every caller must now say explicitly which
+        version this record is for."""
         return cls(
             authorization_id=authorization_id,
-            authorization_version=1,
+            authorization_version=authorization_version,
             envelope_id=envelope_id,
             envelope_version=envelope_version,
             current_state=AuthorizationState.DRAFT,
@@ -312,8 +323,8 @@ class AuthorizationRecord:
 
 
 def create_superseding_authorization(
-    old_record: AuthorizationRecord, *, new_authorization_id: str, new_envelope_id: str,
-    new_envelope_version: int, at: str, evidence: Mapping[str, Any],
+    old_record: AuthorizationRecord, *, new_authorization_id: str, new_authorization_version: int,
+    new_envelope_id: str, new_envelope_version: int, at: str, evidence: Mapping[str, Any],
 ) -> tuple:
     """Implements §4.4's source-change-invalidation flow at the record
     level: transitions old_record to `superseded` (never edits its
@@ -339,6 +350,7 @@ def create_superseding_authorization(
     )
     new_record = AuthorizationRecord.create(
         authorization_id=new_authorization_id,
+        authorization_version=new_authorization_version,
         envelope_id=new_envelope_id,
         envelope_version=new_envelope_version,
         superseded_authorization_id=old_record.authorization_id,

@@ -35,12 +35,15 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
 import requests
 
 from hypogeum.config import Config
+from hypogeum.execution_envelope import GenerationExecutionEnvelope
 from hypogeum.logger import get_logger
 import hypogeum.finance as _finance
 from hypogeum.prompt_loader import load_prompt
@@ -304,6 +307,224 @@ def check_perplexity_health(
     return "available"
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ASSETS_ROOT = _PROJECT_ROOT / ".hypogeum-assets"
+
+_HYPOGEUM_WORKFLOW_ID = "hypogeum_main_production"
+_HYPOGEUM_WORKFLOW_VERSION = "1.0.0"
+_RESEARCH_PROVIDER = "perplexity"
+_RESEARCH_PROVIDER_OPERATION = "research.query"
+_RESEARCH_COMPILER_IDENTITY = "hypogeum.perplexity.query_perplexity"
+_RESEARCH_ENVELOPE_SCHEMA_VERSION = "1.0"
+
+# Conservative per-token rate used to pre-estimate a max_cost_per_call
+# ceiling BEFORE the real usage is known -- see
+# hypogeum.openrouter._estimate_max_cost_ceiling()'s identical rationale.
+# _PERPLEXITY_USD_PER_TOKEN already blends input+output, so a flat
+# per-token ceiling covering the full max_tokens is already conservative.
+_RESEARCH_CEILING_USD_PER_TOKEN = _PERPLEXITY_USD_PER_TOKEN
+
+
+def _canonical_json_bytes(payload: dict) -> bytes:
+    import json
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _single_request_via_gate(
+    *, channel_id: str, grant, query: str, max_tokens: int, phase_id: Optional[str],
+    query_index: Optional[int], config: Config, log, episode_id: str, attempt: int, attempt_label: str,
+) -> "tuple":
+    """
+    The grant-derived gate path for ONE Perplexity dispatch -- mirrors
+    hypogeum.openrouter._call_openrouter_via_gate()'s structure exactly
+    (see that function's own docstring for the full rationale). Never
+    reached unless a real, verified grant already resolves for
+    (channel_id, episode_id). Called once per attempt by
+    _query_perplexity_via_gate() below -- each attempt is its own
+    envelope/authorization/gate submission with its own idempotency_key,
+    per the plan's §5.5 "Retries and fallbacks" rule.
+
+    Returns the exact same (PerplexityResult, failure_type, retry_after)
+    tuple shape _single_request() returns, so _query_perplexity_via_gate()'s
+    retry-variant logic (length doubling, content_filter suffix, etc.) is
+    unaffected by which path actually ran. A genuine gate-level denial
+    (grant/authorization/lease failure, or a truly unclassified
+    unknown_acceptance) raises PerplexitySoftFailureExhausted directly --
+    there is no lower-level "gate_denied" tuple shape to return, so this
+    is surfaced the same way retry exhaustion already is.
+    """
+    import hashlib
+    from datetime import timedelta
+
+    import hypogeum.adapter_registry as adapter_registry
+    import hypogeum.authorization_authority as authority
+    import hypogeum.budget_scopes as bs
+    import hypogeum.channel_config as channel_config
+    import hypogeum.db as db
+    import hypogeum.submission_gate as submission_gate
+    import hypogeum.workflow_executor as workflow_executor
+    from hypogeum.providers.perplexity_adapter import (
+        SCHEMA_VERSION as _RESEARCH_SCHEMA_VERSION, PerplexityAdapter, encode_research_payload,
+    )
+    from hypogeum.provider_receipt import WriteAheadReceiptStore
+
+    at = datetime.now(timezone.utc).isoformat()
+
+    package_identity = channel_config.compute_channel_package_identity(channel_id)
+    if not package_identity.get("available"):
+        raise PerplexitySoftFailureExhausted(f"channel_package_identity_unavailable for {attempt_label!r}")
+    workflow_binding = workflow_executor.resolve_workflow_binding(
+        channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
+    )
+
+    plan_checksum = hashlib.sha256(_canonical_json_bytes({"phase_id": phase_id, "attempt_label": attempt_label})).hexdigest()
+    structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({"max_tokens": max_tokens, "query_index": query_index})).hexdigest()
+
+    operation_payload_bytes = encode_research_payload(
+        query=query, max_tokens=max_tokens, phase_id=phase_id, query_index=query_index, attempt=attempt,
+    )
+    operation_payload_content = operation_payload_bytes.decode("utf-8")
+    operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
+
+    expected_output_identity = f"episodes/{episode_id}/research/{attempt_label}"
+    deterministic_output_path = f".hypogeum-assets/episodes/{episode_id}/research/{attempt_label}.json"
+    max_cost = Decimal(str(round(max_tokens * _RESEARCH_CEILING_USD_PER_TOKEN, 6)))
+    authorization_id = f"{episode_id}:research:{attempt_label}"
+
+    try:
+        envelope = GenerationExecutionEnvelope.create(
+            envelope_schema_version=_RESEARCH_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=attempt_label,
+            structured_spec_checksum=structured_spec_checksum, compiler_identity=_RESEARCH_COMPILER_IDENTITY,
+            compiler_version="1", operation_payload_content=operation_payload_content,
+            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_RESEARCH_SCHEMA_VERSION,
+            content_provenance={
+                "compiler": _RESEARCH_COMPILER_IDENTITY, "compiler_version": "1",
+                "source_work_item_id": attempt_label, "rendered_at": at,
+            },
+            provider=_RESEARCH_PROVIDER, model=config.PERPLEXITY_MODEL, provider_operation=_RESEARCH_PROVIDER_OPERATION,
+            deterministic_output_path=deterministic_output_path, expected_output_identity=expected_output_identity,
+            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+            retry_authorized=False, fallback_authorized=False, idempotency_key=authorization_id,
+            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+            dependency_checksums={
+                "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_RESEARCH_COMPILER_IDENTITY.encode()).hexdigest(),
+            },
+        )
+        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+        raise PerplexitySoftFailureExhausted(f"Research gate authorization failed for {attempt_label!r}: {exc}") from exc
+
+    conn = db.get_connection()
+    try:
+        adapter_registry.register_adapter(_RESEARCH_PROVIDER, config.PERPLEXITY_MODEL, _RESEARCH_PROVIDER_OPERATION, "1.0", PerplexityAdapter)
+        lease_owner_id = f"perplexity_adapter:{attempt_label}"
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
+        if lease is None:
+            raise PerplexitySoftFailureExhausted(f"Research gate lease unavailable for {attempt_label!r}")
+
+        receipt_store = WriteAheadReceiptStore(_ASSETS_ROOT / "episodes" / episode_id)
+        live_sources = submission_gate.LiveSources(
+            channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
+            structured_spec_checksum=structured_spec_checksum, compiler_version="1",
+        )
+        scopes = [
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, attempt_label, max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
+        ]
+        result = submission_gate.submit(
+            envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,
+            lease_owner_id=lease_owner_id, lease_fencing_token=lease["fencing_token"], receipt_store=receipt_store,
+            execution_id=episode_id, attempt_id=authorization_id, budget_scopes=scopes,
+            required_provider=_RESEARCH_PROVIDER, required_model=config.PERPLEXITY_MODEL, at=at,
+            expected_output_identity=expected_output_identity, expected_deterministic_output_path=deterministic_output_path,
+            output_already_exists=False,
+        )
+    finally:
+        conn.close()
+
+    if not result.approved:
+        evidence = result.adapter_result.evidence if result.adapter_result else {}
+        exc_class = evidence.get("exception_class")
+        message = evidence.get("message", result.reason)
+        if exc_class == "PerplexityAuthFailure":
+            raise PerplexityAuthFailure()
+        if exc_class == "PerplexityHardFailure":
+            raise PerplexityHardFailure(message, http_status=evidence.get("http_status"))
+        if exc_class == "soft_failure":
+            return None, evidence.get("failure_type", "gate_denied"), evidence.get("retry_after")
+        raise PerplexitySoftFailureExhausted(f"Research gate denied for {attempt_label!r}: [{result.denied_at_check}] {result.reason}")
+
+    evidence = result.adapter_result.evidence
+    return PerplexityResult(
+        content=evidence["content"], citations=evidence["citations"], usage=evidence["usage"],
+        finish_reason=evidence["finish_reason"], phase_id=phase_id, query_index=query_index,
+        response_time_ms=evidence["response_time_ms"], citations_absent=evidence["citations_absent"],
+    ), None, None
+
+
+def _query_perplexity_via_gate(
+    *, channel_id: str, grant, query: str, config: Config, max_tokens: int,
+    phase_id: Optional[str], query_index: Optional[int], log, episode_id: str,
+) -> PerplexityResult:
+    """
+    The grant-derived gate path for query_perplexity() -- mirrors
+    _execute_with_retry()'s own retry loop exactly (same RETRY_MAX
+    budget, same retry-variant selection logic), except each individual
+    Perplexity dispatch is its own gated attempt via
+    _single_request_via_gate() instead of a direct _single_request()
+    call. Never reached unless a real, verified grant already resolves
+    for (channel_id, episode_id).
+    """
+    current_query = query
+    current_max_tokens = max_tokens
+
+    for attempt in range(RETRY_MAX + 1):
+        result, failure_type, retry_after = _single_request_via_gate(
+            channel_id=channel_id, grant=grant, query=current_query, max_tokens=current_max_tokens,
+            phase_id=phase_id, query_index=query_index, config=config, log=log, episode_id=episode_id,
+            attempt=attempt, attempt_label=f"{phase_id or 'research'}_{query_index if query_index is not None else 0}_{attempt}",
+        )
+
+        if result is not None:
+            return result
+
+        if attempt < RETRY_MAX:
+            if failure_type == "length":
+                current_max_tokens = min(current_max_tokens * 2, _LENGTH_RETRY_MAX_TOKENS_CAP)
+                trigger = "finish_reason_length"
+            elif failure_type == "content_filter":
+                if not current_query.endswith(_CONTENT_FILTER_SUFFIX):
+                    current_query = current_query + _CONTENT_FILTER_SUFFIX
+                trigger = "finish_reason_content_filter"
+            else:
+                trigger = f"http_{failure_type}" if failure_type.isdigit() else failure_type
+
+            delay = _retry_delay(attempt=attempt, retry_after=retry_after)
+            log.warn(
+                "perplexity_retry_triggered", phase_id=phase_id, query_index=query_index,
+                trigger_reason=trigger, retry_delay_seconds=round(delay, 2), attempt=attempt + 1, via_gate=True,
+            )
+            time.sleep(delay)
+        else:
+            log.error(
+                "perplexity_soft_failure_exhausted", phase_id=phase_id, query_index=query_index,
+                failure_type=failure_type, via_gate=True,
+            )
+            raise PerplexitySoftFailureExhausted(
+                f"Query failed via the gate path after {RETRY_MAX} retry (failure_type={failure_type!r}). "
+                f"phase_id={phase_id!r}, query_index={query_index!r}",
+                last_status=int(failure_type) if failure_type.isdigit() else None,
+            )
+
+    raise PerplexitySoftFailureExhausted("Gate-path retry loop exited unexpectedly.")
+
+
 def query_perplexity(
     query: str,
     config: Config,
@@ -313,6 +534,7 @@ def query_perplexity(
     episode_id: Optional[str] = None,
     agent: Optional[str] = None,
     max_tokens_override: Optional[int] = None,
+    channel_id: Optional[str] = None,
 ) -> PerplexityResult:
     """
     Issue one research query to Perplexity and return the structured result.
@@ -328,6 +550,17 @@ def query_perplexity(
         episode_id:         Episode identifier for log correlation.
         agent:              Agent name for log correlation.
         max_tokens_override: Override the config's PERPLEXITY_MAX_TOKENS for this query.
+        channel_id:         Optional (added for the Authorization Authority gate
+                            path, plan §5.5/§6 Commit I -- mirrors hypogeum.muapi.
+                            submit_scene()'s own channel_id parameter exactly).
+                            When supplied AND a real, verified RunAuthorizationGrant
+                            already resolves for (channel_id, episode_id), the call
+                            routes through hypogeum.authorization_authority +
+                            hypogeum.submission_gate instead of the legacy path
+                            below. Every existing caller omits channel_id and is
+                            completely unaffected; even a caller that supplies it
+                            falls straight through to the unchanged legacy path
+                            whenever no real grant exists.
 
     Returns:
         PerplexityResult on success.
@@ -339,6 +572,23 @@ def query_perplexity(
     """
     log = get_logger(episode_id=episode_id, agent=agent or "perplexity")
     max_tokens = max_tokens_override or config.PERPLEXITY_MAX_TOKENS or 2048
+
+    # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
+    # muapi.submit_scene()'s own branch exactly. Only reached when
+    # channel_id is supplied AND a real, verified grant already
+    # resolves for (channel_id, episode_id). Every existing caller
+    # (none of which pass channel_id today) is completely unaffected.
+    # Even a caller that DOES pass channel_id falls straight through
+    # to the legacy path below whenever no real grant exists.
+    if channel_id is not None:
+        import hypogeum.authorization_authority as _authority
+        _eid = episode_id or "unknown_episode"
+        grant = _authority.resolve_active_grant(channel_id, _eid, at=datetime.now(timezone.utc).isoformat())
+        if grant is not None:
+            return _query_perplexity_via_gate(
+                channel_id=channel_id, grant=grant, query=query, config=config, max_tokens=max_tokens,
+                phase_id=phase_id, query_index=query_index, log=log, episode_id=_eid,
+            )
 
     return _execute_with_retry(
         query=query,

@@ -128,6 +128,7 @@ def run_research_director(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> tuple[dict, Optional[dict]]:
     """
     Execute the Research Director agent end-to-end.
@@ -137,6 +138,9 @@ def run_research_director(
         config:       Loaded Config instance. Passed through to all sub-calls.
         episode_id:   Episode identifier for log correlation and file naming.
         output_dir:   Optional output directory override (passed to run_agent()).
+        channel_id:   Optional -- forwarded unchanged to query_perplexity()'s own
+                      channel_id parameter (plan §5.5/§6 Commit I). Every existing
+                      caller omits it and is completely unaffected.
 
     Returns:
         (research_package, None)   — successful synthesis; research_package is
@@ -208,6 +212,7 @@ def run_research_director(
                 episode_id=episode_id,
                 agent=_AGENT_NAME,
                 max_tokens_override=_PERPLEXITY_MAX_TOKENS,
+                channel_id=channel_id,
             )
             raw_results.append(
                 {

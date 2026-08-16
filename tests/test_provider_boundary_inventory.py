@@ -136,6 +136,7 @@ _INVENTORY = [
     {"domain": "text_llm", "module": "hypogeum/openrouter.py", "function": "call_claude", "status": _STATUS_UNGATED},
     {"domain": "text_llm_gate_path", "module": "hypogeum/openrouter.py", "function": "_call_openrouter_via_gate", "status": _STATUS_GATED},
     {"domain": "research", "module": "hypogeum/perplexity.py", "function": "query_perplexity", "status": _STATUS_UNGATED},
+    {"domain": "research_gate_path", "module": "hypogeum/perplexity.py", "function": "_single_request_via_gate", "status": _STATUS_GATED},
     {"domain": "upscale", "module": "hypogeum/providers/muapi_video_upscaler.py", "function": "enhance", "status": _STATUS_UNGATED},
 ]
 
@@ -256,7 +257,7 @@ class TestFakeAdapterRemainsTestOnly:
         "hypogeum/submission_gate.py", "hypogeum/providers/muapi_video_adapter.py",
         "hypogeum/providers/muapi_image_adapter.py", "hypogeum/providers/muapi_thumbnail_adapter.py",
         "hypogeum/providers/elevenlabs_voice_adapter.py", "hypogeum/providers/elevenlabs_music_adapter.py",
-        "hypogeum/providers/openrouter_text_adapter.py",
+        "hypogeum/providers/openrouter_text_adapter.py", "hypogeum/providers/perplexity_adapter.py",
     }
     """submission_gate.py imports fake_provider_adapter.py for the
     shared AdapterInvocationCapability/AdapterResult/

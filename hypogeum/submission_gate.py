@@ -116,6 +116,7 @@ GATE_CHECK_ORDER = (
     "19_lease_and_fencing",
     "20_audit_persistence",
     "21_workflow_binding_not_reconstructed",
+    "22_stored_envelope_durable_integrity",
 )
 
 
@@ -261,6 +262,48 @@ def _validate_envelope_and_sources(
     if required_model is not None and envelope.model != required_model:
         return GateDenial(GATE_CHECK_ORDER[13], f"model {envelope.model!r} != required {required_model!r}")
 
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Step 1.6: durable envelope integrity (docs/architecture/PROTECTED_
+# GENERATION_LIFECYCLE_RECONCILIATION.md Part 1/5)
+# ---------------------------------------------------------------------------
+
+def _check_stored_envelope_durable_integrity(lease_conn, envelope: GenerationExecutionEnvelope) -> Optional[GateDenial]:
+    """
+    Real submission requires a full, durably-stored, integrity-verified
+    envelope -- not merely a caller-supplied in-memory object whose
+    content no one can independently audit later. Reads back
+    hypogeum.authorization_store.get_execution_envelope() for this exact
+    (envelope_id, envelope_version); any failure there (missing --
+    LegacyHashOnlyEnvelopeError; corrupted; identity-mismatched;
+    unsupported schema version) denies here, before any lease/budget
+    state is touched and long before the provider boundary.
+
+    A legacy hash-only proposal (compiled before this storage mechanism
+    existed, or never persisted at all) has no row here and is
+    therefore permanently non-executable through this path -- exactly
+    Part 1 requirement 7's "must never pass the submission gate."
+
+    Read-only: this function only reads authorization_store; it never
+    imports hypogeum.authorization_authority and never calls any
+    minting/persisting function (get_execution_envelope() itself never
+    writes). Deliberately called ONLY from submit(), never shared with
+    run_shadow_checks() -- Observation-Only evaluates freshly-compiled
+    envelopes that are not yet, and may never be, durably persisted;
+    requiring durable storage there would break that flow's own purpose.
+    """
+    try:
+        stored = authorization_store.get_execution_envelope(lease_conn, envelope.envelope_id, envelope.envelope_version)
+    except authorization_store.EnvelopeStoreError as exc:
+        return GateDenial(GATE_CHECK_ORDER[21], f"{type(exc).__name__}: {exc}")
+
+    if stored.envelope_id != envelope.envelope_id or stored.operation_payload_sha256 != envelope.operation_payload_sha256:
+        return GateDenial(
+            GATE_CHECK_ORDER[21],
+            "supplied envelope does not match the durably-stored envelope for this identity",
+        )
     return None
 
 
@@ -640,6 +683,11 @@ def submit(
 
     # ---- Step 1.5: reject a reconstructed legacy binding (plan §5) ----
     denial = _check_workflow_binding_not_reconstructed(envelope)
+    if denial:
+        return _denial(denial.check, denial.reason)
+
+    # ---- Step 1.6: durable envelope integrity (Part 1/5) ----
+    denial = _check_stored_envelope_durable_integrity(lease_conn, envelope)
     if denial:
         return _denial(denial.check, denial.reason)
 

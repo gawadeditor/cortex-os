@@ -617,6 +617,7 @@ def _submit_scene_via_gate(
     import hypogeum.db as db
     import hypogeum.submission_gate as submission_gate
     import hypogeum.workflow_executor as workflow_executor
+    from hypogeum.deterministic_allocation import check_output_collision
     from hypogeum.providers.muapi_video_adapter import (
         SCHEMA_VERSION as _VIDEO_SCHEMA_VERSION, MuapiVideoAdapter, encode_video_payload,
     )
@@ -684,6 +685,14 @@ def _submit_scene_via_gate(
 
     conn = db.get_connection()
     try:
+        # Durable envelope storage (Part 1) -- required before submit()
+        # will accept this envelope at all (Step 1.6:
+        # _check_stored_envelope_durable_integrity()). Every real
+        # submission through this path persists its own envelope in the
+        # same call it compiles it, so there is never a staleness
+        # window between compilation and durable storage.
+        authorization_store.persist_execution_envelope(conn, envelope)
+
         adapter_registry.register_adapter(
             _VIDEO_PROVIDER, model, _VIDEO_PROVIDER_OPERATION, "1.0", MuapiVideoAdapter,
         )
@@ -710,7 +719,7 @@ def _submit_scene_via_gate(
             required_provider=_VIDEO_PROVIDER, required_model=model, at=at,
             expected_duration_seconds=Decimal(str(requested_duration)), expected_aspect_ratio=aspect_ratio,
             expected_output_identity=expected_output_identity, expected_deterministic_output_path=str(dest_path),
-            output_already_exists=dest_path.exists(),
+            output_already_exists=check_output_collision(dest_path),
         )
         # hypogeum.submission_gate.submit() itself never persists
         # AuthorizationRecord state past AUTHORIZED (it is structurally
@@ -1088,6 +1097,7 @@ def _generate_reference_image_via_gate(
 
     import hypogeum.adapter_registry as adapter_registry
     import hypogeum.authorization_authority as authority
+    import hypogeum.authorization_store as authorization_store
     import hypogeum.budget_scopes as bs
     import hypogeum.channel_config as channel_config
     import hypogeum.db as db
@@ -1156,6 +1166,8 @@ def _generate_reference_image_via_gate(
 
     conn = db.get_connection()
     try:
+        authorization_store.persist_execution_envelope(conn, envelope)
+
         adapter_registry.register_adapter(_VIDEO_PROVIDER, model, _IMAGE_PROVIDER_OPERATION, "1.0", MuapiImageAdapter)
         lease_owner_id = f"muapi_image_adapter:ref_{entity_id}"
         lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
@@ -2755,6 +2767,7 @@ def _generate_thumbnail_via_gate(
 
     import hypogeum.adapter_registry as adapter_registry
     import hypogeum.authorization_authority as authority
+    import hypogeum.authorization_store as authorization_store
     import hypogeum.budget_scopes as bs
     import hypogeum.channel_config as channel_config
     import hypogeum.db as db
@@ -2823,6 +2836,8 @@ def _generate_thumbnail_via_gate(
 
     conn = db.get_connection()
     try:
+        authorization_store.persist_execution_envelope(conn, envelope)
+
         adapter_registry.register_adapter(_VIDEO_PROVIDER, model, _THUMBNAIL_PROVIDER_OPERATION, "1.0", MuapiThumbnailAdapter)
         lease_owner_id = f"muapi_thumbnail_adapter:{deliverable_id}"
         lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()

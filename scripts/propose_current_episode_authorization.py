@@ -157,9 +157,14 @@ def propose_current_episode_authorization(
         env.validate_integrity()
 
     # Step 3: persist every one as a new AuthorizationRecord, state
-    # AWAITING_AUTHORIZATION -- not active, not submittable. This is
-    # the ONLY production write this step performs: new rows in
-    # authorization_store's own tables, nothing else.
+    # AWAITING_AUTHORIZATION -- not active, not submittable -- AND its
+    # full canonical envelope (docs/architecture/PROTECTED_GENERATION_
+    # LIFECYCLE_RECONCILIATION.md Part 1): before this, only the
+    # opaque envelope_id checksum was ever durably retained, making a
+    # true field-level audit of a persisted proposal structurally
+    # impossible. This is the ONLY production write this step
+    # performs: new rows in authorization_store's own tables, nothing
+    # else.
     conn = db.get_connection(db_path)
     try:
         astore.ensure_tables(conn)
@@ -177,6 +182,7 @@ def propose_current_episode_authorization(
                 evidence={"preflight_result": "envelope_fields_valid_and_dependency_identity_available"}, at=at,
             )
             astore.persist_authorization_record(conn, rec)
+            astore.persist_execution_envelope(conn, env)
             records.append(rec)
         conn.commit()
 

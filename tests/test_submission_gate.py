@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import hypogeum.adapter_registry as adapter_registry
+import hypogeum.authorization_store as astore
 import hypogeum.budget_scopes as bs
 import hypogeum.db as db
 import hypogeum.submission_gate as sg
@@ -120,7 +121,14 @@ class GateHarness:
     def acquire_lease(self, envelope, owner="worker_a", token_expires="2026-01-01T01:00:00Z"):
         return db.acquire_lease(self.conn, envelope.envelope_id, owner, acquired_at=AT, expires_at=token_expires)
 
+    def persist_envelope(self, envelope):
+        """Explicit opt-out point: tests proving the NEW hash-only-legacy
+        denial (Step 1.6) call submit() directly without this, or via a
+        harness variant that skips it."""
+        astore.persist_execution_envelope(self.conn, envelope)
+
     def submit(self, envelope, **overrides):
+        self.persist_envelope(envelope)
         kwargs = dict(
             live_sources=_live_sources_for(envelope),
             authorization=_make_auth(envelope),
@@ -902,3 +910,111 @@ class TestReconstructedBindingDenial:
         )
         assert not any(o.status == "fail" for o in outcomes), [o for o in outcomes if o.status == "fail"]
         assert not any(o.check == "21_workflow_binding_not_reconstructed" for o in outcomes)
+
+
+class TestStoredEnvelopeDurableIntegrityDenial:
+    """Step 1.6 (docs/architecture/PROTECTED_GENERATION_LIFECYCLE_
+    RECONCILIATION.md Part 1/5): real submission requires a full,
+    durably-stored, integrity-verified envelope. GateHarness.submit()
+    persists the envelope for every OTHER test in this file (matching
+    real production callers, which now do the same); these tests use
+    harness.acquire_lease()+sg.submit() directly, deliberately skipping
+    that persistence step, to prove the denial itself."""
+
+    def test_hash_only_legacy_envelope_denied_with_zero_adapter_calls(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        # Deliberately never call harness.persist_envelope(env) --
+        # simulates a legacy hash-only authorization_records row.
+        result = sg.submit(
+            env, live_sources=_live_sources_for(env), authorization=_make_auth(env), lease_conn=harness.conn,
+            lease_owner_id="worker_a", lease_fencing_token=1, receipt_store=harness.store, execution_id=EXEC_ID,
+            attempt_id="attempt_1", budget_scopes=_default_scopes(env), adapter_mode="success", at=AT,
+            expected_deterministic_output_path=env.deterministic_output_path,
+        )
+        assert result.approved is False
+        assert result.adapter_invoked is False
+        assert harness.adapter.invocation_count == 0
+        assert result.denied_at_check == "22_stored_envelope_durable_integrity"
+
+    def test_corrupted_stored_envelope_denied_with_zero_adapter_calls(self, harness):
+        env = _make_env()
+        harness.persist_envelope(env)
+        row = harness.conn.execute(
+            "SELECT canonical_payload_bytes FROM execution_envelopes WHERE envelope_id = ? AND envelope_version = ?",
+            (env.envelope_id, env.envelope_version),
+        ).fetchone()
+        mutated = row["canonical_payload_bytes"][:-1] + b"X"
+        harness.conn.execute(
+            "UPDATE execution_envelopes SET canonical_payload_bytes = ? WHERE envelope_id = ? AND envelope_version = ?",
+            (mutated, env.envelope_id, env.envelope_version),
+        )
+        harness.conn.commit()
+        harness.acquire_lease(env)
+        result = sg.submit(
+            env, live_sources=_live_sources_for(env), authorization=_make_auth(env), lease_conn=harness.conn,
+            lease_owner_id="worker_a", lease_fencing_token=1, receipt_store=harness.store, execution_id=EXEC_ID,
+            attempt_id="attempt_1", budget_scopes=_default_scopes(env), adapter_mode="success", at=AT,
+            expected_deterministic_output_path=env.deterministic_output_path,
+        )
+        assert result.approved is False
+        assert result.adapter_invoked is False
+        assert harness.adapter.invocation_count == 0
+        assert result.denied_at_check == "22_stored_envelope_durable_integrity"
+
+    def test_valid_stored_envelope_is_not_denied_by_this_check(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        result = harness.submit(env)
+        assert result.approved is True
+        assert result.denied_at_check is None
+
+
+class TestOutputCollisionZeroAdapterCalls:
+    """Part 2/5: an occupied canonical output path must produce zero
+    adapter calls -- never an automatic reassignment to a different
+    slot (there is no such mechanism anywhere in this path)."""
+
+    def test_output_collision_denies_with_zero_adapter_calls(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        result = harness.submit(env, output_already_exists=True)
+        assert result.approved is False
+        assert result.adapter_invoked is False
+        assert harness.adapter.invocation_count == 0
+        assert result.denied_at_check == "16_output_collision"
+
+
+class TestEveryPreBoundaryDenialProducesZeroAdapterCalls:
+    """Item 21: sweep of every distinct pre-boundary denial reason this
+    file's own fixtures can trivially produce, each independently
+    proving zero adapter invocations -- the shared, structural
+    guarantee every individual denial test above already demonstrates
+    one at a time."""
+
+    def test_sweep(self, harness):
+        cases = []
+
+        env_reconstructed = _make_env(audit_metadata={"workflow_binding_reconstructed": True})
+        harness.acquire_lease(env_reconstructed)
+        cases.append(("reconstructed_binding", harness.submit(env_reconstructed)))
+
+        env_collision = _make_env(planned_shot_id="shot_collision")
+        harness.acquire_lease(env_collision)
+        cases.append(("output_collision", harness.submit(env_collision, output_already_exists=True)))
+
+        env_hash_only = _make_env(planned_shot_id="shot_hash_only")
+        harness.acquire_lease(env_hash_only)
+        result_hash_only = sg.submit(
+            env_hash_only, live_sources=_live_sources_for(env_hash_only), authorization=_make_auth(env_hash_only),
+            lease_conn=harness.conn, lease_owner_id="worker_a", lease_fencing_token=1, receipt_store=harness.store,
+            execution_id=EXEC_ID, attempt_id="attempt_hash_only", budget_scopes=_default_scopes(env_hash_only),
+            adapter_mode="success", at=AT, expected_deterministic_output_path=env_hash_only.deterministic_output_path,
+        )
+        cases.append(("hash_only_legacy", result_hash_only))
+
+        for name, result in cases:
+            assert result.approved is False, name
+            assert result.adapter_invoked is False, name
+
+        assert harness.adapter.invocation_count == 0

@@ -164,9 +164,9 @@ def _config():
     return make_config(t2_model=_AUTHORIZED_MODEL)
 
 
-def self_compile(tmp_path, manifest_path, *, db_path=None, config=None, **overrides):
+def self_compile(tmp_path, manifest_path, *, db_path=None, config=None, explicit_binding=None, **overrides):
     args = _args(tmp_path, "ep_test", manifest_path, db_path=db_path, **overrides)
-    return mle.compile_manifest_to_envelopes(args, config=config or _config())
+    return mle.compile_manifest_to_envelopes(args, config=config or _config(), explicit_binding=explicit_binding)
 
 
 def one(report):
@@ -419,28 +419,34 @@ class TestBlockingConditions:
         assert report["duplicate_findings"], report
         assert report["envelope_valid_count"] == 0
 
-    def test_output_already_exists_blocks(self, tmp_path, monkeypatch):
-        # plan_confirmed_shot_allocations() is itself collision-avoidant,
-        # so this tool's own defense-in-depth check is exercised by
-        # forcing the allocation result directly.
+    def test_output_already_exists_does_not_block_compilation(self, tmp_path):
+        """Physical output occupancy is deliberately NOT a compile-time
+        concern (docs/architecture/PROTECTED_GENERATION_LIFECYCLE_
+        RECONCILIATION.md) -- compile-time envelope validity must never
+        depend on current filesystem state, so two otherwise-identical
+        compiles never disagree depending on what happens to exist on
+        disk. Collision detection happens once, later, at the actual
+        pre-execution boundary (hypogeum.deterministic_allocation.
+        check_output_collision(), wired into hypogeum.submission_gate.
+        submit()) -- proven separately in tests/test_deterministic_
+        allocation.py and tests/test_generic_envelope_architecture_
+        repair.py."""
         shot = _shot("b_001__shot1", "b_001")
         scene = _scene("s01", "b_001", [shot])
         rendered = _render_prompt(scene, shot)
         entry = _entry(shot["shot_id"], "b_001", rendered["prompt_checksum"], auth_index=1)
         manifest_path, _ = _write_episode_fixture(tmp_path, "ep_test", [entry], [scene])
 
-        collision_path = tmp_path / "episodes" / "ep_test" / "forced_collision.mp4"
+        # The canonical output path this shot will deterministically
+        # resolve to -- pre-create it to prove compilation is unaffected.
+        collision_path = tmp_path / "episodes" / "ep_test" / "video" / "sc_s01__extra1.mp4"
+        collision_path.parent.mkdir(parents=True, exist_ok=True)
         collision_path.write_bytes(b"not a real video, just a collision marker")
-
-        def _forced_allocation(missing_shots, visual_package, assets_root, episode_id):
-            return [{**missing_shots[0], "extra_scene_id": f"{missing_shots[0]['shot_id']}__extra1", "output_path": str(collision_path)}]
-
-        monkeypatch.setattr(mle, "plan_confirmed_shot_allocations", _forced_allocation)
 
         report = self_compile(tmp_path, manifest_path)
         e = one(report)
-        assert e["envelope_fields_valid"] is False
-        assert "output_already_exists" in " ".join(e["envelope_fields_reasons"])
+        assert e["envelope_fields_valid"] is True
+        assert e["envelope_fields_reasons"] == []
 
     def test_aspect_ratio_mismatch_is_legacy_incompatibility_not_envelope_defect(self, tmp_path):
         shot = _shot("b_001__shot1", "b_001")
@@ -654,11 +660,12 @@ class TestInjectableWorkflowResolverAndReconstructionTag:
         target_entry = active[0]
         target_scene = beat_to_scene[target_entry["beat"]]
         planned_shot, _n = mle.find_planned_shot(target_scene, target_entry["target_shot_id"])
-        allocations = mle.plan_confirmed_shot_allocations(
-            [{"beat_id": target_entry["beat"], "shot_id": target_entry["target_shot_id"],
-              "scene_id": target_scene.get("scene_id"), "short_id": target_scene.get("short_id")}],
-            visual_package, tmp_path, "ep_test",
+        slot = mle.resolve_canonical_output_slot(
+            episode_id="ep_test", scene_id=target_scene.get("scene_id"),
+            shot_order=planned_shot.get("shot_order"), short_id=target_scene.get("short_id"),
+            assets_root=tmp_path,
         )
+        allocations = [{"extra_scene_id": slot.extra_scene_id, "output_path": str(slot.output_path)}]
         result = mle._compile_one_entry(
             target_entry, target_scene, planned_shot, config=_config(), manifest=manifest,
             plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
@@ -687,11 +694,12 @@ class TestInjectableWorkflowResolverAndReconstructionTag:
         target_entry = active[0]
         target_scene = beat_to_scene[target_entry["beat"]]
         planned_shot, _n = mle.find_planned_shot(target_scene, target_entry["target_shot_id"])
-        allocations = mle.plan_confirmed_shot_allocations(
-            [{"beat_id": target_entry["beat"], "shot_id": target_entry["target_shot_id"],
-              "scene_id": target_scene.get("scene_id"), "short_id": target_scene.get("short_id")}],
-            visual_package, tmp_path, "ep_test",
+        slot = mle.resolve_canonical_output_slot(
+            episode_id="ep_test", scene_id=target_scene.get("scene_id"),
+            shot_order=planned_shot.get("shot_order"), short_id=target_scene.get("short_id"),
+            assets_root=tmp_path,
         )
+        allocations = [{"extra_scene_id": slot.extra_scene_id, "output_path": str(slot.output_path)}]
         result = mle._compile_one_entry(
             target_entry, target_scene, planned_shot, config=_config(), manifest=manifest,
             plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
@@ -722,11 +730,12 @@ class TestInjectableWorkflowResolverAndReconstructionTag:
         target_entry = active[0]
         target_scene = beat_to_scene[target_entry["beat"]]
         planned_shot, _n = mle.find_planned_shot(target_scene, target_entry["target_shot_id"])
-        allocations = mle.plan_confirmed_shot_allocations(
-            [{"beat_id": target_entry["beat"], "shot_id": target_entry["target_shot_id"],
-              "scene_id": target_scene.get("scene_id"), "short_id": target_scene.get("short_id")}],
-            visual_package, tmp_path, "ep_test",
+        slot = mle.resolve_canonical_output_slot(
+            episode_id="ep_test", scene_id=target_scene.get("scene_id"),
+            shot_order=planned_shot.get("shot_order"), short_id=target_scene.get("short_id"),
+            assets_root=tmp_path,
         )
+        allocations = [{"extra_scene_id": slot.extra_scene_id, "output_path": str(slot.output_path)}]
         common = dict(
             config=_config(), manifest=manifest, plan_checksum_sha256=plan_checksum_sha256,
             compiler_checksum=compiler_checksum, allocation=allocations[0], episode_id="ep_test",

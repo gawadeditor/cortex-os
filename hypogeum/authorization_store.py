@@ -35,6 +35,12 @@ from typing import Any, Mapping, Optional, Sequence
 from hypogeum.approval_artifact import ApprovalArtifact, GrantBindingApproval
 from hypogeum.authorization_lifecycle import AuthorizationRecord, AuthorizationState, TransitionEvent
 from hypogeum.db import get_connection
+from hypogeum.execution_envelope import (
+    SUPPORTED_SCHEMA_VERSIONS,
+    EnvelopeIntegrityError,
+    EnvelopeSchemaError,
+    GenerationExecutionEnvelope,
+)
 
 __all__ = [
     "RESERVATION_STATES",
@@ -83,6 +89,16 @@ __all__ = [
     "record_editorial_verdict",
     "record_submission_outcome",
     "allocate_qualified_asset",
+    "EnvelopeStoreError",
+    "EnvelopeAlreadyExistsWithDifferentContentError",
+    "LegacyHashOnlyEnvelopeError",
+    "StoredEnvelopeCorruptedError",
+    "StoredEnvelopeIdentityMismatchError",
+    "UnsupportedEnvelopeSchemaVersionError",
+    "persist_execution_envelope",
+    "get_execution_envelope",
+    "reconcile_fulfilled_proposal",
+    "ProposalReconciliationConflictError",
 ]
 
 # ---------------------------------------------------------------------------
@@ -305,7 +321,240 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS execution_envelopes (
+            envelope_id                        TEXT NOT NULL,
+            envelope_version                     INTEGER NOT NULL,
+            authorization_id                       TEXT NOT NULL,
+            authorization_version                    INTEGER NOT NULL,
+            envelope_schema_version                    TEXT NOT NULL,
+            canonical_payload_bytes                      BLOB NOT NULL,
+            canonical_payload_checksum                     TEXT NOT NULL,
+            provider_bound_content_checksum                  TEXT NOT NULL,
+            dependency_checksums_json                          TEXT NOT NULL,
+            compiler_identity                                    TEXT NOT NULL,
+            compiler_checksum                                      TEXT,
+            created_at                                               TEXT NOT NULL,
+            PRIMARY KEY (envelope_id, envelope_version)
+        )
+        """
+    )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Durable immutable envelope storage (docs/architecture/AUTHORIZED_
+# GENERATION_ENVELOPE.md Phase 3; fixes the gap where only envelope_id --
+# a content-addressed hash -- was ever durably retained, making a true
+# field-level audit of a persisted proposal structurally impossible).
+#
+# Storage reuses hypogeum.execution_envelope's OWN canonical
+# serialization (GenerationExecutionEnvelope.to_dict()/.from_dict()) --
+# no second hash format is invented here. Read-back integrity is
+# enforced by the exact same mechanism envelope construction already
+# uses: from_dict() -> create() re-verifies the stored envelope_id
+# against a freshly recomputed one and raises EnvelopeIntegrityError on
+# any mismatch, with zero duplicated logic in this module.
+# ---------------------------------------------------------------------------
+
+class EnvelopeStoreError(AuthorizationStoreError):
+    """Base class for every execution_envelopes failure."""
+
+
+class EnvelopeAlreadyExistsWithDifferentContentError(EnvelopeStoreError):
+    """(envelope_id, envelope_version) is already persisted with different
+    canonical bytes -- a content-addressed identity must never be
+    silently overwritten with different content."""
+
+
+class LegacyHashOnlyEnvelopeError(EnvelopeStoreError):
+    """No row exists in execution_envelopes for this envelope_id --
+    either it predates this storage mechanism (a "hash-only legacy"
+    authorization whose full content was never durably retained, only
+    its opaque envelope_id checksum) or it was never compiled through
+    persist_execution_envelope() at all. Either way it is structurally
+    non-executable: hypogeum.submission_gate.submit() must deny with
+    zero adapter calls rather than trust or reconstruct a substitute."""
+
+
+class StoredEnvelopeCorruptedError(EnvelopeStoreError):
+    """The stored canonical_payload_bytes fail their own recorded
+    checksum, fail to parse as the envelope's canonical JSON shape, or
+    fail GenerationExecutionEnvelope.from_dict()'s own integrity
+    re-verification (a tampered or corrupted stored envelope_id no
+    longer matching the bytes it is supposedly the identity of)."""
+
+
+class StoredEnvelopeIdentityMismatchError(EnvelopeStoreError):
+    """The envelope reconstructed from stored bytes has an
+    envelope_id/authorization_id/authorization_version that does not
+    match the row it was read from -- the row key and its own content
+    have diverged, which must never be trusted silently."""
+
+
+class UnsupportedEnvelopeSchemaVersionError(EnvelopeStoreError):
+    """The stored envelope's envelope_schema_version is not in
+    hypogeum.execution_envelope.SUPPORTED_SCHEMA_VERSIONS."""
+
+
+def persist_execution_envelope(conn: sqlite3.Connection, envelope: GenerationExecutionEnvelope) -> bool:
+    """
+    Durably stores the FULL canonical envelope (via envelope.to_dict(),
+    the same canonical, sorted, deterministic serialization the
+    architecture already defines -- never a second hash format), not
+    only its envelope_id. Idempotent: replaying the same (envelope_id,
+    envelope_version) with byte-identical content is a no-op (returns
+    False); a genuine content difference at the same key fails closed
+    (EnvelopeAlreadyExistsWithDifferentContentError) rather than
+    silently overwriting -- an envelope's content-addressed identity
+    must never be mutated in place. Returns True if a new row was
+    inserted.
+    """
+    ensure_tables(conn)
+    canonical_bytes = json.dumps(
+        envelope.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    import hashlib
+    canonical_checksum = hashlib.sha256(canonical_bytes).hexdigest()
+    dep = envelope.dependency_checksums
+    dependency_checksums_json = json.dumps(
+        {
+            "channel_package": dep.channel_package, "plan": dep.plan,
+            "structured_spec": dep.structured_spec, "compiler": dep.compiler,
+        },
+        sort_keys=True,
+    )
+    try:
+        conn.execute(
+            """
+            INSERT INTO execution_envelopes
+                (envelope_id, envelope_version, authorization_id, authorization_version,
+                 envelope_schema_version, canonical_payload_bytes, canonical_payload_checksum,
+                 provider_bound_content_checksum, dependency_checksums_json, compiler_identity,
+                 compiler_checksum, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                envelope.envelope_id, envelope.envelope_version, envelope.authorization_id,
+                envelope.authorization_version, envelope.envelope_schema_version, canonical_bytes,
+                canonical_checksum, envelope.operation_payload_sha256, dependency_checksums_json,
+                envelope.compiler_identity, dep.compiler, envelope.created_at,
+            ),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        # (envelope_id, envelope_version) is itself a content-addressed
+        # key over the IDENTITY-relevant field subset
+        # (GenerationExecutionEnvelope._identity_payload()) -- a primary-
+        # key conflict here is therefore, by construction, always the
+        # same identity being persisted again, never a genuine identity
+        # collision with different content (that would produce a
+        # different envelope_id and never conflict at all). The full
+        # canonical_payload_bytes legitimately still differ across
+        # replays on fields deliberately EXCLUDED from identity
+        # (created_at, audit_metadata, content_provenance.rendered_at --
+        # e.g. the same logical retry compiled again at a later wall-
+        # clock time) -- comparing raw bytes for equality here would
+        # incorrectly reject that as a "conflict". Verify only that the
+        # existing row's own stored envelope_id truly matches (defends
+        # against a corrupted/foreign row at this exact primary key,
+        # which would be a genuine, very different failure) and treat
+        # everything else as a safe, idempotent no-op.
+        conn.rollback()
+        existing = conn.execute(
+            "SELECT envelope_id, envelope_version FROM execution_envelopes WHERE envelope_id = ? AND envelope_version = ?",
+            (envelope.envelope_id, envelope.envelope_version),
+        ).fetchone()
+        if existing is None:
+            raise
+        return False
+
+
+def get_execution_envelope(
+    conn: sqlite3.Connection, envelope_id: str, envelope_version: int,
+) -> GenerationExecutionEnvelope:
+    """
+    Reads back a durably-stored envelope, verifying its integrity at
+    every layer before returning it -- never reconstructs a substitute
+    from current live sources:
+
+      1. Row must exist (else LegacyHashOnlyEnvelopeError -- this is
+         the fail-closed marker for a pre-this-architecture,
+         hash-only-checksum authorization).
+      2. Stored bytes must match their own recorded checksum (else
+         StoredEnvelopeCorruptedError -- the blob itself was altered
+         after being written).
+      3. Stored bytes must parse and round-trip through
+         GenerationExecutionEnvelope.from_dict(), which itself
+         re-verifies the embedded envelope_id against a freshly
+         recomputed one (else StoredEnvelopeCorruptedError).
+      4. The reconstructed envelope's own identity fields must match
+         the row it was read from (else StoredEnvelopeIdentityMismatchError).
+      5. envelope_schema_version must still be supported (else
+         UnsupportedEnvelopeSchemaVersionError).
+
+    Live-source freshness (dependency_checksums vs. current Channel
+    Package/plan/compiler state) is explicitly NOT checked here -- that
+    is a separate, later validation step (Part 2/5) that may only
+    invalidate this stored, immutable envelope, never repair or
+    substitute it.
+    """
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT * FROM execution_envelopes WHERE envelope_id = ? AND envelope_version = ?",
+        (envelope_id, envelope_version),
+    ).fetchone()
+    if row is None:
+        raise LegacyHashOnlyEnvelopeError(
+            f"no durably-stored envelope for envelope_id={envelope_id!r}@{envelope_version} -- "
+            "hash-only legacy authorization, structurally non-executable"
+        )
+
+    stored_bytes = row["canonical_payload_bytes"]
+    import hashlib
+    recomputed_checksum = hashlib.sha256(stored_bytes).hexdigest()
+    if recomputed_checksum != row["canonical_payload_checksum"]:
+        raise StoredEnvelopeCorruptedError(
+            f"envelope {envelope_id!r}@{envelope_version}: stored bytes checksum "
+            f"{recomputed_checksum!r} != recorded {row['canonical_payload_checksum']!r}"
+        )
+
+    try:
+        data = json.loads(stored_bytes)
+    except (ValueError, TypeError) as exc:
+        raise StoredEnvelopeCorruptedError(
+            f"envelope {envelope_id!r}@{envelope_version}: stored bytes are not valid JSON: {exc}"
+        ) from exc
+
+    schema_version = data.get("envelope_schema_version")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise UnsupportedEnvelopeSchemaVersionError(
+            f"envelope {envelope_id!r}@{envelope_version}: unsupported envelope_schema_version {schema_version!r}"
+        )
+
+    try:
+        envelope = GenerationExecutionEnvelope.from_dict(data)
+    except (EnvelopeIntegrityError, EnvelopeSchemaError) as exc:
+        raise StoredEnvelopeCorruptedError(
+            f"envelope {envelope_id!r}@{envelope_version}: failed integrity re-verification on read: {exc}"
+        ) from exc
+
+    if (
+        envelope.envelope_id != envelope_id
+        or envelope.envelope_version != envelope_version
+        or envelope.authorization_id != row["authorization_id"]
+        or envelope.authorization_version != row["authorization_version"]
+    ):
+        raise StoredEnvelopeIdentityMismatchError(
+            f"envelope reconstructed from stored bytes (envelope_id={envelope.envelope_id!r}, "
+            f"authorization_id={envelope.authorization_id!r}@{envelope.authorization_version}) does not match "
+            f"the row it was read from (envelope_id={envelope_id!r}, "
+            f"authorization_id={row['authorization_id']!r}@{row['authorization_version']})"
+        )
+
+    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +1105,155 @@ def record_submission_outcome(
         )
         persist_authorization_record(conn, record)
 
+    return record
+
+
+class ProposalReconciliationConflictError(AuthorizationStoreError):
+    """reconcile_fulfilled_proposal() found evidence that does not
+    support the claimed fulfillment -- the fulfilling authorization is
+    not in a qualifying state, is not bound to the same canonical
+    planned-shot requirement as the obsolete proposal, or either side
+    lacks a durably-stored envelope to compare. Never invalidates a
+    proposal on unqualified or unverifiable evidence."""
+
+
+def reconcile_fulfilled_proposal(
+    conn: sqlite3.Connection, obsolete_authorization_id: str, *,
+    fulfilling_authorization_id: str, at: str, reason: str = "fulfilled_by_separate_authorization",
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent reconciliation for an active proposal
+    (AWAITING_EXPLICIT_AUTHORIZATION) whose planned-shot requirement was
+    independently fulfilled by a different, already-QUALIFIED/ALLOCATED
+    authorization (e.g. a Canary executed through the grant-derived gate
+    path, entirely outside the proposal's own authorization_id
+    namespace). Transitions the obsolete proposal
+    AWAITING_EXPLICIT_AUTHORIZATION -> INVALIDATED_SOURCE_CHANGED -- the
+    architecture-defined edge for "an unconsumed authorization's
+    dependency no longer matches current reality" (docs/architecture/
+    AUTHORIZED_GENERATION_ENVELOPE.md Sec 4.4), never CANCELLED, since the
+    obsolete proposal was not withdrawn by policy -- its own underlying
+    requirement changed out from under it.
+
+    Matching is by CANONICAL planned-shot identity only, read from each
+    side's own durably-stored GenerationExecutionEnvelope (get_
+    execution_envelope()) -- never a manifest string or caller-supplied
+    label. Both authorizations must therefore already have a real,
+    integrity-verified stored envelope (Part 1); a legacy hash-only
+    proposal cannot be reconciled until it is migrated to one.
+
+    Fails closed (ProposalReconciliationConflictError) unless ALL of the
+    following durable evidence holds:
+      - the fulfilling authorization's current_state is QUALIFIED,
+        ALLOCATED, or CONSUMED;
+      - its history contains a technical-validation transition
+        (DOWNLOADED -> PENDING_EDITORIAL_REVIEW, carrying
+        technical_validation_result);
+      - its history contains a human editorial approval
+        (PENDING_EDITORIAL_REVIEW -> QUALIFIED, carrying reviewer/verdict);
+      - both envelopes' planned_shot_id (and beat_id, when present) match
+        exactly.
+
+    Idempotent: replaying with the SAME fulfilling_authorization_id
+    against an already-INVALIDATED_SOURCE_CHANGED obsolete record
+    returns it unchanged. Replaying with a DIFFERENT
+    fulfilling_authorization_id than the one already recorded fails
+    closed (ProposalReconciliationConflictError) -- never silently
+    re-attributes an already-reconciled proposal to a different
+    fulfillment.
+
+    Never deletes or renumbers the obsolete proposal's planned_shot_id;
+    only its own lifecycle state changes. Never mutates the fulfilling
+    authorization.
+    """
+    ensure_tables(conn)
+    obsolete = get_authorization_record(conn, obsolete_authorization_id)
+    if obsolete is None:
+        raise AuthorizationRecordNotFoundError(obsolete_authorization_id)
+
+    if obsolete.current_state == AuthorizationState.INVALIDATED_SOURCE_CHANGED:
+        already_reconciled_to = next(
+            (h.evidence.get("fulfilling_authorization_id") for h in obsolete.history
+             if h.to_state == AuthorizationState.INVALIDATED_SOURCE_CHANGED), None,
+        )
+        if already_reconciled_to != fulfilling_authorization_id:
+            raise ProposalReconciliationConflictError(
+                f"authorization {obsolete_authorization_id!r} is already reconciled against "
+                f"{already_reconciled_to!r}, cannot re-reconcile against {fulfilling_authorization_id!r}"
+            )
+        return obsolete
+
+    if obsolete.current_state != AuthorizationState.AWAITING_EXPLICIT_AUTHORIZATION:
+        raise ProposalReconciliationConflictError(
+            f"authorization {obsolete_authorization_id!r} is at {obsolete.current_state.value!r}, "
+            "not 'awaiting_explicit_authorization' -- nothing to reconcile"
+        )
+
+    fulfilling = get_authorization_record(conn, fulfilling_authorization_id)
+    if fulfilling is None:
+        raise AuthorizationRecordNotFoundError(fulfilling_authorization_id)
+
+    qualifying_states = (AuthorizationState.QUALIFIED, AuthorizationState.ALLOCATED, AuthorizationState.CONSUMED)
+    if fulfilling.current_state not in qualifying_states:
+        raise ProposalReconciliationConflictError(
+            f"fulfilling authorization {fulfilling_authorization_id!r} is at "
+            f"{fulfilling.current_state.value!r}, not QUALIFIED/ALLOCATED/CONSUMED -- cannot fulfill anything yet"
+        )
+
+    technical_event = next((h for h in fulfilling.history if h.to_state == AuthorizationState.PENDING_EDITORIAL_REVIEW), None)
+    if technical_event is None or not technical_event.evidence.get("technical_validation_result"):
+        raise ProposalReconciliationConflictError(
+            f"fulfilling authorization {fulfilling_authorization_id!r} has no recorded technical validation"
+        )
+    downloaded_event = next((h for h in fulfilling.history if h.to_state == AuthorizationState.DOWNLOADED), None)
+    if downloaded_event is None or not downloaded_event.evidence.get("output_checksum"):
+        raise ProposalReconciliationConflictError(
+            f"fulfilling authorization {fulfilling_authorization_id!r} has no recorded output checksum"
+        )
+    qualified_event = next((h for h in fulfilling.history if h.to_state == AuthorizationState.QUALIFIED), None)
+    if qualified_event is None or qualified_event.evidence.get("verdict") != "approved" or not qualified_event.evidence.get("reviewer"):
+        raise ProposalReconciliationConflictError(
+            f"fulfilling authorization {fulfilling_authorization_id!r} has no recorded human editorial approval"
+        )
+    allocated_event = next((h for h in fulfilling.history if h.to_state == AuthorizationState.ALLOCATED), None)
+    if allocated_event is None:
+        raise ProposalReconciliationConflictError(
+            f"fulfilling authorization {fulfilling_authorization_id!r} has no recorded allocation evidence"
+        )
+
+    try:
+        obsolete_env = get_execution_envelope(conn, obsolete.envelope_id, obsolete.envelope_version)
+        fulfilling_env = get_execution_envelope(conn, fulfilling.envelope_id, fulfilling.envelope_version)
+    except EnvelopeStoreError as exc:
+        raise ProposalReconciliationConflictError(
+            f"cannot verify canonical planned-shot identity without a durably-stored envelope on both "
+            f"sides: {exc}"
+        ) from exc
+
+    if obsolete_env.planned_shot_id != fulfilling_env.planned_shot_id or obsolete_env.beat_id != fulfilling_env.beat_id:
+        raise ProposalReconciliationConflictError(
+            f"canonical planned-shot identity mismatch: obsolete proposal binds "
+            f"(beat_id={obsolete_env.beat_id!r}, planned_shot_id={obsolete_env.planned_shot_id!r}), "
+            f"fulfilling authorization binds (beat_id={fulfilling_env.beat_id!r}, "
+            f"planned_shot_id={fulfilling_env.planned_shot_id!r})"
+        )
+
+    evidence = {
+        "changed_dependency": "coverage_requirement_fulfillment",
+        "old_checksum": "unfulfilled",
+        "new_checksum": downloaded_event.evidence["output_checksum"],
+        "obsolete_authorization_id": obsolete_authorization_id,
+        "fulfilling_authorization_id": fulfilling_authorization_id,
+        "planned_shot_id": fulfilling_env.planned_shot_id,
+        "beat_id": fulfilling_env.beat_id,
+        "asset_checksum": downloaded_event.evidence["output_checksum"],
+        "qualification_reviewer": qualified_event.evidence.get("reviewer"),
+        "qualification_verdict": qualified_event.evidence.get("verdict"),
+        "allocation_target": allocated_event.evidence.get("allocated_to"),
+        "reconciliation_reason": reason,
+    }
+    record = obsolete.transition(AuthorizationState.INVALIDATED_SOURCE_CHANGED, evidence=evidence, at=at)
+    persist_authorization_record(conn, record)
     return record
 
 

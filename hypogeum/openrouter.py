@@ -486,6 +486,7 @@ def _call_openrouter_via_gate(
 
     import hypogeum.adapter_registry as adapter_registry
     import hypogeum.authorization_authority as authority
+    import hypogeum.authorization_store as authorization_store
     import hypogeum.budget_scopes as bs
     import hypogeum.channel_config as channel_config
     import hypogeum.db as db
@@ -550,6 +551,8 @@ def _call_openrouter_via_gate(
 
     conn = db.get_connection()
     try:
+        authorization_store.persist_execution_envelope(conn, envelope)
+
         adapter_registry.register_adapter(_TEXT_PROVIDER, model_slug, _TEXT_PROVIDER_OPERATION, "1.0", OpenrouterTextAdapter)
         lease_owner_id = f"openrouter_text_adapter:{attempt_label}"
         lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()

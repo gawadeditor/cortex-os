@@ -98,7 +98,14 @@ invented, guessed, or repaired:
   hypogeum.agents.provider_router  build_scene_spec() -- used ONLY to evaluate
                                     legacy_path_compatible, never to derive the
                                     envelope's own authorized binding
-  hypogeum.agents.clip_repair_agent.plan_confirmed_shot_allocations()
+  hypogeum.deterministic_allocation resolve_canonical_output_slot() -- deterministic,
+                                    plan-derived output-slot identity; never touches
+                                    the filesystem, replacing hypogeum.agents.
+                                    clip_repair_agent.plan_confirmed_shot_allocations()
+                                    (still correct for its own real-time-generation
+                                    purpose, but never the identity source for an
+                                    already-compiled envelope -- see docs/architecture/
+                                    PROTECTED_GENERATION_LIFECYCLE_RECONCILIATION.md)
   hypogeum.scene_identity           enforce_global_scene_identity(),
                                     enforce_scene_internal_consistency()
   hypogeum.muapi                    MODEL_CREDIT_COSTS, _tier_to_model(),
@@ -127,8 +134,8 @@ from typing import Any, Optional
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from hypogeum.agents.clip_repair_agent import plan_confirmed_shot_allocations  # noqa: E402
 from hypogeum.agents.provider_router import build_scene_spec  # noqa: E402
+from hypogeum.deterministic_allocation import resolve_canonical_output_slot  # noqa: E402
 from hypogeum.canary_preflight import (  # noqa: E402
     CanaryPreflightError as _CheckError,
     check_prompt_checksum,
@@ -240,6 +247,29 @@ def compute_workflow_identity() -> dict:
 # {channel_id}/), not just the DB-backed profiles.
 
 
+@dataclass(frozen=True)
+class ExplicitBinding:
+    """Part 4 (model binding authority): a caller-approved, immutable
+    provider/model/operation binding with an explicit Decimal per-call
+    cost ceiling. When supplied to compile_manifest_to_envelopes(), this
+    binding is authoritative for every compiled entry -- the manifest's
+    own model_tier_planned field and any other tier-derived default are
+    never consulted. A ceiling that does not match the model's own known
+    cost (hypogeum.muapi.MODEL_CREDIT_COSTS) blocks compilation for that
+    entry (envelope_fields_valid=False) rather than silently accepting
+    either value. Never applied to a live episode by this module itself
+    -- a caller decides when and whether to pass one."""
+
+    provider: str
+    model: str
+    provider_operation: str
+    max_cost_per_call_ceiling: Decimal
+
+    def __post_init__(self):
+        if self.max_cost_per_call_ceiling <= 0:
+            raise ValueError(f"max_cost_per_call_ceiling must be positive, got {self.max_cost_per_call_ceiling!r}")
+
+
 @dataclass
 class EntryCompileResult:
     shot_id: Optional[str]
@@ -304,7 +334,7 @@ def _unresolvable(shot_id, beat_id, deliverable, auth_index, reason: str) -> Ent
 def compile_manifest_to_envelopes(
     args: argparse.Namespace, config: Optional[Config] = None, *,
     workflow_identity_resolver=None, tag_as_reconstructed: bool = True, authorization_version: int = 1,
-    include_envelope_dicts: bool = False,
+    include_envelope_dicts: bool = False, explicit_binding: Optional[ExplicitBinding] = None,
 ) -> dict:
     """
     Runs the full read-only compilation pass over every active manifest
@@ -353,6 +383,15 @@ def compile_manifest_to_envelopes(
     default False, this tool's own original, compact report shape,
     unaffected. A caller that needs to reconstruct real envelope
     objects (plan §6 Commit M) sets this.
+
+    explicit_binding: Part 4 (model binding authority). When supplied,
+    every entry's authorized provider/model/operation/cost-ceiling
+    comes from this single, caller-approved ExplicitBinding instead of
+    the manifest's own model_tier_planned field -- e.g. compiling an
+    entire proposal set against a caller-approved Lite binding
+    (veo3.1-lite-text-to-video, USD 0.39/call). Default None (the
+    tool's own original behavior, unaffected). Never applied to a live
+    episode by this function itself.
     """
     assets_root = Path(args.assets_root)
     episode_dir = _episode_dir(assets_root, args.episode_id)
@@ -460,17 +499,37 @@ def compile_manifest_to_envelopes(
         missing_shots_for_allocation.append({
             "beat_id": beat_id, "shot_id": shot_id,
             "scene_id": scene.get("scene_id"), "short_id": scene.get("short_id"),
+            "shot_order": planned_shot.get("shot_order"),
         })
 
+    # Deterministic, plan-derived output-slot identity (docs/architecture/
+    # PROTECTED_GENERATION_LIFECYCLE_RECONCILIATION.md) -- replaces
+    # plan_confirmed_shot_allocations() as the identity source for
+    # COMPILATION specifically. That function remains correct and
+    # unchanged for its own real purpose (finding a live, filesystem-
+    # safe slot for a generation attempt about to actually run inside
+    # hypogeum.agents.clip_repair_agent); it is a read-only migration
+    # diagnostic utility here at most, never the source of an already-
+    # compiled envelope's identity. hypogeum.deterministic_allocation.
+    # resolve_canonical_output_slot() never touches the filesystem, so
+    # adding, deleting, or discovering an unrelated physical file can
+    # never change a shot's compiled envelope identity.
     allocations_by_shot: dict = {}
-    if missing_shots_for_allocation:
-        try:
-            allocations = plan_confirmed_shot_allocations(
-                missing_shots_for_allocation, visual_package, assets_root, args.episode_id,
-            )
-            allocations_by_shot = {a["shot_id"]: a for a in allocations}
-        except SceneIdentityConflictError as exc:
-            global_blockers.append({"check": "scene_identity_conflict_during_allocation", "reason": str(exc)})
+    for missing in missing_shots_for_allocation:
+        if missing["shot_order"] is None:
+            global_blockers.append({
+                "check": "missing_shot_order_for_deterministic_allocation",
+                "reason": f"shot {missing['shot_id']!r} has no shot_order in the coverage plan -- "
+                          "cannot derive a deterministic output slot",
+            })
+            continue
+        slot = resolve_canonical_output_slot(
+            episode_id=args.episode_id, scene_id=missing["scene_id"], shot_order=missing["shot_order"],
+            short_id=missing["short_id"], assets_root=assets_root,
+        )
+        allocations_by_shot[missing["shot_id"]] = {
+            "extra_scene_id": slot.extra_scene_id, "output_path": str(slot.output_path),
+        }
 
     seen_envelope_ids: dict = {}
     seen_idempotency_keys: dict = {}
@@ -502,6 +561,7 @@ def compile_manifest_to_envelopes(
             channel_id=args.channel_id, channel_package=channel_package,
             manifest_md5=manifest_md5, workflow_identity_resolver=workflow_identity_resolver,
             tag_as_reconstructed=tag_as_reconstructed, authorization_version=authorization_version,
+            explicit_binding=explicit_binding,
         )
         results.append(result)
 
@@ -536,6 +596,7 @@ def _compile_one_entry(
     plan_checksum_sha256: Optional[str], compiler_checksum: str, allocation: Optional[dict],
     episode_id: str, channel_id: str, channel_package: dict, manifest_md5: str,
     workflow_identity_resolver=None, tag_as_reconstructed: bool = True, authorization_version: int = 1,
+    explicit_binding: "Optional[ExplicitBinding]" = None,
 ) -> EntryCompileResult:
     if workflow_identity_resolver is None:
         workflow_identity_resolver = compute_workflow_identity
@@ -589,15 +650,37 @@ def _compile_one_entry(
         operation_payload_sha256 = _sha256_bytes(operation_payload_content.encode("utf-8"))
         result.checksums["operation_payload_sha256"] = operation_payload_sha256
 
-    # Authorized binding -- from the manifest, never from the live scene.
-    authorized_model = manifest.get("model_tier_planned")
+    # Authorized binding -- either the caller-approved, immutable
+    # explicit_binding (Part 4: model binding authority), or, when none
+    # is supplied, the manifest's own model_tier_planned field. Never
+    # the live scene's provider_routing -- that is only ever consulted
+    # separately, for the legacy_path_compatible diagnostic below.
     authorized_aspect_ratio = entry.get("aspect_ratio")
-    authorized_cost = MODEL_CREDIT_COSTS.get(authorized_model) if authorized_model else None
+    if explicit_binding is not None:
+        authorized_model = explicit_binding.model
+        known_cost = MODEL_CREDIT_COSTS.get(authorized_model)
+        if known_cost is None:
+            result.envelope_fields_reasons.append(
+                f"unknown_model_cost: no known credit cost for explicit_binding model {authorized_model!r}"
+            )
+            authorized_cost = None
+        elif Decimal(str(known_cost)) != explicit_binding.max_cost_per_call_ceiling:
+            result.envelope_fields_reasons.append(
+                f"explicit_binding_cost_mismatch: caller-approved ceiling "
+                f"{explicit_binding.max_cost_per_call_ceiling} does not match model {authorized_model!r}'s "
+                f"known cost {known_cost}"
+            )
+            authorized_cost = None
+        else:
+            authorized_cost = known_cost
+    else:
+        authorized_model = manifest.get("model_tier_planned")
+        authorized_cost = MODEL_CREDIT_COSTS.get(authorized_model) if authorized_model else None
     authorized_duration_seconds = _VEO3_1_DEFAULT_DURATION if authorized_model in _FIXED_8S_MODEL_FAMILIES else None
 
     if not authorized_model:
-        result.envelope_fields_reasons.append("missing_authorized_model: manifest has no model_tier_planned")
-    elif authorized_cost is None:
+        result.envelope_fields_reasons.append("missing_authorized_model: no explicit_binding and manifest has no model_tier_planned")
+    elif authorized_cost is None and not result.envelope_fields_reasons:
         result.envelope_fields_reasons.append(f"unknown_model_cost: no known credit cost for authorized model {authorized_model!r}")
     if not authorized_aspect_ratio:
         result.envelope_fields_reasons.append("missing_authorized_aspect_ratio: manifest entry has no aspect_ratio")
@@ -608,13 +691,20 @@ def _compile_one_entry(
         )
 
     if allocation is None:
-        result.envelope_fields_reasons.append("output_allocation_missing: plan_confirmed_shot_allocations() returned no allocation for this shot")
+        result.envelope_fields_reasons.append("output_allocation_missing: resolve_canonical_output_slot() produced no allocation for this shot")
         extra_scene_id = output_path = None
     else:
         extra_scene_id = allocation["extra_scene_id"]
         output_path = allocation["output_path"]
-        if Path(output_path).exists():
-            result.envelope_fields_reasons.append(f"output_already_exists: allocated output path already exists on disk: {output_path!r}")
+        # Physical output occupancy is deliberately NOT checked here --
+        # compile-time envelope validity must never depend on current
+        # filesystem state (docs/architecture/PROTECTED_GENERATION_
+        # LIFECYCLE_RECONCILIATION.md). Collision detection happens once,
+        # at the actual pre-execution boundary, via
+        # hypogeum.deterministic_allocation's own check_output_collision()
+        # (wired into the shared mandatory gate elsewhere) -- never as a
+        # compile-time diagnostic that would make two otherwise-identical
+        # compiles disagree depending on what happens to exist on disk.
 
     structured_spec_checksum = _structured_spec_checksum(planned_shot) if stored_prompt else None
     if structured_spec_checksum:

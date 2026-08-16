@@ -638,6 +638,7 @@ def _generate_narration_via_gate(
 
     import hypogeum.adapter_registry as adapter_registry
     import hypogeum.authorization_authority as authority
+    import hypogeum.authorization_store as authorization_store
     import hypogeum.budget_scopes as bs
     import hypogeum.channel_config as channel_config
     import hypogeum.db as db
@@ -715,6 +716,8 @@ def _generate_narration_via_gate(
 
     conn = db.get_connection()
     try:
+        authorization_store.persist_execution_envelope(conn, envelope)
+
         adapter_registry.register_adapter(_VOICE_PROVIDER, model_id, _VOICE_PROVIDER_OPERATION, "1.0", ElevenlabsVoiceAdapter)
         lease_owner_id = f"elevenlabs_voice_adapter:{beat_id}"
         lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
@@ -1419,6 +1422,7 @@ def _generate_music_via_gate(
 
     import hypogeum.adapter_registry as adapter_registry
     import hypogeum.authorization_authority as authority
+    import hypogeum.authorization_store as authorization_store
     import hypogeum.budget_scopes as bs
     import hypogeum.channel_config as channel_config
     import hypogeum.db as db
@@ -1496,6 +1500,8 @@ def _generate_music_via_gate(
 
     conn = db.get_connection()
     try:
+        authorization_store.persist_execution_envelope(conn, envelope)
+
         adapter_registry.register_adapter(_VOICE_PROVIDER, model_id, _MUSIC_PROVIDER_OPERATION, "1.0", ElevenlabsMusicAdapter)
         lease_owner_id = f"elevenlabs_music_adapter:{track_id}"
         lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()

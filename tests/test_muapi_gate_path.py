@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_muapi import make_config, make_scene_spec, _mock_submit_ok, _mock_poll_completed  # noqa: E402
 
+import hypogeum.adapter_registry as adapter_registry
 import hypogeum.authorization_authority as authority
 import hypogeum.authorization_store as astore
 import hypogeum.channel_config as channel_config
@@ -36,6 +37,13 @@ from hypogeum.approval_artifact import GrantBindingApproval, sign_approval_artif
 from hypogeum.muapi import submit_scene
 
 AT = "2026-01-01T00:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _reset_adapter_cache():
+    adapter_registry.reset_adapter_instance_cache()
+    yield
+    adapter_registry.reset_adapter_instance_cache()
 
 
 @pytest.fixture
@@ -97,14 +105,15 @@ def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decima
     )
 
 
-class TestNoGrantLeavesLegacyPathUnaffected:
+class TestOmittedChannelIdLeavesLegacyPathUnaffected:
 
-    def test_channel_id_supplied_but_no_grant_uses_legacy_path(self, tmp_path):
-        """Even with channel_id explicitly supplied, if no grant
-        resolves (the real 'hypogeum' case, always, until Enforcement
-        Cutover) the call falls straight through to the unchanged
-        legacy attempt structure -- proven here via the same HTTP mocks
-        tests/test_muapi.py already uses for the legacy path."""
+    def test_channel_id_omitted_entirely_uses_legacy_path(self, tmp_path):
+        """A caller that never identifies a channel at all (channel_id
+        omitted, the default -- every video-generation caller not yet
+        migrated to pass one) is completely unaffected by the
+        Production Enforcement Cutover -- proven here via the same
+        HTTP mocks tests/test_muapi.py already uses for the legacy
+        path."""
         config = make_config()
         spec = make_scene_spec(scene_id="s01b01")
         with patch("hypogeum.muapi.requests.post") as mock_post, \
@@ -114,8 +123,39 @@ class TestNoGrantLeavesLegacyPathUnaffected:
              patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
             mock_post.return_value = _mock_submit_ok("req_legacy")
             mock_get.return_value = _mock_poll_completed()
-            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="nobody_has_a_grant_for_this_channel")
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path)
         assert result["generation_status"] == "generated"
+
+
+class TestChannelIdSuppliedWithNoGrantIsEnforcedNotBypassed:
+    """Production Enforcement Cutover (video domain only): once a
+    caller supplies channel_id at all, it is committed to the gate --
+    a missing grant is a clean, zero-provider-call denial, never a
+    silent fallback to the legacy paid path. This is the exact
+    behavior change the cutover requires; it applies to any
+    (channel_id, episode_id), never anything hypogeum-specific."""
+
+    def test_channel_id_supplied_but_no_grant_fails_closed_with_zero_provider_calls(self, tmp_path):
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="nobody_has_a_grant_for_this_channel")
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert result["asset_id"] is None
+        assert "no_active_authorization_grant" in result["failure_reason"]
+
+    def test_denial_reason_names_the_channel_id(self, tmp_path):
+        """The failure_reason must name the exact channel_id that
+        triggered enforcement -- generic across any channel, never a
+        hardcoded 'hypogeum' string."""
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        with patch("hypogeum.muapi.requests.post"), patch("hypogeum.muapi.requests.get"):
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="some_other_channel")
+        assert "some_other_channel" in result["failure_reason"]
 
 
 class TestGrantDerivedGatePath:
@@ -167,3 +207,110 @@ class TestGrantDerivedGatePath:
 
         assert result["generation_status"] == "generation_failed"
         assert "gate_path" in result["failure_reason"]
+
+    def test_exact_provider_request_preserves_prompt_bytes_and_execution_binding(self, keypair, tmp_path, monkeypatch):
+        """The validated provider request submitted through the gate
+        must carry the exact same prompt bytes and execution binding
+        (aspect_ratio, duration, model) submit_scene() would have sent
+        via the legacy path -- the cutover changes control flow only,
+        never the request semantics."""
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
+        import hypogeum.video_prompt_writer as video_prompt_writer
+        expected_prompt = video_prompt_writer.assemble_video_scene_prompt(
+            spec["production_spec"]["primary_prompt"],
+        )
+
+        captured = {}
+
+        def _capture_post(url, headers=None, json=None, **kw):
+            captured["url"] = url
+            captured["body"] = json
+            return _mock_submit_ok("req_exact")
+
+        with patch("hypogeum.muapi.requests.post", side_effect=_capture_post), \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+            mock_get.return_value = _mock_poll_completed()
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+
+        assert result["generation_status"] == "generated", result
+        assert captured["body"]["prompt"] == expected_prompt
+        assert captured["body"]["aspect_ratio"] == spec["visual_spec"]["aspect_ratio"]
+
+    def test_second_submission_with_same_idempotency_key_cannot_auto_retry(self, keypair, tmp_path, monkeypatch):
+        """Duplicate/unknown acceptance can never trigger an automatic
+        second real provider call for the same attempt -- a second
+        submit_scene() call for the identical scene, after a first
+        real submission already succeeded, must be denied (idempotency
+        key already has attempt evidence), not silently reattempted."""
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL, max_calls=5, max_total_spend=Decimal("10.00"))
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+            mock_post.return_value = _mock_submit_ok("req_first")
+            mock_get.return_value = _mock_poll_completed()
+            first = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+        assert first["generation_status"] == "generated", first
+
+        # Simulate resume: delete the downloaded file so submit_scene()'s
+        # own resume-safety check doesn't short-circuit before ever
+        # reaching the gate -- the SAME idempotency_key must still be
+        # rejected as already-consumed, proving no automatic retry path
+        # exists through the enforced gate.
+        from hypogeum.muapi import scene_file_path
+        dest_path = scene_file_path(tmp_path, "s01b01", None)
+        if dest_path.exists():
+            dest_path.unlink()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post2, \
+             patch("hypogeum.muapi.requests.get") as mock_get2:
+            second = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post2.called is False
+            assert mock_get2.called is False
+        assert second["generation_status"] == "generation_failed"
+
+    def test_future_episode_and_channel_use_the_same_generic_mechanism(self, keypair, tmp_path, monkeypatch):
+        """Enforcement is Factory-Core-generic: a completely different,
+        synthetic (channel_id, episode_id) pair -- never 'hypogeum' or
+        'ep_gate_test' -- gets the exact same fail-closed-with-zero-
+        calls behavior with no episode-specific code anywhere in the
+        mechanism."""
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(
+                spec, config, "ep_some_future_episode", tmp_path,
+                channel_id="some_future_channel_never_seen_before",
+            )
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "no_active_authorization_grant" in result["failure_reason"]
+        assert "some_future_channel_never_seen_before" in result["failure_reason"]

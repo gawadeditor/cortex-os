@@ -812,24 +812,27 @@ def submit_scene(
     caller's behavior is byte-for-byte unchanged.
 
     channel_id (added for the Authorization Authority gate path,
-    plan §5.5/§6 Commit F): optional. When supplied AND a real,
-    verified hypogeum.authorization_authority.RunAuthorizationGrant
-    already resolves for (channel_id, this call's episode_id), the
-    ENTIRE call routes through the gate instead: compile an immutable
-    envelope from live sources -> issue a child authorization against
-    the grant -> hypogeum.submission_gate.submit() (which resolves and
-    invokes hypogeum.providers.muapi_video_adapter.MuapiVideoAdapter
-    internally). Every existing caller omits channel_id and is
-    completely unaffected. Even a caller that supplies channel_id
-    falls straight through to the unchanged legacy path below whenever
-    no real grant exists -- true for every real channel until a human
-    operator explicitly registers one (out of scope for Commits F0-L;
-    see the plan's Enforcement Cutover section). The gate path
-    currently attempts only the primary prompt/tier -- fallback-prompt
-    retry through the gate is not yet wired; a gate-path failure
-    returns generation_failed directly rather than falling through to
-    the legacy two-attempt structure, since a grant-derived attempt
-    that fails at the provider boundary must never silently reattempt
+    plan §5.5/§6 Commit F; enforcement tightened by the Production
+    Enforcement Cutover, video domain only): optional. Supplying it AT
+    ALL commits this call to the gate, unconditionally -- there is no
+    legacy fallback from that point on. When a real, verified
+    hypogeum.authorization_authority.RunAuthorizationGrant resolves for
+    (channel_id, this call's episode_id): compile an immutable envelope
+    from live sources -> issue a child authorization against the grant
+    -> hypogeum.submission_gate.submit() (which resolves and invokes
+    hypogeum.providers.muapi_video_adapter.MuapiVideoAdapter
+    internally). When no grant resolves: returns generation_failed
+    immediately with failure_reason "no_active_authorization_grant" --
+    never the legacy Attempt 1/2 structure below. Every existing caller
+    that omits channel_id entirely is completely unaffected (this is
+    the exact, deliberate scope boundary that keeps every other
+    provider domain, and every video caller not yet migrated to pass
+    channel_id, unchanged and dormant). The gate path currently
+    attempts only the primary prompt/tier -- fallback-prompt retry
+    through the gate is not yet wired; a gate-path failure returns
+    generation_failed directly rather than falling through to the
+    legacy two-attempt structure, since a grant-derived attempt that
+    fails at the provider boundary must never silently reattempt
     outside the Authority's own accounting.
     """
     scene_id = scene_spec["scene_id"]
@@ -893,33 +896,47 @@ def submit_scene(
         fallback_tier = int(prod_spec.get("fallback_tier", config.MUAPI_DEFAULT_TIER))
         reference_image_url = prod_spec.get("reference_image_url")
 
-    # Grant-derived gate path (Correction 3/5.5) -- only reached when
-    # channel_id is supplied AND a real, verified grant already resolves
-    # for (channel_id, episode_id). Every existing caller (none of which
-    # pass channel_id today) is completely unaffected -- this whole
-    # block is skipped and the legacy attempt structure below runs
-    # exactly as it always has. Even a caller that DOES pass channel_id
-    # falls straight through to the legacy path below whenever no real
-    # grant exists (true for "hypogeum" today and throughout Commits
-    # F0-L -- see the plan's Enforcement Cutover section).
+    # Grant-derived gate path (Correction 3/5.5; enforced, Production
+    # Enforcement Cutover -- video domain only). Once a caller supplies
+    # channel_id at all, it has identified a channel context and is
+    # COMMITTED to the gate: there is no legacy fallback from this point
+    # on, regardless of whether a grant actually resolves. This is the
+    # one, minimal, Factory-Core-generic change the cutover required --
+    # it applies to any (channel_id, episode_id), never anything
+    # hypogeum-specific, and callers that omit channel_id entirely
+    # (every caller not yet migrated to pass one) are completely
+    # unaffected, exactly as before -- see this function's own
+    # docstring and tests/test_muapi_gate_path.py for the full
+    # before/after contract.
     if channel_id is not None:
         import hypogeum.authorization_authority as _authority
         grant = _authority.resolve_active_grant(channel_id, eid, at=datetime.now(timezone.utc).isoformat())
-        if grant is not None:
-            manifest, failure_reason = _submit_scene_via_gate(
-                channel_id=channel_id, grant=grant, prompt=primary_prompt, tier=primary_tier,
-                reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
-                aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
-                output_dir=output_dir, config=config, log=log, is_fallback=False,
-            )
-            if manifest is not None:
-                return manifest
-            log.warn("muapi_gate_path_attempt1_failed", scene_id=scene_id, reason=failure_reason)
+        if grant is None:
+            log.warn("muapi_gate_enforced_no_active_grant", scene_id=scene_id, channel_id=channel_id)
             return {
                 "scene_id": scene_id, "asset_id": None, "generation_status": "generation_failed",
                 "provider": "muapi", "tier_used": None, "model_used": None, "prompt_used": None,
-                "fallback_used": False, "failure_reason": f"gate_path: {failure_reason}",
+                "fallback_used": False,
+                "failure_reason": (
+                    f"no_active_authorization_grant: channel_id={channel_id!r} identifies an enforced "
+                    "channel context with no legacy fallback available -- register a RunAuthorizationGrant "
+                    "before retrying"
+                ),
             }
+        manifest, failure_reason = _submit_scene_via_gate(
+            channel_id=channel_id, grant=grant, prompt=primary_prompt, tier=primary_tier,
+            reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
+            aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
+            output_dir=output_dir, config=config, log=log, is_fallback=False,
+        )
+        if manifest is not None:
+            return manifest
+        log.warn("muapi_gate_path_attempt1_failed", scene_id=scene_id, reason=failure_reason)
+        return {
+            "scene_id": scene_id, "asset_id": None, "generation_status": "generation_failed",
+            "provider": "muapi", "tier_used": None, "model_used": None, "prompt_used": None,
+            "fallback_used": False, "failure_reason": f"gate_path: {failure_reason}",
+        }
 
     # Attempt 1 — primary prompt
     manifest, failure_reason_1 = _attempt_generation(

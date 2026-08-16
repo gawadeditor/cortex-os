@@ -293,7 +293,10 @@ def _unresolvable(shot_id, beat_id, deliverable, auth_index, reason: str) -> Ent
     )
 
 
-def compile_manifest_to_envelopes(args: argparse.Namespace, config: Optional[Config] = None) -> dict:
+def compile_manifest_to_envelopes(
+    args: argparse.Namespace, config: Optional[Config] = None, *,
+    workflow_identity_resolver=None, tag_as_reconstructed: bool = True, authorization_version: int = 1,
+) -> dict:
     """
     Runs the full read-only compilation pass over every active manifest
     entry. Zero provider calls, zero writes to any live file. Reads
@@ -305,11 +308,46 @@ def compile_manifest_to_envelopes(args: argparse.Namespace, config: Optional[Con
     so model/tier resolution used for the legacy_path_compatible
     dimension is deterministic and independent of the real process
     environment). Defaults to a real Config() when omitted.
+
+    workflow_identity_resolver: the single isolated seam
+    compute_workflow_identity()'s own docstring names for exactly this
+    purpose -- a zero-argument callable returning
+    {"available": bool, "version": Optional[str], "reason": Optional[str]}.
+    Defaults to compute_workflow_identity itself (this tool's own,
+    permanently-unavailable stub) -- every existing caller/test is
+    completely unaffected. A caller with a real, current Workflow
+    Registry resolution (plan §6 Commit M, once hypogeum.
+    workflow_executor.resolve_workflow_binding() actually resolves for
+    the target channel) supplies a real resolver instead.
+
+    tag_as_reconstructed: when True (default, this tool's own original
+    and only behavior until now), every constructed envelope's
+    audit_metadata["workflow_binding_reconstructed"] is set to True --
+    permanently ineligible for real submission (see hypogeum.
+    submission_gate._check_workflow_binding_not_reconstructed()).
+    A caller compiling from entirely live, current, provable evidence
+    (not reconstructing a pre-existing legacy authorization) passes
+    False instead.
+
+    authorization_version: every constructed envelope/authorization_id
+    pair is stamped with this version (default 1, this tool's own
+    original and only behavior). A caller producing a genuinely NEW
+    authorization batch for an episode that already has an existing
+    (e.g. legacy-manifest-only) version 1 passes a higher value so the
+    resulting idempotency_key (derived from
+    f"{authorization_id}:{authorization_version}:{provider_operation}")
+    never collides with a version-1 compile of the same entries.
     """
     assets_root = Path(args.assets_root)
     episode_dir = _episode_dir(assets_root, args.episode_id)
     if config is None:
         config = Config()
+    if workflow_identity_resolver is None:
+        # Late-bound (looked up here, at call time, never captured as a
+        # def-time default) so tests that monkeypatch the module-level
+        # compute_workflow_identity name directly keep working exactly
+        # as before this parameter existed.
+        workflow_identity_resolver = compute_workflow_identity
 
     global_blockers: list = []
 
@@ -445,7 +483,8 @@ def compile_manifest_to_envelopes(args: argparse.Namespace, config: Optional[Con
             plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
             allocation=allocations_by_shot.get(shot_id), episode_id=args.episode_id,
             channel_id=args.channel_id, channel_package=channel_package,
-            manifest_md5=manifest_md5,
+            manifest_md5=manifest_md5, workflow_identity_resolver=workflow_identity_resolver,
+            tag_as_reconstructed=tag_as_reconstructed, authorization_version=authorization_version,
         )
         results.append(result)
 
@@ -479,7 +518,10 @@ def _compile_one_entry(
     entry: dict, scene: dict, planned_shot: dict, *, config: Config, manifest: dict,
     plan_checksum_sha256: Optional[str], compiler_checksum: str, allocation: Optional[dict],
     episode_id: str, channel_id: str, channel_package: dict, manifest_md5: str,
+    workflow_identity_resolver=None, tag_as_reconstructed: bool = True, authorization_version: int = 1,
 ) -> EntryCompileResult:
+    if workflow_identity_resolver is None:
+        workflow_identity_resolver = compute_workflow_identity
     shot_id = entry.get("target_shot_id")
     beat_id = entry.get("beat")
     deliverable = entry.get("deliverable")
@@ -571,7 +613,6 @@ def _compile_one_entry(
     # entry error producing two authorizations with the same auth_index
     # is itself an envelope_fields defect, not a dependency-identity one.
     authorization_id = f"{manifest.get('manifest_id')}:{auth_index}" if auth_index is not None else None
-    authorization_version = 1
     if authorization_id is None:
         result.envelope_fields_reasons.append("missing_auth_index: manifest entry has no auth_index")
     else:
@@ -585,7 +626,7 @@ def _compile_one_entry(
     # ------------------------------------------------------------------
     if not channel_package["available"]:
         result.dependency_identity_reasons.append(f"channel_package_checksum: {channel_package['reason']}")
-    workflow_identity = compute_workflow_identity()
+    workflow_identity = workflow_identity_resolver()
     workflow_version = workflow_identity["version"]
     if not workflow_identity["available"]:
         result.dependency_identity_reasons.append(f"workflow_version: {workflow_identity['reason']}")
@@ -670,14 +711,17 @@ def _compile_one_entry(
                     "source_file_checksum_algorithm": "md5",
                     "tool_version": _TOOL_VERSION,
                     # Enforced at the submission gate's reconstructed-
-                    # binding check (plan §5): every envelope this tool
-                    # constructs is bound against evidence reconstructed
-                    # for a pre-existing, already-authorized legacy entry --
-                    # never provably contemporaneous with a real, current
-                    # authorization decision -- so it is permanently
-                    # ineligible for real submission, diagnostic/
-                    # Observation-Only use only.
-                    "workflow_binding_reconstructed": True,
+                    # binding check (plan §5): an envelope bound against
+                    # evidence reconstructed for a pre-existing, already-
+                    # authorized legacy entry -- never provably
+                    # contemporaneous with a real, current authorization
+                    # decision -- is permanently ineligible for real
+                    # submission, diagnostic/Observation-Only use only.
+                    # True by default (this tool's own original and only
+                    # behavior); a caller compiling from entirely live,
+                    # current, provable evidence (plan §6 Commit M)
+                    # passes tag_as_reconstructed=False instead.
+                    "workflow_binding_reconstructed": tag_as_reconstructed,
                 },
                 authorization_status="authorized",
             )

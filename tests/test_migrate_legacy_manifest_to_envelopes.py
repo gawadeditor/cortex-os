@@ -597,3 +597,143 @@ class TestCliDefaultsToDryRunSafely:
         ])
         after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
         assert before == after
+
+
+class TestInjectableWorkflowResolverAndReconstructionTag:
+    """The three additive, backward-compatible parameters plan §6
+    Commit M needs: workflow_identity_resolver, tag_as_reconstructed,
+    authorization_version. Every existing test in this file (all of
+    which omit these three) already proves the defaults are a complete
+    no-op -- these tests prove the injected paths themselves."""
+
+    def _real_resolver_for(self, version: str):
+        return lambda: {"available": True, "version": version, "reason": None}
+
+    def test_default_omitting_all_three_is_unchanged(self, tmp_path, monkeypatch):
+        """Sanity check: NOT supplying any of the three still behaves
+        exactly like every other test in this file (workflow stays
+        unavailable, tag stays True, version stays 1)."""
+        manifest_path, scene, shot, entry, _ = _happy_path_fixture(tmp_path)
+        db_path = tmp_path / "channel.db"
+        _bootstrap_channel(db_path)
+        report = self_compile(tmp_path, manifest_path, db_path=db_path)
+        e = one(report)
+        assert e["envelope_id"] is None
+        assert e["dependency_identity_available"] is False
+
+    def test_injected_resolver_enables_envelope_construction(self, tmp_path):
+        manifest_path, scene, shot, entry, _ = _happy_path_fixture(tmp_path)
+        db_path = tmp_path / "channel.db"
+        _bootstrap_channel(db_path)
+        args = _args(tmp_path, "ep_test", manifest_path, db_path=db_path)
+        report = mle.compile_manifest_to_envelopes(
+            args, config=_config(), workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
+        )
+        e = one(report)
+        assert e["envelope_id"] is not None
+        assert e["dependency_identity_available"] is True
+        assert report["entries"][0]["checksums"]["plan_checksum_sha256"] is not None
+
+    def test_tag_as_reconstructed_default_true_matches_existing_tool_behavior(self, tmp_path):
+        """Default (omitted) must still be True -- this tool's own
+        original migrated-envelope contract, unchanged."""
+        import hypogeum.channel_config as channel_config
+        manifest_path, scene, shot, entry, _ = _happy_path_fixture(tmp_path)
+        db_path = tmp_path / "channel.db"
+        _bootstrap_channel(db_path)
+        channel_package = channel_config.compute_channel_package_identity("hypogeum", db_path=db_path)
+        compiler_checksum = mle._sha256_bytes((mle._ROOT / "hypogeum" / "video_prompt_writer.py").read_bytes())
+        manifest = mle._load_json(manifest_path)
+        active, _inactive = mle.resolve_active_entries(manifest)
+        vp_path = manifest_path.parent / f"visual_package_ep_test.json"
+        visual_package = mle._load_json(vp_path)
+        scenes = visual_package.get("scenes", [])
+        beat_to_scene, _dup = mle.scene_by_beat(scenes)
+        plan_path = manifest_path.parent / "cinematic_coverage_plan_ep_test.json"
+        plan_checksum_sha256 = mle._sha256_bytes(plan_path.read_bytes())
+        target_entry = active[0]
+        target_scene = beat_to_scene[target_entry["beat"]]
+        planned_shot, _n = mle.find_planned_shot(target_scene, target_entry["target_shot_id"])
+        allocations = mle.plan_confirmed_shot_allocations(
+            [{"beat_id": target_entry["beat"], "shot_id": target_entry["target_shot_id"],
+              "scene_id": target_scene.get("scene_id"), "short_id": target_scene.get("short_id")}],
+            visual_package, tmp_path, "ep_test",
+        )
+        result = mle._compile_one_entry(
+            target_entry, target_scene, planned_shot, config=_config(), manifest=manifest,
+            plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
+            allocation=allocations[0], episode_id="ep_test", channel_id="hypogeum",
+            channel_package=channel_package, manifest_md5="deadbeef",
+            workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
+        )
+        assert result.envelope_dict is not None
+        assert result.envelope_dict["audit_metadata"]["workflow_binding_reconstructed"] is True
+
+    def test_tag_as_reconstructed_false_on_full_envelope_dict(self, tmp_path):
+        import hypogeum.channel_config as channel_config
+        manifest_path, scene, shot, entry, _ = _happy_path_fixture(tmp_path)
+        db_path = tmp_path / "channel.db"
+        _bootstrap_channel(db_path)
+        channel_package = channel_config.compute_channel_package_identity("hypogeum", db_path=db_path)
+        compiler_checksum = mle._sha256_bytes((mle._ROOT / "hypogeum" / "video_prompt_writer.py").read_bytes())
+        manifest = mle._load_json(manifest_path)
+        active, _inactive = mle.resolve_active_entries(manifest)
+        vp_path = manifest_path.parent / "visual_package_ep_test.json"
+        visual_package = mle._load_json(vp_path)
+        scenes = visual_package.get("scenes", [])
+        beat_to_scene, _dup = mle.scene_by_beat(scenes)
+        plan_path = manifest_path.parent / "cinematic_coverage_plan_ep_test.json"
+        plan_checksum_sha256 = mle._sha256_bytes(plan_path.read_bytes())
+        target_entry = active[0]
+        target_scene = beat_to_scene[target_entry["beat"]]
+        planned_shot, _n = mle.find_planned_shot(target_scene, target_entry["target_shot_id"])
+        allocations = mle.plan_confirmed_shot_allocations(
+            [{"beat_id": target_entry["beat"], "shot_id": target_entry["target_shot_id"],
+              "scene_id": target_scene.get("scene_id"), "short_id": target_scene.get("short_id")}],
+            visual_package, tmp_path, "ep_test",
+        )
+        result = mle._compile_one_entry(
+            target_entry, target_scene, planned_shot, config=_config(), manifest=manifest,
+            plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
+            allocation=allocations[0], episode_id="ep_test", channel_id="hypogeum",
+            channel_package=channel_package, manifest_md5="deadbeef",
+            workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
+            tag_as_reconstructed=False, authorization_version=2,
+        )
+        assert result.envelope_dict is not None
+        assert result.envelope_dict["audit_metadata"]["workflow_binding_reconstructed"] is False
+        assert result.envelope_dict["authorization_version"] == 2
+
+    def test_authorization_version_changes_idempotency_key(self, tmp_path):
+        import hypogeum.channel_config as channel_config
+        manifest_path, scene, shot, entry, _ = _happy_path_fixture(tmp_path)
+        db_path = tmp_path / "channel.db"
+        _bootstrap_channel(db_path)
+        channel_package = channel_config.compute_channel_package_identity("hypogeum", db_path=db_path)
+        compiler_checksum = mle._sha256_bytes((mle._ROOT / "hypogeum" / "video_prompt_writer.py").read_bytes())
+        manifest = mle._load_json(manifest_path)
+        active, _inactive = mle.resolve_active_entries(manifest)
+        vp_path = manifest_path.parent / "visual_package_ep_test.json"
+        visual_package = mle._load_json(vp_path)
+        scenes = visual_package.get("scenes", [])
+        beat_to_scene, _dup = mle.scene_by_beat(scenes)
+        plan_path = manifest_path.parent / "cinematic_coverage_plan_ep_test.json"
+        plan_checksum_sha256 = mle._sha256_bytes(plan_path.read_bytes())
+        target_entry = active[0]
+        target_scene = beat_to_scene[target_entry["beat"]]
+        planned_shot, _n = mle.find_planned_shot(target_scene, target_entry["target_shot_id"])
+        allocations = mle.plan_confirmed_shot_allocations(
+            [{"beat_id": target_entry["beat"], "shot_id": target_entry["target_shot_id"],
+              "scene_id": target_scene.get("scene_id"), "short_id": target_scene.get("short_id")}],
+            visual_package, tmp_path, "ep_test",
+        )
+        common = dict(
+            config=_config(), manifest=manifest, plan_checksum_sha256=plan_checksum_sha256,
+            compiler_checksum=compiler_checksum, allocation=allocations[0], episode_id="ep_test",
+            channel_id="hypogeum", channel_package=channel_package, manifest_md5="deadbeef",
+            workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
+        )
+        r1 = mle._compile_one_entry(target_entry, target_scene, planned_shot, authorization_version=1, **common)
+        r2 = mle._compile_one_entry(target_entry, target_scene, planned_shot, authorization_version=2, **common)
+        assert r1.idempotency_key != r2.idempotency_key
+        assert r1.envelope_id != r2.envelope_id

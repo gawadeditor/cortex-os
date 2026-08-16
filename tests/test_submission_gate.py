@@ -640,3 +640,128 @@ class TestNoNetworkPath:
         import importlib
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module("hypogeum.providers.muapi_adapter")
+
+
+# ---------------------------------------------------------------------------
+# Grant-derived authorization boundary revalidation + settlement
+# (Correction 3/4, hypogeum.authorization_authority + authorization_store)
+# ---------------------------------------------------------------------------
+
+class TestGrantDerivedAuthorizationBoundary:
+    """Proves submit()'s one new, narrow Step 8.5: a grant-derived
+    AuthorizationRecord's parent grant + reservation is revalidated
+    immediately before the provider boundary, and the reservation is
+    settled according to the adapter's outcome -- while an
+    explicit-approval-derived (grant-free) authorization (every test
+    above this class) is completely unaffected, since it carries no
+    grant evidence at all."""
+
+    def _register_grant_and_issue(self, harness, env, *, max_calls=5, max_total_spend=None):
+        import hypogeum.authorization_authority as authority
+        import hypogeum.authorization_store as astore
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from hypogeum.approval_artifact import GrantBindingApproval, sign_approval_artifact
+
+        if max_total_spend is None:
+            max_total_spend = env.max_cost_per_call * max_calls
+
+        priv = Ed25519PrivateKey.generate()
+        pub = priv.public_key()
+        authority._load_trusted_public_key = lambda: pub
+
+        db_path = harness.tmp_path / "test.db"
+        bindings = [astore.GrantBinding(
+            provider=env.provider, model=env.model, provider_operation=env.provider_operation,
+            currency=env.currency, max_cost_per_call=env.max_cost_per_call,
+            max_calls=max_calls, max_total_spend=max_total_spend,
+        )]
+        grant_checksum = authority.compute_grant_checksum(
+            channel_id=env.channel_id, episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0",
+            workflow_checksum="a" * 64, bindings=bindings, max_total_spend_all_bindings=max_total_spend,
+            currency=env.currency, expires_at="2099-01-01T00:00:00Z",
+        )
+        artifact = sign_approval_artifact(
+            dict(
+                approval_id="appr1", approval_version=1, approval_type="grant", subject_checksum=grant_checksum,
+                channel_id=env.channel_id, scope_id="ep_test", workflow_id="wf", workflow_version="1.0.0",
+                workflow_checksum="a" * 64, channel_package_version="1.0", channel_package_checksum="b" * 64,
+                allowed_bindings=(GrantBindingApproval(env.provider, env.model, env.provider_operation),),
+                currency=env.currency, max_cost_per_call=env.max_cost_per_call, max_total_spend=max_total_spend,
+                max_calls=max_calls, retry_authorized=False, fallback_authorized=False,
+                issued_at=AT, expires_at="2099-01-01T00:00:00Z", approver_identity="operator_x", nonce="nonce_1",
+            ),
+            private_key=priv,
+        )
+        grant = authority.register_run_grant(
+            grant_id="g1", grant_version=1, channel_id=env.channel_id, episode_id="ep_test",
+            workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+            max_total_spend_all_bindings=max_total_spend, currency=env.currency, expires_at="2099-01-01T00:00:00Z",
+            approval_artifact=artifact, db_path=db_path,
+        )
+        record = authority.issue_child_authorization(env, "g1", 1, at=AT, db_path=db_path)
+        return record, grant, authority, astore, db_path
+
+    def test_grant_derived_submission_succeeds_and_settles_committed(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        record, grant, authority, astore, db_path = self._register_grant_and_issue(harness, env)
+
+        result = harness.submit(env, authorization=record)
+        assert result.approved is True
+        assert harness.adapter.invocation_count == 1
+
+        conn = harness.conn
+        reservation_id = record.history[-1].evidence["grant_reservation_id"]
+        reservation = astore.get_ledger_reservation(conn, reservation_id)
+        assert reservation.state == "committed"
+        assert reservation.charged_amount == env.max_cost_per_call
+
+    def test_grant_revoked_after_issuance_denies_at_boundary_with_zero_calls(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        record, grant, authority, astore, db_path = self._register_grant_and_issue(harness, env)
+
+        # Revoke AFTER issuance but BEFORE submission -- "issuance read
+        # active before revocation" must not be sufficient (Correction 3).
+        authority.revoke_grant("g1", 1, revoked_by="operator_x", reason="test", at=AT, db_path=db_path)
+
+        result = harness.submit(env, authorization=record)
+        assert result.approved is False
+        assert harness.adapter.invocation_count == 0
+        assert "03_authorization_active_and_unconsumed" in result.denied_at_check
+
+        reservation_id = record.history[-1].evidence["grant_reservation_id"]
+        reservation = astore.get_ledger_reservation(harness.conn, reservation_id)
+        assert reservation.state == "reserved"  # never advanced to boundary_entered
+
+    def test_grant_reservation_settles_released_on_rejection(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        record, grant, authority, astore, db_path = self._register_grant_and_issue(harness, env)
+
+        result = harness.submit(env, authorization=record, adapter_mode="rejected")
+        assert result.approved is False
+        reservation_id = record.history[-1].evidence["grant_reservation_id"]
+        reservation = astore.get_ledger_reservation(harness.conn, reservation_id)
+        assert reservation.state == "released"
+
+    def test_grant_reservation_settles_possible_unknown_acceptance_and_is_never_auto_released(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        record, grant, authority, astore, db_path = self._register_grant_and_issue(harness, env)
+
+        result = harness.submit(env, authorization=record, adapter_mode="unknown_acceptance")
+        assert result.approved is False
+        reservation_id = record.history[-1].evidence["grant_reservation_id"]
+        reservation = astore.get_ledger_reservation(harness.conn, reservation_id)
+        assert reservation.state == "possible_unknown_acceptance"
+
+    def test_explicit_approval_authorization_has_no_grant_evidence_and_is_unaffected(self, harness):
+        """The default harness authorization (_make_auth(), empty
+        history) must behave exactly as every other test in this file
+        already proves -- Step 8.5 must be a complete no-op for it."""
+        env = _make_env()
+        harness.acquire_lease(env)
+        result = harness.submit(env)
+        assert result.approved is True
+        assert harness.adapter.invocation_count == 1

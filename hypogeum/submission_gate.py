@@ -33,6 +33,22 @@ Default-deny: every check function below returns None on success and
 returns a GateDenial on failure. submit() runs them in the exact order
 documented, stopping at the first denial, and the fake adapter is invoked
 only after all pre-boundary checks (through step 9) have passed.
+
+If `authorization`'s AUTHORIZED-transition evidence carries
+parent_grant_id/parent_grant_version/parent_grant_checksum/
+grant_reservation_id (i.e. it was issued by hypogeum.authorization_
+authority.issue_child_authorization() from a bounded run grant, rather
+than a one-off explicit approval), submit() calls exactly one function
+from hypogeum.authorization_store -- revalidate_grant_reservation() --
+immediately before the provider boundary (mirroring the existing
+Step-8 lease revalidation), and later settles that same reservation's
+state according to the adapter's outcome. This is the ONLY grant-
+related code in this module: revalidate_grant_reservation() and the
+settlement calls are read-and-settle-only on an *already-issued*
+reservation -- they can never create a grant, a reservation, or an
+AUTHORIZED AuthorizationRecord, so this module still never mints or
+broadens authorization. This module never imports
+hypogeum.authorization_authority.
 """
 
 from __future__ import annotations
@@ -42,6 +58,7 @@ from decimal import Decimal
 from typing import Any, Mapping, Optional, Sequence
 
 import hypogeum.adapter_registry as adapter_registry
+import hypogeum.authorization_store as authorization_store
 import hypogeum.budget_scopes as bs
 import hypogeum.db as db
 from hypogeum.authorization_lifecycle import AuthorizationRecord, AuthorizationState
@@ -438,6 +455,48 @@ def _reset_counter_breaker_observed_value(conn, kind: str, limits: Optional[Brea
 
 
 # ---------------------------------------------------------------------------
+# Grant-reservation evidence lookup + settlement (Correction 3/4) --
+# every function here is read-and-settle-only on an *already-issued*
+# reservation; none of them can create a grant, a reservation, or an
+# AUTHORIZED AuthorizationRecord.
+# ---------------------------------------------------------------------------
+
+def _grant_binding_evidence(authorization: AuthorizationRecord) -> Optional[Mapping[str, Any]]:
+    """Returns the parent_grant_id/parent_grant_version/
+    parent_grant_checksum/grant_reservation_id evidence from this
+    authorization's AUTHORIZED transition, or None if it was issued via
+    the one-off explicit-approval path (Commit M's future cutover),
+    which carries no grant evidence at all."""
+    if not authorization.history:
+        return None
+    last_event = authorization.history[-1]
+    if last_event.to_state != AuthorizationState.AUTHORIZED:
+        return None
+    evidence = last_event.evidence
+    if "parent_grant_id" not in evidence:
+        return None
+    return evidence
+
+
+def _settle_grant_reservation(
+    lease_conn, grant_binding_evidence: Optional[Mapping[str, Any]], *, to_state: str, at: str,
+    charged_amount: Optional[Decimal] = None,
+) -> None:
+    """No-op if this authorization carries no grant evidence. Otherwise
+    transitions the already-issued reservation boundary_entered -> the
+    given terminal-for-this-attempt state, mirroring the same three-way
+    outcome branch this function's callers already use for receipts and
+    budget_scopes -- never new control flow, just one more parallel
+    update at the same three existing points."""
+    if grant_binding_evidence is None:
+        return
+    authorization_store.transition_ledger_state(
+        lease_conn, grant_binding_evidence["grant_reservation_id"],
+        from_state="boundary_entered", to_state=to_state, at=at, charged_amount=charged_amount,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Adapter resolution -- the only place a real adapter class is ever
 # located and loaded. No caller supplies one.
 # ---------------------------------------------------------------------------
@@ -624,6 +683,26 @@ def submit(
         _release_reservations()
         return _denial(denial.check, f"lease invalid at pre-boundary revalidation: {denial.reason}")
 
+    # ---- Step 8.5: revalidate the parent grant reservation, if this authorization was grant-derived ----
+    # "Issuance read active before revocation" is not sufficient by itself
+    # (architecture Correction 3) -- this is the actual enforcement point.
+    # A one-off explicit-approval authorization (Commit M's future cutover
+    # path) carries no grant evidence and skips this entirely.
+    grant_binding_evidence = _grant_binding_evidence(authorization)
+    if grant_binding_evidence is not None:
+        try:
+            authorization_store.revalidate_grant_reservation(
+                lease_conn,
+                parent_grant_id=grant_binding_evidence["parent_grant_id"],
+                parent_grant_version=grant_binding_evidence["parent_grant_version"],
+                parent_grant_checksum=grant_binding_evidence["parent_grant_checksum"],
+                grant_reservation_id=grant_binding_evidence["grant_reservation_id"],
+                at=at,
+            )
+        except authorization_store.GrantRevalidationError as exc:
+            _release_reservations()
+            return _denial(GATE_CHECK_ORDER[2], f"parent grant revalidation failed at pre-boundary: {exc}")
+
     # ---- Step 9: persist boundary-entry event immediately before invocation ----
     boundary_entry = ProviderReceiptEvent(
         envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
@@ -665,6 +744,7 @@ def submit(
         # event resolves it (see hypogeum.provider_receipt.RECONCILED).
         _increment_counter_breaker(lease_conn, "unknown_acceptance", "max_unknown_acceptance", breaker_limits, at=at, attempt_id=attempt_id)
         _increment_counter_breaker(lease_conn, "consecutive_failures", "max_consecutive_failures", breaker_limits, at=at, attempt_id=attempt_id)
+        _settle_grant_reservation(lease_conn, grant_binding_evidence, to_state="possible_unknown_acceptance", at=at)
         return GateResult(
             approved=False, denied_at_check=None, reason=f"adapter invocation raised: {exc}",
             adapter_invoked=True, adapter_result=None,
@@ -679,6 +759,7 @@ def submit(
         # stays 'reserved', never released, while acceptance is unknown.
         _increment_counter_breaker(lease_conn, "unknown_acceptance", "max_unknown_acceptance", breaker_limits, at=at, attempt_id=attempt_id)
         _increment_counter_breaker(lease_conn, "consecutive_failures", "max_consecutive_failures", breaker_limits, at=at, attempt_id=attempt_id)
+        _settle_grant_reservation(lease_conn, grant_binding_evidence, to_state="possible_unknown_acceptance", at=at)
         return GateResult(
             approved=False, denied_at_check=None, reason="provider acceptance unknown -- reconciliation required, never auto-retried",
             adapter_invoked=True, adapter_result=adapter_result,
@@ -704,6 +785,7 @@ def submit(
         # non-charge outcome -- safe to release the reservation.
         _release_reservations()
         _increment_counter_breaker(lease_conn, "consecutive_failures", "max_consecutive_failures", breaker_limits, at=at, attempt_id=attempt_id)
+        _settle_grant_reservation(lease_conn, grant_binding_evidence, to_state="released", at=at)
         return GateResult(
             approved=False, denied_at_check=None, reason="provider explicitly rejected",
             adapter_invoked=True, adapter_result=adapter_result,
@@ -726,6 +808,9 @@ def submit(
         execution_id=execution_id, lease_conn=lease_conn, lease_owner_id=lease_owner_id, lease_fencing_token=lease_fencing_token,
     )
     _reset_counter_breaker_observed_value(lease_conn, "consecutive_failures", breaker_limits, at=at)
+    _settle_grant_reservation(
+        lease_conn, grant_binding_evidence, to_state="committed", at=at, charged_amount=adapter_result.charged_amount,
+    )
 
     # ---- Step 12: update budget/breaker evidence according to result ----
     overcharge_exc = None

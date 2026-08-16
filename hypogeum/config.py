@@ -634,6 +634,14 @@ class Config:
         self.FINANCE_WARNING_THRESHOLD_PCT = _get_float("FINANCE_WARNING_THRESHOLD_PCT", default=0.80) or 0.80
         self.FINANCE_LEDGER_PATH = _get_optional("FINANCE_LEDGER_PATH")
 
+        # --- Authorization Authority (hypogeum/authorization_authority.py) ---
+        # Base64-encoded Ed25519 PUBLIC key only -- the matching PRIVATE
+        # key never runs inside this (or any) production process; it is
+        # held only by the offline scripts/approve_*.py operator tooling.
+        # A public key is safe to store in ordinary deployment config: it
+        # can verify a signature but cannot forge one.
+        self.AUTHORIZATION_APPROVAL_PUBLIC_KEY = _get_optional("AUTHORIZATION_APPROVAL_PUBLIC_KEY")
+
         # --- ElevenLabs ---
         self.ELEVENLABS_API_KEY = _get_optional("ELEVENLABS_API_KEY")
         self.ELEVENLABS_VOICE_ID = _get_optional("ELEVENLABS_VOICE_ID")

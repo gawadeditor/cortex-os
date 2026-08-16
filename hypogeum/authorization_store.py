@@ -862,7 +862,18 @@ def persist_authorization_record(conn: sqlite3.Connection, record: Authorization
     the same authorization_id/authorization_version (a NEW
     authorization_version/authorization_id only appears via
     create_superseding_authorization(), which is persisted as a
-    second, separate row)."""
+    second, separate row).
+
+    envelope_id/envelope_version/authorization_version are included in
+    the UPDATE SET (not just current_state/history_json/updated_at):
+    a caller that persists a freshly recompiled record under an
+    authorization_id that already has a row (e.g. re-running a
+    proposal compile that legitimately produced a different envelope
+    for the same authorization_id) must not leave the row internally
+    inconsistent -- history/state describing the new envelope while
+    envelope_id/version still names the old one, which would make
+    get_execution_envelope(conn, record.envelope_id, record.
+    envelope_version) resolve the wrong (or no) envelope entirely."""
     ensure_tables(conn)
     current_state, history_json = _record_to_json(record)
     conn.execute(
@@ -872,6 +883,9 @@ def persist_authorization_record(conn: sqlite3.Connection, record: Authorization
              current_state, history_json, superseded_authorization_id, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(authorization_id) DO UPDATE SET
+            authorization_version = excluded.authorization_version,
+            envelope_id = excluded.envelope_id,
+            envelope_version = excluded.envelope_version,
             current_state = excluded.current_state,
             history_json = excluded.history_json,
             updated_at = excluded.updated_at
@@ -1183,10 +1197,21 @@ def reconcile_fulfilled_proposal(
             )
         return obsolete
 
-    if obsolete.current_state != AuthorizationState.AWAITING_EXPLICIT_AUTHORIZATION:
+    # AWAITING_AUTHORIZATION is included alongside AWAITING_EXPLICIT_
+    # AUTHORIZATION: the underlying state machine already defines
+    # (AWAITING_AUTHORIZATION, INVALIDATED_SOURCE_CHANGED) as a valid
+    # edge with the exact same required evidence -- a proposal whose own
+    # compile round never finished (e.g. superseded by a fresh recompile
+    # of the same batch before it reached AWAITING_EXPLICIT_
+    # AUTHORIZATION) is just as genuinely obsolete once independently
+    # fulfilled as one that did finish; the caller-side fulfillment
+    # evidence requirements below are identical either way.
+    if obsolete.current_state not in (
+        AuthorizationState.AWAITING_AUTHORIZATION, AuthorizationState.AWAITING_EXPLICIT_AUTHORIZATION,
+    ):
         raise ProposalReconciliationConflictError(
             f"authorization {obsolete_authorization_id!r} is at {obsolete.current_state.value!r}, "
-            "not 'awaiting_explicit_authorization' -- nothing to reconcile"
+            "not 'awaiting_authorization' or 'awaiting_explicit_authorization' -- nothing to reconcile"
         )
 
     fulfilling = get_authorization_record(conn, fulfilling_authorization_id)
@@ -1230,11 +1255,32 @@ def reconcile_fulfilled_proposal(
             f"sides: {exc}"
         ) from exc
 
-    if obsolete_env.planned_shot_id != fulfilling_env.planned_shot_id or obsolete_env.beat_id != fulfilling_env.beat_id:
+    # Canonical identity match: the physical-output identity a side
+    # carries may live in either scene_id (hypogeum.deterministic_
+    # allocation's own canonical deterministic output-slot identity) or
+    # planned_shot_id, depending on which real compile path produced the
+    # envelope -- e.g. tools/migrate_legacy_manifest_to_envelopes.py
+    # sets planned_shot_id to the original manifest shot_id and scene_id
+    # to the deterministic slot, while hypogeum.muapi.
+    # _submit_scene_via_gate()'s grant-derived path binds planned_shot_id
+    # directly to its own scene_id and never sets a separate scene_id or
+    # beat_id. Two envelopes describe the same requirement if either
+    # side's scene_id/planned_shot_id value appears on the other side at
+    # all; beat_id, when BOTH sides carry one, must additionally agree
+    # (never weakens the existing fail-closed behavior for a genuine
+    # cross-beat mismatch).
+    obsolete_identities = {v for v in (obsolete_env.scene_id, obsolete_env.planned_shot_id) if v}
+    fulfilling_identities = {v for v in (fulfilling_env.scene_id, fulfilling_env.planned_shot_id) if v}
+    beat_ids_consistent = (
+        obsolete_env.beat_id is None or fulfilling_env.beat_id is None or obsolete_env.beat_id == fulfilling_env.beat_id
+    )
+    same_requirement = bool(obsolete_identities & fulfilling_identities) and beat_ids_consistent
+    if not same_requirement:
         raise ProposalReconciliationConflictError(
             f"canonical planned-shot identity mismatch: obsolete proposal binds "
-            f"(beat_id={obsolete_env.beat_id!r}, planned_shot_id={obsolete_env.planned_shot_id!r}), "
-            f"fulfilling authorization binds (beat_id={fulfilling_env.beat_id!r}, "
+            f"(scene_id={obsolete_env.scene_id!r}, beat_id={obsolete_env.beat_id!r}, "
+            f"planned_shot_id={obsolete_env.planned_shot_id!r}), "
+            f"fulfilling authorization binds (scene_id={fulfilling_env.scene_id!r}, beat_id={fulfilling_env.beat_id!r}, "
             f"planned_shot_id={fulfilling_env.planned_shot_id!r})"
         )
 

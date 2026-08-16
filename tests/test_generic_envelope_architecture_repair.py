@@ -292,6 +292,29 @@ class TestFulfilledProposalReconciliation:
         assert len(invalidated_events) == 1
         assert invalidated_events[0].evidence["fulfilling_authorization_id"] == "canary_1"
 
+    def test_obsolete_still_only_at_awaiting_authorization_can_be_reconciled(self, conn):
+        """A proposal whose own compile round never finished (stuck at
+        AWAITING_AUTHORIZATION, never reached AWAITING_EXPLICIT_
+        AUTHORIZATION -- e.g. a batch re-run that failed Observation-Only
+        for unrelated reasons before this entry's own round completed)
+        is just as reconcilable as one that did finish, since
+        (AWAITING_AUTHORIZATION, INVALIDATED_SOURCE_CHANGED) is already
+        a valid state-machine edge with identical required evidence."""
+        obsolete_env = _make_env(authorization_id="proposal_1", planned_shot_id="b_002__shot2", beat_id="b_002")
+        fulfilling_env = _make_env(authorization_id="canary_1", planned_shot_id="b_002__shot2", beat_id="b_002")
+
+        rec = AuthorizationRecord.create(
+            authorization_id="proposal_1", envelope_id=obsolete_env.envelope_id, envelope_version=obsolete_env.envelope_version,
+        )
+        rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
+        rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
+        astore.persist_execution_envelope(conn, obsolete_env)
+        astore.persist_authorization_record(conn, rec)
+        _make_qualified_allocated_record(conn, "canary_1", fulfilling_env)
+
+        result = astore.reconcile_fulfilled_proposal(conn, "proposal_1", fulfilling_authorization_id="canary_1", at="t5")
+        assert result.current_state == AuthorizationState.INVALIDATED_SOURCE_CHANGED
+
     def test_reconciliation_replay_is_idempotent(self, conn):
         obsolete_env = _make_env(authorization_id="proposal_1", planned_shot_id="b_002__shot2", beat_id="b_002")
         fulfilling_env = _make_env(authorization_id="canary_1", planned_shot_id="b_002__shot2", beat_id="b_002")
@@ -335,6 +358,27 @@ class TestFulfilledProposalReconciliation:
 
         with pytest.raises(astore.ProposalReconciliationConflictError):
             astore.reconcile_fulfilled_proposal(conn, "proposal_1", fulfilling_authorization_id="canary_1", at="t5")
+
+    def test_matching_scene_id_reconciles_even_when_planned_shot_id_convention_differs(self, conn):
+        """Real-world case: hypogeum.muapi._submit_scene_via_gate()'s
+        own grant-derived compile path binds planned_shot_id to its own
+        scene_id and never sets beat_id -- a different field convention
+        than tools/migrate_legacy_manifest_to_envelopes.py's envelopes
+        (planned_shot_id = the original manifest shot_id, scene_id = the
+        deterministic output slot). Both sides agreeing on scene_id (the
+        deterministic, unambiguous physical-output identity) must still
+        reconcile."""
+        obsolete_env = _make_env(
+            authorization_id="proposal_1", planned_shot_id="b_002__shot2", beat_id="b_002", scene_id="s02__extra2",
+        )
+        fulfilling_env = _make_env(
+            authorization_id="canary_1", planned_shot_id="s02__extra2", beat_id=None, scene_id=None,
+        )
+        _make_awaiting_explicit_record(conn, "proposal_1", obsolete_env)
+        _make_qualified_allocated_record(conn, "canary_1", fulfilling_env)
+
+        result = astore.reconcile_fulfilled_proposal(conn, "proposal_1", fulfilling_authorization_id="canary_1", at="t5")
+        assert result.current_state == AuthorizationState.INVALIDATED_SOURCE_CHANGED
 
     def test_reconciled_proposal_leaves_active_set_but_remains_auditable(self, conn):
         obsolete_env = _make_env(authorization_id="proposal_1", planned_shot_id="b_002__shot2", beat_id="b_002")

@@ -58,6 +58,7 @@ import argparse
 import hashlib
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -83,6 +84,25 @@ _HYPOGEUM_WORKFLOW_ID = "hypogeum_main_production"
 _HYPOGEUM_WORKFLOW_VERSION = "1.0.0"
 
 
+@dataclass(frozen=True)
+class FulfilledProposalExclusion:
+    """Generic input, not specific to any one episode or channel: an
+    active manifest entry (identified by the exact `authorization_id`
+    a compile of that entry produces, e.g. "{manifest_id}:{auth_index}")
+    whose planned requirement was independently fulfilled by a separate,
+    already-QUALIFIED/ALLOCATED/CONSUMED authorization -- typically a
+    Canary executed through the grant-derived gate path outside this
+    proposal's own authorization_id namespace. Such an entry is excluded
+    from the new authorization_version's active proposal set and
+    reconciled via hypogeum.authorization_store.
+    reconcile_fulfilled_proposal() (commit f7ca4ec) -- never silently
+    dropped, never CANCELLED, never re-included as if unfulfilled."""
+
+    authorization_id: str
+    fulfilling_authorization_id: str
+    reason: str = "fulfilled_by_separate_authorization"
+
+
 def _real_workflow_identity_resolver(channel_id: str, workflow_id: str, workflow_version: str):
     """A real resolver against the actual, already-registered Workflow
     Registry (Commits B-D) -- the exact seam compile_manifest_to_
@@ -100,7 +120,7 @@ def propose_current_episode_authorization(
     episode_id: str, channel_id: str = "hypogeum", *,
     assets_root: Optional[Path] = None, db_path: Optional[Path] = None,
     proposed_version: int = 2, superseded_version: Optional[int] = 1,
-    config: Optional[Config] = None,
+    config: Optional[Config] = None, fulfilled_exclusions: "Optional[list[FulfilledProposalExclusion]]" = None,
 ) -> dict:
     """
     Runs the full sequence documented in this module's own docstring.
@@ -113,6 +133,22 @@ def propose_current_episode_authorization(
     an isolated path. The rows this function writes there (new
     authorization_records / authorization_proposals rows) are additive
     and touch no existing production table.
+
+    fulfilled_exclusions: generic, optional list of
+    FulfilledProposalExclusion. Each named authorization_id is compiled
+    (like every other active entry) but excluded from the new proposed
+    version's active set; its freshly compiled envelope and the named
+    fulfilling authorization's envelope are both persisted (required by
+    reconcile_fulfilled_proposal()'s dual-stored-envelope identity
+    check), then the pre-existing AuthorizationRecord at that
+    authorization_id is reconciled (AWAITING_EXPLICIT_AUTHORIZATION ->
+    INVALIDATED_SOURCE_CHANGED) via hypogeum.authorization_store.
+    reconcile_fulfilled_proposal() -- never CANCELLED, never deleted,
+    full audit evidence preserved. Fails closed (the whole call returns
+    a "blocked" report, nothing new is persisted for that entry) if an
+    excluded authorization_id doesn't compile to a valid envelope, or if
+    reconcile_fulfilled_proposal() itself raises (e.g. the fulfilling
+    authorization lacks durable qualification evidence).
     """
     assets_root = Path(assets_root) if assets_root else (_ROOT / ".hypogeum-assets")
     if config is None:
@@ -147,11 +183,32 @@ def propose_current_episode_authorization(
     if compile_report["global_blockers"]:
         return {"stage": "compile", "status": "blocked", "compile_report": compile_report}
 
-    compiled = [e for e in compile_report["entries"] if "envelope_dict" in e]
-    if not compiled:
+    compiled_all = [e for e in compile_report["entries"] if "envelope_dict" in e]
+    if not compiled_all:
         return {"stage": "compile", "status": "no_envelopes_constructed", "compile_report": compile_report}
 
     at = datetime.now(timezone.utc).isoformat()
+    excluded_ids = {exc.authorization_id for exc in (fulfilled_exclusions or [])}
+
+    # Step 2.5 (generic exclusion/reconciliation input): an entry named
+    # by fulfilled_exclusions is compiled like every other active entry
+    # (compiled_all above) but never becomes part of this proposed
+    # version's active set -- it is reconciled instead, against the
+    # pre-existing AuthorizationRecord already persisted at that exact
+    # authorization_id, never a new one.
+    missing_exclusions = [
+        exc.authorization_id for exc in (fulfilled_exclusions or [])
+        if exc.authorization_id not in {e["envelope_dict"]["authorization_id"] for e in compiled_all}
+    ]
+    if missing_exclusions:
+        return {
+            "stage": "fulfilled_exclusion", "status": "blocked",
+            "reason": f"excluded authorization_id(s) did not compile to a valid envelope: {missing_exclusions}",
+        }
+
+    compiled = [e for e in compiled_all if e["envelope_dict"]["authorization_id"] not in excluded_ids]
+    if not compiled:
+        return {"stage": "compile", "status": "no_envelopes_constructed", "compile_report": compile_report}
     envelopes = [GenerationExecutionEnvelope.from_dict(e["envelope_dict"]) for e in compiled]
     for env in envelopes:
         env.validate_integrity()
@@ -168,6 +225,59 @@ def propose_current_episode_authorization(
     conn = db.get_connection(db_path)
     try:
         astore.ensure_tables(conn)
+
+        # Step 2.6: reconcile every fulfilled exclusion against the
+        # pre-existing AuthorizationRecord already persisted at that
+        # authorization_id -- generic lifecycle mechanism, commit
+        # f7ca4ec. Requires a durably-stored, integrity-verified
+        # envelope on BOTH sides (reconcile_fulfilled_proposal()'s own
+        # contract): the freshly compiled envelope for the obsolete
+        # entry is persisted here only if its envelope_id exactly
+        # matches what the existing obsolete record already names (a
+        # mismatch means the live source has drifted since that record
+        # was persisted -- fail closed rather than reconcile against
+        # stale identity); the fulfilling authorization's own envelope
+        # must already be durably stored (this function never persists
+        # or reconstructs it -- that is the fulfilling authorization's
+        # own responsibility, out of this generic mechanism's scope).
+        reconciliations: list = []
+        for exc in (fulfilled_exclusions or []):
+            obsolete = astore.get_authorization_record(conn, exc.authorization_id)
+            if obsolete is None:
+                raise astore.AuthorizationRecordNotFoundError(exc.authorization_id)
+
+            # Already reconciled (idempotent replay across separate
+            # script invocations, e.g. a later round recompiling under a
+            # different authorization_version): reconcile_fulfilled_
+            # proposal() itself already returns this unchanged -- skip
+            # the freshness re-verification below entirely, since a
+            # NEWER compile's envelope_id is expected to differ from the
+            # one already recorded at the moment of the FIRST, original
+            # reconciliation, and that is not drift, just a later round.
+            if obsolete.current_state != AuthorizationState.INVALIDATED_SOURCE_CHANGED:
+                excluded_entry = next(e for e in compiled_all if e["envelope_dict"]["authorization_id"] == exc.authorization_id)
+                excluded_env = GenerationExecutionEnvelope.from_dict(excluded_entry["envelope_dict"])
+                excluded_env.validate_integrity()
+                if (excluded_env.envelope_id, excluded_env.envelope_version) != (obsolete.envelope_id, obsolete.envelope_version):
+                    raise astore.ProposalReconciliationConflictError(
+                        f"freshly compiled envelope for {exc.authorization_id!r} "
+                        f"({excluded_env.envelope_id!r}@{excluded_env.envelope_version}) no longer matches the "
+                        f"pre-existing AuthorizationRecord's own envelope "
+                        f"({obsolete.envelope_id!r}@{obsolete.envelope_version}) -- refusing to reconcile against "
+                        "drifted identity"
+                    )
+                astore.persist_execution_envelope(conn, excluded_env)
+
+            reconciled = astore.reconcile_fulfilled_proposal(
+                conn, exc.authorization_id, fulfilling_authorization_id=exc.fulfilling_authorization_id,
+                at=at, reason=exc.reason,
+            )
+            reconciliations.append({
+                "authorization_id": exc.authorization_id, "fulfilling_authorization_id": exc.fulfilling_authorization_id,
+                "reason": exc.reason, "final_state": reconciled.current_state.value,
+            })
+        conn.commit()
+
         records: list = []
         for env in envelopes:
             rec = AuthorizationRecord.create(
@@ -257,6 +367,7 @@ def propose_current_episode_authorization(
                      "verdict": d["decision"].verdict, "blockers": d["decision"].blockers}
                     for d in failures
                 ],
+                "reconciliations": reconciliations,
                 "compile_report_summary": {k: v for k, v in compile_report.items() if k != "entries"},
             }
 
@@ -312,7 +423,7 @@ def propose_current_episode_authorization(
             "max_cost_per_call_ceiling": str(max_cost_per_call_ceiling), "max_total_spend": str(max_total_spend),
             "workflow_id": _HYPOGEUM_WORKFLOW_ID, "workflow_version": workflow_binding["workflow_version"],
             "workflow_checksum": workflow_binding["workflow_checksum"], "proposed_version": proposed_version,
-            "superseded_version": superseded_version,
+            "superseded_version": superseded_version, "reconciliations": reconciliations,
             "compile_report_summary": {k: v for k, v in compile_report.items() if k != "entries"},
         }
     finally:
@@ -332,6 +443,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Required; the only currently-implemented mode. See module docstring for what 'dry-run' means here.",
     )
     p.add_argument("--report-path", default=None, help="optional; if omitted, nothing is written to disk")
+    p.add_argument(
+        "--fulfilled-exclusions-json", default=None,
+        help='optional; JSON array of {"authorization_id": ..., "fulfilling_authorization_id": ..., '
+             '"reason": ...} objects (reason defaults to "fulfilled_by_separate_authorization"). Generic -- '
+             "not specific to any one episode or channel. Each named authorization_id is excluded from the "
+             "new proposed version and reconciled via hypogeum.authorization_store.reconcile_fulfilled_proposal().",
+    )
     return p
 
 
@@ -341,10 +459,15 @@ def main(argv: Optional[list] = None) -> int:
         print("Only --dry-run is currently implemented; refusing to proceed.", file=sys.stderr)
         return 2
 
+    fulfilled_exclusions = None
+    if args.fulfilled_exclusions_json:
+        fulfilled_exclusions = [FulfilledProposalExclusion(**item) for item in json.loads(args.fulfilled_exclusions_json)]
+
     report = propose_current_episode_authorization(
         args.episode_id, args.channel_id, assets_root=Path(args.assets_root),
         db_path=Path(args.db_path) if args.db_path else None,
         proposed_version=args.proposed_version, superseded_version=args.superseded_version,
+        fulfilled_exclusions=fulfilled_exclusions,
     )
 
     if args.report_path:

@@ -239,7 +239,7 @@ class TestProviderVerifierMapping:
     def test_verify_kling_official_verified_on_probe_success(self, db, monkeypatch):
         from hypogeum.provider_verifier import verify_provider, STATUS_VERIFIED
         monkeypatch.setenv("KLING_API_KEY", "kid:ksecret")
-        with patch("hypogeum.kling_official.probe_credential",
+        with patch("hypogeum.dormant_providers.kling_official.probe_credential",
                    return_value=(True, None, 200)):
             result = verify_provider("kling_official", db_path=db)
         assert result["status"] == STATUS_VERIFIED
@@ -247,7 +247,7 @@ class TestProviderVerifierMapping:
     def test_verify_veo_official_verified_on_probe_success(self, db, monkeypatch):
         from hypogeum.provider_verifier import verify_provider, STATUS_VERIFIED
         monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test")
-        with patch("hypogeum.veo_official.probe_credential",
+        with patch("hypogeum.dormant_providers.veo_official.probe_credential",
                    return_value=(True, None, 150)):
             result = verify_provider("veo_official", db_path=db)
         assert result["status"] == STATUS_VERIFIED
@@ -789,7 +789,7 @@ class TestNoNetworkCalls:
             conn.close()
 
     def test_kling_jwt_generation_no_network(self):
-        from hypogeum.kling_official import generate_jwt
+        from hypogeum.dormant_providers.kling_official import generate_jwt
         token = generate_jwt("kid-test", "ksec-test")
         assert "." in token
         assert len(token.split(".")) == 3

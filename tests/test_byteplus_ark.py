@@ -29,7 +29,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_dashboard as server
-from hypogeum.byteplus_ark import (
+from hypogeum.dormant_providers.byteplus_ark import (
     BytePlusArkAuthFailure,
     BytePlusArkError,
     BytePlusArkQuotaExhausted,
@@ -389,7 +389,7 @@ class TestProviderVerifier:
     def test_verify_seedance_official_verified_on_200(self, db, monkeypatch):
         from hypogeum.provider_verifier import verify_provider, STATUS_VERIFIED
         monkeypatch.setenv("BYTEPLUS_ARK_API_KEY", "ark-test-key")
-        with patch("hypogeum.byteplus_ark.probe_credential",
+        with patch("hypogeum.dormant_providers.byteplus_ark.probe_credential",
                    return_value=(True, None, 120)):
             result = verify_provider("seedance_official", db_path=db)
         assert result["status"] == STATUS_VERIFIED
@@ -398,7 +398,7 @@ class TestProviderVerifier:
     def test_verify_seedance_official_failed_on_probe_failure(self, db, monkeypatch):
         from hypogeum.provider_verifier import verify_provider, STATUS_FAILED
         monkeypatch.setenv("BYTEPLUS_ARK_API_KEY", "ark-bad-key")
-        with patch("hypogeum.byteplus_ark.probe_credential",
+        with patch("hypogeum.dormant_providers.byteplus_ark.probe_credential",
                    return_value=(False, "HTTP 401 — invalid API key", 50)):
             result = verify_provider("seedance_official", db_path=db)
         assert result["status"] == STATUS_FAILED
@@ -408,7 +408,7 @@ class TestProviderVerifier:
         from hypogeum.provider_verifier import verify_provider
         from hypogeum.db import get_connection, get_provider_verification
         monkeypatch.setenv("BYTEPLUS_ARK_API_KEY", "ark-test-key")
-        with patch("hypogeum.byteplus_ark.probe_credential",
+        with patch("hypogeum.dormant_providers.byteplus_ark.probe_credential",
                    return_value=(True, None, 80)):
             verify_provider("seedance_official", db_path=db)
         conn = get_connection(db)
@@ -430,7 +430,7 @@ class TestProviderVerifier:
             credential_data="ark-from-profile",
             db_path=db,
         )
-        with patch("hypogeum.byteplus_ark.probe_credential",
+        with patch("hypogeum.dormant_providers.byteplus_ark.probe_credential",
                    return_value=(True, None, 95)):
             result = verify_provider("seedance_official", db_path=db)
         assert result["status"] == STATUS_VERIFIED

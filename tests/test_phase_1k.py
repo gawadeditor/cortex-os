@@ -445,7 +445,7 @@ class TestVerifyRoutes:
     def test_seedance_official_verify_uses_secret_profile(self, db, monkeypatch):
         """Seedance Official key saved as Secret Profile is used by verify route."""
         from hypogeum.provider_verifier import verify_provider
-        with patch("hypogeum.byteplus_ark.probe_credential",
+        with patch("hypogeum.dormant_providers.byteplus_ark.probe_credential",
                    return_value=(True, None, 95)):
             result = verify_provider("seedance_official", db_path=db)
         # No env key set — should resolve from Secret Profile if available,

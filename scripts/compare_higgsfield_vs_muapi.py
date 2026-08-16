@@ -337,7 +337,7 @@ def _run_higgsfield_leg(
     dry_run: bool,
 ) -> dict:
     """Run one Higgsfield DoP leg and return a result dict."""
-    from hypogeum.higgsfield import (
+    from hypogeum.dormant_providers.higgsfield import (
         HiggsFieldAuthError,
         HiggsFieldError,
         HiggsFieldQuotaError,
@@ -965,7 +965,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Pre-flight credential check
     hf_legs = [k for k in legs_to_run if k.startswith("higgsfield")]
     if hf_legs and not args.dry_run:
-        from hypogeum.higgsfield import check_credentials
+        from hypogeum.dormant_providers.higgsfield import check_credentials
         cred_check = check_credentials(cfg)
         if not cred_check["valid"]:
             print(f"ERROR: Higgsfield credentials invalid — {cred_check['detail']}")

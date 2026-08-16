@@ -30,7 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hypogeum.higgsfield import (
+from hypogeum.dormant_providers.higgsfield import (
     DOP_MODELS,
     PRICING,
     HiggsFieldAuthError,
@@ -134,7 +134,7 @@ class TestCheckCredentials:
         mock_resp.status_code = 422
         mock_resp.json.return_value = {"detail": [{"msg": "Field required", "loc": ["body", "prompt"]}]}
         mock_resp.text = ""
-        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", return_value=mock_resp):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is True
 
@@ -142,7 +142,7 @@ class TestCheckCredentials:
         mock_resp = MagicMock()
         mock_resp.status_code = 401
         mock_resp.text = "Unauthorized"
-        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", return_value=mock_resp):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is False
         assert result["error"] == "auth_rejected"
@@ -153,13 +153,13 @@ class TestCheckCredentials:
         mock_resp.status_code = 422
         mock_resp.json.return_value = {"detail": [{"msg": "Field required"}]}
         mock_resp.text = ""
-        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", return_value=mock_resp):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is True
 
     def test_network_error_returns_invalid(self, cfg_with_creds):
         import requests as _req
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    side_effect=_req.ConnectionError("no route")):
             result = check_credentials(cfg_with_creds)
         assert result["valid"] is False
@@ -242,7 +242,7 @@ class TestSubmitDopHttpErrors:
         return mock_resp
 
     def test_401_raises_auth_error(self, cfg_with_creds):
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._mock_submit(401)):
             with pytest.raises(HiggsFieldAuthError):
                 submit_dop_generation(
@@ -251,7 +251,7 @@ class TestSubmitDopHttpErrors:
                 )
 
     def test_402_raises_quota_error(self, cfg_with_creds):
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._mock_submit(402)):
             with pytest.raises(HiggsFieldQuotaError):
                 submit_dop_generation(
@@ -260,7 +260,7 @@ class TestSubmitDopHttpErrors:
                 )
 
     def test_500_raises_higgsfield_error(self, cfg_with_creds):
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._mock_submit(500)):
             with pytest.raises(HiggsFieldError):
                 submit_dop_generation(
@@ -269,7 +269,7 @@ class TestSubmitDopHttpErrors:
                 )
 
     def test_400_raises_higgsfield_error(self, cfg_with_creds):
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._mock_submit(400)):
             with pytest.raises(HiggsFieldError):
                 submit_dop_generation(
@@ -308,11 +308,11 @@ class TestSubmitDopPolling:
 
     def test_completed_poll_returns_result(self, cfg_with_creds):
         poll_resp = self._poll_resp("completed", "https://cdn.example.com/video.mp4")
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
-             patch("hypogeum.higgsfield.requests.get",
+             patch("hypogeum.dormant_providers.higgsfield.requests.get",
                    return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             result = submit_dop_generation(
                 cfg_with_creds, model="dop-lite",
                 prompt="test", image_url="https://example.com/img.jpg",
@@ -324,11 +324,11 @@ class TestSubmitDopPolling:
 
     def test_failed_poll_returns_failed(self, cfg_with_creds):
         poll_resp = self._poll_resp("failed")
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
-             patch("hypogeum.higgsfield.requests.get",
+             patch("hypogeum.dormant_providers.higgsfield.requests.get",
                    return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             result = submit_dop_generation(
                 cfg_with_creds, model="dop-lite",
                 prompt="test", image_url="https://example.com/img.jpg",
@@ -339,11 +339,11 @@ class TestSubmitDopPolling:
 
     def test_nsfw_poll_raises_content_error(self, cfg_with_creds):
         poll_resp = self._poll_resp("nsfw")
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
-             patch("hypogeum.higgsfield.requests.get",
+             patch("hypogeum.dormant_providers.higgsfield.requests.get",
                    return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             with pytest.raises(HiggsFieldContentError):
                 submit_dop_generation(
                     cfg_with_creds, model="dop-lite",
@@ -352,11 +352,11 @@ class TestSubmitDopPolling:
 
     def test_cancelled_poll_returns_cancelled(self, cfg_with_creds):
         poll_resp = self._poll_resp("cancelled")
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
-             patch("hypogeum.higgsfield.requests.get",
+             patch("hypogeum.dormant_providers.higgsfield.requests.get",
                    return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             result = submit_dop_generation(
                 cfg_with_creds, model="dop-lite",
                 prompt="test", image_url="https://example.com/img.jpg",
@@ -368,11 +368,11 @@ class TestSubmitDopPolling:
         cfg_with_creds.HIGGSFIELD_TIMEOUT_SECONDS = 0
         cfg_with_creds.HIGGSFIELD_POLL_INTERVAL_SECONDS = 0
         poll_resp = self._poll_resp("in_progress")
-        with patch("hypogeum.higgsfield.requests.post",
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post",
                    return_value=self._submit_resp()), \
-             patch("hypogeum.higgsfield.requests.get",
+             patch("hypogeum.dormant_providers.higgsfield.requests.get",
                    return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             result = submit_dop_generation(
                 cfg_with_creds, model="dop-lite",
                 prompt="test", image_url="https://example.com/img.jpg",
@@ -391,9 +391,9 @@ class TestSubmitDopPolling:
             return mock
 
         poll_resp = self._poll_resp("Completed", "https://cdn.example.com/v.mp4")
-        with patch("hypogeum.higgsfield.requests.post", side_effect=fake_post), \
-             patch("hypogeum.higgsfield.requests.get", return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", side_effect=fake_post), \
+             patch("hypogeum.dormant_providers.higgsfield.requests.get", return_value=poll_resp), \
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             submit_dop_generation(
                 cfg_with_creds, model="dop-lite",
                 prompt="test", image_url="https://example.com/img.jpg",
@@ -414,9 +414,9 @@ class TestSubmitDopPolling:
             return mock
 
         poll_resp = self._poll_resp("Completed", "https://cdn.example.com/v.mp4")
-        with patch("hypogeum.higgsfield.requests.post", side_effect=fake_post), \
-             patch("hypogeum.higgsfield.requests.get", return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", side_effect=fake_post), \
+             patch("hypogeum.dormant_providers.higgsfield.requests.get", return_value=poll_resp), \
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             submit_dop_generation(
                 cfg_with_creds, model="dop-lite",
                 prompt="test", image_url="https://example.com/img.jpg",
@@ -437,9 +437,9 @@ class TestSubmitDopPolling:
             return mock
 
         poll_resp = self._poll_resp("Completed", "https://cdn.example.com/v.mp4")
-        with patch("hypogeum.higgsfield.requests.post", side_effect=fake_post), \
-             patch("hypogeum.higgsfield.requests.get", return_value=poll_resp), \
-             patch("hypogeum.higgsfield.time.sleep"):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", side_effect=fake_post), \
+             patch("hypogeum.dormant_providers.higgsfield.requests.get", return_value=poll_resp), \
+             patch("hypogeum.dormant_providers.higgsfield.time.sleep"):
             submit_dop_generation(
                 cfg_with_creds, model="dop-lite",
                 prompt="test", image_url="https://example.com/img.jpg",
@@ -460,7 +460,7 @@ class TestUploadReferenceImage:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 401
-        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", return_value=mock_resp):
             with pytest.raises(HiggsFieldAuthError):
                 upload_reference_image(cfg_with_creds, img)
 
@@ -478,8 +478,8 @@ class TestUploadReferenceImage:
         put_resp = MagicMock()
         put_resp.status_code = 500
 
-        with patch("hypogeum.higgsfield.requests.post", return_value=presign_resp), \
-             patch("hypogeum.higgsfield.requests.put", return_value=put_resp):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", return_value=presign_resp), \
+             patch("hypogeum.dormant_providers.higgsfield.requests.put", return_value=put_resp):
             with pytest.raises(HiggsFieldError, match="PUT failed"):
                 upload_reference_image(cfg_with_creds, img)
 
@@ -497,8 +497,8 @@ class TestUploadReferenceImage:
         put_resp = MagicMock()
         put_resp.status_code = 200
 
-        with patch("hypogeum.higgsfield.requests.post", return_value=presign_resp), \
-             patch("hypogeum.higgsfield.requests.put", return_value=put_resp):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", return_value=presign_resp), \
+             patch("hypogeum.dormant_providers.higgsfield.requests.put", return_value=put_resp):
             url = upload_reference_image(cfg_with_creds, img)
 
         assert url == "https://cdn.higgsfield.ai/ref.jpg"
@@ -510,7 +510,7 @@ class TestUploadReferenceImage:
         mock_resp = MagicMock()
         mock_resp.status_code = 503
         mock_resp.text = "service unavailable"
-        with patch("hypogeum.higgsfield.requests.post", return_value=mock_resp):
+        with patch("hypogeum.dormant_providers.higgsfield.requests.post", return_value=mock_resp):
             with pytest.raises(HiggsFieldError, match="Failed to get upload URL"):
                 upload_reference_image(cfg_with_creds, img)
 

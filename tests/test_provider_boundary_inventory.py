@@ -142,11 +142,11 @@ _INVENTORY = [
 ]
 
 _DEAD_UNREACHABLE_MODULES = [
-    "hypogeum.byteplus_ark",
-    "hypogeum.higgsfield",
-    "hypogeum.veo_official",
-    "hypogeum.runway_official",
-    "hypogeum.kling_official",
+    "hypogeum.dormant_providers.byteplus_ark",
+    "hypogeum.dormant_providers.higgsfield",
+    "hypogeum.dormant_providers.veo_official",
+    "hypogeum.dormant_providers.runway_official",
+    "hypogeum.dormant_providers.kling_official",
 ]
 
 # Modules allowed to import a dead/unreachable provider client (credential

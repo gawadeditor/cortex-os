@@ -257,7 +257,7 @@ def _probe_youtube(key: str) -> tuple[bool, Optional[str], int]:
 
 def _probe_byteplus_ark(key: str) -> tuple[bool, Optional[str], int]:
     """Validate a BytePlus ModelArk API key (Phase 1H)."""
-    from hypogeum.byteplus_ark import probe_credential
+    from hypogeum.dormant_providers.byteplus_ark import probe_credential
     return probe_credential(key)
 
 
@@ -293,19 +293,19 @@ def _probe_freepik(key: str) -> tuple[bool, Optional[str], int]:
 
 def _probe_runway_official(key: str) -> tuple[bool, Optional[str], int]:
     """Validate a Runway ML API key (Phase 1J)."""
-    from hypogeum.runway_official import probe_credential
+    from hypogeum.dormant_providers.runway_official import probe_credential
     return probe_credential(key)
 
 
 def _probe_kling_official(key: str) -> tuple[bool, Optional[str], int]:
     """Validate a Kling AI key (Phase 1J). Format: key_id:key_secret"""
-    from hypogeum.kling_official import probe_credential
+    from hypogeum.dormant_providers.kling_official import probe_credential
     return probe_credential(key)
 
 
 def _probe_veo_official(key: str) -> tuple[bool, Optional[str], int]:
     """Validate a Google API key for Veo (Phase 1J)."""
-    from hypogeum.veo_official import probe_credential
+    from hypogeum.dormant_providers.veo_official import probe_credential
     return probe_credential(key)
 
 

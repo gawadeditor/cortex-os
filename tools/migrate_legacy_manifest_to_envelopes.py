@@ -261,8 +261,8 @@ class EntryCompileResult:
     def paid_execution_ready(self) -> bool:
         return self.envelope_fields_valid and self.dependency_identity_available and self.legacy_path_compatible
 
-    def to_report_dict(self) -> dict:
-        return {
+    def to_report_dict(self, *, include_envelope_dict: bool = False) -> dict:
+        d = {
             "shot_id": self.shot_id, "beat": self.beat_id, "deliverable": self.deliverable,
             "auth_index": self.auth_index,
             "envelope_fields_valid": self.envelope_fields_valid,
@@ -275,6 +275,14 @@ class EntryCompileResult:
             "envelope_id": self.envelope_id, "idempotency_key": self.idempotency_key,
             "checksums": self.checksums,
         }
+        # Opt-in only (default False, this tool's own original report
+        # shape is unchanged for every existing caller) -- a caller
+        # that needs to reconstruct the actual GenerationExecutionEnvelope
+        # object (plan §6 Commit M) sets this; ordinary --report-path
+        # dumps stay compact.
+        if include_envelope_dict and self.envelope_dict is not None:
+            d["envelope_dict"] = self.envelope_dict
+        return d
 
 
 def _episode_dir(assets_root: Path, episode_id: str) -> Path:
@@ -296,6 +304,7 @@ def _unresolvable(shot_id, beat_id, deliverable, auth_index, reason: str) -> Ent
 def compile_manifest_to_envelopes(
     args: argparse.Namespace, config: Optional[Config] = None, *,
     workflow_identity_resolver=None, tag_as_reconstructed: bool = True, authorization_version: int = 1,
+    include_envelope_dicts: bool = False,
 ) -> dict:
     """
     Runs the full read-only compilation pass over every active manifest
@@ -337,6 +346,13 @@ def compile_manifest_to_envelopes(
     resulting idempotency_key (derived from
     f"{authorization_id}:{authorization_version}:{provider_operation}")
     never collides with a version-1 compile of the same entries.
+
+    include_envelope_dicts: when True, each report entry that has a
+    real envelope also carries "envelope_dict" (the exact dict
+    GenerationExecutionEnvelope.to_dict()/.from_dict() round-trips) --
+    default False, this tool's own original, compact report shape,
+    unaffected. A caller that needs to reconstruct real envelope
+    objects (plan §6 Commit M) sets this.
     """
     assets_root = Path(args.assets_root)
     episode_dir = _episode_dir(assets_root, args.episode_id)
@@ -416,6 +432,7 @@ def compile_manifest_to_envelopes(
         return _finalize_report(
             args, manifest, manifest_md5, plan_checksum_sha256, plan_checksum_md5_current,
             plan_checksum_md5_manifest, active, inactive, results, global_blockers, channel_package,
+            include_envelope_dicts=include_envelope_dicts,
         )
 
     missing_shots_for_allocation = []
@@ -510,7 +527,7 @@ def compile_manifest_to_envelopes(
     return _finalize_report(
         args, manifest, manifest_md5, plan_checksum_sha256, plan_checksum_md5_current,
         plan_checksum_md5_manifest, active, inactive, results, global_blockers, channel_package,
-        duplicate_findings=duplicate_findings,
+        duplicate_findings=duplicate_findings, include_envelope_dicts=include_envelope_dicts,
     )
 
 
@@ -741,7 +758,7 @@ def _finalize_report(
     plan_checksum_sha256: Optional[str], plan_checksum_md5_current: Optional[str],
     plan_checksum_md5_manifest: Optional[str], active: list, inactive: list,
     results: list, global_blockers: list, channel_package: dict,
-    duplicate_findings: Optional[list] = None,
+    duplicate_findings: Optional[list] = None, include_envelope_dicts: bool = False,
 ) -> dict:
     envelope_valid = [r for r in results if r.envelope_fields_valid]
     dependency_unverifiable = [r for r in results if not r.dependency_identity_available]
@@ -801,7 +818,7 @@ def _finalize_report(
         "global_blockers": global_blockers,
         "duplicate_findings": duplicate_findings or [],
         "entries": sorted(
-            [r.to_report_dict() for r in results],
+            [r.to_report_dict(include_envelope_dict=include_envelope_dicts) for r in results],
             key=lambda r: (r.get("beat") or "", r.get("shot_id") or ""),
         ),
         "provider_calls_made": 0,

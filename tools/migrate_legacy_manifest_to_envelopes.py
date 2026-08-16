@@ -160,6 +160,11 @@ from hypogeum.muapi import (  # noqa: E402
     _compute_asset_id,
     _tier_to_model,
 )
+from hypogeum.providers.muapi_video_adapter import (  # noqa: E402
+    SCHEMA_VERSION as _VIDEO_PAYLOAD_SCHEMA_VERSION,
+    decode_video_payload,
+    encode_video_payload,
+)
 from hypogeum.scene_identity import (  # noqa: E402
     SceneIdentityConflictError,
     enforce_global_scene_identity,
@@ -557,7 +562,7 @@ def compile_manifest_to_envelopes(
         result = _compile_one_entry(
             entry, scene, planned_shot, config=config, manifest=manifest,
             plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
-            allocation=allocations_by_shot.get(shot_id), episode_id=args.episode_id,
+            allocation=allocations_by_shot.get(shot_id), episode_id=args.episode_id, episode_dir=episode_dir,
             channel_id=args.channel_id, channel_package=channel_package,
             manifest_md5=manifest_md5, workflow_identity_resolver=workflow_identity_resolver,
             tag_as_reconstructed=tag_as_reconstructed, authorization_version=authorization_version,
@@ -594,7 +599,7 @@ def compile_manifest_to_envelopes(
 def _compile_one_entry(
     entry: dict, scene: dict, planned_shot: dict, *, config: Config, manifest: dict,
     plan_checksum_sha256: Optional[str], compiler_checksum: str, allocation: Optional[dict],
-    episode_id: str, channel_id: str, channel_package: dict, manifest_md5: str,
+    episode_id: str, episode_dir: Path, channel_id: str, channel_package: dict, manifest_md5: str,
     workflow_identity_resolver=None, tag_as_reconstructed: bool = True, authorization_version: int = 1,
     explicit_binding: "Optional[ExplicitBinding]" = None,
 ) -> EntryCompileResult:
@@ -643,12 +648,18 @@ def _compile_one_entry(
         except Exception as exc:  # noqa: BLE001 -- any compiler failure is a hard block, never silently skipped
             result.envelope_fields_reasons.append(f"compiler_error: {type(exc).__name__}: {exc}")
 
-    operation_payload_content = None
-    operation_payload_sha256 = None
+    # The prompt text itself is resolved here (still gated on the
+    # freshness checks above) -- the CANONICAL JSON payload
+    # (operation_payload_content/operation_payload_sha256) is built
+    # further below, once the authorized model/aspect_ratio/duration
+    # and the deterministic output allocation are also resolved, since
+    # hypogeum.providers.muapi_video_adapter.encode_video_payload()
+    # (the ONLY producer of bytes decode_video_payload() -- the real
+    # adapter's own decoder -- accepts for operation_payload_schema_
+    # version="video.text_to_video/1.0") requires all of them.
+    assembled_prompt = None
     if stored_prompt and not result.envelope_fields_reasons:
-        operation_payload_content = assemble_video_scene_prompt(stored_prompt)
-        operation_payload_sha256 = _sha256_bytes(operation_payload_content.encode("utf-8"))
-        result.checksums["operation_payload_sha256"] = operation_payload_sha256
+        assembled_prompt = assemble_video_scene_prompt(stored_prompt)
 
     # Authorized binding -- either the caller-approved, immutable
     # explicit_binding (Part 4: model binding authority), or, when none
@@ -705,6 +716,44 @@ def _compile_one_entry(
         # (wired into the shared mandatory gate elsewhere) -- never as a
         # compile-time diagnostic that would make two otherwise-identical
         # compiles disagree depending on what happens to exist on disk.
+
+    # Canonical JSON operation payload (video.text_to_video/1.0) --
+    # NEVER raw prompt text. Built only once every field
+    # encode_video_payload() requires is itself already resolved and
+    # error-free; a round-trip through decode_video_payload() (the
+    # REAL adapter's own decoder, imported verbatim -- no second JSON
+    # format invented here) is required to succeed before this
+    # envelope is ever considered valid, so a caller can never emit
+    # bytes the real adapter would itself reject.
+    operation_payload_content = None
+    operation_payload_sha256 = None
+    if (
+        assembled_prompt is not None and authorized_model and authorized_aspect_ratio
+        and authorized_duration_seconds is not None and extra_scene_id is not None
+        and not result.envelope_fields_reasons
+    ):
+        operation_payload_bytes = encode_video_payload(
+            prompt=assembled_prompt, model=authorized_model, aspect_ratio=authorized_aspect_ratio,
+            duration_seconds=float(authorized_duration_seconds), reference_image_url=None,
+            scene_id=extra_scene_id, short_id=scene.get("short_id"), episode_id=episode_id,
+            output_dir=str(episode_dir),
+        )
+        try:
+            decoded = decode_video_payload(operation_payload_bytes)
+        except Exception as exc:  # noqa: BLE001 -- a payload the real adapter would reject is a hard block
+            result.envelope_fields_reasons.append(
+                f"operation_payload_round_trip_failed: {type(exc).__name__}: {exc}"
+            )
+        else:
+            if decoded["prompt"] != assembled_prompt:
+                result.envelope_fields_reasons.append(
+                    "operation_payload_prompt_not_byte_preserved: decoded JSON prompt field does not match "
+                    "the assembled prompt byte-for-byte"
+                )
+            else:
+                operation_payload_content = operation_payload_bytes.decode("utf-8")
+                operation_payload_sha256 = _sha256_bytes(operation_payload_bytes)
+                result.checksums["operation_payload_sha256"] = operation_payload_sha256
 
     structured_spec_checksum = _structured_spec_checksum(planned_shot) if stored_prompt else None
     if structured_spec_checksum:
@@ -792,7 +841,7 @@ def _compile_one_entry(
                 compiler_version=provenance.get("compiler_version") if provenance else None,
                 operation_payload_content=operation_payload_content,
                 operation_payload_sha256=operation_payload_sha256,
-                operation_payload_schema_version=f"{_PROVIDER_OPERATION}/1.0",
+                operation_payload_schema_version=_VIDEO_PAYLOAD_SCHEMA_VERSION,
                 content_provenance={
                     "compiler": provenance.get("compiler") if provenance else None,
                     "compiler_version": provenance.get("compiler_version") if provenance else None,

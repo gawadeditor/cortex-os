@@ -121,6 +121,7 @@ def propose_current_episode_authorization(
     assets_root: Optional[Path] = None, db_path: Optional[Path] = None,
     proposed_version: int = 2, superseded_version: Optional[int] = 1,
     config: Optional[Config] = None, fulfilled_exclusions: "Optional[list[FulfilledProposalExclusion]]" = None,
+    manifest_path_override: Optional[Path] = None, supersedes_map: "Optional[dict[str, str]]" = None,
 ) -> dict:
     """
     Runs the full sequence documented in this module's own docstring.
@@ -149,6 +150,31 @@ def propose_current_episode_authorization(
     excluded authorization_id doesn't compile to a valid envelope, or if
     reconcile_fulfilled_proposal() itself raises (e.g. the fulfilling
     authorization lacks durable qualification evidence).
+
+    manifest_path_override: optional. Default None (this function's own
+    original, only-ever behavior: read the episode's real, live
+    generation_authorization_manifest_{episode_id}.json). When supplied,
+    used as the compiled manifest's own source file INSTEAD of the live
+    manifest -- e.g. an isolated, disjoint-manifest_id copy prepared for
+    a replacement-authorization proposal (never the live manifest itself,
+    never written by this function). visual_package/coverage-plan reads
+    are unaffected -- those always come from the real, live episode
+    directory (mle.compile_manifest_to_envelopes()'s own
+    episode_dir = _episode_dir(assets_root, episode_id), independent of
+    args.manifest_path), so a manifest_path_override still compiles
+    against the same real, current scenes/prompts/plan.
+
+    supersedes_map: optional, generic {authorization_id: superseded_
+    authorization_id} mapping. Default None (no entry's new
+    AuthorizationRecord names a predecessor -- this function's own
+    original behavior). When supplied, each newly created record's
+    superseded_authorization_id is set from this map (looked up by the
+    record's OWN authorization_id, never the other way around) --
+    the durable, native one-to-one link
+    hypogeum.authorization_store.reconcile_superseded_authorization()
+    later verifies before retiring the named predecessor. Never mutates
+    or even reads the predecessor's own record here -- purely a forward
+    reference stamped onto the new row at creation time.
     """
     assets_root = Path(assets_root) if assets_root else (_ROOT / ".hypogeum-assets")
     if config is None:
@@ -170,7 +196,10 @@ def propose_current_episode_authorization(
         "--episode-id", episode_id, "--channel-id", channel_id, "--dry-run",
         "--assets-root", str(assets_root),
     ])
-    args.manifest_path = str(mle._episode_dir(assets_root, episode_id) / f"generation_authorization_manifest_{episode_id}.json")
+    args.manifest_path = (
+        str(manifest_path_override) if manifest_path_override is not None
+        else str(mle._episode_dir(assets_root, episode_id) / f"generation_authorization_manifest_{episode_id}.json")
+    )
     if db_path is not None:
         args.db_path = str(db_path)
 
@@ -283,6 +312,7 @@ def propose_current_episode_authorization(
             rec = AuthorizationRecord.create(
                 authorization_id=env.authorization_id, authorization_version=env.authorization_version,
                 envelope_id=env.envelope_id, envelope_version=env.envelope_version,
+                superseded_authorization_id=(supersedes_map or {}).get(env.authorization_id),
             )
             rec = rec.transition(
                 AuthorizationState.COMPILED,

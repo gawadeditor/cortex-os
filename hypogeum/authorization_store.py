@@ -99,6 +99,9 @@ __all__ = [
     "get_execution_envelope",
     "reconcile_fulfilled_proposal",
     "ProposalReconciliationConflictError",
+    "reconcile_superseded_authorization",
+    "reconcile_all_superseded_authorizations",
+    "SupersessionConflictError",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1301,6 +1304,163 @@ def reconcile_fulfilled_proposal(
     record = obsolete.transition(AuthorizationState.INVALIDATED_SOURCE_CHANGED, evidence=evidence, at=at)
     persist_authorization_record(conn, record)
     return record
+
+
+class SupersessionConflictError(AuthorizationStoreError):
+    """reconcile_superseded_authorization()/reconcile_all_superseded_
+    authorizations() found evidence that does not support the claimed
+    supersession -- the old record is not in a state this mechanism is
+    allowed to retire, the named new record does not exist or does not
+    itself claim to supersede the old one, or a replay names a
+    different new_authorization_id than the one already recorded. Never
+    invalidates an authorization on unverified evidence."""
+
+
+def reconcile_superseded_authorization(
+    conn: sqlite3.Connection, old_authorization_id: str, *,
+    new_authorization_id: str, at: str, changed_dependency: str, old_checksum: str, new_checksum: str,
+    reason: str = "superseded_by_corrected_authorization_proposal",
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent retirement of an AUTHORIZED or SUBMITTING
+    authorization whose own compiled evidence (e.g. its
+    operation_payload_content) has been superseded by a corrected
+    recompile persisted under a DIFFERENT authorization_id -- never the
+    same authorization_id/authorization_version pair, since
+    persist_authorization_record() upserts keyed by authorization_id
+    alone and a same-key recompile would silently overwrite the old
+    record's own durable history rather than preserving it.
+
+    Transitions old_authorization_id AUTHORIZED|SUBMITTING ->
+    INVALIDATED_SOURCE_CHANGED -- the architecture-defined edge for "an
+    authorization's own dependency no longer matches current reality"
+    (docs/architecture/AUTHORIZED_GENERATION_ENVELOPE.md Sec 4.4;
+    hypogeum.authorization_lifecycle.create_superseding_authorization()'s
+    own docstring: "A record already further along (authorized/
+    submitting/etc.) that needs to be superseded due to a source change
+    is invalidated via transition(INVALIDATED_SOURCE_CHANGED, ...)
+    instead"). Never CANCELLED -- the old authorization was not
+    withdrawn by policy, its own compiled basis changed out from under
+    it.
+
+    The one-to-one old->new link is never a second, separate mapping
+    table -- it is the NEW record's own superseded_authorization_id
+    field (set at AuthorizationRecord.create() time, persisted
+    natively by persist_authorization_record()). This function fails
+    closed unless that link is already durably in place on the new
+    side before touching the old record: the new record must exist and
+    its own superseded_authorization_id must equal old_authorization_id
+    exactly -- this is what prevents retiring an old authorization for
+    a "replacement" that never actually claimed to supersede it.
+
+    Idempotent: replaying with the SAME new_authorization_id against an
+    already-INVALIDATED_SOURCE_CHANGED old record returns it unchanged.
+    Replaying with a DIFFERENT new_authorization_id fails closed
+    (SupersessionConflictError) -- never silently re-attributes an
+    already-superseded authorization to a different replacement.
+    """
+    ensure_tables(conn)
+    old = get_authorization_record(conn, old_authorization_id)
+    if old is None:
+        raise AuthorizationRecordNotFoundError(old_authorization_id)
+
+    if old.current_state == AuthorizationState.INVALIDATED_SOURCE_CHANGED:
+        already_superseded_by = next(
+            (h.evidence.get("superseding_authorization_id") for h in old.history
+             if h.to_state == AuthorizationState.INVALIDATED_SOURCE_CHANGED), None,
+        )
+        if already_superseded_by != new_authorization_id:
+            raise SupersessionConflictError(
+                f"authorization {old_authorization_id!r} is already superseded by "
+                f"{already_superseded_by!r}, cannot re-supersede with {new_authorization_id!r}"
+            )
+        return old
+
+    if old.current_state not in (AuthorizationState.AUTHORIZED, AuthorizationState.SUBMITTING):
+        raise SupersessionConflictError(
+            f"authorization {old_authorization_id!r} is at {old.current_state.value!r}, not "
+            "'authorized' or 'submitting' -- this mechanism only retires an authorization that "
+            "already reached the real provider-boundary lifecycle, never a pre-authorization proposal "
+            "(use reconcile_fulfilled_proposal() for that case)"
+        )
+
+    new = get_authorization_record(conn, new_authorization_id)
+    if new is None:
+        raise AuthorizationRecordNotFoundError(new_authorization_id)
+    if new.superseded_authorization_id != old_authorization_id:
+        raise SupersessionConflictError(
+            f"new authorization {new_authorization_id!r} does not itself claim to supersede "
+            f"{old_authorization_id!r} (its superseded_authorization_id is "
+            f"{new.superseded_authorization_id!r}) -- refusing to retire the old authorization "
+            "against an unlinked replacement"
+        )
+
+    evidence = {
+        "changed_dependency": changed_dependency, "old_checksum": old_checksum, "new_checksum": new_checksum,
+        "superseding_authorization_id": new_authorization_id, "reason": reason,
+    }
+    record = old.transition(AuthorizationState.INVALIDATED_SOURCE_CHANGED, evidence=evidence, at=at)
+    persist_authorization_record(conn, record)
+    return record
+
+
+def reconcile_all_superseded_authorizations(
+    conn: sqlite3.Connection, old_to_new_map: Mapping[str, str], *,
+    at: str, changed_dependency: str, old_checksum: str, new_checksum: str,
+    reason: str = "superseded_by_corrected_authorization_proposal",
+) -> list:
+    """
+    Atomic, all-or-nothing bulk application of
+    reconcile_superseded_authorization() over every (old_authorization_id
+    -> new_authorization_id) pair in old_to_new_map. Every precondition
+    (old record exists and is AUTHORIZED/SUBMITTING; new record exists
+    and already names old_authorization_id as its own
+    superseded_authorization_id) is verified for EVERY pair before a
+    single row is written; any failing pair aborts the whole batch with
+    zero writes (conn.rollback()), never a partial retirement of some
+    old authorizations but not others.
+    """
+    ensure_tables(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        olds, news = {}, {}
+        for old_id, new_id in old_to_new_map.items():
+            old = get_authorization_record(conn, old_id)
+            if old is None:
+                raise AuthorizationRecordNotFoundError(old_id)
+            if old.current_state not in (
+                AuthorizationState.AUTHORIZED, AuthorizationState.SUBMITTING,
+                AuthorizationState.INVALIDATED_SOURCE_CHANGED,
+            ):
+                raise SupersessionConflictError(
+                    f"authorization {old_id!r} is at {old.current_state.value!r}, not "
+                    "'authorized', 'submitting', or already-superseded 'invalidated_source_changed'"
+                )
+            new = get_authorization_record(conn, new_id)
+            if new is None:
+                raise AuthorizationRecordNotFoundError(new_id)
+            if new.superseded_authorization_id != old_id:
+                raise SupersessionConflictError(
+                    f"new authorization {new_id!r} does not itself claim to supersede {old_id!r} "
+                    f"(its superseded_authorization_id is {new.superseded_authorization_id!r})"
+                )
+            olds[old_id] = old
+            news[new_id] = new
+
+        records = []
+        for old_id, new_id in old_to_new_map.items():
+            records.append(
+                reconcile_superseded_authorization(
+                    conn, old_id, new_authorization_id=new_id, at=at,
+                    changed_dependency=changed_dependency, old_checksum=old_checksum, new_checksum=new_checksum,
+                    reason=reason,
+                )
+            )
+        conn.commit()
+        return records
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def record_editorial_verdict(

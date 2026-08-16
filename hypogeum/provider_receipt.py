@@ -46,6 +46,8 @@ __all__ = [
     "AmbiguousReceiptsRootError",
     "resolve_episode_receipts_root",
     "relocate_legacy_receipt_trail",
+    "reconcile_unknown_acceptance_as_not_submitted",
+    "AlreadyReconciledWithDifferentResolutionError",
 ]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -622,3 +624,78 @@ def _classify(events: List[ProviderReceiptEvent]) -> RecoveryState:
     if EventType.ABOUT_TO_SUBMIT in by_type:
         return RecoveryState.ATTEMPT_PREPARED_NOT_ENTERED
     return RecoveryState.AUTHORIZED_NO_ATTEMPT
+
+
+class AlreadyReconciledWithDifferentResolutionError(Exception):
+    """A RECONCILED event already exists for this attempt with a
+    DIFFERENT resolution than the one being applied now -- never
+    silently overwritten (receipts are append-only)."""
+
+
+def reconcile_unknown_acceptance_as_not_submitted(
+    receipt_store: "WriteAheadReceiptStore", budget_conn, *, execution_id: str, envelope,
+    idempotency_key: str, reservation_ids: "list[str]", proof: str, at: str,
+) -> ProviderReceiptEvent:
+    """
+    Generic, idempotent reconciliation for an attempt currently
+    classified UNKNOWN_ACCEPTANCE_REQUIRES_RECONCILIATION, for the
+    specific case where durable evidence PROVES the provider boundary
+    was never actually entered (e.g. a local payload-encoding failure
+    inside an adapter's invoke(), before its own HTTP call). Appends a
+    RECONCILED receipt event (resolution="confirmed_not_submitted",
+    reclassifying to RecoveryState.TERMINALLY_FAILED_BEFORE_ACCEPTANCE
+    -- NOT in ELIGIBLE_FOR_SUBMISSION_STATES, so this attempt's own
+    idempotency_key can never become retryable through this
+    reconciliation alone) and releases every named budget reservation
+    still at 'reserved' (never touches an already-'committed' one --
+    there should never be one, since nothing was ever charged).
+
+    proof: a human-readable, durable explanation of HOW "never reached
+    the provider" was established (e.g. citing the exact pre-HTTP
+    exception message and the adapter code path that proves it) --
+    recorded verbatim in the RECONCILED event's own evidence, itself
+    becoming part of the permanent audit trail.
+
+    Never touches the AuthorizationRecord's own lifecycle state -- a
+    caller decides separately whether/when to also transition it (e.g.
+    marking it superseded once a replacement authorization exists).
+    Never touches the original ABOUT_TO_SUBMIT/SUBMISSION_ATTEMPT_
+    STARTED/UNKNOWN_ACCEPTANCE events -- receipts are append-only,
+    history is preserved exactly as originally written.
+
+    Idempotent replay: if a RECONCILED event with resolution=
+    "confirmed_not_submitted" already exists for this idempotency_key,
+    returns it unchanged (also re-releases any reservation still
+    'reserved', harmless/idempotent either way). Fails closed
+    (AlreadyReconciledWithDifferentResolutionError) if a RECONCILED
+    event already exists with a DIFFERENT resolution -- never silently
+    overwrites a prior reconciliation decision.
+    """
+    existing_events = receipt_store.read_events(execution_id, idempotency_key)
+    existing_reconciled = [e for e in existing_events if e.event_type == EventType.RECONCILED]
+    if existing_reconciled:
+        last = existing_reconciled[-1]
+        if last.evidence.get("resolution") != "confirmed_not_submitted":
+            raise AlreadyReconciledWithDifferentResolutionError(
+                f"idempotency_key={idempotency_key!r} already has a RECONCILED event with resolution "
+                f"{last.evidence.get('resolution')!r}, cannot reconcile again as 'confirmed_not_submitted'"
+            )
+        event = last
+    else:
+        event = ProviderReceiptEvent(
+            envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
+            authorization_id=envelope.authorization_id, authorization_version=envelope.authorization_version,
+            attempt_id=idempotency_key, idempotency_key=idempotency_key,
+            event_type=EventType.RECONCILED, event_seq=len(existing_events), at=at,
+            provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
+            provider_bound_content_sha256=envelope.operation_payload_sha256,
+            max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
+            evidence={"resolution": "confirmed_not_submitted", "proof": proof},
+        )
+        event = receipt_store.append_event(event, execution_id=execution_id)
+
+    for reservation_id in reservation_ids:
+        import hypogeum.budget_scopes as bs
+        bs.release_reservation(budget_conn, reservation_id, at=at)
+
+    return event

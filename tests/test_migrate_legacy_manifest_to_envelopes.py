@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -669,7 +670,7 @@ class TestInjectableWorkflowResolverAndReconstructionTag:
         result = mle._compile_one_entry(
             target_entry, target_scene, planned_shot, config=_config(), manifest=manifest,
             plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
-            allocation=allocations[0], episode_id="ep_test", channel_id="hypogeum",
+            allocation=allocations[0], episode_id="ep_test", episode_dir=manifest_path.parent, channel_id="hypogeum",
             channel_package=channel_package, manifest_md5="deadbeef",
             workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
         )
@@ -703,7 +704,7 @@ class TestInjectableWorkflowResolverAndReconstructionTag:
         result = mle._compile_one_entry(
             target_entry, target_scene, planned_shot, config=_config(), manifest=manifest,
             plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
-            allocation=allocations[0], episode_id="ep_test", channel_id="hypogeum",
+            allocation=allocations[0], episode_id="ep_test", episode_dir=manifest_path.parent, channel_id="hypogeum",
             channel_package=channel_package, manifest_md5="deadbeef",
             workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
             tag_as_reconstructed=False, authorization_version=2,
@@ -739,6 +740,7 @@ class TestInjectableWorkflowResolverAndReconstructionTag:
         common = dict(
             config=_config(), manifest=manifest, plan_checksum_sha256=plan_checksum_sha256,
             compiler_checksum=compiler_checksum, allocation=allocations[0], episode_id="ep_test",
+            episode_dir=manifest_path.parent,
             channel_id="hypogeum", channel_package=channel_package, manifest_md5="deadbeef",
             workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
         )
@@ -746,3 +748,158 @@ class TestInjectableWorkflowResolverAndReconstructionTag:
         r2 = mle._compile_one_entry(target_entry, target_scene, planned_shot, authorization_version=2, **common)
         assert r1.idempotency_key != r2.idempotency_key
         assert r1.envelope_id != r2.envelope_id
+
+
+class TestCanonicalOperationPayloadCompilation:
+    """Phase 2 regression/integration coverage for the root bug this
+    tool used to have: operation_payload_content was raw assembled
+    prompt TEXT under operation_payload_schema_version =
+    "video.text_to_video/1.0" (a JSON schema) -- the real adapter's own
+    decode_video_payload() raised "not valid JSON" on the very first
+    real provider-boundary attempt (authorization
+    genauth_ep_f3619022_final:1, 2026-08-16). These tests prove the fix
+    generically: never against the live episode, never touching a real
+    network or a real MUAPI credential."""
+
+    def _real_resolver_for(self, version: str):
+        return lambda: {"available": True, "version": version, "reason": None}
+
+    def _compile_full_envelope(self, tmp_path: Path):
+        """Runs the exact same compilation path
+        TestInjectableWorkflowResolverAndReconstructionTag uses to force
+        a real envelope into existence (workflow identity simulated
+        available), and returns (result, assembled_prompt) so callers
+        can assert on both the envelope and its independently-recomputed
+        expected prompt bytes."""
+        import hypogeum.channel_config as channel_config
+        from hypogeum.video_prompt_writer import assemble_video_scene_prompt
+
+        manifest_path, scene, shot, entry, _ = _happy_path_fixture(tmp_path)
+        db_path = tmp_path / "channel.db"
+        _bootstrap_channel(db_path)
+        channel_package = channel_config.compute_channel_package_identity("hypogeum", db_path=db_path)
+        compiler_checksum = mle._sha256_bytes((mle._ROOT / "hypogeum" / "video_prompt_writer.py").read_bytes())
+        manifest = mle._load_json(manifest_path)
+        active, _inactive = mle.resolve_active_entries(manifest)
+        vp_path = manifest_path.parent / "visual_package_ep_test.json"
+        visual_package = mle._load_json(vp_path)
+        scenes = visual_package.get("scenes", [])
+        beat_to_scene, _dup = mle.scene_by_beat(scenes)
+        plan_path = manifest_path.parent / "cinematic_coverage_plan_ep_test.json"
+        plan_checksum_sha256 = mle._sha256_bytes(plan_path.read_bytes())
+        target_entry = active[0]
+        target_scene = beat_to_scene[target_entry["beat"]]
+        planned_shot, _n = mle.find_planned_shot(target_scene, target_entry["target_shot_id"])
+        slot = mle.resolve_canonical_output_slot(
+            episode_id="ep_test", scene_id=target_scene.get("scene_id"),
+            shot_order=planned_shot.get("shot_order"), short_id=target_scene.get("short_id"),
+            assets_root=tmp_path,
+        )
+        allocation = {"extra_scene_id": slot.extra_scene_id, "output_path": str(slot.output_path)}
+        result = mle._compile_one_entry(
+            target_entry, target_scene, planned_shot, config=_config(), manifest=manifest,
+            plan_checksum_sha256=plan_checksum_sha256, compiler_checksum=compiler_checksum,
+            allocation=allocation, episode_id="ep_test", episode_dir=manifest_path.parent, channel_id="hypogeum",
+            channel_package=channel_package, manifest_md5="deadbeef",
+            workflow_identity_resolver=self._real_resolver_for("wf-real-1"),
+        )
+        assembled_prompt = assemble_video_scene_prompt(planned_shot["primary_prompt"])
+        return result, assembled_prompt
+
+    def test_operation_payload_content_is_canonical_json_not_raw_text(self, tmp_path):
+        # Regression for the exact production defect: operation_payload_
+        # content must never be the bare assembled prompt string -- it
+        # must be a JSON object containing that prompt as one field
+        # among several.
+        result, assembled_prompt = self._compile_full_envelope(tmp_path)
+        assert result.envelope_dict is not None
+        raw_content = result.envelope_dict["operation_payload_content"]
+        assert raw_content != assembled_prompt
+        decoded = json.loads(raw_content)  # raises if it is raw text, not JSON -- this IS the regression check
+        assert decoded["prompt"] == assembled_prompt
+
+    def test_raw_text_payload_rejected_by_real_adapter_decoder(self, tmp_path):
+        # Proves the OLD (buggy) shape -- raw prompt text -- is not
+        # merely "different" from the new shape but is actively rejected
+        # by the real adapter's own decoder, exactly as it was on the
+        # real first attempt.
+        from hypogeum.providers.fake_provider_adapter import InvalidCapabilityError
+        from hypogeum.providers.muapi_video_adapter import decode_video_payload
+
+        _result, assembled_prompt = self._compile_full_envelope(tmp_path)
+        with pytest.raises(InvalidCapabilityError, match="not valid JSON"):
+            decode_video_payload(assembled_prompt.encode("utf-8"))
+
+    def test_operation_payload_decodes_via_real_adapter_decoder(self, tmp_path):
+        # Integration: the newly compiled envelope's payload bytes are
+        # accepted by hypogeum.providers.muapi_video_adapter.
+        # decode_video_payload() -- the exact function MuapiVideoAdapter.
+        # _invoke_real() calls before ever reaching _submit_http().
+        from hypogeum.providers.muapi_video_adapter import decode_video_payload
+
+        result, assembled_prompt = self._compile_full_envelope(tmp_path)
+        payload_bytes = result.envelope_dict["operation_payload_content"].encode("utf-8")
+        decoded = decode_video_payload(payload_bytes)
+        assert decoded["prompt"] == assembled_prompt
+        assert decoded["model"] == result.envelope_dict["model"]
+        assert decoded["aspect_ratio"] == result.envelope_dict["aspect_ratio"]
+        assert decoded["scene_id"] == result.envelope_dict["scene_id"]
+        assert decoded["episode_id"] == "ep_test"
+
+    def test_prompt_bytes_preserved_byte_for_byte_through_encode_decode_round_trip(self, tmp_path):
+        result, assembled_prompt = self._compile_full_envelope(tmp_path)
+        from hypogeum.providers.muapi_video_adapter import decode_video_payload
+
+        payload_bytes = result.envelope_dict["operation_payload_content"].encode("utf-8")
+        decoded = decode_video_payload(payload_bytes)
+        assert decoded["prompt"] == assembled_prompt
+        assert len(decoded["prompt"]) == len(assembled_prompt)
+        assert decoded["prompt"].encode("utf-8") == assembled_prompt.encode("utf-8")
+
+    def test_adapter_reaches_mocked_http_seam_exactly_once_no_real_network(self, tmp_path, monkeypatch):
+        # Fake/no-network boundary test (Phase 2 requirement 7/8): builds
+        # a real AdapterInvocationCapability from the newly compiled
+        # envelope's own payload, invokes MuapiVideoAdapter for real, and
+        # proves (a) decode_video_payload() does NOT raise -- the exact
+        # point the real first attempt failed at -- and (b) the mocked
+        # HTTP seam (hypogeum.muapi._submit_http) is reached exactly
+        # once. No real `requests`/`urllib` call can occur: _submit_http
+        # itself is replaced before the adapter is ever invoked.
+        import hypogeum.muapi as muapi_module
+        from hypogeum.providers.fake_provider_adapter import (
+            AdapterInvocationCapability, compute_capability_checksum,
+        )
+        from hypogeum.providers.muapi_video_adapter import MuapiVideoAdapter
+
+        result, _assembled_prompt = self._compile_full_envelope(tmp_path)
+        env = result.envelope_dict
+        payload_bytes = env["operation_payload_content"].encode("utf-8")
+
+        call_count = {"n": 0}
+
+        def _fake_submit_http(endpoint, payload, config, scene_id, log):
+            call_count["n"] += 1
+            return None, "no_real_http_in_test"  # short-circuits _invoke_real before poll/download
+
+        monkeypatch.setattr(muapi_module, "_submit_http", _fake_submit_http)
+
+        capability_fields = dict(
+            capability_id="cap_test_1", envelope_id=env["envelope_id"], envelope_version=env["envelope_version"],
+            attempt_id="attempt_test_1", idempotency_key=env["idempotency_key"],
+            lease_owner_id="worker_test_1", lease_fencing_token=1,
+            provider=env["provider"], model=env["model"], provider_operation=env["provider_operation"],
+            operation_payload_bytes=payload_bytes, operation_payload_sha256=env["operation_payload_sha256"],
+            operation_payload_schema_version=env["operation_payload_schema_version"],
+            max_cost_per_call=Decimal(str(env["max_cost_per_call"])), currency=env["currency"],
+            budget_reservation_ids=("resv_test_1",), issued_at="2026-08-17T00:00:00+00:00",
+            expires_at="2026-08-17T00:05:00+00:00",
+        )
+        checksum = compute_capability_checksum(AdapterInvocationCapability(capability_checksum="", **capability_fields))
+        capability = AdapterInvocationCapability(capability_checksum=checksum, **capability_fields)
+
+        adapter = MuapiVideoAdapter()
+        outcome = adapter.invoke(capability, mode="real")
+
+        assert call_count["n"] == 1  # the mocked HTTP seam was reached exactly once
+        assert outcome.outcome == "rejected"  # our fake _submit_http returned failure, never a real acceptance
+        assert outcome.evidence["failure_reason"] == "no_real_http_in_test"

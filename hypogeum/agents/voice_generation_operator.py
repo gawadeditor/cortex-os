@@ -126,6 +126,7 @@ def run_voice_generation_operator(
     config: Config,
     episode_id: str,
     output_dir: Path,
+    channel_id: Optional[str] = None,
 ) -> VoiceGenerationResult:
     """
     Generate narration audio for all beats and stitch component tracks.
@@ -175,6 +176,7 @@ def run_voice_generation_operator(
             output_dir=output_dir,
             previous_request_ids=prev_ids,
             log=log,
+            channel_id=channel_id,
         )
         main_results.append(result)
         if result is not None:
@@ -309,6 +311,7 @@ def _generate_beat_safe(
     output_dir: Path,
     previous_request_ids: List[str],
     log,
+    channel_id: Optional[str] = None,
 ) -> Optional[NarrationSegmentResult]:
     """
     Attempt to generate narration for one beat.
@@ -335,6 +338,7 @@ def _generate_beat_safe(
             output_dir=output_dir,
             previous_request_ids=previous_request_ids or None,
             agent=_AGENT_NAME,
+            channel_id=channel_id,
         )
         log.info(
             "vgo_beat_completed",

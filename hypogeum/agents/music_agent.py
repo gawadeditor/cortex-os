@@ -99,6 +99,7 @@ def run_music_agent(
     assets_root: Path,
     section_durations: dict[str, float],
     section_categories: Optional[dict[str, str]] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Source background music tracks for all sections in section_durations.
@@ -195,6 +196,7 @@ def run_music_agent(
                 assets_root=assets_root,
                 tone_arc=tone_arc,
                 agent=_AGENT_NAME,
+                channel_id=channel_id,
             )
             # Success — record track
             tracks[section_key] = {

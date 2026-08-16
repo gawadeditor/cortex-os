@@ -487,6 +487,65 @@ class TestRecordEditorialVerdict:
             store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="maybe", at="t3")
 
 
+class TestAllocateQualifiedAsset:
+    """QUALIFIED -> ALLOCATED: a human-qualified output assigned to a
+    specific coverage slot. Never advances to CONSUMED (that requires
+    separate assembly-use evidence this function has no way to know)."""
+
+    def _at_qualified(self, conn, authorization_id="auth1"):
+        _make_submitted_record(conn, authorization_id)
+        store.advance_to_pending_editorial_review(
+            conn, authorization_id, output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+        )
+        return store.record_editorial_verdict(conn, authorization_id, reviewer="alice", verdict="approved", at="t3")
+
+    def test_allocates_qualified_to_allocated(self, conn):
+        self._at_qualified(conn)
+        rec = store.allocate_qualified_asset(conn, "auth1", allocated_to="shot_x", at="t4")
+        assert rec.current_state == AuthorizationState.ALLOCATED
+        assert not rec.is_terminal()
+        event = next(e for e in rec.history if e.to_state == AuthorizationState.ALLOCATED)
+        assert event.evidence["allocated_to"] == "shot_x"
+        assert event.at == "t4"
+
+    def test_never_advances_to_consumed(self, conn):
+        self._at_qualified(conn)
+        rec = store.allocate_qualified_asset(conn, "auth1", allocated_to="shot_x", at="t4")
+        assert rec.current_state != AuthorizationState.CONSUMED
+
+    def test_idempotent_replay_same_target(self, conn):
+        self._at_qualified(conn)
+        first = store.allocate_qualified_asset(conn, "auth1", allocated_to="shot_x", at="t4")
+        second = store.allocate_qualified_asset(conn, "auth1", allocated_to="shot_x", at="t4")
+        assert len(second.history) == len(first.history)
+
+    def test_conflicting_replay_target_fails_closed(self, conn):
+        self._at_qualified(conn)
+        store.allocate_qualified_asset(conn, "auth1", allocated_to="shot_x", at="t4")
+        with pytest.raises(store.AllocationConflictError):
+            store.allocate_qualified_asset(conn, "auth1", allocated_to="shot_y", at="t5")
+
+    def test_fails_closed_when_not_yet_qualified(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        store.persist_authorization_record(conn, rec)
+        with pytest.raises(store.AuthorizationNotYetSubmittedError):
+            store.allocate_qualified_asset(conn, "auth2", allocated_to="shot_x", at="t4")
+
+    def test_fails_closed_when_record_missing(self, conn):
+        with pytest.raises(store.AuthorizationRecordNotFoundError):
+            store.allocate_qualified_asset(conn, "does-not-exist", allocated_to="shot_x", at="t4")
+
+    def test_extra_evidence_preserved(self, conn):
+        self._at_qualified(conn)
+        rec = store.allocate_qualified_asset(
+            conn, "auth1", allocated_to="shot_x", at="t4",
+            extra_evidence={"deliverable": "main", "aspect_ratio": "16:9"},
+        )
+        event = next(e for e in rec.history if e.to_state == AuthorizationState.ALLOCATED)
+        assert event.evidence["deliverable"] == "main"
+        assert event.evidence["aspect_ratio"] == "16:9"
+
+
 class TestRecordSubmissionOutcome:
     """The fix for an accepted, charged execution being reported as
     merely 'authorized' forever. submission_gate.py itself is

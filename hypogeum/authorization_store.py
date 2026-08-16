@@ -77,10 +77,12 @@ __all__ = [
     "AuthorizationRecordNotFoundError",
     "AuthorizationNotYetSubmittedError",
     "EditorialVerdictConflictError",
+    "AllocationConflictError",
     "advance_to_pending_editorial_review",
     "advance_to_technical_validation_failed",
     "record_editorial_verdict",
     "record_submission_outcome",
+    "allocate_qualified_asset",
 ]
 
 # ---------------------------------------------------------------------------
@@ -172,6 +174,13 @@ class EditorialVerdictConflictError(AuthorizationStoreError):
     authorization_id with a verdict that conflicts with the one already
     durably recorded -- never silently overwrites a prior human
     decision."""
+
+
+class AllocationConflictError(AuthorizationStoreError):
+    """allocate_qualified_asset() was replayed for the same
+    authorization_id with an allocated_to target that conflicts with
+    the one already durably recorded -- never silently reassigns a
+    qualified asset to a different coverage slot."""
 
 
 def _now_iso() -> str:
@@ -904,6 +913,72 @@ def record_editorial_verdict(
     if extra_evidence:
         evidence.update(dict(extra_evidence))
     record = record.transition(target, evidence=evidence, at=at)
+    persist_authorization_record(conn, record)
+    return record
+
+
+def allocate_qualified_asset(
+    conn: sqlite3.Connection, authorization_id: str, *,
+    allocated_to: str, at: str, extra_evidence: Optional[Mapping[str, Any]] = None,
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent recording of QUALIFIED -> ALLOCATED -- a
+    human-qualified output has been assigned to a specific coverage
+    slot. `allocated_to` is an opaque, caller-supplied identity string
+    (e.g. a planned shot id) -- this function never inspects,
+    interprets, or validates its content, and never itself decides
+    whether a slot is the correct or an available destination. The
+    caller is responsible for establishing, from its own domain
+    evidence, that `allocated_to` genuinely is this exact qualified
+    asset's correct, uncontested target before calling this function.
+    This function's own guarantee is narrower and purely structural:
+    it will never allocate a record that is not QUALIFIED, and it will
+    never silently re-target a record already ALLOCATED/CONSUMED to a
+    DIFFERENT `allocated_to` than the one already durably recorded.
+
+    Never advances to CONSUMED -- that transition requires separate,
+    later evidence (`registration_id`, matching authorization_
+    lifecycle.py's own required-evidence table) that an assembly
+    actually used the allocation, which this function has no way to
+    know and does not fabricate.
+
+    Idempotent replay: replaying the same authorization_id with the
+    SAME `allocated_to` as the one already durably recorded (whether
+    the record is at ALLOCATED or already CONSUMED) returns it
+    unchanged. Replaying with a DIFFERENT `allocated_to` fails closed
+    (AllocationConflictError) -- never silently reassigns.
+
+    Fails closed (AuthorizationNotYetSubmittedError) if the record is
+    not at QUALIFIED and not already ALLOCATED/CONSUMED. Fails closed
+    (AuthorizationRecordNotFoundError) if no record exists.
+    """
+    ensure_tables(conn)
+    record = get_authorization_record(conn, authorization_id)
+    if record is None:
+        raise AuthorizationRecordNotFoundError(authorization_id)
+
+    if record.current_state in (AuthorizationState.ALLOCATED, AuthorizationState.CONSUMED):
+        allocated_event = next(
+            (h for h in record.history if h.to_state == AuthorizationState.ALLOCATED), None,
+        )
+        already_allocated_to = allocated_event.evidence.get("allocated_to") if allocated_event else None
+        if already_allocated_to != allocated_to:
+            raise AllocationConflictError(
+                f"authorization {authorization_id!r} is already allocated to "
+                f"{already_allocated_to!r}, cannot re-allocate to {allocated_to!r}"
+            )
+        return record
+
+    if record.current_state != AuthorizationState.QUALIFIED:
+        raise AuthorizationNotYetSubmittedError(
+            f"authorization {authorization_id!r} is at {record.current_state.value!r}, "
+            "not 'qualified' -- no human editorial approval to allocate against"
+        )
+
+    evidence = {"allocated_to": allocated_to}
+    if extra_evidence:
+        evidence.update(dict(extra_evidence))
+    record = record.transition(AuthorizationState.ALLOCATED, evidence=evidence, at=at)
     persist_authorization_record(conn, record)
     return record
 

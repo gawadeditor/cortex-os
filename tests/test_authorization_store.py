@@ -332,6 +332,261 @@ class TestAuthorizationRecordPersistence:
         assert store.get_authorization_record(conn, "does-not-exist") is None
 
 
+def _make_submitted_record(conn, authorization_id="auth1", *, at="t1") -> AuthorizationRecord:
+    rec = AuthorizationRecord.create(authorization_id=authorization_id, envelope_id="env1", envelope_version=1)
+    rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at=at)
+    rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at=at)
+    rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at=at)
+    rec = rec.transition(AuthorizationState.SUBMITTING, evidence={"gate_checks_passed": True}, at=at)
+    rec = rec.transition(AuthorizationState.SUBMITTED, evidence={"provider_job_id": "job_1"}, at=at)
+    store.persist_authorization_record(conn, rec)
+    return rec
+
+
+class TestAdvanceToPendingEditorialReview:
+    """Generic post-acknowledgement lifecycle advancement -- the fix for
+    a real, accepted, charged execution being reported as merely
+    'authorized' forever."""
+
+    def test_advances_submitted_to_pending_editorial_review(self, conn):
+        _make_submitted_record(conn)
+        rec = store.advance_to_pending_editorial_review(
+            conn, "auth1", output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+        )
+        assert rec.current_state == AuthorizationState.PENDING_EDITORIAL_REVIEW
+        states = [e.to_state for e in rec.history]
+        assert AuthorizationState.DOWNLOADED in states
+        assert AuthorizationState.PENDING_EDITORIAL_REVIEW in states
+
+    def test_technical_validation_result_evidence_is_preserved(self, conn):
+        _make_submitted_record(conn)
+        rec = store.advance_to_pending_editorial_review(
+            conn, "auth1", output_checksum="c" * 64,
+            technical_validation_result={"verdict": "PASS", "automated_visual_observations": {"note": "x"}}, at="t2",
+        )
+        review_event = next(e for e in rec.history if e.to_state == AuthorizationState.PENDING_EDITORIAL_REVIEW)
+        assert review_event.evidence["technical_validation_result"]["verdict"] == "PASS"
+
+    def test_idempotent_replay_does_not_duplicate_transitions(self, conn):
+        _make_submitted_record(conn)
+        first = store.advance_to_pending_editorial_review(
+            conn, "auth1", output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+        )
+        second = store.advance_to_pending_editorial_review(
+            conn, "auth1", output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+        )
+        assert second.current_state == first.current_state == AuthorizationState.PENDING_EDITORIAL_REVIEW
+        assert len(second.history) == len(first.history)
+
+    def test_idempotent_when_already_qualified(self, conn):
+        _make_submitted_record(conn)
+        store.advance_to_pending_editorial_review(
+            conn, "auth1", output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+        )
+        qualified = store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="approved", at="t3")
+        assert qualified.current_state == AuthorizationState.QUALIFIED
+        replayed = store.advance_to_pending_editorial_review(
+            conn, "auth1", output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t4",
+        )
+        assert replayed.current_state == AuthorizationState.QUALIFIED, "must not regress a QUALIFIED record"
+
+    def test_fails_closed_when_not_yet_submitted(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        store.persist_authorization_record(conn, rec)
+        with pytest.raises(store.AuthorizationNotYetSubmittedError):
+            store.advance_to_pending_editorial_review(
+                conn, "auth2", output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+            )
+
+    def test_fails_closed_when_record_missing(self, conn):
+        with pytest.raises(store.AuthorizationRecordNotFoundError):
+            store.advance_to_pending_editorial_review(
+                conn, "does-not-exist", output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+            )
+
+
+class TestAdvanceToTechnicalValidationFailed:
+
+    def test_advances_submitted_to_technical_validation_failed(self, conn):
+        _make_submitted_record(conn)
+        rec = store.advance_to_technical_validation_failed(
+            conn, "auth1", output_checksum="c" * 64, failure_reason="corrupt output", at="t2",
+        )
+        assert rec.current_state == AuthorizationState.TECHNICAL_VALIDATION_FAILED
+        assert rec.is_terminal()
+
+    def test_idempotent_replay(self, conn):
+        _make_submitted_record(conn)
+        first = store.advance_to_technical_validation_failed(
+            conn, "auth1", output_checksum="c" * 64, failure_reason="corrupt output", at="t2",
+        )
+        second = store.advance_to_technical_validation_failed(
+            conn, "auth1", output_checksum="c" * 64, failure_reason="corrupt output", at="t2",
+        )
+        assert len(second.history) == len(first.history)
+
+    def test_fails_closed_when_not_yet_submitted(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        store.persist_authorization_record(conn, rec)
+        with pytest.raises(store.AuthorizationNotYetSubmittedError):
+            store.advance_to_technical_validation_failed(
+                conn, "auth2", output_checksum="c" * 64, failure_reason="x", at="t2",
+            )
+
+
+class TestRecordEditorialVerdict:
+    """The ONLY function that can reach QUALIFIED/REJECTED -- automated
+    technical/visual assessment (advance_to_pending_editorial_review)
+    structurally cannot reach either, since it never calls this
+    function and never transitions past PENDING_EDITORIAL_REVIEW."""
+
+    def _at_pending_review(self, conn, authorization_id="auth1"):
+        _make_submitted_record(conn, authorization_id)
+        return store.advance_to_pending_editorial_review(
+            conn, authorization_id, output_checksum="c" * 64, technical_validation_result={"verdict": "PASS"}, at="t2",
+        )
+
+    def test_verdict_starts_unset(self, conn):
+        rec = self._at_pending_review(conn)
+        assert rec.current_state == AuthorizationState.PENDING_EDITORIAL_REVIEW
+        assert not any("reviewer" in e.evidence for e in rec.history)
+
+    def test_approved_verdict_reaches_qualified(self, conn):
+        self._at_pending_review(conn)
+        rec = store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="approved", at="t3")
+        assert rec.current_state == AuthorizationState.QUALIFIED
+        event = next(e for e in rec.history if e.to_state == AuthorizationState.QUALIFIED)
+        assert event.evidence == {"reviewer": "alice", "verdict": "approved"}
+
+    def test_rejected_verdict_reaches_rejected(self, conn):
+        self._at_pending_review(conn)
+        rec = store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="rejected", at="t3")
+        assert rec.current_state == AuthorizationState.REJECTED
+        assert rec.is_terminal()
+
+    def test_idempotent_replay_same_verdict(self, conn):
+        self._at_pending_review(conn)
+        first = store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="approved", at="t3")
+        second = store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="approved", at="t3")
+        assert len(second.history) == len(first.history)
+
+    def test_conflicting_replay_verdict_fails_closed(self, conn):
+        self._at_pending_review(conn)
+        store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="approved", at="t3")
+        with pytest.raises(store.EditorialVerdictConflictError):
+            store.record_editorial_verdict(conn, "auth1", reviewer="bob", verdict="rejected", at="t4")
+
+    def test_fails_closed_when_not_yet_pending_review(self, conn):
+        _make_submitted_record(conn)
+        with pytest.raises(store.AuthorizationNotYetSubmittedError):
+            store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="approved", at="t3")
+
+    def test_invalid_verdict_value_rejected(self, conn):
+        self._at_pending_review(conn)
+        with pytest.raises(ValueError):
+            store.record_editorial_verdict(conn, "auth1", reviewer="alice", verdict="maybe", at="t3")
+
+
+class TestRecordSubmissionOutcome:
+    """The fix for an accepted, charged execution being reported as
+    merely 'authorized' forever. submission_gate.py itself is
+    structurally forbidden from calling persist_authorization_record()
+    (tests/test_authorization_authority_trust_boundary.py) -- this
+    function is what a domain caller invokes immediately after
+    submission_gate.submit() returns, and is equally usable as a
+    backfill for records left stranded at AUTHORIZED from before this
+    mechanism existed."""
+
+    def test_accepted_outcome_advances_authorized_to_submitted(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
+        rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
+        rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
+        store.persist_authorization_record(conn, rec)
+
+        result = store.record_submission_outcome(
+            conn, "auth1", outcome="accepted", submitting_at="t1.5", submitted_at="t1.9", provider_job_id="job_1",
+        )
+        assert result.current_state == AuthorizationState.SUBMITTED
+        submitting_event = next(e for e in result.history if e.to_state == AuthorizationState.SUBMITTING)
+        assert submitting_event.at == "t1.5", "must use the evidence's own timestamp, never a fabricated 'now'"
+        submitted_event = next(e for e in result.history if e.to_state == AuthorizationState.SUBMITTED)
+        assert submitted_event.at == "t1.9"
+        assert submitted_event.evidence["provider_job_id"] == "job_1"
+
+    def test_rejected_outcome_advances_only_to_submitting(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
+        rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
+        rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
+        store.persist_authorization_record(conn, rec)
+
+        result = store.record_submission_outcome(conn, "auth1", outcome="rejected", submitting_at="t1.5")
+        assert result.current_state == AuthorizationState.SUBMITTING
+
+    def test_unknown_acceptance_advances_only_to_submitting(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
+        rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
+        rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
+        store.persist_authorization_record(conn, rec)
+
+        result = store.record_submission_outcome(conn, "auth1", outcome="unknown_acceptance", submitting_at="t1.5")
+        assert result.current_state == AuthorizationState.SUBMITTING
+
+    def test_a_later_accepted_call_advances_an_already_submitting_record(self, conn):
+        """SUBMITTING -> SUBMITTED must still be reachable if a caller
+        first recorded a non-accepted outcome and only later learns of
+        acceptance (e.g. reconciliation of a previously-unknown
+        acceptance)."""
+        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
+        rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
+        rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
+        store.persist_authorization_record(conn, rec)
+        store.record_submission_outcome(conn, "auth1", outcome="unknown_acceptance", submitting_at="t1.5")
+
+        result = store.record_submission_outcome(
+            conn, "auth1", outcome="accepted", submitting_at="t1.5", submitted_at="t2", provider_job_id="job_1",
+        )
+        assert result.current_state == AuthorizationState.SUBMITTED
+        submitting_count = sum(1 for e in result.history if e.to_state == AuthorizationState.SUBMITTING)
+        assert submitting_count == 1, "must not duplicate the SUBMITTING transition"
+
+    def test_idempotent_when_already_past_submitting(self, conn):
+        _make_submitted_record(conn)
+        result = store.record_submission_outcome(
+            conn, "auth1", outcome="accepted", submitting_at="tX", submitted_at="tY", provider_job_id="job_1",
+        )
+        assert result.current_state == AuthorizationState.SUBMITTED
+        submitting_count = sum(1 for e in result.history if e.to_state == AuthorizationState.SUBMITTING)
+        assert submitting_count == 1
+
+    def test_fails_closed_when_not_yet_authorized(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth2", envelope_id="env2", envelope_version=1)
+        store.persist_authorization_record(conn, rec)
+        with pytest.raises(store.AuthorizationNotYetSubmittedError):
+            store.record_submission_outcome(conn, "auth2", outcome="accepted", submitting_at="t1", submitted_at="t2", provider_job_id="job_1")
+
+    def test_fails_closed_when_record_missing(self, conn):
+        with pytest.raises(store.AuthorizationRecordNotFoundError):
+            store.record_submission_outcome(conn, "does-not-exist", outcome="accepted", submitting_at="t1", submitted_at="t2", provider_job_id="job_1")
+
+    def test_invalid_outcome_value_rejected(self, conn):
+        _make_submitted_record(conn)
+        with pytest.raises(ValueError):
+            store.record_submission_outcome(conn, "auth1", outcome="maybe", submitting_at="t1")
+
+    def test_accepted_requires_provider_job_id_and_submitted_at(self, conn):
+        rec = AuthorizationRecord.create(authorization_id="auth1", envelope_id="env1", envelope_version=1)
+        rec = rec.transition(AuthorizationState.COMPILED, evidence={"compiler_identity": "x", "compiler_version": "1"}, at="t1")
+        rec = rec.transition(AuthorizationState.AWAITING_AUTHORIZATION, evidence={"preflight_result": "ok"}, at="t1")
+        rec = rec.transition(AuthorizationState.AUTHORIZED, evidence={"authorized_by": "x", "authorization_method": "y"}, at="t1")
+        store.persist_authorization_record(conn, rec)
+        with pytest.raises(ValueError):
+            store.record_submission_outcome(conn, "auth1", outcome="accepted", submitting_at="t1")
+
+
 class TestAuthorizationProposalPersistence:
     """The immutable, checksummed proposal artifact (plan §6 Commit M) --
     what a future, offline-signed ApprovalArtifact will bind to via

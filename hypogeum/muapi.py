@@ -611,6 +611,7 @@ def _submit_scene_via_gate(
 
     import hypogeum.adapter_registry as adapter_registry
     import hypogeum.authorization_authority as authority
+    import hypogeum.authorization_store as authorization_store
     import hypogeum.budget_scopes as bs
     import hypogeum.channel_config as channel_config
     import hypogeum.db as db
@@ -711,6 +712,28 @@ def _submit_scene_via_gate(
             expected_output_identity=expected_output_identity, expected_deterministic_output_path=str(dest_path),
             output_already_exists=dest_path.exists(),
         )
+        # hypogeum.submission_gate.submit() itself never persists
+        # AuthorizationRecord state past AUTHORIZED (it is structurally
+        # forbidden from calling authorization_store.
+        # persist_authorization_record() -- see tests/test_
+        # authorization_authority_trust_boundary.py's static proof: the
+        # gate settles receipt/grant-ledger/budget evidence for a real
+        # execution, never the record's own persisted lifecycle state).
+        # This domain caller, which already has both the envelope's
+        # authorization_id and the gate's real outcome in hand, is
+        # responsible for recording it -- generic across every future
+        # video caller, never episode/scene-specific. Only reached when
+        # a real boundary was actually entered (adapter_invoked=True);
+        # a pre-boundary denial (bad lease, budget, etc.) leaves the
+        # record correctly untouched at AUTHORIZED.
+        if result.adapter_invoked:
+            adapter_outcome = result.adapter_result.outcome if result.adapter_result is not None else "unknown_acceptance"
+            authorization_store.record_submission_outcome(
+                conn, envelope.authorization_id, outcome=adapter_outcome, submitting_at=at,
+                submitted_at=at if adapter_outcome == "accepted" else None,
+                provider_job_id=(result.adapter_result.provider_job_id if result.adapter_result is not None else None),
+            )
+            conn.commit()
     finally:
         conn.close()
 

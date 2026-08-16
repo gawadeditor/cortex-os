@@ -261,13 +261,15 @@ def write_episode_rollup(
 
         # Roll total_cost_usd into the runs table so the dashboard can display it.
         # Uses episode_id to aggregate across all runs (reruns share the same episode).
+        # Includes protected-path (Authorization Authority / gate) charges via
+        # hypogeum.cost_projection's reconciled total -- costs alone only ever
+        # reflects legacy, run-registered pipeline spend; a grant-derived
+        # execution has no run_id and is never written there directly.
         try:
+            from hypogeum.cost_projection import get_reconciled_episode_total as _reconciled_total
             conn2 = get_connection(resolved_db)
             try:
-                episode_total = conn2.execute(
-                    "SELECT COALESCE(SUM(cost_usd), 0) FROM costs WHERE episode_id = ?",
-                    (episode_id,),
-                ).fetchone()[0]
+                episode_total = float(_reconciled_total(conn2, episode_id))
                 conn2.execute(
                     "UPDATE runs SET total_cost_usd = ? WHERE run_id = ?",
                     (round(episode_total, 6), run_id),

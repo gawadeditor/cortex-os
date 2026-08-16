@@ -74,6 +74,13 @@ __all__ = [
     "sum_active_ledger_consumption",
     "transition_ledger_state",
     "revalidate_grant_reservation",
+    "AuthorizationRecordNotFoundError",
+    "AuthorizationNotYetSubmittedError",
+    "EditorialVerdictConflictError",
+    "advance_to_pending_editorial_review",
+    "advance_to_technical_validation_failed",
+    "record_editorial_verdict",
+    "record_submission_outcome",
 ]
 
 # ---------------------------------------------------------------------------
@@ -145,6 +152,26 @@ class ReservationStateMismatchError(GrantRevalidationError):
     """The reservation is not in 'reserved' state -- already
     boundary-entered by a concurrent path, already released, or
     otherwise inconsistent."""
+
+
+class AuthorizationRecordNotFoundError(AuthorizationStoreError):
+    """No authorization_records row exists for the given authorization_id."""
+
+
+class AuthorizationNotYetSubmittedError(AuthorizationStoreError):
+    """advance_to_pending_editorial_review()/advance_to_technical_
+    validation_failed() was called for a record that has not reached
+    SUBMITTED and has not already passed through this step -- e.g. still
+    DRAFT/COMPILED/AWAITING_AUTHORIZATION/AUTHORIZED/SUBMITTING. Fails
+    closed rather than silently skipping ahead without a genuine
+    SUBMITTED provider acknowledgement backing it."""
+
+
+class EditorialVerdictConflictError(AuthorizationStoreError):
+    """record_editorial_verdict() was replayed for the same
+    authorization_id with a verdict that conflicts with the one already
+    durably recorded -- never silently overwrites a prior human
+    decision."""
 
 
 def _now_iso() -> str:
@@ -619,6 +646,266 @@ def get_authorization_record(conn: sqlite3.Connection, authorization_id: str) ->
         current_state=AuthorizationState(row["current_state"]), history=history,
         superseded_authorization_id=row["superseded_authorization_id"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Post-acknowledgement lifecycle advancement -- generic, domain-agnostic,
+# idempotent. A successful hypogeum.submission_gate.submit() call already
+# advances AUTHORIZED -> SUBMITTING -> SUBMITTED durably (see that
+# module's Step 9.5/11.5); everything past SUBMITTED depends on
+# domain-specific facts (was an output downloaded, is it technically
+# valid) that submission_gate.py cannot know generically, so it is the
+# calling domain's responsibility to call one of the two functions below
+# exactly once per real, verified outcome. Neither function is ever
+# reached by an automated caller merely evaluating shadow/observation
+# checks (hypogeum.shadow_observation never calls this module at all).
+# ---------------------------------------------------------------------------
+
+_PAST_PENDING_EDITORIAL_REVIEW = frozenset({
+    AuthorizationState.PENDING_EDITORIAL_REVIEW, AuthorizationState.QUALIFIED,
+    AuthorizationState.REJECTED, AuthorizationState.ALLOCATED, AuthorizationState.CONSUMED,
+})
+
+
+def advance_to_pending_editorial_review(
+    conn: sqlite3.Connection, authorization_id: str, *,
+    output_checksum: str, technical_validation_result: Mapping[str, Any], at: str,
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent advance of an already-SUBMITTED AuthorizationRecord
+    through DOWNLOADED to PENDING_EDITORIAL_REVIEW -- the exact two
+    transitions authorization_lifecycle.py already defines for "a real
+    output was downloaded and technically validated, now awaiting a human
+    editorial verdict." Domain-agnostic: this function never inspects
+    envelope/episode/provider content -- output_checksum and
+    technical_validation_result are opaque evidence the caller (who alone
+    knows what "downloaded" and "technically valid" mean for its own
+    domain/media type) already computed. An automated visual/technical
+    assessment belongs inside technical_validation_result -- this
+    function cannot reach QUALIFIED/REJECTED under any input, which is
+    what makes it structurally impossible for an automated assessment to
+    impersonate a human editorial verdict (see record_editorial_verdict()
+    below, the only function that can).
+
+    Idempotent replay: if the record is already at PENDING_EDITORIAL_
+    REVIEW or any state reachable only after it (QUALIFIED, REJECTED,
+    ALLOCATED, CONSUMED), returns the record UNCHANGED -- no duplicate
+    transition is recorded and no error is raised, so a reconciliation
+    pass or a process restart can call this repeatedly and safely.
+
+    Fails closed (AuthorizationNotYetSubmittedError) if the record has
+    not yet reached SUBMITTED -- there is no genuine provider
+    acknowledgement to advance past yet. Fails closed
+    (AuthorizationRecordNotFoundError) if no record exists at all.
+    """
+    ensure_tables(conn)
+    record = get_authorization_record(conn, authorization_id)
+    if record is None:
+        raise AuthorizationRecordNotFoundError(authorization_id)
+
+    if record.current_state in _PAST_PENDING_EDITORIAL_REVIEW:
+        return record
+
+    if record.current_state != AuthorizationState.SUBMITTED:
+        raise AuthorizationNotYetSubmittedError(
+            f"authorization {authorization_id!r} is at {record.current_state.value!r}, "
+            "not 'submitted' -- no provider acknowledgement to advance past"
+        )
+
+    record = record.transition(
+        AuthorizationState.DOWNLOADED, evidence={"output_checksum": output_checksum}, at=at,
+    )
+    record = record.transition(
+        AuthorizationState.PENDING_EDITORIAL_REVIEW,
+        evidence={"technical_validation_result": dict(technical_validation_result)}, at=at,
+    )
+    persist_authorization_record(conn, record)
+    return record
+
+
+def advance_to_technical_validation_failed(
+    conn: sqlite3.Connection, authorization_id: str, *,
+    output_checksum: str, failure_reason: str, at: str,
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent sibling of advance_to_pending_editorial_review()
+    for the case where a real download occurred but technical validation
+    failed (corrupt/frozen/wrong-duration/wrong-resolution/etc output) --
+    DOWNLOADED -> TECHNICAL_VALIDATION_FAILED (a terminal state; the
+    authorization is closed, never silently retried from here).
+
+    Idempotent replay: returns an already-TECHNICAL_VALIDATION_FAILED
+    record unchanged. Fails closed exactly as
+    advance_to_pending_editorial_review() does if the record has not yet
+    reached SUBMITTED, or does not exist at all.
+    """
+    ensure_tables(conn)
+    record = get_authorization_record(conn, authorization_id)
+    if record is None:
+        raise AuthorizationRecordNotFoundError(authorization_id)
+
+    if record.current_state == AuthorizationState.TECHNICAL_VALIDATION_FAILED:
+        return record
+
+    if record.current_state != AuthorizationState.SUBMITTED:
+        raise AuthorizationNotYetSubmittedError(
+            f"authorization {authorization_id!r} is at {record.current_state.value!r}, "
+            "not 'submitted' -- no provider acknowledgement to advance past"
+        )
+
+    record = record.transition(
+        AuthorizationState.DOWNLOADED, evidence={"output_checksum": output_checksum}, at=at,
+    )
+    record = record.transition(
+        AuthorizationState.TECHNICAL_VALIDATION_FAILED, evidence={"failure_reason": failure_reason}, at=at,
+    )
+    persist_authorization_record(conn, record)
+    return record
+
+
+def record_submission_outcome(
+    conn: sqlite3.Connection, authorization_id: str, *,
+    outcome: str, submitting_at: str,
+    submitted_at: Optional[str] = None, provider_job_id: Optional[str] = None,
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent recording of a real submission-boundary outcome
+    -- the fix for an accepted, charged execution being reported as
+    merely "authorized" forever. Called by a DOMAIN caller (e.g.
+    hypogeum.muapi._submit_scene_via_gate()) immediately after
+    hypogeum.submission_gate.submit() returns, using the exact outcome
+    it reported -- never by submission_gate.py itself, which is
+    structurally forbidden from calling persist_authorization_record()
+    (see tests/test_authorization_authority_trust_boundary.py's static
+    import-graph proof: the gate settles receipts/grant-ledger/budget
+    evidence for a real execution, never the AuthorizationRecord's own
+    persisted lifecycle state -- that boundary is deliberate, so this
+    function lives here, in the storage module every domain caller
+    already imports for its own reads, not in the gate). Also usable,
+    identically, as a backfill for a record left stranded at AUTHORIZED
+    from before this mechanism existed: the caller then supplies the
+    receipt trail's own recorded event timestamps as
+    submitting_at/submitted_at, never a fabricated "now", so the durable
+    history stays an honest record of when the real events actually
+    happened.
+
+    outcome: "accepted" | "rejected" | "unknown_acceptance" -- the exact
+    adapter outcome submit() observed. Every outcome advances
+    AUTHORIZED -> SUBMITTING (a real provider boundary was entered,
+    evidenced by submitting_at). Only "accepted" advances further,
+    SUBMITTING -> SUBMITTED (evidenced by provider_job_id and
+    submitted_at) -- "rejected"/"unknown_acceptance" have no provider
+    acknowledgement to advance past, so the record correctly stays at
+    SUBMITTING; this function invents no evidence the caller doesn't
+    actually have.
+
+    Idempotent: a record already at or past SUBMITTED (including
+    DOWNLOADED/PENDING_EDITORIAL_REVIEW/QUALIFIED/REJECTED/ALLOCATED/
+    CONSUMED) is returned unchanged, even if called again with
+    outcome="accepted" -- never re-transitioned, never duplicated. A
+    record already at SUBMITTING that is called again with
+    outcome="accepted" advances to SUBMITTED exactly once.
+
+    Fails closed (AuthorizationRecordNotFoundError) if no record
+    exists. Fails closed (AuthorizationNotYetSubmittedError) if the
+    record is in some other, non-AUTHORIZED-and-non-SUBMITTING state
+    (e.g. still COMPILED) -- there is no submission boundary to record
+    an outcome against yet. Fails closed (ValueError) for any outcome
+    other than "accepted"/"rejected"/"unknown_acceptance", or for
+    outcome="accepted" without both submitted_at and provider_job_id.
+    """
+    if outcome not in ("accepted", "rejected", "unknown_acceptance"):
+        raise ValueError(f"outcome must be 'accepted', 'rejected', or 'unknown_acceptance', got {outcome!r}")
+    if outcome == "accepted" and (submitted_at is None or provider_job_id is None):
+        raise ValueError("outcome='accepted' requires both submitted_at and provider_job_id")
+
+    ensure_tables(conn)
+    record = get_authorization_record(conn, authorization_id)
+    if record is None:
+        raise AuthorizationRecordNotFoundError(authorization_id)
+
+    already_past_submitting = _PAST_PENDING_EDITORIAL_REVIEW | {
+        AuthorizationState.SUBMITTED, AuthorizationState.DOWNLOADED, AuthorizationState.TECHNICAL_VALIDATION_FAILED,
+    }
+    if record.current_state in already_past_submitting:
+        return record
+    if record.current_state not in (AuthorizationState.AUTHORIZED, AuthorizationState.SUBMITTING):
+        raise AuthorizationNotYetSubmittedError(
+            f"authorization {authorization_id!r} is at {record.current_state.value!r}, not 'authorized' -- "
+            "no submission boundary to record an outcome against"
+        )
+
+    if record.current_state == AuthorizationState.AUTHORIZED:
+        record = record.transition(
+            AuthorizationState.SUBMITTING, evidence={"gate_checks_passed": True}, at=submitting_at,
+        )
+        persist_authorization_record(conn, record)
+
+    if outcome == "accepted":
+        record = record.transition(
+            AuthorizationState.SUBMITTED, evidence={"provider_job_id": provider_job_id}, at=submitted_at,
+        )
+        persist_authorization_record(conn, record)
+
+    return record
+
+
+def record_editorial_verdict(
+    conn: sqlite3.Connection, authorization_id: str, *,
+    reviewer: str, verdict: str, at: str, extra_evidence: Optional[Mapping[str, Any]] = None,
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent recording of an explicit HUMAN editorial verdict --
+    PENDING_EDITORIAL_REVIEW -> QUALIFIED (verdict="approved") or REJECTED
+    (verdict="rejected"). This is the ONLY function in Factory Core that
+    can make this transition; automated visual/technical assessment must
+    never call it -- that evidence belongs in
+    advance_to_pending_editorial_review()'s technical_validation_result
+    instead. A caller with only automated observations and no genuine
+    human reviewer identity has no path to QUALIFIED/REJECTED other than
+    fabricating a call to this exact function -- which is the intended
+    structural guard, not a policy convention this function itself
+    enforces (it cannot verify who a human is; it can only refuse to be
+    reachable except through an explicit, named call).
+
+    Idempotent replay: replaying the same authorization_id with the SAME
+    verdict as the one already durably recorded returns the record
+    unchanged. Replaying with a DIFFERENT verdict than the one already
+    recorded fails closed (EditorialVerdictConflictError) -- never
+    silently overwrites a prior human decision.
+
+    Fails closed (AuthorizationNotYetSubmittedError) if the record is not
+    at PENDING_EDITORIAL_REVIEW and has not already been given a verdict.
+    """
+    if verdict not in ("approved", "rejected"):
+        raise ValueError(f"verdict must be 'approved' or 'rejected', got {verdict!r}")
+
+    ensure_tables(conn)
+    record = get_authorization_record(conn, authorization_id)
+    if record is None:
+        raise AuthorizationRecordNotFoundError(authorization_id)
+
+    target = AuthorizationState.QUALIFIED if verdict == "approved" else AuthorizationState.REJECTED
+    if record.current_state in (AuthorizationState.QUALIFIED, AuthorizationState.REJECTED):
+        if record.current_state != target:
+            raise EditorialVerdictConflictError(
+                f"authorization {authorization_id!r} already recorded as "
+                f"{record.current_state.value!r}, cannot re-record as {target.value!r}"
+            )
+        return record
+
+    if record.current_state != AuthorizationState.PENDING_EDITORIAL_REVIEW:
+        raise AuthorizationNotYetSubmittedError(
+            f"authorization {authorization_id!r} is at {record.current_state.value!r}, "
+            "not 'pending_editorial_review' -- no technical validation to record a verdict against"
+        )
+
+    evidence = {"reviewer": reviewer, "verdict": verdict}
+    if extra_evidence:
+        evidence.update(dict(extra_evidence))
+    record = record.transition(target, evidence=evidence, at=at)
+    persist_authorization_record(conn, record)
+    return record
 
 
 # ---------------------------------------------------------------------------

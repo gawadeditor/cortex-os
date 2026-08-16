@@ -189,6 +189,45 @@ class TestGrantDerivedGatePath:
         assert result["generation_status"] == "generated", result
         assert result["provider"] == "muapi"
 
+    def test_accepted_call_advances_authorization_past_authorized(self, keypair, tmp_path, monkeypatch):
+        """The lifecycle-reconciliation fix: a real, accepted, charged
+        execution through the gate must not leave its AuthorizationRecord
+        stranded at AUTHORIZED. hypogeum.muapi._submit_scene_via_gate()
+        must call hypogeum.authorization_store.record_submission_
+        outcome() itself (submission_gate.py is structurally forbidden
+        from persisting AuthorizationRecord state -- see
+        tests/test_authorization_authority_trust_boundary.py)."""
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+            mock_post.return_value = _mock_submit_ok("req_lifecycle")
+            mock_get.return_value = _mock_poll_completed()
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+
+        assert result["generation_status"] == "generated", result
+        conn = db.get_connection(db_path)
+        try:
+            authorization_id = "ep_gate_test:s01b01:primary"
+            record = astore.get_authorization_record(conn, authorization_id)
+            assert record is not None
+            from hypogeum.authorization_lifecycle import AuthorizationState
+            assert record.current_state == AuthorizationState.SUBMITTED
+            submitted_event = next(e for e in record.history if e.to_state == AuthorizationState.SUBMITTED)
+            assert submitted_event.evidence["provider_job_id"] == "req_lifecycle"
+        finally:
+            conn.close()
+
     def test_gate_path_capacity_exhausted_fails_closed_with_zero_network_calls(self, keypair, tmp_path, monkeypatch):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"

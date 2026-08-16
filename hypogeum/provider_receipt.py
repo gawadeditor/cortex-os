@@ -43,6 +43,9 @@ __all__ = [
     "DuplicateEventError",
     "MissingAcknowledgementError",
     "LeaseRequiredError",
+    "AmbiguousReceiptsRootError",
+    "resolve_episode_receipts_root",
+    "relocate_legacy_receipt_trail",
 ]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -87,6 +90,154 @@ class DuplicateEventError(Exception):
         self.path = path
         self.reason = reason
         super().__init__(f"{path}: {reason}")
+
+
+class AmbiguousReceiptsRootError(Exception):
+    """resolve_episode_receipts_root() cannot safely determine the
+    canonical receipts directory for the given (assets_root,
+    execution_id) pair -- either the path structurally names a
+    different episode than execution_id, or it contains a directory-
+    traversal component. Never guessed past; the caller must supply an
+    unambiguous root."""
+
+
+def resolve_episode_receipts_root(assets_root: "Path | str", execution_id: str) -> Path:
+    """
+    The single canonical resolver for "what directory holds
+    {execution_id}'s receipts trail" (Factory Core, provider- and
+    domain-agnostic -- takes only a path and an opaque execution_id
+    string, never anything channel/episode-content-specific).
+
+    Accepts any of the shapes a caller might already hold and produces
+    the exact same canonical result for all of them:
+
+      - a bare repository asset root, e.g. ".hypogeum-assets"
+      - an "episodes" root, e.g. ".hypogeum-assets/episodes"
+      - the exact episode root itself, e.g.
+        ".hypogeum-assets/episodes/{execution_id}"
+      - the already-canonical receipts root itself, e.g.
+        ".hypogeum-assets/episodes/{execution_id}/receipts"
+
+    Never appends "episodes/{execution_id}" a second time onto a root
+    that already names it -- this is what fixes the duplicated-segment
+    defect where several callers across this codebase already hold an
+    episode-scoped directory (e.g. `_ASSETS_ROOT / "episodes" /
+    episode_id`) and previously passed it into a receipt store that
+    unconditionally appended "episodes/{execution_id}" again. Every case
+    below is a structural comparison of path parts -- never a string
+    replace/substring-surgery hack.
+
+    Fails closed (AmbiguousReceiptsRootError) if assets_root
+    structurally names `episodes/{something}` where `something` is a
+    DIFFERENT execution_id than the one requested -- silently nesting
+    under the wrong episode's directory is exactly the class of bug
+    this resolver exists to prevent, never a best-effort guess.
+
+    Fails closed (AmbiguousReceiptsRootError) on a directory-traversal
+    component ("..") anywhere in assets_root or in execution_id itself,
+    or on an empty execution_id.
+    """
+    if not execution_id:
+        raise AmbiguousReceiptsRootError("execution_id must be a non-empty string")
+    if Path(execution_id).name != execution_id or ".." in Path(execution_id).parts:
+        raise AmbiguousReceiptsRootError(
+            f"execution_id {execution_id!r} must be a single path segment, not a path itself"
+        )
+
+    root = Path(assets_root)
+    if ".." in root.parts:
+        raise AmbiguousReceiptsRootError(f"assets_root {assets_root!r} contains a directory-traversal component")
+
+    parts = root.parts
+    if "episodes" in parts:
+        idx = parts.index("episodes")
+        if idx + 1 < len(parts) and parts[idx + 1] != execution_id:
+            raise AmbiguousReceiptsRootError(
+                f"assets_root {assets_root!r} already names a different episode "
+                f"({parts[idx + 1]!r}) than the requested execution_id {execution_id!r}"
+            )
+
+    if root.name == "receipts" and root.parent.name == execution_id:
+        return root  # already the canonical receipts root itself
+    if root.name == execution_id:
+        return root / "receipts"
+    if root.name == "episodes":
+        return root / execution_id / "receipts"
+    return root / "episodes" / execution_id / "receipts"
+
+
+def relocate_legacy_receipt_trail(legacy_root: Path, canonical_root: Path, *, at: str) -> dict:
+    """
+    One-shot, auditable relocation of a receipt attempt directory found
+    at a stale/incorrect location (e.g. produced by a caller bug that
+    resolve_episode_receipts_root() now fixes going forward) to its
+    correct canonical location. Generic: takes two plain paths, never
+    inspects or requires any episode/provider/channel content.
+
+    at: caller-supplied ISO-8601 timestamp recorded in the returned
+    audit dict as "relocated_at" -- this module never calls a wall
+    clock internally (matching every other function here), so the
+    caller controls and can test this value deterministically.
+
+    Copies every file byte-for-byte, verifying a SHA-256 checksum match
+    between source and destination for each one -- never deletes or
+    modifies legacy_root, which this function only reads. If
+    canonical_root already holds a file with the same name, verifies it
+    is byte-identical to the source (a prior partial/duplicate
+    relocation) rather than overwriting it; a genuine content mismatch
+    at the destination is a hard failure, never silently resolved.
+    Writes land at their final name via os.replace() from a same-
+    directory temp file, giving the same atomic all-or-nothing
+    guarantee WriteAheadReceiptStore's own writes already rely on.
+
+    Returns an auditable relocation record: {"legacy_root",
+    "canonical_root", "files": [{"name", "sha256", "verified"}, ...],
+    "relocated_at"}. This function performs no logging or database
+    writes itself -- persisting that record is the caller's own
+    responsibility, kept out of this generic module by design.
+
+    Raises RuntimeError (never returns a partial/unverified result as
+    success) if legacy_root does not exist, or if any file's verified
+    destination content does not match its source.
+    """
+    if not legacy_root.exists():
+        raise RuntimeError(f"legacy_root {legacy_root!r} does not exist -- nothing to relocate")
+
+    canonical_root.mkdir(parents=True, exist_ok=True)
+    file_records = []
+    for src in sorted(legacy_root.glob("*.json")):
+        dest = canonical_root / src.name
+        src_bytes = src.read_bytes()
+        src_checksum = _sha256_bytes(src_bytes)
+
+        if dest.exists():
+            dest_checksum = _sha256_bytes(dest.read_bytes())
+            if dest_checksum != src_checksum:
+                raise RuntimeError(
+                    f"canonical destination {dest!r} already exists with different content "
+                    f"(dest sha256 {dest_checksum} != source sha256 {src_checksum})"
+                )
+        else:
+            tmp = dest.with_name(f".tmp.{os.getpid()}.{src.name}")
+            tmp.write_bytes(src_bytes)
+            os.replace(tmp, dest)
+            dest_checksum = _sha256_bytes(dest.read_bytes())
+
+        verified = dest_checksum == src_checksum
+        if not verified:
+            raise RuntimeError(f"post-copy checksum mismatch for {dest!r}")
+        file_records.append({"name": src.name, "sha256": src_checksum, "verified": verified})
+
+    return {
+        "legacy_root": str(legacy_root), "canonical_root": str(canonical_root),
+        "files": file_records, "relocated_at": at,
+    }
+
+
+def _sha256_bytes(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
 
 
 class MissingAcknowledgementError(Exception):
@@ -338,7 +489,7 @@ class WriteAheadReceiptStore:
         self.assets_root = Path(assets_root)
 
     def _attempt_dir(self, execution_id: str, idempotency_key: str) -> Path:
-        return self.assets_root / "episodes" / execution_id / "receipts" / idempotency_key
+        return resolve_episode_receipts_root(self.assets_root, execution_id) / idempotency_key
 
     def prepare_attempt(self, event: ProviderReceiptEvent, *, execution_id: str) -> ProviderReceiptEvent:
         """The one write-ahead call that may happen before any future

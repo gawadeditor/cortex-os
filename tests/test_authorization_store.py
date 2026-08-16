@@ -330,3 +330,68 @@ class TestAuthorizationRecordPersistence:
 
     def test_missing_record_returns_none(self, conn):
         assert store.get_authorization_record(conn, "does-not-exist") is None
+
+
+class TestAuthorizationProposalPersistence:
+    """The immutable, checksummed proposal artifact (plan §6 Commit M) --
+    what a future, offline-signed ApprovalArtifact will bind to via
+    subject_checksum."""
+
+    def _make(self, *, proposal_id="prop_1", **overrides):
+        kwargs = dict(
+            channel_id="hypogeum", episode_id="ep_test", proposed_version=2, superseded_version=1,
+            workflow_id="hypogeum_main_production", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            channel_package_version="1.0", channel_package_checksum="b" * 64,
+            authorization_ids=["a2", "a1"],
+            provider_model_operation_bindings=[("muapi", "veo3.1-lite-text-to-video", "video.text_to_video")],
+            max_cost_per_call_ceiling=Decimal("2.50"), max_total_spend=Decimal("5.00"), currency="USD",
+        )
+        kwargs.update(overrides)
+        checksum = store.compute_proposal_checksum(**kwargs)
+        return store.AuthorizationProposal(
+            proposal_id=proposal_id, created_at="2026-01-01T00:00:00Z", proposal_checksum=checksum, **kwargs,
+        )
+
+    def test_round_trip_preserves_every_field(self, conn):
+        proposal = self._make()
+        store.persist_authorization_proposal(conn, proposal)
+        reloaded = store.get_authorization_proposal(conn, "prop_1")
+        assert reloaded.proposal_checksum == proposal.proposal_checksum
+        assert reloaded.authorization_ids == ("a1", "a2")  # sorted, order-independent
+        assert reloaded.provider_model_operation_bindings == proposal.provider_model_operation_bindings
+        assert reloaded.max_cost_per_call_ceiling == Decimal("2.50")
+        assert reloaded.max_total_spend == Decimal("5.00")
+        assert reloaded.superseded_version == 1
+
+    def test_missing_proposal_returns_none(self, conn):
+        assert store.get_authorization_proposal(conn, "does-not-exist") is None
+
+    def test_checksum_is_order_independent_over_authorization_ids(self):
+        base = dict(
+            channel_id="hypogeum", episode_id="ep_test", proposed_version=2, superseded_version=1,
+            workflow_id="hypogeum_main_production", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            channel_package_version="1.0", channel_package_checksum="b" * 64,
+            provider_model_operation_bindings=[("muapi", "veo3.1-lite-text-to-video", "video.text_to_video")],
+            max_cost_per_call_ceiling=Decimal("2.50"), max_total_spend=Decimal("5.00"), currency="USD",
+        )
+        c1 = store.compute_proposal_checksum(authorization_ids=["a1", "a2"], **base)
+        c2 = store.compute_proposal_checksum(authorization_ids=["a2", "a1"], **base)
+        assert c1 == c2
+
+    def test_checksum_changes_when_max_total_spend_changes(self):
+        base = dict(
+            channel_id="hypogeum", episode_id="ep_test", proposed_version=2, superseded_version=1,
+            workflow_id="hypogeum_main_production", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            channel_package_version="1.0", channel_package_checksum="b" * 64,
+            authorization_ids=["a1", "a2"],
+            provider_model_operation_bindings=[("muapi", "veo3.1-lite-text-to-video", "video.text_to_video")],
+            max_cost_per_call_ceiling=Decimal("2.50"), currency="USD",
+        )
+        c1 = store.compute_proposal_checksum(max_total_spend=Decimal("5.00"), **base)
+        c2 = store.compute_proposal_checksum(max_total_spend=Decimal("5.01"), **base)
+        assert c1 != c2
+
+    def test_duplicate_proposed_version_for_same_scope_rejected(self, conn):
+        store.persist_authorization_proposal(conn, self._make())
+        with pytest.raises(sqlite3.IntegrityError):
+            store.persist_authorization_proposal(conn, self._make(proposal_id="prop_2"))

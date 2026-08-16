@@ -65,6 +65,10 @@ __all__ = [
     "revoke_grant_row",
     "persist_authorization_record",
     "get_authorization_record",
+    "AuthorizationProposal",
+    "compute_proposal_checksum",
+    "persist_authorization_proposal",
+    "get_authorization_proposal",
     "insert_ledger_reservation",
     "get_ledger_reservation",
     "sum_active_ledger_consumption",
@@ -238,6 +242,30 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             history_json                         TEXT NOT NULL,
             superseded_authorization_id            TEXT,
             updated_at                                TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS authorization_proposals (
+            proposal_id             TEXT NOT NULL PRIMARY KEY,
+            channel_id               TEXT NOT NULL,
+            episode_id                 TEXT NOT NULL,
+            proposed_version             INTEGER NOT NULL,
+            superseded_version             INTEGER,
+            workflow_id                      TEXT NOT NULL,
+            workflow_version                  TEXT NOT NULL,
+            workflow_checksum                  TEXT NOT NULL,
+            channel_package_version              TEXT NOT NULL,
+            channel_package_checksum               TEXT NOT NULL,
+            authorization_ids_json                   TEXT NOT NULL,
+            provider_model_operation_bindings_json     TEXT NOT NULL,
+            max_cost_per_call_ceiling_usd                TEXT NOT NULL,
+            max_total_spend_usd                            TEXT NOT NULL,
+            currency                                         TEXT NOT NULL,
+            created_at                                         TEXT NOT NULL,
+            proposal_checksum                                    TEXT NOT NULL,
+            UNIQUE(channel_id, episode_id, proposed_version)
         )
         """
     )
@@ -590,6 +618,136 @@ def get_authorization_record(conn: sqlite3.Connection, authorization_id: str) ->
         envelope_id=row["envelope_id"], envelope_version=row["envelope_version"],
         current_state=AuthorizationState(row["current_state"]), history=history,
         superseded_authorization_id=row["superseded_authorization_id"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Authorization proposal artifact (plan §6 Commit M)
+#
+# An immutable, checksummed summary of a batch of authorization_records
+# all newly compiled from live/current/provable evidence for one
+# (channel_id, episode_id), produced ONLY when every one of them has
+# passed Observation-Only. This is itself the exact payload a future,
+# offline-signed ApprovalArtifact (approval_type="authorization_
+# proposal") will bind to via subject_checksum -- see
+# hypogeum.approval_artifact.compute_approval_subject_checksum()'s own
+# "binds an artifact to one exact payload" discipline, applied here to
+# the proposal side rather than the grant side. Never signed itself --
+# it is the thing a human later signs, not a signature.
+# ---------------------------------------------------------------------------
+
+class AuthorizationProposal:
+    __slots__ = (
+        "proposal_id", "channel_id", "episode_id", "proposed_version", "superseded_version",
+        "workflow_id", "workflow_version", "workflow_checksum",
+        "channel_package_version", "channel_package_checksum",
+        "authorization_ids", "provider_model_operation_bindings",
+        "max_cost_per_call_ceiling", "max_total_spend", "currency", "created_at", "proposal_checksum",
+    )
+
+    def __init__(
+        self, *, proposal_id: str, channel_id: str, episode_id: str, proposed_version: int,
+        superseded_version: Optional[int], workflow_id: str, workflow_version: str, workflow_checksum: str,
+        channel_package_version: str, channel_package_checksum: str,
+        authorization_ids: Sequence[str], provider_model_operation_bindings: Sequence[tuple],
+        max_cost_per_call_ceiling: Decimal, max_total_spend: Decimal, currency: str,
+        created_at: str, proposal_checksum: str,
+    ):
+        self.proposal_id = proposal_id
+        self.channel_id = channel_id
+        self.episode_id = episode_id
+        self.proposed_version = proposed_version
+        self.superseded_version = superseded_version
+        self.workflow_id = workflow_id
+        self.workflow_version = workflow_version
+        self.workflow_checksum = workflow_checksum
+        self.channel_package_version = channel_package_version
+        self.channel_package_checksum = channel_package_checksum
+        self.authorization_ids = tuple(sorted(authorization_ids))
+        self.provider_model_operation_bindings = tuple(sorted(set(provider_model_operation_bindings)))
+        self.max_cost_per_call_ceiling = max_cost_per_call_ceiling
+        self.max_total_spend = max_total_spend
+        self.currency = currency
+        self.created_at = created_at
+        self.proposal_checksum = proposal_checksum
+
+
+def _proposal_checksum_payload(
+    *, channel_id: str, episode_id: str, proposed_version: int, superseded_version: Optional[int],
+    workflow_id: str, workflow_version: str, workflow_checksum: str,
+    channel_package_version: str, channel_package_checksum: str,
+    authorization_ids: Sequence[str], provider_model_operation_bindings: Sequence[tuple],
+    max_cost_per_call_ceiling: Decimal, max_total_spend: Decimal, currency: str,
+) -> dict:
+    return {
+        "channel_id": channel_id, "episode_id": episode_id, "proposed_version": proposed_version,
+        "superseded_version": superseded_version, "workflow_id": workflow_id,
+        "workflow_version": workflow_version, "workflow_checksum": workflow_checksum,
+        "channel_package_version": channel_package_version, "channel_package_checksum": channel_package_checksum,
+        "authorization_ids": sorted(authorization_ids),
+        "provider_model_operation_bindings": sorted(list(t) for t in set(provider_model_operation_bindings)),
+        "max_cost_per_call_ceiling": str(max_cost_per_call_ceiling), "max_total_spend": str(max_total_spend),
+        "currency": currency,
+    }
+
+
+def compute_proposal_checksum(**kwargs) -> str:
+    """Content-addressed checksum over every field of the proposal
+    EXCEPT proposal_id/created_at/proposal_checksum itself -- mirrors
+    hypogeum.authorization_authority.compute_grant_checksum()'s own
+    discipline exactly (same canonical-JSON + sha256 pattern)."""
+    import hashlib
+    payload = _proposal_checksum_payload(**kwargs)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def persist_authorization_proposal(conn: sqlite3.Connection, proposal: AuthorizationProposal) -> None:
+    """Insert-only -- a proposal is immutable once written. A second
+    insert attempt for the same (channel_id, episode_id, proposed_version)
+    fails on the table's own UNIQUE constraint rather than silently
+    overwriting a prior proposal's content."""
+    ensure_tables(conn)
+    conn.execute(
+        """
+        INSERT INTO authorization_proposals
+            (proposal_id, channel_id, episode_id, proposed_version, superseded_version,
+             workflow_id, workflow_version, workflow_checksum,
+             channel_package_version, channel_package_checksum,
+             authorization_ids_json, provider_model_operation_bindings_json,
+             max_cost_per_call_ceiling_usd, max_total_spend_usd, currency, created_at, proposal_checksum)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            proposal.proposal_id, proposal.channel_id, proposal.episode_id, proposal.proposed_version,
+            proposal.superseded_version, proposal.workflow_id, proposal.workflow_version, proposal.workflow_checksum,
+            proposal.channel_package_version, proposal.channel_package_checksum,
+            json.dumps(list(proposal.authorization_ids), sort_keys=True),
+            json.dumps([list(t) for t in proposal.provider_model_operation_bindings], sort_keys=True),
+            str(proposal.max_cost_per_call_ceiling), str(proposal.max_total_spend), proposal.currency,
+            proposal.created_at, proposal.proposal_checksum,
+        ),
+    )
+    conn.commit()
+
+
+def get_authorization_proposal(conn: sqlite3.Connection, proposal_id: str) -> Optional[AuthorizationProposal]:
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT * FROM authorization_proposals WHERE proposal_id = ?", (proposal_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return AuthorizationProposal(
+        proposal_id=row["proposal_id"], channel_id=row["channel_id"], episode_id=row["episode_id"],
+        proposed_version=row["proposed_version"], superseded_version=row["superseded_version"],
+        workflow_id=row["workflow_id"], workflow_version=row["workflow_version"], workflow_checksum=row["workflow_checksum"],
+        channel_package_version=row["channel_package_version"], channel_package_checksum=row["channel_package_checksum"],
+        authorization_ids=json.loads(row["authorization_ids_json"]),
+        provider_model_operation_bindings=[tuple(t) for t in json.loads(row["provider_model_operation_bindings_json"])],
+        max_cost_per_call_ceiling=_str_to_decimal(row["max_cost_per_call_ceiling_usd"]),
+        max_total_spend=_str_to_decimal(row["max_total_spend_usd"]), currency=row["currency"],
+        created_at=row["created_at"], proposal_checksum=row["proposal_checksum"],
     )
 
 

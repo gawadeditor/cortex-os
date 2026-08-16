@@ -768,6 +768,87 @@ class TestGrantDerivedAuthorizationBoundary:
 
 
 # ---------------------------------------------------------------------------
+# Grant-capacity shadow check (plan §5.5 Correction 4, added for Commit M)
+# ---------------------------------------------------------------------------
+
+class TestGrantCapacityShadowCheck:
+    """run_shadow_checks()'s new grant_capacity_remaining outcome --
+    read-only, never reserves anything. Reuses
+    TestGrantDerivedAuthorizationBoundary._register_grant_and_issue()."""
+
+    def _register_grant_and_issue(self, harness, env, **kwargs):
+        return TestGrantDerivedAuthorizationBoundary()._register_grant_and_issue(harness, env, **kwargs)
+
+    def test_no_authorization_supplied_is_unverifiable(self, harness):
+        env = _make_env()
+        outcomes = sg.run_shadow_checks(env, live_sources=_live_sources_for(env), at=AT)
+        outcome = next(o for o in outcomes if o.check == "grant_capacity_remaining")
+        assert outcome.status == "unverifiable"
+
+    def test_non_grant_derived_authorization_is_a_pass_never_unverifiable(self, harness):
+        """The default, grant-free authorization (every real domain's
+        production call today) must never block WOULD_ALLOW."""
+        env = _make_env()
+        outcomes = sg.run_shadow_checks(
+            env, live_sources=_live_sources_for(env), authorization=_make_auth(env), at=AT,
+        )
+        outcome = next(o for o in outcomes if o.check == "grant_capacity_remaining")
+        assert outcome.status == "pass"
+
+    def test_grant_with_remaining_capacity_passes(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        record, grant, authority, astore, db_path = self._register_grant_and_issue(harness, env, max_calls=5)
+        outcomes = sg.run_shadow_checks(
+            env, live_sources=_live_sources_for(env), authorization=record,
+            lease_conn=harness.conn, at=AT,
+        )
+        outcome = next(o for o in outcomes if o.check == "grant_capacity_remaining")
+        assert outcome.status == "pass", outcome.detail
+
+    def test_grant_with_exhausted_call_capacity_fails(self, harness):
+        """max_calls=0 would make issue_child_authorization() itself
+        deny at issuance for a THIRD attempt -- to prove the shadow
+        check's own capacity math independently, register max_calls=1,
+        really consume that one slot with env1, then evaluate a SECOND
+        envelope (env2, same binding) whose authorization record is
+        hand-built with the same grant evidence but was never actually
+        issued through the grant (issuing it for real would itself
+        raise GrantCapacityExhaustedError, which is exactly what this
+        test wants to independently confirm the shadow check reports
+        without needing to trigger that live exception path)."""
+        import dataclasses
+        env1 = _make_env(planned_shot_id="shot_1", authorization_id="auth_1", idempotency_key="idem_1")
+        env2 = _make_env(planned_shot_id="shot_2", authorization_id="auth_2", idempotency_key="idem_2")
+        harness.acquire_lease(env1)
+        record1, grant, authority, astore, db_path = self._register_grant_and_issue(harness, env1, max_calls=1)
+
+        grant_evidence = record1.history[-1].evidence
+        record2 = dataclasses.replace(
+            record1, authorization_id=env2.authorization_id, envelope_id=env2.envelope_id,
+            history=record1.history[:-1] + (
+                dataclasses.replace(record1.history[-1], evidence={**grant_evidence, "grant_reservation_id": "unused_synthetic_reservation"}),
+            ),
+        )
+        outcomes = sg.run_shadow_checks(
+            env2, live_sources=_live_sources_for(env2), authorization=record2,
+            lease_conn=harness.conn, at=AT,
+        )
+        outcome = next(o for o in outcomes if o.check == "grant_capacity_remaining")
+        assert outcome.status == "fail", outcome.detail
+
+    def test_no_lease_conn_supplied_is_unverifiable_even_with_grant_evidence(self, harness):
+        env = _make_env()
+        harness.acquire_lease(env)
+        record, grant, authority, astore, db_path = self._register_grant_and_issue(harness, env)
+        outcomes = sg.run_shadow_checks(
+            env, live_sources=_live_sources_for(env), authorization=record, at=AT,
+        )
+        outcome = next(o for o in outcomes if o.check == "grant_capacity_remaining")
+        assert outcome.status == "unverifiable"
+
+
+# ---------------------------------------------------------------------------
 # Reconstructed-binding block (plan §5 -- Commit M precondition fix)
 # ---------------------------------------------------------------------------
 

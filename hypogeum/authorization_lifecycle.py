@@ -45,6 +45,7 @@ class AuthorizationState(str, Enum):
     COMPILED = "compiled"
     PREFLIGHT_FAILED = "preflight_failed"
     AWAITING_AUTHORIZATION = "awaiting_authorization"
+    AWAITING_EXPLICIT_AUTHORIZATION = "awaiting_explicit_authorization"
     AUTHORIZED = "authorized"
     SUBMITTING = "submitting"
     SUBMITTED = "submitted"
@@ -74,8 +75,21 @@ ALLOWED_TRANSITIONS: frozenset = frozenset({
     (S.COMPILED, S.SUPERSEDED),
 
     (S.AWAITING_AUTHORIZATION, S.AUTHORIZED),
+    (S.AWAITING_AUTHORIZATION, S.AWAITING_EXPLICIT_AUTHORIZATION),
     (S.AWAITING_AUTHORIZATION, S.INVALIDATED_SOURCE_CHANGED),
     (S.AWAITING_AUTHORIZATION, S.CANCELLED),
+
+    # Reachable only from awaiting_authorization, only after 88/88 (or
+    # N/N) Observation-Only has passed (plan §5.5/§6 Commit M) --
+    # itself transitions to authorized ONLY via a separate, later,
+    # explicit-approval event (a verified ApprovalArtifact, never
+    # automatically) -- see hypogeum.authorization_authority.
+    # issue_authorization_from_explicit_approval(). The same
+    # invalidation/cancellation safety valves every other pre-authorized
+    # state has remain available while a proposal sits here.
+    (S.AWAITING_EXPLICIT_AUTHORIZATION, S.AUTHORIZED),
+    (S.AWAITING_EXPLICIT_AUTHORIZATION, S.INVALIDATED_SOURCE_CHANGED),
+    (S.AWAITING_EXPLICIT_AUTHORIZATION, S.CANCELLED),
 
     (S.AUTHORIZED, S.SUBMITTING),
     (S.AUTHORIZED, S.INVALIDATED_SOURCE_CHANGED),
@@ -121,10 +135,21 @@ REQUIRED_TRANSITION_EVIDENCE_KEYS: Mapping[tuple, tuple] = {
     (S.COMPILED, S.SUPERSEDED): ("superseding_envelope_id",),
 
     (S.AWAITING_AUTHORIZATION, S.AUTHORIZED): ("authorized_by", "authorization_method"),
+    (S.AWAITING_AUTHORIZATION, S.AWAITING_EXPLICIT_AUTHORIZATION): (
+        "observation_only_pass_count", "observation_only_total_count", "proposal_artifact_checksum",
+    ),
     (S.AWAITING_AUTHORIZATION, S.INVALIDATED_SOURCE_CHANGED): (
         "changed_dependency", "old_checksum", "new_checksum",
     ),
     (S.AWAITING_AUTHORIZATION, S.CANCELLED): ("cancelled_by", "reason"),
+
+    (S.AWAITING_EXPLICIT_AUTHORIZATION, S.AUTHORIZED): (
+        "authorized_by", "authorization_method", "approval_artifact_id", "approval_subject_checksum",
+    ),
+    (S.AWAITING_EXPLICIT_AUTHORIZATION, S.INVALIDATED_SOURCE_CHANGED): (
+        "changed_dependency", "old_checksum", "new_checksum",
+    ),
+    (S.AWAITING_EXPLICIT_AUTHORIZATION, S.CANCELLED): ("cancelled_by", "reason"),
 
     (S.AUTHORIZED, S.SUBMITTING): ("gate_checks_passed",),
     (S.AUTHORIZED, S.INVALIDATED_SOURCE_CHANGED): (

@@ -955,6 +955,66 @@ class CheckOutcome:
     detail: Optional[str] = None
 
 
+def _check_grant_capacity_shadow(
+    lease_conn, envelope: GenerationExecutionEnvelope, authorization: Optional[AuthorizationRecord],
+) -> CheckOutcome:
+    """
+    Read-only grant-capacity parity check for Observation-Only (plan
+    §5.5 Correction 4's remaining-capacity computation, added for
+    Commit M) -- never reserves anything, never writes a ledger row.
+    Reports whether the grant that authorized (or would authorize)
+    this envelope still has room, purely as diagnostic evidence in the
+    shadow report. "unverifiable" whenever the evidence needed to even
+    ask the question is absent -- there is no lower-severity "skip"
+    outcome, matching every other check in this function.
+    """
+    if authorization is None:
+        return CheckOutcome(
+            "grant_capacity_remaining", "unverifiable",
+            "no authorization supplied -- cannot tell whether this would be a grant-derived attempt",
+        )
+    grant_evidence = _grant_binding_evidence(authorization)
+    if grant_evidence is None:
+        # A complete, valid authorization that simply carries no grant
+        # evidence (the one-off explicit-approval path, or -- true for
+        # every real domain today -- no grant exists at all) is not a
+        # capacity-check failure: there is no grant ceiling to exceed.
+        # A genuine "pass", never "unverifiable" -- otherwise every
+        # non-grant-derived shadow evaluation across every domain would
+        # be blocked from ever reaching WOULD_ALLOW.
+        return CheckOutcome("grant_capacity_remaining", "pass", "not a grant-derived attempt -- no grant ceiling applies")
+    if lease_conn is None:
+        return CheckOutcome("grant_capacity_remaining", "unverifiable", "no lease_conn supplied -- cannot read the grant ledger")
+
+    grant = authorization_store.get_grant(lease_conn, grant_evidence["parent_grant_id"], grant_evidence["parent_grant_version"])
+    if grant is None:
+        return CheckOutcome("grant_capacity_remaining", "fail", "parent grant no longer exists")
+    if grant.status != "active":
+        return CheckOutcome("grant_capacity_remaining", "fail", f"parent grant status is {grant.status!r}, not 'active'")
+
+    binding = grant.find_binding(envelope.provider, envelope.model, envelope.provider_operation)
+    if binding is None:
+        return CheckOutcome("grant_capacity_remaining", "fail", "no matching grant binding for this envelope's (provider, model, provider_operation)")
+
+    call_count, spend_total = authorization_store.sum_active_ledger_consumption(
+        lease_conn, grant.grant_id, envelope.provider, envelope.model, envelope.provider_operation,
+    )
+    if binding.max_calls is not None and call_count >= binding.max_calls:
+        return CheckOutcome("grant_capacity_remaining", "fail", f"binding call capacity exhausted: {call_count}/{binding.max_calls}")
+    if binding.max_total_spend is not None and spend_total + envelope.max_cost_per_call > binding.max_total_spend:
+        return CheckOutcome(
+            "grant_capacity_remaining", "fail",
+            f"binding spend capacity would be exceeded: {spend_total} + {envelope.max_cost_per_call} > {binding.max_total_spend}",
+        )
+
+    max_calls_display = binding.max_calls if binding.max_calls is not None else "unlimited"
+    max_spend_display = binding.max_total_spend if binding.max_total_spend is not None else "unlimited"
+    return CheckOutcome(
+        "grant_capacity_remaining", "pass",
+        f"{call_count}/{max_calls_display} calls, {spend_total}/{max_spend_display} spend",
+    )
+
+
 def run_shadow_checks(
     envelope: Optional[GenerationExecutionEnvelope],
     *,
@@ -1046,5 +1106,7 @@ def run_shadow_checks(
         outcomes.append(CheckOutcome(GATE_CHECK_ORDER[16], "unverifiable", "no budget scopes supplied"))
     else:
         outcomes.append(CheckOutcome(GATE_CHECK_ORDER[16], "pass", "scope configuration present (no reservation attempted in shadow mode)"))
+
+    outcomes.append(_check_grant_capacity_shadow(lease_conn, envelope, authorization))
 
     return tuple(outcomes)

@@ -126,7 +126,9 @@ _INVENTORY = [
     {"domain": "video", "module": "hypogeum/muapi.py", "function": "_attempt_generation", "status": _STATUS_SHADOW_ONLY},
     {"domain": "video_gate_path", "module": "hypogeum/muapi.py", "function": "_submit_scene_via_gate", "status": _STATUS_GATED},
     {"domain": "image_reference", "module": "hypogeum/muapi.py", "function": "generate_reference_image", "status": _STATUS_UNGATED},
+    {"domain": "image_gate_path", "module": "hypogeum/muapi.py", "function": "_generate_reference_image_via_gate", "status": _STATUS_GATED},
     {"domain": "thumbnail", "module": "hypogeum/muapi.py", "function": "_generate_thumbnail_with_model", "status": _STATUS_UNGATED},
+    {"domain": "thumbnail_gate_path", "module": "hypogeum/muapi.py", "function": "_generate_thumbnail_via_gate", "status": _STATUS_GATED},
     {"domain": "voice", "module": "hypogeum/elevenlabs.py", "function": "generate_narration_segment", "status": _STATUS_UNGATED},
     {"domain": "music", "module": "hypogeum/elevenlabs.py", "function": "generate_music_track", "status": _STATUS_UNGATED},
     {"domain": "text_llm", "module": "hypogeum/openrouter.py", "function": "call_claude", "status": _STATUS_UNGATED},
@@ -247,7 +249,10 @@ class TestFakeAdapterRemainsTestOnly:
     any production module -- it is the one sanctioned test-only bypass,
     and this must remain true throughout every commit in the program."""
 
-    _ALLOWED_IMPORTERS = {"hypogeum/submission_gate.py", "hypogeum/providers/muapi_video_adapter.py"}
+    _ALLOWED_IMPORTERS = {
+        "hypogeum/submission_gate.py", "hypogeum/providers/muapi_video_adapter.py",
+        "hypogeum/providers/muapi_image_adapter.py", "hypogeum/providers/muapi_thumbnail_adapter.py",
+    }
     """submission_gate.py imports fake_provider_adapter.py for the
     shared AdapterInvocationCapability/AdapterResult/
     compute_capability_checksum definitions -- the gate itself, not a

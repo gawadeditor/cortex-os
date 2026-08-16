@@ -1031,6 +1031,127 @@ _VIDEO_TO_REF_ASPECT: dict[str, str] = {
 # Production callers must pass an explicit video_aspect_ratio.
 _REF_ASPECT_FALLBACK = "1:1"
 
+_IMAGE_PROVIDER_OPERATION = "image.reference"
+_IMAGE_COMPILER_IDENTITY = "hypogeum.muapi.generate_reference_image"
+
+
+def _generate_reference_image_via_gate(
+    *, channel_id: str, grant, entity_id: str, prompt: str, aspect_ratio: str,
+    episode_id: str, output_dir: Path, config: Config, log,
+) -> "tuple[Optional[ReferenceImageResult], Optional[str]]":
+    """The grant-derived gate path for reference-image generation --
+    mirrors _submit_scene_via_gate()'s structure exactly (see that
+    function's own docstring for the full rationale). Never reached
+    unless a real, verified grant already resolves for (channel_id,
+    episode_id)."""
+    import hashlib
+
+    import hypogeum.adapter_registry as adapter_registry
+    import hypogeum.authorization_authority as authority
+    import hypogeum.budget_scopes as bs
+    import hypogeum.channel_config as channel_config
+    import hypogeum.db as db
+    import hypogeum.submission_gate as submission_gate
+    import hypogeum.workflow_executor as workflow_executor
+    from datetime import timedelta
+    from hypogeum.providers.muapi_image_adapter import (
+        SCHEMA_VERSION as _IMAGE_SCHEMA_VERSION, MuapiImageAdapter, encode_image_payload,
+    )
+    from hypogeum.provider_receipt import WriteAheadReceiptStore
+
+    model = config.MUAPI_IMAGE_MODEL
+    at = datetime.now(timezone.utc).isoformat()
+
+    package_identity = channel_config.compute_channel_package_identity(channel_id)
+    if not package_identity.get("available"):
+        return None, "channel_package_identity_unavailable"
+    workflow_binding = workflow_executor.resolve_workflow_binding(
+        channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
+    )
+
+    plan_checksum = hashlib.sha256(_canonical_json_bytes({"entity_id": entity_id, "prompt": prompt})).hexdigest()
+    structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({"aspect_ratio": aspect_ratio})).hexdigest()
+
+    operation_payload_bytes = encode_image_payload(
+        prompt=prompt, model=model, aspect_ratio=aspect_ratio, entity_id=entity_id,
+        episode_id=episode_id, output_dir=str(output_dir),
+    )
+    operation_payload_content = operation_payload_bytes.decode("utf-8")
+    operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
+
+    expected_output_identity = f"episodes/{episode_id}/video/ref_{entity_id}"
+    dest_path = output_dir / "video" / f"ref_{entity_id}.jpg"
+    max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, 0.015)))
+    authorization_id = f"{episode_id}:ref_{entity_id}"
+
+    try:
+        envelope = GenerationExecutionEnvelope.create(
+            envelope_schema_version=_VIDEO_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=f"ref_{entity_id}",
+            structured_spec_checksum=structured_spec_checksum, compiler_identity=_IMAGE_COMPILER_IDENTITY,
+            compiler_version="1", operation_payload_content=operation_payload_content,
+            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_IMAGE_SCHEMA_VERSION,
+            content_provenance={
+                "compiler": _IMAGE_COMPILER_IDENTITY, "compiler_version": "1",
+                "source_work_item_id": f"ref_{entity_id}", "rendered_at": at,
+            },
+            provider=_VIDEO_PROVIDER, model=model, provider_operation=_IMAGE_PROVIDER_OPERATION,
+            deterministic_output_path=str(dest_path), expected_output_identity=expected_output_identity,
+            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+            retry_authorized=False, fallback_authorized=False, idempotency_key=authorization_id,
+            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+            dependency_checksums={
+                "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_IMAGE_COMPILER_IDENTITY.encode()).hexdigest(),
+            },
+            aspect_ratio=aspect_ratio,
+        )
+        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+        log.warn("muapi_gate_authorization_failed", entity_id=entity_id, reason=str(exc))
+        return None, f"gate_authorization_failed: {exc}"
+
+    conn = db.get_connection()
+    try:
+        adapter_registry.register_adapter(_VIDEO_PROVIDER, model, _IMAGE_PROVIDER_OPERATION, "1.0", MuapiImageAdapter)
+        lease_owner_id = f"muapi_image_adapter:ref_{entity_id}"
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
+        if lease is None:
+            return None, "gate_lease_unavailable"
+
+        receipt_store = WriteAheadReceiptStore(output_dir)
+        live_sources = submission_gate.LiveSources(
+            channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
+            structured_spec_checksum=structured_spec_checksum, compiler_version="1",
+        )
+        scopes = [
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"ref_{entity_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
+        ]
+        result = submission_gate.submit(
+            envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,
+            lease_owner_id=lease_owner_id, lease_fencing_token=lease["fencing_token"], receipt_store=receipt_store,
+            execution_id=episode_id, attempt_id=authorization_id, budget_scopes=scopes,
+            required_provider=_VIDEO_PROVIDER, required_model=model, at=at,
+            expected_aspect_ratio=aspect_ratio, expected_output_identity=expected_output_identity,
+            expected_deterministic_output_path=str(dest_path), output_already_exists=dest_path.exists(),
+        )
+    finally:
+        conn.close()
+
+    if not result.approved:
+        return None, f"gate_denied[{result.denied_at_check}]: {result.reason}"
+
+    hosted_url = result.adapter_result.evidence.get("hosted_url") if result.adapter_result else None
+    if not hosted_url:
+        return None, "gate_accepted_but_no_hosted_url_in_evidence"
+
+    return ReferenceImageResult(asset_id=expected_output_identity, hosted_url=hosted_url), None
+
 
 def generate_reference_image(
     entity_id: str,
@@ -1042,9 +1163,21 @@ def generate_reference_image(
     video_aspect_ratio: str = "16:9",
     agent: Optional[str] = None,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    channel_id: Optional[str] = None,
 ) -> ReferenceImageResult:
     """
     Generate a reference image for a final-locked entity (Path A).
+
+    channel_id (added for the Authorization Authority gate path,
+    plan §5.5/§6 Commit F -- mirrors submit_scene()'s own channel_id
+    parameter exactly): optional. When supplied AND a real, verified
+    RunAuthorizationGrant already resolves for (channel_id, episode_id),
+    the call routes through hypogeum.authorization_authority + hypogeum.
+    submission_gate instead of the legacy path below. Every existing
+    caller omits channel_id and is completely unaffected; even a caller
+    that supplies it falls straight through to the unchanged legacy
+    path whenever no real grant exists (true for every real channel
+    until a human operator explicitly runs the Enforcement Cutover).
 
     Submits an image generation job, polls for completion, downloads the image
     locally, uploads it to MUAPI storage for a stable hosted URL, and returns
@@ -1084,6 +1217,23 @@ def generate_reference_image(
     ref_aspect_ratio = _VIDEO_TO_REF_ASPECT[video_aspect_ratio]
 
     log = get_logger(episode_id=episode_id, agent=agent or "muapi")
+
+    # Grant-derived gate path (Correction 3/5.5) -- see submit_scene()'s
+    # own identical branch for the full rationale. Skipped entirely
+    # unless channel_id is supplied AND a real, verified grant resolves.
+    if channel_id is not None:
+        import hypogeum.authorization_authority as _authority
+        grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+        if grant is not None:
+            gate_result, gate_failure_reason = _generate_reference_image_via_gate(
+                channel_id=channel_id, grant=grant, entity_id=entity_id, prompt=visual_spec_text,
+                aspect_ratio=ref_aspect_ratio, episode_id=episode_id, output_dir=output_dir,
+                config=config, log=log,
+            )
+            if gate_result is not None:
+                return gate_result
+            raise MUAPIError(f"Reference image gate path failed for entity {entity_id!r}: {gate_failure_reason}")
+
     image_model = config.MUAPI_IMAGE_MODEL
     endpoint = f"{config.MUAPI_BASE_URL}/{image_model}"
     payload = {
@@ -1936,9 +2086,17 @@ def generate_thumbnail(
     text_overlay: Optional[dict] = None,
     typography_plan: Optional[dict] = None,
     typography_integration: str = "composited",
+    channel_id: Optional[str] = None,
 ) -> ThumbnailResult:
     """
     Generate a thumbnail image for one deliverable (main episode or a Short).
+
+    channel_id (added for the Authorization Authority gate path, plan
+    §5.5/§6 Commit F): optional, forwarded only to the "muapi" provider
+    branch. When supplied AND a real, verified RunAuthorizationGrant
+    resolves for (channel_id, episode_id), that branch routes through
+    the gate instead of its legacy path; the "openai"/"openrouter"
+    branches are unaffected and out of scope for this program.
 
     Tries each provider in config.THUMBNAIL_IMAGE_PROVIDER / _FALLBACK_PROVIDER /
     _FALLBACK2_PROVIDER order (default: muapi/GPT Image 2 primary, then openrouter,
@@ -2019,6 +2177,7 @@ def generate_thumbnail(
                 typography_integration=typography_integration,
                 log=log,
                 is_fallback=is_fallback,
+                channel_id=channel_id,
             )
             if is_fallback:
                 log.info(
@@ -2069,11 +2228,16 @@ def _generate_thumbnail_one_provider(
     typography_integration: str,
     log,
     is_fallback: bool,
+    channel_id: Optional[str] = None,
 ) -> "ThumbnailResult":
     """
     Try one thumbnail provider. Returns ThumbnailResult on success.
     Raises on any failure — caller decides whether to try the next provider.
     MUAPIBudgetExhausted is always re-raised by the caller without retrying.
+
+    channel_id (Commit F): forwarded only to the "muapi" branch's
+    _attempt_thumbnail_generation() call -- the "openai"/"openrouter"
+    branches are out of scope for this program's gate migration.
     """
     local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
 
@@ -2160,6 +2324,7 @@ def _generate_thumbnail_one_provider(
         typography_plan=typography_plan,
         typography_integration=typography_integration,
         log=log,
+        channel_id=channel_id,
     )
     thumb_asset_id = f"episodes/{episode_id}/thumbnails/{deliverable_id}"
     _finance.record_cost(
@@ -2528,6 +2693,127 @@ def _attempt_generation(
 # Internal: thumbnail generation helpers
 # ---------------------------------------------------------------------------
 
+_THUMBNAIL_PROVIDER_OPERATION = "image.thumbnail"
+_THUMBNAIL_COMPILER_IDENTITY = "hypogeum.muapi._generate_thumbnail_with_model"
+
+
+def _generate_thumbnail_via_gate(
+    *, channel_id: str, grant, model: str, deliverable_id: str, image_prompt: str,
+    aspect_ratio: str, episode_id: str, output_dir: Path, config: Config, local_path: Path, log,
+) -> None:
+    """
+    The grant-derived gate path for thumbnail generation (muapi
+    provider branch only) -- mirrors _submit_scene_via_gate()'s
+    structure exactly (see that function's own docstring for the full
+    rationale). Same void/write-to-local_path/raise-MUAPIError-on-
+    failure contract as _generate_thumbnail_with_model(), so it is a
+    drop-in replacement at its one call site in
+    _attempt_thumbnail_generation(). Never reached unless a real,
+    verified grant already resolves for (channel_id, episode_id).
+    """
+    import hashlib
+
+    import hypogeum.adapter_registry as adapter_registry
+    import hypogeum.authorization_authority as authority
+    import hypogeum.budget_scopes as bs
+    import hypogeum.channel_config as channel_config
+    import hypogeum.db as db
+    import hypogeum.submission_gate as submission_gate
+    import hypogeum.workflow_executor as workflow_executor
+    from datetime import timedelta
+    from hypogeum.providers.muapi_thumbnail_adapter import (
+        SCHEMA_VERSION as _THUMBNAIL_SCHEMA_VERSION, MuapiThumbnailAdapter, encode_thumbnail_payload,
+    )
+    from hypogeum.provider_receipt import WriteAheadReceiptStore
+
+    at = datetime.now(timezone.utc).isoformat()
+    is_gpt_image_2 = model in _GPT_IMAGE_2_MODELS
+
+    package_identity = channel_config.compute_channel_package_identity(channel_id)
+    if not package_identity.get("available"):
+        raise MUAPIError(f"channel_package_identity_unavailable for {deliverable_id!r}")
+    workflow_binding = workflow_executor.resolve_workflow_binding(
+        channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
+    )
+
+    plan_checksum = hashlib.sha256(_canonical_json_bytes({"deliverable_id": deliverable_id, "prompt": image_prompt})).hexdigest()
+    structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({"aspect_ratio": aspect_ratio, "model": model})).hexdigest()
+
+    operation_payload_bytes = encode_thumbnail_payload(
+        prompt=image_prompt, model=model, aspect_ratio=aspect_ratio, deliverable_id=deliverable_id,
+        episode_id=episode_id, output_dir=str(output_dir), is_gpt_image_2=is_gpt_image_2,
+        resolution=config.THUMBNAIL_IMAGE_RESOLUTION if is_gpt_image_2 else None,
+        quality=config.THUMBNAIL_IMAGE_QUALITY if is_gpt_image_2 else None,
+    )
+    operation_payload_content = operation_payload_bytes.decode("utf-8")
+    operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
+
+    expected_output_identity = f"episodes/{episode_id}/thumbnails/{deliverable_id}"
+    max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, 0.015)))
+    authorization_id = f"{episode_id}:thumb_{deliverable_id}"
+
+    try:
+        envelope = GenerationExecutionEnvelope.create(
+            envelope_schema_version=_VIDEO_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=f"thumb_{deliverable_id}",
+            structured_spec_checksum=structured_spec_checksum, compiler_identity=_THUMBNAIL_COMPILER_IDENTITY,
+            compiler_version="1", operation_payload_content=operation_payload_content,
+            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_THUMBNAIL_SCHEMA_VERSION,
+            content_provenance={
+                "compiler": _THUMBNAIL_COMPILER_IDENTITY, "compiler_version": "1",
+                "source_work_item_id": f"thumb_{deliverable_id}", "rendered_at": at,
+            },
+            provider=_VIDEO_PROVIDER, model=model, provider_operation=_THUMBNAIL_PROVIDER_OPERATION,
+            deterministic_output_path=str(local_path), expected_output_identity=expected_output_identity,
+            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+            retry_authorized=False, fallback_authorized=False, idempotency_key=authorization_id,
+            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+            dependency_checksums={
+                "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_THUMBNAIL_COMPILER_IDENTITY.encode()).hexdigest(),
+            },
+            aspect_ratio=aspect_ratio,
+        )
+        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+        raise MUAPIError(f"Thumbnail gate authorization failed for {deliverable_id!r}: {exc}") from exc
+
+    conn = db.get_connection()
+    try:
+        adapter_registry.register_adapter(_VIDEO_PROVIDER, model, _THUMBNAIL_PROVIDER_OPERATION, "1.0", MuapiThumbnailAdapter)
+        lease_owner_id = f"muapi_thumbnail_adapter:{deliverable_id}"
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
+        if lease is None:
+            raise MUAPIError(f"Thumbnail gate lease unavailable for {deliverable_id!r}")
+
+        receipt_store = WriteAheadReceiptStore(output_dir)
+        live_sources = submission_gate.LiveSources(
+            channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
+            structured_spec_checksum=structured_spec_checksum, compiler_version="1",
+        )
+        scopes = [
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"thumb_{deliverable_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
+        ]
+        result = submission_gate.submit(
+            envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,
+            lease_owner_id=lease_owner_id, lease_fencing_token=lease["fencing_token"], receipt_store=receipt_store,
+            execution_id=episode_id, attempt_id=authorization_id, budget_scopes=scopes,
+            required_provider=_VIDEO_PROVIDER, required_model=model, at=at,
+            expected_aspect_ratio=aspect_ratio, expected_output_identity=expected_output_identity,
+            expected_deterministic_output_path=str(local_path), output_already_exists=local_path.exists(),
+        )
+    finally:
+        conn.close()
+
+    if not result.approved:
+        raise MUAPIError(f"Thumbnail gate denied for {deliverable_id!r}: [{result.denied_at_check}] {result.reason}")
+
+
 def _generate_thumbnail_with_model(
     model: str,
     deliverable_id: str,
@@ -2652,6 +2938,7 @@ def _attempt_thumbnail_generation(
     log,
     typography_plan: Optional[dict] = None,
     typography_integration: str = "composited",
+    channel_id: Optional[str] = None,
 ) -> tuple[str, bool]:
     """
     Attempt thumbnail generation with primary_model; fall back to fallback_model on failure.
@@ -2664,9 +2951,31 @@ def _attempt_thumbnail_generation(
     Returns (model_used, used_fallback).
     Raises MUAPIError if all attempts fail.
     Raises MUAPIAuthFailure / MUAPIQuotaExhausted on halt conditions.
+
+    channel_id (added for the Authorization Authority gate path, plan
+    §5.5/§6 Commit F -- mirrors submit_scene()'s own channel_id
+    parameter exactly, scoped to the muapi-provider branch only). See
+    _generate_thumbnail_via_gate()'s own docstring.
     """
     local_path = output_dir / "thumbnails" / f"{deliverable_id}.jpg"
     integrated = (typography_integration == "embedded")
+
+    def _generate_one(model: str) -> None:
+        if channel_id is not None:
+            import hypogeum.authorization_authority as _authority
+            grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+            if grant is not None:
+                _generate_thumbnail_via_gate(
+                    channel_id=channel_id, grant=grant, model=model, deliverable_id=deliverable_id,
+                    image_prompt=image_prompt, aspect_ratio=aspect_ratio, episode_id=episode_id,
+                    output_dir=output_dir, config=config, local_path=local_path, log=log,
+                )
+                return
+        _generate_thumbnail_with_model(
+            model=model, deliverable_id=deliverable_id, image_prompt=image_prompt,
+            aspect_ratio=aspect_ratio, config=config, local_path=local_path,
+            budget_guard=budget_guard, log=log,
+        )
 
     def _post_process(model: str, used_fallback: bool) -> tuple[str, bool]:
         _normalize_thumbnail(local_path, aspect_ratio)
@@ -2721,16 +3030,7 @@ def _attempt_thumbnail_generation(
 
     # Primary attempt
     try:
-        _generate_thumbnail_with_model(
-            model=primary_model,
-            deliverable_id=deliverable_id,
-            image_prompt=image_prompt,
-            aspect_ratio=aspect_ratio,
-            config=config,
-            local_path=local_path,
-            budget_guard=budget_guard,
-            log=log,
-        )
+        _generate_one(primary_model)
         return _post_process(primary_model, False)
     except (MUAPIAuthFailure, MUAPIQuotaExhausted, MUAPIBudgetExhausted):
         raise  # halt conditions propagate immediately
@@ -2749,16 +3049,7 @@ def _attempt_thumbnail_generation(
         )
 
     # Fallback attempt
-    _generate_thumbnail_with_model(
-        model=fallback_model,
-        deliverable_id=deliverable_id,
-        image_prompt=image_prompt,
-        aspect_ratio=aspect_ratio,
-        config=config,
-        local_path=local_path,
-        budget_guard=budget_guard,
-        log=log,
-    )
+    _generate_one(fallback_model)
     return _post_process(fallback_model, True)
 
 

@@ -89,6 +89,7 @@ def run_clip_repair(
     config: Config,
     episode_id: str,
     log=None,
+    channel_id: Optional[str] = None,
 ) -> ClipRepairResult:
     """
     Attempt to fill missing clips via semantic reuse (A) then generation (B).
@@ -303,12 +304,20 @@ def run_clip_repair(
                 # fix), not a new regression.
                 submit_spec = build_scene_spec(missing_scene, entity_hosted_urls={})
 
+                # channel_id is included only when not None, so every
+                # existing caller's exact prior submit_scene() kwarg set
+                # (and any test mock with a fixed signature) is completely
+                # unaffected -- mirrors the same "omit entirely, don't
+                # pass None" discipline used at this function's other two
+                # gate-eligible call sites.
+                _gate_kwargs = {"channel_id": channel_id} if channel_id is not None else {}
                 asset_result = submit_scene(
                     scene_spec=submit_spec,
                     config=config,
                     episode_id=episode_id,
                     output_dir=output_dir,
                     agent="clip_repair_agent",
+                    **_gate_kwargs,
                 )
                 status = asset_result.get("generation_status", "generation_failed")
                 if status in ("generated", "reused", "dry_run") and target_path.exists():
@@ -366,6 +375,7 @@ def fill_coverage_deficits(
     config: Config,
     episode_id: str,
     log=None,
+    channel_id: Optional[str] = None,
 ) -> Dict[str, List[Path]]:
     """
     Request additional distinct clips for beats whose available visual
@@ -671,12 +681,14 @@ def fill_coverage_deficits(
                         )
 
                     output_dir.mkdir(parents=True, exist_ok=True)
+                    _gate_kwargs = {"channel_id": channel_id} if channel_id is not None else {}
                     asset_result = submit_scene(
                         scene_spec=extra_scene_spec,
                         config=config,
                         episode_id=episode_id,
                         output_dir=output_dir,
                         agent="clip_repair_agent",
+                        **_gate_kwargs,
                     )
                     status = asset_result.get("generation_status", "generation_failed")
                     # Single source of truth (2026-08-05 fix): this used to
@@ -982,6 +994,7 @@ def fill_confirmed_missing_shots(
     require_source_qualification: bool = False,
     upscale_budget_credits: float = 0.0,
     log=None,
+    channel_id: Optional[str] = None,
 ) -> Dict[str, object]:
     """
     Generate exactly the caller-confirmed missing planned shots — the
@@ -1077,6 +1090,19 @@ def fill_confirmed_missing_shots(
     missing_shots dicts, annotated with clip_path/cost fields or
     failure_reason respectively. A shot only appears in "generated" once
     it has passed every check this call was configured to require.
+
+    channel_id (Commit F): forwarded to submit_scene()'s own channel_id
+    parameter unchanged. When a real, verified grant resolves (never
+    true in production until a human operator runs the separate
+    Enforcement Cutover -- see the plan), forced_tier's effect on
+    scene_spec is now gate-enforced for free: submit_scene()'s tier
+    resolution reads the SAME (possibly forced) scene_spec this
+    function already mutated above, so the compiled envelope's
+    provider/model always reflects the actual forced tier, and
+    hypogeum.submission_gate.submit()'s existing model/provider-match
+    check denies any attempt whose resulting binding doesn't match what
+    the grant/authorization actually cover -- no new enforcement code,
+    the existing shared gate check already does this.
     """
     from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
     from hypogeum.artifact_compatibility import evaluate_video_clip_compatibility  # noqa: PLC0415
@@ -1192,6 +1218,7 @@ def fill_confirmed_missing_shots(
 
             try:
                 output_dir.mkdir(parents=True, exist_ok=True)
+                _gate_kwargs = {"channel_id": channel_id} if channel_id is not None else {}
                 asset_result = submit_scene(
                     scene_spec=scene_spec,
                     config=config,
@@ -1199,6 +1226,7 @@ def fill_confirmed_missing_shots(
                     output_dir=output_dir,
                     agent="clip_repair_agent",
                     budget_guard=guard,
+                    **_gate_kwargs,
                 )
             except (MUAPIBudgetExhausted, MUAPIAuthFailure, MUAPIQuotaExhausted) as exc:
                 stopped_reason = f"{type(exc).__name__}: {exc}"

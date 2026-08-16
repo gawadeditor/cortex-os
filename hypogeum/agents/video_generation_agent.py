@@ -91,9 +91,15 @@ def generate_scene_video(
     output_dir: Path,
     log,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    channel_id: Optional[str] = None,
 ) -> None:
     """
     Generate video for one scene and write the result back to asset_manifest.
+
+    channel_id (Commit F): forwarded to submit_scene()'s own channel_id
+    parameter unchanged -- see that function's docstring. Omitting it
+    (the default, every existing caller's current behavior) leaves this
+    function's behavior byte-for-byte unchanged.
 
     Does NOT raise on generation failure — generation_failed scenes are
     documented in the asset_manifest and the loop continues.
@@ -149,6 +155,7 @@ def generate_scene_video(
             output_dir,
             agent=_AGENT_NAME,
             budget_guard=budget_guard,
+            channel_id=channel_id,
         )
     except (MUAPIAuthFailure, MUAPIQuotaExhausted, MUAPIBudgetExhausted) as exc:
         _asset_registry.register_asset_failure(
@@ -239,6 +246,7 @@ def generate_all_scene_videos(
     output_dir: Path,
     log,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    channel_id: Optional[str] = None,
 ) -> None:
     """
     Run the per-scene MUAPI generation loop over all ordered, filtered scenes.
@@ -282,5 +290,5 @@ def generate_all_scene_videos(
         generate_scene_video(
             scene, asset_index, asset_manifest_assets, entity_hosted_urls,
             config, episode_id, output_dir, log,
-            budget_guard=budget_guard,
+            budget_guard=budget_guard, channel_id=channel_id,
         )

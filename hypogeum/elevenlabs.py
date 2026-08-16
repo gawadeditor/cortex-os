@@ -73,6 +73,7 @@ import random
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional
 
@@ -81,6 +82,7 @@ import requests
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 import hypogeum.finance as _finance
+from hypogeum.execution_envelope import GenerationExecutionEnvelope
 from hypogeum.prompt_loader import load_music_categories
 
 _MUSIC_CATEGORIES_FILE = Path(__file__).resolve().parent / "prompts" / "music_categories.json"
@@ -606,6 +608,169 @@ def _words_to_srt_blocks(
 # Public: generate_narration_segment
 # ---------------------------------------------------------------------------
 
+_HYPOGEUM_WORKFLOW_ID = "hypogeum_main_production"
+_HYPOGEUM_WORKFLOW_VERSION = "1.0.0"
+_VOICE_PROVIDER = "elevenlabs"
+_VOICE_PROVIDER_OPERATION = "voice.narration_segment"
+_VOICE_COMPILER_IDENTITY = "hypogeum.elevenlabs.generate_narration_segment"
+_VOICE_ENVELOPE_SCHEMA_VERSION = "1.0"
+
+
+def _canonical_json_bytes(payload: dict) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _generate_narration_via_gate(
+    *, channel_id: str, grant, beat_id: str, text: str, episode_id: str, output_dir: Path,
+    config: Config, log, previous_request_ids: Optional[List[str]] = None,
+) -> NarrationSegmentResult:
+    """
+    The grant-derived gate path for narration generation -- mirrors
+    hypogeum.muapi._submit_scene_via_gate()'s structure exactly (see
+    that function's own docstring for the full rationale). Never
+    reached unless a real, verified grant already resolves for
+    (channel_id, episode_id). Raises ElevenLabsError on any
+    compile/authorize/gate-denial failure, matching the legacy path's
+    own exception contract.
+    """
+    import hashlib
+    from datetime import timedelta
+
+    import hypogeum.adapter_registry as adapter_registry
+    import hypogeum.authorization_authority as authority
+    import hypogeum.budget_scopes as bs
+    import hypogeum.channel_config as channel_config
+    import hypogeum.db as db
+    import hypogeum.submission_gate as submission_gate
+    import hypogeum.workflow_executor as workflow_executor
+    from hypogeum.providers.elevenlabs_voice_adapter import (
+        SCHEMA_VERSION as _VOICE_SCHEMA_VERSION, ElevenlabsVoiceAdapter, encode_narration_payload,
+    )
+    from hypogeum.provider_receipt import WriteAheadReceiptStore
+
+    voice_id = config.ELEVENLABS_VOICE_ID
+    model_id = config.ELEVENLABS_MODEL_ID or _DEFAULT_MODEL_ID
+    output_format = config.ELEVENLABS_OUTPUT_FORMAT or _DEFAULT_OUTPUT_FORMAT
+    stability = config.ELEVENLABS_STABILITY if config.ELEVENLABS_STABILITY is not None else _DEFAULT_STABILITY
+    similarity = config.ELEVENLABS_SIMILARITY_BOOST if config.ELEVENLABS_SIMILARITY_BOOST is not None else _DEFAULT_SIMILARITY_BOOST
+
+    if not voice_id:
+        raise ElevenLabsError(
+            "ELEVENLABS_VOICE_ID is not set. This is a permanent channel identity lock — pin it before first production run."
+        )
+
+    at = datetime.now(timezone.utc).isoformat()
+
+    package_identity = channel_config.compute_channel_package_identity(channel_id)
+    if not package_identity.get("available"):
+        raise ElevenLabsError(f"channel_package_identity_unavailable for beat {beat_id!r}")
+    workflow_binding = workflow_executor.resolve_workflow_binding(
+        channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
+    )
+
+    plan_checksum = hashlib.sha256(_canonical_json_bytes({"beat_id": beat_id, "text": text})).hexdigest()
+    structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({"voice_id": voice_id, "model_id": model_id})).hexdigest()
+
+    operation_payload_bytes = encode_narration_payload(
+        text=text, model_id=model_id, voice_id=voice_id, output_format=output_format,
+        stability=stability, similarity_boost=similarity, previous_request_ids=previous_request_ids,
+        beat_id=beat_id, episode_id=episode_id, output_dir=str(output_dir),
+    )
+    operation_payload_content = operation_payload_bytes.decode("utf-8")
+    operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
+
+    expected_output_identity = f"episodes/{episode_id}/narration/{beat_id}"
+    dest_path = output_dir / "narration" / f"{beat_id}{_output_format_extension(output_format)}"
+    char_count = len(text)
+    max_cost = Decimal(str(round(char_count * _TTS_USD_PER_CHAR, 6)))
+    authorization_id = f"{episode_id}:narr_{beat_id}"
+
+    try:
+        envelope = GenerationExecutionEnvelope.create(
+            envelope_schema_version=_VOICE_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=f"narr_{beat_id}",
+            structured_spec_checksum=structured_spec_checksum, compiler_identity=_VOICE_COMPILER_IDENTITY,
+            compiler_version="1", operation_payload_content=operation_payload_content,
+            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_VOICE_SCHEMA_VERSION,
+            content_provenance={
+                "compiler": _VOICE_COMPILER_IDENTITY, "compiler_version": "1",
+                "source_work_item_id": f"narr_{beat_id}", "rendered_at": at,
+            },
+            provider=_VOICE_PROVIDER, model=model_id, provider_operation=_VOICE_PROVIDER_OPERATION,
+            deterministic_output_path=str(dest_path), expected_output_identity=expected_output_identity,
+            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+            retry_authorized=False, fallback_authorized=False, idempotency_key=authorization_id,
+            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+            dependency_checksums={
+                "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_VOICE_COMPILER_IDENTITY.encode()).hexdigest(),
+            },
+        )
+        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+        raise ElevenLabsError(f"Narration gate authorization failed for beat {beat_id!r}: {exc}") from exc
+
+    conn = db.get_connection()
+    try:
+        adapter_registry.register_adapter(_VOICE_PROVIDER, model_id, _VOICE_PROVIDER_OPERATION, "1.0", ElevenlabsVoiceAdapter)
+        lease_owner_id = f"elevenlabs_voice_adapter:{beat_id}"
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
+        if lease is None:
+            raise ElevenLabsError(f"Narration gate lease unavailable for beat {beat_id!r}")
+
+        receipt_store = WriteAheadReceiptStore(output_dir)
+        live_sources = submission_gate.LiveSources(
+            channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
+            structured_spec_checksum=structured_spec_checksum, compiler_version="1",
+        )
+        scopes = [
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"narr_{beat_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
+        ]
+        result = submission_gate.submit(
+            envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,
+            lease_owner_id=lease_owner_id, lease_fencing_token=lease["fencing_token"], receipt_store=receipt_store,
+            execution_id=episode_id, attempt_id=authorization_id, budget_scopes=scopes,
+            required_provider=_VOICE_PROVIDER, required_model=model_id, at=at,
+            expected_output_identity=expected_output_identity, expected_deterministic_output_path=str(dest_path),
+            output_already_exists=dest_path.exists(),
+        )
+    finally:
+        conn.close()
+
+    if not result.approved:
+        raise ElevenLabsError(f"Narration gate denied for beat {beat_id!r}: [{result.denied_at_check}] {result.reason}")
+
+    evidence = result.adapter_result.evidence if result.adapter_result else {}
+    local_path = Path(evidence["local_path"])
+    word_timings = [WordTiming(**w) for w in evidence.get("word_timings", [])]
+    alignment_source = evidence.get("alignment_source")
+
+    if alignment_source is None:
+        log.warn("elevenlabs_alignment_null", beat_id=beat_id, action="escalating_to_forced_alignment")
+        word_timings, alignment_source = _alignment_fallback_cascade(
+            beat_id=beat_id, audio_path=local_path, transcript=text, config=config, episode_id=episode_id, log=log,
+        )
+
+    duration_seconds = word_timings[-1].end_seconds if word_timings else 0.0
+    _finance.record_cost(
+        provider=_VOICE_PROVIDER, model=model_id, call_type="narration",
+        cost_usd=float(result.adapter_result.charged_amount) if result.adapter_result and result.adapter_result.charged_amount else round(char_count * _TTS_USD_PER_CHAR, 6),
+        tokens_or_credits=float(char_count), asset_id=expected_output_identity,
+    )
+
+    return NarrationSegmentResult(
+        beat_id=beat_id, asset_id=expected_output_identity, local_path=local_path,
+        duration_seconds=duration_seconds,
+        request_id=result.adapter_result.provider_job_id if result.adapter_result else f"el_{beat_id}",
+        character_cost=char_count, word_timings=word_timings, alignment_source=alignment_source,
+    )
+
+
 def generate_narration_segment(
     beat_id: str,
     text: str,
@@ -615,9 +780,20 @@ def generate_narration_segment(
     *,
     previous_request_ids: Optional[List[str]] = None,
     agent: Optional[str] = None,
+    channel_id: Optional[str] = None,
 ) -> NarrationSegmentResult:
     """
     Generate one narration audio segment for a Script Package beat.
+
+    channel_id (added for the Authorization Authority gate path, plan
+    §5.5/§6 Commit G -- mirrors hypogeum.muapi.submit_scene()'s own
+    channel_id parameter exactly): optional. When supplied AND a real,
+    verified RunAuthorizationGrant already resolves for (channel_id,
+    episode_id), the call routes through hypogeum.authorization_
+    authority + hypogeum.submission_gate instead of the legacy path
+    below. Every existing caller omits channel_id and is completely
+    unaffected; even a caller that supplies it falls straight through
+    to the unchanged legacy path whenever no real grant exists.
 
     Calls POST v1/text-to-speech/{voice_id}/with-timestamps. Decodes the
     base64 audio and writes it to disk. Parses alignment data and reconstructs
@@ -644,6 +820,23 @@ def generate_narration_segment(
         ElevenLabsError          — Any other generation failure.
     """
     log = get_logger(episode_id=episode_id, agent=agent or "elevenlabs")
+
+    # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
+    # muapi.submit_scene()'s own branch exactly. Only reached when
+    # channel_id is supplied AND a real, verified grant already
+    # resolves for (channel_id, episode_id). Every existing caller
+    # (none of which pass channel_id today) is completely unaffected.
+    # Even a caller that DOES pass channel_id falls straight through
+    # to the legacy path below whenever no real grant exists (true for
+    # "hypogeum" today and throughout Commits F0-L).
+    if channel_id is not None:
+        import hypogeum.authorization_authority as _authority
+        grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+        if grant is not None:
+            return _generate_narration_via_gate(
+                channel_id=channel_id, grant=grant, beat_id=beat_id, text=text, episode_id=episode_id,
+                output_dir=output_dir, config=config, log=log, previous_request_ids=previous_request_ids,
+            )
 
     voice_id      = config.ELEVENLABS_VOICE_ID
     model_id      = config.ELEVENLABS_MODEL_ID or _DEFAULT_MODEL_ID
@@ -1191,6 +1384,184 @@ def fetch_model_cost_multiplier(
 # Public: generate_music_track  (M4.1 — corrected per C1–C9 verified 2026-06-03)
 # ---------------------------------------------------------------------------
 
+_MUSIC_PROVIDER_OPERATION = "music.track"
+_MUSIC_COMPILER_IDENTITY = "hypogeum.elevenlabs.generate_music_track"
+_MUSIC_ENVELOPE_SCHEMA_VERSION = "1.0"
+
+
+def _generate_music_via_gate(
+    *, channel_id: str, grant, category: str, required_duration_seconds: float, episode_id: str,
+    assets_root: Path, config: Config, log, tone_arc: Optional[str] = None,
+) -> MusicTrackResult:
+    """
+    The grant-derived gate path for music generation -- mirrors
+    hypogeum.elevenlabs._generate_narration_via_gate()'s structure
+    (which itself mirrors hypogeum.muapi._submit_scene_via_gate()).
+    Never reached unless a real, verified grant already resolves for
+    (channel_id, episode_id), and only on a Channel Music Library
+    cache MISS -- see generate_music_track()'s own branch, which
+    performs the library search before ever calling this function, so
+    a cache hit never touches the Authority or the gate at all.
+
+    Unlike every other domain's gate path, the deterministic output
+    identity (track_id, local_path) is chosen HERE, before the
+    envelope is compiled, rather than being derivable from a caller-
+    supplied stable id (scene_id/entity_id/beat_id) -- music has no
+    such stable identity per generation event. This mirrors the legacy
+    path's own uuid4() track_id generation, just moved earlier so the
+    envelope can carry a deterministic path the same way every other
+    domain's envelope does. Raises ElevenLabsError on any
+    compile/authorize/gate-denial/quality-rejection failure, matching
+    the legacy path's own exception contract.
+    """
+    import hashlib
+    from datetime import timedelta
+
+    import hypogeum.adapter_registry as adapter_registry
+    import hypogeum.authorization_authority as authority
+    import hypogeum.budget_scopes as bs
+    import hypogeum.channel_config as channel_config
+    import hypogeum.db as db
+    import hypogeum.submission_gate as submission_gate
+    import hypogeum.workflow_executor as workflow_executor
+    from hypogeum.providers.elevenlabs_music_adapter import (
+        SCHEMA_VERSION as _MUSIC_SCHEMA_VERSION, ElevenlabsMusicAdapter, encode_music_payload,
+    )
+    from hypogeum.provider_receipt import WriteAheadReceiptStore
+
+    prompt = _build_music_prompt(category=category, tone_arc=tone_arc)
+    model_id = config.ELEVENLABS_MUSIC_MODEL_ID or _MUSIC_DEFAULT_MODEL_ID
+
+    duration_ms = int(required_duration_seconds * 1000)
+    duration_ms = max(_MUSIC_MIN_DURATION_MS, min(duration_ms, _MUSIC_MAX_DURATION_MS))
+    actual_duration_seconds = duration_ms / 1000.0
+
+    track_id = str(uuid.uuid4())
+    category_slug = _MUSIC_CATEGORY_SLUGS.get(category, category.lower().replace(" ", "-"))
+    music_dir = assets_root / "channel" / "music" / category_slug
+    local_path = music_dir / f"{category_slug}_{track_id}.mp3"
+    expected_output_identity = f"channel/music/{category_slug}/{category_slug}_{track_id}"
+
+    at = datetime.now(timezone.utc).isoformat()
+
+    package_identity = channel_config.compute_channel_package_identity(channel_id)
+    if not package_identity.get("available"):
+        raise ElevenLabsError(f"channel_package_identity_unavailable for music category {category!r}")
+    workflow_binding = workflow_executor.resolve_workflow_binding(
+        channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
+    )
+
+    plan_checksum = hashlib.sha256(_canonical_json_bytes({"category": category, "track_id": track_id})).hexdigest()
+    structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({
+        "duration_ms": duration_ms, "force_instrumental": _MUSIC_FORCE_INSTRUMENTAL, "model_id": model_id,
+    })).hexdigest()
+
+    operation_payload_bytes = encode_music_payload(
+        prompt=prompt, model_id=model_id, duration_ms=duration_ms, force_instrumental=_MUSIC_FORCE_INSTRUMENTAL,
+        category=category, track_id=track_id, local_path=str(local_path), episode_id=episode_id,
+    )
+    operation_payload_content = operation_payload_bytes.decode("utf-8")
+    operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
+
+    max_cost = Decimal(str(round(actual_duration_seconds * _MUSIC_USD_PER_SEC, 6)))
+    authorization_id = f"{episode_id}:music:{category_slug}:{track_id}"
+
+    try:
+        envelope = GenerationExecutionEnvelope.create(
+            envelope_schema_version=_MUSIC_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=f"music_{category_slug}",
+            structured_spec_checksum=structured_spec_checksum, compiler_identity=_MUSIC_COMPILER_IDENTITY,
+            compiler_version="1", operation_payload_content=operation_payload_content,
+            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_MUSIC_SCHEMA_VERSION,
+            content_provenance={
+                "compiler": _MUSIC_COMPILER_IDENTITY, "compiler_version": "1",
+                "source_work_item_id": f"music_{category_slug}", "rendered_at": at,
+            },
+            provider=_VOICE_PROVIDER, model=model_id, provider_operation=_MUSIC_PROVIDER_OPERATION,
+            deterministic_output_path=str(local_path), expected_output_identity=expected_output_identity,
+            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+            retry_authorized=False, fallback_authorized=False, idempotency_key=authorization_id,
+            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+            dependency_checksums={
+                "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_MUSIC_COMPILER_IDENTITY.encode()).hexdigest(),
+            },
+        )
+        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+        raise ElevenLabsError(f"Music gate authorization failed for category {category!r}: {exc}") from exc
+
+    conn = db.get_connection()
+    try:
+        adapter_registry.register_adapter(_VOICE_PROVIDER, model_id, _MUSIC_PROVIDER_OPERATION, "1.0", ElevenlabsMusicAdapter)
+        lease_owner_id = f"elevenlabs_music_adapter:{track_id}"
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
+        if lease is None:
+            raise ElevenLabsError(f"Music gate lease unavailable for category {category!r}")
+
+        receipt_store = WriteAheadReceiptStore(assets_root / "episodes" / episode_id)
+        live_sources = submission_gate.LiveSources(
+            channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
+            structured_spec_checksum=structured_spec_checksum, compiler_version="1",
+        )
+        scopes = [
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"music_{track_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
+        ]
+        result = submission_gate.submit(
+            envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,
+            lease_owner_id=lease_owner_id, lease_fencing_token=lease["fencing_token"], receipt_store=receipt_store,
+            execution_id=episode_id, attempt_id=authorization_id, budget_scopes=scopes,
+            required_provider=_VOICE_PROVIDER, required_model=model_id, at=at,
+            expected_output_identity=expected_output_identity, expected_deterministic_output_path=str(local_path),
+            output_already_exists=local_path.exists(),
+        )
+    finally:
+        conn.close()
+
+    if not result.approved:
+        evidence = result.adapter_result.evidence if result.adapter_result else {}
+        failure_reason = evidence.get("failure_reason")
+        if failure_reason == "zero_byte_audio":
+            raise ElevenLabsError(
+                f"ElevenLabs Music returned zero bytes for category {category!r}. PDR required for this section."
+            )
+        if failure_reason == "ancient_civ_low_confidence":
+            raise ElevenLabsError(
+                f"ElevenLabs Music: Ancient Civilizations low confidence "
+                f"(audio_bytes={evidence.get('audio_bytes')} < {_MUSIC_ANCIENT_CIV_MIN_BYTES}). "
+                "PDR required for this section."
+            )
+        raise ElevenLabsError(f"Music gate denied for category {category!r}: [{result.denied_at_check}] {result.reason}")
+
+    evidence = result.adapter_result.evidence
+    now_iso = datetime.now(timezone.utc).isoformat()
+    new_entry = {
+        "track_id": track_id, "category": category, "path": expected_output_identity,
+        "source": "ai_generated", "provider": _VOICE_PROVIDER, "model_id": model_id,
+        "duration_seconds": evidence["duration_seconds"], "prompt_used": prompt,
+        "generated_at": now_iso, "usage_count": 0, "last_used_date": None,
+    }
+    library_path = assets_root / "channel" / "music" / _MUSIC_LIBRARY_FILENAME
+    _append_to_music_library(library_path=library_path, entry=new_entry, log=log)
+
+    _finance.record_cost(
+        provider=_VOICE_PROVIDER, model=model_id, call_type="music",
+        cost_usd=float(result.adapter_result.charged_amount) if result.adapter_result.charged_amount else round(evidence["duration_seconds"] * _MUSIC_USD_PER_SEC, 6),
+        tokens_or_credits=evidence["duration_seconds"], asset_id=expected_output_identity,
+    )
+
+    return MusicTrackResult(
+        track_id=track_id, category=category, asset_id=expected_output_identity,
+        local_path=Path(evidence["local_path"]), source="ai_generated",
+        duration_seconds=evidence["duration_seconds"], prompt_used=prompt,
+    )
+
+
 def generate_music_track(
     category: str,
     required_duration_seconds: float,
@@ -1200,6 +1571,7 @@ def generate_music_track(
     *,
     tone_arc: Optional[str] = None,
     agent: Optional[str] = None,
+    channel_id: Optional[str] = None,
 ) -> MusicTrackResult:
     """
     Source a background music track for a given category and duration.
@@ -1253,6 +1625,25 @@ def generate_music_track(
     )
     if hit is not None:
         return hit
+
+    # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
+    # elevenlabs._generate_narration_via_gate()'s own branch exactly.
+    # Only reached on a cache MISS, when channel_id is supplied AND a
+    # real, verified grant already resolves for (channel_id,
+    # episode_id). Every existing caller (none of which pass
+    # channel_id today) is completely unaffected. Even a caller that
+    # DOES pass channel_id falls straight through to the legacy path
+    # below whenever no real grant exists (true for "hypogeum" today
+    # and throughout Commits F0-L).
+    if channel_id is not None:
+        import hypogeum.authorization_authority as _authority
+        grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+        if grant is not None:
+            return _generate_music_via_gate(
+                channel_id=channel_id, grant=grant, category=category,
+                required_duration_seconds=required_duration_seconds, episode_id=episode_id,
+                assets_root=assets_root, config=config, log=log, tone_arc=tone_arc,
+            )
 
     # ------------------------------------------------------------------
     # Cache miss — generate via ElevenLabs Music POST /v1/music

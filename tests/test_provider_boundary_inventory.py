@@ -130,7 +130,9 @@ _INVENTORY = [
     {"domain": "thumbnail", "module": "hypogeum/muapi.py", "function": "_generate_thumbnail_with_model", "status": _STATUS_UNGATED},
     {"domain": "thumbnail_gate_path", "module": "hypogeum/muapi.py", "function": "_generate_thumbnail_via_gate", "status": _STATUS_GATED},
     {"domain": "voice", "module": "hypogeum/elevenlabs.py", "function": "generate_narration_segment", "status": _STATUS_UNGATED},
+    {"domain": "voice_gate_path", "module": "hypogeum/elevenlabs.py", "function": "_generate_narration_via_gate", "status": _STATUS_GATED},
     {"domain": "music", "module": "hypogeum/elevenlabs.py", "function": "generate_music_track", "status": _STATUS_UNGATED},
+    {"domain": "music_gate_path", "module": "hypogeum/elevenlabs.py", "function": "_generate_music_via_gate", "status": _STATUS_GATED},
     {"domain": "text_llm", "module": "hypogeum/openrouter.py", "function": "call_claude", "status": _STATUS_UNGATED},
     {"domain": "research", "module": "hypogeum/perplexity.py", "function": "query_perplexity", "status": _STATUS_UNGATED},
     {"domain": "upscale", "module": "hypogeum/providers/muapi_video_upscaler.py", "function": "enhance", "status": _STATUS_UNGATED},
@@ -252,6 +254,7 @@ class TestFakeAdapterRemainsTestOnly:
     _ALLOWED_IMPORTERS = {
         "hypogeum/submission_gate.py", "hypogeum/providers/muapi_video_adapter.py",
         "hypogeum/providers/muapi_image_adapter.py", "hypogeum/providers/muapi_thumbnail_adapter.py",
+        "hypogeum/providers/elevenlabs_voice_adapter.py", "hypogeum/providers/elevenlabs_music_adapter.py",
     }
     """submission_gate.py imports fake_provider_adapter.py for the
     shared AdapterInvocationCapability/AdapterResult/
@@ -260,10 +263,12 @@ class TestFakeAdapterRemainsTestOnly:
     (Commit F) imports the exact same shared protocol dataclasses for
     the identical reason -- every real per-domain adapter implements
     FakeProviderAdapter's own protocol, so every real adapter module is
-    expected to import these definitions from the same place. This
-    exemption is expected to GROW by one entry per domain-migration
-    commit (F-J), not shrink -- it never grows to include anything
-    other than a real, registered adapter module."""
+    expected to import these definitions from the same place.
+    hypogeum/providers/elevenlabs_voice_adapter.py (Commit G) is the
+    same pattern applied to the voice domain. This exemption is
+    expected to GROW by one entry per domain-migration commit (F-J),
+    not shrink -- it never grows to include anything other than a
+    real, registered adapter module."""
 
     def test_fake_adapter_not_imported_by_production(self):
         for f in _all_production_python_files():

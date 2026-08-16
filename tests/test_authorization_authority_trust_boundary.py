@@ -159,7 +159,10 @@ class TestOnlyAuthorizationAuthorityMintsOrActivates:
             tree = _parse(path)
             if _calls_any_function_named(tree, _ORDINARY_CHILD_ISSUANCE_FUNCTION_NAMES):
                 offenders.append(str(path.relative_to(_ROOT)))
-        allowed = {"hypogeum/muapi.py"}  # Commit F: video/image/thumbnail domain closure
+        allowed = {
+            "hypogeum/muapi.py",  # Commit F: video/image/thumbnail domain closure
+            "hypogeum/elevenlabs.py",  # Commit G: voice/music domain closure
+        }
         unexpected = [o for o in offenders if o not in allowed]
         assert unexpected == [], f"unexpected child-issuance caller(s) outside the reviewed domain-closure list: {unexpected}"
 

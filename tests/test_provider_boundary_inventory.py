@@ -71,16 +71,23 @@ def _calls_any(module_path: str, function_name: str, target_names: frozenset) ->
     name in target_names -- a real AST Call node, not a substring match
     (so a comment/docstring mentioning the name can never produce a
     false positive, matching the pattern already established and
-    hardened in tests/test_muapi_submission_gate_shadow.py)."""
+    hardened in tests/test_muapi_submission_gate_shadow.py). Matches
+    both a bare-name call (`submit(...)`) and a module-qualified
+    attribute call (`submission_gate.submit(...)`) -- Commit F's real
+    gate call sites use the latter form."""
     source = _module_source(module_path)
     tree = ast.parse(source)
     fn = _find_function(tree, function_name)
     if fn is None:
         raise AssertionError(f"{module_path}::{function_name} not found -- inventory is stale, update it")
-    called_names = {
-        n.func.id for n in ast.walk(fn)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-    }
+    called_names = set()
+    for n in ast.walk(fn):
+        if not isinstance(n, ast.Call):
+            continue
+        if isinstance(n.func, ast.Name):
+            called_names.add(n.func.id)
+        elif isinstance(n.func, ast.Attribute):
+            called_names.add(n.func.attr)
     return bool(called_names & target_names)
 
 
@@ -107,7 +114,17 @@ def _module_imported_by(importer_path: str, target_module_dotted: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _INVENTORY = [
+    # Commit F: the legacy path (_attempt_generation) is deliberately
+    # NOT flipped to "gated" -- it is still the exact path every real
+    # production call takes today (no real grant exists for any real
+    # channel; see the plan's Enforcement Cutover section), so it stays
+    # honestly "shadow_only" until that legacy code is actually removed
+    # at a future, separately-approved cutover. _submit_scene_via_gate
+    # is the NEW, real, structural gated path Commit F adds alongside
+    # it -- reachable only when a caller supplies channel_id AND a
+    # verified grant resolves (synthetic-only through Commit L).
     {"domain": "video", "module": "hypogeum/muapi.py", "function": "_attempt_generation", "status": _STATUS_SHADOW_ONLY},
+    {"domain": "video_gate_path", "module": "hypogeum/muapi.py", "function": "_submit_scene_via_gate", "status": _STATUS_GATED},
     {"domain": "image_reference", "module": "hypogeum/muapi.py", "function": "generate_reference_image", "status": _STATUS_UNGATED},
     {"domain": "thumbnail", "module": "hypogeum/muapi.py", "function": "_generate_thumbnail_with_model", "status": _STATUS_UNGATED},
     {"domain": "voice", "module": "hypogeum/elevenlabs.py", "function": "generate_narration_segment", "status": _STATUS_UNGATED},
@@ -230,13 +247,18 @@ class TestFakeAdapterRemainsTestOnly:
     any production module -- it is the one sanctioned test-only bypass,
     and this must remain true throughout every commit in the program."""
 
-    _ALLOWED_IMPORTERS = {"hypogeum/submission_gate.py"}
-    """submission_gate.py currently imports fake_provider_adapter.py for
-    the shared AdapterInvocationCapability/AdapterResult/
+    _ALLOWED_IMPORTERS = {"hypogeum/submission_gate.py", "hypogeum/providers/muapi_video_adapter.py"}
+    """submission_gate.py imports fake_provider_adapter.py for the
+    shared AdapterInvocationCapability/AdapterResult/
     compute_capability_checksum definitions -- the gate itself, not a
-    business-logic caller. Commit E generalizes/relocates these
-    definitions into the Adapter Registry; this exemption is expected to
-    shrink or disappear at that point, not grow."""
+    business-logic caller. hypogeum/providers/muapi_video_adapter.py
+    (Commit F) imports the exact same shared protocol dataclasses for
+    the identical reason -- every real per-domain adapter implements
+    FakeProviderAdapter's own protocol, so every real adapter module is
+    expected to import these definitions from the same place. This
+    exemption is expected to GROW by one entry per domain-migration
+    commit (F-J), not shrink -- it never grows to include anything
+    other than a real, registered adapter module."""
 
     def test_fake_adapter_not_imported_by_production(self):
         for f in _all_production_python_files():

@@ -83,6 +83,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar, Optional
 
@@ -573,6 +574,157 @@ def check_muapi_health(
     return "available"
 
 
+_HYPOGEUM_WORKFLOW_ID = "hypogeum_main_production"
+_HYPOGEUM_WORKFLOW_VERSION = "1.0.0"
+_VIDEO_PROVIDER = "muapi"
+_VIDEO_PROVIDER_OPERATION = "video.text_to_video"
+_VIDEO_COMPILER_IDENTITY = "hypogeum.video_prompt_writer.assemble_video_scene_prompt"
+_VIDEO_ENVELOPE_SCHEMA_VERSION = "1.0"
+
+
+def _canonical_json_bytes(payload: dict) -> bytes:
+    import json as _json
+    return _json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _submit_scene_via_gate(
+    *, channel_id: str, grant, prompt: str, tier: int, reference_image_url: Optional[str],
+    scene_id: str, short_id: Optional[str], aspect_ratio: str, requested_duration: float,
+    episode_id: str, output_dir: Path, config: Config, log, is_fallback: bool,
+) -> "tuple[Optional[dict], Optional[str]]":
+    """
+    The grant-derived gate path (Correction 3/5.5): compile an
+    immutable envelope from live, current sources -> resolve/issue a
+    child authorization against the caller-resolved active `grant` ->
+    submit through hypogeum.submission_gate.submit(), which internally
+    resolves and invokes hypogeum.providers.muapi_video_adapter.
+    MuapiVideoAdapter. Never reached unless a real, verified grant
+    already resolves for (channel_id, episode_id) -- see submit_scene()
+    for the branch that decides whether to call this function at all.
+
+    Returns the exact same (manifest_entry_or_None, failure_reason)
+    shape _attempt_generation() returns, so submit_scene()'s two-attempt
+    orchestration and every caller's result handling are unaffected by
+    which path actually ran.
+    """
+    import hashlib
+
+    import hypogeum.adapter_registry as adapter_registry
+    import hypogeum.authorization_authority as authority
+    import hypogeum.budget_scopes as bs
+    import hypogeum.channel_config as channel_config
+    import hypogeum.db as db
+    import hypogeum.submission_gate as submission_gate
+    import hypogeum.workflow_executor as workflow_executor
+    from hypogeum.providers.muapi_video_adapter import (
+        SCHEMA_VERSION as _VIDEO_SCHEMA_VERSION, MuapiVideoAdapter, encode_video_payload,
+    )
+    from hypogeum.provider_receipt import WriteAheadReceiptStore
+
+    model = _tier_to_model(tier, reference_image_url, config)
+    at = datetime.now(timezone.utc).isoformat()
+
+    package_identity = channel_config.compute_channel_package_identity(channel_id)
+    if not package_identity.get("available"):
+        return None, "channel_package_identity_unavailable"
+    workflow_binding = workflow_executor.resolve_workflow_binding(
+        channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
+    )
+
+    plan_checksum = hashlib.sha256(_canonical_json_bytes({"scene_id": scene_id, "prompt": prompt, "tier": tier})).hexdigest()
+    structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({
+        "aspect_ratio": aspect_ratio, "requested_duration": requested_duration,
+        "reference_image_url": reference_image_url,
+    })).hexdigest()
+
+    operation_payload_bytes = encode_video_payload(
+        prompt=prompt, model=model, aspect_ratio=aspect_ratio, duration_seconds=requested_duration,
+        reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
+        episode_id=episode_id, output_dir=str(output_dir),
+    )
+    operation_payload_content = operation_payload_bytes.decode("utf-8")
+    operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
+
+    dest_path = scene_file_path(output_dir, scene_id, short_id)
+    expected_output_identity = _compute_asset_id(episode_id, scene_id, short_id)
+    max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, _DEFAULT_UNKNOWN_MODEL_COST)))
+    authorization_id = f"{episode_id}:{scene_id}:{'fallback' if is_fallback else 'primary'}"
+    idempotency_key = authorization_id
+
+    try:
+        envelope = GenerationExecutionEnvelope.create(
+            envelope_schema_version=_VIDEO_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=scene_id,
+            structured_spec_checksum=structured_spec_checksum, compiler_identity=_VIDEO_COMPILER_IDENTITY,
+            compiler_version="1", operation_payload_content=operation_payload_content,
+            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_VIDEO_SCHEMA_VERSION,
+            content_provenance={
+                "compiler": _VIDEO_COMPILER_IDENTITY, "compiler_version": "1",
+                "source_work_item_id": scene_id, "rendered_at": at,
+            },
+            provider=_VIDEO_PROVIDER, model=model, provider_operation=_VIDEO_PROVIDER_OPERATION,
+            deterministic_output_path=str(dest_path), expected_output_identity=expected_output_identity,
+            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+            retry_authorized=False, fallback_authorized=False, idempotency_key=idempotency_key,
+            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+            dependency_checksums={
+                "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_VIDEO_COMPILER_IDENTITY.encode()).hexdigest(),
+            },
+            aspect_ratio=aspect_ratio, duration_seconds=Decimal(str(requested_duration)),
+        )
+        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+        log.warn("muapi_gate_authorization_failed", scene_id=scene_id, reason=str(exc))
+        return None, f"gate_authorization_failed: {exc}"
+
+    conn = db.get_connection()
+    try:
+        adapter_registry.register_adapter(
+            _VIDEO_PROVIDER, model, _VIDEO_PROVIDER_OPERATION, "1.0", MuapiVideoAdapter,
+        )
+        lease_owner_id = f"muapi_video_adapter:{scene_id}"
+        from datetime import timedelta
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
+        if lease is None:
+            return None, "gate_lease_unavailable"
+
+        receipt_store = WriteAheadReceiptStore(output_dir)
+        live_sources = submission_gate.LiveSources(
+            channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
+            structured_spec_checksum=structured_spec_checksum, compiler_version="1",
+        )
+        scopes = [
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, scene_id, max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
+        ]
+        result = submission_gate.submit(
+            envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,
+            lease_owner_id=lease_owner_id, lease_fencing_token=lease["fencing_token"], receipt_store=receipt_store,
+            execution_id=episode_id, attempt_id=idempotency_key, budget_scopes=scopes,
+            required_provider=_VIDEO_PROVIDER, required_model=model, at=at,
+            expected_duration_seconds=Decimal(str(requested_duration)), expected_aspect_ratio=aspect_ratio,
+            expected_output_identity=expected_output_identity, expected_deterministic_output_path=str(dest_path),
+            output_already_exists=dest_path.exists(),
+        )
+    finally:
+        conn.close()
+
+    if not result.approved:
+        return None, f"gate_denied[{result.denied_at_check}]: {result.reason}"
+
+    return {
+        "scene_id": scene_id, "asset_id": expected_output_identity, "generation_status": "generated",
+        "provider": _VIDEO_PROVIDER, "tier_used": tier, "model_used": model, "prompt_used": prompt,
+        "fallback_used": is_fallback, "failure_reason": None,
+        "request_id": result.adapter_result.provider_job_id if result.adapter_result else None,
+    }, None
+
+
 def submit_scene(
     scene_spec: dict,
     config: Config,
@@ -584,6 +736,7 @@ def submit_scene(
     budget_guard: Optional[MUAPIBudgetGuard] = None,
     shadow_evidence: Optional["_shadow_observation.ShadowEvidence"] = None,
     observation_only: bool = False,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Generate a video clip for one scene and return the asset manifest entry.
@@ -657,6 +810,27 @@ def submit_scene(
     alone (the default False here) still reaches the real network call
     exactly as it always has. Defaults to False so every existing
     caller's behavior is byte-for-byte unchanged.
+
+    channel_id (added for the Authorization Authority gate path,
+    plan §5.5/§6 Commit F): optional. When supplied AND a real,
+    verified hypogeum.authorization_authority.RunAuthorizationGrant
+    already resolves for (channel_id, this call's episode_id), the
+    ENTIRE call routes through the gate instead: compile an immutable
+    envelope from live sources -> issue a child authorization against
+    the grant -> hypogeum.submission_gate.submit() (which resolves and
+    invokes hypogeum.providers.muapi_video_adapter.MuapiVideoAdapter
+    internally). Every existing caller omits channel_id and is
+    completely unaffected. Even a caller that supplies channel_id
+    falls straight through to the unchanged legacy path below whenever
+    no real grant exists -- true for every real channel until a human
+    operator explicitly registers one (out of scope for Commits F0-L;
+    see the plan's Enforcement Cutover section). The gate path
+    currently attempts only the primary prompt/tier -- fallback-prompt
+    retry through the gate is not yet wired; a gate-path failure
+    returns generation_failed directly rather than falling through to
+    the legacy two-attempt structure, since a grant-derived attempt
+    that fails at the provider boundary must never silently reattempt
+    outside the Authority's own accounting.
     """
     scene_id = scene_spec["scene_id"]
     short_id = scene_spec.get("short_id")
@@ -718,6 +892,34 @@ def submit_scene(
         primary_tier = int(prod_spec.get("primary_tier", config.MUAPI_DEFAULT_TIER))
         fallback_tier = int(prod_spec.get("fallback_tier", config.MUAPI_DEFAULT_TIER))
         reference_image_url = prod_spec.get("reference_image_url")
+
+    # Grant-derived gate path (Correction 3/5.5) -- only reached when
+    # channel_id is supplied AND a real, verified grant already resolves
+    # for (channel_id, episode_id). Every existing caller (none of which
+    # pass channel_id today) is completely unaffected -- this whole
+    # block is skipped and the legacy attempt structure below runs
+    # exactly as it always has. Even a caller that DOES pass channel_id
+    # falls straight through to the legacy path below whenever no real
+    # grant exists (true for "hypogeum" today and throughout Commits
+    # F0-L -- see the plan's Enforcement Cutover section).
+    if channel_id is not None:
+        import hypogeum.authorization_authority as _authority
+        grant = _authority.resolve_active_grant(channel_id, eid, at=datetime.now(timezone.utc).isoformat())
+        if grant is not None:
+            manifest, failure_reason = _submit_scene_via_gate(
+                channel_id=channel_id, grant=grant, prompt=primary_prompt, tier=primary_tier,
+                reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
+                aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
+                output_dir=output_dir, config=config, log=log, is_fallback=False,
+            )
+            if manifest is not None:
+                return manifest
+            log.warn("muapi_gate_path_attempt1_failed", scene_id=scene_id, reason=failure_reason)
+            return {
+                "scene_id": scene_id, "asset_id": None, "generation_status": "generation_failed",
+                "provider": "muapi", "tier_used": None, "model_used": None, "prompt_used": None,
+                "fallback_used": False, "failure_reason": f"gate_path: {failure_reason}",
+            }
 
     # Attempt 1 — primary prompt
     manifest, failure_reason_1 = _attempt_generation(

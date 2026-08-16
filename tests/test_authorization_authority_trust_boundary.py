@@ -19,9 +19,30 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 _HYPOGEUM_DIR = _ROOT / "hypogeum"
 
-_MINTING_FUNCTION_NAMES = frozenset({
-    "register_run_grant", "issue_child_authorization", "issue_authorization_from_explicit_approval",
+# register_run_grant()/issue_authorization_from_explicit_approval() both
+# REQUIRE a cryptographically verified, offline-signed ApprovalArtifact
+# -- only hypogeum/authorization_authority.py and the two offline
+# approval scripts ever call them (see TestOnlyAuthorizationAuthority
+# MintsOrActivates below).
+_HUMAN_APPROVAL_GATED_FUNCTION_NAMES = frozenset({
+    "register_run_grant", "issue_authorization_from_explicit_approval",
 })
+
+# issue_child_authorization()/resolve_active_grant() are the INTENDED,
+# ordinary way a domain caller (hypogeum/muapi.py, and later per-domain
+# modules) issues a child authorization against an already-verified,
+# already-active grant -- legitimately callable from production domain
+# modules, unlike the human-approval-gated pair above. Both still only
+# ever MINT a new AuthorizationRecord through
+# hypogeum.authorization_authority's own internal calls -- a domain
+# caller never constructs one directly (see the "transition to
+# AUTHORIZED" test below, which still allows only authorization_
+# authority.py to do that).
+_ORDINARY_CHILD_ISSUANCE_FUNCTION_NAMES = frozenset({
+    "issue_child_authorization", "resolve_active_grant",
+})
+
+_MINTING_FUNCTION_NAMES = _HUMAN_APPROVAL_GATED_FUNCTION_NAMES | _ORDINARY_CHILD_ISSUANCE_FUNCTION_NAMES
 
 
 def _iter_python_files(root: Path):
@@ -50,9 +71,9 @@ def _calls_transition_to_authorized(tree: ast.Module) -> bool:
     return False
 
 
-def _calls_any_minting_function(tree: ast.Module) -> bool:
-    """True if the module calls any of _MINTING_FUNCTION_NAMES, whether
-    as a bare name (`issue_child_authorization(...)`) or via attribute
+def _calls_any_function_named(tree: ast.Module, names: frozenset) -> bool:
+    """True if the module calls any function in `names`, whether as a
+    bare name (`issue_child_authorization(...)`) or via attribute
     access (`authority.issue_child_authorization(...)`,
     `authorization_authority.register_run_grant(...)`)."""
     for node in ast.walk(tree):
@@ -64,9 +85,15 @@ def _calls_any_minting_function(tree: ast.Module) -> bool:
             name = func.id
         elif isinstance(func, ast.Attribute):
             name = func.attr
-        if name in _MINTING_FUNCTION_NAMES:
+        if name in names:
             return True
     return False
+
+
+def _calls_any_minting_function(tree: ast.Module) -> bool:
+    """True if the module calls any of _MINTING_FUNCTION_NAMES (the
+    full set -- human-approval-gated AND ordinary child-issuance)."""
+    return _calls_any_function_named(tree, _MINTING_FUNCTION_NAMES)
 
 
 def _module_imports(tree: ast.Module) -> "list[str]":
@@ -98,18 +125,43 @@ class TestOnlyAuthorizationAuthorityMintsOrActivates:
                 offenders.append(str(path.relative_to(_ROOT)))
         assert offenders == [], f"only authorization_authority.py may transition a record to AUTHORIZED: {offenders}"
 
-    def test_only_authorization_authority_defines_and_calls_minting_functions_in_production_code(self):
+    def test_only_authorization_authority_calls_human_approval_gated_functions(self):
+        """register_run_grant()/issue_authorization_from_explicit_approval()
+        both require an offline-signed ApprovalArtifact -- no domain
+        caller (present or future) may call either; only
+        authorization_authority.py itself (and the offline approval
+        scripts, checked separately below) may."""
         offenders = []
         for path in _iter_python_files(_HYPOGEUM_DIR):
             if path.name in ("authorization_authority.py",):
                 continue
             tree = _parse(path)
-            if _calls_any_minting_function(tree):
+            if _calls_any_function_named(tree, _HUMAN_APPROVAL_GATED_FUNCTION_NAMES):
                 offenders.append(str(path.relative_to(_ROOT)))
         assert offenders == [], (
             f"no production module other than authorization_authority.py may call "
-            f"register_run_grant()/issue_child_authorization()/issue_authorization_from_explicit_approval(): {offenders}"
+            f"register_run_grant()/issue_authorization_from_explicit_approval(): {offenders}"
         )
+
+    def test_ordinary_child_issuance_functions_are_only_called_by_registered_domain_modules(self):
+        """issue_child_authorization()/resolve_active_grant() ARE the
+        intended way a domain caller issues a child authorization
+        against an already-verified grant -- unlike the human-approval
+        pair above, these are expected to be called by production
+        domain modules. This test is the living inventory of exactly
+        which modules do so, updated once per domain-closure commit
+        (Commit F: hypogeum/muapi.py) -- an unexpected new caller here
+        still needs conscious review, just not an outright ban."""
+        offenders = []
+        for path in _iter_python_files(_HYPOGEUM_DIR):
+            if path.name in ("authorization_authority.py",):
+                continue
+            tree = _parse(path)
+            if _calls_any_function_named(tree, _ORDINARY_CHILD_ISSUANCE_FUNCTION_NAMES):
+                offenders.append(str(path.relative_to(_ROOT)))
+        allowed = {"hypogeum/muapi.py"}  # Commit F: video/image/thumbnail domain closure
+        unexpected = [o for o in offenders if o not in allowed]
+        assert unexpected == [], f"unexpected child-issuance caller(s) outside the reviewed domain-closure list: {unexpected}"
 
     def test_authorization_authority_is_the_only_repo_wide_caller_including_scripts_and_tools(self):
         offenders = []

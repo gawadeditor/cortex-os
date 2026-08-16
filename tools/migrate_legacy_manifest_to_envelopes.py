@@ -669,6 +669,15 @@ def _compile_one_entry(
                     "source_file_checksum": manifest_md5,
                     "source_file_checksum_algorithm": "md5",
                     "tool_version": _TOOL_VERSION,
+                    # Enforced at the submission gate's reconstructed-
+                    # binding check (plan §5): every envelope this tool
+                    # constructs is bound against evidence reconstructed
+                    # for a pre-existing, already-authorized legacy entry --
+                    # never provably contemporaneous with a real, current
+                    # authorization decision -- so it is permanently
+                    # ineligible for real submission, diagnostic/
+                    # Observation-Only use only.
+                    "workflow_binding_reconstructed": True,
                 },
                 authorization_status="authorized",
             )

@@ -765,3 +765,59 @@ class TestGrantDerivedAuthorizationBoundary:
         result = harness.submit(env)
         assert result.approved is True
         assert harness.adapter.invocation_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Reconstructed-binding block (plan §5 -- Commit M precondition fix)
+# ---------------------------------------------------------------------------
+
+class TestReconstructedBindingDenial:
+    """audit_metadata['workflow_binding_reconstructed'] is True for every
+    envelope tools/migrate_legacy_manifest_to_envelopes.py constructs --
+    it must be gate-denied for real submission with zero adapter calls,
+    but MUST remain fully evaluable by run_shadow_checks()/
+    evaluate_shadow() (Observation-Only), since that diagnostic path is
+    the entire reason the tag exists."""
+
+    def test_reconstructed_binding_blocks_real_submission_with_zero_calls(self, harness):
+        env = _make_env(audit_metadata={"workflow_binding_reconstructed": True})
+        harness.acquire_lease(env)
+        result = harness.submit(env)
+        assert result.approved is False
+        assert harness.adapter.invocation_count == 0
+        assert result.denied_at_check == "21_workflow_binding_not_reconstructed"
+
+    def test_non_reconstructed_binding_is_unaffected(self, harness):
+        """False, absent, or any other value never trips the check --
+        only a literal True does (never a truthy-but-wrong type). Each
+        variant uses its own idempotency_key/authorization_id so the
+        three submissions in this loop don't collide with each other on
+        check 05 (idempotency_key_unconsumed), which is orthogonal to
+        what this test is actually proving."""
+        for i, audit_metadata in enumerate(({}, {"workflow_binding_reconstructed": False}, {"workflow_binding_reconstructed": "true"})):
+            env = _make_env(
+                audit_metadata=audit_metadata, planned_shot_id=f"shot_variant_{i}",
+                authorization_id=f"auth_variant_{i}", idempotency_key=f"idem_variant_{i}",
+            )
+            harness.acquire_lease(env)
+            result = harness.submit(env, authorization=_make_auth(env))
+            assert result.approved is True, (audit_metadata, result.reason)
+
+    def test_reconstructed_envelope_remains_fully_evaluable_by_shadow_checks(self, harness):
+        """run_shadow_checks() never calls _check_workflow_binding_not_
+        reconstructed() -- it is structurally absent from the shared
+        check functions run_shadow_checks() reuses, so a reconstructed
+        envelope's every OTHER dimension is still evaluated normally
+        (whatever evidence was actually supplied -- "unverifiable" for
+        anything omitted, exactly as run_shadow_checks()'s own contract
+        promises), and no CheckOutcome for check 21 appears at all
+        (there is nothing to report -- the check simply never runs in
+        this path)."""
+        env = _make_env(audit_metadata={"workflow_binding_reconstructed": True})
+        outcomes = sg.run_shadow_checks(
+            env, live_sources=_live_sources_for(env), required_provider="fake", required_model="fake-model",
+            expected_deterministic_output_path=env.deterministic_output_path,
+            authorization=_make_auth(env), at=AT,
+        )
+        assert not any(o.status == "fail" for o in outcomes), [o for o in outcomes if o.status == "fail"]
+        assert not any(o.check == "21_workflow_binding_not_reconstructed" for o in outcomes)

@@ -115,6 +115,7 @@ GATE_CHECK_ORDER = (
     "18_retry_fallback_authorization",
     "19_lease_and_fencing",
     "20_audit_persistence",
+    "21_workflow_binding_not_reconstructed",
 )
 
 
@@ -260,6 +261,40 @@ def _validate_envelope_and_sources(
     if required_model is not None and envelope.model != required_model:
         return GateDenial(GATE_CHECK_ORDER[13], f"model {envelope.model!r} != required {required_model!r}")
 
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Step 1.5: reconstructed-binding block (plan §5 -- legacy migration policy)
+# ---------------------------------------------------------------------------
+
+def _check_workflow_binding_not_reconstructed(envelope: GenerationExecutionEnvelope) -> Optional[GateDenial]:
+    """
+    A workflow/channel-package binding reconstructed against the
+    CURRENT registry for a PRE-registry authorization (e.g. a legacy
+    manifest migrated via tools/migrate_legacy_manifest_to_envelopes.py)
+    may only be used for diagnostics and Observation-Only -- it must
+    never be accepted for real submission. tools/migrate_legacy_
+    manifest_to_envelopes.py tags every envelope it constructs
+    audit_metadata["workflow_binding_reconstructed"] = True; this check
+    is the sole enforcement point for that tag.
+
+    Deliberately called ONLY from submit() itself, never from
+    _validate_envelope_and_sources() or any other function
+    run_shadow_checks() shares with submit() -- Observation-Only must
+    remain able to evaluate a reconstructed envelope's every other
+    dimension (that is the whole point of the migration tool's dry-run
+    report), so this one check is structurally absent from shadow
+    evaluation's own check list rather than being conditionally
+    skipped inside a shared function.
+    """
+    if envelope.audit_metadata.get("workflow_binding_reconstructed") is True:
+        return GateDenial(
+            GATE_CHECK_ORDER[20],
+            "envelope.audit_metadata['workflow_binding_reconstructed'] is True -- "
+            "a reconstructed legacy binding may only be used for diagnostics/Observation-Only, "
+            "never for real submission",
+        )
     return None
 
 
@@ -600,6 +635,11 @@ def submit(
     """
     # ---- Step 1: validate envelope and sources ----
     denial = _validate_envelope_and_sources(envelope, live_sources, required_model, required_provider, dominance_leak_validator)
+    if denial:
+        return _denial(denial.check, denial.reason)
+
+    # ---- Step 1.5: reject a reconstructed legacy binding (plan §5) ----
+    denial = _check_workflow_binding_not_reconstructed(envelope)
     if denial:
         return _denial(denial.check, denial.reason)
 

@@ -234,6 +234,59 @@ def load_adapter_class(qualified_name: str) -> Type:
         raise AdapterRegistrationError(f"module {module_name!r} has no attribute {class_name!r}") from exc
 
 
+def _migrate_pre_supersession_schema(conn: sqlite3.Connection) -> None:
+    """One-time structural migration for a database whose
+    adapter_registrations table predates registration_version /
+    supersession support (registration_id alone as PRIMARY KEY, no
+    registration_version column). Rebuilds the table with the new
+    schema (registration_id, registration_version) as PRIMARY KEY,
+    copying every existing row forward unchanged with
+    registration_version=1 -- no row, checksum, or status is altered,
+    only the table's own structural shape changes. No-op if the table
+    doesn't exist yet or already has the new column."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='adapter_registrations'"
+    ).fetchone()
+    if row is None:
+        return  # fresh database -- CREATE TABLE below builds the current schema directly
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(adapter_registrations)").fetchall()}
+    if "registration_version" in columns:
+        return  # already migrated
+
+    conn.execute("ALTER TABLE adapter_registrations RENAME TO adapter_registrations_pre_supersession")
+    conn.execute(
+        """
+        CREATE TABLE adapter_registrations (
+            registration_id                 TEXT NOT NULL,
+            registration_version             INTEGER NOT NULL DEFAULT 1,
+            provider                        TEXT NOT NULL,
+            model                            TEXT NOT NULL,
+            provider_operation              TEXT NOT NULL,
+            adapter_protocol_version        TEXT NOT NULL,
+            adapter_qualified_name          TEXT NOT NULL,
+            adapter_implementation_checksum TEXT NOT NULL,
+            registered_at                   TEXT NOT NULL,
+            status                           TEXT NOT NULL DEFAULT 'active',
+            PRIMARY KEY (registration_id, registration_version)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO adapter_registrations
+            (registration_id, registration_version, provider, model, provider_operation,
+             adapter_protocol_version, adapter_qualified_name, adapter_implementation_checksum,
+             registered_at, status)
+        SELECT registration_id, 1, provider, model, provider_operation,
+               adapter_protocol_version, adapter_qualified_name, adapter_implementation_checksum,
+               registered_at, status
+        FROM adapter_registrations_pre_supersession
+        """
+    )
+    conn.execute("DROP TABLE adapter_registrations_pre_supersession")
+    conn.commit()
+
+
 def _ensure_tables(conn: sqlite3.Connection) -> None:
     # Cheap existence check first -- never a DDL statement once the
     # schema exists, matching hypogeum.authorization_store.ensure_tables()'s
@@ -246,6 +299,8 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if already_initialized is not None:
         return
+
+    _migrate_pre_supersession_schema(conn)
 
     conn.execute(
         """

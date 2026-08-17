@@ -288,7 +288,16 @@ def _migrate_pre_supersession_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_tables(conn: sqlite3.Connection) -> None:
-    # Cheap existence check first -- never a DDL statement once the
+    # The migration check itself is a cheap PRAGMA read, never a DDL
+    # statement when nothing needs migrating -- safe to run before the
+    # "already initialized" early-return below, and it must run first:
+    # a database that reached adapter_registration_supersessions
+    # existing (e.g. from an earlier attempt that failed after that
+    # CREATE but before adapter_registrations itself was migrated) must
+    # still get its adapter_registrations table upgraded, not skipped.
+    _migrate_pre_supersession_schema(conn)
+
+    # Cheap existence check next -- never a DDL statement once the
     # schema exists, matching hypogeum.authorization_store.ensure_tables()'s
     # own documented reason: Python's sqlite3 module implicitly commits
     # any open transaction before a DDL statement, even a no-op "CREATE
@@ -299,8 +308,6 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if already_initialized is not None:
         return
-
-    _migrate_pre_supersession_schema(conn)
 
     conn.execute(
         """

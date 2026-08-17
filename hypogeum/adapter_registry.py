@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import inspect
+import subprocess
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -57,11 +58,15 @@ __all__ = [
     "AdapterIntegrityError",
     "UnregisteredAdapterError",
     "AdapterImplementationDriftError",
+    "AdapterSupersessionError",
+    "AdapterSupersessionConflictError",
+    "AdapterSupersessionRecord",
     "compute_adapter_implementation_checksum",
     "load_adapter_class",
     "register_adapter",
     "resolve_adapter",
     "resolve_adapter_via_conn",
+    "supersede_adapter_registration",
     "get_or_create_adapter_instance",
     "reset_adapter_instance_cache",
 ]
@@ -139,10 +144,45 @@ class AdapterImplementationDriftError(Exception):
     implementation changed without a new registration."""
 
 
+class AdapterSupersessionError(Exception):
+    """A requested supersession of an active adapter registration is
+    invalid: unchanged checksum, wrong previous checksum, unresolvable
+    or uncommitted adapter module, provider/model/operation mismatch,
+    missing explicit authorization, or an attempted rollback to a
+    checksum already present in this registration's own history."""
+
+
+class AdapterSupersessionConflictError(AdapterSupersessionError):
+    """The active row changed between being read and the conditional
+    UPDATE that marks it superseded -- a concurrent supersession (or
+    an unregister/re-register race) already won. Never applied
+    partially; the caller must re-read and retry with the new active
+    checksum as its own previous_checksum."""
+
+
+@dataclass(frozen=True)
+class AdapterSupersessionRecord:
+    """One immutable entry in the adapter_registration_supersessions
+    history -- never updated or deleted once written."""
+
+    supersession_id: str
+    registration_id: str
+    old_version: int
+    new_version: int
+    old_checksum: str
+    new_checksum: str
+    actor: str
+    reason: str
+    source_commit: str
+    superseded_at: str
+
+
 @dataclass(frozen=True)
 class AdapterBinding:
     """The registry's index record for one registered (provider, model,
-    provider_operation) adapter binding."""
+    provider_operation) adapter binding. registration_version starts at
+    1 and increments by exactly 1 on each supersession -- never reused,
+    never decremented."""
 
     provider: str
     model: str
@@ -153,6 +193,7 @@ class AdapterBinding:
     registered_at: str
     status: str
     registration_id: str
+    registration_version: int = 1
 
 
 def _now_iso() -> str:
@@ -194,10 +235,23 @@ def load_adapter_class(qualified_name: str) -> Type:
 
 
 def _ensure_tables(conn: sqlite3.Connection) -> None:
+    # Cheap existence check first -- never a DDL statement once the
+    # schema exists, matching hypogeum.authorization_store.ensure_tables()'s
+    # own documented reason: Python's sqlite3 module implicitly commits
+    # any open transaction before a DDL statement, even a no-op "CREATE
+    # TABLE IF NOT EXISTS" -- which would silently break the atomic
+    # BEGIN IMMEDIATE transaction supersede_adapter_registration() opens.
+    already_initialized = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='adapter_registration_supersessions'"
+    ).fetchone()
+    if already_initialized is not None:
+        return
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS adapter_registrations (
-            registration_id                 TEXT PRIMARY KEY,
+            registration_id                 TEXT NOT NULL,
+            registration_version             INTEGER NOT NULL DEFAULT 1,
             provider                        TEXT NOT NULL,
             model                            TEXT NOT NULL,
             provider_operation              TEXT NOT NULL,
@@ -206,7 +260,30 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
             adapter_implementation_checksum TEXT NOT NULL,
             registered_at                   TEXT NOT NULL,
             status                           TEXT NOT NULL DEFAULT 'active',
-            UNIQUE(provider, model, provider_operation)
+            PRIMARY KEY (registration_id, registration_version)
+        )
+        """
+    )
+    # Every immutable, historical registration a supersession ever
+    # produces -- append-only, never updated, never deleted. The old
+    # adapter_registrations row it references is itself never deleted
+    # or overwritten either; only its `status` column moves
+    # 'active' -> 'superseded' (a controlled, evidenced transition, not
+    # a content mutation -- provider/model/operation/checksum/
+    # qualified_name/registered_at on that row are unchanged forever).
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS adapter_registration_supersessions (
+            supersession_id  TEXT NOT NULL PRIMARY KEY,
+            registration_id  TEXT NOT NULL,
+            old_version      INTEGER NOT NULL,
+            new_version      INTEGER NOT NULL,
+            old_checksum     TEXT NOT NULL,
+            new_checksum     TEXT NOT NULL,
+            actor            TEXT NOT NULL,
+            reason           TEXT NOT NULL,
+            source_commit    TEXT NOT NULL,
+            superseded_at    TEXT NOT NULL
         )
         """
     )
@@ -224,6 +301,7 @@ def _row_to_binding(row: sqlite3.Row) -> AdapterBinding:
         registered_at=row["registered_at"],
         status=row["status"],
         registration_id=row["registration_id"],
+        registration_version=row["registration_version"],
     )
 
 
@@ -268,19 +346,23 @@ def register_adapter(
             conn.execute(
                 """
                 INSERT INTO adapter_registrations
-                    (registration_id, provider, model, provider_operation,
+                    (registration_id, registration_version, provider, model, provider_operation,
                      adapter_protocol_version, adapter_qualified_name,
                      adapter_implementation_checksum, registered_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'active')
                 """,
                 (registration_id, provider, model, provider_operation,
                  adapter_protocol_version, qualified_name, checksum, registered_at),
             )
             conn.commit()
         except sqlite3.IntegrityError:
-            # Row already exists for this exact key -- verify, never overwrite.
+            # version-1 row already exists for this exact key (whether
+            # still active or long since superseded) -- the CURRENT
+            # active row (any version) is what a repeat registration
+            # attempt must be compared against, never version 1
+            # specifically, so this stays correct after a supersession.
             existing = conn.execute(
-                "SELECT * FROM adapter_registrations WHERE registration_id = ?",
+                "SELECT * FROM adapter_registrations WHERE registration_id = ? AND status = 'active'",
                 (registration_id,),
             ).fetchone()
             if existing is None:
@@ -293,7 +375,7 @@ def register_adapter(
             return _row_to_binding(existing)
 
         row = conn.execute(
-            "SELECT * FROM adapter_registrations WHERE registration_id = ?",
+            "SELECT * FROM adapter_registrations WHERE registration_id = ? AND registration_version = 1",
             (registration_id,),
         ).fetchone()
         return _row_to_binding(row)
@@ -338,3 +420,211 @@ def resolve_adapter_via_conn(
             f"provider_operation={provider_operation!r})"
         )
     return _row_to_binding(row)
+
+
+def _verify_committed_source(module_file: Path, source_commit: str, *, repo_root: Path) -> None:
+    """Fails closed (AdapterSupersessionError) unless: source_commit is
+    a real, resolvable commit that contains this exact file, AND the
+    live working-tree file is byte-identical to that commit's version
+    of it (which also transitively proves the working tree has no
+    uncommitted changes to this file -- a dirty file could never match
+    any commit's stored bytes exactly)."""
+    rel_path = module_file.resolve().relative_to(repo_root)
+    show = subprocess.run(
+        ["git", "show", f"{source_commit}:{rel_path.as_posix()}"],
+        cwd=str(repo_root), capture_output=True,
+    )
+    if show.returncode != 0:
+        raise AdapterSupersessionError(
+            f"source_commit {source_commit!r} does not contain {rel_path.as_posix()} "
+            f"(or is not a valid commit): {show.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    committed_bytes = show.stdout
+    live_bytes = module_file.read_bytes()
+    if committed_bytes != live_bytes:
+        raise AdapterSupersessionError(
+            f"uncommitted or divergent adapter code: the live working-tree content of "
+            f"{rel_path.as_posix()} does not byte-for-byte match its content at commit "
+            f"{source_commit!r} -- refusing to supersede against unverified source"
+        )
+
+
+def supersede_adapter_registration(
+    provider: str,
+    model: str,
+    provider_operation: str,
+    adapter_class: Type,
+    *,
+    previous_checksum: str,
+    actor: str,
+    reason: str,
+    source_commit: str,
+    confirm_supersede: bool = False,
+    repo_root: Optional[Path] = None,
+    db_path: Optional[Path] = None,
+) -> AdapterBinding:
+    """
+    The one, generic, Factory-Core way to move an already-registered
+    (provider, model, provider_operation) binding onto a legitimately
+    changed adapter implementation, without ever deleting, overwriting,
+    or mutating the old registration's own recorded content.
+
+    Preserves immutable history: the prior row's provider/model/
+    provider_operation/adapter_qualified_name/adapter_implementation_
+    checksum/registered_at are never touched -- only its `status`
+    column moves 'active' -> 'superseded' (a controlled, evidenced
+    lifecycle transition, exactly mirroring hypogeum.authorization_
+    lifecycle's own transition discipline, never a content rewrite). A
+    new row is inserted at registration_version + 1, and one immutable
+    AdapterSupersessionRecord is appended to adapter_registration_
+    supersessions -- carrying the exact previous/new checksums, actor,
+    reason, source_commit, and timestamp this supersession requires as
+    evidence. resolve_adapter()/resolve_adapter_via_conn() are
+    unchanged and continue to select the single row with status =
+    'active' -- always the latest, by construction.
+
+    Fails closed, before mutating anything, on:
+      - confirm_supersede is not True ("unauthorized supersede")
+      - missing actor/reason/source_commit
+      - no active registration exists yet for this key (nothing to
+        supersede -- use register_adapter() for a first registration)
+      - provider/model/operation do not match the active row's own
+        recorded identity
+      - the adapter_class's module cannot be resolved ("missing
+        current module")
+      - the live module file is not byte-identical to source_commit's
+        stored version of it ("uncommitted adapter code" / a
+        source_commit that does not actually contain this content)
+      - previous_checksum does not equal the active row's own recorded
+        checksum ("wrong previous checksum")
+      - the freshly computed checksum equals previous_checksum
+        ("unchanged checksum")
+      - the freshly computed checksum already appears anywhere in this
+        registration_id's own historical checksums ("rollback to an
+        earlier checksum")
+      - a concurrent supersession already changed the active row since
+        it was read (AdapterSupersessionConflictError, via a
+        conditional UPDATE ... WHERE version = ? AND status = 'active'
+        with a rowcount check -- exactly one winner, the loser fails
+        closed rather than double-applying)
+
+    All-or-nothing: the old-row status flip, the new-row insert, and
+    the supersession-history insert happen inside one BEGIN IMMEDIATE
+    transaction.
+    """
+    if not confirm_supersede:
+        raise AdapterSupersessionError(
+            "unauthorized supersede: confirm_supersede=True is required as explicit supersede authorization"
+        )
+    if not actor or not reason or not source_commit:
+        raise AdapterSupersessionError("actor, reason, and source_commit are all required")
+    if not provider or not model or not provider_operation:
+        raise AdapterRegistrationError("provider, model, and provider_operation must all be non-empty")
+
+    repo_root = Path(repo_root) if repo_root else Path(__file__).resolve().parent.parent
+    registration_id = f"{provider}:{model}:{provider_operation}"
+
+    # "missing current module" -- raises AdapterRegistrationError if the
+    # adapter_class's defining module cannot be resolved at all.
+    new_checksum = compute_adapter_implementation_checksum(adapter_class)
+    qualified_name = _qualified_name(adapter_class)
+    module_file = Path(inspect.getmodule(adapter_class).__file__)
+
+    # "uncommitted adapter code" -- fails closed unless the live file is
+    # byte-identical to source_commit's own stored content.
+    _verify_committed_source(module_file, source_commit, repo_root=repo_root)
+
+    conn = get_connection(db_path)
+    try:
+        _ensure_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            active = conn.execute(
+                "SELECT * FROM adapter_registrations WHERE registration_id = ? AND status = 'active'",
+                (registration_id,),
+            ).fetchone()
+            if active is None:
+                raise AdapterSupersessionError(
+                    f"no active registration exists for {registration_id!r} -- nothing to supersede"
+                )
+
+            if (active["provider"], active["model"], active["provider_operation"]) != (provider, model, provider_operation):
+                raise AdapterSupersessionError(
+                    "provider/model/operation mismatch against the existing active registration's own identity"
+                )
+
+            if active["adapter_implementation_checksum"] != previous_checksum:
+                raise AdapterSupersessionError(
+                    f"wrong previous checksum: active registration is at "
+                    f"{active['adapter_implementation_checksum']!r}, caller supplied {previous_checksum!r}"
+                )
+
+            if new_checksum == active["adapter_implementation_checksum"]:
+                raise AdapterSupersessionError(
+                    "unchanged checksum: freshly computed implementation checksum is identical to the "
+                    "active registration's own checksum -- nothing to supersede"
+                )
+
+            historical_checksums = {
+                r["adapter_implementation_checksum"]
+                for r in conn.execute(
+                    "SELECT adapter_implementation_checksum FROM adapter_registrations WHERE registration_id = ?",
+                    (registration_id,),
+                ).fetchall()
+            }
+            if new_checksum in historical_checksums:
+                raise AdapterSupersessionError(
+                    "rollback to an earlier checksum is not permitted: this checksum already exists in "
+                    f"{registration_id!r}'s own registration history"
+                )
+
+            old_version = active["registration_version"]
+            new_version = old_version + 1
+
+            cur = conn.execute(
+                "UPDATE adapter_registrations SET status = 'superseded' "
+                "WHERE registration_id = ? AND registration_version = ? AND status = 'active'",
+                (registration_id, old_version),
+            )
+            if cur.rowcount != 1:
+                raise AdapterSupersessionConflictError(
+                    f"concurrent conflicting supersede detected for {registration_id!r} -- "
+                    "the active row changed since it was read; re-read and retry"
+                )
+
+            at = _now_iso()
+            conn.execute(
+                """
+                INSERT INTO adapter_registrations
+                    (registration_id, registration_version, provider, model, provider_operation,
+                     adapter_protocol_version, adapter_qualified_name,
+                     adapter_implementation_checksum, registered_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                """,
+                (registration_id, new_version, provider, model, provider_operation,
+                 active["adapter_protocol_version"], qualified_name, new_checksum, at),
+            )
+
+            supersession_id = f"{registration_id}:{old_version}->{new_version}"
+            conn.execute(
+                """
+                INSERT INTO adapter_registration_supersessions
+                    (supersession_id, registration_id, old_version, new_version, old_checksum, new_checksum,
+                     actor, reason, source_commit, superseded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (supersession_id, registration_id, old_version, new_version,
+                 previous_checksum, new_checksum, actor, reason, source_commit, at),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+        row = conn.execute(
+            "SELECT * FROM adapter_registrations WHERE registration_id = ? AND registration_version = ?",
+            (registration_id, new_version),
+        ).fetchone()
+        return _row_to_binding(row)
+    finally:
+        conn.close()

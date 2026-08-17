@@ -33,7 +33,10 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from hypogeum.approval_artifact import ApprovalArtifact, GrantBindingApproval
-from hypogeum.authorization_lifecycle import AuthorizationRecord, AuthorizationState, TransitionEvent
+from hypogeum.authorization_lifecycle import (
+    AuthorizationRecord, AuthorizationState, TransitionEvent,
+    correct_technical_validation_failure as _correct_technical_validation_failure,
+)
 from hypogeum.db import get_connection
 from hypogeum.execution_envelope import (
     SUPPORTED_SCHEMA_VERSIONS,
@@ -86,6 +89,8 @@ __all__ = [
     "AllocationConflictError",
     "advance_to_pending_editorial_review",
     "advance_to_technical_validation_failed",
+    "correct_technical_validation_failure",
+    "TechnicalValidationCorrectionError",
     "record_editorial_verdict",
     "record_submission_outcome",
     "allocate_qualified_asset",
@@ -1033,6 +1038,73 @@ def advance_to_technical_validation_failed(
     )
     record = record.transition(
         AuthorizationState.TECHNICAL_VALIDATION_FAILED, evidence={"failure_reason": failure_reason}, at=at,
+    )
+    persist_authorization_record(conn, record)
+    return record
+
+
+class TechnicalValidationCorrectionError(AuthorizationStoreError):
+    """correct_technical_validation_failure() refuses to correct: the
+    record is not at TECHNICAL_VALIDATION_FAILED, or the caller-supplied
+    fresh technical_validation_result itself reports failures (this
+    function corrects a false failure -- it can never be used to force
+    a genuinely-failing asset past validation)."""
+
+
+def correct_technical_validation_failure(
+    conn: sqlite3.Connection, authorization_id: str, *,
+    technical_validation_result: Mapping[str, Any], correction_reason: str, corrected_by: str, at: str,
+) -> AuthorizationRecord:
+    """
+    Generic, idempotent, narrowly-scoped correction for a record that
+    reached TECHNICAL_VALIDATION_FAILED because of a defect in the
+    VALIDATING caller's own tooling -- never because of a real defect
+    in the underlying asset. Requires technical_validation_result to
+    itself show a clean pass (an empty/falsy "failures" key, if
+    present) -- fails closed (TechnicalValidationCorrectionError)
+    otherwise, so this can never be used to force a genuinely-failing
+    asset through. The original TECHNICAL_VALIDATION_FAILED evidence
+    is never edited or deleted; hypogeum.authorization_lifecycle.
+    correct_technical_validation_failure() (the single narrow exception
+    to the state machine's blanket terminal-state guard -- see that
+    function's own docstring) appends this correction as one new,
+    fully-evidenced TransitionEvent, carrying the ORIGINAL failure
+    reason (read from the record's own history, never caller-supplied)
+    alongside the fresh, real validation result.
+
+    Idempotent replay: a record already past PENDING_EDITORIAL_REVIEW
+    is returned unchanged. Fails closed
+    (AuthorizationRecordNotFoundError) if no record exists at all;
+    fails closed (TechnicalValidationCorrectionError) if the record is
+    not currently at TECHNICAL_VALIDATION_FAILED.
+    """
+    ensure_tables(conn)
+    record = get_authorization_record(conn, authorization_id)
+    if record is None:
+        raise AuthorizationRecordNotFoundError(authorization_id)
+
+    if record.current_state in _PAST_PENDING_EDITORIAL_REVIEW:
+        return record
+
+    if record.current_state != AuthorizationState.TECHNICAL_VALIDATION_FAILED:
+        raise TechnicalValidationCorrectionError(
+            f"authorization {authorization_id!r} is at {record.current_state.value!r}, not "
+            "'technical_validation_failed' -- nothing to correct"
+        )
+
+    if technical_validation_result.get("failures"):
+        raise TechnicalValidationCorrectionError(
+            f"technical_validation_result for {authorization_id!r} itself reports failures "
+            f"({technical_validation_result['failures']!r}) -- refusing to correct a genuinely failing asset"
+        )
+
+    record = _correct_technical_validation_failure(
+        record,
+        evidence={
+            "technical_validation_result": dict(technical_validation_result),
+            "correction_reason": correction_reason, "corrected_by": corrected_by,
+        },
+        at=at,
     )
     persist_authorization_record(conn, record)
     return record

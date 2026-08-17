@@ -37,6 +37,7 @@ __all__ = [
     "TransitionEvent",
     "AuthorizationRecord",
     "create_superseding_authorization",
+    "correct_technical_validation_failure",
 ]
 
 
@@ -320,6 +321,84 @@ class AuthorizationRecord:
 
     def is_terminal(self) -> bool:
         return self.current_state in TERMINAL_STATES
+
+
+# One edge, one required-evidence set, defined LOCALLY here -- deliberately
+# NOT added to the module-wide ALLOWED_TRANSITIONS/REQUIRED_TRANSITION_
+# EVIDENCE_KEYS maps. Those maps are asserted, structurally, to make every
+# one of their edges reachable via the ordinary AuthorizationRecord.
+# transition() call (tests/test_authorization_lifecycle.py::
+# TestLegalTransitionsSucceed::test_every_documented_transition_succeeds
+# iterates ALLOWED_TRANSITIONS and requires every edge to succeed through
+# transition() itself) -- an edge whose source is a terminal state can
+# never satisfy that, since transition()'s single, unconditional guard
+# (`if self.current_state in TERMINAL_STATES: raise TerminalStateError`)
+# always fires first. Keeping this edge out of the shared maps preserves
+# that guarantee, and the AUTHORIZED_GENERATION_ENVELOPE.md §4.1 diagram,
+# completely unchanged.
+_TECHNICAL_VALIDATION_CORRECTION_REQUIRED_EVIDENCE_KEYS = (
+    "technical_validation_result", "correction_reason", "corrected_by",
+)
+
+
+def correct_technical_validation_failure(
+    record: AuthorizationRecord, *, evidence: Mapping[str, Any], at: str,
+) -> AuthorizationRecord:
+    """
+    The ONE narrow, explicit exception to AuthorizationRecord.
+    transition()'s blanket "terminal states never transition further"
+    guard. Exists for exactly one scenario: a record was moved to
+    TECHNICAL_VALIDATION_FAILED because of a genuine defect in the
+    VALIDATING caller's own tooling (e.g. a crash before any real
+    inspection ran) -- never because of a real defect in the
+    underlying asset -- and real technical validation evidence now
+    exists, produced separately, proving the asset is actually valid.
+
+    Every other terminal state (PREFLIGHT_FAILED, REJECTED, CONSUMED,
+    INVALIDATED_SOURCE_CHANGED, SUPERSEDED, CANCELLED) -- and every
+    OTHER record at TECHNICAL_VALIDATION_FAILED for a genuine asset
+    defect -- remains fully, unconditionally terminal: this function
+    only ever accepts a record already at TECHNICAL_VALIDATION_FAILED,
+    only ever produces PENDING_EDITORIAL_REVIEW, and is not a general
+    escape hatch usable from any other call site or state.
+    AuthorizationRecord.transition()'s own guard is completely
+    untouched by this function's existence -- every other real call
+    site in this codebase still hits it, unweakened.
+
+    original_failure_reason is never accepted as caller-supplied
+    evidence -- it is read directly from the record's OWN stored
+    history (the exact evidence its own TECHNICAL_VALIDATION_FAILED
+    transition already carries), so a caller cannot misattribute a
+    different original reason than what genuinely happened, and it is
+    always included in the new evidence dict verbatim, preserved.
+    """
+    if record.current_state != AuthorizationState.TECHNICAL_VALIDATION_FAILED:
+        raise TerminalStateError(record.current_state)
+
+    missing = tuple(
+        k for k in _TECHNICAL_VALIDATION_CORRECTION_REQUIRED_EVIDENCE_KEYS if not evidence.get(k)
+    )
+    if missing:
+        raise MissingTransitionEvidenceError(
+            record.current_state, AuthorizationState.PENDING_EDITORIAL_REVIEW, missing,
+        )
+
+    original_failure_event = next(
+        (h for h in reversed(record.history) if h.to_state == AuthorizationState.TECHNICAL_VALIDATION_FAILED), None,
+    )
+    original_failure_reason = original_failure_event.evidence.get("failure_reason") if original_failure_event else None
+
+    full_evidence = {**dict(evidence), "original_failure_reason": original_failure_reason}
+    event = TransitionEvent(
+        from_state=record.current_state, to_state=AuthorizationState.PENDING_EDITORIAL_REVIEW,
+        at=at, evidence=full_evidence,
+    )
+    return AuthorizationRecord(
+        authorization_id=record.authorization_id, authorization_version=record.authorization_version,
+        envelope_id=record.envelope_id, envelope_version=record.envelope_version,
+        current_state=AuthorizationState.PENDING_EDITORIAL_REVIEW, history=record.history + (event,),
+        superseded_authorization_id=record.superseded_authorization_id,
+    )
 
 
 def create_superseding_authorization(

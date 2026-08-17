@@ -106,7 +106,7 @@ def _run_ffprobe(file_path: Path) -> dict:
         "-show_format",
         str(file_path),
     ]
-    log.debug("ffprobe_start", path=str(file_path))
+    log.info("ffprobe_start", path=str(file_path))
     try:
         result = subprocess.run(
             cmd,

@@ -396,11 +396,13 @@ class TestCancelCheckFiresBetweenStages:
         startup_report.openrouter_reachable = True
         startup_report.fallback_active = False
 
+        cancel_run_calls = []
         pause_transition_calls = []
 
         with patch("hypogeum.pipeline.run_startup_checks", return_value=startup_report), \
              patch("hypogeum.pipeline.register_run", return_value="run_test"), \
-             patch("hypogeum.pipeline.cancel_run"), \
+             patch("hypogeum.pipeline.cancel_run",
+                   side_effect=lambda *a, **kw: cancel_run_calls.append((a, kw))), \
              patch("hypogeum.pipeline.fail_run"), \
              patch("hypogeum.pipeline.transition_run_state",
                    side_effect=lambda **kw: pause_transition_calls.append(kw)), \
@@ -428,11 +430,15 @@ class TestCancelCheckFiresBetweenStages:
                     )
             assert exc_info.value.stage_after == stage_name
 
-        # Item 1: a controlled stop persists the canonical pre-paid state --
-        # a transition to 'paused', not a call to cancel_run()/fail_run().
-        assert len(pause_transition_calls) == 1
-        assert pause_transition_calls[0]["to_state"] == "paused"
-        assert stage_name in pause_transition_calls[0]["reason"]
+        # A bare cancel_check()-triggered stop is ALWAYS operator
+        # cancellation (see PipelineCancelledError's own docstring and
+        # hypogeum.queue._cancel_check(), the only real production
+        # constructor of cancel_check) -- terminal 'cancelled' via
+        # cancel_run(), never 'paused' via transition_run_state(). This
+        # holds regardless of which stage it fires after, including
+        # Research Director and Thumbnail Strategy (TESTS items 1/2).
+        assert len(cancel_run_calls) == 1, "cancel_run must be called for operator cancellation"
+        assert len(pause_transition_calls) == 0, "a bare cancel_check must never produce a pause transition"
 
     def test_cancel_after_executive_producer(self, tmp_path):
         self._run_pipeline_until_stage("executive_producer", tmp_path)
@@ -542,24 +548,29 @@ class TestCancelCheckFiresBetweenStages:
 
 
 # ===========================================================================
-# 7. pipeline.py: PipelineCancelledError transitions to 'paused'
-#    (not the terminal 'cancelled'/'failed' states)
+# 7. pipeline.py: PipelineCancelledError means operator cancellation ->
+#    'cancelled' (terminal). PipelineAuthorizationRequiredError means an
+#    authorization-boundary stop -> 'paused' (resumable). These are two
+#    structurally distinct exceptions, never inferred from one shared signal.
 # ===========================================================================
 #
-# Regression coverage for the 2026-08-17 incident: run ecb0f87a, deliberately
-# stopped by cancel_check right after thumbnail_strategy (i.e. positioned
-# immediately before the Audio Agent paid boundary), was persisted as
-# status='cancelled' -- a *terminal* state per run_registry.RUN_STATES /
-# _VALID_TRANSITIONS ("cancelled": frozenset()) -- indistinguishable from an
-# operator abandoning the run outright. 'paused' is the existing, correct,
-# non-terminal canonical state for this (pause_run()'s own docstring:
-# "Transition a running run to paused state"); pipeline.py's
-# PipelineCancelledError handler now transitions there directly instead of
-# calling cancel_run().
+# History: a first attempt at fixing the 2026-08-17 run-ecb0f87a incident
+# (commit 2051fa1) collapsed EVERY PipelineCancelledError into 'paused',
+# which is itself wrong in the other direction -- cancel_check's only real
+# production meaning (hypogeum.queue._cancel_check(), the sole real
+# constructor) is a genuine operator cancellation request, which must stay
+# terminal 'cancelled'. This corrects that regression: PipelineCancelledError
+# restores its original, correct 'cancelled' semantics (TestOperatorCancellationRestored
+# below); a new, structurally separate PipelineAuthorizationRequiredError
+# (opt-in via enforce_authorization_boundaries=True, never raised for any
+# existing production caller) now owns the 'paused' semantics
+# (TestAuthorizationBoundaryPause below).
 
-class TestPipelineCancelledTransitionsToPaused:
-    def test_cancel_error_transitions_to_paused_not_cancelled_or_failed(self, tmp_path):
-        """When PipelineCancelledError escapes, the run must be marked paused."""
+class TestOperatorCancellationRestored:
+    """TESTS items 1/2: operator cancellation always becomes 'cancelled', at any stage."""
+
+    def test_cancel_error_calls_cancel_run_not_paused_or_failed(self, tmp_path):
+        """When PipelineCancelledError escapes, the run must be marked cancelled."""
         from hypogeum.pipeline import run_pipeline, PipelineCancelledError
         from hypogeum.startup import StartupReport
 
@@ -587,7 +598,10 @@ class TestPipelineCancelledTransitionsToPaused:
              patch("hypogeum.pipeline.is_channel_blocked", return_value=False), \
              patch("hypogeum.pipeline._run_executive_producer",
                    return_value=({"decision": "ACCEPT", "overall_score": 8.0}, {})):
-            # cancel_check returns True after EP, causing PipelineCancelledError
+            # cancel_check returns True after EP, causing PipelineCancelledError.
+            # enforce_authorization_boundaries is left at its default False, so
+            # this is a pure operator-cancellation scenario (item 4: a generic
+            # cancel_check cannot impersonate an authorization pause).
             call_count = [0]
             def cancel_check():
                 call_count[0] += 1
@@ -606,12 +620,151 @@ class TestPipelineCancelledTransitionsToPaused:
                     db_path=tmp_path / "h.db",
                 )
 
-        assert len(cancel_run_calls) == 0, "cancel_run must NOT be called on a deliberate pre-paid-boundary stop"
+        assert len(cancel_run_calls) == 1, "cancel_run must be called for operator cancellation"
         assert len(fail_run_calls) == 0, "fail_run must NOT be called on cancellation"
-        assert len(transition_calls) == 1, "transition_run_state must be called exactly once"
+        assert len(transition_calls) == 0, "transition_run_state (paused) must NOT be called for a bare cancel_check"
+
+
+class TestAuthorizationBoundaryPause:
+    """
+    TESTS items 3/4/5: an explicit authorization-boundary stop (opt-in via
+    enforce_authorization_boundaries=True) becomes 'paused', is structurally
+    distinct from cancel_check, and never fires for a non-paid next stage.
+    """
+
+    def _run(self, tmp_path, enforce, stop_stage="thumbnail_strategy", cancel_check=None):
+        from hypogeum.pipeline import run_pipeline
+        from hypogeum.startup import StartupReport
+
+        startup_report = StartupReport.__new__(StartupReport)
+        startup_report.overall_status = "ok"
+        startup_report.openrouter_reachable = True
+        startup_report.fallback_active = False
+
+        cancel_run_calls = []
+        transition_calls = []
+
+        def _mock(name, rv):
+            def _fn(*a, **kw):
+                return rv
+            return _fn
+
+        stage_targets = [
+            ("hypogeum.pipeline._run_executive_producer",
+             ({"decision": "ACCEPT", "overall_score": 8.0}, {})),
+            ("hypogeum.pipeline._run_research_director", ({"source_registry": []}, None)),
+            ("hypogeum.pipeline._run_narrative_architect", {}),
+            ("hypogeum.pipeline._run_script_engine", {}),
+            ("hypogeum.pipeline._run_budget_authorization",
+             {"verdict": "PROCEED", "estimated_spend_usd": 1.0}),
+            ("hypogeum.pipeline._run_thumbnail_strategy", {}),
+        ]
+        stop_index = {
+            "executive_producer": 0, "research_director": 1, "narrative_architect": 2,
+            "script_engine": 3, "finance_agent_authorization": 4, "thumbnail_strategy": 5,
+        }[stop_stage]
+
+        with patch("hypogeum.pipeline.run_startup_checks", return_value=startup_report), \
+             patch("hypogeum.pipeline.register_run", return_value="run_auth_test"), \
+             patch("hypogeum.pipeline.cancel_run", side_effect=lambda *a, **kw: cancel_run_calls.append(a)), \
+             patch("hypogeum.pipeline.fail_run"), \
+             patch("hypogeum.pipeline.transition_run_state",
+                   side_effect=lambda **kw: transition_calls.append(kw)), \
+             patch("hypogeum.pipeline.set_run_context"), \
+             patch("hypogeum.pipeline.clear_run_context"), \
+             patch("hypogeum.pipeline._record_stage_start", return_value=("sid", "t0")), \
+             patch("hypogeum.pipeline._record_stage_complete"), \
+             patch("hypogeum.pipeline._record_stage_failed"), \
+             patch("hypogeum.pipeline.is_factory_blocked", return_value=False), \
+             patch("hypogeum.pipeline.is_channel_blocked", return_value=False):
+            with contextlib.ExitStack() as stack:
+                for target, rv in stage_targets[: stop_index + 1]:
+                    stack.enter_context(patch(target, side_effect=_mock(target, rv)))
+                exc = None
+                try:
+                    run_pipeline(
+                        topic_input="test topic",
+                        episode_id="ep_auth_test",
+                        config=MagicMock(
+                            EPISODE_ZERO_MAX_SCENES=0,
+                            ENABLE_DEDICATED_SHORT_GENERATION=False,
+                        ),
+                        channel_id=None,
+                        db_path=tmp_path / "h.db",
+                        cancel_check=cancel_check,
+                        enforce_authorization_boundaries=enforce,
+                    )
+                except Exception as e:
+                    exc = e
+        return exc, cancel_run_calls, transition_calls
+
+    def test_authorization_required_stop_becomes_paused(self, tmp_path):
+        """Item 3: explicit authorization-required stop before Audio Agent -> paused."""
+        from hypogeum.pipeline import PipelineAuthorizationRequiredError
+
+        exc, cancel_run_calls, transition_calls = self._run(tmp_path, enforce=True)
+
+        assert isinstance(exc, PipelineAuthorizationRequiredError)
+        assert exc.stage_after == "thumbnail_strategy"
+        assert exc.next_stage == "audio_agent"
+        assert len(cancel_run_calls) == 0
+        assert len(transition_calls) == 1
         assert transition_calls[0]["to_state"] == "paused"
-        assert transition_calls[0]["run_id"] == "run_cancel_test"
-        assert "executive_producer" in transition_calls[0]["reason"]
+        assert transition_calls[0]["run_id"] == "run_auth_test"
+        assert "audio_agent" in transition_calls[0]["reason"]
+
+    def test_generic_cancel_check_cannot_impersonate_authorization_pause(self, tmp_path):
+        """
+        Item 4: with enforce_authorization_boundaries left False (every real
+        production caller's default), the boundary check must never fire even
+        though the very next stage (audio_agent) genuinely requires
+        authorization. A cancel_check that fires at the same point
+        (mimicking a simultaneous, unrelated operator cancellation) must
+        produce plain PipelineCancelledError, never PipelineAuthorizationRequiredError
+        -- proving the two signals cannot be confused for one another. A
+        cancel_check is required here (rather than leaving the run to
+        actually enter audio_agent) so this test never risks a real,
+        unmocked provider call.
+        """
+        from hypogeum.pipeline import PipelineAuthorizationRequiredError, PipelineCancelledError
+
+        exc, cancel_run_calls, transition_calls = self._run(
+            tmp_path, enforce=False, cancel_check=lambda: True,
+        )
+
+        assert isinstance(exc, PipelineCancelledError)
+        assert not isinstance(exc, PipelineAuthorizationRequiredError)
+        assert len(cancel_run_calls) == 1
+        assert len(transition_calls) == 0
+
+    def test_non_paid_next_stage_produces_no_exception(self):
+        """
+        Item 5: a direct, unit-level check that a non-paid next stage
+        (research_director) never produces authorization-pause evidence,
+        even with enforcement on -- checked directly against the same
+        functions run_pipeline() calls at every boundary, with no pipeline
+        execution (and therefore no risk of reaching any real stage).
+        """
+        import hypogeum.pipeline as pl
+
+        assert pl._stage_requires_unavailable_authorization("research_director") is None
+        assert pl._stage_requires_unavailable_authorization("script_engine") is None
+        assert pl._stage_requires_unavailable_authorization("thumbnail_strategy") is None
+
+        pl._raise_if_authorization_required(
+            "ep_x", "executive_producer", "research_director",
+            enforce_authorization_boundaries=True,
+        )  # must not raise
+
+    def test_paid_next_stage_produces_authorization_required(self):
+        """Sanity counterpart: a paid next stage DOES raise when enforced."""
+        import hypogeum.pipeline as pl
+
+        with pytest.raises(pl.PipelineAuthorizationRequiredError):
+            pl._raise_if_authorization_required(
+                "ep_x", "thumbnail_strategy", "audio_agent",
+                enforce_authorization_boundaries=True,
+            )
 
 
 # ===========================================================================

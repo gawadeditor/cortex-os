@@ -69,12 +69,16 @@ from typing import Optional
 
 from hypogeum.config import Config
 from hypogeum.db import (
+    acquire_lease,
     get_connection,
+    get_lease,
     initialize_schema,
     insert_episode,
     insert_run,
     insert_run_state_transition,
     get_run_state_transitions,
+    release_lease,
+    renew_lease,
     update_run_complete,
     update_run_failed,
 )
@@ -88,6 +92,130 @@ from hypogeum.identifiers import METADATA_VERSION, generate_run_id
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 _DEFAULT_RUNS_DIR = _PROJECT_ROOT / ".hypogeum-assets" / "runs"
+
+
+# ---------------------------------------------------------------------------
+# Run ownership — reuses the existing runtime_leases fencing-token
+# mechanism (hypogeum/db.py, Authorized Generation Envelope Commit 2 /
+# Part 3) as the single ownership system for pipeline runs, rather than
+# inventing a second one. resource_id="run:{run_id}"; owner_id identifies
+# the current OS process (stable for its lifetime, unique per process, so
+# a restart always looks like a legitimate takeover via acquire_lease()'s
+# existing expired-lease takeover path, never a fabricated "same owner").
+#
+# Root cause this replaces (2026-08-17 incident): orphan_runs.py used to
+# infer ownership from "does this row's status match the one worker
+# daemon's own in-memory-tracked status" -- a live, legitimate,
+# out-of-band run_pipeline() call (this session's resume tooling) that no
+# worker process was tracking got misclassified as orphaned and marked
+# failed while it was genuinely still executing. A durable, per-run lease
+# with a heartbeat-renewed expiry answers "is this specific run legitimately
+# owned right now" directly, independent of which process or entrypoint
+# is running it.
+# ---------------------------------------------------------------------------
+
+_PROCESS_LEASE_OWNER_ID = f"pid:{uuid.uuid4().hex[:12]}"
+_RUN_LEASE_TTL_SECONDS = 1800  # 30 min; renewed at every stage boundary (heartbeat)
+
+
+def _lease_resource_id(run_id: str) -> str:
+    return f"run:{run_id}"
+
+
+def _lease_expiry(from_iso: str, ttl_seconds: int = _RUN_LEASE_TTL_SECONDS) -> str:
+    dt = datetime.fromisoformat(from_iso)
+    from datetime import timedelta
+    return (dt + timedelta(seconds=ttl_seconds)).isoformat()
+
+
+def acquire_run_lease(run_id: str, at: str, db_path: Optional[Path] = None) -> bool:
+    """
+    Register durable ownership of run_id for the current process. Called by
+    register_run() before any agent runs. Best-effort by design (matches
+    every other non-blocking write in this module) -- a lease-acquisition
+    failure must never prevent a real pipeline run from starting; it only
+    means orphan reconciliation falls back to its pre-lease heuristic for
+    this one run (see orphan_runs.py).
+    """
+    try:
+        conn = get_connection(_db_path(db_path))
+        try:
+            lease = acquire_lease(
+                conn,
+                resource_id=_lease_resource_id(run_id),
+                owner_id=_PROCESS_LEASE_OWNER_ID,
+                acquired_at=at,
+                expires_at=_lease_expiry(at),
+                metadata_json=json.dumps({"run_id": run_id}),
+            )
+            return lease is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def renew_run_lease(run_id: str, db_path: Optional[Path] = None) -> bool:
+    """
+    Heartbeat: extend this process's ownership lease on run_id. Called at
+    every stage-completion boundary in pipeline.py. Never raises -- a
+    renewal failure (e.g. this process lost the lease to a takeover) is
+    reported via the return value only; callers treat it as informational.
+    """
+    try:
+        conn = get_connection(_db_path(db_path))
+        try:
+            resource_id = _lease_resource_id(run_id)
+            lease = get_lease(conn, resource_id)
+            if lease is None or lease["owner_id"] != _PROCESS_LEASE_OWNER_ID:
+                return False
+            now = _now_iso()
+            return renew_lease(
+                conn, resource_id, _PROCESS_LEASE_OWNER_ID, lease["fencing_token"],
+                renewed_at=now, new_expires_at=_lease_expiry(now),
+            )
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def release_run_lease(run_id: str, db_path: Optional[Path] = None) -> bool:
+    """Voluntarily release this process's lease on run_id at run exit (any outcome)."""
+    try:
+        conn = get_connection(_db_path(db_path))
+        try:
+            resource_id = _lease_resource_id(run_id)
+            lease = get_lease(conn, resource_id)
+            if lease is None or lease["owner_id"] != _PROCESS_LEASE_OWNER_ID:
+                return False
+            return release_lease(
+                conn, resource_id, _PROCESS_LEASE_OWNER_ID, lease["fencing_token"],
+                released_at=_now_iso(),
+            )
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def run_lease_is_live(run_id: str, at: str, db_path: Optional[Path] = None) -> bool:
+    """
+    Read-only: does run_id currently have a non-expired, active lease
+    (regardless of owner)? Used by orphan_runs.py in place of the old
+    single-worker in-memory heuristic.
+    """
+    try:
+        conn = get_connection(_db_path(db_path))
+        try:
+            lease = get_lease(conn, _lease_resource_id(run_id))
+            if lease is None or lease.get("status") != "active":
+                return False
+            return lease["expires_at"] > at
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +664,11 @@ def register_run(
         conn.commit()
     finally:
         conn.close()
+
+    # Register durable ownership before any agent runs (best-effort; see
+    # acquire_run_lease()'s own docstring for why this must never block
+    # pipeline start).
+    acquire_run_lease(run_id, started_at, db_path=db_path)
 
     # Record the initial state transition (None → running) — non-blocking
     try:

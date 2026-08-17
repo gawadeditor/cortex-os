@@ -776,3 +776,83 @@ class TestOrphanAutoRetryTier3:
         # The original orphaned run is only reconciled once (no longer
         # 'running' on the second pass), so no second retry item is created.
         assert len(_auto_retry_queue_rows(db, episode_id)) == 1
+
+
+# ===========================================================================
+# TestLeaseBasedOwnership — Defect C (2026-08-17) regression coverage
+# ===========================================================================
+#
+# Root cause of the 2026-08-17 incident: this module used to treat "does the
+# ONE tracked worker's own in-memory/DB status say it's actively running a
+# pipeline" as the sole ownership signal. A live, legitimate, out-of-band
+# run_pipeline() call -- an entrypoint other than the tracked worker daemon
+# -- was invisible to that signal and got marked orphaned/failed while it
+# was genuinely still executing. reconcile_orphaned_runs() now checks each
+# running row's durable runtime_leases lease (hypogeum.run_registry
+# acquire_run_lease()/renew_run_lease()) independently of any single
+# worker's tracked status.
+
+class TestLeaseBasedOwnership:
+    def test_live_out_of_band_run_is_not_orphaned(self, tmp_path):
+        """
+        Item 6 / the exact 2026-08-17 scenario: a run with a live lease is
+        never marked orphaned, even though worker_process_alive=False (no
+        tracked worker at all) -- this is precisely what run ecb0f87a needed
+        and did not have.
+        """
+        from hypogeum.run_registry import acquire_run_lease
+        from datetime import datetime, timezone
+
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        now = datetime.now(timezone.utc).isoformat()
+        assert acquire_run_lease(run_id, now, db_path=db) is True
+
+        result = reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert result == []
+        assert _run_status(db, run_id) == "running"
+
+    def test_stale_expired_leased_run_is_orphaned(self, tmp_path):
+        """Item 11: a run whose lease has expired is genuinely orphaned and reconciled."""
+        from hypogeum.db import get_connection, acquire_lease
+        from datetime import datetime, timezone, timedelta
+
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+
+        # Acquire a lease that already expired in the past.
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        also_past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        conn = get_connection(db)
+        acquire_lease(
+            conn, resource_id=f"run:{run_id}", owner_id="dead-process",
+            acquired_at=past, expires_at=also_past,
+        )
+        conn.close()
+
+        result = reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
+
+        assert result == [run_id]
+        assert _run_status(db, run_id) == "failed"
+
+    def test_leased_run_survives_even_when_legacy_signal_says_no_worker(self, tmp_path):
+        """
+        A run with a live lease must not be orphaned regardless of the
+        legacy worker_process_alive/worker_db_status values -- the lease is
+        authoritative once it exists, not merely an additional OR condition.
+        """
+        from hypogeum.run_registry import acquire_run_lease
+        from datetime import datetime, timezone
+
+        db = _db(tmp_path)
+        run_id = _insert_run(db, "running")
+        now = datetime.now(timezone.utc).isoformat()
+        acquire_run_lease(run_id, now, db_path=db)
+
+        result = reconcile_orphaned_runs(
+            db_path=db, worker_process_alive=False, worker_db_status="stopped",
+        )
+
+        assert result == []
+        assert _run_status(db, run_id) == "running"

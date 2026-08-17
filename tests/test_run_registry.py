@@ -21,10 +21,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hypogeum.db import get_connection, initialize_schema
+from hypogeum.db import get_connection, get_lease, initialize_schema
 from hypogeum.run_registry import (
     InvalidRunTransitionError,
     RUN_STATES,
+    acquire_run_lease,
     complete_run,
     fail_run,
     get_run_state,
@@ -32,7 +33,10 @@ from hypogeum.run_registry import (
     get_run_workflow_binding,
     pause_run,
     register_run,
+    release_run_lease,
+    renew_run_lease,
     resume_run,
+    run_lease_is_live,
     transition_run_state,
 )
 
@@ -891,3 +895,103 @@ class TestStateMachine:
             ).fetchone()
             prod_conn.close()
             assert row is None, "run_id must not appear in production DB"
+
+
+# ===========================================================================
+# TestRunOwnershipLease — Defect C (2026-08-17)
+# ===========================================================================
+#
+# Reuses the existing runtime_leases fencing-token mechanism (hypogeum/db.py)
+# as the single ownership system for pipeline runs -- no second ownership
+# system is introduced. register_run() now acquires a lease automatically;
+# these tests exercise that lease directly, independent of orphan_runs.py's
+# own consumption of it (see tests/test_orphan_runs.py for that side).
+
+class TestRunOwnershipLease:
+    def _register(self, store) -> tuple[str, Path, Path]:
+        db_path, runs_dir = store
+        run_id = register_run(
+            "ep_lease_001", _make_config(),
+            db_path=db_path, runs_dir=runs_dir,
+        )
+        return run_id, db_path, runs_dir
+
+    def test_register_run_acquires_a_lease(self, store):
+        """Item: a run started through the legitimate entrypoint registers ownership before execution."""
+        run_id, db_path, _ = self._register(store)
+        conn = get_connection(db_path)
+        lease = get_lease(conn, f"run:{run_id}")
+        conn.close()
+        assert lease is not None
+        assert lease["status"] == "active"
+
+    def test_live_lease_reports_live(self, store):
+        """Item 10: a live run with a valid (unexpired) lease is not orphaned."""
+        run_id, db_path, _ = self._register(store)
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        assert run_lease_is_live(run_id, at=now, db_path=db_path) is True
+
+    def test_expired_lease_reports_not_live(self, store):
+        """Item 11: a stale/expired lease is detected as no longer live."""
+        run_id, db_path, _ = self._register(store)
+        from datetime import datetime, timezone, timedelta
+        far_future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        assert run_lease_is_live(run_id, at=far_future, db_path=db_path) is False
+
+    def test_renew_extends_expiry_for_current_owner(self, store):
+        """Heartbeat: renewal keeps the lease alive across a stage boundary."""
+        run_id, db_path, _ = self._register(store)
+        assert renew_run_lease(run_id, db_path=db_path) is True
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        assert run_lease_is_live(run_id, at=now, db_path=db_path) is True
+
+    def test_fresh_process_reconstructs_ownership_from_durable_state(self, store):
+        """
+        Item 12: a fresh connection/process (simulating a restart) reads back
+        the exact same lease -- ownership is never only in-memory.
+        """
+        run_id, db_path, _ = self._register(store)
+        conn1 = get_connection(db_path)
+        lease1 = get_lease(conn1, f"run:{run_id}")
+        conn1.close()
+
+        # Simulate a brand new process: new connection, no shared state.
+        conn2 = get_connection(db_path)
+        lease2 = get_lease(conn2, f"run:{run_id}")
+        conn2.close()
+
+        assert lease2 == lease1
+
+    def test_release_then_reacquire_by_different_owner(self, store):
+        """
+        Item 13: lease takeover respects fencing -- after a voluntary
+        release, a new acquisition (a different process, in practice) must
+        receive a strictly greater fencing_token, and the old owner's
+        fencing_token can no longer renew.
+        """
+        run_id, db_path, _ = self._register(store)
+        conn = get_connection(db_path)
+        original = get_lease(conn, f"run:{run_id}")
+        conn.close()
+
+        assert release_run_lease(run_id, db_path=db_path) is True
+
+        # Simulate a different owner taking over the now-released lease.
+        from hypogeum.db import acquire_lease as _db_acquire_lease
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(db_path)
+        takeover = _db_acquire_lease(
+            conn, resource_id=f"run:{run_id}", owner_id="a-different-process",
+            acquired_at=now, expires_at=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+        )
+        conn.close()
+
+        assert takeover is not None
+        assert takeover["fencing_token"] > original["fencing_token"]
+        assert takeover["owner_id"] == "a-different-process"
+
+        # The original owner's renewal must now fail (stale fencing_token).
+        assert renew_run_lease(run_id, db_path=db_path) is False

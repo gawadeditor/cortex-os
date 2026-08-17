@@ -38,20 +38,44 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _has_ever_had_a_lease(run_id: str, db_path: Optional[Path]) -> bool:
+    """Whether any runtime_leases row exists for this run, active or not."""
+    from hypogeum.db import get_connection, get_lease
+    try:
+        conn = get_connection(db_path)
+        try:
+            return get_lease(conn, f"run:{run_id}") is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
 def reconcile_orphaned_runs(
     db_path: Optional[Path] = None,
     worker_process_alive: bool = False,
     worker_db_status: str = "stopped",
 ) -> list[str]:
     """
-    Find all runs with status='running' that have no active worker.
+    Find all runs with status='running' that are not legitimately owned
+    right now.
 
-    worker_process_alive: True if the worker OS process is alive (PID check).
-    worker_db_status:     Value of worker_control['worker_status'] in DB.
+    Ownership is determined per-run via the durable runtime_leases lease
+    each run acquires at register_run() and renews (heartbeat) at every
+    stage boundary (see hypogeum.run_registry.acquire_run_lease() /
+    renew_run_lease() / run_lease_is_live()) -- an active, unexpired lease
+    means SOME process legitimately owns this run right now, regardless of
+    whether it is the one worker daemon this function's caller happens to
+    be tracking. This replaces the pre-2026-08-17-fix behavior, which
+    treated "not the one worker's own in-memory-tracked status" as
+    equivalent to "orphaned" -- misclassifying any live, legitimate,
+    out-of-band run_pipeline() call (an entrypoint other than the tracked
+    worker daemon) as orphaned while it was genuinely still executing.
 
-    Orphan condition (either is enough):
-      - worker_process_alive is False
-      - worker_db_status not in {'running', 'cancelling'}
+    worker_process_alive/worker_db_status remain as a fallback signal ONLY
+    for runs with no lease row at all (registered before this fix, or a
+    lease-acquisition failure at registration time) -- never authoritative
+    once a lease exists.
 
     Marks each orphaned run as 'failed' in the DB with ORPHAN_ERROR.
     Stage executions and checkpoints on disk are never modified.
@@ -59,13 +83,12 @@ def reconcile_orphaned_runs(
     Returns list of run_ids that were orphaned (may be empty).
     """
     from hypogeum.db import get_connection, initialize_schema
+    from hypogeum.run_registry import run_lease_is_live
 
-    worker_is_running_pipeline = (
+    legacy_worker_is_running_pipeline = (
         worker_process_alive
         and worker_db_status in _ACTIVE_PIPELINE_STATUSES
     )
-    if worker_is_running_pipeline:
-        return []
 
     try:
         initialize_schema(db_path)
@@ -73,7 +96,6 @@ def reconcile_orphaned_runs(
         return []
 
     try:
-        from hypogeum.db import get_connection
         conn = get_connection(db_path)
         try:
             rows = conn.execute(
@@ -91,6 +113,18 @@ def reconcile_orphaned_runs(
     for row in rows:
         run_id = row["run_id"]
         episode_id = row["episode_id"]
+
+        if run_lease_is_live(run_id, at=now, db_path=db_path):
+            continue  # legitimately owned right now -- never orphaned
+
+        has_lease_row = _has_ever_had_a_lease(run_id, db_path)
+        if not has_lease_row and legacy_worker_is_running_pipeline:
+            # No lease was ever registered for this run (pre-fix run, or a
+            # best-effort acquisition failure) -- fall back to the old
+            # heuristic rather than treating absence-of-lease as proof of
+            # death on its own.
+            continue
+
         try:
             _mark_orphaned(run_id, episode_id, now, db_path)
             orphaned_ids.append(run_id)
@@ -107,7 +141,10 @@ def reconcile_orphaned_runs(
     # the Tier 2 residual sweep below still fires for a queue item whose
     # owning worker crashed before its runs row was ever registered.
     try:
-        _reconcile_queue_and_stage_state(orphaned_episode_ids, now, db_path)
+        _reconcile_queue_and_stage_state(
+            orphaned_episode_ids, now, db_path,
+            skip_tier2=legacy_worker_is_running_pipeline,
+        )
     except Exception:
         pass
 
@@ -118,20 +155,26 @@ def _reconcile_queue_and_stage_state(
     orphaned_episode_ids: list,
     now: str,
     db_path: Optional[Path],
+    skip_tier2: bool = False,
 ) -> None:
     """
     Tier 1: reconcile run_queue/stage_executions rows attributable to the
     orphaned runs rows just identified — the preferred path, since it
     produces precise evidence (which run each stuck item belonged to).
+    Always runs -- driven entirely by orphaned_episode_ids, which is
+    correctly empty whenever nothing was actually orphaned.
 
     Tier 2: reconcile any run_queue row still 'claimed' afterward. A
     worker can crash after claiming a queue item but before its runs row
     is even inserted, leaving a row with no orphaned run to associate it
-    with. The caller has already established no worker is actively
-    running a pipeline right now, so any row still 'claimed' at this point
-    is unconditionally stale — this tier exists so such a row is still
-    reconciled (never invisibly claimed), just logged separately so the
-    evidence honestly distinguishes "attributed" from "unattributed."
+    with, so any row still 'claimed' at this point is unconditionally
+    stale -- UNLESS skip_tier2 is True, meaning the caller's legacy
+    worker-tracking signal says a worker IS actively running a pipeline
+    right now (the per-run lease loop above only ever falls back to that
+    legacy signal for runs with no lease row at all -- see
+    reconcile_orphaned_runs()'s own docstring), in which case a 'claimed'
+    row could legitimately belong to that in-progress work and must not be
+    swept.
 
     Never raises past this function — the caller treats it as best-effort.
     """
@@ -176,12 +219,14 @@ def _reconcile_queue_and_stage_state(
             episode_ids=orphaned_episode_ids,
         )
 
-    conn = get_connection(db_path)
-    try:
-        tier2_queue_ids = fail_all_claimed_queue_items(conn, now, ORPHAN_ERROR)
-        conn.commit()
-    finally:
-        conn.close()
+    tier2_queue_ids: list = []
+    if not skip_tier2:
+        conn = get_connection(db_path)
+        try:
+            tier2_queue_ids = fail_all_claimed_queue_items(conn, now, ORPHAN_ERROR)
+            conn.commit()
+        finally:
+            conn.close()
 
     if tier2_queue_ids:
         log.warn(

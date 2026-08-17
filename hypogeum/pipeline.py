@@ -136,6 +136,88 @@ _ASSETS_ROOT = Path(__file__).resolve().parent.parent / ".hypogeum-assets"
 
 
 # ---------------------------------------------------------------------------
+# Stage boundary metadata (Defect B, 2026-08-17)
+#
+# Declares, per stage, whether it performs a paid provider operation and
+# whether owner authorization is required before entering it. This is
+# metadata about *this channel's* stage sequence (pipeline.py already
+# hardcodes the full EP/RD/NA/SE/... stage list itself, so this table lives
+# alongside it, not in any shared/generic module) -- never episode- or
+# run-specific, and never referencing a specific provider name (ElevenLabs,
+# MUAPI, etc.) so it stays meaningful if the underlying provider changes.
+#
+# requires_generation_envelope marks stages whose real, future gate is a
+# Generation Execution Envelope + Authorization Authority grant (not built
+# yet -- see docs/architecture plan, Factory Commit F0 onward). Until that
+# authority exists, _stage_requires_unavailable_authorization() below always
+# treats a requires_authorization=True stage as lacking valid authorization
+# -- an honest "not yet possible" answer, never a fabricated pass.
+# ---------------------------------------------------------------------------
+
+_STAGE_BOUNDARY_METADATA: dict[str, dict] = {
+    "executive_producer":          {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "research_director":           {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "narrative_architect":         {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "script_engine":                {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "finance_agent_authorization": {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "thumbnail_strategy":          {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "audio_agent":                  {"paid": True,  "requires_authorization": True,  "requires_generation_envelope": True},
+    "visual_package_director":     {"paid": True,  "requires_authorization": True,  "requires_generation_envelope": True},
+    "source_enhancement":          {"paid": True,  "requires_authorization": True,  "requires_generation_envelope": True},
+    "thumbnail_director":          {"paid": True,  "requires_authorization": True,  "requires_generation_envelope": True},
+    "assembly_agent":               {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "qa_agent":                     {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "compliance_agent":             {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+    "publishing_agent":             {"paid": False, "requires_authorization": False, "requires_generation_envelope": False},
+}
+
+
+def _stage_requires_unavailable_authorization(next_stage: str) -> Optional[dict]:
+    """
+    Returns pause evidence ({"next_stage", "required_authorization_identity"})
+    if `next_stage` requires authorization that does not currently exist, or
+    None if it may be entered freely (not paid/authorization-required, or a
+    real authorization already covers it).
+
+    No real Authorization Authority exists yet (Factory Commit F0 onward,
+    not built by this fix), so today every requires_authorization=True stage
+    always returns pause evidence -- this function's only job right now is
+    to answer "would this stage need authorization" honestly and generically;
+    it never fabricates an authorization that doesn't exist.
+    """
+    meta = _STAGE_BOUNDARY_METADATA.get(next_stage)
+    if meta is None or not meta.get("requires_authorization"):
+        return None
+    return {
+        "next_stage": next_stage,
+        "required_authorization_identity": next_stage,
+    }
+
+
+def _raise_if_authorization_required(
+    episode_id: str, stage_after: str, next_stage: str, enforce_authorization_boundaries: bool,
+) -> None:
+    """
+    Called at every stage boundary, right alongside the existing cancel_check
+    check. A no-op unless the caller explicitly opted in via
+    enforce_authorization_boundaries=True (every existing production caller
+    leaves this False, so behavior is unchanged for them) -- see
+    PipelineAuthorizationRequiredError's docstring for why this must be a
+    structurally distinct signal from cancel_check/PipelineCancelledError.
+    """
+    if not enforce_authorization_boundaries:
+        return
+    evidence = _stage_requires_unavailable_authorization(next_stage)
+    if evidence is None:
+        return
+    raise PipelineAuthorizationRequiredError(
+        episode_id=episode_id, stage_after=stage_after,
+        next_stage=evidence["next_stage"],
+        required_authorization_identity=evidence["required_authorization_identity"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint loader
 # ---------------------------------------------------------------------------
 
@@ -513,6 +595,50 @@ class PipelineCancelledError(PipelineError):
         )
 
 
+class PipelineAuthorizationRequiredError(PipelineError):
+    """
+    The next stage requires paid-provider/owner authorization that does not
+    currently exist, so the run stops here rather than entering it.
+
+    Structurally distinct from PipelineCancelledError (operator cancellation)
+    -- the two must never share one exception type or be inferred from a
+    cancel_check() bool alone (see run_pipeline()'s enforce_authorization_boundaries
+    parameter and _stage_requires_unavailable_authorization()). Only this
+    exception may result in a 'paused' run state with a
+    paused_before_paid_boundary reason; PipelineCancelledError always means
+    operator-requested cancellation and always results in 'cancelled'.
+
+    Raised only after the current stage has fully completed (its output is
+    checkpointed) and only when the caller opted in via
+    enforce_authorization_boundaries=True -- by default (every existing
+    production caller, e.g. hypogeum.queue.process_next()) this is never
+    raised and behavior is unchanged.
+
+    Attributes:
+        episode_id                    — episode identifier.
+        stage_after                   — name of the stage that just completed.
+        next_stage                    — name of the stage that would run next.
+        required_authorization_identity — opaque identifier for what
+            authorization is missing (stage name today; a real
+            Generation Execution Envelope / grant identity once the
+            Authorization Authority exists).
+    """
+    def __init__(
+        self, episode_id: str, stage_after: str, next_stage: str,
+        required_authorization_identity: str,
+    ) -> None:
+        self.episode_id = episode_id
+        self.stage_after = stage_after
+        self.next_stage = next_stage
+        self.required_authorization_identity = required_authorization_identity
+        super().__init__(
+            f"Episode {episode_id!r}: stage {next_stage!r} requires authorization "
+            f"({required_authorization_identity!r}) that does not currently exist. "
+            f"Paused after {stage_after!r}; checkpoints are preserved — resume once "
+            f"authorization is granted."
+        )
+
+
 class ChannelNotFoundError(PipelineError):
     """
     No channel record exists in the DB for the requested channel_id.
@@ -638,12 +764,28 @@ def run_pipeline(
     db_path: Optional[Path] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     publishing_platform_filter: Optional[frozenset] = None,
+    enforce_authorization_boundaries: bool = False,
 ) -> PipelineResult:
     """
     Execute the full 9-agent pipeline end-to-end.
 
     Args:
         topic_input:      The topic idea string passed to the Executive Producer.
+        enforce_authorization_boundaries: When True, the run stops
+                          (PipelineAuthorizationRequiredError, resulting in a
+                          'paused' run state) immediately before any stage
+                          marked requires_authorization in
+                          _STAGE_BOUNDARY_METADATA, if no valid authorization
+                          exists for it (currently: always, since no
+                          Authorization Authority exists yet). Defaults to
+                          False, matching every existing production caller
+                          (hypogeum.queue.process_next() via
+                          worker_integration.py) unchanged -- real autonomous
+                          production runs are not affected by this flag.
+                          Structurally independent of cancel_check, which
+                          always means operator-requested cancellation (see
+                          PipelineCancelledError / PipelineAuthorizationRequiredError
+                          docstrings).
                           e.g. "The Antikythera Mechanism"
         episode_id:       Unique identifier for this episode run. Used for log
                           correlation and asset file naming (see run_agent docs).
@@ -784,6 +926,12 @@ def run_pipeline(
         )
         startup_report = run_startup_checks(config, episode_id=episode_id)
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
 
         log.info(
@@ -811,6 +959,12 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
 
         # Fail-fast: REJECT halts the pipeline before any downstream agent is called.
@@ -831,6 +985,7 @@ def run_pipeline(
         )
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="executive_producer")
+        _raise_if_authorization_required(episode_id, "executive_producer", "research_director", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 3. Research Director
@@ -850,6 +1005,12 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
 
         # Fail-fast: PDR halts the pipeline; operator resolves deficiencies and re-runs.
@@ -865,6 +1026,7 @@ def run_pipeline(
         log.info("pipeline_stage_completed", agent="research_director")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="research_director")
+        _raise_if_authorization_required(episode_id, "research_director", "narrative_architect", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 4. Narrative Architect
@@ -883,10 +1045,17 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="narrative_architect")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="narrative_architect")
+        _raise_if_authorization_required(episode_id, "narrative_architect", "script_engine", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 5. Script Engine
@@ -905,10 +1074,17 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="script_engine")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="script_engine")
+        _raise_if_authorization_required(episode_id, "script_engine", "finance_agent_authorization", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 6. Finance Agent — budget authorization gate (pre-generation spend)
@@ -928,6 +1104,12 @@ def run_pipeline(
             db_path=db_path,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
@@ -948,6 +1130,7 @@ def run_pipeline(
 
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="finance_agent_authorization")
+        _raise_if_authorization_required(episode_id, "finance_agent_authorization", "thumbnail_strategy", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 6b. Thumbnail Strategy — produces thumbnail_concept_brief, which
@@ -972,6 +1155,12 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
@@ -980,6 +1169,7 @@ def run_pipeline(
         )
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="thumbnail_strategy")
+        _raise_if_authorization_required(episode_id, "thumbnail_strategy", "audio_agent", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 7. Audio Agent (Voice) — moved before Visual Package Director.
@@ -1019,10 +1209,17 @@ def run_pipeline(
             skip_shorts=_skip_shorts,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="audio_agent")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="audio_agent")
+        _raise_if_authorization_required(episode_id, "audio_agent", "visual_package_director", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 7a-pre. Fail-closed narration completeness gate (2026-08-08).
@@ -1059,10 +1256,17 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="visual_package_director")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="visual_package_director")
+        _raise_if_authorization_required(episode_id, "visual_package_director", "source_enhancement", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 7b. Source Enhancement — provider-agnostic resolution-compliance
@@ -1083,10 +1287,17 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="source_enhancement")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="source_enhancement")
+        _raise_if_authorization_required(episode_id, "source_enhancement", "thumbnail_director", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 7c. Thumbnail Director
@@ -1106,10 +1317,17 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="thumbnail_director")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="thumbnail_director")
+        _raise_if_authorization_required(episode_id, "thumbnail_director", "assembly_agent", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 8. Assembly Agent
@@ -1133,10 +1351,17 @@ def run_pipeline(
             topic_brief=topic_brief,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="assembly_agent")
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="assembly_agent")
+        _raise_if_authorization_required(episode_id, "assembly_agent", "qa_agent", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 9b. Asset Archive — catalog all generated assets (non-blocking)
@@ -1157,6 +1382,12 @@ def run_pipeline(
             run_id=run_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
@@ -1183,6 +1414,12 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
@@ -1201,6 +1438,7 @@ def run_pipeline(
 
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="qa_agent")
+        _raise_if_authorization_required(episode_id, "qa_agent", "compliance_agent", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 11. Rights & Compliance Agent
@@ -1220,6 +1458,12 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
@@ -1238,6 +1482,7 @@ def run_pipeline(
 
         if cancel_check is not None and cancel_check():
             raise PipelineCancelledError(episode_id=episode_id, stage_after="compliance_agent")
+        _raise_if_authorization_required(episode_id, "compliance_agent", "publishing_agent", enforce_authorization_boundaries)
 
         # -----------------------------------------------------------------------
         # 11b. Approval gate — human review required by compliance report
@@ -1331,6 +1576,12 @@ def run_pipeline(
             enabled_platforms=publishing_platform_filter,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info("pipeline_stage_completed", agent="publishing_agent")
 
@@ -1351,6 +1602,12 @@ def run_pipeline(
             output_dir=output_dir,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
@@ -1380,6 +1637,12 @@ def run_pipeline(
             run_id=run_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import renew_run_lease
+                renew_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         _current_stage_id = None
         log.info(
             "pipeline_stage_completed",
@@ -1447,6 +1710,11 @@ def run_pipeline(
         complete_run(run_id=run_id, episode_id=episode_id)
         write_episode_rollup(run_id=run_id, episode_id=episode_id)
         clear_run_context()
+        try:
+            from hypogeum.run_registry import release_run_lease
+            release_run_lease(run_id, db_path=db_path)
+        except Exception:
+            pass
 
         result = PipelineResult(
             episode_id=episode_id,
@@ -1484,31 +1752,32 @@ def run_pipeline(
 
         return result
 
-    except PipelineCancelledError as _exc:
-        # A cancel_check callback stopped the run deliberately between stages
-        # -- most commonly a caller stopping before a paid provider boundary
-        # (e.g. Audio Agent), not an operator abandoning the run. This is a
-        # resumable, non-terminal condition: checkpoints on disk are preserved
-        # and the same stage sequence can continue later. 'cancelled' is a
-        # *terminal* state (_VALID_TRANSITIONS["cancelled"] == frozenset())
-        # reserved for actual operator-requested abandonment (see cancel_run()
-        # / hypogeum.worker_control) -- using it here mischaracterized every
-        # deliberate pre-paid-boundary stop as an irrecoverable cancellation
-        # (confirmed for real on run ecb0f87a-7e58-4e45-a9db-2cb33d2a19d6,
-        # 2026-08-17: stage_after="thumbnail_strategy" got persisted as
-        # status='cancelled'). 'paused' is the existing canonical state for
-        # exactly this ("Transition a running run to paused state" --
-        # pause_run()'s own docstring); transitioning there directly (rather
-        # than via pause_run(), which is operator-only) keeps this a
-        # system-triggered pause without inventing a new state.
+    except PipelineAuthorizationRequiredError as _exc:
+        # The next stage requires authorization that does not currently
+        # exist (see _stage_requires_unavailable_authorization() and the
+        # exception's own docstring) -- structurally distinct from operator
+        # cancellation below. This is a resumable, non-terminal condition:
+        # checkpoints on disk are preserved. 'paused' is the existing
+        # canonical state for this ("Transition a running run to paused
+        # state" -- pause_run()'s own docstring); transitioning there
+        # directly (rather than via pause_run(), which is operator-only)
+        # keeps this a system-triggered pause without inventing a new state.
+        # Only reachable when the caller explicitly passed
+        # enforce_authorization_boundaries=True (see run_pipeline()'s own
+        # docstring) -- never for any existing production caller today.
         if run_id is not None:
             try:
                 transition_run_state(
                     run_id=run_id,
                     to_state="paused",
-                    triggered_by="system:cancel_check",
+                    triggered_by="system:authorization_boundary",
                     trigger_source="pipeline",
-                    reason=f"paused_before_paid_boundary:{_exc.stage_after}",
+                    reason=f"paused_before_paid_boundary:{_exc.next_stage}",
+                    metadata={
+                        "stage_after": _exc.stage_after,
+                        "next_stage": _exc.next_stage,
+                        "required_authorization_identity": _exc.required_authorization_identity,
+                    },
                     db_path=db_path,
                     episode_id=episode_id,
                 )
@@ -1522,7 +1791,7 @@ def run_pipeline(
         if _current_stage_id is not None:
             _record_stage_failed(
                 _current_stage_id, _current_stage_t0,
-                f"cancelled: {_exc.stage_after}", log, db_path=db_path,
+                f"paused: authorization required for {_exc.next_stage}", log, db_path=db_path,
             )
         try:
             clear_run_context()
@@ -1532,7 +1801,48 @@ def run_pipeline(
             "pipeline_run_paused",
             episode_id=episode_id,
             stage_after=_exc.stage_after,
+            next_stage=_exc.next_stage,
         )
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import release_run_lease
+                release_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
+        raise
+
+    except PipelineCancelledError as _exc:
+        # An operator explicitly requested cancellation via cancel_check
+        # (the only real production meaning of this exception -- see its own
+        # docstring; hypogeum.queue.process_next()'s _cancel_check() polls a
+        # genuine operator-set cancel flag). Terminal: 'cancelled'
+        # (_VALID_TRANSITIONS["cancelled"] == frozenset()) is correct here,
+        # unlike the resumable authorization-boundary case handled above.
+        if run_id is not None:
+            try:
+                cancel_run(run_id, episode_id, db_path=db_path)
+            except Exception:
+                pass
+        if _current_stage_id is not None:
+            _record_stage_failed(
+                _current_stage_id, _current_stage_t0,
+                f"cancelled: {_exc.stage_after}", log, db_path=db_path,
+            )
+        try:
+            clear_run_context()
+        except Exception:
+            pass
+        log.info(
+            "pipeline_run_cancelled",
+            episode_id=episode_id,
+            stage_after=_exc.stage_after,
+        )
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import release_run_lease
+                release_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         raise
 
     except Exception as _exc:
@@ -1550,6 +1860,12 @@ def run_pipeline(
             clear_run_context()
         except Exception:
             pass
+        if run_id is not None:
+            try:
+                from hypogeum.run_registry import release_run_lease
+                release_run_lease(run_id, db_path=db_path)
+            except Exception:
+                pass
         raise
 
 

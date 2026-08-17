@@ -519,6 +519,24 @@ def activate_authorization_proposal(
     re-transition, no duplicate approval_artifacts row. A record
     already AUTHORIZED under a DIFFERENT approval_id fails closed
     (never silently re-approves under a different signature).
+
+    No grant, no ledger -- deliberately, structurally distinct from
+    issue_child_authorization(envelope, grant_id, grant_version, ...),
+    the OTHER path that reaches AUTHORIZED. This function's own
+    AUTHORIZED-transition evidence never carries parent_grant_id/
+    parent_grant_version/parent_grant_checksum/grant_reservation_id --
+    only authorized_by/authorization_method/approval_artifact_id/
+    approval_subject_checksum. A RunAuthorizationGrant registered
+    separately (e.g. via register_run_grant()) alongside a batch this
+    function activates is therefore NEVER consulted, consumed, or
+    revalidated by hypogeum.submission_gate.submit() for any record
+    this function produces -- see that module's
+    _grant_binding_evidence() docstring for the real incident
+    (ep_f3619022 v4 replacement batch, 2026-08-17) that surfaced this,
+    and tests/test_grant_not_consumed_by_proposal_activation.py for a
+    structural proof. This is a known, documented gap, not a defect
+    introduced here -- closing it (e.g. an optional grant-binding
+    parameter on this function) is future, separately-authorized work.
     """
     _require_verified(approval_artifact, approval_type="authorization_proposal", subject_checksum=proposal_checksum)
 

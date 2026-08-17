@@ -1043,12 +1043,45 @@ def advance_to_technical_validation_failed(
     return record
 
 
+# The complete, closed set of original failure_reason strings this
+# correction path is willing to touch. Each entry names a SPECIFIC,
+# already-fixed tooling defect (never a category, a prefix, or a
+# pattern) -- adding a future entry requires knowing, by exact string,
+# what the defect actually was, exactly mirroring how this exact set
+# was populated after the real 2026-08-16/17 incident (hypogeum.
+# agents.media_specs_qa._run_ffprobe() called log.debug(), a method
+# hypogeum.logger.Logger never implements, crashing every real call
+# BEFORE ffprobe ever ran -- fixed in the same commit that introduced
+# this correction mechanism). A record whose original reason is
+# missing, merely similar, or not in this exact set is never eligible
+# -- see TestGenuineFailuresRemainTerminal in
+# tests/test_correct_technical_validation_failure.py.
+_KNOWN_TECHNICAL_VALIDATION_TOOLING_DEFECT_SIGNATURES = frozenset({
+    "ffprobe_failed: AttributeError: 'Logger' object has no attribute 'debug'",
+})
+
+# The fresh technical_validation_result must be independently produced,
+# structured, real ffprobe evidence -- never merely an empty/falsy
+# "failures" key a caller could fabricate in one line. Every one of
+# these observed fields must be present and non-null, and "check" must
+# name what was actually run.
+_REQUIRED_TECHNICAL_VALIDATION_OBSERVED_KEYS = ("width", "height", "fps", "duration_seconds")
+
+
 class TechnicalValidationCorrectionError(AuthorizationStoreError):
     """correct_technical_validation_failure() refuses to correct: the
-    record is not at TECHNICAL_VALIDATION_FAILED, or the caller-supplied
-    fresh technical_validation_result itself reports failures (this
-    function corrects a false failure -- it can never be used to force
-    a genuinely-failing asset past validation)."""
+    record is not at TECHNICAL_VALIDATION_FAILED; the record's own
+    ORIGINAL failure_reason is missing, or is not byte-for-byte one of
+    the _KNOWN_TECHNICAL_VALIDATION_TOOLING_DEFECT_SIGNATURES (a
+    different, ambiguous, or unrelated original failure -- including a
+    genuine asset defect -- is never eligible); or the caller-supplied
+    fresh technical_validation_result does not itself carry a
+    structurally complete, independently-produced passing result (a
+    named `check`, a non-empty `observed` dict with real width/height/
+    fps/duration_seconds, and `failures` exactly equal to `[]`) -- this
+    function can never be used to force a genuinely-failing asset past
+    validation, and can never be satisfied by a fabricated or
+    minimal "empty failures list" alone."""
 
 
 def correct_technical_validation_failure(
@@ -1057,20 +1090,37 @@ def correct_technical_validation_failure(
 ) -> AuthorizationRecord:
     """
     Generic, idempotent, narrowly-scoped correction for a record that
-    reached TECHNICAL_VALIDATION_FAILED because of a defect in the
-    VALIDATING caller's own tooling -- never because of a real defect
-    in the underlying asset. Requires technical_validation_result to
-    itself show a clean pass (an empty/falsy "failures" key, if
-    present) -- fails closed (TechnicalValidationCorrectionError)
-    otherwise, so this can never be used to force a genuinely-failing
-    asset through. The original TECHNICAL_VALIDATION_FAILED evidence
-    is never edited or deleted; hypogeum.authorization_lifecycle.
-    correct_technical_validation_failure() (the single narrow exception
-    to the state machine's blanket terminal-state guard -- see that
-    function's own docstring) appends this correction as one new,
-    fully-evidenced TransitionEvent, carrying the ORIGINAL failure
-    reason (read from the record's own history, never caller-supplied)
-    alongside the fresh, real validation result.
+    reached TECHNICAL_VALIDATION_FAILED because of ONE SPECIFIC, KNOWN
+    defect in the VALIDATING caller's own tooling -- never because of a
+    real defect in the underlying asset, and never for any original
+    failure reason outside the closed
+    _KNOWN_TECHNICAL_VALIDATION_TOOLING_DEFECT_SIGNATURES set (see that
+    constant's own comment). The record's own original_failure_reason
+    is read directly from its history via hypogeum.
+    authorization_lifecycle.get_technical_validation_failure_reason()
+    -- never accepted from a caller, so it cannot be misattributed --
+    and is compared for EXACT equality against that closed set; missing
+    (None), merely similar, or any other reason (including a genuine
+    asset defect) fails closed.
+
+    technical_validation_result must be independently-produced,
+    structured, real evidence, not merely an empty/falsy "failures"
+    key a caller could fabricate: it must carry a non-empty `check`
+    (naming what was actually run), an `observed` dict with real,
+    non-null width/height/fps/duration_seconds, and `failures` EXACTLY
+    equal to the empty list `[]` (not merely falsy -- None, a missing
+    key, 0, or "" all fail closed here too). Fails closed
+    (TechnicalValidationCorrectionError) on any shortfall, so this can
+    never be used to force a genuinely-failing (or unverified) asset
+    through.
+
+    The original TECHNICAL_VALIDATION_FAILED evidence is never edited
+    or deleted; hypogeum.authorization_lifecycle.correct_technical_
+    validation_failure() (the single narrow exception to the state
+    machine's blanket terminal-state guard -- see that function's own
+    docstring) appends this correction as one new, fully-evidenced
+    TransitionEvent, carrying the ORIGINAL failure reason alongside the
+    fresh, real validation result.
 
     Idempotent replay: a record already past PENDING_EDITORIAL_REVIEW
     is returned unchanged. Fails closed
@@ -1092,10 +1142,39 @@ def correct_technical_validation_failure(
             "'technical_validation_failed' -- nothing to correct"
         )
 
-    if technical_validation_result.get("failures"):
+    from hypogeum.authorization_lifecycle import get_technical_validation_failure_reason
+    original_failure_reason = get_technical_validation_failure_reason(record)
+    if original_failure_reason not in _KNOWN_TECHNICAL_VALIDATION_TOOLING_DEFECT_SIGNATURES:
         raise TechnicalValidationCorrectionError(
-            f"technical_validation_result for {authorization_id!r} itself reports failures "
-            f"({technical_validation_result['failures']!r}) -- refusing to correct a genuinely failing asset"
+            f"authorization {authorization_id!r}'s original failure_reason "
+            f"({original_failure_reason!r}) is missing, ambiguous, or not one of the closed set of known "
+            f"tooling-defect signatures this correction path is willing to touch -- refusing to correct "
+            "(a genuine asset defect, or any unrelated tooling failure, must never be reopened this way)"
+        )
+
+    if technical_validation_result.get("failures") != []:
+        raise TechnicalValidationCorrectionError(
+            f"technical_validation_result for {authorization_id!r} does not report failures as exactly "
+            f"[] ({technical_validation_result.get('failures')!r}) -- refusing to correct a genuinely "
+            "failing (or unverified) asset"
+        )
+    check_name = technical_validation_result.get("check")
+    if not isinstance(check_name, str) or not check_name:
+        raise TechnicalValidationCorrectionError(
+            f"technical_validation_result for {authorization_id!r} names no real 'check' performed "
+            f"({check_name!r}) -- refusing to accept an unstructured or fabricated pass claim"
+        )
+    observed = technical_validation_result.get("observed")
+    if not isinstance(observed, Mapping):
+        raise TechnicalValidationCorrectionError(
+            f"technical_validation_result for {authorization_id!r} carries no 'observed' evidence dict -- "
+            "refusing to accept a pass claim with no independently-produced measurement behind it"
+        )
+    missing_observed = tuple(k for k in _REQUIRED_TECHNICAL_VALIDATION_OBSERVED_KEYS if observed.get(k) is None)
+    if missing_observed:
+        raise TechnicalValidationCorrectionError(
+            f"technical_validation_result for {authorization_id!r}'s 'observed' evidence is missing or "
+            f"null for required key(s) {missing_observed} -- refusing to accept incomplete measurement evidence"
         )
 
     record = _correct_technical_validation_failure(

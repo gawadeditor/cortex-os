@@ -38,6 +38,7 @@ __all__ = [
     "AuthorizationRecord",
     "create_superseding_authorization",
     "correct_technical_validation_failure",
+    "get_technical_validation_failure_reason",
 ]
 
 
@@ -341,6 +342,25 @@ _TECHNICAL_VALIDATION_CORRECTION_REQUIRED_EVIDENCE_KEYS = (
 )
 
 
+def get_technical_validation_failure_reason(record: AuthorizationRecord) -> Optional[str]:
+    """Reads the exact `failure_reason` evidence of a record's own MOST
+    RECENT (DOWNLOADED -> TECHNICAL_VALIDATION_FAILED) transition --
+    the single, deterministic source of truth for "what reason was
+    this record actually closed for," never inferred, guessed, or
+    accepted from a caller. Returns None if the record has no such
+    transition in its history (e.g. is not currently, and never was,
+    TECHNICAL_VALIDATION_FAILED). Used both by correct_technical_
+    validation_failure() below (to stamp the evidence trail) and by
+    hypogeum.authorization_store.correct_technical_validation_failure()
+    (to enforce that only ONE specific, known tooling-defect signature
+    is ever eligible for correction -- see that function's own
+    docstring)."""
+    original_failure_event = next(
+        (h for h in reversed(record.history) if h.to_state == AuthorizationState.TECHNICAL_VALIDATION_FAILED), None,
+    )
+    return original_failure_event.evidence.get("failure_reason") if original_failure_event else None
+
+
 def correct_technical_validation_failure(
     record: AuthorizationRecord, *, evidence: Mapping[str, Any], at: str,
 ) -> AuthorizationRecord:
@@ -365,12 +385,24 @@ def correct_technical_validation_failure(
     untouched by this function's existence -- every other real call
     site in this codebase still hits it, unweakened.
 
+    This function itself is content-agnostic about WHAT the original
+    failure reason was or whether the fresh evidence is trustworthy --
+    it is pure state-machine mechanics (guard + evidence-key presence +
+    the one transition). Content-based policy (the original reason must
+    exactly match a known tooling-defect signature; the fresh evidence
+    must show a real, structured pass, not merely an empty failures
+    list) is deliberately NOT enforced here -- see hypogeum.
+    authorization_store.correct_technical_validation_failure(), the
+    only sanctioned caller, which enforces it before ever reaching this
+    function.
+
     original_failure_reason is never accepted as caller-supplied
     evidence -- it is read directly from the record's OWN stored
-    history (the exact evidence its own TECHNICAL_VALIDATION_FAILED
-    transition already carries), so a caller cannot misattribute a
-    different original reason than what genuinely happened, and it is
-    always included in the new evidence dict verbatim, preserved.
+    history via get_technical_validation_failure_reason() (the exact
+    evidence its own TECHNICAL_VALIDATION_FAILED transition already
+    carries), so a caller cannot misattribute a different original
+    reason than what genuinely happened, and it is always included in
+    the new evidence dict verbatim, preserved.
     """
     if record.current_state != AuthorizationState.TECHNICAL_VALIDATION_FAILED:
         raise TerminalStateError(record.current_state)
@@ -383,10 +415,7 @@ def correct_technical_validation_failure(
             record.current_state, AuthorizationState.PENDING_EDITORIAL_REVIEW, missing,
         )
 
-    original_failure_event = next(
-        (h for h in reversed(record.history) if h.to_state == AuthorizationState.TECHNICAL_VALIDATION_FAILED), None,
-    )
-    original_failure_reason = original_failure_event.evidence.get("failure_reason") if original_failure_event else None
+    original_failure_reason = get_technical_validation_failure_reason(record)
 
     full_evidence = {**dict(evidence), "original_failure_reason": original_failure_reason}
     event = TransitionEvent(

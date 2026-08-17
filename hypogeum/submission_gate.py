@@ -544,7 +544,37 @@ def _grant_binding_evidence(authorization: AuthorizationRecord) -> Optional[Mapp
     parent_grant_checksum/grant_reservation_id evidence from this
     authorization's AUTHORIZED transition, or None if it was issued via
     the one-off explicit-approval path (Commit M's future cutover),
-    which carries no grant evidence at all."""
+    which carries no grant evidence at all.
+
+    Real-incident note (ep_f3619022, 2026-08-17): a RunAuthorizationGrant
+    (grant_ep_f3619022_v4_replacement) was registered via hypogeum.
+    authorization_authority.register_run_grant() alongside a v4
+    replacement-proposal batch, but the batch's 85 AuthorizationRecords
+    were AUTHORIZED via hypogeum.authorization_authority.
+    activate_authorization_proposal() -- a DIFFERENT authorization-
+    issuance path than issue_child_authorization(grant_id, ...). That
+    function's own AUTHORIZED-transition evidence is exactly
+    {"authorized_by", "authorization_method": "explicit_human_approval_
+    proposal_batch", "approval_artifact_id", "approval_subject_checksum"}
+    -- it never carries parent_grant_id/parent_grant_version/
+    parent_grant_checksum/grant_reservation_id, because
+    activate_authorization_proposal() has no grant to attach one from
+    (it activates an already-compiled proposal batch, not a grant-bound
+    child authorization). This function therefore returns None for
+    every one of those 85 records, submission_gate.submit() never calls
+    revalidate_grant_reservation() for any of them, and the registered
+    grant's own ledger (run_authorization_grant_consumption) ends up
+    with ZERO rows for it -- the grant existed as a durable, signed
+    policy record, but was never structurally consulted, consumed, or
+    revalidated by any of the 65 real provider-boundary calls that
+    batch made. See tests/test_grant_not_consumed_by_proposal_
+    activation.py for a structural proof of this exact gap, reproduced
+    generically (not tied to the real episode's own data). This is
+    documented as a known, real architectural gap -- not fixed here,
+    per explicit instruction not to resume execution or repair it by
+    direct database mutation; closing it (e.g. by having
+    activate_authorization_proposal() optionally accept and bind a
+    grant) is future, separately-authorized work."""
     if not authorization.history:
         return None
     last_event = authorization.history[-1]

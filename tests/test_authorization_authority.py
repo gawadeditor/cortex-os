@@ -81,12 +81,12 @@ def _register_grant(priv, db_path, *, channel_id="test_channel", episode_id="ep_
 
 def _make_env(*, channel_id="test_channel", provider="fake", model="fake-model",
               provider_operation="video.text_to_video", cost="0.39", idem_key="idem_1",
-              authorization_id="auth_1"):
+              authorization_id="auth_1", episode_id="ep_test", workflow_version="1.0.0"):
     prompt = f"a compiled prompt for {idem_key}"
     return GenerationExecutionEnvelope.create(
         envelope_schema_version="1.0", envelope_version=1, channel_id=channel_id,
         channel_package_version="1.0", channel_package_checksum="b" * 64, execution_id="ep_test",
-        workflow_version="1.0.0", plan_version="1.0", plan_checksum="c" * 64, planned_shot_id="shot_1",
+        workflow_version=workflow_version, plan_version="1.0", plan_checksum="c" * 64, planned_shot_id="shot_1",
         structured_spec_checksum="d" * 64, compiler_identity="pkg.compile", compiler_version="v1",
         operation_payload_content=prompt, operation_payload_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
         operation_payload_schema_version="video.text_to_video/1.0",
@@ -96,7 +96,7 @@ def _make_env(*, channel_id="test_channel", provider="fake", model="fake-model",
         provider=provider, model=model, provider_operation=provider_operation,
         deterministic_output_path=f"/tmp/{idem_key}.mp4", expected_output_identity=f"asset_{idem_key}",
         authorization_id=authorization_id, authorization_version=1, max_cost_per_call=Decimal(cost),
-        run_level_budget_ref="run_1", episode_level_budget_ref="ep_test", currency="USD",
+        run_level_budget_ref="run_1", episode_level_budget_ref=episode_id, currency="USD",
         retry_authorized=False, fallback_authorized=False, idempotency_key=idem_key, created_at=AT,
         expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
         dependency_checksums={"channel_package": "b" * 64, "plan": "c" * 64, "structured_spec": "d" * 64, "compiler": "e" * 64},
@@ -326,7 +326,7 @@ class TestMultiChannelGenericity:
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
         _register_grant(priv, db_path, channel_id="another_channel", episode_id="ep_other", grant_id="g_other")
-        env = _make_env(channel_id="another_channel")
+        env = _make_env(channel_id="another_channel", episode_id="ep_other")
         record = authority.issue_child_authorization(env, "g_other", 1, at=AT, db_path=db_path)
         assert record.current_state.value == "authorized"
         resolved = authority.resolve_active_grant("another_channel", "ep_other", at=AT, db_path=db_path)

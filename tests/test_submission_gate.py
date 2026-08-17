@@ -684,14 +684,16 @@ class TestGrantDerivedAuthorizationBoundary:
             max_calls=max_calls, max_total_spend=max_total_spend,
         )]
         grant_checksum = authority.compute_grant_checksum(
-            channel_id=env.channel_id, episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0",
+            channel_id=env.channel_id, episode_id=env.episode_level_budget_ref, workflow_id="wf",
+            workflow_version=env.workflow_version,
             workflow_checksum="a" * 64, bindings=bindings, max_total_spend_all_bindings=max_total_spend,
             currency=env.currency, expires_at="2099-01-01T00:00:00Z",
         )
         artifact = sign_approval_artifact(
             dict(
                 approval_id="appr1", approval_version=1, approval_type="grant", subject_checksum=grant_checksum,
-                channel_id=env.channel_id, scope_id="ep_test", workflow_id="wf", workflow_version="1.0.0",
+                channel_id=env.channel_id, scope_id=env.episode_level_budget_ref, workflow_id="wf",
+                workflow_version=env.workflow_version,
                 workflow_checksum="a" * 64, channel_package_version="1.0", channel_package_checksum="b" * 64,
                 allowed_bindings=(GrantBindingApproval(env.provider, env.model, env.provider_operation),),
                 currency=env.currency, max_cost_per_call=env.max_cost_per_call, max_total_spend=max_total_spend,
@@ -701,8 +703,8 @@ class TestGrantDerivedAuthorizationBoundary:
             private_key=priv,
         )
         grant = authority.register_run_grant(
-            grant_id="g1", grant_version=1, channel_id=env.channel_id, episode_id="ep_test",
-            workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+            grant_id="g1", grant_version=1, channel_id=env.channel_id, episode_id=env.episode_level_budget_ref,
+            workflow_id="wf", workflow_version=env.workflow_version, workflow_checksum="a" * 64, bindings=bindings,
             max_total_spend_all_bindings=max_total_spend, currency=env.currency, expires_at="2099-01-01T00:00:00Z",
             approval_artifact=artifact, db_path=db_path,
         )

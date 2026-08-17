@@ -259,8 +259,11 @@ class TestGateRevalidationBlocksStaleGrantForProposalActivatedRecord:
         )
         grant = _register_grant(
             priv, db_path, grant_id=grant_id, bindings=bindings, max_total_spend_all_bindings=max_total_spend,
+            channel_id=env.channel_id, episode_id=env.episode_level_budget_ref,
         )
-        checksum = _make_proposal_fixture(db_path, envs=[env])
+        checksum = _make_proposal_fixture(
+            db_path, envs=[env], channel_id=env.channel_id, episode_id=env.episode_level_budget_ref,
+        )
         artifact = _sign_proposal_artifact(priv, checksum)
         records = authority.activate_authorization_proposal(
             checksum, approval_artifact=artifact, grant_id=grant_id, grant_version=1, at=AT, db_path=db_path,
@@ -271,7 +274,7 @@ class TestGateRevalidationBlocksStaleGrantForProposalActivatedRecord:
         from tests.test_submission_gate import GateHarness, _make_env as _sg_make_env
 
         harness = GateHarness(tmp_path)
-        env = _sg_make_env(idempotency_key="idem_proposal_1", authorization_id="auth_proposal_1")
+        env = _sg_make_env(idempotency_key="idem_proposal_1", authorization_id="auth_proposal_1", workflow_version="1.0.0")
         harness.acquire_lease(env)
         record, grant = self._activate_via_proposal(harness, env)
 
@@ -290,7 +293,7 @@ class TestGateRevalidationBlocksStaleGrantForProposalActivatedRecord:
         from tests.test_submission_gate import GateHarness, _make_env as _sg_make_env
 
         harness = GateHarness(tmp_path)
-        env = _sg_make_env(idempotency_key="idem_proposal_2", authorization_id="auth_proposal_2")
+        env = _sg_make_env(idempotency_key="idem_proposal_2", authorization_id="auth_proposal_2", workflow_version="1.0.0")
         harness.acquire_lease(env)
         record, grant = self._activate_via_proposal(harness, env)
 

@@ -51,6 +51,7 @@ __all__ = [
     "NoMatchingGrantBindingError",
     "EnvelopeExceedsGrantLimitsError",
     "GrantCapacityExhaustedError",
+    "GrantScopeMismatchError",
     "compute_grant_checksum",
     "register_run_grant",
     "resolve_active_grant",
@@ -117,6 +118,19 @@ class EnvelopeExceedsGrantLimitsError(AuthorizationAuthorityError):
 
 class GrantCapacityExhaustedError(AuthorizationAuthorityError):
     pass
+
+
+class GrantScopeMismatchError(AuthorizationAuthorityError):
+    """The authorization target's (envelope's or proposal's) declared
+    channel_id/episode_id/workflow identity does not exactly equal the
+    grant's own -- or the target is missing that scope evidence
+    entirely. Raised by _validate_grant_scope_binding(), the ONE shared
+    check both issue_child_authorization() and
+    activate_authorization_proposal() call, before any ledger
+    reservation or authorization state transition. A grant registered
+    for one channel/episode/workflow can never authorize a target
+    belonging to a different one, even if every provider/model/
+    operation/currency/cost binding happens to match."""
 
 
 def _load_trusted_public_key() -> Ed25519PublicKey:
@@ -306,6 +320,92 @@ def _resolve_and_verify_active_grant(
     return grant
 
 
+def _validate_grant_scope_binding(
+    grant: "store.RunAuthorizationGrant", *,
+    channel_id: Optional[str], episode_id: Optional[str], workflow_version: Optional[str],
+    workflow_id: Optional[str] = None, workflow_checksum: Optional[str] = None,
+    target_description: str,
+) -> None:
+    """The ONE shared fail-closed channel/episode/run(workflow)-scope
+    check both issue_child_authorization() and
+    activate_authorization_proposal() call -- never duplicated into two
+    divergent implementations. Requires EXACT equality between the
+    grant's own channel_id/episode_id/workflow_version and the
+    authorization target's (an envelope's or a proposal's) declared
+    scope, before any ledger reservation or authorization state
+    transition. Missing target scope evidence (None or empty) fails
+    closed exactly like a genuine mismatch -- it is never treated as
+    "not applicable, skip the check."
+
+    workflow_id/workflow_checksum are compared ONLY when the caller
+    actually supplies a non-None value for them -- i.e. only when the
+    target's own data model genuinely exposes that identity (an
+    AuthorizationProposal carries workflow_id/workflow_checksum; a bare
+    GenerationExecutionEnvelope does not carry workflow_id at all, by
+    design of that schema, not by omission) -- "wherever both sides
+    expose that identity." workflow_version IS always present on both
+    an envelope and a proposal, and is therefore always required and
+    compared, exactly like channel_id/episode_id.
+
+    Never mutates the grant or the target to make them match (there is
+    no write in this function at all); never a bypass or fallback --
+    every branch below either passes silently or raises
+    GrantScopeMismatchError.
+    """
+    if not channel_id:
+        raise GrantScopeMismatchError(f"{target_description} is missing channel_id -- cannot verify grant scope")
+    if channel_id != grant.channel_id:
+        raise GrantScopeMismatchError(
+            f"{target_description}'s channel_id {channel_id!r} does not match grant "
+            f"{grant.grant_id!r}@{grant.grant_version}'s channel_id {grant.channel_id!r}"
+        )
+
+    if not episode_id:
+        raise GrantScopeMismatchError(f"{target_description} is missing episode_id -- cannot verify grant scope")
+    if episode_id != grant.episode_id:
+        raise GrantScopeMismatchError(
+            f"{target_description}'s episode_id {episode_id!r} does not match grant "
+            f"{grant.grant_id!r}@{grant.grant_version}'s episode_id {grant.episode_id!r}"
+        )
+
+    if not workflow_version:
+        raise GrantScopeMismatchError(f"{target_description} is missing workflow_version -- cannot verify grant scope")
+    if workflow_version != grant.workflow_version:
+        raise GrantScopeMismatchError(
+            f"{target_description}'s workflow_version {workflow_version!r} does not match grant "
+            f"{grant.grant_id!r}@{grant.grant_version}'s workflow_version {grant.workflow_version!r}"
+        )
+
+    if workflow_id is not None and workflow_id != grant.workflow_id:
+        raise GrantScopeMismatchError(
+            f"{target_description}'s workflow_id {workflow_id!r} does not match grant "
+            f"{grant.grant_id!r}@{grant.grant_version}'s workflow_id {grant.workflow_id!r}"
+        )
+    if workflow_checksum is not None and workflow_checksum != grant.workflow_checksum:
+        raise GrantScopeMismatchError(
+            f"{target_description}'s workflow_checksum {workflow_checksum!r} does not match grant "
+            f"{grant.grant_id!r}@{grant.grant_version}'s workflow_checksum {grant.workflow_checksum!r}"
+        )
+
+
+def _validate_envelope_grant_scope(
+    grant: "store.RunAuthorizationGrant", envelope: GenerationExecutionEnvelope, *, target_description: str,
+) -> None:
+    """Thin adapter: extracts an envelope's own scope fields and calls
+    the one shared _validate_grant_scope_binding(). envelope.
+    episode_level_budget_ref is the envelope-side field carrying the
+    same episode identity as RunAuthorizationGrant.episode_id /
+    AuthorizationProposal.episode_id -- every real compiler (tools.
+    migrate_legacy_manifest_to_envelopes, scripts.propose_current_
+    episode_authorization) sources both from the exact same episode_id
+    value. workflow_id/workflow_checksum are never passed here -- the
+    envelope schema does not carry them at all."""
+    _validate_grant_scope_binding(
+        grant, channel_id=envelope.channel_id, episode_id=envelope.episode_level_budget_ref,
+        workflow_version=envelope.workflow_version, target_description=target_description,
+    )
+
+
 def _validate_envelope_against_grant_binding(
     grant: "store.RunAuthorizationGrant", envelope: GenerationExecutionEnvelope,
 ) -> "store.GrantBinding":
@@ -392,6 +492,15 @@ def issue_child_authorization(
     See plan §5.5 for the full algorithm. Uses envelope.idempotency_key
     (already a required envelope field) as the ledger's idempotency
     key -- no separate, potentially-conflicting parameter is accepted.
+
+    Before any ledger reservation, requires the envelope's own
+    channel_id/episode_level_budget_ref/workflow_version to exactly
+    equal the grant's own channel_id/episode_id/workflow_version (see
+    _validate_envelope_grant_scope() / _validate_grant_scope_binding()
+    -- the one shared check activate_authorization_proposal() also
+    uses). A grant registered for a different channel, episode, or
+    workflow fails closed (GrantScopeMismatchError) even if every
+    provider/model/operation/currency/cost binding matches.
     """
     conn = get_connection(db_path)
     try:
@@ -399,6 +508,9 @@ def issue_child_authorization(
         conn.execute("BEGIN IMMEDIATE")
         try:
             grant = _resolve_and_verify_active_grant(conn, grant_id, grant_version, at)
+            _validate_envelope_grant_scope(
+                grant, envelope, target_description=f"envelope {envelope.envelope_id!r}",
+            )
             binding = _validate_envelope_against_grant_binding(grant, envelope)
             reservation = _reserve_grant_ledger_capacity(conn, grant, grant_version, binding, envelope, at)
 
@@ -549,12 +661,18 @@ def activate_authorization_proposal(
     constructed). Uses the exact same shared, already-tested grant
     resolution/validation/reservation helpers issue_child_authorization()
     uses (_resolve_and_verify_active_grant(),
+    _validate_grant_scope_binding() / _validate_envelope_grant_scope(),
     _validate_envelope_against_grant_binding(),
     _reserve_grant_ledger_capacity()) -- a missing, revoked, expired, or
-    unverifiable grant; a missing/mismatched binding; an over-ceiling
-    envelope; or exhausted binding/grant-wide capacity all fail closed,
-    before mutating anything, with zero adapter calls (this function
-    never touches submission_gate at all).
+    unverifiable grant; a channel/episode/workflow scope mismatch
+    (checked BOTH against the proposal's own declared scope AND
+    independently against every named envelope's own scope, so a
+    mixed-channel/mixed-episode/mixed-run batch fails closed even when
+    the proposal's own metadata happens to match); a missing/mismatched
+    provider/model/operation/currency/cost binding; or exhausted
+    binding/grant-wide capacity all fail closed, before mutating
+    anything, with zero adapter calls (this function never touches
+    submission_gate at all).
 
     The missing counterpart to issue_authorization_from_explicit_
     approval(): that function only ever constructs a BRAND NEW record
@@ -613,6 +731,21 @@ def activate_authorization_proposal(
             # proposal or a missing authorization_id already did.
             grant = _resolve_and_verify_active_grant(conn, grant_id, grant_version, at)
 
+            # Proposal-level scope check, BEFORE reading a single named
+            # record -- catches "this grant belongs to a different
+            # channel/episode/workflow entirely" with zero mutation and
+            # zero per-record reads. Checked against the proposal's own
+            # declared channel_id/episode_id/workflow_id/workflow_
+            # version/workflow_checksum -- the fullest scope identity
+            # available on either side of this function (a bare
+            # envelope never carries workflow_id).
+            _validate_grant_scope_binding(
+                grant, channel_id=proposal.channel_id, episode_id=proposal.episode_id,
+                workflow_version=proposal.workflow_version, workflow_id=proposal.workflow_id,
+                workflow_checksum=proposal.workflow_checksum,
+                target_description=f"proposal {proposal.proposal_id!r}",
+            )
+
             records: dict = {}
             envelopes: dict = {}
             already_authorized_under_this_approval = True
@@ -654,9 +787,18 @@ def activate_authorization_proposal(
                 conn.commit()
                 return [records[aid] for aid in proposal.authorization_ids]
 
-            # Validate every envelope's grant binding BEFORE reserving
-            # anything -- a single mismatched envelope anywhere in the
-            # batch blocks the whole batch, never a partial activation.
+            # Validate every envelope's own channel/episode/workflow
+            # scope AND grant binding BEFORE reserving anything -- a
+            # single mismatched envelope anywhere in the batch blocks
+            # the whole batch, never a partial activation. This is a
+            # SEPARATE check from the proposal-level one above: even if
+            # the proposal's own declared metadata matches the grant, an
+            # individual envelope within it could still diverge (a
+            # mixed-channel/mixed-episode/mixed-run batch) -- every
+            # envelope is checked independently, never inferred safe
+            # from the proposal's own scope alone.
+            for aid, env in envelopes.items():
+                _validate_envelope_grant_scope(grant, env, target_description=f"envelope {env.envelope_id!r} ({aid!r})")
             bindings = {
                 aid: _validate_envelope_against_grant_binding(grant, env) for aid, env in envelopes.items()
             }

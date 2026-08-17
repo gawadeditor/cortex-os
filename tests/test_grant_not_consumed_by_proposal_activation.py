@@ -69,20 +69,20 @@ def _make_awaiting_explicit_record(db_path, authorization_id, env):
     return rec
 
 
-def _make_proposal_fixture(db_path, *, envs, proposed_version=2):
+def _make_proposal_fixture(db_path, *, envs, proposed_version=2, channel_id="test_channel", episode_id="ep_test"):
     for env in envs:
         _make_awaiting_explicit_record(db_path, env.authorization_id, env)
     authorization_ids = [env.authorization_id for env in envs]
     bindings = [("fake", "fake-model", "video.text_to_video")]
     checksum = store.compute_proposal_checksum(
-        channel_id="test_channel", episode_id="ep_test", proposed_version=proposed_version, superseded_version=1,
+        channel_id=channel_id, episode_id=episode_id, proposed_version=proposed_version, superseded_version=1,
         workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
         channel_package_version="1.0", channel_package_checksum="b" * 64,
         authorization_ids=authorization_ids, provider_model_operation_bindings=bindings,
         max_cost_per_call_ceiling=Decimal("0.39"), max_total_spend=Decimal("0.39") * len(envs), currency="USD",
     )
     proposal = store.AuthorizationProposal(
-        proposal_id=f"proposal_ep_test_v{proposed_version}", channel_id="test_channel", episode_id="ep_test",
+        proposal_id=f"proposal_{episode_id}_v{proposed_version}", channel_id=channel_id, episode_id=episode_id,
         proposed_version=proposed_version, superseded_version=1, workflow_id="wf", workflow_version="1.0.0",
         workflow_checksum="a" * 64, channel_package_version="1.0", channel_package_checksum="b" * 64,
         authorization_ids=authorization_ids, provider_model_operation_bindings=bindings,

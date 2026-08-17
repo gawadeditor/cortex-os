@@ -48,7 +48,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hypogeum.schemas import SchemaError, validate
-from hypogeum.agents.thumbnail_strategy import _build_strategy_brief, run_thumbnail_strategy
+from hypogeum.agents.thumbnail_strategy import (
+    _build_strategy_brief,
+    _MAX_HOOK_TEXT_REPAIR_ATTEMPTS,
+    run_thumbnail_strategy,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +441,175 @@ class TestThumbnailStrategySkill:
 
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["model_slug"] == "anthropic/claude-sonnet-4.6"
+
+
+# ---------------------------------------------------------------------------
+# TestHookTextWordCountRepair — regression suite for the 2026-08-17 incident
+# ---------------------------------------------------------------------------
+#
+#   ep_20260817153311_25d3d0's real Thumbnail Strategy call produced a
+#   6-word suggested_hook_text ("NO ONE KNOWS WHAT SHE IS"), which
+#   run_agent()'s pre-write schema validation correctly rejected -- but with
+#   no retry, the whole stage failed outright. run_thumbnail_strategy() now
+#   catches exactly that SchemaError shape and retries the model call, bounded
+#   by _MAX_HOOK_TEXT_REPAIR_ATTEMPTS, with a deterministic correction
+#   instruction built from the error itself. See that function and
+#   _hook_text_repair_instruction()'s docstrings for the full contract.
+
+def _hook_text_schema_error(word_count: int, hook_text: str, concept_index: int = 0) -> SchemaError:
+    """Build a SchemaError matching schemas.py's exact suggested_hook_text shape."""
+    return SchemaError(
+        "thumbnail_concept_brief",
+        f"concepts[{concept_index}].suggested_hook_text",
+        f"must be 3–5 words (got {word_count}): {hook_text!r}",
+    )
+
+
+class TestHookTextWordCountRepair:
+
+    def test_valid_3_word_hook_passes_unchanged(self, tmp_path):
+        """A compliant 3-word hook requires no repair -- run_agent called once."""
+        config = _make_mock_config()
+        expected = _make_valid_brief()  # all hooks already 2-3 words
+
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent",
+                   return_value=expected) as mock_run:
+            result = run_thumbnail_strategy(
+                topic_brief=_make_topic_brief(),
+                script_package=_make_script_package(),
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert mock_run.call_count == 1
+        assert result["concepts"][0]["suggested_hook_text"] == "IT SHOULDN'T EXIST"
+
+    def test_valid_5_word_hook_passes_unchanged(self, tmp_path):
+        """A compliant 5-word hook requires no repair -- run_agent called once."""
+        config = _make_mock_config()
+        expected = _make_valid_brief()
+        expected["concepts"][0]["suggested_hook_text"] = "THIS SHOULD NOT BE POSSIBLE"
+
+        with patch("hypogeum.agents.thumbnail_strategy.run_agent",
+                   return_value=expected) as mock_run:
+            result = run_thumbnail_strategy(
+                topic_brief=_make_topic_brief(),
+                script_package=_make_script_package(),
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert mock_run.call_count == 1
+        assert result["concepts"][0]["suggested_hook_text"] == "THIS SHOULD NOT BE POSSIBLE"
+
+    def test_6_word_hook_incident_is_repaired_through_bounded_retry(self, tmp_path):
+        """
+        Reproduces the exact ep_20260817153311_25d3d0 incident: a 6-word hook
+        ('NO ONE KNOWS WHAT SHE IS') fails validation once, then a compliant
+        regenerated response is accepted on retry.
+        """
+        config = _make_mock_config()
+        bad_hook = "NO ONE KNOWS WHAT SHE IS"
+        repaired = _make_valid_brief()
+        repaired["concepts"][0]["suggested_hook_text"] = "NO ONE KNOWS HER"
+
+        with patch(
+            "hypogeum.agents.thumbnail_strategy.run_agent",
+            side_effect=[_hook_text_schema_error(6, bad_hook), repaired],
+        ) as mock_run:
+            result = run_thumbnail_strategy(
+                topic_brief=_make_topic_brief(),
+                script_package=_make_script_package(),
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        assert mock_run.call_count == 2
+        # second call must carry a deterministic correction instruction
+        second_call_input = mock_run.call_args_list[1][1]["input_package"]
+        assert "correction_required" in second_call_input
+        correction = second_call_input["correction_required"]
+        assert correction["concept_index"] == 0
+        assert correction["offending_text"] == bad_hook
+        assert correction["offending_word_count"] == 6
+        assert result["concepts"][0]["suggested_hook_text"] == "NO ONE KNOWS HER"
+
+    def test_repair_result_is_schema_valid(self, tmp_path):
+        """The repaired response, once accepted, validates cleanly end to end."""
+        config = _make_mock_config()
+        repaired = _make_valid_brief()
+        repaired["concepts"][0]["suggested_hook_text"] = "WHAT WAS SHE HIDING"
+
+        with patch(
+            "hypogeum.agents.thumbnail_strategy.run_agent",
+            side_effect=[_hook_text_schema_error(6, "NO ONE KNOWS WHAT SHE IS"), repaired],
+        ):
+            result = run_thumbnail_strategy(
+                topic_brief=_make_topic_brief(),
+                script_package=_make_script_package(),
+                config=config,
+                episode_id="ep_001",
+                output_dir=tmp_path,
+            )
+
+        validate("thumbnail_concept_brief", result)  # must not raise
+
+    def test_failed_repair_does_not_persist_and_raises(self, tmp_path):
+        """
+        If every attempt (initial + all repairs) keeps violating the word
+        limit, run_thumbnail_strategy must fail closed: raise the original
+        SchemaError shape and never return/persist an invalid package. Since
+        run_agent() itself only ever writes to disk after its own successful
+        validation (never on a caught SchemaError), and here run_agent is
+        exhausted entirely by SchemaErrors, no output_dir file is ever
+        touched.
+        """
+        config = _make_mock_config()
+        always_bad = _hook_text_schema_error(6, "NO ONE KNOWS WHAT SHE IS")
+
+        with patch(
+            "hypogeum.agents.thumbnail_strategy.run_agent",
+            side_effect=always_bad,
+        ) as mock_run:
+            with pytest.raises(SchemaError):
+                run_thumbnail_strategy(
+                    topic_brief=_make_topic_brief(),
+                    script_package=_make_script_package(),
+                    config=config,
+                    episode_id="ep_001",
+                    output_dir=tmp_path,
+                )
+
+        # bounded: initial attempt + _MAX_HOOK_TEXT_REPAIR_ATTEMPTS retries, never more
+        assert mock_run.call_count == _MAX_HOOK_TEXT_REPAIR_ATTEMPTS + 1
+        assert list(tmp_path.iterdir()) == []
+
+    def test_non_hook_text_schema_error_is_never_retried(self, tmp_path):
+        """
+        A SchemaError unrelated to suggested_hook_text word count (e.g. a
+        missing field) must propagate immediately on the first attempt --
+        the repair path is deliberately narrow and must never mask or retry
+        a different kind of validation failure.
+        """
+        config = _make_mock_config()
+        unrelated = SchemaError(
+            "thumbnail_concept_brief", "central_viewer_question", "missing required field"
+        )
+
+        with patch(
+            "hypogeum.agents.thumbnail_strategy.run_agent",
+            side_effect=unrelated,
+        ) as mock_run:
+            with pytest.raises(SchemaError):
+                run_thumbnail_strategy(
+                    topic_brief=_make_topic_brief(),
+                    script_package=_make_script_package(),
+                    config=config,
+                    episode_id="ep_001",
+                    output_dir=tmp_path,
+                )
+
+        assert mock_run.call_count == 1

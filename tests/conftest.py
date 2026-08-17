@@ -40,6 +40,29 @@ Three known contamination vectors are patched here:
    Fix: _isolate_pipeline_workflow_verification (function, autouse)
    patches verify_and_load_workflow in the pipeline module namespace to
    read the real artifact file directly, skipping only the DB lookup.
+
+5. OIS emit_signal live-DB contamination (both the implicit-default path
+   AND an explicit db_path that itself points at the production file) —
+   hypogeum.ois.emit_signal()/hypogeum.signals.emit_signal() write real
+   signal_records rows. A test may leave db_path=None (resolves to the
+   production DB by default) or may pass db_path explicitly but set it
+   to the production path itself (confirmed root cause of the 2026-08-17
+   OIS contamination incident: tests/test_isolation.py's
+   test_pipeline_not_blocked_by_live_ois_signals passed
+   db_path=Path(".hypogeum-assets/hypogeum.db") explicitly — the prior
+   guard only checked "was db_path omitted", not "does db_path resolve
+   to the production file", so an explicit-but-still-production path
+   sailed straight through, and the test's own best-effort cleanup
+   (bare try/except, not a finally) left 11 blocking credential_failure
+   signals stranded in production over the following week).
+   Fix: _isolate_ois_emit_signal (function, autouse) compares the
+   *resolved* effective db_path (explicit or default) against
+   hypogeum.ois._DEFAULT_DB_PATH and silently no-ops (returns a fake
+   signal_id, no DB write) whenever they match — regardless of whether
+   db_path was omitted or explicitly supplied. Tests that legitimately
+   want emit_signal to write somewhere real must point db_path at an
+   isolated tmp_path DB (never the production path) or patch
+   hypogeum.ois.get_connection, both of which still pass through unchanged.
 """
 
 from __future__ import annotations
@@ -256,28 +279,43 @@ def _isolate_ois_emit_signal():
     explicit db_path, causing budget_exhaustion, low_budget_warning, and
     credential_failure signals to accumulate in the production DB across test runs.
 
-    The guard: if called without db_path AND get_connection has not been patched
-    (i.e. no test-level redirect to a tmp DB is in place), silently return a fake
-    signal ID without touching any database.
+    The guard: if the *effective* db_path (explicit or default) resolves to the
+    real production DB AND get_connection has not been patched (i.e. no
+    test-level redirect to a tmp DB is in place), silently return a fake
+    signal ID without touching any database. This covers both an omitted
+    db_path (which resolves to the production default) and an explicit
+    db_path that itself names the production file — the latter is how
+    tests/test_isolation.py's test_pipeline_not_blocked_by_live_ois_signals
+    leaked 11 blocking credential_failure signals into production between
+    2026-08-10 and 2026-08-17 (see this module's docstring, vector 5):
+    the prior guard only checked "was db_path omitted", so an explicit
+    db_path pointed at the production path was never caught.
 
     When a test patches hypogeum.ois.get_connection to redirect to a tmp db (e.g.
     TestBudgetExhaustionSignal), the guard detects this and passes through to the
     real emit_signal so the signal IS written to the tmp db as the test expects.
 
-    Calls with an explicit db_path always pass through unchanged (e.g. test_ois.py).
+    Calls with an explicit db_path that does NOT resolve to the production file
+    always pass through unchanged (e.g. test_ois.py's tmp_path-based tests).
 
     Both hypogeum.ois.emit_signal and hypogeum.signals.emit_signal are patched to
     the same function object, preserving the identity invariant checked by
     TestBackwardsCompat.test_ois_re_exports_from_signals.
     """
     import uuid as _uuid
+    from pathlib import Path as _Path
     from hypogeum import ois as _ois_mod
     from unittest.mock import MagicMock as _MM
     _real_emit = _ois_mod.emit_signal
+    _production_db_path = _ois_mod._DEFAULT_DB_PATH.resolve()
 
     def _guarded(*args, db_path=None, **kwargs):
-        if db_path is None and not isinstance(_ois_mod.get_connection, _MM):
-            return str(_uuid.uuid4())
+        if not isinstance(_ois_mod.get_connection, _MM):
+            effective_path = (
+                _Path(db_path).resolve() if db_path is not None else _production_db_path
+            )
+            if effective_path == _production_db_path:
+                return str(_uuid.uuid4())
         return _real_emit(*args, db_path=db_path, **kwargs)
 
     with _patch("hypogeum.ois.emit_signal", new=_guarded):

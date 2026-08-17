@@ -347,7 +347,29 @@ class TestPipelineOISIsolation:
             return Config()
 
     def test_pipeline_not_blocked_by_live_ois_signals(self):
-        """run_pipeline() proceeds even when live DB has blocking OIS signals."""
+        """
+        run_pipeline() proceeds even when the live DB would have blocking OIS
+        signals.
+
+        This test used to emit a real blocking signal into the live DB
+        (db_path=_LIVE_DB) to prove the conftest patch protects run_pipeline()
+        from it, with best-effort (non-guaranteed) cleanup afterwards. That
+        was itself an isolation violation of the exact kind this file exists
+        to catch: an explicit db_path pointing at the production file bypassed
+        the old emit_signal guard (which only checked "was db_path omitted"),
+        and the cleanup being a bare try/except rather than a finally meant
+        any failure left the signal permanently stranded in production — which
+        is exactly what happened (11 leaked credential_failure signals,
+        2026-08-10 through 2026-08-17, cleaned up as a separate incident).
+
+        conftest.py's _isolate_ois_emit_signal fixture is now path-aware (see
+        that fixture's docstring) and no-ops ANY call whose effective db_path
+        resolves to the production file, explicit or not — so emit_signal can
+        no longer reach the live DB from this or any other test. This test now
+        only needs to prove run_pipeline() itself does not consult live OIS
+        state (via the conftest _isolate_pipeline_ois patch), which is the
+        actual thing under test.
+        """
         from hypogeum.pipeline import run_pipeline
         from hypogeum.startup import StartupReport
 
@@ -360,22 +382,6 @@ class TestPipelineOISIsolation:
             fallback_configured=False,
             checked_at="2026-01-01T00:00:00Z",
         )
-
-        # Emit a blocking signal to the LIVE DB
-        if _live_db_exists():
-            try:
-                from hypogeum.ois import emit_signal
-                emit_signal(
-                    signal_type="credential_failure",
-                    severity="CRITICAL",
-                    message="pipeline isolation test signal",
-                    channel_id=None,
-                    source_system="test_isolation",
-                    blocking=True,
-                    db_path=_LIVE_DB,
-                )
-            except Exception:
-                pass  # If this fails, the test still validates the conftest patch
 
         fake_ep_result = (
             {"decision": "PASS", "overall_score": 8.0},
@@ -451,19 +457,6 @@ class TestPipelineOISIsolation:
                                                                                     )
                                                                                     assert result is not None
 
-        # Clean up the test signal from live DB
-        if _live_db_exists():
-            try:
-                conn = get_connection(_LIVE_DB)
-                conn.execute(
-                    "UPDATE signal_records SET lifecycle_status='resolved' "
-                    "WHERE source_system='test_isolation'"
-                )
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
-
     def test_conftest_ois_patch_is_active(self):
         """The conftest autouse fixture must patch is_factory_blocked in pipeline namespace."""
         import hypogeum.pipeline as pl
@@ -477,6 +470,86 @@ class TestPipelineOISIsolation:
         import hypogeum.pipeline as pl
         result = pl.is_channel_blocked("any-channel-id")
         assert result is False
+
+    def test_emit_signal_with_explicit_production_db_path_does_not_write(self):
+        """
+        Regression test for the 2026-08-17 OIS contamination incident.
+
+        Root cause: conftest.py's _isolate_ois_emit_signal guard used to check
+        only "was db_path omitted" — a call that explicitly passed the real
+        production path (db_path=_LIVE_DB, exactly what
+        test_pipeline_not_blocked_by_live_ois_signals used to do) sailed
+        straight through and wrote a real row. This test proves the guard now
+        also catches an *explicit* db_path that resolves to the production
+        file, using the exact same call shape as the leak.
+        """
+        from hypogeum.ois import emit_signal
+
+        before = _live_signal_count() if _live_db_exists() else 0
+
+        signal_id = emit_signal(
+            signal_type="credential_failure",
+            severity="CRITICAL",
+            message="pipeline isolation test signal",
+            channel_id=None,
+            source_system="test_isolation",
+            blocking=True,
+            db_path=_LIVE_DB,
+        )
+
+        # A fake UUID is still returned (callers get a signal_id either way),
+        # but no row may have been written to the live DB.
+        assert signal_id is not None
+        after = _live_signal_count() if _live_db_exists() else 0
+        assert after == before, (
+            "emit_signal() wrote to the production DB despite an explicit "
+            "db_path pointing at it -- the isolation guard regressed"
+        )
+
+        if _live_db_exists():
+            conn = get_connection(_LIVE_DB)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM signal_records WHERE signal_id = ?",
+                    (signal_id,),
+                ).fetchone()
+                assert row[0] == 0, "the guarded signal_id must not exist in the production DB"
+            finally:
+                conn.close()
+
+    def test_emit_signal_with_tmp_db_path_still_writes(self, tmp_path):
+        """
+        The guard must not be so broad it blocks legitimate isolated writes --
+        an explicit db_path that does NOT resolve to the production file must
+        still pass through to a real write (mirrors test_ois.py's existing
+        coverage; kept here so the two guard behaviours are visible side by
+        side in the same file that documents the incident).
+        """
+        from hypogeum.db import initialize_schema
+        from hypogeum.ois import emit_signal
+
+        db_path = tmp_path / "isolated.db"
+        initialize_schema(db_path)
+
+        signal_id = emit_signal(
+            signal_type="credential_failure",
+            severity="CRITICAL",
+            message="tmp db regression check",
+            channel_id=None,
+            source_system="test_isolation",
+            blocking=True,
+            db_path=db_path,
+        )
+
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM signal_records WHERE signal_id = ?",
+                (signal_id,),
+            ).fetchone()
+            assert row[0] == 1, "an explicit non-production db_path must still receive the write"
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

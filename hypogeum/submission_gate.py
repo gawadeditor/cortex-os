@@ -543,38 +543,33 @@ def _grant_binding_evidence(authorization: AuthorizationRecord) -> Optional[Mapp
     """Returns the parent_grant_id/parent_grant_version/
     parent_grant_checksum/grant_reservation_id evidence from this
     authorization's AUTHORIZED transition, or None if it was issued via
-    the one-off explicit-approval path (Commit M's future cutover),
-    which carries no grant evidence at all.
+    the one-off explicit-approval path (issue_authorization_from_
+    explicit_approval() -- Commit M's future cutover), which carries no
+    grant evidence at all.
 
-    Real-incident note (ep_f3619022, 2026-08-17): a RunAuthorizationGrant
-    (grant_ep_f3619022_v4_replacement) was registered via hypogeum.
-    authorization_authority.register_run_grant() alongside a v4
+    Historical note (ep_f3619022, 2026-08-17): a RunAuthorizationGrant
+    (grant_ep_f3619022_v4_replacement) was registered alongside a v4
     replacement-proposal batch, but the batch's 85 AuthorizationRecords
     were AUTHORIZED via hypogeum.authorization_authority.
-    activate_authorization_proposal() -- a DIFFERENT authorization-
-    issuance path than issue_child_authorization(grant_id, ...). That
-    function's own AUTHORIZED-transition evidence is exactly
-    {"authorized_by", "authorization_method": "explicit_human_approval_
-    proposal_batch", "approval_artifact_id", "approval_subject_checksum"}
-    -- it never carries parent_grant_id/parent_grant_version/
-    parent_grant_checksum/grant_reservation_id, because
-    activate_authorization_proposal() has no grant to attach one from
-    (it activates an already-compiled proposal batch, not a grant-bound
-    child authorization). This function therefore returns None for
-    every one of those 85 records, submission_gate.submit() never calls
-    revalidate_grant_reservation() for any of them, and the registered
-    grant's own ledger (run_authorization_grant_consumption) ends up
-    with ZERO rows for it -- the grant existed as a durable, signed
-    policy record, but was never structurally consulted, consumed, or
-    revalidated by any of the 65 real provider-boundary calls that
-    batch made. See tests/test_grant_not_consumed_by_proposal_
-    activation.py for a structural proof of this exact gap, reproduced
-    generically (not tied to the real episode's own data). This is
-    documented as a known, real architectural gap -- not fixed here,
-    per explicit instruction not to resume execution or repair it by
-    direct database mutation; closing it (e.g. by having
-    activate_authorization_proposal() optionally accept and bind a
-    grant) is future, separately-authorized work."""
+    activate_authorization_proposal(), which at the time never bound a
+    grant at all -- this function returned None for every one of those
+    85 records, and the registered grant's own ledger ended up with
+    ZERO rows for it. Documented and proven structurally in
+    tests/test_grant_not_consumed_by_proposal_activation.py, then
+    CLOSED (2026-08-17, same day): activate_authorization_proposal()
+    now REQUIRES grant_id/grant_version, resolves and verifies the
+    grant, validates every envelope's binding, reserves ledger capacity
+    for every envelope (atomically, within one transaction, so the
+    batch itself cannot oversubscribe), and stamps the exact same
+    parent_grant_id/parent_grant_version/parent_grant_checksum/
+    grant_reservation_id evidence issue_child_authorization() already
+    stamps -- so this function (and this module's own unchanged Step
+    8.5 boundary revalidation) now applies identically to records
+    produced by EITHER authorization-issuance path. See
+    tests/test_grant_binding_hardening.py for the closure's own
+    coverage. The 65 real calls the ep_f3619022 v4 replacement batch
+    already made were not, and are not, retroactively repaired -- this
+    closes the gap for every future proposal activation only."""
     if not authorization.history:
         return None
     last_event = authorization.history[-1]
@@ -848,7 +843,10 @@ def submit(
     capability = _mint_capability(envelope, attempt_id, lease_owner_id, lease_fencing_token, reservation_ids, at, capability_expires_at or at)
     try:
         adapter_instance = adapter_registry.get_or_create_adapter_instance(adapter_class)
-        adapter_result = adapter_instance.invoke(capability, mode=adapter_mode)
+        on_provider_acknowledged = _make_provider_acknowledgement_recorder(
+            receipt_store, envelope, execution_id, attempt_id, at, lease_conn, lease_owner_id, lease_fencing_token,
+        )
+        adapter_result = adapter_instance.invoke(capability, mode=adapter_mode, on_provider_acknowledged=on_provider_acknowledged)
         outcome = adapter_result.outcome
     except Exception as exc:  # noqa: BLE001 -- a crash *during* invocation is exactly "possible acceptance, no ack"
         adapter_result = None
@@ -891,7 +889,8 @@ def submit(
                 envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
                 authorization_id=envelope.authorization_id, authorization_version=envelope.authorization_version,
                 attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
-                event_type=EventType.REJECTED, event_seq=2, at=at,
+                event_type=EventType.REJECTED,
+                event_seq=len(receipt_store.read_events(execution_id, envelope.idempotency_key)), at=at,
                 provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
                 provider_bound_content_sha256=envelope.operation_payload_sha256,
                 max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
@@ -917,7 +916,8 @@ def submit(
             envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
             authorization_id=envelope.authorization_id, authorization_version=envelope.authorization_version,
             attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
-            event_type=EventType.ACCEPTED, event_seq=2, at=at,
+            event_type=EventType.ACCEPTED,
+            event_seq=len(receipt_store.read_events(execution_id, envelope.idempotency_key)), at=at,
             provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
             provider_bound_content_sha256=envelope.operation_payload_sha256,
             max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
@@ -971,17 +971,65 @@ def submit(
     )
 
 
+def _make_provider_acknowledgement_recorder(
+    receipt_store, envelope, execution_id, attempt_id, at, lease_conn, lease_owner_id, lease_fencing_token,
+):
+    """Builds the on_provider_acknowledged callback passed into
+    adapter_instance.invoke() -- the ONE thing an adapter is given to
+    durably record a real provider job/request ID the moment it has
+    one, strictly before any subsequent poll/wait. Appends a
+    PROVIDER_ACKNOWLEDGED receipt event synchronously (event_seq=2,
+    the fixed position immediately after SUBMISSION_ATTEMPT_STARTED --
+    this event, when it happens at all, always happens at exactly this
+    point in the sequence). Lease-protected exactly like the boundary-
+    entry event it directly follows."""
+    def _on_provider_acknowledged(*, provider_job_id=None, provider_request_id=None):
+        receipt_store.append_event(
+            ProviderReceiptEvent(
+                envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
+                authorization_id=envelope.authorization_id, authorization_version=envelope.authorization_version,
+                attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
+                event_type=EventType.PROVIDER_ACKNOWLEDGED, event_seq=2, at=at,
+                provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
+                provider_bound_content_sha256=envelope.operation_payload_sha256,
+                max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
+                evidence={"provider_job_id": provider_job_id, "provider_request_id": provider_request_id},
+            ),
+            execution_id=execution_id,
+            lease_conn=lease_conn, lease_owner_id=lease_owner_id, lease_fencing_token=lease_fencing_token,
+        )
+    return _on_provider_acknowledged
+
+
 def _persist_unknown_acceptance(receipt_store, envelope, execution_id, attempt_id, at, *, reason: str):
+    # Fold in the provider job/request ID from an already-durably-
+    # written PROVIDER_ACKNOWLEDGED event, if one exists for this
+    # attempt -- this is what makes "post-submit timeout retains
+    # request_id in unknown-acceptance evidence" hold whether this
+    # function is reached via a normal AdapterResult(outcome=
+    # "unknown_acceptance") return OR via the caller's own except-block
+    # after the adapter raised mid-invocation (in both cases, the
+    # acknowledgement -- if any -- was already written before the
+    # failure, never reconstructed after the fact).
+    existing_events = receipt_store.read_events(execution_id, envelope.idempotency_key)
+    ack_event = next(
+        (e for e in reversed(existing_events) if e.event_type == EventType.PROVIDER_ACKNOWLEDGED), None,
+    )
+    evidence = {"detected_by": "submission_gate", "reason": reason}
+    if ack_event is not None:
+        evidence["provider_job_id"] = ack_event.evidence.get("provider_job_id")
+        evidence["provider_request_id"] = ack_event.evidence.get("provider_request_id")
+
     receipt_store.append_event(
         ProviderReceiptEvent(
             envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
             authorization_id=envelope.authorization_id, authorization_version=envelope.authorization_version,
             attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
-            event_type=EventType.UNKNOWN_ACCEPTANCE, event_seq=2, at=at,
+            event_type=EventType.UNKNOWN_ACCEPTANCE, event_seq=len(existing_events), at=at,
             provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
             provider_bound_content_sha256=envelope.operation_payload_sha256,
             max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,
-            evidence={"detected_by": "submission_gate", "reason": reason},
+            evidence=evidence,
         ),
         execution_id=execution_id,
     )

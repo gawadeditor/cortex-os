@@ -271,16 +271,26 @@ class LeaseRequiredError(Exception):
 
 
 class EventType(str, Enum):
-    """The write-ahead sequence from architecture doc §6.2, plus two
-    events that sequence doesn't name explicitly but §6.3's crash table
+    """The write-ahead sequence from architecture doc §6.2, plus events
+    that sequence doesn't name explicitly but §6.3's crash table
     requires to make recovery states distinguishable purely from durable
     evidence: SUBMISSION_ATTEMPT_STARTED (marks that the network boundary
     was actually approached, distinct from ABOUT_TO_SUBMIT's earlier
-    write-ahead-only marker) and TERMINAL_FAILURE (a failure discovered
-    before ever reaching the provider, e.g. a local budget check)."""
+    write-ahead-only marker), PROVIDER_ACKNOWLEDGED (the provider
+    returned a real job/request ID -- written synchronously, durably,
+    BEFORE any subsequent polling/waiting begins, so a crash or timeout
+    during that later wait can never lose the one piece of evidence a
+    later status-only reconciliation needs -- see hypogeum.
+    submission_gate.submit()'s on_provider_acknowledged callback and
+    hypogeum.providers.muapi_video_adapter.MuapiVideoAdapter._invoke_
+    real(), which calls it immediately after _submit_http() returns a
+    request_id and strictly before _poll_until_complete()), and
+    TERMINAL_FAILURE (a failure discovered before ever reaching the
+    provider, e.g. a local budget check)."""
 
     ABOUT_TO_SUBMIT = "about_to_submit"
     SUBMISSION_ATTEMPT_STARTED = "submission_attempt_started"
+    PROVIDER_ACKNOWLEDGED = "provider_acknowledged"
     ACCEPTED = "accepted"
     UNKNOWN_ACCEPTANCE = "unknown_acceptance"
     SUBMITTED = "submitted"
@@ -291,7 +301,7 @@ class EventType(str, Enum):
     RECONCILED = "reconciled"
 
 
-_ACKNOWLEDGEMENT_EVENT_TYPES = frozenset({EventType.ACCEPTED, EventType.SUBMITTED})
+_ACKNOWLEDGEMENT_EVENT_TYPES = frozenset({EventType.PROVIDER_ACKNOWLEDGED, EventType.ACCEPTED, EventType.SUBMITTED})
 _RECONCILIATION_RESOLUTIONS = frozenset({"confirmed_accepted", "confirmed_not_submitted"})
 
 
@@ -619,6 +629,17 @@ def _classify(events: List[ProviderReceiptEvent]) -> RecoveryState:
         return RecoveryState.ACKNOWLEDGED_SUBMITTED
     if EventType.TERMINAL_FAILURE in by_type:
         return RecoveryState.TERMINALLY_FAILED_BEFORE_ACCEPTANCE
+    if EventType.PROVIDER_ACKNOWLEDGED in by_type:
+        # The provider returned a real job/request ID, durably recorded,
+        # but nothing terminal (accepted/rejected/unknown_acceptance/
+        # downloaded) was ever appended after it -- a crash or timeout
+        # during the subsequent poll/wait. Never eligible for automatic
+        # resubmission (not in ELIGIBLE_FOR_SUBMISSION_STATES): a job may
+        # already be running provider-side. The retained PROVIDER_
+        # ACKNOWLEDGED event's own evidence (provider_job_id/
+        # provider_request_id) is exactly what makes a later status-only
+        # reconciliation possible without ever resubmitting.
+        return RecoveryState.UNKNOWN_ACCEPTANCE_REQUIRES_RECONCILIATION
     if EventType.SUBMISSION_ATTEMPT_STARTED in by_type:
         return RecoveryState.SUBMITTING_NO_ACKNOWLEDGEMENT
     if EventType.ABOUT_TO_SUBMIT in by_type:

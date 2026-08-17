@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from hypogeum.providers.fake_provider_adapter import (
     AdapterInvocationCapability,
@@ -100,14 +100,26 @@ class MuapiVideoAdapter:
         self._consumed_capability_ids: set = set()
         self.received_capabilities: list = []
 
-    def invoke(self, capability: AdapterInvocationCapability, *, mode: "str | None" = None) -> AdapterResult:
+    def invoke(
+        self, capability: AdapterInvocationCapability, *, mode: "str | None" = None,
+        on_provider_acknowledged: "Callable[..., None] | None" = None,
+    ) -> AdapterResult:
         """`mode` is accepted (and ignored, beyond being a compatibility
         no-op) only so this adapter satisfies the exact call signature
         hypogeum.submission_gate.submit() currently uses uniformly for
         every registered adapter (Commit E's `adapter_instance.invoke(
         capability, mode=adapter_mode)`); a real adapter has no test-
         control "modes" -- its only inputs are the capability's own
-        already-authorized fields."""
+        already-authorized fields.
+
+        on_provider_acknowledged: optional callable, invoked with
+        keyword args provider_job_id/provider_request_id the moment
+        _submit_http() returns a real request_id -- strictly BEFORE
+        _poll_until_complete() is ever called. hypogeum.submission_gate.
+        submit() supplies this bound to its own receipt_store, so the
+        ID is durably persisted (a new PROVIDER_ACKNOWLEDGED receipt
+        event) before any wait that could time out or the whole process
+        could crash during. See this class's own _invoke_real()."""
         if isinstance(capability, str):
             raise RawPromptRejectedError(
                 "MuapiVideoAdapter.invoke() refuses a raw string prompt -- "
@@ -134,9 +146,12 @@ class MuapiVideoAdapter:
         self._consumed_capability_ids.add(capability.capability_id)
         self.received_capabilities.append(capability)
 
-        return self._invoke_real(capability)
+        return self._invoke_real(capability, on_provider_acknowledged=on_provider_acknowledged)
 
-    def _invoke_real(self, capability: AdapterInvocationCapability) -> AdapterResult:
+    def _invoke_real(
+        self, capability: AdapterInvocationCapability,
+        on_provider_acknowledged: "Callable[..., None] | None" = None,
+    ) -> AdapterResult:
         # Local import: keeps this adapter module free of a hard,
         # module-load-time dependency on hypogeum.muapi's own (much
         # larger) import surface, and avoids any import-cycle risk
@@ -167,6 +182,14 @@ class MuapiVideoAdapter:
                 outcome="rejected", provider_job_id=None, provider_request_id=None,
                 charged_amount=None, response_checksum=None, evidence={"failure_reason": failure_reason},
             )
+
+        # Durably persist the real request_id IMMEDIATELY, before any
+        # further waiting -- if _poll_until_complete() below times out,
+        # raises, or this whole process is killed mid-poll, the ID this
+        # call already returned must never be lost. See EventType.
+        # PROVIDER_ACKNOWLEDGED's own docstring.
+        if on_provider_acknowledged is not None:
+            on_provider_acknowledged(provider_job_id=request_id, provider_request_id=request_id)
 
         result, failure_reason = _poll_until_complete(request_id, config, payload["scene_id"], log)
         if result is None:

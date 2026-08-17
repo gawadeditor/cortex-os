@@ -77,7 +77,15 @@ class MuapiImageAdapter:
         self._consumed_capability_ids: set = set()
         self.received_capabilities: list = []
 
-    def invoke(self, capability: AdapterInvocationCapability, *, mode: "str | None" = None) -> AdapterResult:
+    def invoke(
+        self, capability: AdapterInvocationCapability, *, mode: "str | None" = None,
+        on_provider_acknowledged: "object | None" = None,
+    ) -> AdapterResult:
+        # on_provider_acknowledged: accepted for protocol uniformity with
+        # every other registered adapter (hypogeum.submission_gate.submit()
+        # passes it to every adapter's invoke() uniformly) -- this domain
+        # has no intermediate submit-then-poll acknowledgement phase, so it
+        # is intentionally never called here.
         if isinstance(capability, str):
             raise RawPromptRejectedError(
                 "MuapiImageAdapter.invoke() refuses a raw string prompt -- "

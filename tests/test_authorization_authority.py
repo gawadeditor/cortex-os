@@ -43,11 +43,12 @@ def _bindings(**overrides):
 
 
 def _sign_grant_artifact(priv, *, channel_id="test_channel", episode_id="ep_test", bindings=None,
-                          expires_at="2099-01-01T00:00:00Z", **overrides):
+                          expires_at="2099-01-01T00:00:00Z", max_total_spend_all_bindings=Decimal("1.00"),
+                          **overrides):
     bindings = bindings or _bindings()
     checksum = authority.compute_grant_checksum(
         channel_id=channel_id, episode_id=episode_id, workflow_id="wf", workflow_version="1.0.0",
-        workflow_checksum="a" * 64, bindings=bindings, max_total_spend_all_bindings=Decimal("1.00"),
+        workflow_checksum="a" * 64, bindings=bindings, max_total_spend_all_bindings=max_total_spend_all_bindings,
         currency="USD", expires_at=expires_at,
     )
     fields = dict(
@@ -55,7 +56,7 @@ def _sign_grant_artifact(priv, *, channel_id="test_channel", episode_id="ep_test
         channel_id=channel_id, scope_id=episode_id, workflow_id="wf", workflow_version="1.0.0",
         workflow_checksum="a" * 64, channel_package_version="1.0", channel_package_checksum="b" * 64,
         allowed_bindings=tuple(GrantBindingApproval(b.provider, b.model, b.provider_operation) for b in bindings),
-        currency="USD", max_cost_per_call=Decimal("0.39"), max_total_spend=Decimal("1.00"), max_calls=2,
+        currency="USD", max_cost_per_call=Decimal("0.39"), max_total_spend=max_total_spend_all_bindings, max_calls=2,
         retry_authorized=False, fallback_authorized=False, issued_at=AT, expires_at=expires_at,
         approver_identity="operator_x", nonce="nonce_grant_1",
     )
@@ -64,15 +65,16 @@ def _sign_grant_artifact(priv, *, channel_id="test_channel", episode_id="ep_test
 
 
 def _register_grant(priv, db_path, *, channel_id="test_channel", episode_id="ep_test", bindings=None,
-                     grant_id="g1", expires_at="2099-01-01T00:00:00Z"):
+                     grant_id="g1", expires_at="2099-01-01T00:00:00Z", max_total_spend_all_bindings=Decimal("1.00")):
     bindings = bindings or _bindings()
     artifact, checksum, bindings = _sign_grant_artifact(
         priv, channel_id=channel_id, episode_id=episode_id, bindings=bindings, expires_at=expires_at,
+        max_total_spend_all_bindings=max_total_spend_all_bindings,
     )
     return authority.register_run_grant(
         grant_id=grant_id, grant_version=1, channel_id=channel_id, episode_id=episode_id,
         workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
-        max_total_spend_all_bindings=Decimal("1.00"), currency="USD", expires_at=expires_at,
+        max_total_spend_all_bindings=max_total_spend_all_bindings, currency="USD", expires_at=expires_at,
         approval_artifact=artifact, db_path=db_path,
     )
 
@@ -445,13 +447,25 @@ class TestActivateAuthorizationProposal:
         )
         return sign_approval_artifact(fields, private_key=priv)
 
+    def _register_batch_grant(self, priv, db_path, *, grant_id="g_batch"):
+        """A grant with enough headroom for every _make_proposal_fixture
+        batch this class exercises (n up to 3, cost 0.39 each)."""
+        return _register_grant(
+            priv, db_path, grant_id=grant_id,
+            bindings=_bindings(max_calls=10, max_total_spend=Decimal("10.00")),
+            max_total_spend_all_bindings=Decimal("10.00"),
+        )
+
     def test_valid_activation_authorizes_the_whole_named_set(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        grant = self._register_batch_grant(priv, db_path)
         checksum, authorization_ids = self._make_proposal_fixture(db_path, n=3)
         artifact = self._sign_proposal_artifact(priv, checksum)
 
-        records = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+        records = authority.activate_authorization_proposal(
+            checksum, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+        )
         assert len(records) == 3
         assert all(r.current_state == authority.AuthorizationState.AUTHORIZED for r in records)
         for r in records:
@@ -459,6 +473,10 @@ class TestActivateAuthorizationProposal:
             assert ev["authorization_method"] == "explicit_human_approval_proposal_batch"
             assert ev["approval_artifact_id"] == "proposal_appr_1"
             assert ev["approval_subject_checksum"] == checksum
+            assert ev["parent_grant_id"] == "g_batch"
+            assert ev["parent_grant_version"] == 1
+            assert ev["parent_grant_checksum"] == grant.grant_checksum
+            assert "grant_reservation_id" in ev
 
     def test_invalid_signature_rejected_with_zero_mutation(self, tmp_path, monkeypatch):
         priv = Ed25519PrivateKey.generate()
@@ -469,7 +487,9 @@ class TestActivateAuthorizationProposal:
         artifact = self._sign_proposal_artifact(priv, checksum)
 
         with pytest.raises(authority.InvalidApprovalSignatureError):
-            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+            authority.activate_authorization_proposal(
+                checksum, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+            )
 
         import hypogeum.db as db
         conn = db.get_connection(db_path)
@@ -487,20 +507,26 @@ class TestActivateAuthorizationProposal:
         artifact = self._sign_proposal_artifact(priv, "0" * 64)  # signed for a DIFFERENT checksum
 
         with pytest.raises(authority.ApprovalSubjectMismatchError):
-            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+            authority.activate_authorization_proposal(
+                checksum, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+            )
 
     def test_unknown_proposal_checksum_fails_closed(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        self._register_batch_grant(priv, db_path)
         self._make_proposal_fixture(db_path, n=2)
         artifact = self._sign_proposal_artifact(priv, "f" * 64)
 
         with pytest.raises(store.AuthorizationRecordNotFoundError):
-            authority.activate_authorization_proposal("f" * 64, approval_artifact=artifact, at=AT, db_path=db_path)
+            authority.activate_authorization_proposal(
+                "f" * 64, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+            )
 
     def test_one_record_in_wrong_state_blocks_entire_batch(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        self._register_batch_grant(priv, db_path)
         checksum, authorization_ids = self._make_proposal_fixture(db_path, n=3)
 
         import hypogeum.db as db
@@ -518,7 +544,9 @@ class TestActivateAuthorizationProposal:
 
         artifact = self._sign_proposal_artifact(priv, checksum)
         with pytest.raises(store.ProposalReconciliationConflictError):
-            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+            authority.activate_authorization_proposal(
+                checksum, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+            )
 
         conn = db.get_connection(db_path)
         try:
@@ -534,6 +562,7 @@ class TestActivateAuthorizationProposal:
     def test_missing_named_authorization_id_fails_closed(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        self._register_batch_grant(priv, db_path)
         checksum, authorization_ids = self._make_proposal_fixture(db_path, n=2)
 
         import hypogeum.db as db
@@ -546,16 +575,23 @@ class TestActivateAuthorizationProposal:
 
         artifact = self._sign_proposal_artifact(priv, checksum)
         with pytest.raises(store.AuthorizationRecordNotFoundError):
-            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+            authority.activate_authorization_proposal(
+                checksum, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+            )
 
     def test_replay_with_same_artifact_is_idempotent(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        self._register_batch_grant(priv, db_path)
         checksum, authorization_ids = self._make_proposal_fixture(db_path, n=3)
         artifact = self._sign_proposal_artifact(priv, checksum)
 
-        first = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
-        second = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+        first = authority.activate_authorization_proposal(
+            checksum, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+        )
+        second = authority.activate_authorization_proposal(
+            checksum, approval_artifact=artifact, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+        )
         assert [r.current_state for r in first] == [r.current_state for r in second]
         for f, s in zip(first, second):
             assert len(f.history) == len(s.history)
@@ -563,10 +599,15 @@ class TestActivateAuthorizationProposal:
     def test_replay_with_different_approval_id_fails_closed(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        self._register_batch_grant(priv, db_path)
         checksum, authorization_ids = self._make_proposal_fixture(db_path, n=2)
         artifact1 = self._sign_proposal_artifact(priv, checksum, approval_id="approval_A", nonce="nonce_A")
-        authority.activate_authorization_proposal(checksum, approval_artifact=artifact1, at=AT, db_path=db_path)
+        authority.activate_authorization_proposal(
+            checksum, approval_artifact=artifact1, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+        )
 
         artifact2 = self._sign_proposal_artifact(priv, checksum, approval_id="approval_B", nonce="nonce_B")
         with pytest.raises(store.ProposalReconciliationConflictError):
-            authority.activate_authorization_proposal(checksum, approval_artifact=artifact2, at=AT, db_path=db_path)
+            authority.activate_authorization_proposal(
+                checksum, approval_artifact=artifact2, grant_id="g_batch", grant_version=1, at=AT, db_path=db_path,
+            )

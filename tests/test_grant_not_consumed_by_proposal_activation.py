@@ -1,38 +1,24 @@
 """
-tests/test_grant_not_consumed_by_proposal_activation.py — Structural
-proof of a real, documented architectural gap discovered on the
-ep_f3619022 v4 replacement batch (2026-08-17): a RunAuthorizationGrant
-(grant_ep_f3619022_v4_replacement) was registered via hypogeum.
-authorization_authority.register_run_grant() alongside that batch, but
-the batch's 85 AuthorizationRecords were AUTHORIZED via hypogeum.
-authorization_authority.activate_authorization_proposal() -- a
-DIFFERENT authorization-issuance path than issue_child_authorization(),
-the one path that actually binds a grant. As a direct, structural
-consequence:
-  - the AUTHORIZED-transition evidence produced by
-    activate_authorization_proposal() never carries parent_grant_id/
-    parent_grant_version/parent_grant_checksum/grant_reservation_id;
-  - hypogeum.submission_gate._grant_binding_evidence() therefore
-    returns None for every such record;
-  - hypogeum.submission_gate.submit() never calls
-    revalidate_grant_reservation() or _settle_grant_reservation() for
-    any of them;
-  - the grant's own ledger (run_authorization_grant_consumption) never
-    accumulates a row for any of the batch's real calls.
+tests/test_grant_not_consumed_by_proposal_activation.py — Regression
+coverage for a real, documented architectural gap discovered on the
+ep_f3619022 v4 replacement batch (2026-08-16/17) and CLOSED the same
+day: hypogeum.authorization_authority.activate_authorization_proposal()
+used to reach AUTHORIZED without ever binding a RunAuthorizationGrant,
+so a grant registered alongside a proposal-activation batch was never
+consulted, consumed, or revalidated by hypogeum.submission_gate.
+submit() for any record that batch produced.
 
-This is documented (not fixed) in hypogeum.submission_gate.
-_grant_binding_evidence()'s own docstring and hypogeum.
-authorization_authority.activate_authorization_proposal()'s own
-docstring -- this file proves it structurally, generically, using
-synthetic fixtures (never the real episode's own data), and contrasts
-it against issue_child_authorization()'s own grant-bound path to prove
-the distinction is real, not merely "always returns None regardless
-of how a record was authorized."
+This file originally proved the gap existed; it now proves it CANNOT
+be reconstructed: activate_authorization_proposal() requires
+grant_id/grant_version, and every record it produces carries the exact
+same grant evidence issue_child_authorization() already produces. See
+tests/test_grant_binding_hardening.py for the full closure test suite
+(fail-closed cases, ledger reservations, concurrency, gate
+revalidation, compatibility). This file keeps the original real-
+incident framing and the direct issue_child_authorization() contrast.
 
-No test here makes a network call, mutates the real
-.hypogeum-assets/hypogeum.db, or resumes/repairs anything -- this is
-diagnostic-only, exactly mirroring the real incident's own resolution:
-documented and tested, never repaired by direct database mutation.
+No test here makes a network call or mutates the real
+.hypogeum-assets/hypogeum.db.
 """
 
 from __future__ import annotations
@@ -125,63 +111,89 @@ def _sign_proposal_artifact(priv, checksum, *, approval_id="proposal_appr_1", no
     return sign_approval_artifact(fields, private_key=priv)
 
 
-class TestProposalActivationNeverCarriesGrantEvidence:
+class TestGapIsClosedProposalActivationNowRequiresAndBindsGrant:
 
-    def test_authorized_evidence_has_no_grant_fields(self, keypair, tmp_path):
+    def test_grant_id_and_version_are_now_required(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        env = _make_env(idem_key="idem_req", authorization_id="auth_req")
+        checksum = _make_proposal_fixture(db_path, envs=[env])
+        artifact = _sign_proposal_artifact(priv, checksum)
+
+        with pytest.raises(TypeError):
+            authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+
+    def test_authorized_evidence_now_carries_grant_fields(self, keypair, tmp_path):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        grant = _register_grant(
+            priv, db_path, grant_id="g_replacement",
+            bindings=_bindings(max_calls=10, max_total_spend=Decimal("10.00")),
+            max_total_spend_all_bindings=Decimal("10.00"),
+        )
         envs = [_make_env(idem_key=f"idem_{i}", authorization_id=f"auth_{i}") for i in range(3)]
         checksum = _make_proposal_fixture(db_path, envs=envs)
         artifact = _sign_proposal_artifact(priv, checksum)
 
-        records = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+        records = authority.activate_authorization_proposal(
+            checksum, approval_artifact=artifact, grant_id="g_replacement", grant_version=1, at=AT, db_path=db_path,
+        )
         assert len(records) == 3
         for rec in records:
             evidence = rec.history[-1].evidence
             assert evidence["authorization_method"] == "explicit_human_approval_proposal_batch"
-            for grant_field in ("parent_grant_id", "parent_grant_version", "parent_grant_checksum", "grant_reservation_id"):
-                assert grant_field not in evidence
+            assert evidence["parent_grant_id"] == "g_replacement"
+            assert evidence["parent_grant_version"] == 1
+            assert evidence["parent_grant_checksum"] == grant.grant_checksum
+            assert "grant_reservation_id" in evidence
 
-    def test_grant_binding_evidence_returns_none_for_proposal_activated_records(self, keypair, tmp_path):
+    def test_grant_binding_evidence_now_returns_it_for_proposal_activated_records(self, keypair, tmp_path):
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
+        _register_grant(priv, db_path, grant_id="g_solo")
         env = _make_env(idem_key="idem_solo", authorization_id="auth_solo")
         checksum = _make_proposal_fixture(db_path, envs=[env])
         artifact = _sign_proposal_artifact(priv, checksum)
 
-        records = authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
-        assert gate._grant_binding_evidence(records[0]) is None
+        records = authority.activate_authorization_proposal(
+            checksum, approval_artifact=artifact, grant_id="g_solo", grant_version=1, at=AT, db_path=db_path,
+        )
+        evidence = gate._grant_binding_evidence(records[0])
+        assert evidence is not None
+        assert evidence["parent_grant_id"] == "g_solo"
 
-    def test_a_grant_registered_alongside_is_never_consumed_by_the_batch(self, keypair, tmp_path):
-        """The exact real-incident shape: a grant exists, durably and
-        validly registered, but the batch activated via
-        activate_authorization_proposal() never touches its ledger."""
+    def test_grant_registered_alongside_is_now_consumed_by_the_batch(self, keypair, tmp_path):
+        """The exact real-incident shape, now fixed: a grant registered
+        alongside a proposal-activation batch DOES accumulate ledger
+        rows for it."""
         priv, _pub = keypair
         db_path = tmp_path / "auth.db"
-        _register_grant(priv, db_path, grant_id="g_replacement")
+        _register_grant(priv, db_path, grant_id="g_replacement2")
 
         env = _make_env(idem_key="idem_solo2", authorization_id="auth_solo2")
         checksum = _make_proposal_fixture(db_path, envs=[env], proposed_version=3)
         artifact = _sign_proposal_artifact(priv, checksum, approval_id="proposal_appr_2", nonce="nonce_prop_2")
-        authority.activate_authorization_proposal(checksum, approval_artifact=artifact, at=AT, db_path=db_path)
+        authority.activate_authorization_proposal(
+            checksum, approval_artifact=artifact, grant_id="g_replacement2", grant_version=1, at=AT, db_path=db_path,
+        )
 
         conn = db.get_connection(db_path)
         try:
             row = conn.execute(
-                "SELECT COUNT(*) c FROM run_authorization_grant_consumption WHERE grant_id = ?", ("g_replacement",),
+                "SELECT COUNT(*) c FROM run_authorization_grant_consumption WHERE grant_id = ?", ("g_replacement2",),
             ).fetchone()
-            assert row["c"] == 0
+            assert row["c"] == 1
         finally:
             conn.close()
 
 
 class TestIssueChildAuthorizationContrastsByActuallyBindingAGrant:
-    """Proves the distinction in TestProposalActivationNeverCarriesGrant
-    Evidence is real -- the OTHER authorization-issuance path DOES
-    carry grant evidence, and _grant_binding_evidence() DOES return it,
-    for a record produced that way. If this test were failing (e.g.
-    _grant_binding_evidence() always returned None regardless of
-    input), the tests above would be meaningless."""
+    """The OTHER authorization-issuance path already bound a grant
+    before this fix, and still does, unchanged -- both paths now share
+    the exact same grant evidence shape and the exact same underlying
+    helper functions (_resolve_and_verify_active_grant(),
+    _validate_envelope_against_grant_binding(),
+    _reserve_grant_ledger_capacity())."""
 
     def test_grant_bound_record_carries_full_grant_evidence(self, keypair, tmp_path):
         priv, _pub = keypair

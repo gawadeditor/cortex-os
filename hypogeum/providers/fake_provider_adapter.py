@@ -26,7 +26,7 @@ import hashlib
 import json
 from dataclasses import dataclass, fields, is_dataclass
 from decimal import Decimal
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 __all__ = [
     "AdapterInvocationCapability",
@@ -182,7 +182,10 @@ class FakeProviderAdapter:
         self._consumed_capability_ids: set = set()
         self.received_capabilities: list = []
 
-    def invoke(self, capability: AdapterInvocationCapability, *, mode: str = "success") -> AdapterResult:
+    def invoke(
+        self, capability: AdapterInvocationCapability, *, mode: str = "success",
+        on_provider_acknowledged: "Callable[..., None] | None" = None,
+    ) -> AdapterResult:
         """
         mode is a deterministic test-control knob, never something a
         real provider integration would expose:
@@ -193,6 +196,24 @@ class FakeProviderAdapter:
           "duplicate_acknowledgement"-> outcome="accepted", identical content to a
                                          prior "success" invocation for the same
                                          idempotency_key (same derived job id)
+          "post_submit_timeout"      -> calls on_provider_acknowledged() with a
+                                         REAL job id (simulating a successful
+                                         submit), THEN raises -- simulating a
+                                         crash/timeout during a later poll/wait,
+                                         AFTER the provider already returned an
+                                         ID. Exists specifically to test that
+                                         durable persistence happens before the
+                                         later failure, never only after it.
+
+        on_provider_acknowledged: optional callable, invoked with
+        keyword args provider_job_id/provider_request_id the moment
+        this adapter has a real provider-side identifier -- mirrors
+        hypogeum.providers.muapi_video_adapter.MuapiVideoAdapter's own
+        real call to it, immediately after a successful submit and
+        strictly before any subsequent poll/wait. Never called for
+        "unknown_acceptance" (simulates never even getting an ID) or
+        "rejected" (simulates outright submission failure) -- only for
+        modes that reach a real acknowledgement first.
 
         Raises RawPromptRejectedError if capability is not an
         AdapterInvocationCapability at all (e.g. a raw string), and
@@ -230,6 +251,8 @@ class FakeProviderAdapter:
         ).hexdigest()
 
         if mode in ("success", "duplicate_acknowledgement"):
+            if on_provider_acknowledged is not None:
+                on_provider_acknowledged(provider_job_id=job_id, provider_request_id=request_id)
             return AdapterResult(
                 outcome="accepted", provider_job_id=job_id, provider_request_id=request_id,
                 charged_amount=capability.max_cost_per_call, response_checksum=response_checksum,
@@ -247,9 +270,19 @@ class FakeProviderAdapter:
                 evidence={"mode": mode, "reason": "simulated provider rejection"},
             )
         if mode == "overcharge":
+            if on_provider_acknowledged is not None:
+                on_provider_acknowledged(provider_job_id=job_id, provider_request_id=request_id)
             return AdapterResult(
                 outcome="accepted", provider_job_id=job_id, provider_request_id=request_id,
                 charged_amount=capability.max_cost_per_call + Decimal("0.10"),
                 response_checksum=response_checksum, evidence={"mode": mode},
+            )
+        if mode == "post_submit_timeout":
+            if on_provider_acknowledged is not None:
+                on_provider_acknowledged(provider_job_id=job_id, provider_request_id=request_id)
+            raise TimeoutError(
+                f"simulated post-submit timeout for idempotency_key={capability.idempotency_key!r} "
+                f"AFTER acknowledgement (job_id={job_id!r}) -- the provider was contacted and returned "
+                "an ID, but polling/waiting for a terminal result never completed"
             )
         raise FakeProviderAdapterError(f"unknown mode {mode!r}")

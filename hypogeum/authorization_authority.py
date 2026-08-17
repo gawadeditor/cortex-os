@@ -280,6 +280,110 @@ def resolve_active_grant(
 # issue_child_authorization() -- Correction 3/4
 # ---------------------------------------------------------------------------
 
+def _resolve_and_verify_active_grant(
+    conn: sqlite3.Connection, grant_id: str, grant_version: int, at: str,
+) -> "store.RunAuthorizationGrant":
+    """The shared lookup+status+expiry+artifact-verification block every
+    grant-consuming issuance path (issue_child_authorization() and
+    activate_authorization_proposal()) requires identically. Fails
+    closed (GrantNotFoundError/GrantRevokedError/GrantExpiredError/
+    GrantUnverifiableError) before any ledger or AuthorizationRecord
+    mutation -- a missing, revoked, expired, or unverifiable grant
+    never reaches capacity-checking or reservation, let alone
+    activation."""
+    grant = store.get_grant(conn, grant_id, grant_version)
+    if grant is None:
+        raise GrantNotFoundError(f"grant {grant_id!r}@{grant_version} not found")
+    if grant.status != "active":
+        raise GrantRevokedError(f"grant {grant_id!r}@{grant_version} is {grant.status!r}, not active")
+    if at >= grant.expires_at:
+        raise GrantExpiredError(f"grant {grant_id!r}@{grant_version} expired at {grant.expires_at!r}")
+
+    artifact = store.get_approval_artifact_for_grant(conn, grant_id, grant_version)
+    public_key = _load_trusted_public_key()
+    if artifact is None or not verify_approval_artifact(artifact, public_key=public_key):
+        raise GrantUnverifiableError(f"grant {grant_id!r}@{grant_version} has no verifiable approval artifact")
+    return grant
+
+
+def _validate_envelope_against_grant_binding(
+    grant: "store.RunAuthorizationGrant", envelope: GenerationExecutionEnvelope,
+) -> "store.GrantBinding":
+    """The shared per-envelope binding-match + limits check. Fails
+    closed (NoMatchingGrantBindingError/EnvelopeExceedsGrantLimitsError)
+    -- a mismatched provider/model/operation, an over-ceiling cost, a
+    currency mismatch, or an unauthorized retry/fallback request is
+    never silently accepted."""
+    binding = grant.find_binding(envelope.provider, envelope.model, envelope.provider_operation)
+    if binding is None:
+        raise NoMatchingGrantBindingError(
+            f"grant {grant.grant_id!r}@{grant.grant_version} has no binding for "
+            f"({envelope.provider!r}, {envelope.model!r}, {envelope.provider_operation!r})"
+        )
+
+    if envelope.max_cost_per_call > binding.max_cost_per_call:
+        raise EnvelopeExceedsGrantLimitsError(
+            f"envelope max_cost_per_call {envelope.max_cost_per_call} > binding max {binding.max_cost_per_call}"
+        )
+    if envelope.currency != binding.currency:
+        raise EnvelopeExceedsGrantLimitsError(
+            f"envelope currency {envelope.currency!r} != binding currency {binding.currency!r}"
+        )
+    if envelope.retry_authorized and not binding.retry_authorized:
+        raise EnvelopeExceedsGrantLimitsError("envelope requests retry_authorized but binding does not permit it")
+    if envelope.fallback_authorized and not binding.fallback_authorized:
+        raise EnvelopeExceedsGrantLimitsError("envelope requests fallback_authorized but binding does not permit it")
+    return binding
+
+
+def _reserve_grant_ledger_capacity(
+    conn: sqlite3.Connection, grant: "store.RunAuthorizationGrant", grant_version: int,
+    binding: "store.GrantBinding", envelope: GenerationExecutionEnvelope, at: str,
+) -> "store.LedgerReservation":
+    """The shared cumulative-capacity check (binding-level calls/spend,
+    then grant-wide spend) plus the atomic ledger insert itself. Reads
+    hypogeum.authorization_store.sum_active_ledger_consumption() (and,
+    for a grant-wide ceiling, every OTHER binding's own consumption too)
+    fresh from the SAME open transaction/connection this call runs
+    inside -- so sequential calls within one batch (e.g.
+    activate_authorization_proposal()'s own loop, still inside its one
+    BEGIN IMMEDIATE) each see every reservation already inserted earlier
+    in that same batch, which is exactly what prevents the batch itself
+    from oversubscribing the grant. Concurrent callers on DIFFERENT
+    connections are serialized by BEGIN IMMEDIATE's own write-lock
+    semantics -- see tests/test_grant_binding_hardening.py::
+    TestConcurrentActivationCannotOversubscribe."""
+    grant_id = grant.grant_id
+    calls, spend = store.sum_active_ledger_consumption(
+        conn, grant_id, envelope.provider, envelope.model, envelope.provider_operation,
+    )
+    if calls + 1 > binding.max_calls:
+        raise GrantCapacityExhaustedError(
+            f"binding call capacity exhausted: {calls} already active, max_calls={binding.max_calls}"
+        )
+    if spend + envelope.max_cost_per_call > binding.max_total_spend:
+        raise GrantCapacityExhaustedError(
+            f"binding spend capacity exhausted: {spend} already active + {envelope.max_cost_per_call} "
+            f"would exceed max_total_spend={binding.max_total_spend}"
+        )
+    if grant.max_total_spend_all_bindings is not None:
+        grant_total = _sum_grant_wide_consumption(conn, grant)
+        if grant_total + envelope.max_cost_per_call > grant.max_total_spend_all_bindings:
+            raise GrantCapacityExhaustedError(
+                f"grant-wide spend capacity exhausted: {grant_total} already active + "
+                f"{envelope.max_cost_per_call} would exceed max_total_spend_all_bindings="
+                f"{grant.max_total_spend_all_bindings}"
+            )
+
+    reservation_id = f"{grant_id}:{grant_version}:{binding.binding_key()}:{envelope.idempotency_key}"
+    return store.insert_ledger_reservation(
+        conn, reservation_id=reservation_id, grant_id=grant_id, grant_version=grant_version,
+        provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
+        idempotency_key=envelope.idempotency_key, envelope_id=envelope.envelope_id,
+        authorization_id=envelope.authorization_id, reserved_amount=envelope.max_cost_per_call, at=at,
+    )
+
+
 def issue_child_authorization(
     envelope: GenerationExecutionEnvelope, grant_id: str, grant_version: int, *,
     at: str, db_path: Optional[Path] = None,
@@ -294,59 +398,9 @@ def issue_child_authorization(
         store.ensure_tables(conn)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            grant = store.get_grant(conn, grant_id, grant_version)
-            if grant is None:
-                raise GrantNotFoundError(f"grant {grant_id!r}@{grant_version} not found")
-            if grant.status != "active":
-                raise GrantRevokedError(f"grant {grant_id!r}@{grant_version} is {grant.status!r}, not active")
-            if at >= grant.expires_at:
-                raise GrantExpiredError(f"grant {grant_id!r}@{grant_version} expired at {grant.expires_at!r}")
-
-            artifact = store.get_approval_artifact_for_grant(conn, grant_id, grant_version)
-            public_key = _load_trusted_public_key()
-            if artifact is None or not verify_approval_artifact(artifact, public_key=public_key):
-                raise GrantUnverifiableError(f"grant {grant_id!r}@{grant_version} has no verifiable approval artifact")
-
-            binding = grant.find_binding(envelope.provider, envelope.model, envelope.provider_operation)
-            if binding is None:
-                raise NoMatchingGrantBindingError(
-                    f"grant {grant_id!r}@{grant_version} has no binding for "
-                    f"({envelope.provider!r}, {envelope.model!r}, {envelope.provider_operation!r})"
-                )
-
-            if envelope.max_cost_per_call > binding.max_cost_per_call:
-                raise EnvelopeExceedsGrantLimitsError(
-                    f"envelope max_cost_per_call {envelope.max_cost_per_call} > binding max {binding.max_cost_per_call}"
-                )
-            if envelope.currency != binding.currency:
-                raise EnvelopeExceedsGrantLimitsError(
-                    f"envelope currency {envelope.currency!r} != binding currency {binding.currency!r}"
-                )
-            if envelope.retry_authorized and not binding.retry_authorized:
-                raise EnvelopeExceedsGrantLimitsError("envelope requests retry_authorized but binding does not permit it")
-            if envelope.fallback_authorized and not binding.fallback_authorized:
-                raise EnvelopeExceedsGrantLimitsError("envelope requests fallback_authorized but binding does not permit it")
-
-            calls, spend = store.sum_active_ledger_consumption(
-                conn, grant_id, envelope.provider, envelope.model, envelope.provider_operation,
-            )
-            if calls + 1 > binding.max_calls:
-                raise GrantCapacityExhaustedError(
-                    f"binding call capacity exhausted: {calls} already active, max_calls={binding.max_calls}"
-                )
-            if spend + envelope.max_cost_per_call > binding.max_total_spend:
-                raise GrantCapacityExhaustedError(
-                    f"binding spend capacity exhausted: {spend} already active + {envelope.max_cost_per_call} "
-                    f"would exceed max_total_spend={binding.max_total_spend}"
-                )
-            if grant.max_total_spend_all_bindings is not None:
-                grant_total = _sum_grant_wide_consumption(conn, grant)
-                if grant_total + envelope.max_cost_per_call > grant.max_total_spend_all_bindings:
-                    raise GrantCapacityExhaustedError(
-                        f"grant-wide spend capacity exhausted: {grant_total} already active + "
-                        f"{envelope.max_cost_per_call} would exceed max_total_spend_all_bindings="
-                        f"{grant.max_total_spend_all_bindings}"
-                    )
+            grant = _resolve_and_verify_active_grant(conn, grant_id, grant_version, at)
+            binding = _validate_envelope_against_grant_binding(grant, envelope)
+            reservation = _reserve_grant_ledger_capacity(conn, grant, grant_version, binding, envelope, at)
 
             # AuthorizationRecord.authorization_id must be exactly
             # envelope.authorization_id -- an envelope carries its own
@@ -355,14 +409,6 @@ def issue_child_authorization(
             # requires the two to match exactly), never a value this
             # module invents independently.
             authorization_id = envelope.authorization_id
-            reservation_id = f"{grant_id}:{grant_version}:{binding.binding_key()}:{envelope.idempotency_key}"
-
-            reservation = store.insert_ledger_reservation(
-                conn, reservation_id=reservation_id, grant_id=grant_id, grant_version=grant_version,
-                provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
-                idempotency_key=envelope.idempotency_key, envelope_id=envelope.envelope_id,
-                authorization_id=authorization_id, reserved_amount=envelope.max_cost_per_call, at=at,
-            )
 
             existing_record = store.get_authorization_record(conn, authorization_id)
             if existing_record is not None:
@@ -483,7 +529,8 @@ def issue_authorization_from_explicit_approval(
 
 
 def activate_authorization_proposal(
-    proposal_checksum: str, *, approval_artifact: ApprovalArtifact, at: str, db_path: Optional[Path] = None,
+    proposal_checksum: str, *, approval_artifact: ApprovalArtifact, grant_id: str, grant_version: int,
+    at: str, db_path: Optional[Path] = None,
 ) -> "list[AuthorizationRecord]":
     """
     Generic, atomic, idempotent bulk activation of an already-compiled,
@@ -491,7 +538,23 @@ def activate_authorization_proposal(
     AuthorizationProposal, produced by scripts.propose_current_episode_
     authorization) from AWAITING_EXPLICIT_AUTHORIZATION to AUTHORIZED,
     given one verified ApprovalArtifact bound to the proposal's own
-    checksum.
+    checksum, structurally bound to a valid, verified RunAuthorizationGrant.
+
+    grant_id/grant_version are REQUIRED, never optional or defaulted --
+    every proposal-activated paid authorization must be bound to a
+    grant (closes the real, documented gap this function previously
+    had: see git history for the prior version's own docstring, and
+    tests/test_grant_not_consumed_by_proposal_activation.py, which now
+    additionally proves the OLD, ungapped shape can no longer be
+    constructed). Uses the exact same shared, already-tested grant
+    resolution/validation/reservation helpers issue_child_authorization()
+    uses (_resolve_and_verify_active_grant(),
+    _validate_envelope_against_grant_binding(),
+    _reserve_grant_ledger_capacity()) -- a missing, revoked, expired, or
+    unverifiable grant; a missing/mismatched binding; an over-ceiling
+    envelope; or exhausted binding/grant-wide capacity all fail closed,
+    before mutating anything, with zero adapter calls (this function
+    never touches submission_gate at all).
 
     The missing counterpart to issue_authorization_from_explicit_
     approval(): that function only ever constructs a BRAND NEW record
@@ -500,43 +563,36 @@ def activate_authorization_proposal(
     activate a batch that has already reached AWAITING_EXPLICIT_
     AUTHORIZATION. This function's target state transition
     (AWAITING_EXPLICIT_AUTHORIZATION -> AUTHORIZED) and its required
-    evidence (authorized_by, authorization_method, approval_artifact_id,
-    approval_subject_checksum) are unchanged from authorization_
-    lifecycle.py's own existing, already-defined edge -- no new
-    lifecycle state or transition is introduced.
+    evidence are unchanged from authorization_lifecycle.py's own
+    existing, already-defined edge -- no new lifecycle state or
+    transition is introduced. The AUTHORIZED-transition evidence now
+    ALSO carries parent_grant_id/parent_grant_version/
+    parent_grant_checksum/grant_reservation_id, exactly matching
+    issue_child_authorization()'s own evidence shape -- this is what
+    makes hypogeum.submission_gate._grant_binding_evidence() (and the
+    gate's existing, unchanged Step 8.5 boundary revalidation) apply to
+    every record this function now produces, with zero changes to
+    submission_gate.py itself.
 
     Fails closed, before mutating anything, if: no AuthorizationProposal
     exists with this exact proposal_checksum; any one of the proposal's
     own named authorization_ids is missing; or any one is in a state
     other than AWAITING_EXPLICIT_AUTHORIZATION or (for idempotent
-    replay only) already AUTHORIZED under this exact approval_id.
-    Validates the ENTIRE named set before transitioning ANY of them --
-    all-or-nothing, one BEGIN IMMEDIATE transaction.
+    replay only) already AUTHORIZED under this exact approval_id AND
+    this exact grant_id/grant_version. Validates the ENTIRE named set
+    (grant resolution, every envelope's binding match, and every
+    envelope's ledger capacity, checked cumulatively across the whole
+    batch within this one open transaction) before transitioning ANY of
+    them -- all-or-nothing, one BEGIN IMMEDIATE transaction.
 
     Idempotent replay: if every named authorization_id is already
     AUTHORIZED with approval_artifact_id == this artifact's own
-    approval_id, returns the existing records unchanged -- no
-    re-transition, no duplicate approval_artifacts row. A record
-    already AUTHORIZED under a DIFFERENT approval_id fails closed
-    (never silently re-approves under a different signature).
-
-    No grant, no ledger -- deliberately, structurally distinct from
-    issue_child_authorization(envelope, grant_id, grant_version, ...),
-    the OTHER path that reaches AUTHORIZED. This function's own
-    AUTHORIZED-transition evidence never carries parent_grant_id/
-    parent_grant_version/parent_grant_checksum/grant_reservation_id --
-    only authorized_by/authorization_method/approval_artifact_id/
-    approval_subject_checksum. A RunAuthorizationGrant registered
-    separately (e.g. via register_run_grant()) alongside a batch this
-    function activates is therefore NEVER consulted, consumed, or
-    revalidated by hypogeum.submission_gate.submit() for any record
-    this function produces -- see that module's
-    _grant_binding_evidence() docstring for the real incident
-    (ep_f3619022 v4 replacement batch, 2026-08-17) that surfaced this,
-    and tests/test_grant_not_consumed_by_proposal_activation.py for a
-    structural proof. This is a known, documented gap, not a defect
-    introduced here -- closing it (e.g. an optional grant-binding
-    parameter on this function) is future, separately-authorized work.
+    approval_id AND parent_grant_id/parent_grant_version == the ones
+    supplied now, returns the existing records unchanged -- no
+    re-transition, no duplicate approval_artifacts row, no duplicate
+    ledger reservation. A record already AUTHORIZED under a DIFFERENT
+    approval_id OR a DIFFERENT grant fails closed (never silently
+    re-approves under a different signature or grant).
     """
     _require_verified(approval_artifact, approval_type="authorization_proposal", subject_checksum=proposal_checksum)
 
@@ -551,7 +607,14 @@ def activate_authorization_proposal(
                     f"no AuthorizationProposal found with proposal_checksum={proposal_checksum!r}"
                 )
 
+            # Grant resolved and verified BEFORE any per-record work --
+            # a missing/revoked/expired/unverifiable grant blocks the
+            # entire batch with zero mutation, exactly like a missing
+            # proposal or a missing authorization_id already did.
+            grant = _resolve_and_verify_active_grant(conn, grant_id, grant_version, at)
+
             records: dict = {}
+            envelopes: dict = {}
             already_authorized_under_this_approval = True
             for authorization_id in proposal.authorization_ids:
                 record = store.get_authorization_record(conn, authorization_id)
@@ -567,6 +630,15 @@ def activate_authorization_proposal(
                             f"approval_artifact_id ({approved_evidence.get('approval_artifact_id')!r}), cannot "
                             f"re-approve under {approval_artifact.approval_id!r}"
                         )
+                    if (
+                        approved_evidence.get("parent_grant_id") != grant_id
+                        or approved_evidence.get("parent_grant_version") != grant_version
+                    ):
+                        raise store.ProposalReconciliationConflictError(
+                            f"authorization {authorization_id!r} is already AUTHORIZED under a DIFFERENT grant "
+                            f"({approved_evidence.get('parent_grant_id')!r}@{approved_evidence.get('parent_grant_version')!r}), "
+                            f"cannot re-activate under {grant_id!r}@{grant_version!r}"
+                        )
                     records[authorization_id] = record
                     continue
                 already_authorized_under_this_approval = False
@@ -576,10 +648,30 @@ def activate_authorization_proposal(
                         "not 'awaiting_explicit_authorization' -- not eligible for bulk activation"
                     )
                 records[authorization_id] = record
+                envelopes[authorization_id] = store.get_execution_envelope(conn, record.envelope_id, record.envelope_version)
 
             if already_authorized_under_this_approval:
                 conn.commit()
                 return [records[aid] for aid in proposal.authorization_ids]
+
+            # Validate every envelope's grant binding BEFORE reserving
+            # anything -- a single mismatched envelope anywhere in the
+            # batch blocks the whole batch, never a partial activation.
+            bindings = {
+                aid: _validate_envelope_against_grant_binding(grant, env) for aid, env in envelopes.items()
+            }
+
+            # Reserve ledger capacity for every envelope, sequentially,
+            # inside this same open transaction -- each reservation is
+            # immediately visible to sum_active_ledger_consumption() for
+            # every subsequent envelope in this same batch (Correction:
+            # this is what prevents the batch itself from oversubscribing
+            # the grant; a genuinely concurrent activation on a DIFFERENT
+            # connection is serialized by BEGIN IMMEDIATE's write lock).
+            reservations = {
+                aid: _reserve_grant_ledger_capacity(conn, grant, grant_version, bindings[aid], env, at)
+                for aid, env in envelopes.items()
+            }
 
             store.persist_approval_artifact(conn, approval_artifact, consumed_by_authorization_id=proposal.proposal_id)
 
@@ -587,6 +679,7 @@ def activate_authorization_proposal(
             for authorization_id in proposal.authorization_ids:
                 record = records[authorization_id]
                 if record.current_state != AuthorizationState.AUTHORIZED:
+                    reservation = reservations[authorization_id]
                     record = record.transition(
                         AuthorizationState.AUTHORIZED,
                         evidence={
@@ -594,6 +687,10 @@ def activate_authorization_proposal(
                             "authorization_method": "explicit_human_approval_proposal_batch",
                             "approval_artifact_id": approval_artifact.approval_id,
                             "approval_subject_checksum": approval_artifact.subject_checksum,
+                            "parent_grant_id": grant_id,
+                            "parent_grant_version": grant_version,
+                            "parent_grant_checksum": grant.grant_checksum,
+                            "grant_reservation_id": reservation.reservation_id,
                         },
                         at=at,
                     )

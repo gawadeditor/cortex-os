@@ -184,6 +184,7 @@ class TestReconcileAllSupersededAuthorizationsAtomicity:
         for i in (1, 2, 3):
             store.persist_authorization_record(conn, _authorized_record(f"bulk_old{i}"))
             store.persist_authorization_record(conn, _linked_new_record(f"bulk_new{i}", f"bulk_old{i}"))
+        conn.commit()
         mapping = {f"bulk_old{i}": f"bulk_new{i}" for i in (1, 2, 3)}
         results = store.reconcile_all_superseded_authorizations(
             conn, mapping, at="t1", changed_dependency="x", old_checksum="a", new_checksum="b",
@@ -196,6 +197,7 @@ class TestReconcileAllSupersededAuthorizationsAtomicity:
         store.persist_authorization_record(conn, _authorized_record("ok_old1"))
         store.persist_authorization_record(conn, _linked_new_record("ok_new1", "ok_old1"))
         store.persist_authorization_record(conn, _authorized_record("bad_old2"))
+        conn.commit()
         # bad_new2 is never persisted -- this pair must fail closed.
         mapping = {"ok_old1": "ok_new1", "bad_old2": "bad_new2"}
         with pytest.raises(store.AuthorizationRecordNotFoundError):
@@ -208,6 +210,7 @@ class TestReconcileAllSupersededAuthorizationsAtomicity:
     def test_bulk_idempotent_replay_over_already_superseded_entries(self, conn):
         store.persist_authorization_record(conn, _authorized_record("idem_old1"))
         store.persist_authorization_record(conn, _linked_new_record("idem_new1", "idem_old1"))
+        conn.commit()
         mapping = {"idem_old1": "idem_new1"}
         store.reconcile_all_superseded_authorizations(
             conn, mapping, at="t1", changed_dependency="x", old_checksum="a", new_checksum="b",

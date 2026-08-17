@@ -224,6 +224,39 @@ def _str_to_decimal(value: Optional[str]) -> Optional[Decimal]:
 # ---------------------------------------------------------------------------
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
+    # Cheap existence check FIRST, via a plain SELECT -- never a DDL
+    # statement. This is not an optimization: Python's sqlite3 module
+    # (default isolation_level) implicitly COMMITS any currently-open
+    # transaction immediately before executing ANY non-DML statement,
+    # including "CREATE TABLE IF NOT EXISTS" even when every table
+    # already exists and the statement is a pure no-op. Every function
+    # in this module calls ensure_tables(conn) as its first line, and
+    # every multi-step atomic operation in hypogeum.authorization_
+    # authority (issue_child_authorization(), activate_authorization_
+    # proposal(), register_run_grant()) calls several of those functions
+    # inside ONE `BEGIN IMMEDIATE` transaction -- without this guard,
+    # the second such call silently commits everything written by the
+    # first, and a later exception's conn.rollback() has nothing left
+    # to roll back. Discovered via a real, reproducible test failure
+    # (tests/test_grant_binding_hardening.py::
+    # TestActivateAuthorizationProposalFailsClosedOnGrantProblems::
+    # test_exhausted_grant_fails_closed_zero_ledger_rows) while closing
+    # the grant-binding gap, 2026-08-17 -- exactly the same class of bug
+    # (a "successful" partial write surviving an intended rollback) as
+    # the missing-final-commit incident found the same day in Phase 4
+    # technical-validation corrections, just the opposite direction (too
+    # many implicit commits here, instead of too few explicit ones
+    # there). A SELECT triggers no such implicit commit, so once the
+    # schema exists (the overwhelmingly common case -- every real
+    # process's very first ensure_tables() call bootstraps it once),
+    # every subsequent call within the same connection's lifetime, and
+    # every call nested inside any open transaction, is side-effect-free.
+    already_initialized = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='approval_artifacts'"
+    ).fetchone()
+    if already_initialized is not None:
+        return
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS approval_artifacts (

@@ -749,6 +749,32 @@ class TestStateMachine:
         pause_run(run_id, "operator_user_001", "investigating", db_path=db_path)
         assert get_run_state(run_id, db_path=db_path) == "paused"
 
+    def test_paused_state_survives_fresh_connection(self, store):
+        """
+        A 'paused' run's state must be durable, not an in-memory artifact of
+        the process that set it -- a fresh connection (simulating a worker
+        restart, a new dashboard request, or a completely separate process)
+        must read back the same state. Also exercises pipeline.py's actual
+        call shape (transition_run_state directly, system-triggered) rather
+        than the operator-only pause_run() wrapper, since that's what
+        PipelineCancelledError's handler calls.
+        """
+        run_id, db_path, _ = self._register(store)
+        transition_run_state(
+            run_id=run_id,
+            to_state="paused",
+            triggered_by="system:cancel_check",
+            trigger_source="pipeline",
+            reason="paused_before_paid_boundary:thumbnail_strategy",
+            db_path=db_path,
+        )
+        # Simulate restart: open a brand new connection, no shared state.
+        assert get_run_state(run_id, db_path=db_path) == "paused"
+        conn = get_connection(db_path)
+        row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        conn.close()
+        assert row["status"] == "paused"
+
     def test_pause_sets_paused_at(self, store):
         run_id, db_path, _ = self._register(store)
         pause_run(run_id, "operator_user_001", "investigating", db_path=db_path)

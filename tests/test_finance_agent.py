@@ -541,6 +541,142 @@ class TestBudgetAuthorizationOutputFile:
 
 
 # ---------------------------------------------------------------------------
+# TestBudgetAuthorizationCheckpointReuse
+# ---------------------------------------------------------------------------
+#
+# Regression coverage for the 2026-08-17 incident: unlike Executive Producer/
+# Research Director/Narrative Architect/Script Engine/Thumbnail Strategy
+# (all gated by _load_package() in pipeline.py), run_budget_authorization()
+# had no checkpoint at all -- every resumed run re-executed it unconditionally,
+# so identical script_package bytes produced a finance_authorization file with
+# a fresh finance_id/recorded_at every time, and once, a genuinely different
+# narration_chars figure whose origin was never verifiable because nothing
+# bound the persisted output to the exact inputs that produced it.
+
+class TestBudgetAuthorizationCheckpointReuse:
+    """
+    All calls pass db_path pointing at a nonexistent file so
+    get_effective_budget_ceiling()'s factory-policy DB lookup fails closed
+    and falls back to config.FINANCE_BUDGET_CEILING_USD (finance_agent.py's
+    own try/except around that call) -- otherwise these tests would silently
+    read whatever real ceiling exists in the production DB, exactly the kind
+    of implicit, unbound input this fix exists to eliminate.
+    """
+
+    def _no_db(self, tmp) -> Path:
+        return Path(tmp) / "no_such.db"
+
+    def test_identical_inputs_are_not_rerun(self):
+        """
+        Item 5: Finance is not rerun when its bound inputs are unchanged --
+        the second call must return the exact same finance_id/recorded_at as
+        the first (proof it was reused, not recomputed with the same numbers
+        by coincidence -- recomputation always mints a fresh uuid4 + timestamp).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = make_script_package()
+            cfg = make_config(ceiling=100.0)
+            first = run_budget_authorization(
+                script_package=sp, episode_id="ep_reuse", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            second = run_budget_authorization(
+                script_package=sp, episode_id="ep_reuse", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            assert second["finance_id"] == first["finance_id"]
+            assert second["recorded_at"] == first["recorded_at"]
+
+    def test_identical_inputs_produce_byte_identical_file(self):
+        """Item 6: identical Finance inputs produce byte-identical output on disk."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = make_script_package()
+            cfg = make_config(ceiling=100.0)
+            out_path = Path(tmp) / "finance_authorization_ep_bytes.json"
+
+            run_budget_authorization(
+                script_package=sp, episode_id="ep_bytes", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            first_bytes = out_path.read_bytes()
+
+            run_budget_authorization(
+                script_package=sp, episode_id="ep_bytes", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            second_bytes = out_path.read_bytes()
+
+            assert second_bytes == first_bytes
+
+    def test_changed_script_package_invalidates_explicitly(self):
+        """
+        Item 7: a changed Finance dependency (script_package content, hence
+        narration_chars) must invalidate the old authorization explicitly --
+        a new finance_id, a supersedes_finance_id pointing at the old one, and
+        an invalidation_reason naming what changed -- never a silent overwrite.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(ceiling=100.0)
+            first = run_budget_authorization(
+                script_package=make_script_package(chars_per_beat=200),
+                episode_id="ep_changed", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            second = run_budget_authorization(
+                script_package=make_script_package(chars_per_beat=400),
+                episode_id="ep_changed", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            assert second["finance_id"] != first["finance_id"]
+            assert second["cost_breakdown"]["narration_chars"] != first["cost_breakdown"]["narration_chars"]
+            assert second["supersedes_finance_id"] == first["finance_id"]
+            assert "script_package" in second["invalidation_reason"]
+
+    def test_changed_ceiling_invalidates_explicitly(self):
+        """Same as above, but the bound ceiling changes instead of script_package."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = make_script_package()
+            first = run_budget_authorization(
+                script_package=sp, episode_id="ep_ceiling", config=make_config(ceiling=100.0),
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            second = run_budget_authorization(
+                script_package=sp, episode_id="ep_ceiling", config=make_config(ceiling=50.0),
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            assert second["finance_id"] != first["finance_id"]
+            assert second["supersedes_finance_id"] == first["finance_id"]
+            assert "budget_ceiling" in second["invalidation_reason"]
+
+    def test_bound_fields_present_on_every_record(self):
+        """The checkpoint-binding key itself must always be persisted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = run_budget_authorization(
+                script_package=make_script_package(), episode_id="ep_bound",
+                config=make_config(ceiling=100.0),
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            assert rec["bound_script_package_checksum"]
+            assert rec["bound_budget_ceiling_usd"] == 100.0
+            assert rec["bound_finance_agent_version"]
+
+    def test_reused_record_still_schema_valid(self):
+        """A checkpoint-reused record (early-return path) must still validate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = make_script_package()
+            cfg = make_config(ceiling=100.0)
+            run_budget_authorization(
+                script_package=sp, episode_id="ep_valid", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            reused = run_budget_authorization(
+                script_package=sp, episode_id="ep_valid", config=cfg,
+                output_dir=Path(tmp), db_path=self._no_db(tmp),
+            )
+            validate("finance_record", reused)  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # TestCostLedgerRecorded
 # ---------------------------------------------------------------------------
 

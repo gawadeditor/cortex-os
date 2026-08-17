@@ -396,10 +396,14 @@ class TestCancelCheckFiresBetweenStages:
         startup_report.openrouter_reachable = True
         startup_report.fallback_active = False
 
+        pause_transition_calls = []
+
         with patch("hypogeum.pipeline.run_startup_checks", return_value=startup_report), \
              patch("hypogeum.pipeline.register_run", return_value="run_test"), \
              patch("hypogeum.pipeline.cancel_run"), \
              patch("hypogeum.pipeline.fail_run"), \
+             patch("hypogeum.pipeline.transition_run_state",
+                   side_effect=lambda **kw: pause_transition_calls.append(kw)), \
              patch("hypogeum.pipeline.set_run_context"), \
              patch("hypogeum.pipeline.clear_run_context"), \
              patch("hypogeum.pipeline._record_stage_start", return_value=("sid", _now_utc())), \
@@ -424,6 +428,12 @@ class TestCancelCheckFiresBetweenStages:
                     )
             assert exc_info.value.stage_after == stage_name
 
+        # Item 1: a controlled stop persists the canonical pre-paid state --
+        # a transition to 'paused', not a call to cancel_run()/fail_run().
+        assert len(pause_transition_calls) == 1
+        assert pause_transition_calls[0]["to_state"] == "paused"
+        assert stage_name in pause_transition_calls[0]["reason"]
+
     def test_cancel_after_executive_producer(self, tmp_path):
         self._run_pipeline_until_stage("executive_producer", tmp_path)
 
@@ -441,6 +451,76 @@ class TestCancelCheckFiresBetweenStages:
 
     def test_cancel_after_thumbnail_strategy(self, tmp_path):
         self._run_pipeline_until_stage("thumbnail_strategy", tmp_path)
+
+    def test_cancel_after_thumbnail_strategy_never_reaches_audio_agent(self, tmp_path):
+        """
+        Items 8/9, exact real-incident scenario: stopping right after
+        thumbnail_strategy (the first zero-cost stage before the Audio Agent
+        paid boundary) must never call the Audio Agent's stage function at
+        all -- zero provider-adapter invocations, not merely zero *successful*
+        ones. hypogeum.pipeline._run_audio_agent is deliberately left
+        unpatched here; if resume logic ever crossed the boundary, the call
+        would hit the real function and fail with something other than
+        PipelineCancelledError, and the assertion below on stages_seen would
+        also catch a mock-based crossing.
+        """
+        from hypogeum.pipeline import run_pipeline, PipelineCancelledError
+        from hypogeum.startup import StartupReport
+
+        stages_seen: list[str] = []
+        audio_agent_calls: list = []
+
+        def cancel_check() -> bool:
+            return "thumbnail_strategy" in stages_seen
+
+        def _mock(name):
+            def _fn(*a, **kw):
+                stages_seen.append(name)
+                if name == "executive_producer":
+                    return ({"decision": "ACCEPT", "overall_score": 8.0}, {})
+                if name == "research_director":
+                    return ({"source_registry": []}, None)
+                return {}
+            return _fn
+
+        startup_report = StartupReport.__new__(StartupReport)
+        startup_report.overall_status = "ok"
+        startup_report.openrouter_reachable = True
+        startup_report.fallback_active = False
+
+        with patch("hypogeum.pipeline.run_startup_checks", return_value=startup_report), \
+             patch("hypogeum.pipeline.register_run", return_value="run_boundary_test"), \
+             patch("hypogeum.pipeline.transition_run_state"), \
+             patch("hypogeum.pipeline.set_run_context"), \
+             patch("hypogeum.pipeline.clear_run_context"), \
+             patch("hypogeum.pipeline._record_stage_start", return_value=("sid", _now_utc())), \
+             patch("hypogeum.pipeline._record_stage_complete"), \
+             patch("hypogeum.pipeline._record_stage_failed"), \
+             patch("hypogeum.pipeline.is_factory_blocked", return_value=False), \
+             patch("hypogeum.pipeline.is_channel_blocked", return_value=False), \
+             patch("hypogeum.pipeline._run_executive_producer", side_effect=_mock("executive_producer")), \
+             patch("hypogeum.pipeline._run_research_director", side_effect=_mock("research_director")), \
+             patch("hypogeum.pipeline._run_narrative_architect", side_effect=_mock("narrative_architect")), \
+             patch("hypogeum.pipeline._run_script_engine", side_effect=_mock("script_engine")), \
+             patch("hypogeum.pipeline._run_budget_authorization", side_effect=_mock("finance_agent_authorization")), \
+             patch("hypogeum.pipeline._run_thumbnail_strategy", side_effect=_mock("thumbnail_strategy")):
+            # _run_audio_agent is intentionally NOT patched -- see docstring.
+            with pytest.raises(PipelineCancelledError) as exc_info:
+                run_pipeline(
+                    topic_input="test topic",
+                    episode_id="ep_boundary_test",
+                    config=MagicMock(
+                        EPISODE_ZERO_MAX_SCENES=0,
+                        ENABLE_DEDICATED_SHORT_GENERATION=False,
+                    ),
+                    cancel_check=cancel_check,
+                    channel_id=None,
+                    db_path=tmp_path / "h.db",
+                )
+
+        assert exc_info.value.stage_after == "thumbnail_strategy"
+        assert "audio_agent" not in stages_seen
+        assert len(audio_agent_calls) == 0
 
     def test_cancel_after_visual_package_director(self, tmp_path):
         self._run_pipeline_until_stage("visual_package_director", tmp_path)
@@ -462,12 +542,24 @@ class TestCancelCheckFiresBetweenStages:
 
 
 # ===========================================================================
-# 7. pipeline.py: PipelineCancelledError calls cancel_run (not fail_run)
+# 7. pipeline.py: PipelineCancelledError transitions to 'paused'
+#    (not the terminal 'cancelled'/'failed' states)
 # ===========================================================================
+#
+# Regression coverage for the 2026-08-17 incident: run ecb0f87a, deliberately
+# stopped by cancel_check right after thumbnail_strategy (i.e. positioned
+# immediately before the Audio Agent paid boundary), was persisted as
+# status='cancelled' -- a *terminal* state per run_registry.RUN_STATES /
+# _VALID_TRANSITIONS ("cancelled": frozenset()) -- indistinguishable from an
+# operator abandoning the run outright. 'paused' is the existing, correct,
+# non-terminal canonical state for this (pause_run()'s own docstring:
+# "Transition a running run to paused state"); pipeline.py's
+# PipelineCancelledError handler now transitions there directly instead of
+# calling cancel_run().
 
-class TestPipelineCancelledCallsCancelRun:
-    def test_cancel_error_calls_cancel_run_not_fail_run(self, tmp_path):
-        """When PipelineCancelledError escapes, the run must be marked cancelled."""
+class TestPipelineCancelledTransitionsToPaused:
+    def test_cancel_error_transitions_to_paused_not_cancelled_or_failed(self, tmp_path):
+        """When PipelineCancelledError escapes, the run must be marked paused."""
         from hypogeum.pipeline import run_pipeline, PipelineCancelledError
         from hypogeum.startup import StartupReport
 
@@ -478,11 +570,14 @@ class TestPipelineCancelledCallsCancelRun:
 
         cancel_run_calls = []
         fail_run_calls = []
+        transition_calls = []
 
         with patch("hypogeum.pipeline.run_startup_checks", return_value=startup_report), \
              patch("hypogeum.pipeline.register_run", return_value="run_cancel_test"), \
              patch("hypogeum.pipeline.cancel_run", side_effect=lambda *a, **kw: cancel_run_calls.append(a)), \
              patch("hypogeum.pipeline.fail_run", side_effect=lambda *a, **kw: fail_run_calls.append(a)), \
+             patch("hypogeum.pipeline.transition_run_state",
+                   side_effect=lambda **kw: transition_calls.append(kw)), \
              patch("hypogeum.pipeline.set_run_context"), \
              patch("hypogeum.pipeline.clear_run_context"), \
              patch("hypogeum.pipeline._record_stage_start", return_value=("sid", "t0")), \
@@ -511,8 +606,12 @@ class TestPipelineCancelledCallsCancelRun:
                     db_path=tmp_path / "h.db",
                 )
 
-        assert len(cancel_run_calls) == 1, "cancel_run must be called once"
+        assert len(cancel_run_calls) == 0, "cancel_run must NOT be called on a deliberate pre-paid-boundary stop"
         assert len(fail_run_calls) == 0, "fail_run must NOT be called on cancellation"
+        assert len(transition_calls) == 1, "transition_run_state must be called exactly once"
+        assert transition_calls[0]["to_state"] == "paused"
+        assert transition_calls[0]["run_id"] == "run_cancel_test"
+        assert "executive_producer" in transition_calls[0]["reason"]
 
 
 # ===========================================================================

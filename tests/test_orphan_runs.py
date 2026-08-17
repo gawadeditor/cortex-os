@@ -241,8 +241,16 @@ class TestWorkerAliveButIdleOrphansRun:
 # ===========================================================================
 
 class TestTerminalRunsUntouched:
-    @pytest.mark.parametrize("status", ["failed", "completed", "cancelled", "blocked"])
+    @pytest.mark.parametrize("status", ["failed", "completed", "cancelled", "blocked", "paused"])
     def test_terminal_run_not_touched(self, tmp_path, status):
+        """
+        'paused' is not terminal in run_registry.RUN_STATES (it can resume to
+        'running'), but reconcile_orphaned_runs() only ever queries
+        status='running' -- so a run a cancel_check callback deliberately
+        parked in 'paused' immediately before a paid boundary (2026-08-17
+        incident: run ecb0f87a) must never be touched by orphan
+        reconciliation, exactly like the genuinely terminal states below.
+        """
         db = _db(tmp_path)
         run_id = _insert_run(db, status)
 

@@ -1485,14 +1485,40 @@ def run_pipeline(
         return result
 
     except PipelineCancelledError as _exc:
-        # Operator cancelled the run between stages. Mark the run cancelled (not
-        # failed) so the operator can distinguish intentional stops from errors.
-        # Checkpoints on disk are preserved — the run can be resumed via rerun.
+        # A cancel_check callback stopped the run deliberately between stages
+        # -- most commonly a caller stopping before a paid provider boundary
+        # (e.g. Audio Agent), not an operator abandoning the run. This is a
+        # resumable, non-terminal condition: checkpoints on disk are preserved
+        # and the same stage sequence can continue later. 'cancelled' is a
+        # *terminal* state (_VALID_TRANSITIONS["cancelled"] == frozenset())
+        # reserved for actual operator-requested abandonment (see cancel_run()
+        # / hypogeum.worker_control) -- using it here mischaracterized every
+        # deliberate pre-paid-boundary stop as an irrecoverable cancellation
+        # (confirmed for real on run ecb0f87a-7e58-4e45-a9db-2cb33d2a19d6,
+        # 2026-08-17: stage_after="thumbnail_strategy" got persisted as
+        # status='cancelled'). 'paused' is the existing canonical state for
+        # exactly this ("Transition a running run to paused state" --
+        # pause_run()'s own docstring); transitioning there directly (rather
+        # than via pause_run(), which is operator-only) keeps this a
+        # system-triggered pause without inventing a new state.
         if run_id is not None:
             try:
-                cancel_run(run_id, episode_id)
-            except Exception:
-                pass
+                transition_run_state(
+                    run_id=run_id,
+                    to_state="paused",
+                    triggered_by="system:cancel_check",
+                    trigger_source="pipeline",
+                    reason=f"paused_before_paid_boundary:{_exc.stage_after}",
+                    db_path=db_path,
+                    episode_id=episode_id,
+                )
+            except Exception as _te:
+                log.warn(
+                    "pipeline_pause_transition_failed",
+                    run_id=run_id,
+                    stage_after=_exc.stage_after,
+                    error=str(_te)[:200],
+                )
         if _current_stage_id is not None:
             _record_stage_failed(
                 _current_stage_id, _current_stage_t0,
@@ -1503,7 +1529,7 @@ def run_pipeline(
         except Exception:
             pass
         log.info(
-            "pipeline_run_cancelled",
+            "pipeline_run_paused",
             episode_id=episode_id,
             stage_after=_exc.stage_after,
         )

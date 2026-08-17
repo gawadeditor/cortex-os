@@ -39,6 +39,7 @@ No Claude calls — pure deterministic evaluation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -73,6 +74,13 @@ _ELEVENLABS_MUSIC_COST_PER_TRACK: float = 0.20   # USD per generated music track
 # Conservative fallback for model cost when model slug is not in MODEL_CREDIT_COSTS
 _MUAPI_UNKNOWN_MODEL_COST: float = 2.5
 
+# Bumped whenever the cost constants above or the estimation formula in
+# run_budget_authorization() change in a way that would alter its output for
+# the same script_package/ceiling -- part of the checkpoint binding key below,
+# so a pricing change explicitly invalidates any existing checkpointed
+# authorization rather than being silently masked by checkpoint reuse.
+_FINANCE_AUTHORIZATION_BINDING_VERSION: str = "1.0"
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -80,6 +88,18 @@ _MUAPI_UNKNOWN_MODEL_COST: float = 2.5
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _compute_script_package_checksum(script_package: dict) -> str:
+    """
+    Deterministic sha256 of script_package's canonical JSON serialization --
+    the checkpoint-binding key's primary input. Same sort_keys+compact-separator
+    convention used for checksums elsewhere in this codebase.
+    """
+    canonical = json.dumps(
+        script_package, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _estimate_narration_chars(script_package: dict) -> int:
@@ -346,6 +366,22 @@ def run_budget_authorization(
             - verdict="WARNING"    — above warning threshold but under ceiling
             - verdict="BLOCKED"    — estimate exceeds ceiling; raise FinanceBudgetBlockedError
 
+    Checkpoint reuse (2026-08-17): unlike Executive Producer/Research
+    Director/etc., this stage has no upstream _load_package() gate in
+    pipeline.py, so every resumed run re-executed it unconditionally even
+    when script_package and the effective ceiling were byte-for-byte
+    identical -- producing a new finance_id/recorded_at (and, once, a
+    genuinely different narration_chars count from a run whose in-memory
+    script_package was never itself checksum-bound at the time, so its
+    provenance could not be verified after the fact). An existing
+    finance_authorization_{episode_id}.json is now reused verbatim (returned
+    unread-modified, so the file bytes never change) only when its
+    bound_script_package_checksum, bound_budget_ceiling_usd, and
+    bound_finance_agent_version all match the current inputs exactly. Any
+    mismatch explicitly invalidates the prior authorization -- the new
+    record records supersedes_finance_id/invalidation_reason rather than
+    silently overwriting it with no trace.
+
     The pipeline raises FinanceBudgetBlockedError when verdict=="BLOCKED".
     """
     checks: list = []
@@ -362,6 +398,30 @@ def run_budget_authorization(
     except Exception:
         ceiling = config.FINANCE_BUDGET_CEILING_USD
     warn_pct = config.FINANCE_WARNING_THRESHOLD_PCT
+
+    # ----------------------------------------------------------------
+    # Checkpoint reuse — bound to explicit checksums/config, not implicit
+    # ----------------------------------------------------------------
+    _base = output_dir or (
+        Path(__file__).resolve().parent.parent.parent
+        / ".hypogeum-assets" / "episodes" / episode_id
+    )
+    _existing_path = Path(_base) / f"finance_authorization_{episode_id}.json"
+    _script_package_checksum = _compute_script_package_checksum(script_package)
+    _existing_record: Optional[dict] = None
+    if _existing_path.exists():
+        try:
+            _existing_record = json.loads(_existing_path.read_text(encoding="utf-8"))
+        except Exception:
+            _existing_record = None
+    if (
+        _existing_record is not None
+        and _existing_record.get("bound_script_package_checksum") == _script_package_checksum
+        and _existing_record.get("bound_budget_ceiling_usd") == ceiling
+        and _existing_record.get("bound_finance_agent_version")
+            == _FINANCE_AUTHORIZATION_BINDING_VERSION
+    ):
+        return _existing_record
 
     # ----------------------------------------------------------------
     # Check 1 — ceiling configured
@@ -477,7 +537,31 @@ def run_budget_authorization(
         "failures": failures,
         "warnings": warnings,
         "cost_breakdown": cost_breakdown,
+        # Checkpoint-binding key -- see run_budget_authorization()'s own
+        # docstring. Reused verbatim on the next call iff all three match.
+        "bound_script_package_checksum": _script_package_checksum,
+        "bound_budget_ceiling_usd": ceiling,
+        "bound_finance_agent_version": _FINANCE_AUTHORIZATION_BINDING_VERSION,
     }
+
+    # Explicit invalidation evidence: this call is only reached when either
+    # no prior authorization existed, or one existed but its binding key
+    # didn't match (the checkpoint-reuse return above already handled the
+    # matching case) -- record exactly what changed rather than silently
+    # overwriting a prior authorization with no trace.
+    if _existing_record is not None:
+        record["supersedes_finance_id"] = _existing_record.get("finance_id")
+        _changed = []
+        if _existing_record.get("bound_script_package_checksum") != _script_package_checksum:
+            _changed.append("script_package")
+        if _existing_record.get("bound_budget_ceiling_usd") != ceiling:
+            _changed.append("budget_ceiling")
+        if _existing_record.get("bound_finance_agent_version") != _FINANCE_AUTHORIZATION_BINDING_VERSION:
+            _changed.append("finance_agent_version")
+        record["invalidation_reason"] = (
+            f"prior authorization {_existing_record.get('finance_id')!r} invalidated: "
+            f"changed inputs: {', '.join(_changed) if _changed else 'unknown (binding fields missing on prior record)'}"
+        )
 
     validate("finance_record", record)
 
@@ -531,11 +615,7 @@ def run_budget_authorization(
             pass
 
     # Write output file
-    base = output_dir or (
-        Path(__file__).resolve().parent.parent.parent
-        / ".hypogeum-assets" / "episodes" / episode_id
-    )
-    _write_output(record, Path(base) / f"finance_authorization_{episode_id}.json")
+    _write_output(record, _existing_path)
 
     return record
 

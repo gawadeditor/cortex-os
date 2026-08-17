@@ -1,6 +1,7 @@
 # Generated assets — never commit
 .hypogeum-assets/
 .hypogeum-assets-backup-*/
+.hypogeum-review/
 
 # Secrets
 .env

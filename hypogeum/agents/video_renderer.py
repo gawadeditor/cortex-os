@@ -224,17 +224,37 @@ def render_episode(
         _segments_with_tracks[-1]["start_seconds"] if _segments_with_tracks else 0.0
     )
 
-    main_success = _render_main_episode(
-        timeline=main_timeline,
-        narration_path=main_narration_path,
-        music_track=main_music_track,
-        output_path=main_output_path,
-        episode_id=episode_id,
-        timeout=ffmpeg_timeout,
-        log=log,
-        music_segments=main_music_segments,
-    )
-    if not (main_success and main_output_path.exists() and main_output_path.stat().st_size > 0):
+    if not main_timeline:
+        # A caller scoped this render_episode() call to zero main-episode
+        # scenes (e.g. a Shorts-only pass over a filtered visual_package).
+        # main_output_path is a fixed, deterministic path shared across
+        # every call for this episode_id -- unconditionally invoking
+        # _render_main_episode() here would write a near-empty file to
+        # that same path and silently destroy any previously valid main
+        # render that already exists there. Treat "zero main scenes this
+        # call" as "main not requested this call", never as "render an
+        # empty main episode": never touch main_output_path, and report
+        # main_success from whatever (if anything) already exists there.
+        main_success = main_output_path.exists() and main_output_path.stat().st_size > 0
+        log.info(
+            "assembly_main_timeline_empty_skipping_render",
+            episode_id=episode_id,
+            existing_main_present=main_success,
+        )
+    else:
+        main_success = _render_main_episode(
+            timeline=main_timeline,
+            narration_path=main_narration_path,
+            music_track=main_music_track,
+            output_path=main_output_path,
+            episode_id=episode_id,
+            timeout=ffmpeg_timeout,
+            log=log,
+            music_segments=main_music_segments,
+        )
+    if not main_timeline:
+        pass
+    elif not (main_success and main_output_path.exists() and main_output_path.stat().st_size > 0):
         render_status = "failed"
         ffmpeg_errors.append("main_episode_render_failed")
     elif end_page_path is not None and end_page_path.exists():

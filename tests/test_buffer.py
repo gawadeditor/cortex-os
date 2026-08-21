@@ -1,22 +1,40 @@
 """
-tests/test_buffer.py — One-episode publish-ready buffer gate.
+tests/test_buffer.py — Channel-scoped, deliverable/bundle-generic buffer gate.
 
-Covers hypogeum.buffer.compute_buffer_state() (pure — 0/1/2+ publish-ready
-buffer episodes) and hypogeum.buffer.gather_buffer_candidates() (the I/O
-layer, exercised against an isolated tmp_path database and fake episode
-assets — never the production DB). Also covers run_worker.py's Step 0
-wiring: the buffer gate skips discovery-refill for a channel without
-touching tick()/consume_scheduled_runs()/poll().
+Covers hypogeum.buffer.compute_buffer_state() (pure — target-based
+enqueue/hold/excess, and the structural ForeignDemandItemError isolation
+guarantee) and hypogeum.buffer.gather_channel_demand_items() /
+resolve_complete_item_ids_for_channel() (the I/O layer, exercised against
+an isolated tmp_path database and fake episode assets — never the
+production DB).
+
+Also proves cross-channel, cross-bundle isolation with two structurally
+different channels run through run_worker.py's real Step 0 wiring in the
+SAME iteration:
+    Channel A: bundle_id='main_episode_bundle' (one long-form + associated
+               Shorts as one unit), target_buffer_count=1.
+    Channel B: bundle_id='short' (six independent Shorts, no long-form),
+               target_buffer_count=2.
+Channel A's buffer state must never affect Channel B's gate decision, and
+vice versa.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
-from hypogeum.buffer import BufferEpisodeCandidate, BufferState, compute_buffer_state, gather_buffer_candidates
+from hypogeum.buffer import (
+    BufferState,
+    ChannelDemandItem,
+    DeliverableBundleDefinition,
+    ForeignDemandItemError,
+    compute_buffer_state,
+    gather_channel_demand_items,
+    resolve_complete_item_ids_for_channel,
+)
 from hypogeum.db import get_connection, initialize_schema, insert_episode, insert_episode_topic
 
 
@@ -24,53 +42,86 @@ from hypogeum.db import get_connection, initialize_schema, insert_episode, inser
 # Pure function — compute_buffer_state
 # ---------------------------------------------------------------------------
 
-def _cand(episode_id, ready=True, published=False, current_week=False):
-    return BufferEpisodeCandidate(
-        episode_id=episode_id, publish_ready=ready,
-        already_published=published, is_current_week=current_week,
+CHANNEL_A = DeliverableBundleDefinition(channel_id="channel_a", bundle_id="main_episode_bundle", target_buffer_count=1)
+CHANNEL_B = DeliverableBundleDefinition(channel_id="channel_b", bundle_id="short", target_buffer_count=2)
+
+
+def _item(definition, item_id, ready=True, published=False, current_cycle=False):
+    return ChannelDemandItem(
+        channel_id=definition.channel_id, bundle_id=definition.bundle_id, item_id=item_id,
+        publish_ready=ready, already_published=published, is_current_cycle=current_cycle,
     )
 
 
 class TestComputeBufferStatePure:
-    def test_zero_publish_ready_episodes_enqueues(self):
-        state = compute_buffer_state("hypogeum", [])
+    def test_below_target_enqueues(self):
+        state = compute_buffer_state(CHANNEL_A, [])
         assert state.action == "enqueue"
         assert state.buffer_count == 0
+        assert state.target_buffer_count == 1
 
-    def test_zero_because_all_are_published_or_current_week(self):
-        candidates = [
-            _cand("ep_a", ready=True, published=True),
-            _cand("ep_b", ready=True, current_week=True),
-            _cand("ep_c", ready=False),
+    def test_zero_because_all_are_published_or_current_cycle_or_not_ready(self):
+        items = [
+            _item(CHANNEL_A, "a", ready=True, published=True),
+            _item(CHANNEL_A, "b", ready=True, current_cycle=True),
+            _item(CHANNEL_A, "c", ready=False),
         ]
-        state = compute_buffer_state("hypogeum", candidates)
+        state = compute_buffer_state(CHANNEL_A, items)
         assert state.action == "enqueue"
         assert state.buffer_count == 0
-        assert set(state.excluded_episode_ids) == {"ep_a", "ep_b", "ep_c"}
+        assert set(state.excluded_item_ids) == {"a", "b", "c"}
 
-    def test_exactly_one_holds(self):
-        candidates = [_cand("ep_a", ready=True), _cand("ep_b", ready=False)]
-        state = compute_buffer_state("hypogeum", candidates)
+    def test_exactly_at_target_holds(self):
+        items = [_item(CHANNEL_A, "a", ready=True), _item(CHANNEL_A, "b", ready=False)]
+        state = compute_buffer_state(CHANNEL_A, items)
         assert state.action == "hold"
         assert state.buffer_count == 1
-        assert state.counted_episode_ids == ["ep_a"]
+        assert state.counted_item_ids == ["a"]
 
-    def test_two_or_more_is_excess(self):
-        candidates = [_cand("ep_a"), _cand("ep_b"), _cand("ep_c", ready=False)]
-        state = compute_buffer_state("hypogeum", candidates)
+    def test_above_target_is_excess(self):
+        items = [_item(CHANNEL_A, "a"), _item(CHANNEL_A, "b"), _item(CHANNEL_A, "c", ready=False)]
+        state = compute_buffer_state(CHANNEL_A, items)
         assert state.action == "excess"
         assert state.buffer_count == 2
-        assert sorted(state.counted_episode_ids) == ["ep_a", "ep_b"]
+
+    def test_higher_target_bundle_needs_more_to_hold(self):
+        # Channel B declares target_buffer_count=2 -- one ready item is
+        # still "enqueue", not "hold", proving the target is genuinely
+        # config-driven, not a hardcoded "1".
+        items = [_item(CHANNEL_B, "s0", ready=True)]
+        state = compute_buffer_state(CHANNEL_B, items)
+        assert state.action == "enqueue"
+        assert state.buffer_count == 1
+        assert state.target_buffer_count == 2
+
+        items2 = [_item(CHANNEL_B, "s0"), _item(CHANNEL_B, "s1")]
+        assert compute_buffer_state(CHANNEL_B, items2).action == "hold"
 
     def test_deterministic_for_same_input(self):
-        candidates = [_cand("ep_a"), _cand("ep_b")]
-        s1 = compute_buffer_state("hypogeum", candidates)
-        s2 = compute_buffer_state("hypogeum", candidates)
-        assert s1 == s2
+        items = [_item(CHANNEL_A, "a"), _item(CHANNEL_A, "b")]
+        assert compute_buffer_state(CHANNEL_A, items) == compute_buffer_state(CHANNEL_A, items)
+
+
+class TestForeignDemandItemIsolation:
+    def test_item_from_a_different_channel_raises(self):
+        items = [_item(CHANNEL_A, "a"), _item(CHANNEL_B, "s0")]
+        with pytest.raises(ForeignDemandItemError):
+            compute_buffer_state(CHANNEL_A, items)
+
+    def test_item_from_a_different_bundle_same_channel_raises(self):
+        other_bundle = DeliverableBundleDefinition(channel_id="channel_a", bundle_id="other_bundle", target_buffer_count=1)
+        items = [_item(CHANNEL_A, "a"), _item(other_bundle, "x")]
+        with pytest.raises(ForeignDemandItemError):
+            compute_buffer_state(CHANNEL_A, items)
+
+    def test_error_message_never_silently_swallowed(self):
+        items = [_item(CHANNEL_B, "s0")]
+        with pytest.raises(ForeignDemandItemError, match="channel_b"):
+            compute_buffer_state(CHANNEL_A, items)
 
 
 # ---------------------------------------------------------------------------
-# I/O layer — gather_buffer_candidates
+# I/O layer — gather_channel_demand_items / resolve_complete_item_ids_for_channel
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
@@ -91,165 +142,254 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _seed_complete_episode(db_path, assets_root, episode_id, *, channel_id="hypogeum"):
+def _seed_complete_item(db_path, assets_root, item_id, *, channel_id):
     conn = get_connection(db_path)
     try:
-        # topic matches the render package's metadata_source.episode_title
-        # below ("T") so the A_METADATA title-candidate check sees a single
-        # consistent value rather than an artificial conflict this fixture
-        # would otherwise introduce.
-        insert_episode(conn, episode_id=episode_id, created_at=_now_iso(), topic="T", status="complete")
+        # topic matches metadata_source.episode_title below ("T") so
+        # A_METADATA sees one consistent candidate, not an artificial
+        # conflict this fixture would otherwise introduce.
+        insert_episode(conn, episode_id=item_id, created_at=_now_iso(), topic="T", status="complete")
         insert_episode_topic(
-            conn, topic_id=f"topic_{episode_id}", channel_id=channel_id, topic_text="A topic",
-            created_at=_now_iso(), updated_at=_now_iso(), episode_id=episode_id,
+            conn, topic_id=f"topic_{item_id}", channel_id=channel_id, topic_text="A topic",
+            created_at=_now_iso(), updated_at=_now_iso(), episode_id=item_id,
         )
         conn.commit()
     finally:
         conn.close()
 
-    ep_dir = assets_root / "episodes" / episode_id
+    ep_dir = assets_root / "episodes" / item_id
     ep_dir.mkdir(parents=True)
-    pkg = {
-        "metadata_source": {"episode_title": "T", "description": "d", "shorts_titles": []},
-        "shorts_renders": [],
-    }
-    (ep_dir / f"final_render_package_{episode_id}.json").write_text(json.dumps(pkg), encoding="utf-8")
-    (ep_dir / f"main_{episode_id}.mp4").write_bytes(b"x" * 1024)
+    pkg = {"metadata_source": {"episode_title": "T", "description": "d", "shorts_titles": []}, "shorts_renders": []}
+    (ep_dir / f"final_render_package_{item_id}.json").write_text(json.dumps(pkg), encoding="utf-8")
+    (ep_dir / f"main_{item_id}.mp4").write_bytes(b"x" * 1024)
 
 
-class TestGatherBufferCandidates:
-    def test_no_complete_episodes_returns_empty(self, db_path, assets_root):
-        candidates = gather_buffer_candidates("hypogeum", db_path=db_path, assets_root=assets_root)
-        assert candidates == []
+class TestResolveCompleteItemIds:
+    def test_scoped_to_channel_via_episode_topics_join(self, db_path, assets_root):
+        _seed_complete_item(db_path, assets_root, "item_a", channel_id="channel_a")
+        _seed_complete_item(db_path, assets_root, "item_b", channel_id="channel_b")
+        assert resolve_complete_item_ids_for_channel("channel_a", db_path=db_path) == ["item_a"]
+        assert resolve_complete_item_ids_for_channel("channel_b", db_path=db_path) == ["item_b"]
+        assert resolve_complete_item_ids_for_channel("channel_c", db_path=db_path) == []
 
-    def test_complete_and_metadata_only_ready_episode_is_counted(self, db_path, assets_root):
+
+class TestGatherChannelDemandItems:
+    def test_publish_ready_item_is_counted(self, db_path, assets_root):
         from hypogeum.credential_manager import create_secret_profile
 
-        _seed_complete_episode(db_path, assets_root, "ep_ready")
+        _seed_complete_item(db_path, assets_root, "item_a", channel_id="channel_a")
         create_secret_profile(
             provider="zernio", label="k", credential_type="api_key",
             credential_data="sk_test", scope="factory", db_path=db_path,
         )
-        candidates = gather_buffer_candidates("hypogeum", db_path=db_path, assets_root=assets_root)
-        assert len(candidates) == 1
-        assert candidates[0].episode_id == "ep_ready"
-        assert candidates[0].publish_ready is True
-        assert candidates[0].already_published is False
-        assert candidates[0].is_current_week is False
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["item_a"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert len(items) == 1
+        assert items[0].channel_id == "channel_a"
+        assert items[0].bundle_id == "main_episode_bundle"
+        assert items[0].publish_ready is True
+        assert items[0].already_published is False
+        assert items[0].is_current_cycle is False
 
-    def test_metadata_blocked_episode_is_not_publish_ready(self, db_path, assets_root):
-        # No secret profile created -> E_MEDIA_STAGING_READY fails -> not publish_ready.
-        _seed_complete_episode(db_path, assets_root, "ep_blocked")
-        candidates = gather_buffer_candidates("hypogeum", db_path=db_path, assets_root=assets_root)
-        assert len(candidates) == 1
-        assert candidates[0].publish_ready is False
+    def test_metadata_blocked_item_is_not_publish_ready(self, db_path, assets_root):
+        # No secret profile created -> readiness fails -> not publish_ready.
+        _seed_complete_item(db_path, assets_root, "item_a", channel_id="channel_a")
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["item_a"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].publish_ready is False
 
-    def test_already_published_episode_flagged(self, db_path, assets_root):
-        _seed_complete_episode(db_path, assets_root, "ep_live")
+    def test_current_cycle_item_ids_is_explicit_not_inferred(self, db_path, assets_root):
+        _seed_complete_item(db_path, assets_root, "item_a", channel_id="channel_a")
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["item_a"], current_cycle_item_ids=frozenset({"item_a"}),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].is_current_cycle is True
+
+    def test_already_published_item_flagged(self, db_path, assets_root):
+        _seed_complete_item(db_path, assets_root, "item_a", channel_id="channel_a")
         conn = get_connection(db_path)
         try:
             conn.execute(
                 """
                 INSERT INTO publishing_outcomes
                     (outcome_id, episode_id, platform, deliverable_id, publishing_status, recorded_at)
-                VALUES ('out_1', 'ep_live', 'youtube', 'main_episode', 'success', ?)
+                VALUES ('out_1', 'item_a', 'youtube', 'main_episode', 'success', ?)
                 """,
                 (_now_iso(),),
             )
             conn.commit()
         finally:
             conn.close()
-        candidates = gather_buffer_candidates("hypogeum", db_path=db_path, assets_root=assets_root)
-        assert candidates[0].already_published is True
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["item_a"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is True
 
-    def test_current_week_episode_flagged(self, db_path, assets_root):
-        _seed_complete_episode(db_path, assets_root, "ep_soon")
-        soon = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
-        conn = get_connection(db_path)
-        try:
-            conn.execute(
-                """
-                INSERT INTO publish_calendar
-                    (calendar_id, episode_id, platform, target_publish_at, created_at, updated_at)
-                VALUES ('cal_1', 'ep_soon', 'youtube', ?, ?, ?)
-                """,
-                (soon, _now_iso(), _now_iso()),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        candidates = gather_buffer_candidates("hypogeum", db_path=db_path, assets_root=assets_root)
-        assert candidates[0].is_current_week is True
-
-    def test_other_channel_episode_excluded(self, db_path, assets_root):
-        _seed_complete_episode(db_path, assets_root, "ep_other_channel", channel_id="some_other_channel")
-        candidates = gather_buffer_candidates("hypogeum", db_path=db_path, assets_root=assets_root)
-        assert candidates == []
+    def test_items_carry_the_definitions_channel_and_bundle_id(self, db_path, assets_root):
+        _seed_complete_item(db_path, assets_root, "s0", channel_id="channel_b")
+        items = gather_channel_demand_items(
+            CHANNEL_B, item_ids=["s0"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].channel_id == "channel_b"
+        assert items[0].bundle_id == "short"
+        # Feeding straight into compute_buffer_state for the SAME
+        # definition must never raise -- proves gather's output is
+        # self-consistent with the isolation check.
+        compute_buffer_state(CHANNEL_B, items)
 
 
 # ---------------------------------------------------------------------------
-# run_worker.py wiring — Step 0 gate only
+# End-to-end cross-channel isolation via run_worker.py's real Step 0 wiring
 # ---------------------------------------------------------------------------
 
-class TestRunWorkerBufferWiring:
-    def test_buffer_gated_channel_skips_discovery_but_result_reports_it(self, db_path, assets_root, monkeypatch):
+def _make_channel_profile(db_path, channel_id):
+    from hypogeum.channel_config import (
+        create_brand_profile, create_channel_profile, create_model_profile, create_publishing_profile,
+    )
+    brand = create_brand_profile(name=f"{channel_id} Brand", db_path=db_path)
+    model = create_model_profile(name=f"{channel_id} Model", db_path=db_path)
+    pub = create_publishing_profile(name=f"{channel_id} Publishing", db_path=db_path)
+    create_channel_profile(
+        channel_id=channel_id, name=channel_id,
+        brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
+        publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+    )
+
+
+class TestCrossChannelBundleIsolationViaRunWorker:
+    def test_channel_a_full_buffer_does_not_suppress_channel_b_refill_and_vice_versa(
+        self, db_path, assets_root, monkeypatch,
+    ):
         import run_worker
-        from hypogeum.channel_config import create_channel_profile, create_brand_profile, create_model_profile, create_publishing_profile
+        from hypogeum.credential_manager import create_secret_profile
 
-        brand = create_brand_profile(name="Hypogeum Brand", db_path=db_path)
-        model = create_model_profile(name="Hypogeum Model", db_path=db_path)
-        pub = create_publishing_profile(name="Hypogeum Publishing", db_path=db_path)
-        create_channel_profile(
-            channel_id="hypogeum", name="Hypogeum",
-            brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
-            publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+        _make_channel_profile(db_path, "channel_a")
+        _make_channel_profile(db_path, "channel_b")
+
+        # Channel A: one ready, publish-ready item -> meets target_buffer_count=1 -> "hold".
+        _seed_complete_item(db_path, assets_root, "ep_a1", channel_id="channel_a")
+        # Channel B: zero ready items -> target_buffer_count=2 unmet -> "enqueue".
+        # (No items seeded for channel_b at all.)
+
+        create_secret_profile(
+            provider="zernio", label="k", credential_type="api_key",
+            credential_data="sk_test", scope="factory", db_path=db_path,
         )
 
-        monkeypatch.setattr(
-            "hypogeum.buffer.compute_buffer_state",
-            lambda channel_id, candidates: BufferState(
-                channel_id=channel_id, action="hold", buffer_count=1, counted_episode_ids=["ep_x"], reason="test-forced-hold",
-            ),
-        )
-        monkeypatch.setattr("hypogeum.buffer.gather_buffer_candidates", lambda *a, **k: [])
+        # Stand in for a real Channel-Package compiler (see
+        # run_worker._resolve_bundle_definitions_for_channel's own
+        # docstring for why this is normally hardcoded per-channel there;
+        # this test exercises both channels through the SAME real
+        # gate/loop code by patching the resolver to return each
+        # channel's own declared bundle).
+        def _resolve(channel_id):
+            if channel_id == "channel_a":
+                return [DeliverableBundleDefinition(channel_id="channel_a", bundle_id="main_episode_bundle", target_buffer_count=1)]
+            if channel_id == "channel_b":
+                return [DeliverableBundleDefinition(channel_id="channel_b", bundle_id="short", target_buffer_count=2)]
+            return []
 
-        called = {"discovery": False}
-        monkeypatch.setattr(
-            "hypogeum.topic_discovery.run_discovery_cycle",
-            lambda *a, **k: called.__setitem__("discovery", True) or {"ok": True, "cycle_id": "c1", "candidate_count": 0},
-        )
+        monkeypatch.setattr("run_worker._resolve_bundle_definitions_for_channel", _resolve)
 
-        result = run_worker._check_and_refill_queue(db_path=db_path, threshold=2, auto_approve=False, assets_root=assets_root)
-
-        assert called["discovery"] is False
-        assert "hypogeum" in result["buffer_gated"]
-        assert result["buffer_states"]["hypogeum"]["action"] == "hold"
-
-    def test_buffer_enqueue_state_falls_through_to_existing_queue_depth_logic(self, db_path, assets_root, monkeypatch):
-        import run_worker
-        from hypogeum.channel_config import create_channel_profile, create_brand_profile, create_model_profile, create_publishing_profile
-
-        brand = create_brand_profile(name="Hypogeum Brand", db_path=db_path)
-        model = create_model_profile(name="Hypogeum Model", db_path=db_path)
-        pub = create_publishing_profile(name="Hypogeum Publishing", db_path=db_path)
-        create_channel_profile(
-            channel_id="hypogeum", name="Hypogeum",
-            brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
-            publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
-        )
-
-        monkeypatch.setattr("hypogeum.buffer.gather_buffer_candidates", lambda *a, **k: [])
-
-        called = {"discovery": False}
+        discovery_calls = []
 
         def _fake_discovery(channel_id, db_path=None):
-            called["discovery"] = True
+            discovery_calls.append(channel_id)
+            return {"ok": True, "cycle_id": f"c_{channel_id}", "candidate_count": 0, "selected_candidate_id": None}
+
+        monkeypatch.setattr("hypogeum.topic_discovery.run_discovery_cycle", _fake_discovery)
+
+        result = run_worker._check_and_refill_queue(
+            db_path=db_path, threshold=2, auto_approve=False, assets_root=assets_root,
+        )
+
+        # Channel A is buffer-gated (hold, target met) -- its discovery is skipped.
+        assert "channel_a" in result["buffer_gated"]
+        assert result["buffer_states"]["channel_a"]["main_episode_bundle"]["action"] == "hold"
+        assert "channel_a" not in discovery_calls
+
+        # Channel B is NOT buffer-gated (enqueue, target unmet) -- its
+        # discovery runs, proving Channel A's full buffer never suppressed it.
+        assert "channel_b" not in result["buffer_gated"]
+        assert result["buffer_states"]["channel_b"]["short"]["action"] == "enqueue"
+        assert "channel_b" in discovery_calls
+
+    def test_channel_b_full_buffer_does_not_suppress_channel_a_refill(self, db_path, assets_root, monkeypatch):
+        import run_worker
+        from hypogeum.credential_manager import create_secret_profile
+
+        _make_channel_profile(db_path, "channel_a")
+        _make_channel_profile(db_path, "channel_b")
+
+        # Channel B: two ready items -> meets target_buffer_count=2 -> "hold".
+        _seed_complete_item(db_path, assets_root, "sh_b1", channel_id="channel_b")
+        _seed_complete_item(db_path, assets_root, "sh_b2", channel_id="channel_b")
+        # Channel A: zero ready items -> target_buffer_count=1 unmet -> "enqueue".
+
+        create_secret_profile(
+            provider="zernio", label="k", credential_type="api_key",
+            credential_data="sk_test", scope="factory", db_path=db_path,
+        )
+
+        def _resolve(channel_id):
+            if channel_id == "channel_a":
+                return [DeliverableBundleDefinition(channel_id="channel_a", bundle_id="main_episode_bundle", target_buffer_count=1)]
+            if channel_id == "channel_b":
+                return [DeliverableBundleDefinition(channel_id="channel_b", bundle_id="short", target_buffer_count=2)]
+            return []
+
+        monkeypatch.setattr("run_worker._resolve_bundle_definitions_for_channel", _resolve)
+
+        discovery_calls = []
+
+        def _fake_discovery(channel_id, db_path=None):
+            discovery_calls.append(channel_id)
+            return {"ok": True, "cycle_id": f"c_{channel_id}", "candidate_count": 0, "selected_candidate_id": None}
+
+        monkeypatch.setattr("hypogeum.topic_discovery.run_discovery_cycle", _fake_discovery)
+
+        result = run_worker._check_and_refill_queue(
+            db_path=db_path, threshold=2, auto_approve=False, assets_root=assets_root,
+        )
+
+        assert "channel_b" in result["buffer_gated"]
+        assert result["buffer_states"]["channel_b"]["short"]["action"] == "hold"
+        assert "channel_b" not in discovery_calls
+
+        assert "channel_a" not in result["buffer_gated"]
+        assert result["buffer_states"]["channel_a"]["main_episode_bundle"]["action"] == "enqueue"
+        assert "channel_a" in discovery_calls
+
+    def test_unresolvable_channel_is_never_buffer_gated_falls_through_unaffected(
+        self, db_path, assets_root, monkeypatch,
+    ):
+        """A channel with no compiled bundle definition (the real,
+        production-honest default for every channel except Hypogeum today)
+        must never be buffer-gated -- it falls straight through to the
+        existing queue-depth logic, exactly as before this slice."""
+        import run_worker
+
+        _make_channel_profile(db_path, "channel_unknown")
+
+        discovery_calls = []
+
+        def _fake_discovery(channel_id, db_path=None):
+            discovery_calls.append(channel_id)
             return {"ok": True, "cycle_id": "c1", "candidate_count": 0, "selected_candidate_id": None}
 
         monkeypatch.setattr("hypogeum.topic_discovery.run_discovery_cycle", _fake_discovery)
 
-        result = run_worker._check_and_refill_queue(db_path=db_path, threshold=2, auto_approve=False, assets_root=assets_root)
+        result = run_worker._check_and_refill_queue(
+            db_path=db_path, threshold=2, auto_approve=False, assets_root=assets_root,
+        )
 
-        assert "hypogeum" not in result["buffer_gated"]
-        assert result["buffer_states"]["hypogeum"]["action"] == "enqueue"
-        assert called["discovery"] is True
+        assert "channel_unknown" not in result["buffer_gated"]
+        assert "channel_unknown" not in result["buffer_states"]
+        assert "channel_unknown" in discovery_calls

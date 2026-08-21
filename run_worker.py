@@ -177,6 +177,39 @@ def _sync_analytics_background(db_path: Path, config) -> None:
         log.error("analytics_sync_error error=%s", exc)
 
 
+def _resolve_bundle_definitions_for_channel(channel_id: str) -> list:
+    """
+    TEMPORARY, EXPLICIT stand-in for a real Channel-Package-driven bundle
+    compiler — see hypogeum/buffer.py's own SCHEMA GAP note. The current
+    Channel Package schema (channel_operations_profiles.
+    production_cadence_json / publishing_schedule_json) has no generic,
+    formalized concept of "deliverable/bundle definitions" or their target
+    buffer counts for an arbitrary channel, so nothing here is compiled
+    from the database — only Hypogeum's own single known real bundle is
+    hardcoded, here, at this one call site (never inside hypogeum/buffer.py
+    itself, which stays fully channel-agnostic and knows nothing about
+    "episode", "Shorts", or Hypogeum at all).
+
+    Any channel_id not explicitly listed here returns [] — the buffer gate
+    in _check_and_refill_queue() is then skipped entirely for it (falls
+    through to the existing queue-depth-only refill logic, unaffected),
+    which is the correct, fail-closed behavior for a channel whose bundle
+    shape has not been compiled: never guess a Hypogeum-shaped bundle onto
+    a channel we know nothing about.
+
+    A real multi-channel factory replaces this function's body with a
+    genuine Channel Package compiler once that schema exists — this
+    function's docstring is the exact, load-bearing seam where that plugs
+    in; nothing else in this file (or hypogeum/buffer.py) needs to change.
+    """
+    if channel_id == "hypogeum":
+        from hypogeum.buffer import DeliverableBundleDefinition
+        return [DeliverableBundleDefinition(
+            channel_id="hypogeum", bundle_id="main_episode_bundle", target_buffer_count=1,
+        )]
+    return []
+
+
 def _check_and_refill_queue(
     db_path: Path,
     threshold: int,
@@ -186,22 +219,31 @@ def _check_and_refill_queue(
     """
     Inspect topic queue depth across all active channels.
 
-    For each active channel: first check the one-episode publish-ready
-    buffer (hypogeum.buffer.compute_buffer_state) — a channel with a
-    sufficient or excess buffer (>=1 publish-ready, unpublished,
-    non-current-week complete episode) is skipped entirely for this
-    iteration, regardless of topic-backlog depth. This is a DIFFERENT gate
-    than the queue-depth check below: queue depth is about the topic
-    *backlog* (raw ideas awaiting production), the buffer gate is about
-    *finished, publish-ready episodes* already ahead of the current
-    schedule — see hypogeum/buffer.py's own docstring. Only when the buffer
-    reports "enqueue" (0 publish-ready episodes ahead) does the existing
-    queue-depth-driven discovery/auto-approve logic below run at all.
+    For each active channel: first check its declared deliverable/bundle
+    ready-ahead buffer(s) (hypogeum.buffer.compute_buffer_state) — a
+    channel whose EVERY declared bundle already reports "hold" or "excess"
+    (buffer target met or exceeded) is skipped entirely for this iteration,
+    regardless of topic-backlog depth. This is a DIFFERENT gate than the
+    queue-depth check below: queue depth is about the topic *backlog* (raw
+    ideas awaiting production), the buffer gate is about *finished,
+    publish-ready deliverables/bundles* already ahead of schedule — see
+    hypogeum/buffer.py's own docstring, including its documented Channel
+    Package schema gap. hypogeum.buffer is fully channel/bundle-generic —
+    it has no notion of "episode", "Shorts", "weekly", or any Hypogeum
+    constant; _resolve_bundle_definitions_for_channel() below is this
+    file's own narrow, explicit, documented stand-in for a real Channel-
+    Package-driven bundle compiler (which does not exist yet — see that
+    function's docstring). A channel with no resolvable bundle definition
+    is never buffer-gated at all (falls through to the queue-depth logic
+    below, unaffected) — never guessed at.
 
-    Otherwise unchanged: if the number of queued topics is below
-    `threshold`, run a discovery cycle to generate fresh candidates. If
-    `auto_approve` is True, the top-scored candidate is automatically
-    approved and enqueued, closing the loop without operator input.
+    Only when a channel's buffer gate allows it (or the channel has no
+    resolvable bundle definition) does the existing queue-depth-driven
+    discovery/auto-approve logic below run, otherwise unchanged: if the
+    number of queued topics is below `threshold`, run a discovery cycle to
+    generate fresh candidates. If `auto_approve` is True, the top-scored
+    candidate is automatically approved and enqueued, closing the loop
+    without operator input.
 
     Duplicate-topic errors from enqueue_topic() are handled gracefully —
     treated as a successful enqueue of an already-queued topic.
@@ -213,13 +255,14 @@ def _check_and_refill_queue(
           "cycles_run": list[str],     # cycle_ids
           "topics_enqueued": list[str] # topic texts (only when auto_approve)
           "buffer_gated": list[str],   # channel_ids skipped this iteration by the buffer gate
-          "buffer_states": {channel_id: {"action": ..., "buffer_count": ..., "reason": ...}}
+          "buffer_states": {channel_id: {bundle_id: {"action": ..., "buffer_count": ...,
+                                                       "target_buffer_count": ..., "reason": ...}}}
         }
     """
     from hypogeum.channel_config import list_channel_profiles
     from hypogeum.topic_discovery import run_discovery_cycle, approve_candidate
     from hypogeum.db import get_connection
-    from hypogeum.buffer import compute_buffer_state, gather_buffer_candidates
+    from hypogeum.buffer import compute_buffer_state, gather_channel_demand_items, resolve_complete_item_ids_for_channel
 
     effective_assets_root = Path(assets_root) if assets_root is not None else Path(db_path).parent
 
@@ -250,36 +293,58 @@ def _check_and_refill_queue(
         channel_id = ch.channel_id
         result["channels_checked"] += 1
 
-        # ── One-episode buffer gate (Step 0 discovery-refill gate ONLY —
-        # tick()/consume_scheduled_runs()/poll() below are never touched by
-        # this) ──────────────────────────────────────────────────────────
-        try:
-            candidates = gather_buffer_candidates(
-                channel_id, db_path=db_path, assets_root=effective_assets_root,
-            )
-            buffer_state = compute_buffer_state(channel_id, candidates)
-            result["buffer_states"][channel_id] = {
-                "action": buffer_state.action,
-                "buffer_count": buffer_state.buffer_count,
-                "reason": buffer_state.reason,
-            }
-        except Exception as exc:
-            # Fail closed, matching this codebase's pervasive ambiguity
-            # policy (production_output_gate.py, the Zernio adapter, media
-            # staging): an unknown buffer state must never be treated as
-            # "buffer empty, safe to enqueue more work".
-            log.error("buffer_gate_error channel=%s error=%s — gating discovery (fail closed)", channel_id, exc)
-            result["buffer_gated"].append(channel_id)
-            result["buffer_states"][channel_id] = {"action": "error", "buffer_count": None, "reason": str(exc)}
-            continue
+        # ── Deliverable/bundle buffer gate (Step 0 discovery-refill gate
+        # for THIS channel only — tick()/consume_scheduled_runs()/poll()
+        # below, and every other channel's own iteration of this loop, are
+        # never touched by this) ────────────────────────────────────────
+        bundle_definitions = _resolve_bundle_definitions_for_channel(channel_id)
+        if bundle_definitions:
+            try:
+                bundle_states = []
+                for bundle_def in bundle_definitions:
+                    item_ids = resolve_complete_item_ids_for_channel(channel_id, db_path=db_path)
+                    demand_items = gather_channel_demand_items(
+                        bundle_def, item_ids=item_ids,
+                        # No generic current-publishing-slot resolver exists
+                        # yet (documented schema gap in hypogeum/buffer.py) —
+                        # passing empty here is this call site's own
+                        # conscious, temporary, documented choice, never a
+                        # hidden default inside hypogeum.buffer itself.
+                        current_cycle_item_ids=frozenset(),
+                        db_path=db_path, assets_root=effective_assets_root,
+                    )
+                    bundle_states.append(compute_buffer_state(bundle_def, demand_items))
 
-        if buffer_state.action != "enqueue":
-            result["buffer_gated"].append(channel_id)
-            log.info(
-                "discovery_buffer_gated channel=%s action=%s buffer_count=%d reason=%s",
-                channel_id, buffer_state.action, buffer_state.buffer_count, buffer_state.reason,
-            )
-            continue
+                result["buffer_states"][channel_id] = {
+                    b.bundle_id: {
+                        "action": b.action, "buffer_count": b.buffer_count,
+                        "target_buffer_count": b.target_buffer_count, "reason": b.reason,
+                    }
+                    for b in bundle_states
+                }
+
+                # Gate this channel's discovery refill only if EVERY one of
+                # its declared bundles already has a sufficient/excess
+                # buffer — a channel with two bundles where only one still
+                # needs replenishment must not be starved on the other's
+                # account (discovery itself is not yet bundle-scoped; see
+                # hypogeum/buffer.py's SCHEMA GAP note).
+                if bundle_states and all(b.action != "enqueue" for b in bundle_states):
+                    result["buffer_gated"].append(channel_id)
+                    log.info(
+                        "discovery_buffer_gated channel=%s bundles=%s",
+                        channel_id, result["buffer_states"][channel_id],
+                    )
+                    continue
+            except Exception as exc:
+                # Fail closed, matching this codebase's pervasive ambiguity
+                # policy (production_output_gate.py, the Zernio adapter,
+                # media staging): an unknown buffer state must never be
+                # treated as "buffer empty, safe to enqueue more work".
+                log.error("buffer_gate_error channel=%s error=%s — gating discovery (fail closed)", channel_id, exc)
+                result["buffer_gated"].append(channel_id)
+                result["buffer_states"][channel_id] = {"error": str(exc)}
+                continue
 
         # ── Queue depth check ─────────────────────────────────────────────
         try:

@@ -1,136 +1,224 @@
 """
-hypogeum/buffer.py — One-episode publish-ready buffer gate.
+hypogeum/buffer.py — Channel-scoped, deliverable/bundle-generic ready-ahead
+buffer gate.
+
+Factory Core is channel-agnostic (see CLAUDE.md's Strategic Reorientation:
+"NOT a YouTube channel — Multi-Channel Autonomous Media Factory Platform").
+This module has NO concept of "episode", "Shorts", "weekly", or "one
+episode ahead" — those are Hypogeum's own Channel Package configuration,
+not Factory constants. A different channel may declare a completely
+different deliverable/bundle shape and buffer target (e.g. six
+independently-publishable Shorts with no long-form episode at all, buffer
+target 2) and this module behaves identically for it — every decision is
+driven by the DeliverableBundleDefinition passed in, never by a hardcoded
+Hypogeum assumption.
 
 Two layers, deliberately separated:
-    compute_buffer_state(channel_id, candidates)  — pure, deterministic,
-        no I/O. Given a list of already-classified BufferEpisodeCandidate
-        objects, decides "enqueue" / "hold" / "excess". Trivially unit-
-        testable with fixture candidate lists (0 / 1 / 2+ scenarios) — no
-        DB, no disk, no provider call.
-    gather_buffer_candidates(channel_id, ...)      — the I/O layer that
-        builds that candidate list from real state (episodes table,
-        publish_calendar, publishing_outcomes, and
-        hypogeum.publishing.readiness.check_publish_readiness()). Used only
-        to build compute_buffer_state()'s input for real use.
+    compute_buffer_state(definition, items)   — pure, deterministic, no
+        I/O. Scoped to exactly one (channel_id, bundle_id,
+        target_buffer_count). Enforces isolation STRUCTURALLY: raises
+        ForeignDemandItemError if any ChannelDemandItem does not belong to
+        that exact (channel_id, bundle_id) pair — a ready item belonging
+        to one channel or one bundle can never silently count toward a
+        different channel's or bundle's buffer.
+    gather_channel_demand_items(...)          — the I/O layer that builds
+        ChannelDemandItem objects for one (channel_id, bundle_id) from
+        real state. See its own docstring for the schema gap it fails
+        closed on rather than guessing at.
 
-Wired into run_worker.py's Step 0 discovery-refill path ONLY — gates
-whether NEW discovery-driven topic enqueue is allowed for a channel. Every
-other worker duty (tick, consume, poll, publishing) is completely
-unaffected; this module never stops, pauses, or starts anything on its own.
+SCHEMA GAP (documented here, NOT invented or redesigned in this slice):
+the Channel Package (channel_operations_profiles.production_cadence_json /
+publishing_schedule_json) has no generic, formalized, cross-channel
+contract for:
+  (a) which deliverable/bundle definitions a channel declares, their
+      bundle membership rules (e.g. "these 3 Shorts belong to this one
+      long-form's bundle" vs. "each Short is its own independent bundle
+      instance"), or their target ready-ahead buffer count — see
+      DeliverableBundleDefinition's own docstring;
+  (b) a generic way to resolve "which ready item already occupies the
+      next/current publishing slot" (this module's cadence-agnostic stand-
+      in for "current week") for an arbitrary channel's arbitrary cadence.
+Compiling a real Channel Package into this module's inputs is therefore
+NOT implemented here. Every DeliverableBundleDefinition, every item_id set,
+and every current-cycle assignment must be supplied explicitly by the
+caller — today, run_worker.py's own narrow, documented, per-channel stand-
+in (see its _resolve_bundle_definitions_for_channel()), never inferred or
+guessed by this module. A channel with no compiled definition is simply
+never gated by this module at all (fail closed at the call site, not here).
 
-Buffer definition: the count of a channel's episodes that are ALL of:
-  - episodes.status == 'complete'
-  - publish-ready per hypogeum.publishing.readiness.check_publish_readiness()
-    (no operator metadata override applied by this module — a
-    metadata-blocked episode never counts)
-  - NOT already published (a publishing_outcomes row with
-    publishing_status='success', or a publish_calendar row with
-    publish_status='live', for this episode — an already-published episode
-    has already been consumed by a slot, it is not "ahead" any more)
-  - NOT the current week's episode (a publish_calendar row for this episode
-    with target_publish_at inside the next 7 days from `now` — that episode
-    is about to air, it is not surplus buffer)
-
-Gate contract:
-    buffer == 0  -> "enqueue"  (discovery refill may run)
-    buffer == 1  -> "hold"     (sufficient — do not enqueue more)
-    buffer >= 2  -> "excess"   (report the surplus — do not enqueue more)
-
-This module never unpauses a schedule, never starts a run, and never
-enqueues anything itself — it only classifies state; the caller decides
-what "enqueue"/"hold"/"excess" means for its own loop.
+Gate contract — generic, target-based (not "0/1/2+", which was Hypogeum's
+own now-removed buffer target of 1):
+    buffer_count <  target_buffer_count  -> "enqueue"
+    buffer_count == target_buffer_count  -> "hold"
+    buffer_count >  target_buffer_count  -> "excess"
 
 Public API:
-    BufferEpisodeCandidate, BufferState
-    compute_buffer_state(channel_id, candidates)                 -> BufferState
-    gather_buffer_candidates(channel_id, *, db_path=None,
-                              assets_root, platforms=(), now=None)
-        -> list[BufferEpisodeCandidate]
+    DeliverableBundleDefinition, ChannelDemandItem, BufferState
+    ForeignDemandItemError
+    compute_buffer_state(definition, items)                       -> BufferState
+    resolve_complete_item_ids_for_channel(channel_id, db_path=None) -> list[str]
+    gather_channel_demand_items(definition, *, item_ids,
+                                 current_cycle_item_ids, db_path=None,
+                                 assets_root, platforms=(), provider_id="zernio")
+        -> list[ChannelDemandItem]
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import FrozenSet, List, Optional, Sequence
 
-_CURRENT_WEEK_WINDOW_DAYS = 7
+
+class ForeignDemandItemError(ValueError):
+    """
+    Raised by compute_buffer_state() when a ChannelDemandItem does not
+    belong to the exact (channel_id, bundle_id) of the
+    DeliverableBundleDefinition it is being evaluated against. This is the
+    structural enforcement of "a ready item belonging to one channel must
+    never satisfy another channel's buffer" — never a silent filter, so a
+    caller that accidentally mixes demand from two channels/bundles finds
+    out immediately rather than getting a quietly-wrong buffer count.
+    """
 
 
 @dataclass(frozen=True)
-class BufferEpisodeCandidate:
-    episode_id: str
+class DeliverableBundleDefinition:
+    """
+    One channel-declared deliverable or bundle definition. Entirely
+    channel-declared; Factory Core assigns no universal meaning to
+    bundle_id — it is an opaque string chosen by whatever compiled this
+    definition (a future Channel-Package compiler; today, an explicit,
+    documented call-site stand-in — see this module's SCHEMA GAP note).
+
+    Illustrative examples (never hardcoded inside this module):
+        Channel A: bundle_id='main_episode_bundle' — one long-form episode
+                   plus its associated Shorts, published together as one
+                   unit. target_buffer_count=1.
+        Channel B: bundle_id='short' — each Short is independently
+                   publishable, no long-form episode exists at all.
+                   target_buffer_count=2 (illustrative; channel-declared).
+    """
+    channel_id: str
+    bundle_id: str
+    target_buffer_count: int
+
+
+@dataclass(frozen=True)
+class ChannelDemandItem:
+    """
+    One compiled unit of ready supply toward exactly one
+    (channel_id, bundle_id)'s buffer — e.g. one completed episode+Shorts
+    bundle instance for Channel A, or one completed independent Short for
+    Channel B. item_id is opaque to this module (never assumed to be an
+    "episode_id" in any Factory-Core sense).
+    """
+    channel_id: str
+    bundle_id: str
+    item_id: str
     publish_ready: bool
     already_published: bool
-    is_current_week: bool
+    is_current_cycle: bool
 
 
 @dataclass(frozen=True)
 class BufferState:
     channel_id: str
+    bundle_id: str
     action: str  # "enqueue" | "hold" | "excess"
     buffer_count: int
-    counted_episode_ids: List[str] = field(default_factory=list)
-    excluded_episode_ids: List[str] = field(default_factory=list)
+    target_buffer_count: int
+    counted_item_ids: List[str] = field(default_factory=list)
+    excluded_item_ids: List[str] = field(default_factory=list)
     reason: str = ""
 
 
-def compute_buffer_state(channel_id: str, candidates: Sequence[BufferEpisodeCandidate]) -> BufferState:
-    """Pure — no I/O, no side effects, deterministic for a given input."""
-    counted = [
-        c.episode_id for c in candidates
-        if c.publish_ready and not c.already_published and not c.is_current_week
-    ]
-    excluded = [c.episode_id for c in candidates if c.episode_id not in counted]
-    n = len(counted)
+def compute_buffer_state(
+    definition: DeliverableBundleDefinition,
+    items: Sequence[ChannelDemandItem],
+) -> BufferState:
+    """
+    Pure — no I/O, no side effects, deterministic for a given input.
 
-    if n == 0:
+    Scoped strictly to definition.channel_id + definition.bundle_id. Raises
+    ForeignDemandItemError (see its own docstring) if any item does not
+    match both — this is the load-bearing isolation guarantee: this
+    function can never be tricked into letting one channel's or one
+    bundle's ready item count toward a different channel's or bundle's
+    buffer, regardless of what its caller passes in.
+    """
+    foreign = [
+        i for i in items
+        if i.channel_id != definition.channel_id or i.bundle_id != definition.bundle_id
+    ]
+    if foreign:
+        raise ForeignDemandItemError(
+            f"compute_buffer_state() for channel_id={definition.channel_id!r} "
+            f"bundle_id={definition.bundle_id!r} received {len(foreign)} item(s) belonging to a "
+            f"different channel/bundle: "
+            f"{[(i.channel_id, i.bundle_id, i.item_id) for i in foreign]}"
+        )
+
+    counted = [
+        i.item_id for i in items
+        if i.publish_ready and not i.already_published and not i.is_current_cycle
+    ]
+    excluded = [i.item_id for i in items if i.item_id not in counted]
+    n = len(counted)
+    target = definition.target_buffer_count
+
+    if n < target:
         action = "enqueue"
-        reason = "no publish-ready buffer episode ahead — discovery refill may enqueue one replacement episode"
-    elif n == 1:
+        reason = (
+            f"{n}/{target} publish-ready buffer item(s) for channel_id={definition.channel_id!r} "
+            f"bundle_id={definition.bundle_id!r} — refill may enqueue"
+        )
+    elif n == target:
         action = "hold"
-        reason = "exactly one publish-ready buffer episode ahead — sufficient, do not enqueue"
+        reason = (
+            f"{n}/{target} publish-ready buffer item(s) for channel_id={definition.channel_id!r} "
+            f"bundle_id={definition.bundle_id!r} — target met, do not enqueue"
+        )
     else:
         action = "excess"
-        reason = f"{n} publish-ready buffer episodes ahead — excess, do not enqueue"
+        reason = (
+            f"{n}/{target} publish-ready buffer item(s) for channel_id={definition.channel_id!r} "
+            f"bundle_id={definition.bundle_id!r} — excess, do not enqueue"
+        )
 
     return BufferState(
-        channel_id=channel_id, action=action, buffer_count=n,
-        counted_episode_ids=counted, excluded_episode_ids=excluded, reason=reason,
+        channel_id=definition.channel_id, bundle_id=definition.bundle_id, action=action,
+        buffer_count=n, target_buffer_count=target,
+        counted_item_ids=counted, excluded_item_ids=excluded, reason=reason,
     )
 
 
-def gather_buffer_candidates(
-    channel_id: str,
-    *,
-    db_path: Optional[Path] = None,
-    assets_root: Path,
-    platforms: Sequence[str] = (),
-    provider_id: str = "zernio",
-    now: Optional[datetime] = None,
-) -> List[BufferEpisodeCandidate]:
-    """
-    Real-state gathering for compute_buffer_state()'s input. Read-only —
-    issues SELECTs against episodes/episode_topics/publish_calendar/
-    publishing_outcomes and calls check_publish_readiness() (itself
-    read-only); never mutates anything.
+# ---------------------------------------------------------------------------
+# I/O layer
+# ---------------------------------------------------------------------------
 
-    episodes has no channel_id column — an episode is scoped to a channel
-    via its episode_topics row(s) (same join hypogeum.run_registry.
-    _sync_episode_row() already uses), so an episode with no episode_topics
-    row at all cannot be attributed to any channel and is excluded.
+def resolve_complete_item_ids_for_channel(
+    channel_id: str, db_path: Optional[Path] = None,
+) -> List[str]:
+    """
+    Generic, channel-scoped item resolution — the only channel-scoping join
+    the current schema actually supports (episodes has no channel_id column
+    of its own; every episode is attributed to a channel only via its
+    episode_topics row(s), same join hypogeum.run_registry.
+    _sync_episode_row() and the prior slice's gatherer both already use).
+
+    Deliberately does NOT know about bundle membership — it returns every
+    'complete' item_id attributed to channel_id, full stop. A caller with
+    more than one bundle_id per channel must partition this list itself
+    (or resolve item_ids some other way); this module has no schema-backed
+    way to do that partitioning today (see the module's SCHEMA GAP note).
     """
     from hypogeum.db import get_connection, initialize_schema  # noqa: PLC0415
-    from hypogeum.publishing.readiness import check_publish_readiness  # noqa: PLC0415
-
-    now = now or datetime.now(timezone.utc)
-    current_week_cutoff = now + timedelta(days=_CURRENT_WEEK_WINDOW_DAYS)
 
     initialize_schema(db_path)
     conn = get_connection(db_path)
     try:
-        episode_rows = conn.execute(
+        rows = conn.execute(
             """
             SELECT DISTINCT e.episode_id
             FROM episodes e
@@ -139,48 +227,75 @@ def gather_buffer_candidates(
             """,
             (channel_id,),
         ).fetchall()
-        episode_ids = [r["episode_id"] for r in episode_rows]
+        return [r["episode_id"] for r in rows]
+    finally:
+        conn.close()
 
-        candidates: List[BufferEpisodeCandidate] = []
-        for episode_id in episode_ids:
+
+def gather_channel_demand_items(
+    definition: DeliverableBundleDefinition,
+    *,
+    item_ids: Sequence[str],
+    current_cycle_item_ids: FrozenSet[str],
+    db_path: Optional[Path] = None,
+    assets_root: Path,
+    platforms: Sequence[str] = (),
+    provider_id: str = "zernio",
+) -> List[ChannelDemandItem]:
+    """
+    Real-state gathering for compute_buffer_state()'s input, scoped to
+    exactly one (channel_id, bundle_id) via `definition`.
+
+    item_ids and current_cycle_item_ids are REQUIRED, caller-supplied — see
+    this module's own SCHEMA GAP note: Factory Core has no generic way to
+    compile "which item_ids belong to this bundle" or "which of them
+    already occupies the next publishing slot" from the current Channel
+    Package schema, so this function never guesses either. A caller with
+    no real slot-resolution available must pass
+    current_cycle_item_ids=frozenset() explicitly and document why at the
+    call site (see run_worker.py) — treating nothing as confirmed
+    current-cycle is the fail-closed default here: it can only ever
+    UNDER-count the buffer (never over-count it), so the gate errs toward
+    "enqueue" rather than silently starving a channel of a refill it
+    genuinely still needs.
+
+    Only publish_ready (via
+    hypogeum.publishing.readiness.check_publish_readiness(), itself
+    already generic/deliverable-agnostic — see that module) and
+    already_published (via publishing_outcomes/publish_calendar, both
+    keyed only by item_id, not by any channel- or bundle-specific shape)
+    are computed here — both are real signals the current schema DOES
+    express generically. Bundle membership itself is never computed here;
+    item_ids is exactly the set the caller says belongs to this bundle.
+    """
+    from hypogeum.db import get_connection, initialize_schema  # noqa: PLC0415
+    from hypogeum.publishing.readiness import check_publish_readiness  # noqa: PLC0415
+
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        result: List[ChannelDemandItem] = []
+        for item_id in item_ids:
             published_row = conn.execute(
-                """
-                SELECT 1 FROM publishing_outcomes
-                WHERE episode_id = ? AND publishing_status = 'success'
-                LIMIT 1
-                """,
-                (episode_id,),
+                "SELECT 1 FROM publishing_outcomes WHERE episode_id = ? AND publishing_status = 'success' LIMIT 1",
+                (item_id,),
             ).fetchone()
             live_calendar_row = conn.execute(
-                """
-                SELECT 1 FROM publish_calendar
-                WHERE episode_id = ? AND publish_status = 'live'
-                LIMIT 1
-                """,
-                (episode_id,),
+                "SELECT 1 FROM publish_calendar WHERE episode_id = ? AND publish_status = 'live' LIMIT 1",
+                (item_id,),
             ).fetchone()
             already_published = bool(published_row or live_calendar_row)
 
-            current_week_row = conn.execute(
-                """
-                SELECT 1 FROM publish_calendar
-                WHERE episode_id = ? AND target_publish_at IS NOT NULL
-                  AND target_publish_at <= ? AND publish_status != 'live'
-                LIMIT 1
-                """,
-                (episode_id, current_week_cutoff.isoformat()),
-            ).fetchone()
-            is_current_week = bool(current_week_row)
-
             readiness = check_publish_readiness(
-                episode_id, assets_root=assets_root, db_path=db_path,
-                channel_id=channel_id, platforms=platforms,
+                item_id, assets_root=assets_root, db_path=db_path,
+                channel_id=definition.channel_id, platforms=platforms,
                 provider_id=provider_id, metadata_override=None,
             )
-            candidates.append(BufferEpisodeCandidate(
-                episode_id=episode_id, publish_ready=readiness.passed,
-                already_published=already_published, is_current_week=is_current_week,
+            result.append(ChannelDemandItem(
+                channel_id=definition.channel_id, bundle_id=definition.bundle_id, item_id=item_id,
+                publish_ready=readiness.passed, already_published=already_published,
+                is_current_cycle=item_id in current_cycle_item_ids,
             ))
-        return candidates
+        return result
     finally:
         conn.close()

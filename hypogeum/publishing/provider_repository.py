@@ -26,7 +26,9 @@ Ownership boundary (ADR-013 Decision 3), enforced by construction:
 
 Public API:
     upsert_provider_profile(...)          -> dict   (idempotent by provider_id+external_profile_id)
+    get_provider_profile(...)             -> Optional[dict]  (read-only, by internal PK)
     upsert_provider_account(...)          -> dict   (idempotent by provider_id+platform+external_account_id)
+    get_provider_account(...)             -> Optional[dict]  (read-only, by internal PK)
     bind_channel_provider(...)            -> dict   (fails closed on a conflicting active binding)
     resolve_active_binding(...)           -> Optional[dict]
     list_bindings(...)                    -> list[dict]
@@ -209,6 +211,16 @@ def upsert_provider_profile(
         conn.close()
 
 
+def get_provider_profile(db_path: Optional[Path], *, provider_profile_id: str) -> Optional[dict]:
+    """Read-only lookup by internal Cortex PK. Returns None if unknown."""
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        return _row(conn, "provider_profiles", "provider_profile_id", provider_profile_id)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # provider_accounts
 # ---------------------------------------------------------------------------
@@ -284,6 +296,16 @@ def upsert_provider_account(
         except BaseException:
             conn.rollback()
             raise
+    finally:
+        conn.close()
+
+
+def get_provider_account(db_path: Optional[Path], *, provider_account_id: str) -> Optional[dict]:
+    """Read-only lookup by internal Cortex PK. Returns None if unknown."""
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        return _row(conn, "provider_accounts", "provider_account_id", provider_account_id)
     finally:
         conn.close()
 

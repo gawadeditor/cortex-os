@@ -19,11 +19,17 @@ meta}` module object every existing caller and test already targets, so
 default-routed behavior (every existing caller; no publishing_provider_by_platform
 given) is byte-for-byte unchanged.
 
-No Zernio provider is registered here (ADR-013 Decision 7, item 4 — a later
-slice). Registries are plain instances, never a hidden mutable global:
-build_default_registry() returns a fresh ProviderRegistry every call, and
-constructing one performs no import beyond what the process already has
-loaded, no credential resolution, and no network action.
+ADR-013 Decision 7, item 4 registers hypogeum.publishing.zernio.ZernioProvider
+here too (provider_id='zernio') so an explicit provider_map override can
+resolve it — but DEFAULT_PROVIDER_ROUTING never includes it, so every
+existing caller (no override given) is completely unaffected, and no
+channel is activated onto it by this registration alone (that also
+requires real, separately-created channel_provider_bindings rows — see
+hypogeum.publishing.zernio's own docstring). Registries are plain
+instances, never a hidden mutable global: build_default_registry() returns
+a fresh ProviderRegistry every call, and constructing one performs no
+import beyond what the process already has loaded, no credential
+resolution, and no network action.
 """
 
 from __future__ import annotations
@@ -217,15 +223,23 @@ class ProviderRegistry:
 
 def build_default_registry() -> ProviderRegistry:
     """
-    Fresh registry with the three existing direct providers registered.
-    No Zernio provider is added here (ADR-013 Decision 7, item 4 — later
-    slice). Constructing this performs no credential resolution and no
-    network action — each provider's __init__ only binds a module reference.
+    Fresh registry with the three existing direct providers plus
+    hypogeum.publishing.zernio.ZernioProvider (ADR-013 Decision 7, item 4)
+    registered. Registration alone changes nothing observable for any
+    existing caller — DEFAULT_PROVIDER_ROUTING still resolves every
+    platform to its direct provider unless a caller explicitly overrides
+    it, and ZernioProvider.publish() itself fails closed unless real,
+    separately-created channel_provider_bindings/provider_accounts rows
+    already exist for the requested (channel_id, platform). Constructing
+    this performs no credential resolution and no network action — each
+    provider's __init__ only binds a module/transport reference.
     """
     registry = ProviderRegistry()
     registry.register(YouTubeDirectProvider())
     registry.register(TikTokDirectProvider())
     registry.register(MetaDirectProvider())
+    from hypogeum.publishing.zernio import ZernioProvider
+    registry.register(ZernioProvider())
     return registry
 
 

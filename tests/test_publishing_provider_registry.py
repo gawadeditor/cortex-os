@@ -204,20 +204,32 @@ class TestRegistryIsolation:
 
 
 # ===========================================================================
-# 15. No Zernio provider registered in this slice
+# 15. Zernio is registered (ADR-013 Decision 7, item 4) but never a default
+# route and never active for any channel by registration alone. Registered
+# under "zernio", never "zernio_direct" (that provider_id never existed).
 # ===========================================================================
 
-class TestNoZernioProvider:
-    def test_no_zernio_provider_registered(self):
+class TestZernioRegisteredButNotDefault:
+    def test_zernio_provider_is_registered(self):
         registry = build_default_registry()
-        with pytest.raises(UnknownProviderError):
-            registry.resolve("zernio")
+        provider = registry.resolve("zernio")
+        assert provider.provider_id == "zernio"
+
+    def test_zernio_direct_was_never_a_provider_id(self):
+        registry = build_default_registry()
         with pytest.raises(UnknownProviderError):
             registry.resolve("zernio_direct")
 
     def test_no_zernio_string_in_default_routing(self):
         assert "zernio" not in DEFAULT_PROVIDER_ROUTING.values()
         assert "zernio" not in DEFAULT_PROVIDER_ROUTING
+
+    def test_default_platform_routing_still_resolves_direct_providers(self):
+        """Registering Zernio must not shift a single existing default."""
+        assert resolve_platform_provider("youtube").provider_id == "youtube_direct"
+        assert resolve_platform_provider("tiktok").provider_id == "tiktok_direct"
+        assert resolve_platform_provider("facebook").provider_id == "meta_direct"
+        assert resolve_platform_provider("instagram").provider_id == "meta_direct"
 
 
 # ===========================================================================

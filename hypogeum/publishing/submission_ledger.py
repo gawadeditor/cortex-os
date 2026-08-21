@@ -272,6 +272,15 @@ class AttemptGuard:
     existing_receipt: Optional[dict] = None
     existing_attempt_state: Optional[str] = None
     reason: Optional[str] = None  # populated for 'blocked' and 'use_existing'
+    # The durable per-attempt idempotency/request key already generated and
+    # persisted by this function (publishing_attempts.provider_request_key).
+    # Exposed so a provider that has its own server-side idempotency header
+    # (e.g. an aggregator's x-request-id) can reuse Cortex's own durable
+    # per-attempt key instead of minting a second, uncoordinated one -- a
+    # retry of the SAME attempt then reuses the SAME provider-side dedup
+    # key by construction. Populated for every action ('proceed',
+    # 'use_existing', 'blocked') whenever a concrete attempt row exists.
+    provider_request_key: Optional[str] = None
 
 
 def guard_and_prepare_attempt(
@@ -327,6 +336,7 @@ def guard_and_prepare_attempt(
                     publication_intent_id=intent_id, existing_receipt=receipt,
                     existing_attempt_state=latest["state"],
                     reason="publication intent already succeeded",
+                    provider_request_key=latest.get("provider_request_key"),
                 )
 
             if latest is not None and latest["state"] in _ACKNOWLEDGED_NOT_YET_SUCCEEDED:
@@ -340,6 +350,7 @@ def guard_and_prepare_attempt(
                     existing_attempt_state=latest["state"],
                     reason="prior attempt was acknowledged by the provider but not yet "
                            "confirmed succeeded locally -- reconcile before retrying",
+                    provider_request_key=latest.get("provider_request_key"),
                 )
 
             if latest is not None and latest["state"] not in _PERMITS_NEW_ATTEMPT:
@@ -361,10 +372,12 @@ def guard_and_prepare_attempt(
                     reason=f"prior attempt is {latest['state']} -- reconciliation required "
                            f"(or another caller is currently attempting it) before any new "
                            f"external call",
+                    provider_request_key=latest.get("provider_request_key"),
                 )
 
             attempt_number = (latest["attempt_number"] + 1) if latest else 1
             attempt_id = _new_id("attempt")
+            request_key = _new_id("req")
             conn.execute(
                 """
                 INSERT INTO publishing_attempts
@@ -374,7 +387,7 @@ def guard_and_prepare_attempt(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
                 """,
                 (attempt_id, intent_id, channel_id, episode_id, deliverable_id, platform,
-                 provider_id, _new_id("req"), attempt_number, now, now),
+                 provider_id, request_key, attempt_number, now, now),
             )
             # Advance straight to 'submitting', in the SAME transaction, so
             # the durable state any concurrent/subsequent guard call sees is
@@ -384,7 +397,10 @@ def guard_and_prepare_attempt(
             # applied before this function ever returns.
             _transition_attempt(conn, attempt_id, "submitting", now=now)
             conn.commit()
-            return AttemptGuard(action="proceed", attempt_id=attempt_id, publication_intent_id=intent_id)
+            return AttemptGuard(
+                action="proceed", attempt_id=attempt_id, publication_intent_id=intent_id,
+                provider_request_key=request_key,
+            )
         except BaseException:
             conn.rollback()
             raise

@@ -39,6 +39,7 @@ from hypogeum.queue import (
     provision_bounded_run,
     release,
 )
+from hypogeum.topics import enqueue_topic
 
 
 # ---------------------------------------------------------------------------
@@ -336,18 +337,153 @@ class TestClaimNextBounded:
         with pytest.raises(BoundedRunError):
             claim_next_bounded(worker_id="w1", bounded_run_id="br_exh", db_path=db_path)
 
-    def test_bounded_claiming_skips_items_without_episode_id(self, db_path):
+    def test_null_episode_id_scheduler_row_is_bounded_claimed(self, db_path):
+        """CORE CORRECTION: a fresh scheduler-originated row (episode_id
+        starts NULL, exactly what tick()/consume_scheduled_runs() produce
+        for a genuine autonomous discovery) must be a valid bounded
+        candidate -- not excluded in favor of only pre-existing-episode_id
+        items."""
         provision_bounded_run("br_epid", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
-        # No episode_id -- a topic-backlog-driven item, not yet resolved.
-        backlog_queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=-100, source="schedule")
-        eligible_queue_id = _enqueue_with_episode(db_path, "ep_known", priority=0)
+        null_ep_queue_id = enqueue(
+            db_path=db_path, channel_id="hypogeum", episode_id=None, priority=-100, source="schedule",
+        )
 
         claimed = claim_next_bounded(worker_id="w1", bounded_run_id="br_epid", db_path=db_path)
 
         assert claimed is not None
-        assert claimed["queue_id"] == eligible_queue_id
-        backlog_row = _run_queue_row(db_path, backlog_queue_id)
-        assert backlog_row["status"] == "queued"  # untouched
+        assert claimed["queue_id"] == null_ep_queue_id
+        assert claimed["status"] == "claimed"
+        # Synthesized using the exact existing fallback formula -- no new ID scheme.
+        assert claimed["episode_id"] == f"ep_{null_ep_queue_id[:8]}"
+
+    def test_synthesized_episode_id_and_all_four_effects_are_one_atomic_commit(self, db_path):
+        """Queue claim, episode_id assignment, ledger insert, and the
+        exhausted transition (cap=1) all land in a single commit."""
+        provision_bounded_run("br_atomic4", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+
+        claimed = claim_next_bounded(worker_id="w1", bounded_run_id="br_atomic4", db_path=db_path)
+        expected_episode_id = f"ep_{queue_id[:8]}"
+
+        assert claimed["episode_id"] == expected_episode_id
+        row = _run_queue_row(db_path, queue_id)
+        assert row["status"] == "claimed"
+        assert row["episode_id"] == expected_episode_id  # (1) queue claim + (2) episode_id assignment
+
+        conn = get_connection(db_path)
+        try:
+            ledger = conn.execute(
+                "SELECT * FROM bounded_run_claims WHERE bounded_run_id = ?", ("br_atomic4",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert ledger["episode_id"] == expected_episode_id  # (3) ledger insert
+
+        run_row = _bounded_run_row(db_path, "br_atomic4")
+        assert run_row["status"] == "exhausted"  # (4) exhausted transition
+
+    def test_forced_failure_at_ledger_insert_leaves_all_four_effects_uncommitted(self, db_path, monkeypatch):
+        provision_bounded_run("br_fail_ledger", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+
+        monkeypatch.setattr(
+            "hypogeum.queue.record_bounded_run_claim",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom at ledger insert")),
+        )
+
+        with pytest.raises(RuntimeError):
+            claim_next_bounded(worker_id="w1", bounded_run_id="br_fail_ledger", db_path=db_path)
+
+        row = _run_queue_row(db_path, queue_id)
+        assert row["status"] == "queued"
+        assert row["episode_id"] is None  # synthesis rolled back too
+        assert _claim_count(db_path, "br_fail_ledger") == 0
+        run_row = _bounded_run_row(db_path, "br_fail_ledger")
+        assert run_row["status"] == "active"
+
+    def test_forced_failure_at_exhausted_transition_leaves_all_four_effects_uncommitted(self, db_path, monkeypatch):
+        provision_bounded_run("br_fail_exh", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+
+        monkeypatch.setattr(
+            "hypogeum.queue.mark_bounded_run_exhausted",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom at exhausted transition")),
+        )
+
+        with pytest.raises(RuntimeError):
+            claim_next_bounded(worker_id="w1", bounded_run_id="br_fail_exh", db_path=db_path)
+
+        # The ledger insert already executed inside the same transaction as
+        # this forced failure -- but since nothing committed, it must be
+        # rolled back too, along with the queue claim and episode_id write.
+        row = _run_queue_row(db_path, queue_id)
+        assert row["status"] == "queued"
+        assert row["episode_id"] is None
+        assert _claim_count(db_path, "br_fail_exh") == 0
+        run_row = _bounded_run_row(db_path, "br_fail_exh")
+        assert run_row["status"] == "active"
+
+    def test_existing_episode_id_reused_not_resynthesized(self, db_path):
+        provision_bounded_run("br_reuse", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        queue_id = _enqueue_with_episode(db_path, "ep_preexisting_rerun")
+
+        claimed = claim_next_bounded(worker_id="w1", bounded_run_id="br_reuse", db_path=db_path)
+
+        assert claimed["queue_id"] == queue_id
+        assert claimed["episode_id"] == "ep_preexisting_rerun"
+        assert claimed["episode_id"] != f"ep_{queue_id[:8]}"
+
+    def test_bounded_ordering_matches_legacy_priority_fifo_ordering(self, db_path, tmp_path):
+        """Bounded claiming now uses the exact same candidate SELECT as
+        claim_next() (no episode_id filter) -- draining the same mixed
+        priority/episode_id-known/NULL queue via each path must claim items
+        in the same enqueue-index sequence."""
+        legacy_db = tmp_path / "legacy_ordering.db"
+        initialize_schema(legacy_db)
+
+        specs = [
+            ("hypogeum", "ep_a", 5),
+            ("hypogeum", None, 0),
+            ("hypogeum", "ep_b", 0),
+            ("hypogeum", None, -10),
+        ]
+        bounded_ids_by_index = {}
+        legacy_ids_by_index = {}
+        for i, (channel_id, episode_id, priority) in enumerate(specs):
+            qid = enqueue(db_path=db_path, channel_id=channel_id, episode_id=episode_id, priority=priority, source="schedule")
+            bounded_ids_by_index[qid] = i
+            lid = enqueue(db_path=legacy_db, channel_id=channel_id, episode_id=episode_id, priority=priority, source="schedule")
+            legacy_ids_by_index[lid] = i
+
+        provision_bounded_run("br_order", max_episode_claims=len(specs), publishing_allowed=False, db_path=db_path)
+
+        bounded_order = []
+        for i in range(len(specs)):
+            claimed = claim_next_bounded(worker_id=f"w{i}", bounded_run_id="br_order", db_path=db_path)
+            bounded_order.append(bounded_ids_by_index[claimed["queue_id"]])
+
+        legacy_order = []
+        for i in range(len(specs)):
+            claimed = claim_next(worker_id=f"legacy{i}", db_path=legacy_db)
+            legacy_order.append(legacy_ids_by_index[claimed["queue_id"]])
+
+        assert bounded_order == legacy_order == [3, 1, 2, 0]  # priority ASC, then FIFO (queued_at)
+
+    def test_cap_1_blocks_second_null_episode_candidate_leaves_it_null(self, db_path):
+        provision_bounded_run("br_cap_null", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        first_queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+        second_queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=1, source="schedule")
+
+        first = claim_next_bounded(worker_id="w1", bounded_run_id="br_cap_null", db_path=db_path)
+        assert first["queue_id"] == first_queue_id
+        assert first["episode_id"] == f"ep_{first_queue_id[:8]}"
+
+        with pytest.raises(BoundedRunError):
+            claim_next_bounded(worker_id="w1", bounded_run_id="br_cap_null", db_path=db_path)
+
+        second_row = _run_queue_row(db_path, second_queue_id)
+        assert second_row["status"] == "queued"
+        assert second_row["episode_id"] is None  # untouched -- never synthesized
 
 
 # ===========================================================================
@@ -355,14 +491,16 @@ class TestClaimNextBounded:
 # ===========================================================================
 
 class TestLegacyUnboundedUnchanged:
-    def test_legacy_claim_next_unaffected_by_bounded_addition(self, db_path):
+    def test_legacy_claim_next_never_synthesizes_episode_id(self, db_path):
         """claim_next() (no bounded_run_id anywhere) still claims an item
-        with NULL episode_id -- proves require_episode_id's default (False)
-        preserves prior behavior exactly."""
+        with NULL episode_id, and NEVER synthesizes one -- proves
+        synthesize_episode_id's default (False) preserves prior behavior
+        exactly."""
         queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
         claimed = claim_next(worker_id="w1", db_path=db_path)
         assert claimed is not None
         assert claimed["queue_id"] == queue_id
+        assert claimed["episode_id"] is None
 
     def test_process_next_without_bounded_run_id_never_calls_claim_next_bounded(self, db_path, monkeypatch):
         from hypogeum.calog import set_channel_state
@@ -440,6 +578,90 @@ def _patch_pipeline_capture(monkeypatch, call_log):
             "publishing_platform_filter": publishing_platform_filter,
         })
     monkeypatch.setattr("hypogeum.pipeline.run_pipeline", _fake)
+
+
+class TestDivergenceGuard:
+    def test_divergent_topic_episode_id_fails_closed_zero_pipeline_calls(self, db_path):
+        _make_operations_profile(db_path)
+        provision_bounded_run("br_divergence", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+
+        # A stale/conflicting topic row that already carries a DIFFERENT
+        # episode_id than what the bounded claim will synthesize below.
+        enqueue_topic(
+            "hypogeum", "Conflicting Topic", priority=0, validate_channel=True,
+            db_path=db_path, episode_id="ep_conflicting_preexisting",
+        )
+        queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+
+        call_log = []
+
+        def _spy_executor(*, topic_input, episode_id, config, channel_id,
+                           cancel_check=None, queue_id=None, worker_id=None):
+            call_log.append({"episode_id": episode_id})
+
+        pr = process_next(
+            worker_id="w1", db_path=db_path, dry_run=False, config=object(),
+            pipeline_executor=_spy_executor, bounded_run_id="br_divergence",
+        )
+
+        assert pr.status == "failed"
+        assert "divergence" in (pr.error_message or "").lower()
+        assert call_log == []  # zero pipeline/provider/publishing calls
+
+        synthesized = f"ep_{queue_id[:8]}"
+        row = _run_queue_row(db_path, queue_id)
+        assert row["episode_id"] == synthesized  # ledgered identity never overwritten
+        assert row["status"] == "failed"
+
+        conn = get_connection(db_path)
+        try:
+            ledger = conn.execute(
+                "SELECT episode_id FROM bounded_run_claims WHERE bounded_run_id = ?",
+                ("br_divergence",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert ledger["episode_id"] == synthesized  # ledger row never overwritten either
+
+    def test_full_autonomous_process_next_uses_same_ledgered_episode_id(self, db_path):
+        """Non-divergent case: a genuine fresh discovery topic (episode_id
+        NULL on the topic row, exactly what topic_discovery/enqueue_topic
+        produces for source='discovered') -- the value passed to the
+        pipeline must equal the already-ledgered episode_id."""
+        _make_operations_profile(db_path)
+        provision_bounded_run("br_full_auto", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+
+        enqueue_topic(
+            "hypogeum", "Freshly Discovered Topic", priority=0, validate_channel=True,
+            db_path=db_path, source="discovered",
+        )
+        queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+
+        call_log = []
+
+        def _spy_executor(*, topic_input, episode_id, config, channel_id,
+                           cancel_check=None, queue_id=None, worker_id=None):
+            call_log.append({"episode_id": episode_id, "topic_input": topic_input})
+
+        pr = process_next(
+            worker_id="w1", db_path=db_path, dry_run=False, config=object(),
+            pipeline_executor=_spy_executor, bounded_run_id="br_full_auto",
+        )
+
+        expected = f"ep_{queue_id[:8]}"
+        assert pr.status == "completed"
+        assert len(call_log) == 1
+        assert call_log[0]["episode_id"] == expected
+
+        conn = get_connection(db_path)
+        try:
+            ledger = conn.execute(
+                "SELECT episode_id FROM bounded_run_claims WHERE bounded_run_id = ?",
+                ("br_full_auto",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert ledger["episode_id"] == expected
 
 
 class TestPublishingProhibition:
@@ -522,6 +744,33 @@ class TestPublishingProhibition:
         assert pr.status == "completed"
         assert call_log[0]["publishing_platform_filter"] == frozenset()
 
+    def test_publishing_allowed_false_blocks_all_platforms_for_synthesized_episode_id(self, db_path, monkeypatch):
+        """The actual target scenario: a freshly-discovered, NULL-episode_id
+        item claimed autonomously (not a pre-existing --gated-episode-id) --
+        publishing_allowed=0 must still block every platform."""
+        _make_operations_profile(db_path)
+        provision_bounded_run("br_pub_synth", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        call_log = []
+        _patch_pipeline_capture(monkeypatch, call_log)
+
+        enqueue_topic(
+            "hypogeum", "Freshly Discovered Topic", priority=0, validate_channel=True,
+            db_path=db_path, source="discovered",
+        )
+        queue_id = enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+
+        from hypogeum import worker_integration as wi
+        executor = wi.build_gated_pipeline_executor(db_path=db_path, bounded_run_id="br_pub_synth")
+        pr = process_next(
+            worker_id="w1", db_path=db_path, dry_run=False, config=object(),
+            pipeline_executor=executor, bounded_run_id="br_pub_synth",
+        )
+
+        assert pr.status == "completed"
+        assert len(call_log) == 1
+        assert call_log[0]["episode_id"] == f"ep_{queue_id[:8]}"
+        assert call_log[0]["publishing_platform_filter"] == frozenset()
+
 
 # ===========================================================================
 # 20. Schema installation
@@ -579,6 +828,23 @@ class TestSchemaInstallation:
                 conn.execute(
                     "INSERT INTO bounded_runs (bounded_run_id, max_episode_claims, created_at, status) "
                     "VALUES ('bad3', 1, '2026-01-01T00:00:00+00:00', 'not_a_real_status')"
+                )
+                conn.commit()
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def test_bounded_run_claims_rejects_null_episode_id(self, db_path):
+        """The corrective design deliberately synthesizes episode_id inside
+        the claim transaction rather than relaxing this constraint --
+        confirms bounded_run_claims.episode_id is still NOT NULL."""
+        provision_bounded_run("br_notnull", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        conn = get_connection(db_path)
+        try:
+            with pytest.raises(Exception):
+                conn.execute(
+                    "INSERT INTO bounded_run_claims (bounded_run_id, queue_id, episode_id, claimed_at) "
+                    "VALUES ('br_notnull', 'q1', NULL, '2026-01-01T00:00:00+00:00')"
                 )
                 conn.commit()
         finally:
@@ -643,3 +909,160 @@ class TestSchemaInstallation:
         row = _bounded_run_row(db_path, "br_idempotent")
         assert row is not None
         assert row["status"] == "active"
+
+
+# ===========================================================================
+# 13/14/15/17. Normal autonomous worker wiring (run_worker.py)
+# ===========================================================================
+
+class TestNormalAutonomousWorkerWiring:
+    def test_bounded_run_id_alone_reaches_run_worker_not_gated_cli(self, monkeypatch, tmp_path):
+        """--bounded-run-id does NOT require --gated-episode-id -- it must
+        reach the normal daemon-loop entry point (run_worker()), never the
+        manual/gated CLI path."""
+        import run_worker
+
+        captured = {}
+
+        def _spy_run_worker(**kwargs):
+            captured.update(kwargs)
+            return 0
+        monkeypatch.setattr(run_worker, "run_worker", _spy_run_worker)
+
+        def _fail_gated_cli(*a, **k):
+            raise AssertionError("must not enter the gated/manual CLI path")
+        monkeypatch.setattr(run_worker, "_run_gated_cli", _fail_gated_cli)
+
+        rc = run_worker.main(["--once", "--bounded-run-id", "br_daemon", "--db-path", str(tmp_path / "x.db")])
+
+        assert rc == 0
+        assert captured.get("bounded_run_id") == "br_daemon"
+
+    def test_run_iteration_forwards_bounded_run_id_to_poll_and_executor(self, tmp_path, monkeypatch):
+        import run_worker
+
+        iter_db_path = tmp_path / "iter.db"
+        initialize_schema(iter_db_path)
+
+        class _FakeClearance:
+            cleared = True
+            reason = None
+            validation_exemption = None
+        monkeypatch.setattr(
+            "hypogeum.factory_director.check_run_clearance", lambda **k: _FakeClearance(),
+        )
+
+        captured_executor_kwargs = {}
+
+        def _spy_build_executor(db_path=None, project_root=None, bounded_run_id=None):
+            captured_executor_kwargs["bounded_run_id"] = bounded_run_id
+            return lambda **k: None
+        monkeypatch.setattr(
+            "hypogeum.worker_integration.build_gated_pipeline_executor", _spy_build_executor,
+        )
+
+        from hypogeum.queue import PollResult
+
+        captured_poll_kwargs = {}
+
+        def _spy_poll(**kwargs):
+            captured_poll_kwargs.update(kwargs)
+            return PollResult()
+        monkeypatch.setattr("hypogeum.queue.poll", _spy_poll)
+
+        run_worker.run_iteration(
+            worker_id="w1", db_path=iter_db_path, dry_run=False, channel_id=None,
+            config=object(), iteration=1, bounded_run_id="br_iter",
+        )
+
+        assert captured_executor_kwargs.get("bounded_run_id") == "br_iter"
+        assert captured_poll_kwargs.get("bounded_run_id") == "br_iter"
+
+    def test_run_worker_rejects_unknown_bounded_run_before_any_iteration(self, tmp_path, monkeypatch):
+        import run_worker
+
+        db_path = tmp_path / "reject_unknown.db"
+
+        def _fail_iteration(**k):
+            raise AssertionError("run_iteration must never be called for an unknown bounded_run_id")
+        monkeypatch.setattr(run_worker, "run_iteration", _fail_iteration)
+
+        rc = run_worker.run_worker(
+            db_path=db_path, dry_run=True, interval=0, once=True, channel_id=None,
+            bounded_run_id="br_never_provisioned",
+        )
+        assert rc == 1
+
+    def test_run_worker_rejects_exhausted_bounded_run_before_any_iteration(self, tmp_path, monkeypatch):
+        import run_worker
+
+        db_path = tmp_path / "reject_exhausted.db"
+        initialize_schema(db_path)
+        provision_bounded_run("br_exh_daemon", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        conn = get_connection(db_path)
+        try:
+            conn.execute("UPDATE bounded_runs SET status = 'exhausted' WHERE bounded_run_id = ?", ("br_exh_daemon",))
+            conn.commit()
+        finally:
+            conn.close()
+
+        def _fail_iteration(**k):
+            raise AssertionError("run_iteration must never be called for an exhausted bounded_run_id")
+        monkeypatch.setattr(run_worker, "run_iteration", _fail_iteration)
+
+        rc = run_worker.run_worker(
+            db_path=db_path, dry_run=True, interval=0, once=True, channel_id=None,
+            bounded_run_id="br_exh_daemon",
+        )
+        assert rc == 1
+
+    def test_run_worker_rejects_cancelled_bounded_run_before_any_iteration(self, tmp_path, monkeypatch):
+        import run_worker
+
+        db_path = tmp_path / "reject_cancelled.db"
+        initialize_schema(db_path)
+        provision_bounded_run("br_cancel_daemon", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        conn = get_connection(db_path)
+        try:
+            conn.execute("UPDATE bounded_runs SET status = 'cancelled' WHERE bounded_run_id = ?", ("br_cancel_daemon",))
+            conn.commit()
+        finally:
+            conn.close()
+
+        def _fail_iteration(**k):
+            raise AssertionError("run_iteration must never be called for a cancelled bounded_run_id")
+        monkeypatch.setattr(run_worker, "run_iteration", _fail_iteration)
+
+        rc = run_worker.run_worker(
+            db_path=db_path, dry_run=True, interval=0, once=True, channel_id=None,
+            bounded_run_id="br_cancel_daemon",
+        )
+        assert rc == 1
+
+    def test_publishing_allowed_flag_without_provisioning_fails_closed(self, tmp_path):
+        import run_worker
+        rc = run_worker.main(["--publishing-allowed", "--db-path", str(tmp_path / "x.db")])
+        assert rc == 1
+
+    def test_max_episode_claims_flag_without_provisioning_fails_closed(self, tmp_path):
+        import run_worker
+        rc = run_worker.main(["--max-episode-claims", "3", "--db-path", str(tmp_path / "x.db")])
+        assert rc == 1
+
+    def test_invalid_bounded_run_id_never_falls_back_to_unbounded_claim(self, db_path, monkeypatch):
+        called = {"claim_next": False}
+
+        def _spy_claim_next(*a, **k):
+            called["claim_next"] = True
+            return None
+        monkeypatch.setattr("hypogeum.queue.claim_next", _spy_claim_next)
+
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id=None, priority=0, source="schedule")
+
+        pr = process_next(
+            worker_id="w1", db_path=db_path, dry_run=True,
+            bounded_run_id="br_never_provisioned_2",
+        )
+
+        assert pr.status == "empty"
+        assert called["claim_next"] is False

@@ -257,15 +257,27 @@ def provision_bounded_run(
         conn.close()
 
 
+class BoundedRunEpisodeIdDivergenceError(RuntimeError):
+    """
+    A bounded claim's ledgered episode_id (recorded atomically inside
+    claim_next_bounded()'s transaction) and the episode_id carried by the
+    topic later resolved in process_next() Step 4 disagree. Raised, never
+    silently resolved, by process_next()'s divergence guard -- see there.
+    """
+    failure_policy = FailurePolicy.TERMINAL  # never auto-retried into the same divergence
+
+
 def claim_next_bounded(
     worker_id: str,
     bounded_run_id: Optional[str],
     db_path: Optional[Path] = None,
 ) -> Optional[dict]:
     """
-    Atomically claim the next bounded-eligible queued item AND record its
-    durable bounded_run_claims ledger row, in one SQLite transaction
-    (CORE INVARIANTS #5, #7, #8). See schema.sql's "bounded_runs /
+    Atomically claim the next queued item — the SAME candidate set and
+    priority/FIFO ordering as claim_next(), including a fresh scheduler-
+    originated row whose episode_id starts NULL — AND record its durable
+    bounded_run_claims ledger row, in one SQLite transaction (CORE
+    INVARIANTS #5, #7, #8). See schema.sql's "bounded_runs /
     bounded_run_claims" section for the full contract.
 
     bounded_run_id must already be explicitly provisioned via
@@ -273,13 +285,16 @@ def claim_next_bounded(
     bounded_runs row's identity (CORE INVARIANTS #1/#2), only reads it and
     (on the claim that reaches the cap) flips its status to 'exhausted'.
 
-    Only run_queue candidates with a non-NULL episode_id are eligible: the
-    ledger's episode_id column is NOT NULL and must be recorded in the same
-    transaction as the claim, but episode_id for a topic-backlog-driven item
-    is not resolved until well after a plain claim_next() call returns (see
-    process_next() Step 4) — so bounded claiming only ever consumes queue
-    items that were enqueued for a specific, already-known episode_id (e.g.
-    via enqueue(episode_id=...) or the --gated-episode-id CLI path).
+    episode_id is decided INSIDE this same transaction (never before it,
+    never after): claim_next_queue_item(synthesize_episode_id=True) reuses
+    any existing episode_id (manual/rerun items) or synthesizes
+    f"ep_{queue_id[:8]}" — the exact fallback formula process_next() Step 5
+    (hypogeum/queue.py) already uses — for a NULL one, folding the mint into
+    the very same conditional UPDATE that claims the row. There is no
+    "before episode_id exists" window: the claim transaction is what makes
+    it exist, so the bounded_run_claims ledger row (episode_id NOT NULL,
+    unchanged from the approved schema — never made nullable) can always be
+    written in the same commit as the claim.
 
     Concurrency (CORE INVARIANTS #6): uses BEGIN IMMEDIATE, not the default
     deferred transaction, so a second concurrent claim attempt (this
@@ -287,18 +302,21 @@ def claim_next_bounded(
     transaction commits or rolls back — the read-count-then-insert sequence
     is fully serialized across callers rather than racing optimistically.
 
-    Raises hypogeum.db.BoundedRunError (fail closed — no run_queue claim and
-    no ledger row is ever left committed) when: bounded_run_id is missing;
-    the bounded run is unknown; its status is not 'active'; its
-    max_episode_claims is invalid; it has already reached
-    max_episode_claims; or the write-lock transaction cannot be acquired.
-    Never silently falls back to unbounded claiming.
+    Raises hypogeum.db.BoundedRunError (fail closed — no run_queue claim,
+    episode_id assignment, ledger row, or exhausted transition is ever left
+    committed) when: bounded_run_id is missing; the bounded run is unknown;
+    its status is not 'active'; its max_episode_claims is invalid; it has
+    already reached max_episode_claims; the write-lock transaction cannot be
+    acquired; or (defensive — should be unreachable given
+    synthesize_episode_id=True always fills a NULL value) the claimed row
+    somehow still has no episode_id. Never silently falls back to unbounded
+    claiming.
 
     Returns:
-        Dict of the claimed run_queue row (same shape as claim_next()), or
-        None if no bounded-eligible candidate exists right now — the normal
-        "nothing to claim yet" case (queue empty, or every queued item still
-        lacks episode_id), not a denial.
+        Dict of the claimed run_queue row (same shape as claim_next()),
+        including its (possibly freshly synthesized) episode_id, or None if
+        the queue is empty right now — the normal "nothing to claim yet"
+        case, not a denial.
     """
     if not bounded_run_id:
         raise BoundedRunError("bounded_run_id is required for bounded claiming")
@@ -338,16 +356,27 @@ def claim_next_bounded(
                     f"max_episode_claims={max_claims}"
                 )
 
-            claimed = claim_next_queue_item(conn, worker_id, now, require_episode_id=True)
-            if claimed is None or not claimed.get("episode_id"):
+            claimed = claim_next_queue_item(conn, worker_id, now, synthesize_episode_id=True)
+            if claimed is None:
                 conn.rollback()
                 return None
+
+            episode_id = claimed.get("episode_id")
+            if not episode_id:
+                # Unreachable in practice: synthesize_episode_id=True always
+                # fills a NULL value in the same UPDATE above. Fail closed
+                # rather than insert a NOT NULL-violating ledger row.
+                raise BoundedRunError(
+                    f"bounded_run_id {bounded_run_id!r} claimed "
+                    f"queue_id={claimed['queue_id']!r} but no episode_id "
+                    f"could be determined"
+                )
 
             record_bounded_run_claim(
                 conn,
                 bounded_run_id=bounded_run_id,
                 queue_id=claimed["queue_id"],
-                episode_id=claimed["episode_id"],
+                episode_id=episode_id,
                 claimed_at=now,
             )
 
@@ -894,7 +923,17 @@ def process_next(
                          failure) is caught here and reported as
                          ProcessResult(status="empty", error_message=<reason>)
                          — no claim is made and this never silently falls
-                         back to unbounded claiming.
+                         back to unbounded claiming. When a bounded claim
+                         does succeed, Step 4/5 also applies a divergence
+                         guard: if the topic resolved from the backlog
+                         carries a non-NULL episode_id that differs from the
+                         one already committed to bounded_run_claims at
+                         claim time, this raises
+                         BoundedRunEpisodeIdDivergenceError before any
+                         pipeline/provider/publishing call — caught by the
+                         existing pipeline-exception handler below, which
+                         fails the item and records error_message through
+                         the normal queue lifecycle (status="failed").
 
     Failure hygiene (dry_run=False, backlog path):
         On any pipeline exception:
@@ -1080,7 +1119,35 @@ def process_next(
         # Prefer episode_id from the topic row (set for reruns to reuse disk checkpoints),
         # fall back to the queue row's episode_id, then to a hash of the queue_id.
         _topic_ep_id = (topic_row.get("episode_id") if using_backlog and topic_row else None)
-        episode_id = _topic_ep_id or claimed.get("episode_id") or f"ep_{queue_id[:8]}"
+        _claimed_ep_id = claimed.get("episode_id")
+
+        # Divergence guard (bounded mode only -- unbounded claiming records
+        # no ledger, so legacy behavior is unaffected either way). Under a
+        # bounded claim, claim_next_bounded() already committed _claimed_ep_id
+        # to bounded_run_claims atomically, inside the same transaction as
+        # the run_queue claim. If the topic resolved just now (Step 4) turns
+        # out to carry a *different* non-NULL episode_id, using either value
+        # would silently break the identity the ledger recorded. Fail closed
+        # before any pipeline/provider/publishing call -- raising here lets
+        # the existing `except Exception` handler below record this through
+        # the normal queue lifecycle (fail() + topic release) rather than a
+        # second, ad hoc failure path. BoundedRunEpisodeIdDivergenceError is
+        # FailurePolicy.TERMINAL, so _maybe_schedule_retry() never schedules
+        # an auto-retry into the same divergence.
+        if (
+            bounded_run_id is not None
+            and _topic_ep_id is not None
+            and _claimed_ep_id is not None
+            and _topic_ep_id != _claimed_ep_id
+        ):
+            raise BoundedRunEpisodeIdDivergenceError(
+                f"bounded_run_id={bounded_run_id!r} episode_id divergence: "
+                f"ledgered/queue episode_id={_claimed_ep_id!r} but claimed "
+                f"topic topic_id={topic_id!r} carries "
+                f"episode_id={_topic_ep_id!r} -- refusing to run either identity"
+            )
+
+        episode_id = _topic_ep_id or _claimed_ep_id or f"ep_{queue_id[:8]}"
 
         # Identity contract: topic_id claimed -> episode_id assigned (above) ->
         # episode_topics.episode_id persisted (here) -> run_queue.episode_id

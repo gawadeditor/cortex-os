@@ -1702,7 +1702,7 @@ def claim_next_queue_item(
     conn: sqlite3.Connection,
     worker_id: str,
     claimed_at: str,
-    require_episode_id: bool = False,
+    synthesize_episode_id: bool = False,
 ) -> Optional[dict]:
     """
     Atomically claim the highest-priority queued item for worker_id.
@@ -1712,7 +1712,9 @@ def claim_next_queue_item(
     the same row will produce rowcount=1 for exactly one of them and rowcount=0
     for the other. The loser receives None and must retry or give up.
 
-    Ordering:
+    Ordering (never filtered by episode_id — every queued candidate,
+    including a fresh scheduler-originated row whose episode_id is still
+    NULL, is eligible on equal footing):
       1. priority ASC  — lower integer = higher urgency
       2. source='rerun' before other sources — checkpoint recovery wins
       3. For reruns: created_at DESC — newest rerun intent wins (avoids stale reruns
@@ -1721,21 +1723,28 @@ def claim_next_queue_item(
       4. queued_at ASC  — FIFO within the same priority+source bucket.
 
     Args:
-        conn:               Open connection (FK enforcement active).
-        worker_id:          Unique identifier for the claiming worker process.
-        claimed_at:         ISO 8601 UTC timestamp of the claim.
-        require_episode_id: When True, only rows with a non-NULL episode_id
-                            are eligible candidates. False (default — every
-                            existing caller) preserves prior behavior exactly.
-                            Used by hypogeum.queue.claim_next_bounded(): a
-                            bounded_run_claims ledger row (episode_id NOT
-                            NULL) must be recorded in the same transaction as
-                            the claim, and episode_id for a topic-backlog-
-                            driven item is not known until well after this
-                            function returns (topic resolution happens later,
-                            in process_next() Step 4) — so bounded claiming
-                            is restricted to queue items already enqueued
-                            for a specific, known episode_id.
+        conn:                   Open connection (FK enforcement active).
+        worker_id:               Unique identifier for the claiming worker process.
+        claimed_at:               ISO 8601 UTC timestamp of the claim.
+        synthesize_episode_id:   When True, and the selected candidate's
+                                episode_id is NULL, atomically assigns
+                                episode_id = f"ep_{queue_id[:8]}" in the SAME
+                                conditional UPDATE that claims the row (via
+                                SQL COALESCE(episode_id, ?) — an existing
+                                non-NULL episode_id, e.g. a rerun's, is never
+                                overwritten). False (default — every existing
+                                caller) preserves prior behavior exactly:
+                                episode_id is left untouched either way.
+                                Used by hypogeum.queue.claim_next_bounded()
+                                so a bounded_run_claims ledger row (episode_id
+                                NOT NULL) can be recorded in the very same
+                                transaction as the claim, even for a fresh
+                                topic-backlog/scheduler row whose episode_id
+                                would otherwise not be resolved until
+                                process_next() Step 5 — this reuses that
+                                exact fallback formula (hypogeum/queue.py's
+                                f"ep_{{queue_id[:8]}}"), just computed here,
+                                atomically, instead of later.
 
     Returns:
         Dict of the claimed run_queue row, or None if no queued item exists
@@ -1746,12 +1755,10 @@ def claim_next_queue_item(
     # Regular items: FIFO (queued_at ASC as final tiebreaker).
     # next_attempt_at gates auto-retry items until their backoff elapses —
     # NULL (every other item type) is always immediately claimable.
-    episode_filter = "AND episode_id IS NOT NULL" if require_episode_id else ""
     candidate = conn.execute(
-        f"""
+        """
         SELECT queue_id FROM run_queue
         WHERE status = 'queued'
-          {episode_filter}
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         ORDER BY
             priority ASC,
@@ -1767,15 +1774,30 @@ def claim_next_queue_item(
 
     queue_id = candidate[0]
 
-    # Step 2: atomic conditional claim — only succeeds if still 'queued'
-    cursor = conn.execute(
-        """
-        UPDATE run_queue
-        SET status = 'claimed', worker_id = ?, claimed_at = ?
-        WHERE queue_id = ? AND status = 'queued'
-        """,
-        (worker_id, claimed_at, queue_id),
-    )
+    # Step 2: atomic conditional claim — only succeeds if still 'queued'.
+    # synthesize_episode_id folds the mint into this same UPDATE: COALESCE
+    # keeps any pre-existing (e.g. rerun) episode_id untouched, and only
+    # fills a NULL one — never a second write, never a second transaction.
+    if synthesize_episode_id:
+        synthesized_episode_id = f"ep_{queue_id[:8]}"
+        cursor = conn.execute(
+            """
+            UPDATE run_queue
+            SET status = 'claimed', worker_id = ?, claimed_at = ?,
+                episode_id = COALESCE(episode_id, ?)
+            WHERE queue_id = ? AND status = 'queued'
+            """,
+            (worker_id, claimed_at, synthesized_episode_id, queue_id),
+        )
+    else:
+        cursor = conn.execute(
+            """
+            UPDATE run_queue
+            SET status = 'claimed', worker_id = ?, claimed_at = ?
+            WHERE queue_id = ? AND status = 'queued'
+            """,
+            (worker_id, claimed_at, queue_id),
+        )
     if cursor.rowcount == 0:
         # Another worker claimed this row between our SELECT and UPDATE
         return None

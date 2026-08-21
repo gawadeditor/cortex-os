@@ -44,9 +44,16 @@ channel/episode, then runs exactly one gated poll() iteration.
 Bounded autonomous run (durable claim cap — see hypogeum/queue.py's
 claim_next_bounded() and hypogeum/schema.sql's "bounded_runs /
 bounded_run_claims" section): provision once, then claim through the same
-bounded_run_id on every (re)launch.
+bounded_run_id on every (re)launch. --bounded-run-id runs through the SAME
+scheduler -> queue -> pipeline path as an unbounded run (topic discovery,
+scheduler-originated queue rows, fresh episode_id synthesis included) — it
+is not limited to a pre-existing --gated-episode-id.
     python run_worker.py --provision-bounded-run br_001 \
         --max-episode-claims 1                      # publishing_allowed defaults False
+    python run_worker.py --once --bounded-run-id br_001   # normal autonomous claim, capped
+
+--bounded-run-id can also be combined with --gated-episode-id to run one
+specific, already-known episode through a bounded allowance instead:
     python run_worker.py --gated-episode-id ep_001 --channel-id foo \
         --bounded-run-id br_001
 
@@ -324,6 +331,7 @@ def run_iteration(
     config,
     iteration: int = 1,
     validation_mode: bool = False,
+    bounded_run_id: str | None = None,
 ) -> dict:
     """
     Execute one scheduler → consume → poll cycle.
@@ -335,6 +343,20 @@ def run_iteration(
         run_worker() (the actual autonomous daemon loop below) or by any
         CLI flag — only an explicit, one-off caller (e.g. a supervised
         validation script calling run_iteration() directly) can set it.
+
+    bounded_run_id: Optional. None (default, every existing caller)
+        preserves prior behavior exactly — Step 3's poll() claims via the
+        plain unbounded claim_next() and the gated executor carries no
+        bounded_run_id. When given, forwarded unchanged to both poll()
+        (so Step 3 claims via claim_next_bounded() — same candidate set and
+        priority/FIFO ordering as unbounded claiming, including a fresh
+        scheduler-originated row whose episode_id starts NULL) and
+        build_gated_pipeline_executor() (so publishing_allowed=0 on that
+        bounded run is enforced at the real publishing boundary for this
+        claim). Never silently falls back to unbounded claiming — a
+        BoundedRunError surfaces as poll_status="empty" with the reason in
+        the corresponding ProcessResult.error_message (see process_next()'s
+        own docstring).
 
     Returns a summary dict with counts from each step.
     Queue-paused mode: tick and consume run normally, but poll is skipped.
@@ -408,7 +430,7 @@ def run_iteration(
     else:
         _wc_set("worker_status", "claiming", db_path)
         from hypogeum.worker_integration import build_gated_pipeline_executor
-        gated_executor = build_gated_pipeline_executor(db_path=db_path)
+        gated_executor = build_gated_pipeline_executor(db_path=db_path, bounded_run_id=bounded_run_id)
         poll_result = poll(
             worker_id=worker_id,
             db_path=db_path,
@@ -417,6 +439,7 @@ def run_iteration(
             sleep_interval=0.0,
             config=config,
             pipeline_executor=gated_executor,
+            bounded_run_id=bounded_run_id,
         )
 
         proc = next((r for r in poll_result.results if r.status != "empty"), None)
@@ -467,9 +490,23 @@ def run_worker(
     interval: float,
     once: bool,
     channel_id: str | None,
+    bounded_run_id: str | None = None,
 ) -> int:
     """
     Run the worker loop. Returns exit code.
+
+    bounded_run_id: Optional. None (default, every existing caller)
+        preserves prior behavior exactly — unbounded claim_next() every
+        iteration. When given, must already be provisioned (checked here
+        via _validate_bounded_run_ready() before the loop even starts —
+        fail closed with a clear error rather than looping silently on
+        poll_status="empty"). Forwarded unchanged into every run_iteration()
+        call, which forwards it into poll()/build_gated_pipeline_executor()
+        — the SAME real scheduler → queue → pipeline path every autonomous
+        run already takes; there is no second, bounded-only execution path.
+        This applies to fresh scheduler-originated queue rows exactly like
+        every other queued item: bounded claiming is never restricted to
+        pre-existing --gated-episode-id items.
     """
     try:
         from hypogeum.config import Config
@@ -485,11 +522,18 @@ def run_worker(
         log.error("startup db_error=%s", exc)
         return 1
 
+    if bounded_run_id is not None:
+        reason = _validate_bounded_run_ready(bounded_run_id, db_path)
+        if reason is not None:
+            log.error("startup_bounded_run_invalid reason=%s", reason)
+            print(reason, file=sys.stderr)
+            return 1
+
     worker_id = str(uuid.uuid4())
     mode = "dry-run" if dry_run else "live"
     log.info(
-        "worker_started worker_id=%s mode=%s interval=%ss db=%s channel=%s",
-        worker_id, mode, interval, db_path, channel_id or "all",
+        "worker_started worker_id=%s mode=%s interval=%ss db=%s channel=%s bounded_run_id=%s",
+        worker_id, mode, interval, db_path, channel_id or "all", bounded_run_id or "(unbounded)",
     )
 
     # Startup verification (Phase 3 Production Hardening, P0.5): run the
@@ -597,6 +641,7 @@ def run_worker(
                 channel_id=channel_id,
                 config=config,
                 iteration=iteration,
+                bounded_run_id=bounded_run_id,
             )
             log.info(
                 "iteration=%d done sr_created=%d q_created=%d poll=%s%s%s",
@@ -718,13 +763,48 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--bounded-run-id",
         metavar="BOUNDED_RUN_ID",
         default=None,
-        help="Combine with --gated-episode-id to claim and run that one "
-             "episode through an already-provisioned bounded run "
-             "(--provision-bounded-run) instead of unbounded claiming. Fails "
-             "closed if the bounded_run_id is unknown, not active, or "
+        help="Claim through an already-provisioned bounded run "
+             "(--provision-bounded-run) instead of unbounded claiming. Used "
+             "alone, applies to the normal autonomous daemon loop (same "
+             "scheduler -> queue -> pipeline path, including fresh "
+             "scheduler-originated / topic-backlog episodes). Combine with "
+             "--gated-episode-id to instead run one specific, already-known "
+             "episode through the bounded allowance. Fails closed before "
+             "any claiming if the bounded_run_id is unknown, not active, or "
              "already exhausted — never falls back to unbounded claiming.",
     )
     return parser.parse_args(argv)
+
+
+def _validate_bounded_run_ready(bounded_run_id: str, db_path: Path) -> str | None:
+    """
+    Read-only pre-flight check for an already-provisioned bounded run.
+
+    Returns None when the bounded run exists and is 'active'; otherwise a
+    human-readable reason ("unknown bounded_run_id", "not active
+    (status=...)"). Used by every bounded CLI entry point (--gated-episode-id
+    + --bounded-run-id, and the plain autonomous daemon loop) to fail closed
+    *before* starting any claiming, rather than a daemon loop silently
+    reporting "empty" every iteration with no diagnostic. The real,
+    authoritative enforcement remains inside
+    hypogeum.queue.claim_next_bounded() regardless of this check — this
+    function never provisions, claims, or mutates anything.
+    """
+    from hypogeum.db import get_bounded_run, get_connection
+
+    conn = get_connection(db_path)
+    try:
+        bounded_run = get_bounded_run(conn, bounded_run_id)
+    finally:
+        conn.close()
+    if bounded_run is None:
+        return (
+            f"unknown bounded_run_id: {bounded_run_id!r} — provision it first "
+            f"with --provision-bounded-run"
+        )
+    if bounded_run["status"] != "active":
+        return f"bounded_run_id {bounded_run_id!r} is not active (status={bounded_run['status']!r})"
+    return None
 
 
 def _run_gated_cli(
@@ -740,13 +820,13 @@ def _run_gated_cli(
 
     bounded_run_id: Optional. None (default) preserves prior behavior
         exactly — unbounded claim_next(). When given, must already be
-        provisioned via --provision-bounded-run (checked here for a fast,
-        clear CLI error; the real enforcement is inside
-        hypogeum.queue.claim_next_bounded() regardless) — this function
-        never provisions one itself.
+        provisioned via --provision-bounded-run (checked here via
+        _validate_bounded_run_ready() for a fast, clear CLI error; the real
+        enforcement is inside hypogeum.queue.claim_next_bounded()
+        regardless) — this function never provisions one itself.
     """
     from hypogeum.config import Config
-    from hypogeum.db import get_bounded_run, get_connection, initialize_schema
+    from hypogeum.db import initialize_schema
     from hypogeum.queue import enqueue, poll
     from hypogeum.worker_integration import build_gated_pipeline_executor
 
@@ -758,18 +838,9 @@ def _run_gated_cli(
         return 1
 
     if bounded_run_id is not None:
-        conn = get_connection(db_path)
-        try:
-            bounded_run = get_bounded_run(conn, bounded_run_id)
-        finally:
-            conn.close()
-        if bounded_run is None:
-            print(f"unknown bounded_run_id: {bounded_run_id!r} — provision it first "
-                  f"with --provision-bounded-run", file=sys.stderr)
-            return 1
-        if bounded_run["status"] != "active":
-            print(f"bounded_run_id {bounded_run_id!r} is not active "
-                  f"(status={bounded_run['status']!r})", file=sys.stderr)
+        reason = _validate_bounded_run_ready(bounded_run_id, db_path)
+        if reason is not None:
+            print(reason, file=sys.stderr)
             return 1
 
     queue_id = enqueue(
@@ -827,6 +898,20 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     db_path = Path(args.db_path) if args.db_path else _DEFAULT_DB
 
+    # --publishing-allowed / --max-episode-claims are provisioning-only
+    # parameters -- fail closed if either is supplied without
+    # --provision-bounded-run, rather than silently accepting and ignoring
+    # a flag whose name implies it did something.
+    if not args.provision_bounded_run:
+        if args.publishing_allowed:
+            print("--publishing-allowed is only valid together with --provision-bounded-run",
+                  file=sys.stderr)
+            return 1
+        if args.max_episode_claims is not None:
+            print("--max-episode-claims is only valid together with --provision-bounded-run",
+                  file=sys.stderr)
+            return 1
+
     if args.provision_bounded_run:
         return _run_provision_bounded_cli(
             bounded_run_id=args.provision_bounded_run,
@@ -845,12 +930,19 @@ def main(argv: list[str] | None = None) -> int:
             bounded_run_id=args.bounded_run_id,
         )
 
+    # Normal autonomous daemon loop. --bounded-run-id does NOT require
+    # --gated-episode-id -- an already-provisioned bounded run threads
+    # straight through to run_worker()'s real scheduler -> queue -> pipeline
+    # loop (see run_worker()'s own docstring), covering fresh
+    # scheduler-originated / topic-backlog episodes, not just a pre-created
+    # --gated-episode-id.
     return run_worker(
         db_path=db_path,
         dry_run=args.dry_run,
         interval=args.interval,
         once=args.once,
         channel_id=args.channel_id,
+        bounded_run_id=args.bounded_run_id,
     )
 
 

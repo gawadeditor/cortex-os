@@ -2052,3 +2052,64 @@ CREATE INDEX IF NOT EXISTS idx_provider_content_mappings_intent
     ON provider_content_mappings(publication_intent_id);
 CREATE INDEX IF NOT EXISTS idx_provider_content_mappings_attempt
     ON provider_content_mappings(attempt_id);
+
+-- ---------------------------------------------------------------------------
+-- media_staging_attempts
+--
+-- Generic, provider-neutral durable media-staging boundary (blocker
+-- identified in docs/operations/audits/ZERNIO_OPERATIONAL_ENABLEMENT_READINESS_2026-08-21.md
+-- §4/§7 -- "no working public-media-URL path exists"). Mirrors
+-- publishing_attempts' write-ahead pattern exactly (hypogeum.publishing.
+-- submission_ledger, ADR-013 Decision 7 item 2): a durable row is
+-- committed BEFORE either external boundary (presign, then upload) is
+-- called, so a caller retrying after a crash/timeout never blindly
+-- re-uploads. provider_id is a free-text column (e.g. 'zernio' today);
+-- this table and hypogeum.publishing.media_staging (its sole reader/
+-- writer) contain no provider-specific request/response field names --
+-- see that module's own docstring.
+--
+-- Identity for reuse/dedup purposes is (provider_id, channel_id,
+-- episode_id, deliverable_id, source_sha256) -- looked up via
+-- idx_media_staging_attempts_scope, not a UNIQUE constraint, matching
+-- publishing_attempts' own "most recent row for this scope" pattern
+-- rather than publication_intents' partial-unique-index pattern (there is
+-- no "deliberate re-stage" concept analogous to a deliberate republish
+-- here -- a fresh attempt is warranted only after failed_definitive or
+-- expired, both structural, never an operator decision).
+--
+-- Never stores the presigned upload URL (short-lived, sensitive query
+-- string) -- only the resulting durable public_url, and only once a
+-- provider's own contract confirms that field is the intended, stable
+-- media reference (see hypogeum.publishing.zernio_media_staging).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS media_staging_attempts (
+    staging_attempt_id      TEXT NOT NULL PRIMARY KEY,
+    provider_id                TEXT NOT NULL,
+    channel_id                   TEXT,
+    episode_id                     TEXT NOT NULL,
+    deliverable_id                   TEXT NOT NULL,
+    source_sha256                      TEXT NOT NULL,
+    source_size_bytes                    INTEGER NOT NULL,
+    source_mime_type                       TEXT NOT NULL,
+    attempt_number                           INTEGER NOT NULL DEFAULT 1,
+    state                                      TEXT NOT NULL DEFAULT 'prepared'
+                                                    CHECK(state IN (
+                                                        'prepared', 'presigning', 'upload_ready', 'uploading',
+                                                        'uploaded', 'failed_definitive', 'failed_ambiguous',
+                                                        'expired', 'reconciliation_required'
+                                                    )),
+    public_url                                     TEXT,
+    remote_object_id                                 TEXT,
+    expires_at                                         TEXT,
+    last_error_category                                  TEXT,
+    last_error_message                                     TEXT,
+    metadata_json                                            TEXT,
+    created_at                                                 TEXT NOT NULL,
+    updated_at                                                   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_staging_attempts_scope
+    ON media_staging_attempts(provider_id, channel_id, episode_id, deliverable_id, source_sha256);
+CREATE INDEX IF NOT EXISTS idx_media_staging_attempts_state
+    ON media_staging_attempts(state);

@@ -706,6 +706,221 @@ Trade-offs
 
 ---
 
+# ADR-013
+
+## Title
+
+Unified Multi-Platform Publishing and Analytics Provider Contract
+
+Status
+
+Accepted
+
+Context
+
+Cortex is a channel-agnostic Factory OS; Hypogeum is its first Channel
+Package. Zernio is an external provider offering publishing and
+analytics transport across existing destination platforms — it is not
+itself a destination platform. Destination platform identity remains
+`youtube`, `tiktok`, `instagram`, `facebook`, exactly as already modeled
+in `platform_analytics.platform` and `publishing_outcomes.platform`.
+
+One active Zernio credential exists in Credential Manager
+(`secret_profiles`, `provider='zernio'`, `scope='factory'`). Live
+read-only verification on 2026-08-21 proved `GET /api/v1/accounts` →
+HTTP 200, `GET /api/v1/profiles` → HTTP 200, and `GET /api/v1/analytics`
+→ HTTP 200; all four destination-platform accounts (YouTube, TikTok,
+Instagram, Facebook) were connected and active, all four were associated
+with one Zernio profile, analytics were returned for all four, and both
+native platform IDs and Zernio-internal IDs were available in the
+response. No Zernio live write or publishing smoke test has occurred.
+Full sanitized evidence — including the exact endpoint contracts, field
+names, and pagination/idempotency behavior discovered — is recorded in
+`docs/operations/audits/ZERNIO_CONTRACT_AUDIT_2026-08-21.md`; account
+identifiers and raw responses are not reproduced here.
+
+No Zernio publishing adapter, analytics adapter, routing, persistence
+integration, or learning integration currently exists in the codebase.
+Legacy direct YouTube/TikTok/Meta publishing paths
+(`hypogeum/publishing/{youtube,tiktok,meta}.py`) remain wired and are
+the only paths a real publish can currently take.
+
+Decision
+
+**Decision 1 — Provider versus platform.** Zernio is modeled as a
+provider with publishing and analytics capabilities. It must never be
+stored as the destination-platform value. Records remain
+platform-specific (`youtube`, `tiktok`, `instagram`, `facebook`).
+Provider provenance — which system delivered or transported a given
+record — is a separate dimension from platform identity, never merged
+into it.
+
+**Decision 2 — Replaceable provider architecture.** Factory Core must
+define generic publishing-provider and analytics-provider contracts.
+Provider selection must be configuration-driven, not hardcoded per
+platform. Zernio must be an adapter behind those contracts, in the same
+shape as the existing `StagingProvider` protocol / `get_staging_provider()`
+resolver pattern (`hypogeum/publishing/staging.py`). No Hypogeum-specific
+branching may enter Factory Core. Legacy direct-platform adapters may
+remain available as alternative providers until separately deprecated.
+Exactly one authorized provider route must own a given external
+publishing attempt — never two providers racing to publish the same
+platform+episode. The current contract does **not** already support
+this: `hypogeum/agents/publishing_agent.py::run_publishing_agent()`
+imports `youtube`, `tiktok`, and `meta` adapter modules by hardcoded
+name, with no registry or dispatch indirection. Building the generic
+routing contract is required work, not already-present capability.
+
+**Decision 3 — Ownership boundaries.** Credential material remains in
+Credential Manager. Channel Package owns provider preference, enabled
+destination platforms, channel-specific publishing policy,
+channel-specific analytics objectives, and logical account/profile
+selection configuration. Operational database state may own external
+provider account IDs, external profile IDs, connection status, native
+platform IDs, provider content IDs, sync state, and publication attempts
+and receipts. Credential records must not be used as substitutes for
+account, profile, or content mappings — `secret_profiles.channel_id`
+scopes a *credential*, not an account or profile identity, and must not
+be overloaded to represent one. Factory Core remains independent of
+Hypogeum identity throughout.
+
+**Decision 4 — Publishing safety and idempotency.** The existing
+`publishing_outcomes.UNIQUE(episode_id, platform, deliverable_id)`
+constraint protects local record uniqueness only; it does not prove an
+external side effect occurred exactly once. The unprotected sequence is
+real: external publish succeeds → local persistence fails or times out →
+Cortex retries, possibly through a different provider → a second
+external post is created → local uniqueness rejects only the second
+database row, after the duplicate already exists externally. All
+publishing providers, including the existing direct adapters, must
+eventually pass through one generalized publishing submission boundary.
+Before any external publish call, Cortex must durably persist an attempt
+containing at minimum: an internal operation ID, channel ID,
+episode/deliverable identity, destination platform, selected provider,
+an external idempotency/request key where the provider supports one, and
+attempt state. Ambiguous failures must be reconciled against provider
+status before any retry, not retried blindly. Partial multi-platform
+success (Zernio's own contract allows one request to fan out across
+several platforms with independent per-platform results) must be
+persisted per destination platform, not collapsed into one outcome.
+Zernio's documented `x-request-id` request-deduplication window (~5
+minutes, evidenced live) is useful but is not sufficient as Cortex's
+sole idempotency guarantee — it protects against a fast retry, not
+against reconciliation after a longer ambiguous failure.
+
+**Decision 5 — Analytics normalization.** Zernio analytics must
+normalize into the existing destination-platform identities — `platform`
+never becomes `'zernio'`. Analytics persistence must distinguish:
+destination platform; ingestion provider; provider account/profile
+identity where required; native platform content ID; provider content ID
+where required; Cortex channel/episode/publication identity;
+observation/import time; and provider update time where available (the
+live contract exposes a distinct `analytics.lastUpdated` per record,
+separate from Cortex's own import time). Sync state must not be keyed by
+platform alone once more than one provider or account can supply the
+same platform — `platform_sync_log` today is keyed by platform only.
+Raw payload storage (`platform_analytics.raw_json`) is supporting
+evidence, not a substitute for first-class provenance and mapping
+fields. No migration is authorized by this decision; schema shape is
+deferred to implementation.
+
+**Decision 6 — Learning boundaries.** Channel-specific audience/content/
+platform findings belong to Channel Learning, with evidence. Cross-
+channel provider reliability, latency, failure patterns, API behavior,
+and reconciliation evidence may belong to Factory Learning, per ADR-012's
+existing Factory Learning / Channel Learning split. Raw channel
+performance must not leak into Factory Learning as channel identity.
+This decision does not claim that either learning path is currently
+autonomous — `hypogeum/learning_engine.py` presently stores insights and
+actions without automatic pipeline consumption, regardless of which
+provider supplied the underlying analytics.
+
+**Decision 7 — Delivery order** (recorded, not authorized for execution
+by this ADR):
+
+1. Generic publishing-provider contract and provider routing.
+2. Durable write-ahead publishing attempt/receipt boundary.
+3. Provider/account/profile/content operational mappings.
+4. Zernio publishing adapter, using fake-transport tests only.
+5. Generic analytics-provider contract and normalized provenance.
+6. Zernio analytics adapter and background sync, using fake-transport
+   tests only.
+7. Database-to-Channel-Learning evidence path.
+8. Appropriate provider-operational evidence path to Factory Learning.
+9. Authorized live read-only verification (repeatable as needed once the
+   adapter exists).
+10. Separately authorized live write smoke test, with publishing
+    disabled everywhere else and an explicit single-target safety plan.
+
+This ordering records sequence only. It does not itself authorize
+starting item 1 or any later item.
+
+Alternatives Considered
+
+- Treating `zernio` as a valid `platform_analytics.platform` /
+  `publishing_outcomes.platform` value — rejected: conflates transport
+  with destination identity, contradicted by the live contract itself
+  (Zernio's own `SocialAccount.platform` enum lists the real destination
+  platforms; Zernio is never one of its own platform values either).
+- Building the Zernio adapter directly against the existing hardcoded
+  per-platform import pattern in `publishing_agent.py` — rejected: would
+  add a fourth hardcoded branch instead of correcting the structural gap
+  (Decision 2), and would leave the routing/idempotency gap in Decision 4
+  unaddressed for a second provider before it was ever fixed for the
+  first.
+- Deferring this decision until after Phase 6 (Factory Capability
+  Evolution, ADR-012) — rejected on the evidence gathered this cycle:
+  `MASTER_CAPABILITY_BLUEPRINT.md` LEVEL 9 ("Provider Platform") and
+  ADR-012's own Context section scope that gate to AI *generation*
+  model/provider evolution (Model Registry, Provider Benchmarking, Shadow
+  Testing, Canary Rollout); Publishing and Analytics Collection are
+  separate LEVEL 1 capability rows with no such gate. Applying ADR-012's
+  Phase 6 gate to a publishing/analytics transport provider was an
+  overextension identified and corrected during this audit cycle, not a
+  reversal of ADR-012 itself.
+
+Consequences
+
+Positive
+
+- A unified multi-platform provider becomes replaceable rather than
+  hardcoded, consistent with the existing `staging.py` provider pattern.
+- Direct adapters remain available and are not forced out.
+- Platform and provider identities stay separate and unambiguous.
+- Publishing retries can become externally safe once Decision 4 ships.
+- Analytics provenance becomes explicit rather than inferred.
+- Multi-channel architecture remains intact — no Hypogeum-specific logic
+  enters Factory Core.
+
+Trade-offs
+
+- A publishing routing contract is required work, not already present.
+- New operational mappings (account/profile/content) are required work.
+- Persistence evolves (new columns/tables) beyond today's schema.
+- Existing direct adapters eventually need the same generalized safety
+  boundary Zernio requires — the gap in Decision 4 already exists for
+  them today, just unexercised because only one provider has ever served
+  each platform.
+- Analytics sync identity becomes more granular (provider-scoped, not
+  platform-only), adding operational complexity.
+- Migration and compatibility tests will be required later, once schema
+  shape is decided.
+
+Explicit non-decisions
+
+This ADR does not:
+
+- authorize a live publish;
+- select Zernio as the permanent exclusive provider;
+- remove any direct adapter;
+- authorize queue or worker changes;
+- authorize paid generation;
+- define the final database schema;
+- activate analytics synchronization;
+- claim Learning integration is complete.
+
+---
+
 # Decision Lifecycle
 
 Architectural decisions are expected to evolve.

@@ -552,7 +552,9 @@ def list_worker_attempts(episode_id: str, project_root: Optional[Path] = None) -
 # The canonical gated executor — the sole integration point.
 # ---------------------------------------------------------------------------
 
-def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = None):
+def build_gated_pipeline_executor(
+    db_path=None, project_root: Optional[Path] = None, bounded_run_id: Optional[str] = None,
+):
     """
     Returns a callable matching hypogeum.queue.process_next()'s
     pipeline_executor contract:
@@ -565,6 +567,20 @@ def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = N
     hypogeum.pipeline.run_pipeline() is invoked. db_path/project_root are
     captured once here (closure) — process_next() itself never needs to
     know about either.
+
+    bounded_run_id: Optional. None (default, every existing caller)
+        preserves prior behavior exactly. When given, this executor reads
+        hypogeum.db.bounded_runs.publishing_allowed for that bounded_run_id
+        and, when it is falsy (0, or the row cannot be read at all — fail
+        closed rather than assume authorization), forces the publishing
+        platform filter to an active-but-empty set (frozenset()) regardless
+        of the channel's own ChannelOperationsProfile — CORE INVARIANTS #13:
+        publishing_allowed=0 is enforced here, at the actual execution path,
+        before hypogeum.pipeline.run_pipeline() is ever called, so zero
+        publishing platform calls are made. This does not gate whether the
+        claim itself is authorized — that is queue.claim_next_bounded()'s
+        job — only whether the run this executor is about to launch may
+        publish.
 
     Gate order for a channel-scoped item (channel_id is not None — matches
     process_next()'s own CALOG check, which is likewise skipped for
@@ -615,12 +631,33 @@ def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = N
     ) -> None:
         from hypogeum.pipeline import run_pipeline
 
+        # Bounded-run publishing boundary — resolved once per call, applied
+        # in both branches below. Fail closed: an unreadable/missing
+        # bounded_runs row is treated the same as publishing_allowed=0.
+        bounded_publishing_forced_off = False
+        if bounded_run_id is not None:
+            from hypogeum.db import get_bounded_run, get_connection as _get_connection
+
+            _conn = _get_connection(db_path)
+            try:
+                _bounded_run = get_bounded_run(_conn, bounded_run_id)
+            finally:
+                _conn.close()
+            bounded_publishing_forced_off = (
+                _bounded_run is None or not _bounded_run.get("publishing_allowed")
+            )
+
         if channel_id is None:
             # No channel scope — nothing to gate (matches process_next()'s
             # own CALOG check, which is also conditional on channel_id).
+            # publishing_platform_filter=None means "no filter" (every
+            # platform enabled) downstream — an empty frozenset() is what
+            # actually blocks every platform, so bounded-forced-off must
+            # pass that, never None, here.
             run_pipeline(
                 topic_input=topic_input, episode_id=episode_id, config=config,
                 channel_id=channel_id, db_path=db_path, cancel_check=cancel_check,
+                publishing_platform_filter=frozenset() if bounded_publishing_forced_off else None,
             )
             return
 
@@ -705,6 +742,12 @@ def build_gated_pipeline_executor(db_path=None, project_root: Optional[Path] = N
         eligible_platforms, excluded_platforms = resolve_publishing_platforms(profile)
         if not profile.publishing_enabled:
             excluded_platforms = {p: "publishing_enabled is False for this channel" for p in eligible_platforms}
+            eligible_platforms = []
+        if bounded_publishing_forced_off:
+            for _p in eligible_platforms:
+                excluded_platforms[_p] = (
+                    f"publishing_allowed is False for bounded_run_id={bounded_run_id!r}"
+                )
             eligible_platforms = []
         attempt.eligible_platforms = eligible_platforms
         attempt.excluded_platforms = excluded_platforms

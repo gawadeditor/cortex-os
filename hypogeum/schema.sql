@@ -1608,6 +1608,48 @@ CREATE TABLE IF NOT EXISTS worker_control (
 );
 
 -- ---------------------------------------------------------------------------
+-- bounded_runs / bounded_run_claims
+-- Durable, permanent claim allowance for run_worker.py's --max-episodes
+-- bounded mode (hypogeum.queue.claim_next_bounded() /
+-- hypogeum.db.provision_bounded_run() / hypogeum.db.record_bounded_run_claim()).
+--
+-- Deliberately NOT derived from run_queue.worker_id: release() clears that
+-- column back to NULL on requeue, and a restarted process may not even reuse
+-- the same worker_id, so neither is a valid durable consumption record.
+-- bounded_run_id is supplied explicitly by the caller (never auto-generated
+-- by the claim path) and stays fixed across any restart of the same logical
+-- bounded run — that fixed identity is what makes the claim count durable.
+--
+-- The claim count is never a standalone mutable counter: it is always
+-- COUNT(*) FROM bounded_run_claims WHERE bounded_run_id = ? — reconstructable
+-- from an append-only ledger, not a summary integer that could drift from
+-- reality. A row in bounded_run_claims, once inserted (in the same SQLite
+-- transaction as the run_queue claim it corresponds to — see
+-- claim_next_bounded()), is never deleted — not when processing later
+-- fails, the queue item is released, or the worker crashes/restarts. The
+-- allowance, once spent, stays spent.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS bounded_runs (
+    bounded_run_id      TEXT    NOT NULL PRIMARY KEY,
+    max_episode_claims  INTEGER NOT NULL CHECK (max_episode_claims > 0),
+    publishing_allowed  INTEGER NOT NULL DEFAULT 0 CHECK (publishing_allowed IN (0, 1)),
+    created_at          TEXT    NOT NULL,
+    completed_at        TEXT,
+    status              TEXT    NOT NULL DEFAULT 'active'
+                             CHECK (status IN ('active', 'exhausted', 'cancelled'))
+);
+
+CREATE TABLE IF NOT EXISTS bounded_run_claims (
+    bounded_run_id TEXT NOT NULL REFERENCES bounded_runs(bounded_run_id),
+    queue_id       TEXT NOT NULL,
+    episode_id     TEXT NOT NULL,
+    claimed_at     TEXT NOT NULL,
+    PRIMARY KEY (bounded_run_id, queue_id),
+    UNIQUE (bounded_run_id, episode_id)
+);
+
+-- ---------------------------------------------------------------------------
 -- audit_records
 -- Minimal persistence form of DATA_MODEL.md's canonical "Audit Record"
 -- entity ("Represents a significant platform event"). Generic across any

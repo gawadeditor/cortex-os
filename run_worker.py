@@ -41,6 +41,15 @@ channel/episode, then runs exactly one gated poll() iteration.
     python run_worker.py --gated-episode-id ep_001 --channel-id foo \
         --topic "The Antikythera Mechanism"
 
+Bounded autonomous run (durable claim cap — see hypogeum/queue.py's
+claim_next_bounded() and hypogeum/schema.sql's "bounded_runs /
+bounded_run_claims" section): provision once, then claim through the same
+bounded_run_id on every (re)launch.
+    python run_worker.py --provision-bounded-run br_001 \
+        --max-episode-claims 1                      # publishing_allowed defaults False
+    python run_worker.py --gated-episode-id ep_001 --channel-id foo \
+        --bounded-run-id br_001
+
 Exit codes:
     0 — clean shutdown (SIGINT, SIGTERM, or --once), or a gated invocation's
         claimed item completed successfully
@@ -680,19 +689,64 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Explicit topic text for --gated-episode-id. If omitted, the topic "
              "is claimed from the channel's existing topic backlog.",
     )
+    parser.add_argument(
+        "--provision-bounded-run",
+        metavar="BOUNDED_RUN_ID",
+        default=None,
+        help="Explicitly provision a bounded run (see hypogeum.queue."
+             "provision_bounded_run()), print the resulting bounded_runs row "
+             "as JSON, and exit. Requires --max-episode-claims. Idempotent "
+             "for a restart of the same bounded_run_id with identical "
+             "parameters. Does not claim anything or enter the daemon loop.",
+    )
+    parser.add_argument(
+        "--max-episode-claims",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Durable claim cap for --provision-bounded-run. Must be > 0.",
+    )
+    parser.add_argument(
+        "--publishing-allowed",
+        action="store_true",
+        default=False,
+        help="Authorize publishing for --provision-bounded-run. Omit to "
+             "provision a bounded run that can never reach a publishing "
+             "boundary (the default).",
+    )
+    parser.add_argument(
+        "--bounded-run-id",
+        metavar="BOUNDED_RUN_ID",
+        default=None,
+        help="Combine with --gated-episode-id to claim and run that one "
+             "episode through an already-provisioned bounded run "
+             "(--provision-bounded-run) instead of unbounded claiming. Fails "
+             "closed if the bounded_run_id is unknown, not active, or "
+             "already exhausted — never falls back to unbounded claiming.",
+    )
     return parser.parse_args(argv)
 
 
-def _run_gated_cli(channel_id: str, episode_id: str, topic: str | None, db_path: Path) -> int:
+def _run_gated_cli(
+    channel_id: str, episode_id: str, topic: str | None, db_path: Path,
+    bounded_run_id: str | None = None,
+) -> int:
     """
     Enqueues one run_queue item for (channel_id, episode_id) and runs a
     single gated poll() iteration against it — the exact same queue
     lifecycle (claim/topic-resolve/complete/fail/release) and the exact
     same gated executor the daemon loop uses, not a second implementation.
     Returns a process exit code: 0 only for a genuinely completed run.
+
+    bounded_run_id: Optional. None (default) preserves prior behavior
+        exactly — unbounded claim_next(). When given, must already be
+        provisioned via --provision-bounded-run (checked here for a fast,
+        clear CLI error; the real enforcement is inside
+        hypogeum.queue.claim_next_bounded() regardless) — this function
+        never provisions one itself.
     """
     from hypogeum.config import Config
-    from hypogeum.db import initialize_schema
+    from hypogeum.db import get_bounded_run, get_connection, initialize_schema
     from hypogeum.queue import enqueue, poll
     from hypogeum.worker_integration import build_gated_pipeline_executor
 
@@ -703,17 +757,32 @@ def _run_gated_cli(channel_id: str, episode_id: str, topic: str | None, db_path:
         print(f"startup error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
+    if bounded_run_id is not None:
+        conn = get_connection(db_path)
+        try:
+            bounded_run = get_bounded_run(conn, bounded_run_id)
+        finally:
+            conn.close()
+        if bounded_run is None:
+            print(f"unknown bounded_run_id: {bounded_run_id!r} — provision it first "
+                  f"with --provision-bounded-run", file=sys.stderr)
+            return 1
+        if bounded_run["status"] != "active":
+            print(f"bounded_run_id {bounded_run_id!r} is not active "
+                  f"(status={bounded_run['status']!r})", file=sys.stderr)
+            return 1
+
     queue_id = enqueue(
         db_path=db_path, channel_id=channel_id, episode_id=episode_id,
         priority=-100, source="manual",
     )
     topic_resolver = (lambda _claimed_row: topic) if topic else None
-    executor = build_gated_pipeline_executor(db_path=db_path)
+    executor = build_gated_pipeline_executor(db_path=db_path, bounded_run_id=bounded_run_id)
 
     result = poll(
         worker_id=str(uuid.uuid4()), db_path=db_path, dry_run=False,
         max_iterations=1, config=config, topic_resolver=topic_resolver,
-        pipeline_executor=executor,
+        pipeline_executor=executor, bounded_run_id=bounded_run_id,
     )
     proc = next((r for r in result.results if r.status != "empty"), None)
     output = proc.__dict__ if proc is not None else {"status": "empty", "queue_id": queue_id}
@@ -722,9 +791,49 @@ def _run_gated_cli(channel_id: str, episode_id: str, topic: str | None, db_path:
     return 0 if proc is not None and proc.status == "completed" else 1
 
 
+def _run_provision_bounded_cli(
+    bounded_run_id: str, max_episode_claims: int | None, publishing_allowed: bool,
+    db_path: Path,
+) -> int:
+    """
+    Explicitly provisions a bounded run (hypogeum.queue.provision_bounded_run)
+    and prints the resulting bounded_runs row as JSON. Makes no run_queue
+    claim and calls no pipeline/provider/publishing code.
+    """
+    from hypogeum.db import BoundedRunError, initialize_schema
+    from hypogeum.queue import provision_bounded_run
+
+    if not max_episode_claims:
+        print("--provision-bounded-run requires --max-episode-claims", file=sys.stderr)
+        return 1
+
+    try:
+        initialize_schema(db_path)
+        row = provision_bounded_run(
+            bounded_run_id=bounded_run_id,
+            max_episode_claims=max_episode_claims,
+            publishing_allowed=publishing_allowed,
+            db_path=db_path,
+        )
+    except BoundedRunError as exc:
+        print(f"provision error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(row, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     db_path = Path(args.db_path) if args.db_path else _DEFAULT_DB
+
+    if args.provision_bounded_run:
+        return _run_provision_bounded_cli(
+            bounded_run_id=args.provision_bounded_run,
+            max_episode_claims=args.max_episode_claims,
+            publishing_allowed=args.publishing_allowed,
+            db_path=db_path,
+        )
 
     if args.gated_episode_id:
         if not args.channel_id:
@@ -733,6 +842,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_gated_cli(
             channel_id=args.channel_id, episode_id=args.gated_episode_id,
             topic=args.topic, db_path=db_path,
+            bounded_run_id=args.bounded_run_id,
         )
 
     return run_worker(

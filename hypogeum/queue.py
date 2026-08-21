@@ -50,6 +50,8 @@ Queue Poller:
 Public API:
     enqueue(...)                -> str            (queue_id)
     claim_next(...)             -> dict | None
+    provision_bounded_run(...)  -> dict            (explicit bounded-run provisioning)
+    claim_next_bounded(...)     -> dict | None     (durable, capped claim — see below)
     complete(...)               -> None
     fail(...)                   -> None
     cancel(...)                 -> None
@@ -62,6 +64,7 @@ Public API:
 
 from __future__ import annotations
 
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -72,17 +75,23 @@ from typing import Callable, List, Optional
 import hypogeum.pipeline as _pipeline_module  # patched by tests via monkeypatch
 
 from hypogeum.db import (
+    BoundedRunError,
     abort_queue_item,
     cancel_queue_item,
     claim_next_queue_item,
     complete_queue_item,
+    count_bounded_run_claims,
     fail_queue_item,
+    get_bounded_run,
     get_connection,
     get_pending_scheduled_runs,
     get_queue_item,
     initialize_schema,
     insert_queue_item,
     is_cancel_requested,
+    mark_bounded_run_exhausted,
+    provision_bounded_run as _db_provision_bounded_run,
+    record_bounded_run_claim,
     release_queue_item,
     set_worker_control,
     update_scheduled_run_status,
@@ -205,6 +214,151 @@ def claim_next(
         claimed = claim_next_queue_item(conn, worker_id, _iso(_now_utc()))
         conn.commit()
         return claimed
+    finally:
+        conn.close()
+
+
+def provision_bounded_run(
+    bounded_run_id: str,
+    max_episode_claims: int,
+    publishing_allowed: bool = False,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """
+    Explicitly provision a bounded run before any bounded claiming happens
+    (CORE INVARIANTS #1). Idempotent for a restart of the same logical
+    bounded run (same bounded_run_id + identical parameters) — see
+    hypogeum.db.provision_bounded_run() for the exact contract, including
+    the BoundedRunError raised on an ambiguous re-provisioning attempt.
+
+    Args:
+        bounded_run_id:      Caller-supplied identity. Never generated here.
+        max_episode_claims:  Must be a positive integer.
+        publishing_allowed:  Defaults to False — a bounded run starts unable
+                             to publish unless explicitly authorized.
+        db_path:              Override DB path (for tests).
+
+    Returns:
+        Dict of the bounded_runs row (freshly created or pre-existing).
+    """
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        row = _db_provision_bounded_run(
+            conn,
+            bounded_run_id=bounded_run_id,
+            max_episode_claims=max_episode_claims,
+            publishing_allowed=publishing_allowed,
+            created_at=_iso(_now_utc()),
+        )
+        conn.commit()
+        return row
+    finally:
+        conn.close()
+
+
+def claim_next_bounded(
+    worker_id: str,
+    bounded_run_id: Optional[str],
+    db_path: Optional[Path] = None,
+) -> Optional[dict]:
+    """
+    Atomically claim the next bounded-eligible queued item AND record its
+    durable bounded_run_claims ledger row, in one SQLite transaction
+    (CORE INVARIANTS #5, #7, #8). See schema.sql's "bounded_runs /
+    bounded_run_claims" section for the full contract.
+
+    bounded_run_id must already be explicitly provisioned via
+    provision_bounded_run() — this function never creates or mutates a
+    bounded_runs row's identity (CORE INVARIANTS #1/#2), only reads it and
+    (on the claim that reaches the cap) flips its status to 'exhausted'.
+
+    Only run_queue candidates with a non-NULL episode_id are eligible: the
+    ledger's episode_id column is NOT NULL and must be recorded in the same
+    transaction as the claim, but episode_id for a topic-backlog-driven item
+    is not resolved until well after a plain claim_next() call returns (see
+    process_next() Step 4) — so bounded claiming only ever consumes queue
+    items that were enqueued for a specific, already-known episode_id (e.g.
+    via enqueue(episode_id=...) or the --gated-episode-id CLI path).
+
+    Concurrency (CORE INVARIANTS #6): uses BEGIN IMMEDIATE, not the default
+    deferred transaction, so a second concurrent claim attempt (this
+    process or another) blocks on SQLite's write lock until this
+    transaction commits or rolls back — the read-count-then-insert sequence
+    is fully serialized across callers rather than racing optimistically.
+
+    Raises hypogeum.db.BoundedRunError (fail closed — no run_queue claim and
+    no ledger row is ever left committed) when: bounded_run_id is missing;
+    the bounded run is unknown; its status is not 'active'; its
+    max_episode_claims is invalid; it has already reached
+    max_episode_claims; or the write-lock transaction cannot be acquired.
+    Never silently falls back to unbounded claiming.
+
+    Returns:
+        Dict of the claimed run_queue row (same shape as claim_next()), or
+        None if no bounded-eligible candidate exists right now — the normal
+        "nothing to claim yet" case (queue empty, or every queued item still
+        lacks episode_id), not a denial.
+    """
+    if not bounded_run_id:
+        raise BoundedRunError("bounded_run_id is required for bounded claiming")
+
+    now = _iso(_now_utc())
+    conn = get_connection(db_path)
+    try:
+        conn.isolation_level = None  # manual transaction control for BEGIN IMMEDIATE
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            raise BoundedRunError(
+                f"could not acquire bounded-run transaction lock for "
+                f"bounded_run_id={bounded_run_id!r}: {exc}"
+            ) from exc
+
+        try:
+            run = get_bounded_run(conn, bounded_run_id)
+            if run is None:
+                raise BoundedRunError(f"unknown bounded_run_id: {bounded_run_id!r}")
+            if run["status"] != "active":
+                raise BoundedRunError(
+                    f"bounded_run_id {bounded_run_id!r} is not active "
+                    f"(status={run['status']!r})"
+                )
+            max_claims = run["max_episode_claims"]
+            if not isinstance(max_claims, int) or max_claims <= 0:
+                raise BoundedRunError(
+                    f"bounded_run_id {bounded_run_id!r} has an invalid "
+                    f"max_episode_claims={max_claims!r}"
+                )
+
+            claimed_count = count_bounded_run_claims(conn, bounded_run_id)
+            if claimed_count >= max_claims:
+                raise BoundedRunError(
+                    f"bounded_run_id {bounded_run_id!r} has already reached "
+                    f"max_episode_claims={max_claims}"
+                )
+
+            claimed = claim_next_queue_item(conn, worker_id, now, require_episode_id=True)
+            if claimed is None or not claimed.get("episode_id"):
+                conn.rollback()
+                return None
+
+            record_bounded_run_claim(
+                conn,
+                bounded_run_id=bounded_run_id,
+                queue_id=claimed["queue_id"],
+                episode_id=claimed["episode_id"],
+                claimed_at=now,
+            )
+
+            if claimed_count + 1 >= max_claims:
+                mark_bounded_run_exhausted(conn, bounded_run_id, now)
+
+            conn.commit()
+            return claimed
+        except BaseException:
+            conn.rollback()
+            raise
     finally:
         conn.close()
 
@@ -654,6 +808,7 @@ def process_next(
     config=None,
     topic_resolver: Optional[Callable[[dict], Optional[str]]] = None,
     pipeline_executor: Optional[Callable[..., None]] = None,
+    bounded_run_id: Optional[str] = None,
 ) -> ProcessResult:
     """
     Claim the next queued item, check CALOG, resolve a topic, run pipeline.
@@ -728,6 +883,18 @@ def process_next(
                          into the real claim → topic → pipeline →
                          complete/fail/release lifecycle without
                          duplicating any of it.
+        bounded_run_id:  Optional. When given, Step 1 claims via
+                         claim_next_bounded() instead of claim_next() — see
+                         that function's docstring for the durable claim-cap
+                         contract. None (default, every existing caller)
+                         preserves prior behavior exactly. A
+                         hypogeum.db.BoundedRunError raised by
+                         claim_next_bounded() (unknown/inactive bounded run,
+                         exhausted cap, invalid limit, or a transaction-lock
+                         failure) is caught here and reported as
+                         ProcessResult(status="empty", error_message=<reason>)
+                         — no claim is made and this never silently falls
+                         back to unbounded claiming.
 
     Failure hygiene (dry_run=False, backlog path):
         On any pipeline exception:
@@ -745,7 +912,22 @@ def process_next(
             "no_topic"  — no queued topic; queue item released for retry
     """
     # Step 1: Claim atomically
-    claimed = claim_next(worker_id=worker_id, db_path=db_path)
+    if bounded_run_id is not None:
+        try:
+            claimed = claim_next_bounded(
+                worker_id=worker_id, bounded_run_id=bounded_run_id, db_path=db_path,
+            )
+        except BoundedRunError as exc:
+            return ProcessResult(
+                status="empty",
+                queue_id=None,
+                channel_id=None,
+                worker_id=worker_id,
+                dry_run=dry_run,
+                error_message=str(exc),
+            )
+    else:
+        claimed = claim_next(worker_id=worker_id, db_path=db_path)
     if claimed is None:
         return ProcessResult(
             status="empty",
@@ -1147,6 +1329,7 @@ def poll(
     topic_resolver: Optional[Callable[[dict], Optional[str]]] = None,
     max_stall_iterations: int = 100,
     pipeline_executor: Optional[Callable[..., None]] = None,
+    bounded_run_id: Optional[str] = None,
 ) -> PollResult:
     """
     Run process_next() in a loop until the queue is empty, the iteration
@@ -1198,6 +1381,9 @@ def poll(
                                pipeline_executor parameter — see there for
                                the full contract. None (default) preserves
                                prior behavior exactly.
+        bounded_run_id:        Forwarded unchanged to process_next()'s own
+                               bounded_run_id parameter. None (default)
+                               preserves prior behavior exactly.
 
     Returns:
         PollResult with per-status counts and stop_reason.
@@ -1214,6 +1400,7 @@ def poll(
                 config=config,
                 topic_resolver=topic_resolver,
                 pipeline_executor=pipeline_executor,
+                bounded_run_id=bounded_run_id,
             )
             result.results.append(pr)
 

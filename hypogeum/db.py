@@ -1702,6 +1702,7 @@ def claim_next_queue_item(
     conn: sqlite3.Connection,
     worker_id: str,
     claimed_at: str,
+    require_episode_id: bool = False,
 ) -> Optional[dict]:
     """
     Atomically claim the highest-priority queued item for worker_id.
@@ -1720,9 +1721,21 @@ def claim_next_queue_item(
       4. queued_at ASC  — FIFO within the same priority+source bucket.
 
     Args:
-        conn:       Open connection (FK enforcement active).
-        worker_id:  Unique identifier for the claiming worker process.
-        claimed_at: ISO 8601 UTC timestamp of the claim.
+        conn:               Open connection (FK enforcement active).
+        worker_id:          Unique identifier for the claiming worker process.
+        claimed_at:         ISO 8601 UTC timestamp of the claim.
+        require_episode_id: When True, only rows with a non-NULL episode_id
+                            are eligible candidates. False (default — every
+                            existing caller) preserves prior behavior exactly.
+                            Used by hypogeum.queue.claim_next_bounded(): a
+                            bounded_run_claims ledger row (episode_id NOT
+                            NULL) must be recorded in the same transaction as
+                            the claim, and episode_id for a topic-backlog-
+                            driven item is not known until well after this
+                            function returns (topic resolution happens later,
+                            in process_next() Step 4) — so bounded claiming
+                            is restricted to queue items already enqueued
+                            for a specific, known episode_id.
 
     Returns:
         Dict of the claimed run_queue row, or None if no queued item exists
@@ -1733,10 +1746,12 @@ def claim_next_queue_item(
     # Regular items: FIFO (queued_at ASC as final tiebreaker).
     # next_attempt_at gates auto-retry items until their backoff elapses —
     # NULL (every other item type) is always immediately claimable.
+    episode_filter = "AND episode_id IS NOT NULL" if require_episode_id else ""
     candidate = conn.execute(
-        """
+        f"""
         SELECT queue_id FROM run_queue
         WHERE status = 'queued'
+          {episode_filter}
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         ORDER BY
             priority ASC,
@@ -1972,6 +1987,161 @@ def get_queue_item(
         "SELECT * FROM run_queue WHERE queue_id = ?", (queue_id,)
     ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# bounded_runs / bounded_run_claims
+#
+# Durable, permanent claim allowance for run_worker.py's bounded-run mode.
+# See schema.sql's "bounded_runs / bounded_run_claims" section for the full
+# contract these primitives implement. The actual atomic claim+ledger
+# transaction lives in hypogeum.queue.claim_next_bounded(); the functions
+# below are the read/write primitives it (and CLI provisioning) compose.
+# ---------------------------------------------------------------------------
+
+class BoundedRunError(RuntimeError):
+    """Bounded-run claim/provisioning preconditions were not satisfied.
+
+    Always fail closed: raising this means no run_queue claim and no
+    bounded_run_claims ledger row was persisted for the call that raised it.
+    """
+
+
+def provision_bounded_run(
+    conn: sqlite3.Connection,
+    bounded_run_id: str,
+    max_episode_claims: int,
+    publishing_allowed: bool,
+    created_at: str,
+) -> dict:
+    """
+    Explicitly provision a bounded run. This is the only way a bounded_runs
+    row comes into existence — hypogeum.queue.claim_next_bounded() never
+    creates one itself (CORE INVARIANTS #1/#2).
+
+    Idempotent restart behavior (CORE INVARIANTS #3): calling this again with
+    the same bounded_run_id and identical max_episode_claims/
+    publishing_allowed returns the existing row unchanged rather than
+    raising, so restarting the same logical bounded run is safe. Calling it
+    again with the same bounded_run_id but *different* parameters raises
+    BoundedRunError — an ambiguous re-provisioning is refused, never silently
+    applied.
+
+    Args:
+        conn:                Open connection.
+        bounded_run_id:      Caller-supplied identity (never generated here).
+        max_episode_claims:  Must be a positive integer.
+        publishing_allowed:  Whether the bounded run may reach a publishing
+                             boundary. Truthy/falsy; stored as 0/1.
+        created_at:          ISO 8601 UTC timestamp.
+
+    Returns:
+        Dict of the bounded_runs row (freshly created or pre-existing).
+    """
+    if not bounded_run_id:
+        raise BoundedRunError("bounded_run_id is required to provision a bounded run")
+    if not isinstance(max_episode_claims, int) or isinstance(max_episode_claims, bool) or max_episode_claims <= 0:
+        raise BoundedRunError(
+            f"max_episode_claims must be a positive integer, got {max_episode_claims!r}"
+        )
+
+    publishing_flag = 1 if publishing_allowed else 0
+
+    existing = conn.execute(
+        "SELECT * FROM bounded_runs WHERE bounded_run_id = ?", (bounded_run_id,)
+    ).fetchone()
+    if existing is not None:
+        existing = dict(existing)
+        if (
+            existing["max_episode_claims"] != max_episode_claims
+            or existing["publishing_allowed"] != publishing_flag
+        ):
+            raise BoundedRunError(
+                f"bounded_run_id {bounded_run_id!r} is already provisioned with "
+                f"max_episode_claims={existing['max_episode_claims']}, "
+                f"publishing_allowed={existing['publishing_allowed']} — refusing "
+                f"to re-provision with different parameters "
+                f"(max_episode_claims={max_episode_claims}, "
+                f"publishing_allowed={publishing_flag})"
+            )
+        return existing
+
+    conn.execute(
+        """
+        INSERT INTO bounded_runs
+            (bounded_run_id, max_episode_claims, publishing_allowed, created_at, status)
+        VALUES (?, ?, ?, ?, 'active')
+        """,
+        (bounded_run_id, max_episode_claims, publishing_flag, created_at),
+    )
+    row = conn.execute(
+        "SELECT * FROM bounded_runs WHERE bounded_run_id = ?", (bounded_run_id,)
+    ).fetchone()
+    return dict(row)
+
+
+def get_bounded_run(conn: sqlite3.Connection, bounded_run_id: str) -> Optional[dict]:
+    """Return a single bounded_runs row as a dict, or None if not found."""
+    row = conn.execute(
+        "SELECT * FROM bounded_runs WHERE bounded_run_id = ?", (bounded_run_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def count_bounded_run_claims(conn: sqlite3.Connection, bounded_run_id: str) -> int:
+    """
+    Durable claim count for a bounded run — always COUNT(*) over the
+    append-only bounded_run_claims ledger, never a standalone mutable
+    counter (CORE INVARIANTS #12), so it cannot drift from what was actually
+    committed.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM bounded_run_claims WHERE bounded_run_id = ?",
+        (bounded_run_id,),
+    ).fetchone()
+    return row[0]
+
+
+def record_bounded_run_claim(
+    conn: sqlite3.Connection,
+    bounded_run_id: str,
+    queue_id: str,
+    episode_id: str,
+    claimed_at: str,
+) -> None:
+    """
+    Insert one immutable claim ledger row.
+
+    Caller (hypogeum.queue.claim_next_bounded()) is responsible for doing
+    this inside the same transaction as the run_queue claim it corresponds
+    to, and for committing both together (CORE INVARIANTS #5/#8). Once
+    committed, this row is never deleted or updated by any other function in
+    this codebase — release, downstream failure, worker crash, and restart
+    all leave it exactly as written (CORE INVARIANTS #9/#10).
+    """
+    conn.execute(
+        """
+        INSERT INTO bounded_run_claims (bounded_run_id, queue_id, episode_id, claimed_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (bounded_run_id, queue_id, episode_id, claimed_at),
+    )
+
+
+def mark_bounded_run_exhausted(
+    conn: sqlite3.Connection,
+    bounded_run_id: str,
+    completed_at: str,
+) -> None:
+    """Conditional UPDATE — only 'active' bounded runs transition to 'exhausted'."""
+    conn.execute(
+        """
+        UPDATE bounded_runs
+        SET status = 'exhausted', completed_at = ?
+        WHERE bounded_run_id = ? AND status = 'active'
+        """,
+        (completed_at, bounded_run_id),
+    )
 
 
 # ---------------------------------------------------------------------------

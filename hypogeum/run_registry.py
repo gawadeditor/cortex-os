@@ -835,6 +835,19 @@ def _sync_episode_row(
     finally:
         conn.close()
 
+    # Root-cause fix for the staleness class documented in
+    # docs/operations/audits/HYPOGEUM_WEEKLY_AUTONOMOUS_LOOP_READINESS_2026-08-21.md
+    # finding #2/#11: once this episode_id has just reached the terminal
+    # 'complete' state above, any still-queued (never-claimed) retry topic
+    # for it is now obsolete and must not remain claimable ahead of real new
+    # work. Best-effort, scoped to exactly this episode_id — must never
+    # affect the run's own completion, already recorded above.
+    try:
+        from hypogeum.topics import reconcile_stale_topics_for_episode
+        reconcile_stale_topics_for_episode(episode_id, db_path=db_path, dry_run=False)
+    except Exception:
+        pass
+
 
 def fail_run(
     run_id: str,

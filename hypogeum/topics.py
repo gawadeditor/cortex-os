@@ -49,6 +49,8 @@ Public API:
                                  db_path=None)            -> bool
     set_topic_episode_id(topic_id, episode_id,
                           db_path=None)                  -> bool
+    reconcile_stale_topics_for_episode(episode_id, db_path=None,
+                                        dry_run=True)     -> TopicReconciliationResult
 
 Exceptions:
     DuplicateTopicError — raised when a queued/claimed topic with the same
@@ -77,6 +79,8 @@ from hypogeum.db import (
     list_episode_topics,
     update_episode_topic_status,
 )
+
+_RECONCILIATION_REASON = "terminal_state_reconciliation"
 
 
 # ---------------------------------------------------------------------------
@@ -676,3 +680,152 @@ def make_topic_resolver(
         return topic_row["topic_text"]
 
     return _resolver
+
+
+# ---------------------------------------------------------------------------
+# Stale-topic reconciliation
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TopicReconciliationRow:
+    """One episode_topics row a reconciliation call found or acted on."""
+    topic_id: str
+    source: str
+    priority: int
+    created_at: str
+
+
+@dataclass
+class TopicReconciliationResult:
+    """
+    Auditable outcome of one reconcile_stale_topics_for_episode() call.
+
+    eligible=False means episode_id is unknown or not yet in a terminal
+    'complete' state — no row is ever touched in that case, regardless of
+    dry_run. When eligible=True and dry_run=True, `rows` lists exactly the
+    queued rows that WOULD be reconciled and applied_count is always 0 (no
+    mutation occurred). When eligible=True and dry_run=False, `rows` lists
+    the rows that WERE reconciled and applied_count == len(rows).
+    """
+    episode_id: str
+    dry_run: bool
+    eligible: bool
+    episode_status: Optional[str]
+    reason: str
+    rows: List[TopicReconciliationRow] = field(default_factory=list)
+    applied_count: int = 0
+
+
+def reconcile_stale_topics_for_episode(
+    episode_id: str,
+    db_path: Optional[Path] = None,
+    dry_run: bool = True,
+) -> TopicReconciliationResult:
+    """
+    Idempotent, scoped-to-one-episode closure of obsolete queued
+    episode_topics rows, once episodes.status='complete' for that episode —
+    the terminal state confirming no further retry of THIS episode_id is
+    ever needed again. Never touches 'claimed' rows (those are owned by an
+    active worker — same boundary cancel_queued_topics_for_episode() in
+    hypogeum.db already respects) and never touches any other episode_id's
+    rows.
+
+    Two callers:
+      - An operator, explicitly, with dry_run=True first (preview) then
+        dry_run=False (apply) — the manual path for pre-existing stale rows
+        that predate this reconciliation mechanism (e.g. ep_f3619022's 8
+        rows).
+      - hypogeum.run_registry._sync_episode_row(), automatically, with
+        dry_run=False, immediately after it sets episodes.status='complete'
+        — the root-cause fix so this staleness never recurs for any
+        episode completed from this point forward. Best-effort there
+        (wrapped in try/except); never allowed to affect run completion.
+
+    Args:
+        episode_id: Exactly one episode to reconcile. No broad/multi-episode
+                    cleanup is performed by this function.
+        db_path:    Override DB path (for tests / isolated reconciliation DBs).
+        dry_run:    True (default) previews without mutating. False applies.
+
+    Returns:
+        TopicReconciliationResult — see its own docstring for field meaning.
+    """
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            ep_row = conn.execute(
+                "SELECT status FROM episodes WHERE episode_id = ?", (episode_id,),
+            ).fetchone()
+            episode_status = ep_row["status"] if ep_row is not None else None
+
+            if episode_status != "complete":
+                conn.rollback()
+                return TopicReconciliationResult(
+                    episode_id=episode_id, dry_run=dry_run, eligible=False,
+                    episode_status=episode_status,
+                    reason=(
+                        f"episode_id {episode_id!r} is not in a terminal 'complete' state "
+                        f"(status={episode_status!r}) — no queued topics reconciled"
+                    ),
+                )
+
+            candidates = conn.execute(
+                """
+                SELECT topic_id, source, priority, created_at FROM episode_topics
+                WHERE episode_id = ? AND status = 'queued'
+                ORDER BY created_at ASC
+                """,
+                (episode_id,),
+            ).fetchall()
+            rows = [
+                TopicReconciliationRow(
+                    topic_id=r["topic_id"], source=r["source"],
+                    priority=r["priority"], created_at=r["created_at"],
+                )
+                for r in candidates
+            ]
+
+            if not rows:
+                conn.rollback()
+                return TopicReconciliationResult(
+                    episode_id=episode_id, dry_run=dry_run, eligible=True,
+                    episode_status=episode_status,
+                    reason="no queued topics remain for this episode — nothing to reconcile",
+                )
+
+            if dry_run:
+                conn.rollback()
+                return TopicReconciliationResult(
+                    episode_id=episode_id, dry_run=True, eligible=True,
+                    episode_status=episode_status,
+                    reason=f"preview only — {len(rows)} queued topic(s) would be reconciled; no mutation performed",
+                    rows=rows,
+                )
+
+            now = _now_iso()
+            applied = 0
+            for row in rows:
+                cursor = conn.execute(
+                    """
+                    UPDATE episode_topics
+                    SET status = 'cancelled', reason = ?, updated_at = ?
+                    WHERE topic_id = ? AND status = 'queued'
+                    """,
+                    (_RECONCILIATION_REASON, now, row.topic_id),
+                )
+                applied += cursor.rowcount
+            conn.commit()
+            return TopicReconciliationResult(
+                episode_id=episode_id, dry_run=False, eligible=True,
+                episode_status=episode_status,
+                reason=f"reconciled {applied} stale queued topic(s)",
+                rows=rows, applied_count=applied,
+            )
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()

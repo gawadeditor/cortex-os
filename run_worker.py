@@ -181,13 +181,26 @@ def _check_and_refill_queue(
     db_path: Path,
     threshold: int,
     auto_approve: bool,
+    assets_root: Path | None = None,
 ) -> dict:
     """
     Inspect topic queue depth across all active channels.
 
-    For each active channel: if the number of queued topics is below
-    `threshold`, run a discovery cycle to generate fresh candidates.
-    If `auto_approve` is True, the top-scored candidate is automatically
+    For each active channel: first check the one-episode publish-ready
+    buffer (hypogeum.buffer.compute_buffer_state) — a channel with a
+    sufficient or excess buffer (>=1 publish-ready, unpublished,
+    non-current-week complete episode) is skipped entirely for this
+    iteration, regardless of topic-backlog depth. This is a DIFFERENT gate
+    than the queue-depth check below: queue depth is about the topic
+    *backlog* (raw ideas awaiting production), the buffer gate is about
+    *finished, publish-ready episodes* already ahead of the current
+    schedule — see hypogeum/buffer.py's own docstring. Only when the buffer
+    reports "enqueue" (0 publish-ready episodes ahead) does the existing
+    queue-depth-driven discovery/auto-approve logic below run at all.
+
+    Otherwise unchanged: if the number of queued topics is below
+    `threshold`, run a discovery cycle to generate fresh candidates. If
+    `auto_approve` is True, the top-scored candidate is automatically
     approved and enqueued, closing the loop without operator input.
 
     Duplicate-topic errors from enqueue_topic() are handled gracefully —
@@ -199,17 +212,24 @@ def _check_and_refill_queue(
           "channels_refilled": int,
           "cycles_run": list[str],     # cycle_ids
           "topics_enqueued": list[str] # topic texts (only when auto_approve)
+          "buffer_gated": list[str],   # channel_ids skipped this iteration by the buffer gate
+          "buffer_states": {channel_id: {"action": ..., "buffer_count": ..., "reason": ...}}
         }
     """
     from hypogeum.channel_config import list_channel_profiles
     from hypogeum.topic_discovery import run_discovery_cycle, approve_candidate
     from hypogeum.db import get_connection
+    from hypogeum.buffer import compute_buffer_state, gather_buffer_candidates
+
+    effective_assets_root = Path(assets_root) if assets_root is not None else Path(db_path).parent
 
     result: dict = {
         "channels_checked": 0,
         "channels_refilled": 0,
         "cycles_run": [],
         "topics_enqueued": [],
+        "buffer_gated": [],
+        "buffer_states": {},
     }
 
     try:
@@ -229,6 +249,37 @@ def _check_and_refill_queue(
     for ch in channels:
         channel_id = ch.channel_id
         result["channels_checked"] += 1
+
+        # ── One-episode buffer gate (Step 0 discovery-refill gate ONLY —
+        # tick()/consume_scheduled_runs()/poll() below are never touched by
+        # this) ──────────────────────────────────────────────────────────
+        try:
+            candidates = gather_buffer_candidates(
+                channel_id, db_path=db_path, assets_root=effective_assets_root,
+            )
+            buffer_state = compute_buffer_state(channel_id, candidates)
+            result["buffer_states"][channel_id] = {
+                "action": buffer_state.action,
+                "buffer_count": buffer_state.buffer_count,
+                "reason": buffer_state.reason,
+            }
+        except Exception as exc:
+            # Fail closed, matching this codebase's pervasive ambiguity
+            # policy (production_output_gate.py, the Zernio adapter, media
+            # staging): an unknown buffer state must never be treated as
+            # "buffer empty, safe to enqueue more work".
+            log.error("buffer_gate_error channel=%s error=%s — gating discovery (fail closed)", channel_id, exc)
+            result["buffer_gated"].append(channel_id)
+            result["buffer_states"][channel_id] = {"action": "error", "buffer_count": None, "reason": str(exc)}
+            continue
+
+        if buffer_state.action != "enqueue":
+            result["buffer_gated"].append(channel_id)
+            log.info(
+                "discovery_buffer_gated channel=%s action=%s buffer_count=%d reason=%s",
+                channel_id, buffer_state.action, buffer_state.buffer_count, buffer_state.reason,
+            )
+            continue
 
         # ── Queue depth check ─────────────────────────────────────────────
         try:

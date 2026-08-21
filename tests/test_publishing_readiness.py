@@ -1,9 +1,12 @@
 """
 tests/test_publishing_readiness.py — Publish-Readiness Check.
 
-Covers hypogeum.publishing.readiness.check_publish_readiness(): every
+Covers hypogeum.publishing.readiness.check_publish_readiness(): the
+mandatory CHANNEL_SCOPE check (required channel_id, no default, no global
+fallback, short-circuits every other check on failure so no cross-channel
+metadata/render/binding/staging evidence is ever returned), every other
 blocking reason (A_METADATA missing/conflicting/resolved-by-override,
-B_LONG_RENDER, C_SHORTS_RENDERS, D_PUBLISHING_BINDING, E_MEDIA_STAGING_READY)
+B_LONG_RENDER, C_SHORTS_RENDERS, D_PUBLISHING_BINDING, E_MEDIA_STAGING_READY),
 and the full-pass case. All state is built under tmp_path (fake episode
 assets dir) and an isolated tmp_path SQLite database — never the production
 .hypogeum-assets tree. No network, no real Zernio call.
@@ -16,7 +19,7 @@ import json
 import pytest
 
 from hypogeum.credential_manager import create_secret_profile
-from hypogeum.db import get_connection, initialize_schema, insert_episode
+from hypogeum.db import get_connection, initialize_schema, insert_episode, insert_episode_topic
 from hypogeum.publishing.provider_repository import (
     bind_channel_provider,
     upsert_provider_account,
@@ -25,6 +28,7 @@ from hypogeum.publishing.provider_repository import (
 from hypogeum.publishing.readiness import MetadataOverride, check_publish_readiness
 
 EPISODE_ID = "ep_test01"
+CHANNEL_ID = "channel_a"
 
 
 @pytest.fixture()
@@ -44,6 +48,21 @@ def assets_root(tmp_path):
 @pytest.fixture()
 def episode_dir(assets_root):
     return assets_root / "episodes" / EPISODE_ID
+
+
+def _attribute_to_channel(db_path, episode_id=EPISODE_ID, channel_id=CHANNEL_ID):
+    """Seed the episode_topics row that attributes episode_id to
+    channel_id — the only real channel-attribution mechanism the current
+    schema supports (see readiness.py's CHANNEL_SCOPE check)."""
+    conn = get_connection(db_path)
+    try:
+        insert_episode_topic(
+            conn, topic_id=f"topic_{episode_id}", channel_id=channel_id, topic_text="A topic",
+            created_at="2026-01-01T00:00:00+00:00", updated_at="2026-01-01T00:00:00+00:00", episode_id=episode_id,
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _write_render_package(episode_dir, *, metadata_source=None, shorts_renders=None):
@@ -67,7 +86,9 @@ def _write_short_render(episode_dir, index, size=512):
     (episode_dir / f"short_{index}_{EPISODE_ID}.mp4").write_bytes(b"x" * size)
 
 
-def _make_fully_ready(episode_dir, db_path, *, n_shorts=2, platforms=(), channel_id=None):
+def _make_fully_ready(episode_dir, db_path, *, n_shorts=2, platforms=(), channel_id=CHANNEL_ID, attribute=True):
+    if attribute:
+        _attribute_to_channel(db_path, channel_id=channel_id)
     _write_render_package(
         episode_dir,
         metadata_source={
@@ -84,7 +105,7 @@ def _make_fully_ready(episode_dir, db_path, *, n_shorts=2, platforms=(), channel
         provider="zernio", label="test key", credential_type="api_key",
         credential_data="sk_test_never_real", scope="factory", db_path=db_path,
     )
-    if platforms and channel_id:
+    if platforms:
         profile = upsert_provider_profile(db_path, provider_id="zernio", external_profile_id="prof_1")
         account = upsert_provider_account(
             db_path, provider_id="zernio", platform=platforms[0], external_account_id="acct_1",
@@ -97,37 +118,77 @@ def _make_fully_ready(episode_dir, db_path, *, n_shorts=2, platforms=(), channel
         )
 
 
+class TestChannelScopeBlocking:
+    def test_missing_channel_id_blocks_and_reads_nothing_else(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id="", assets_root=episode_dir.parent.parent, db_path=db_path)
+        assert result.passed is False
+        assert [c.capability for c in result.checks] == ["CHANNEL_SCOPE"]
+        assert "channel_id is required" in result.checks[0].reason
+
+    def test_no_attributing_row_blocks_and_reads_nothing_else(self, episode_dir, db_path):
+        # No _attribute_to_channel() call -- episode_topics has no row at all.
+        _write_render_package(episode_dir)
+        _write_main_render(episode_dir)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        assert result.passed is False
+        assert [c.capability for c in result.checks] == ["CHANNEL_SCOPE"]
+        assert "no episode_topics row attributes" in result.checks[0].reason
+
+    def test_mismatched_channel_id_blocks_and_never_exposes_real_metadata(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, channel_id="channel_a")
+        result = check_publish_readiness(
+            EPISODE_ID, channel_id="channel_b", assets_root=episode_dir.parent.parent, db_path=db_path,
+        )
+        assert result.passed is False
+        assert [c.capability for c in result.checks] == ["CHANNEL_SCOPE"]
+        scope_check = result.checks[0]
+        assert "channel_a" in scope_check.evidence["attributed_channel_ids"]
+        assert scope_check.evidence["asserted_channel_id"] == "channel_b"
+        # The real episode's title ("The Real Title") must never appear
+        # anywhere in a result evaluated under the wrong channel_id.
+        assert "The Real Title" not in json.dumps(result.to_dict())
+
+    def test_correct_channel_id_proceeds_to_every_other_check(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, channel_id=CHANNEL_ID)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        assert "CHANNEL_SCOPE" in {c.capability for c in result.checks}
+        assert len(result.checks) > 1
+
+
 class TestFullPass:
     def test_all_checks_pass(self, episode_dir, db_path):
-        _make_fully_ready(episode_dir, db_path, n_shorts=2, platforms=("youtube",), channel_id="hypogeum")
+        _make_fully_ready(episode_dir, db_path, n_shorts=2, platforms=("youtube",), channel_id=CHANNEL_ID)
         result = check_publish_readiness(
             EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path,
-            channel_id="hypogeum", platforms=("youtube",),
+            channel_id=CHANNEL_ID, platforms=("youtube",),
         )
         assert result.passed is True
         assert {c.capability for c in result.checks} == {
-            "A_METADATA", "B_LONG_RENDER", "C_SHORTS_RENDERS", "D_PUBLISHING_BINDING", "E_MEDIA_STAGING_READY",
+            "CHANNEL_SCOPE", "A_METADATA", "B_LONG_RENDER", "C_SHORTS_RENDERS", "D_PUBLISHING_BINDING", "E_MEDIA_STAGING_READY",
         }
         assert all(c.status == "pass" for c in result.checks)
 
     def test_no_shorts_episode_passes_shorts_check(self, episode_dir, db_path):
         _make_fully_ready(episode_dir, db_path, n_shorts=0)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         shorts_check = next(c for c in result.checks if c.capability == "C_SHORTS_RENDERS")
         assert shorts_check.status == "pass"
 
 
 class TestMetadataBlocking:
     def test_missing_title_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir, metadata_source={"episode_title": "", "description": "d", "shorts_titles": []})
         _write_main_render(episode_dir)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "fail"
         assert "no title candidate" in meta.reason
         assert result.passed is False
 
     def test_conflicting_title_candidates_block_and_never_auto_select(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir, metadata_source={"episode_title": "", "description": "d", "shorts_titles": []})
         (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
             json.dumps({"episode_title": "Candidate A"}), encoding="utf-8",
@@ -140,7 +201,7 @@ class TestMetadataBlocking:
             conn.close()
         _write_main_render(episode_dir)
 
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "fail"
         assert "conflicting title candidates" in meta.reason
@@ -149,6 +210,7 @@ class TestMetadataBlocking:
         assert result.passed is False
 
     def test_metadata_override_resolves_title_without_choosing_one_itself(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir, metadata_source={"episode_title": "", "description": "d", "shorts_titles": []})
         (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
             json.dumps({"episode_title": "Candidate A"}), encoding="utf-8",
@@ -163,7 +225,7 @@ class TestMetadataBlocking:
 
         override = MetadataOverride(title="Operator-Confirmed Title")
         result = check_publish_readiness(
-            EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path, metadata_override=override,
+            EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, metadata_override=override,
         )
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "pass"
@@ -179,21 +241,23 @@ class TestMetadataBlocking:
         assert row["topic"] == "Candidate B"
 
     def test_missing_description_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir, metadata_source={"episode_title": "T", "description": "", "shorts_titles": []})
         _write_main_render(episode_dir)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "fail"
         assert "description" in meta.reason
 
     def test_incomplete_shorts_titles_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(
             episode_dir,
             metadata_source={"episode_title": "T", "description": "d", "shorts_titles": ["only one"]},
             shorts_renders=[{"short_id": "sh_0"}, {"short_id": "sh_1"}],
         )
         _write_main_render(episode_dir)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "fail"
         assert "shorts_titles" in meta.reason
@@ -201,21 +265,24 @@ class TestMetadataBlocking:
 
 class TestRenderAvailabilityBlocking:
     def test_missing_main_render_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         long_render = next(c for c in result.checks if c.capability == "B_LONG_RENDER")
         assert long_render.status == "fail"
         assert result.passed is False
 
     def test_empty_main_render_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir)
         _write_main_render(episode_dir, size=0)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         long_render = next(c for c in result.checks if c.capability == "B_LONG_RENDER")
         assert long_render.status == "fail"
         assert "empty" in long_render.reason
 
     def test_missing_short_render_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(
             episode_dir,
             metadata_source={"episode_title": "T", "description": "d", "shorts_titles": ["a", "b"]},
@@ -224,7 +291,7 @@ class TestRenderAvailabilityBlocking:
         _write_main_render(episode_dir)
         _write_short_render(episode_dir, 0)
         # short index 1 deliberately missing.
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         shorts_check = next(c for c in result.checks if c.capability == "C_SHORTS_RENDERS")
         assert shorts_check.status == "fail"
         assert "1/2" in shorts_check.reason
@@ -235,6 +302,7 @@ class TestRenderAvailabilityBlocking:
         video_asset_id placeholders (the exact real shape found in
         production, per the prior readiness audit) — physical files DO
         exist so C passes, but A must still block."""
+        _attribute_to_channel(db_path)
         _write_render_package(
             episode_dir,
             metadata_source={"episode_title": "", "logline": "", "description": "", "shorts_titles": [], "sources": []},
@@ -248,7 +316,7 @@ class TestRenderAvailabilityBlocking:
         for i in range(3):
             _write_short_render(episode_dir, i)
 
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         by_cap = {c.capability: c for c in result.checks}
         assert by_cap["A_METADATA"].status == "fail"
         assert by_cap["B_LONG_RENDER"].status == "pass"
@@ -259,7 +327,7 @@ class TestRenderAvailabilityBlocking:
 class TestBindingBlocking:
     def test_no_platforms_requested_passes_trivially(self, episode_dir, db_path):
         _make_fully_ready(episode_dir, db_path, n_shorts=0)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=())
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=())
         binding = next(c for c in result.checks if c.capability == "D_PUBLISHING_BINDING")
         assert binding.status == "pass"
 
@@ -267,16 +335,28 @@ class TestBindingBlocking:
         _make_fully_ready(episode_dir, db_path, n_shorts=0)
         result = check_publish_readiness(
             EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path,
-            channel_id="hypogeum", platforms=("youtube",),
+            channel_id=CHANNEL_ID, platforms=("youtube",),
         )
         binding = next(c for c in result.checks if c.capability == "D_PUBLISHING_BINDING")
         assert binding.status == "fail"
         assert result.passed is False
 
-    def test_missing_channel_id_blocks_when_platforms_requested(self, episode_dir, db_path):
-        _make_fully_ready(episode_dir, db_path, n_shorts=0)
+    def test_binding_for_a_different_channel_does_not_satisfy_this_one(self, episode_dir, db_path):
+        # Bind 'youtube' for channel_b, but evaluate readiness for channel_a
+        # (this episode's own real channel) -- must still fail.
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, channel_id=CHANNEL_ID)
+        profile = upsert_provider_profile(db_path, provider_id="zernio", external_profile_id="prof_2")
+        account = upsert_provider_account(
+            db_path, provider_id="zernio", platform="youtube", external_account_id="acct_2",
+            provider_profile_id=profile["provider_profile_id"],
+        )
+        bind_channel_provider(
+            db_path, channel_id="channel_b", capability="publishing", platform="youtube",
+            provider_id="zernio", provider_profile_id=profile["provider_profile_id"],
+            provider_account_id=account["provider_account_id"],
+        )
         result = check_publish_readiness(
-            EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",),
+            EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",),
         )
         binding = next(c for c in result.checks if c.capability == "D_PUBLISHING_BINDING")
         assert binding.status == "fail"
@@ -284,21 +364,23 @@ class TestBindingBlocking:
 
 class TestMediaStagingReadyBlocking:
     def test_no_credential_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir)
         _write_main_render(episode_dir)
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         staging = next(c for c in result.checks if c.capability == "E_MEDIA_STAGING_READY")
         assert staging.status == "fail"
         assert "credential" in staging.reason.lower()
         assert result.passed is False
 
     def test_credential_present_but_deliverable_empty_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
         _write_render_package(episode_dir)
         _write_main_render(episode_dir, size=0)
         create_secret_profile(
             provider="zernio", label="k", credential_type="api_key",
             credential_data="sk_test", scope="factory", db_path=db_path,
         )
-        result = check_publish_readiness(EPISODE_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         staging = next(c for c in result.checks if c.capability == "E_MEDIA_STAGING_READY")
         assert staging.status == "fail"

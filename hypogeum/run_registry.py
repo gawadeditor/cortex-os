@@ -844,7 +844,25 @@ def _sync_episode_row(
     # affect the run's own completion, already recorded above.
     try:
         from hypogeum.topics import reconcile_stale_topics_for_episode
-        reconcile_stale_topics_for_episode(episode_id, db_path=db_path, dry_run=False)
+
+        # channel_id is now required (mandatory Factory isolation
+        # invariant) -- resolve it from episode_topics the same way the
+        # topic lookup above already does. If it cannot be resolved
+        # unambiguously (no attributing row, or rows disagreeing on
+        # channel_id), skip the call entirely rather than guessing; this
+        # is best-effort cleanup, never worth a wrong-channel mutation.
+        conn = get_connection(_db_path(db_path))
+        try:
+            channel_rows = conn.execute(
+                "SELECT DISTINCT channel_id FROM episode_topics WHERE episode_id = ?", (episode_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        channel_ids = {r["channel_id"] for r in channel_rows}
+        if len(channel_ids) == 1:
+            reconcile_stale_topics_for_episode(
+                episode_id, next(iter(channel_ids)), db_path=db_path, dry_run=False,
+            )
     except Exception:
         pass
 

@@ -49,8 +49,9 @@ Public API:
                                  db_path=None)            -> bool
     set_topic_episode_id(topic_id, episode_id,
                           db_path=None)                  -> bool
-    reconcile_stale_topics_for_episode(episode_id, db_path=None,
-                                        dry_run=True)     -> TopicReconciliationResult
+    reconcile_stale_topics_for_episode(episode_id, channel_id,
+                                        db_path=None, dry_run=True)
+                                                           -> TopicReconciliationResult
 
 Exceptions:
     DuplicateTopicError — raised when a queued/claimed topic with the same
@@ -718,17 +719,30 @@ class TopicReconciliationResult:
 
 def reconcile_stale_topics_for_episode(
     episode_id: str,
+    channel_id: str,
     db_path: Optional[Path] = None,
     dry_run: bool = True,
 ) -> TopicReconciliationResult:
     """
-    Idempotent, scoped-to-one-episode closure of obsolete queued
-    episode_topics rows, once episodes.status='complete' for that episode —
-    the terminal state confirming no further retry of THIS episode_id is
-    ever needed again. Never touches 'claimed' rows (those are owned by an
-    active worker — same boundary cancel_queued_topics_for_episode() in
-    hypogeum.db already respects) and never touches any other episode_id's
-    rows.
+    Idempotent, scoped-to-one-(channel_id, episode_id) closure of obsolete
+    queued episode_topics rows, once episodes.status='complete' for that
+    episode — the terminal state confirming no further retry of THIS
+    episode_id is ever needed again. Never touches 'claimed' rows (those
+    are owned by an active worker — same boundary
+    cancel_queued_topics_for_episode() in hypogeum.db already respects) and
+    never touches any other episode_id's rows.
+
+    channel_id is required — no default, no global fallback (mandatory
+    Factory isolation invariant). Every SELECT/UPDATE this function issues
+    filters on BOTH episode_id AND channel_id — a caller that asserts the
+    wrong channel_id for a real episode simply finds zero matching rows
+    (SQL WHERE-clause enforcement, not a post-hoc check) and reconciles
+    nothing; reconciliation for one channel can never mutate another
+    channel's rows, even under an operator mistake. If episode_topics rows
+    for this episode_id exist under a DIFFERENT channel_id than asserted,
+    that mismatch is reported explicitly (eligible=False) rather than
+    silently folded into "nothing to reconcile", to keep the caller's
+    mistake visible.
 
     Two callers:
       - An operator, explicitly, with dry_run=True first (preview) then
@@ -740,10 +754,14 @@ def reconcile_stale_topics_for_episode(
         — the root-cause fix so this staleness never recurs for any
         episode completed from this point forward. Best-effort there
         (wrapped in try/except); never allowed to affect run completion.
+        Skips the call entirely (rather than guessing) if channel_id
+        cannot be resolved unambiguously — see that function's own code.
 
     Args:
         episode_id: Exactly one episode to reconcile. No broad/multi-episode
                     cleanup is performed by this function.
+        channel_id: The channel this episode is asserted to belong to.
+                    Required — see above.
         db_path:    Override DB path (for tests / isolated reconciliation DBs).
         dry_run:    True (default) previews without mutating. False applies.
 
@@ -756,6 +774,14 @@ def reconcile_stale_topics_for_episode(
         conn.isolation_level = None
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if not channel_id:
+                conn.rollback()
+                return TopicReconciliationResult(
+                    episode_id=episode_id, dry_run=dry_run, eligible=False,
+                    episode_status=None,
+                    reason="channel_id is required and was not supplied — channel scope cannot be proven",
+                )
+
             ep_row = conn.execute(
                 "SELECT status FROM episodes WHERE episode_id = ?", (episode_id,),
             ).fetchone()
@@ -772,13 +798,29 @@ def reconcile_stale_topics_for_episode(
                     ),
                 )
 
+            attributed_rows = conn.execute(
+                "SELECT DISTINCT channel_id FROM episode_topics WHERE episode_id = ?", (episode_id,),
+            ).fetchall()
+            attributed_channel_ids = {r["channel_id"] for r in attributed_rows}
+            if attributed_channel_ids and attributed_channel_ids != {channel_id}:
+                conn.rollback()
+                return TopicReconciliationResult(
+                    episode_id=episode_id, dry_run=dry_run, eligible=False,
+                    episode_status=episode_status,
+                    reason=(
+                        f"episode_id {episode_id!r} episode_topics rows are attributed to "
+                        f"channel(s) {sorted(attributed_channel_ids)}, not the asserted "
+                        f"channel_id={channel_id!r} — refusing to reconcile under the wrong channel"
+                    ),
+                )
+
             candidates = conn.execute(
                 """
                 SELECT topic_id, source, priority, created_at FROM episode_topics
-                WHERE episode_id = ? AND status = 'queued'
+                WHERE episode_id = ? AND channel_id = ? AND status = 'queued'
                 ORDER BY created_at ASC
                 """,
-                (episode_id,),
+                (episode_id, channel_id),
             ).fetchall()
             rows = [
                 TopicReconciliationRow(
@@ -812,9 +854,9 @@ def reconcile_stale_topics_for_episode(
                     """
                     UPDATE episode_topics
                     SET status = 'cancelled', reason = ?, updated_at = ?
-                    WHERE topic_id = ? AND status = 'queued'
+                    WHERE topic_id = ? AND episode_id = ? AND channel_id = ? AND status = 'queued'
                     """,
-                    (_RECONCILIATION_REASON, now, row.topic_id),
+                    (_RECONCILIATION_REASON, now, row.topic_id, episode_id, channel_id),
                 )
                 applied += cursor.rowcount
             conn.commit()

@@ -33,6 +33,7 @@ from hypogeum.publishing.zernio_media_staging import (
     ZernioMediaStagingProvider,
 )
 from hypogeum.publishing.zernio_publish_runtime import (
+    ChannelScopeMismatchError,
     DeliverableFile,
     DeliverableSchedule,
     InvalidSchedulePlanError,
@@ -43,6 +44,7 @@ from hypogeum.publishing.zernio_publish_runtime import (
 )
 
 EPISODE_ID = "ep_runtime01"
+CHANNEL_ID = "hypogeum"
 
 
 @pytest.fixture()
@@ -61,17 +63,21 @@ def main_file(tmp_path):
 
 @pytest.fixture()
 def short_files(tmp_path):
+    # Three related Shorts, matching Channel A's declared bundle shape
+    # (one long-form + three Shorts) used throughout this test module.
     paths = []
-    for i in range(2):
+    for i in range(3):
         p = tmp_path / f"short_{i}_{EPISODE_ID}.mp4"
         p.write_bytes(f"short {i} bytes".encode() * 500)
         paths.append(p)
     return paths
 
 
-def _package(main_file, short_files):
+def _package(main_file, short_files, *, channel_id=CHANNEL_ID, bundle_id="main_episode_bundle"):
     return PublishPackage(
+        channel_id=channel_id,
         episode_id=EPISODE_ID,
+        bundle_id=bundle_id,
         main_episode=DeliverableFile(
             deliverable_id="main_episode", local_path=main_file, mime_type="video/mp4",
             media_type="video", filename=main_file.name,
@@ -90,11 +96,12 @@ def _future(days=1):
     return datetime.now(timezone.utc) + timedelta(days=days)
 
 
-def _full_schedule_plan(*, publish_now=True):
-    return SchedulePlan(entries={
+def _full_schedule_plan(*, publish_now=True, channel_id=CHANNEL_ID):
+    return SchedulePlan(channel_id=channel_id, entries={
         "main_episode": DeliverableSchedule(publish_now=publish_now),
         "short_0": DeliverableSchedule(publish_now=publish_now),
         "short_1": DeliverableSchedule(publish_now=publish_now),
+        "short_2": DeliverableSchedule(publish_now=publish_now),
     })
 
 
@@ -176,10 +183,10 @@ class TestFullChain:
 
         assert result.blocked is False
         assert result.all_published is True
-        assert len(result.deliverables) == 3
-        assert {d.deliverable_id for d in result.deliverables} == {"main_episode", "short_0", "short_1"}
-        assert len(media_transport.presign_calls) == 3
-        assert len(publish_transport.post_calls) == 3
+        assert len(result.deliverables) == 4
+        assert {d.deliverable_id for d in result.deliverables} == {"main_episode", "short_0", "short_1", "short_2"}
+        assert len(media_transport.presign_calls) == 4
+        assert len(publish_transport.post_calls) == 4
 
     def test_idempotent_second_call_reuses_staging_and_ledger(self, db_path, main_file, short_files):
         _setup_binding_and_credential(db_path)
@@ -198,8 +205,8 @@ class TestFullChain:
         assert first.all_published is True
         assert second.all_published is True
         # Reused, not re-uploaded/re-posted.
-        assert len(media_transport.presign_calls) == 3
-        assert len(publish_transport.post_calls) == 3
+        assert len(media_transport.presign_calls) == 4
+        assert len(publish_transport.post_calls) == 4
 
 
 class TestSchedulePlanGating:
@@ -225,7 +232,7 @@ class TestSchedulePlanGating:
         _setup_binding_and_credential(db_path)
         media_transport = FakeMediaTransport()
         publish_transport = FakePublishTransport()
-        incomplete_plan = SchedulePlan(entries={"main_episode": DeliverableSchedule(publish_now=True)})
+        incomplete_plan = SchedulePlan(channel_id=CHANNEL_ID, entries={"main_episode": DeliverableSchedule(publish_now=True)})
 
         result = publish_episode_package(
             _package(main_file, short_files), platform="youtube", channel_id="hypogeum", db_path=db_path,
@@ -235,7 +242,7 @@ class TestSchedulePlanGating:
         )
 
         assert result.blocked is True
-        assert "short_0" in result.blocked_reason and "short_1" in result.blocked_reason
+        assert "short_0" in result.blocked_reason and "short_1" in result.blocked_reason and "short_2" in result.blocked_reason
         assert media_transport.presign_calls == []
         assert publish_transport.post_calls == []
 
@@ -246,6 +253,101 @@ class TestSchedulePlanGating:
         )
         assert result.blocked is True
         assert isinstance(result.blocked_reason, str)
+
+
+class TestChannelIsolation:
+    """PublishPackage.channel_id and SchedulePlan.channel_id are both
+    required and both checked against publish_episode_package()'s own
+    channel_id argument before any staging/publish call — see
+    ChannelScopeMismatchError. Provider-binding isolation itself is
+    proven by resolve_active_binding()'s pre-existing channel_id-scoped
+    lookup (ADR-013, unchanged by this slice)."""
+
+    def test_package_built_for_a_different_channel_blocks_before_any_call(self, db_path, main_file, short_files):
+        _setup_binding_and_credential(db_path, channel_id="channel_a")
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        package = _package(main_file, short_files, channel_id="channel_b")  # package says channel_b...
+        result = publish_episode_package(
+            package, platform="youtube", channel_id="channel_a",  # ...call asserts channel_a
+            db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_a"),
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+        )
+
+        assert result.blocked is True
+        assert "PublishPackage.channel_id" in result.blocked_reason
+        assert media_transport.presign_calls == []
+        assert publish_transport.post_calls == []
+
+    def test_schedule_plan_built_for_a_different_channel_blocks_before_any_call(self, db_path, main_file, short_files):
+        _setup_binding_and_credential(db_path, channel_id="channel_a")
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        package = _package(main_file, short_files, channel_id="channel_a")
+        result = publish_episode_package(
+            package, platform="youtube", channel_id="channel_a",
+            db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_b"),  # wrong channel's schedule
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+        )
+
+        assert result.blocked is True
+        assert "SchedulePlan.channel_id" in result.blocked_reason
+        assert media_transport.presign_calls == []
+        assert publish_transport.post_calls == []
+
+    def test_channel_b_cannot_use_channel_as_provider_binding(self, db_path, main_file, short_files):
+        # Binding exists ONLY for channel_a.
+        _setup_binding_and_credential(db_path, channel_id="channel_a")
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        package = _package(main_file, short_files, channel_id="channel_b")
+        result = publish_episode_package(
+            package, platform="youtube", channel_id="channel_b",
+            db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_b"),
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+        )
+
+        # Not blocked at the schedule-plan gate (everything internally
+        # consistent for channel_b) -- fails downstream, per-deliverable,
+        # at binding resolution instead. Either way, channel_b's request
+        # must never succeed using channel_a's binding, and no publish
+        # transport call is ever made (binding resolution happens before
+        # the transport call inside ZernioProvider.publish()).
+        assert result.blocked is False
+        assert all(d.status == "blocked" for d in result.deliverables)
+        assert publish_transport.post_calls == []
+
+    def test_each_channel_publishes_correctly_with_its_own_binding(self, db_path, main_file, short_files):
+        _setup_binding_and_credential(db_path, channel_id="channel_a")
+        _setup_binding_and_credential(db_path, channel_id="channel_b")
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+        staging = ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport)
+        publisher = ZernioProvider(transport=publish_transport)
+
+        result_a = publish_episode_package(
+            _package(main_file, short_files, channel_id="channel_a"), platform="youtube", channel_id="channel_a",
+            db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_a"),
+            media_staging_provider=staging, publishing_provider=publisher,
+        )
+        assert result_a.all_published is True
+
+        # A different episode's short files for channel_b (main_file/
+        # short_files are reused as bytes-identical local files here only
+        # because sha256/staging dedup is scoped by episode_id/deliverable_id/
+        # provider, not by file identity; channel_id flows through separately).
+        result_b = publish_episode_package(
+            _package(main_file, short_files, channel_id="channel_b"), platform="youtube", channel_id="channel_b",
+            db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_b"),
+            media_staging_provider=staging, publishing_provider=publisher,
+        )
+        assert result_b.all_published is True
 
 
 class TestNoLiveCallsOrProductionMutation:

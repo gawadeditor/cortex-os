@@ -21,7 +21,19 @@ metadata gap; this module never invents one on its own.
 
 Checks (each recorded as a GateCheckResult — capability/status/reason/
 evidence, never silent):
-    A_METADATA            — title (conflict-checked across
+    CHANNEL_SCOPE          — channel_id is required (no implicit/global
+                             fallback) and must be the ONE channel
+                             episode_topics actually attributes episode_id
+                             to. Missing, ambiguous (no attributing row, or
+                             rows disagreeing on channel_id), or mismatched
+                             scope fails closed and SHORT-CIRCUITS every
+                             other check — no metadata, render, binding, or
+                             staging evidence for this episode_id is ever
+                             read or returned under the wrong channel_id, so
+                             a caller asserting the wrong channel can never
+                             observe another channel's episode data through
+                             this function.
+    A_METADATA             — title (conflict-checked across
                              metadata_source.episode_title / topic_brief /
                              episodes.topic, unless overridden), description,
                              shorts_titles.
@@ -43,10 +55,13 @@ evidence, never silent):
 
 Public API:
     MetadataOverride, GateCheckResult, ReadinessCheckResult
-    check_publish_readiness(episode_id, *, assets_root, db_path=None,
-                             channel_id=None, platforms=(), logical_alias="default",
+    check_publish_readiness(episode_id, *, channel_id, assets_root,
+                             db_path=None, platforms=(), logical_alias="default",
                              provider_id="zernio", metadata_override=None)
         -> ReadinessCheckResult
+        channel_id is a required keyword argument — there is no default
+        and no global fallback; every call must state which channel it is
+        evaluating readiness for.
 """
 
 from __future__ import annotations
@@ -121,6 +136,65 @@ def _load_json(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# CHANNEL SCOPE — mandatory Factory isolation invariant, evaluated first
+# ---------------------------------------------------------------------------
+
+def _check_channel_scope(episode_id: str, channel_id: Optional[str], db_path: Optional[Path]) -> GateCheckResult:
+    """
+    channel_id is a required argument with no default and no global
+    fallback (see module docstring). This check additionally proves the
+    caller's asserted channel_id actually matches the ONE channel
+    episode_topics attributes episode_id to — episode_topics.channel_id is
+    the only real, existing attribution of an episode to a channel
+    (episodes itself has no channel_id column; hypogeum.run_registry.
+    _sync_episode_row() uses the same join). Missing, ambiguous, or
+    mismatched scope fails closed; never repaired with a default or a
+    guess.
+    """
+    if not channel_id:
+        return GateCheckResult(
+            capability="CHANNEL_SCOPE", status="fail",
+            reason="channel_id is required and was not supplied — channel scope cannot be proven",
+            remediation="Supply the explicit channel_id this readiness check is being evaluated for.",
+        )
+
+    from hypogeum.db import get_connection, initialize_schema  # noqa: PLC0415
+
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT channel_id FROM episode_topics WHERE episode_id = ?", (episode_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    attributed = {r["channel_id"] for r in rows}
+
+    if not attributed:
+        return GateCheckResult(
+            capability="CHANNEL_SCOPE", status="fail",
+            reason=f"no episode_topics row attributes episode_id={episode_id!r} to any channel — channel scope cannot be proven",
+            evidence={"asserted_channel_id": channel_id},
+            remediation="Verify episode_id is correct and has at least one episode_topics row.",
+        )
+    if attributed != {channel_id}:
+        return GateCheckResult(
+            capability="CHANNEL_SCOPE", status="fail",
+            reason=(
+                f"episode_id={episode_id!r} is attributed to channel(s) {sorted(attributed)}, "
+                f"not the asserted channel_id={channel_id!r}"
+            ),
+            evidence={"asserted_channel_id": channel_id, "attributed_channel_ids": sorted(attributed)},
+            remediation="This episode does not belong to the asserted channel — do not proceed under this channel_id.",
+        )
+    return GateCheckResult(
+        capability="CHANNEL_SCOPE", status="pass",
+        reason=f"episode_id={episode_id!r} confirmed attributed to channel_id={channel_id!r}",
+        evidence={"channel_id": channel_id},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +459,9 @@ def _check_media_staging_ready(
 def check_publish_readiness(
     episode_id: str,
     *,
+    channel_id: str,
     assets_root: Path,
     db_path: Optional[Path] = None,
-    channel_id: Optional[str] = None,
     platforms: Sequence[str] = (),
     logical_alias: str = "default",
     provider_id: str = "zernio",
@@ -396,16 +470,34 @@ def check_publish_readiness(
     """
     Read-only, deterministic. Never mutates any file or database row.
 
-    Loads final_render_package_{episode_id}.json (and, for the title check
-    only, topic_brief_{episode_id}.json and episodes.topic) from disk/DB and
-    runs all five checks above. A missing package file is not itself fatal
-    to every check — each check evaluates what it can from an empty dict/
-    missing file and reports its own explicit failure reason.
+    channel_id is required — there is no default and no global fallback
+    (see module docstring and mandatory Factory isolation invariant). The
+    CHANNEL_SCOPE check runs first and, on any failure (missing,
+    ambiguous, or mismatched scope), SHORT-CIRCUITS: no other check runs,
+    and no metadata/render/binding/staging evidence for episode_id is ever
+    read or included in the result — a caller asserting the wrong
+    channel_id can never observe another channel's episode data through
+    this function, not even in a failed check's evidence.
+
+    Once channel scope is proven, loads final_render_package_{episode_id}.json
+    (and, for the title check only, topic_brief_{episode_id}.json and
+    episodes.topic) from disk/DB and runs the remaining five checks. A
+    missing package file is not itself fatal to every check — each check
+    evaluates what it can from an empty dict/missing file and reports its
+    own explicit failure reason.
     """
+    scope_check = _check_channel_scope(episode_id, channel_id, db_path)
+    if scope_check.status != "pass":
+        return ReadinessCheckResult(
+            passed=False, episode_id=episode_id, evaluated_at=_now_iso(),
+            checks=[scope_check], metadata_override_applied=metadata_override is not None,
+        )
+
     episode_dir = Path(assets_root) / "episodes" / episode_id
     final_render_package = _load_json(episode_dir / f"final_render_package_{episode_id}.json")
 
     checks = [
+        scope_check,
         _check_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package),
         _check_long_render(episode_id, episode_dir),
         _check_shorts_renders(episode_id, episode_dir, final_render_package),

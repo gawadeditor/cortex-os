@@ -21,9 +21,21 @@ Per-datetime validity (future, timezone-aware, non-contradictory
 publish_now/is_draft) is enforced by ZernioProvider.publish() itself — not
 re-implemented here, per the "use existing provider abstractions" contract.
 
+Mandatory Factory isolation invariant: PublishPackage.channel_id and
+SchedulePlan.channel_id are both REQUIRED and are both checked against the
+`channel_id` argument passed to publish_episode_package() BEFORE any
+staging or publish call — a package assembled for one channel, or a
+schedule built for one channel, can never be silently published under a
+different channel_id (ChannelScopeMismatchError, reported via
+PublishPackageResult.blocked/.blocked_reason like every other pre-flight
+gate in this module). Provider-binding isolation itself is enforced
+downstream, unchanged, by hypogeum.publishing.provider_repository.
+resolve_active_binding()'s existing channel_id-scoped lookup (ADR-013 —
+not re-implemented here).
+
 Public API:
     DeliverableSchedule, SchedulePlan
-    MissingSchedulePlanError, InvalidSchedulePlanError
+    MissingSchedulePlanError, InvalidSchedulePlanError, ChannelScopeMismatchError
     DeliverableFile, PublishPackage
     DeliverablePublishOutcome, PublishPackageResult
     publish_episode_package(package, *, platform, channel_id, db_path=None,
@@ -67,6 +79,16 @@ class InvalidSchedulePlanError(ZernioPublishRuntimeError):
     the package, or is not a SchedulePlan instance."""
 
 
+class ChannelScopeMismatchError(ZernioPublishRuntimeError):
+    """
+    PublishPackage.channel_id or SchedulePlan.channel_id does not match the
+    channel_id this publish_episode_package() call is asserting — the
+    mandatory Factory isolation invariant this module enforces before any
+    staging or publish call. A package or schedule built for one channel
+    can never be silently used to publish under a different channel_id.
+    """
+
+
 @dataclass(frozen=True)
 class DeliverableSchedule:
     """One deliverable's resolved publish timing — passed straight through
@@ -85,7 +107,14 @@ class SchedulePlan:
     PublishPackage. Must be built by the caller from a resolved editorial
     calendar (a human decision) — this module never computes an offset,
     per-platform lead time, or default timing on the caller's behalf.
+
+    channel_id is required: a Channel Package's own publishing schedule
+    and timezone are declared per-channel (see module docstring's Factory
+    isolation invariant); a SchedulePlan is only ever valid for the one
+    channel it was built for, checked by publish_episode_package() before
+    any staging or publish call.
     """
+    channel_id: str
     entries: Dict[str, DeliverableSchedule] = field(default_factory=dict)
 
     def get(self, deliverable_id: str) -> Optional[DeliverableSchedule]:
@@ -111,6 +140,26 @@ def _validate_schedule_plan_covers(schedule_plan, expected_deliverable_ids: List
         )
 
 
+def _validate_channel_scope(package: "PublishPackage", schedule_plan: "SchedulePlan", channel_id: str) -> None:
+    """
+    Mandatory Factory isolation invariant, checked before any staging or
+    publish call. Raises ChannelScopeMismatchError — never silently
+    substitutes the asserted channel_id, never proceeds under a mismatch.
+    """
+    if package.channel_id != channel_id:
+        raise ChannelScopeMismatchError(
+            f"PublishPackage.channel_id={package.channel_id!r} does not match the asserted "
+            f"channel_id={channel_id!r} for this publish_episode_package() call — refusing to "
+            f"publish another channel's package under a different channel"
+        )
+    if schedule_plan.channel_id != channel_id:
+        raise ChannelScopeMismatchError(
+            f"SchedulePlan.channel_id={schedule_plan.channel_id!r} does not match the asserted "
+            f"channel_id={channel_id!r} for this publish_episode_package() call — refusing to "
+            f"apply another channel's schedule/timezone"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Publish package — one long episode + its Shorts, as local deliverable files
 # ---------------------------------------------------------------------------
@@ -129,11 +178,23 @@ class DeliverableFile:
 
 @dataclass(frozen=True)
 class PublishPackage:
-    """The long episode and all of its associated Shorts, published as one
-    explicit unit — never partially assembled by this module."""
+    """
+    The long episode and all of its associated Shorts, published as one
+    explicit unit — never partially assembled by this module.
+
+    channel_id is required: provenance and the Factory isolation invariant
+    (checked against publish_episode_package()'s own channel_id argument
+    before any staging/publish call — see ChannelScopeMismatchError).
+    bundle_id is optional provenance identifying which channel-declared
+    bundle/production-unit (hypogeum.buffer.DeliverableBundleDefinition —
+    e.g. 'main_episode_bundle', 'short') this package instance fulfills;
+    carried for traceability only, never interpreted by this module.
+    """
+    channel_id: str
     episode_id: str
     main_episode: DeliverableFile
     shorts: List[DeliverableFile] = field(default_factory=list)
+    bundle_id: Optional[str] = None
 
     def all_deliverables(self) -> List[DeliverableFile]:
         return [self.main_episode, *self.shorts]
@@ -198,9 +259,12 @@ def publish_episode_package(
     Blocks BEFORE any staging or publish call — for the whole package, not
     per-deliverable — when schedule_plan is missing or does not cover every
     deliverable_id in the package (MissingSchedulePlanError /
-    InvalidSchedulePlanError, both caught here and reported via
+    InvalidSchedulePlanError), OR when package.channel_id or
+    schedule_plan.channel_id does not match the `channel_id` argument
+    (ChannelScopeMismatchError — the mandatory Factory isolation
+    invariant). All three are caught here and reported via
     PublishPackageResult.blocked/.blocked_reason rather than raised, so a
-    caller can inspect the result uniformly).
+    caller can inspect the result uniformly.
 
     Per-deliverable failures (staging or publish) do not stop the loop —
     every deliverable in the package is always attempted once the
@@ -212,6 +276,7 @@ def publish_episode_package(
 
     try:
         _validate_schedule_plan_covers(schedule_plan, expected_ids)
+        _validate_channel_scope(package, schedule_plan, channel_id)
     except ZernioPublishRuntimeError as exc:
         return PublishPackageResult(
             episode_id=package.episode_id, platform=platform,

@@ -236,6 +236,7 @@ def run_publishing_agent(
     publish_at: Optional[str] = None,
     project_root: Optional[Path] = None,
     enabled_platforms: Optional[frozenset] = None,
+    publishing_provider_by_platform: Optional[dict] = None,
 ) -> dict:
     """
     Execute the Publishing Agent end-to-end.
@@ -270,6 +271,21 @@ def run_publishing_agent(
                               gated (see STEP 8 / STEP 9 below) — this is an
                               existing architecture constraint, not something
                               this parameter changes.
+        publishing_provider_by_platform: Optional {platform: provider_id}
+                              mapping (ADR-013 Decision 7, item 1) —
+                              Channel Package / runtime configuration
+                              overriding which provider implements a
+                              platform. None (default, every existing
+                              caller) uses
+                              hypogeum.publishing.provider_registry.DEFAULT_PROVIDER_ROUTING
+                              unmodified, which resolves to the exact same
+                              hypogeum.publishing.{youtube,tiktok,meta}
+                              modules this function always imported
+                              directly — behavior is unchanged. Facebook and
+                              instagram must resolve to the same provider
+                              (they share one Meta client/token) —
+                              PublishingAgentError otherwise. No Zernio
+                              provider exists yet (a later slice).
 
     Returns:
         publishing_record dict (schema-validated, written to disk).
@@ -424,10 +440,38 @@ def run_publishing_agent(
     youtube_available = False
     youtube_pdr: Optional[dict] = None
 
-    # Import platform clients (lazy to keep test isolation clean)
-    from hypogeum.publishing import youtube as yt_client
-    from hypogeum.publishing import meta as meta_client
-    from hypogeum.publishing import tiktok as tt_client
+    # Provider routing (ADR-013 Decision 7, item 1): which module implements
+    # each destination platform is resolved through the generic registry,
+    # driven by publishing_provider_by_platform (channel/runtime
+    # configuration) instead of a hardcoded import. Default routing
+    # (publishing_provider_by_platform=None, every existing caller) resolves
+    # to the exact same modules this used to import directly — see
+    # hypogeum.publishing.provider_registry.DEFAULT_PROVIDER_ROUTING — so
+    # every downstream yt_client./meta_client./tt_client. call below is
+    # unchanged, and existing tests that patch
+    # hypogeum.publishing.{youtube,tiktok,meta}.<function> directly keep
+    # working: yt_client/meta_client/tt_client are still bound to those same
+    # module objects, just resolved indirectly.
+    from hypogeum.publishing.provider_registry import resolve_platform_provider
+
+    yt_client = resolve_platform_provider("youtube", publishing_provider_by_platform).client_module
+    tt_client = resolve_platform_provider("tiktok", publishing_provider_by_platform).client_module
+    _fb_provider_id = resolve_platform_provider("facebook", publishing_provider_by_platform).provider_id
+    _ig_provider_id = resolve_platform_provider("instagram", publishing_provider_by_platform).provider_id
+    if _fb_provider_id != _ig_provider_id:
+        # Facebook and Instagram share one Meta OAuth token and one client
+        # module throughout STEP 8/9 below (existing architecture
+        # constraint, unchanged by this refactor — see the enabled_platforms
+        # docstring above). Routing them to two different providers is
+        # ambiguous with today's single shared meta_client variable; fail
+        # closed rather than silently pick one.
+        raise PublishingAgentError(
+            f"publishing_provider_by_platform routes facebook to "
+            f"{_fb_provider_id!r} and instagram to {_ig_provider_id!r} — "
+            f"these must resolve to the same provider today, since Facebook "
+            f"and Instagram share one Meta client and OAuth token."
+        )
+    meta_client = resolve_platform_provider("facebook", publishing_provider_by_platform).client_module
 
     yt_client.reset_quota_counter()
 

@@ -764,6 +764,7 @@ def run_pipeline(
     db_path: Optional[Path] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     publishing_platform_filter: Optional[frozenset] = None,
+    publishing_provider_by_platform: Optional[dict] = None,
     enforce_authorization_boundaries: bool = False,
 ) -> PipelineResult:
     """
@@ -817,6 +818,11 @@ def run_pipeline(
                           (used when publishing_enabled is False upstream).
                           See hypogeum.agents.publishing_agent.run_publishing_agent's
                           enabled_platforms parameter.
+        publishing_provider_by_platform: Optional {platform: provider_id}
+                          mapping (ADR-013 Decision 7, item 1) — forwarded
+                          unchanged to run_publishing_agent()'s parameter of
+                          the same name. None (default, every existing
+                          caller) preserves prior behavior exactly.
 
     Returns:
         PipelineResult — all 11 packages populated on success.
@@ -1574,6 +1580,7 @@ def run_pipeline(
             youtube_privacy=youtube_privacy,
             publish_at=_episode_publish_at,
             enabled_platforms=publishing_platform_filter,
+            publishing_provider_by_platform=publishing_provider_by_platform,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -2644,6 +2651,7 @@ def _run_publishing_agent(
     youtube_privacy: str = "public",
     publish_at: Optional[str] = None,
     enabled_platforms: Optional[frozenset] = None,
+    publishing_provider_by_platform: Optional[dict] = None,
 ) -> dict:
     """
     Publishing Agent (M5.2 — implemented).
@@ -2656,6 +2664,11 @@ def _run_publishing_agent(
     enabled_platforms: forwarded unchanged to run_publishing_agent()'s own
     enabled_platforms parameter — see that function's docstring for the
     exact per-platform gating contract. None preserves prior behavior.
+
+    publishing_provider_by_platform: forwarded unchanged to
+    run_publishing_agent()'s own parameter of the same name (ADR-013
+    Decision 7, item 1). None (default, every existing caller) preserves
+    prior behavior exactly.
 
     No Claude calls — pure Python orchestration over platform client modules.
 
@@ -2685,4 +2698,5 @@ def _run_publishing_agent(
         youtube_privacy=youtube_privacy,
         publish_at=publish_at,
         enabled_platforms=enabled_platforms,
+        publishing_provider_by_platform=publishing_provider_by_platform,
     )

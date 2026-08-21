@@ -1785,3 +1785,110 @@ CREATE TABLE IF NOT EXISTS circuit_breakers (
 
 CREATE INDEX IF NOT EXISTS idx_circuit_breakers_tripped
     ON circuit_breakers(tripped);
+
+-- ---------------------------------------------------------------------------
+-- publication_intents / publishing_attempts / publishing_receipts
+--
+-- Durable write-ahead publishing submission boundary (ADR-013 Decision 7,
+-- item 2 — DECISION_LOG.md). Provider-neutral: never references a specific
+-- provider by name in this schema (platform stays youtube/tiktok/instagram/
+-- facebook; provider_id is a free-text column populated by the caller, e.g.
+-- 'youtube_direct' today, other adapters later — see ADR-013 Decision 1's
+-- provider-vs-platform distinction).
+--
+-- Three durable identities, deliberately separate (never conflated):
+--   publication_intents  -- one deliberate publish/republish operation.
+--                            Retries of the SAME intent reuse its id; a
+--                            deliberate republish (e.g. after the external
+--                            publication was deleted) requires a NEW,
+--                            explicitly-provisioned intent -- never minted
+--                            automatically by a retry.
+--   publishing_attempts  -- one external submission attempt within an
+--                            intent. Committed with state='prepared'
+--                            BEFORE any external call is made -- see
+--                            hypogeum.publishing.submission_ledger, the
+--                            sole writer of this table.
+--   publishing_receipts  -- the acknowledged external result for one
+--                            attempt, once known. Never stores credentials
+--                            or authorization headers.
+--
+-- This mirrors the proven write-ahead-persistence / immutable-identity /
+-- fail-closed-transition concepts already used for paid generation calls
+-- (hypogeum.provider_receipt.WriteAheadReceiptStore,
+-- hypogeum.authorization_store) without reusing those classes/tables
+-- directly -- ownership differs (publishing is already DB-table-backed via
+-- publishing_outcomes, unlike the file-backed generation receipt trail).
+--
+-- publishing_outcomes (existing, unchanged by this migration) remains the
+-- canonical read model for "is this deliverable published" consulted by
+-- the rest of the pipeline (get_publishing_outcome/record_publishing_outcome);
+-- these three new tables are the write-ahead safety boundary sitting in
+-- front of it, not a replacement for it.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS publication_intents (
+    publication_intent_id TEXT NOT NULL PRIMARY KEY,
+    channel_id             TEXT,
+    episode_id             TEXT NOT NULL,
+    deliverable_id         TEXT NOT NULL,
+    platform               TEXT NOT NULL
+                                CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    status                 TEXT NOT NULL DEFAULT 'open'
+                                CHECK(status IN ('open','succeeded','failed_closed','cancelled')),
+    created_at              TEXT NOT NULL,
+    updated_at               TEXT NOT NULL
+);
+
+-- At most one OPEN intent per (episode_id, platform, deliverable_id) --
+-- enforced atomically at the DB level (SQLite partial unique index), not
+-- just in application code, so a race between two callers can never both
+-- succeed at opening a second one.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_publication_intents_one_open
+    ON publication_intents(episode_id, platform, deliverable_id)
+    WHERE status = 'open';
+
+CREATE INDEX IF NOT EXISTS idx_publication_intents_lookup
+    ON publication_intents(episode_id, platform, deliverable_id);
+
+CREATE TABLE IF NOT EXISTS publishing_attempts (
+    attempt_id             TEXT NOT NULL PRIMARY KEY,
+    publication_intent_id  TEXT NOT NULL REFERENCES publication_intents(publication_intent_id),
+    channel_id              TEXT,
+    episode_id               TEXT NOT NULL,
+    deliverable_id            TEXT NOT NULL,
+    platform                  TEXT NOT NULL
+                                   CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    provider_id                TEXT NOT NULL,
+    provider_request_key        TEXT,
+    attempt_number                INTEGER NOT NULL DEFAULT 1,
+    state                          TEXT NOT NULL DEFAULT 'prepared'
+                                        CHECK(state IN (
+                                            'prepared', 'submitting', 'acknowledged', 'succeeded',
+                                            'failed_definitive', 'ambiguous', 'reconciliation_required',
+                                            'cancelled'
+                                        )),
+    last_error_category              TEXT,
+    last_error_message                 TEXT,
+    created_at                          TEXT NOT NULL,
+    updated_at                           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_publishing_attempts_intent
+    ON publishing_attempts(publication_intent_id);
+
+CREATE INDEX IF NOT EXISTS idx_publishing_attempts_state
+    ON publishing_attempts(state);
+
+CREATE TABLE IF NOT EXISTS publishing_receipts (
+    receipt_id                  TEXT NOT NULL PRIMARY KEY,
+    attempt_id                   TEXT NOT NULL REFERENCES publishing_attempts(attempt_id),
+    provider_id                    TEXT NOT NULL,
+    platform                        TEXT NOT NULL
+                                         CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    provider_publication_id           TEXT,
+    native_platform_content_id          TEXT,
+    provider_status                       TEXT,
+    acknowledged_at                        TEXT NOT NULL,
+    raw_receipt_metadata_json                TEXT,
+    UNIQUE(attempt_id)
+);

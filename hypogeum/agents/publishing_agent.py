@@ -46,6 +46,12 @@ from hypogeum.publishing.metadata import (
     get_short_title,
 )
 from hypogeum.publishing.record import PublishingRecord, make_result_entry
+from hypogeum.publishing.submission_ledger import (
+    guard_and_prepare_attempt,
+    record_ambiguous,
+    record_definitive_failure,
+    record_success,
+)
 from hypogeum.publishing.retry import (
     HardFailureError,
     PollTimeoutError,
@@ -784,7 +790,24 @@ def run_publishing_agent(
 
         video_path = _resolve_asset_path(main_video_id, assets_root, ".mp4")
 
-        if video_path and video_path.exists():
+        # Durable write-ahead submission boundary (ADR-013 Decision 7, item
+        # 2): resolved once, before the real upload call is even reached.
+        # Skipped for dry-run (no external call is ever made, so no
+        # attempt/receipt is created — matches "publishing-disabled or
+        # filtered platforms must create no intent, attempt, or receipt").
+        # A 'blocked' guard (ambiguous/reconciliation_required/in-flight
+        # from a concurrent or crashed prior attempt) routes into the
+        # existing else-branch below via the condition, never into the
+        # upload call.
+        _yt_dry_run = getattr(config, "YOUTUBE_DRY_RUN", False)
+        _yt_guard = None
+        if video_path and video_path.exists() and not _yt_dry_run:
+            _yt_guard = guard_and_prepare_attempt(
+                assets_root / "hypogeum.db", channel_id=None, episode_id=episode_id,
+                deliverable_id="main_episode", platform="youtube", provider_id="youtube_direct",
+            )
+
+        if video_path and video_path.exists() and (_yt_guard is None or _yt_guard.action == "proceed"):
             try:
                 if getattr(config, "YOUTUBE_DRY_RUN", False):
                     # Dry-run: log the metadata that WOULD be sent to YouTube API.
@@ -811,6 +834,13 @@ def run_publishing_agent(
                     )
                     youtube_main_published = True
                     youtube_main_video_id = yt_main_id
+                    if _yt_guard is not None:
+                        record_success(
+                            assets_root / "hypogeum.db", _yt_guard.attempt_id,
+                            provider_publication_id=yt_main_id,
+                            native_platform_content_id=yt_main_id,
+                            provider_status="published",
+                        )
 
                 log.info(
                     "publishing_youtube_main_uploaded",
@@ -980,6 +1010,12 @@ def run_publishing_agent(
                 )
                 if exc.error_code == "quotaExceeded":
                     youtube_quota_exceeded = True
+                if _yt_guard is not None:
+                    record_definitive_failure(
+                        assets_root / "hypogeum.db", _yt_guard.attempt_id,
+                        error_category=exc.error_code or "hard_failure",
+                        error_message=str(exc),
+                    )
                 entry = make_result_entry(
                     platform="youtube",
                     deliverable_type="main_episode",
@@ -1003,6 +1039,11 @@ def run_publishing_agent(
                     episode_id=episode_id,
                     error=str(exc),
                 )
+                if _yt_guard is not None:
+                    record_ambiguous(
+                        assets_root / "hypogeum.db", _yt_guard.attempt_id,
+                        error_category="soft_failure_or_unknown", error_message=str(exc),
+                    )
                 entry = make_result_entry(
                     platform="youtube",
                     deliverable_type="main_episode",
@@ -1019,6 +1060,27 @@ def run_publishing_agent(
                 )
                 record.add_failure(pdr)
                 failed_count += 1
+
+        elif video_path and video_path.exists() and _yt_guard is not None and _yt_guard.action != "proceed":
+            # Submission ledger refused a new external call (ambiguous prior
+            # attempt, or one currently in flight) -- never fall through to
+            # asset-missing messaging, which would misreport the reason.
+            log.warn(
+                "publishing_youtube_main_blocked_by_submission_ledger",
+                episode_id=episode_id,
+                reason=_yt_guard.reason,
+                attempt_state=_yt_guard.existing_attempt_state,
+            )
+            entry = make_result_entry(
+                platform="youtube",
+                deliverable_type="main_episode",
+                status="failed",
+                skipped_reason="reconciliation_required",
+                title=get_episode_title(metadata_source),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            failed_count += 1
 
         else:
             log.error(
@@ -1321,7 +1383,15 @@ def run_publishing_agent(
 
         fb_video_path = _resolve_asset_path(main_video_id, assets_root, ".mp4")
 
+        # Durable write-ahead submission boundary (ADR-013 Decision 7, item 2).
+        _fb_guard = None
         if fb_video_path and fb_video_path.exists():
+            _fb_guard = guard_and_prepare_attempt(
+                assets_root / "hypogeum.db", channel_id=None, episode_id=episode_id,
+                deliverable_id="main_episode", platform="facebook", provider_id="meta_direct",
+            )
+
+        if fb_video_path and fb_video_path.exists() and _fb_guard.action == "proceed":
             try:
                 fb_video_id_result = meta_client.upload_facebook_video(
                     config=config,
@@ -1332,6 +1402,12 @@ def run_publishing_agent(
                 )
 
                 _fb_published_at = datetime.now(timezone.utc).isoformat()
+                record_success(
+                    assets_root / "hypogeum.db", _fb_guard.attempt_id,
+                    provider_publication_id=fb_video_id_result,
+                    native_platform_content_id=fb_video_id_result,
+                    provider_status="published",
+                )
                 entry = make_result_entry(
                     platform="facebook",
                     deliverable_type="main_episode",
@@ -1367,6 +1443,16 @@ def run_publishing_agent(
                     episode_id=episode_id,
                     error=str(exc),
                 )
+                if isinstance(exc, HardFailureError):
+                    record_definitive_failure(
+                        assets_root / "hypogeum.db", _fb_guard.attempt_id,
+                        error_category=exc.error_code or "hard_failure", error_message=str(exc),
+                    )
+                else:
+                    record_ambiguous(
+                        assets_root / "hypogeum.db", _fb_guard.attempt_id,
+                        error_category="soft_failure_or_unknown", error_message=str(exc),
+                    )
                 entry = make_result_entry(
                     platform="facebook",
                     deliverable_type="main_episode",
@@ -1376,6 +1462,23 @@ def run_publishing_agent(
                 )
                 record.append_result(entry)
                 failed_count += 1
+        elif fb_video_path and fb_video_path.exists() and _fb_guard is not None:
+            # Submission ledger refused a new external call.
+            log.warn(
+                "publishing_facebook_blocked_by_submission_ledger",
+                episode_id=episode_id, reason=_fb_guard.reason,
+                attempt_state=_fb_guard.existing_attempt_state,
+            )
+            entry = make_result_entry(
+                platform="facebook",
+                deliverable_type="main_episode",
+                status="failed",
+                skipped_reason="reconciliation_required",
+                title=get_episode_title(metadata_source),
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            failed_count += 1
         else:
             entry = make_result_entry(
                 platform="facebook",
@@ -1494,6 +1597,36 @@ def run_publishing_agent(
             failed_count += 1
             continue
 
+        # Durable write-ahead submission boundary (ADR-013 Decision 7, item
+        # 2), resolved before staging even begins -- a blocked guard must
+        # skip staging entirely, not just the final publish call, or a
+        # staged file would leak with nothing left to clean it up. One
+        # attempt covers the whole staging+create/poll/publish sub-sequence
+        # for this reel (one deliberate publish operation, not several
+        # separate provider calls).
+        _ig_guard = guard_and_prepare_attempt(
+            assets_root / "hypogeum.db", channel_id=None, episode_id=episode_id,
+            deliverable_id=_ig_deliverable_id, platform="instagram", provider_id="meta_direct",
+        )
+        if _ig_guard.action != "proceed":
+            log.warn(
+                "publishing_instagram_short_blocked_by_submission_ledger",
+                episode_id=episode_id, short_id=short_id, reason=_ig_guard.reason,
+                attempt_state=_ig_guard.existing_attempt_state,
+            )
+            entry = make_result_entry(
+                platform="instagram",
+                deliverable_type="short",
+                status="failed",
+                short_id=short_id,
+                skipped_reason="reconciliation_required",
+                title=short_title,
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            failed_count += 1
+            continue
+
         # Stage video
         staged_video_url: Optional[str] = None
         staged_thumb_url: Optional[str] = None
@@ -1529,6 +1662,15 @@ def run_publishing_agent(
                 episode_id=episode_id,
                 short_id=short_id,
                 error=str(exc),
+            )
+            # Staging failed before Instagram's own API was ever reached --
+            # the attempt this guard already committed must still be
+            # finalized (never left stuck in 'submitting', which would
+            # permanently block every future retry). Definitive: nothing
+            # ambiguous happened at the platform itself.
+            record_definitive_failure(
+                assets_root / "hypogeum.db", _ig_guard.attempt_id,
+                error_category="staging_failed", error_message=str(exc),
             )
             entry = make_result_entry(
                 platform="instagram",
@@ -1571,6 +1713,12 @@ def run_publishing_agent(
                 episode_id=episode_id,
             )
             ig_success = True
+            record_success(
+                assets_root / "hypogeum.db", _ig_guard.attempt_id,
+                provider_publication_id=ig_media_id,
+                native_platform_content_id=ig_media_id,
+                provider_status=status,
+            )
 
         except HardFailureError as exc:
             log.error(
@@ -1582,6 +1730,10 @@ def run_publishing_agent(
             )
             if exc.status_code == 401:
                 ig_auth_failed = True
+            record_definitive_failure(
+                assets_root / "hypogeum.db", _ig_guard.attempt_id,
+                error_category=exc.error_code or "hard_failure", error_message=str(exc),
+            )
             failed_count += 1
 
         except (SoftFailureError, PollTimeoutError, Exception) as exc:
@@ -1590,6 +1742,10 @@ def run_publishing_agent(
                 episode_id=episode_id,
                 short_id=short_id,
                 error=str(exc),
+            )
+            record_ambiguous(
+                assets_root / "hypogeum.db", _ig_guard.attempt_id,
+                error_category="soft_failure_or_unknown", error_message=str(exc),
             )
             failed_count += 1
 
@@ -1775,6 +1931,33 @@ def run_publishing_agent(
             failed_count += 1
             continue
 
+        # Durable write-ahead submission boundary (ADR-013 Decision 7, item
+        # 2), immediately before the real TikTok init/chunked-upload/poll
+        # sequence -- one attempt covers this whole sub-sequence (direct
+        # post or upload-to-inbox mode) for this short.
+        _tt_guard = guard_and_prepare_attempt(
+            assets_root / "hypogeum.db", channel_id=None, episode_id=episode_id,
+            deliverable_id=_tt_deliverable_id, platform="tiktok", provider_id="tiktok_direct",
+        )
+        if _tt_guard.action != "proceed":
+            log.warn(
+                "publishing_tiktok_short_blocked_by_submission_ledger",
+                episode_id=episode_id, short_id=short_id, reason=_tt_guard.reason,
+                attempt_state=_tt_guard.existing_attempt_state,
+            )
+            entry = make_result_entry(
+                platform="tiktok",
+                deliverable_type="short",
+                status="failed",
+                short_id=short_id,
+                skipped_reason="reconciliation_required",
+                title=tt_title,
+                ai_disclosure_included=False,
+            )
+            record.append_result(entry)
+            failed_count += 1
+            continue
+
         try:
             if tiktok_publish_mode == "direct_post":
                 def _do_tiktok_direct_upload() -> str:
@@ -1806,6 +1989,12 @@ def run_publishing_agent(
                     episode_id=episode_id,
                 )
                 _tt_published_at = datetime.now(timezone.utc).isoformat()
+                record_success(
+                    assets_root / "hypogeum.db", _tt_guard.attempt_id,
+                    provider_publication_id=post_id,
+                    native_platform_content_id=post_id,
+                    provider_status="published",
+                )
                 entry = make_result_entry(
                     platform="tiktok",
                     deliverable_type="short",
@@ -1866,6 +2055,17 @@ def run_publishing_agent(
                     episode_id=episode_id,
                 )
                 _tt_uploaded_at = datetime.now(timezone.utc).isoformat()
+                # uploaded_to_inbox is a distinct terminal status (ADR-011)
+                # from full autonomous publish, but it is still a genuine,
+                # durable server-side result -- the ledger's 'succeeded'
+                # state applies; provider_status distinguishes it in the
+                # receipt from a full Direct Post.
+                record_success(
+                    assets_root / "hypogeum.db", _tt_guard.attempt_id,
+                    provider_publication_id=publish_id,
+                    native_platform_content_id=publish_id,
+                    provider_status="uploaded_to_inbox",
+                )
                 entry = make_result_entry(
                     platform="tiktok",
                     deliverable_type="short",
@@ -1910,6 +2110,16 @@ def run_publishing_agent(
                 short_id=short_id,
                 error=str(exc),
             )
+            if isinstance(exc, HardFailureError):
+                record_definitive_failure(
+                    assets_root / "hypogeum.db", _tt_guard.attempt_id,
+                    error_category=exc.error_code or "hard_failure", error_message=str(exc),
+                )
+            else:
+                record_ambiguous(
+                    assets_root / "hypogeum.db", _tt_guard.attempt_id,
+                    error_category="soft_failure_or_unknown", error_message=str(exc),
+                )
             entry = make_result_entry(
                 platform="tiktok",
                 deliverable_type="short",

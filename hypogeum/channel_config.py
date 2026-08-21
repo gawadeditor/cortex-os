@@ -319,6 +319,20 @@ class ChannelOperationsProfile:
     updated_at:                   str
     metadata_version:             str = METADATA_VERSION
 
+    # Optional, per-deliverable-type schedule override (ADR — autonomous
+    # runtime slice). Empty dict (default) means "no per-deliverable
+    # policy configured" -- hypogeum.publishing.schedule_compiler falls
+    # back to the single publishing_schedule slot for every deliverable,
+    # exactly as before this field existed. Keyed by an opaque
+    # deliverable_id (e.g. 'main_episode', 'short_0') this module assigns
+    # no meaning to -- the actual keys and values are entirely
+    # channel-declared (see channel_packages/{channel_id}/ for the
+    # versioned, reviewable definition of what should be installed here).
+    # Each entry: {"day_of_week": ..., "time_of_day": ..., "timezone": ...}
+    # (same shape hypogeum.scheduler.compute_next_publish_slot() already
+    # consumes for the single-slot case).
+    deliverable_schedule_policy:  dict = field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -441,6 +455,7 @@ def _ensure_tables(conn) -> None:
     """)
     conn.commit()
     _apply_publishing_profile_column_migrations(conn)
+    _apply_channel_operations_profile_column_migrations(conn)
 
 
 # SQLite does not support ALTER TABLE ADD COLUMN IF NOT EXISTS. This table is
@@ -465,6 +480,27 @@ def _apply_publishing_profile_column_migrations(conn) -> None:
     for col_name, col_def in _PUBLISHING_PROFILE_COLUMN_MIGRATIONS:
         if col_name not in existing:
             conn.execute(f"ALTER TABLE publishing_profiles ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
+# Same idempotent PRAGMA-table_info-then-ALTER pattern as
+# _apply_publishing_profile_column_migrations() above, scoped to
+# channel_operations_profiles. Adds the optional per-deliverable-type
+# schedule override column (see ChannelOperationsProfile.deliverable_schedule_policy's
+# own docstring) without touching any existing row's other values.
+_CHANNEL_OPERATIONS_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("deliverable_schedule_policy_json", "TEXT"),
+]
+
+
+def _apply_channel_operations_profile_column_migrations(conn) -> None:
+    existing = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(channel_operations_profiles)").fetchall()
+    }
+    for col_name, col_def in _CHANNEL_OPERATIONS_PROFILE_COLUMN_MIGRATIONS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE channel_operations_profiles ADD COLUMN {col_name} {col_def}")
     conn.commit()
 
 
@@ -551,6 +587,7 @@ def _row_to_channel(row) -> ChannelProfile:
 
 
 def _row_to_operations(row) -> ChannelOperationsProfile:
+    keys = row.keys()
     return ChannelOperationsProfile(
         channel_id                   = row["channel_id"],
         channel_name                 = row["channel_name"],
@@ -573,6 +610,10 @@ def _row_to_operations(row) -> ChannelOperationsProfile:
         created_at                   = row["created_at"],
         updated_at                   = row["updated_at"],
         metadata_version             = row["metadata_version"],
+        deliverable_schedule_policy  = (
+            _uj(row["deliverable_schedule_policy_json"], {})
+            if "deliverable_schedule_policy_json" in keys else {}
+        ),
     )
 
 
@@ -1245,6 +1286,7 @@ def create_channel_operations_profile(
     failure_halt_policy:          Optional[dict] = None,
     cost_ceiling_usd_per_episode: Optional[float] = None,
     default_privacy_state:        str            = "private",
+    deliverable_schedule_policy:  Optional[dict] = None,
     db_path:                      Optional[Path] = None,
 ) -> ChannelOperationsProfile:
     """
@@ -1278,6 +1320,7 @@ def create_channel_operations_profile(
     publishing_schedule = publishing_schedule or {}
     retry_policy = retry_policy or {}
     failure_halt_policy = failure_halt_policy or {}
+    deliverable_schedule_policy = deliverable_schedule_policy or {}
 
     _validate_operations_fields(
         timezone_=timezone,
@@ -1312,6 +1355,7 @@ def create_channel_operations_profile(
         default_privacy_state=default_privacy_state,
         created_at=now,
         updated_at=now,
+        deliverable_schedule_policy=deliverable_schedule_policy,
     )
     try:
         conn = get_connection(_resolve_db_path(db_path))
@@ -1326,8 +1370,9 @@ def create_channel_operations_profile(
                     analytics_sync_enabled, unattended_operation_enabled,
                     max_concurrent_episodes, retry_policy_json, failure_halt_policy_json,
                     cost_ceiling_usd_per_episode, default_privacy_state,
-                    created_at, updated_at, metadata_version)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    created_at, updated_at, metadata_version,
+                    deliverable_schedule_policy_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (channel_id, channel_name, timezone, int(operator_enabled),
                  _j(production_cadence), _j(publishing_schedule),
                  _j(enabled_platforms), _j(blocked_platform_reasons),
@@ -1335,7 +1380,8 @@ def create_channel_operations_profile(
                  int(analytics_sync_enabled), int(unattended_operation_enabled),
                  max_concurrent_episodes, _j(retry_policy), _j(failure_halt_policy),
                  cost_ceiling_usd_per_episode, default_privacy_state,
-                 now, now, profile.metadata_version),
+                 now, now, profile.metadata_version,
+                 _j(deliverable_schedule_policy)),
             )
             conn.commit()
         finally:

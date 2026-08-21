@@ -231,6 +231,53 @@ class TestGatherChannelDemandItems:
         )
         assert items[0].already_published is True
 
+    def test_zernio_confirmed_publish_is_recognized_as_already_published(self, db_path, assets_root):
+        """Zernio writes to publication_intents/publishing_receipts, never
+        to the legacy publishing_outcomes/publish_calendar tables -- this
+        proves that path is recognized too, scoped by channel_id."""
+        _seed_complete_item(db_path, assets_root, "item_a", channel_id="channel_a")
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO publication_intents
+                    (publication_intent_id, channel_id, episode_id, deliverable_id, platform, status, created_at, updated_at)
+                VALUES ('pi_1', 'channel_a', 'item_a', 'main_episode', 'youtube', 'succeeded', ?, ?)
+                """,
+                (_now_iso(), _now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["item_a"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is True
+
+    def test_zernio_confirmed_publish_for_a_different_channel_does_not_leak(self, db_path, assets_root):
+        _seed_complete_item(db_path, assets_root, "item_a", channel_id="channel_a")
+        conn = get_connection(db_path)
+        try:
+            # Same episode_id, but attributed to channel_b's intent -- must
+            # never satisfy channel_a's already_published check.
+            conn.execute(
+                """
+                INSERT INTO publication_intents
+                    (publication_intent_id, channel_id, episode_id, deliverable_id, platform, status, created_at, updated_at)
+                VALUES ('pi_2', 'channel_b', 'item_a', 'main_episode', 'youtube', 'succeeded', ?, ?)
+                """,
+                (_now_iso(), _now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["item_a"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
     def test_items_carry_the_definitions_channel_and_bundle_id(self, db_path, assets_root):
         _seed_complete_item(db_path, assets_root, "s0", channel_id="channel_b")
         items = gather_channel_demand_items(

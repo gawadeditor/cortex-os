@@ -262,11 +262,25 @@ def gather_channel_demand_items(
     Only publish_ready (via
     hypogeum.publishing.readiness.check_publish_readiness(), itself
     already generic/deliverable-agnostic — see that module) and
-    already_published (via publishing_outcomes/publish_calendar, both
-    keyed only by item_id, not by any channel- or bundle-specific shape)
-    are computed here — both are real signals the current schema DOES
-    express generically. Bundle membership itself is never computed here;
-    item_ids is exactly the set the caller says belongs to this bundle.
+    already_published are computed here — both are real signals the
+    current schema DOES express generically. Bundle membership itself is
+    never computed here; item_ids is exactly the set the caller says
+    belongs to this bundle.
+
+    already_published checks BOTH the legacy direct-adapter tables
+    (publishing_outcomes.publishing_status='success',
+    publish_calendar.publish_status='live') AND the ADR-013
+    publication_intents.status='succeeded' signal that
+    hypogeum.publishing.submission_ledger.record_success() writes on a
+    confirmed Zernio publish — scoped by BOTH episode_id AND channel_id
+    (publication_intents has its own channel_id column; this is a
+    WHERE-clause channel-isolation guarantee, not a post-hoc filter).
+    Without this second check, a real Zernio-confirmed publish would never
+    be recognized here at all (Zernio writes to publication_intents/
+    publishing_receipts/provider_content_mappings, never to the legacy
+    publishing_outcomes/publish_calendar tables) — the buffer would keep
+    counting an already-published item as spare buffer forever, and
+    refill would never correctly trigger after a real advance.
     """
     from hypogeum.db import get_connection, initialize_schema  # noqa: PLC0415
     from hypogeum.publishing.readiness import check_publish_readiness  # noqa: PLC0415
@@ -284,7 +298,14 @@ def gather_channel_demand_items(
                 "SELECT 1 FROM publish_calendar WHERE episode_id = ? AND publish_status = 'live' LIMIT 1",
                 (item_id,),
             ).fetchone()
-            already_published = bool(published_row or live_calendar_row)
+            zernio_succeeded_row = conn.execute(
+                """
+                SELECT 1 FROM publication_intents
+                WHERE episode_id = ? AND channel_id = ? AND status = 'succeeded' LIMIT 1
+                """,
+                (item_id, definition.channel_id),
+            ).fetchone()
+            already_published = bool(published_row or live_calendar_row or zernio_succeeded_row)
 
             readiness = check_publish_readiness(
                 item_id, assets_root=assets_root, db_path=db_path,

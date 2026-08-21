@@ -134,6 +134,7 @@ def _make_channel_config(
     bga2="openai/gpt-5.5-pro",
     voice_id="j9jfwdrw7BRfcR43Qohk",
     status="active",
+    publishing_provider_by_platform=None,
 ) -> ChannelConfig:
     """Build a minimal ChannelConfig for unit tests (no DB needed)."""
     channel = ChannelProfile(
@@ -151,7 +152,14 @@ def _make_channel_config(
         brand_guardian_p2=bga2,
         narration_voice_id=voice_id,
     )
-    return ChannelConfig(channel=channel, models=models)
+    publishing = None
+    if publishing_provider_by_platform is not None:
+        publishing = PublishingProfile(
+            publishing_profile_id="pp-test",
+            name="Test Publishing",
+            publishing_provider_by_platform=publishing_provider_by_platform,
+        )
+    return ChannelConfig(channel=channel, models=models, publishing=publishing)
 
 
 def _make_startup_report(status="healthy") -> StartupReport:
@@ -533,6 +541,92 @@ class TestRunPipelineChannelId:
                             output_dir=tmp_path,
                         )
         mock_load.assert_not_called()
+
+
+# ===========================================================================
+# TestRunPipelineProviderPreference — ADR-013 Decision 7, item 3: the
+# runtime must receive the Channel Package's persisted publishing-provider
+# preference. Reuses tests/test_pipeline.py's full-pipeline stub scaffolding
+# (_all_stubs_context) so the run reaches STEP 12 (Publishing Agent) instead
+# of stopping early, and asserts on the exact kwarg
+# _run_publishing_agent() receives -- no DB, no network, no real channel
+# config touched (load_channel_config is patched, same as every other test
+# in this class).
+# ===========================================================================
+
+class TestRunPipelineProviderPreference:
+    def test_persisted_provider_preference_threaded_to_publishing_agent(self, tmp_path):
+        from tests.test_pipeline import _all_stubs_context, make_config, make_startup_report
+
+        cfg = make_config()
+        with patch(
+            "hypogeum.channel_config.load_channel_config",
+            return_value=_make_channel_config(
+                publishing_provider_by_platform={"youtube": "zernio"},
+            ),
+        ):
+            with patch("hypogeum.pipeline.run_startup_checks",
+                       return_value=make_startup_report()):
+                with _all_stubs_context() as mocks:
+                    run_pipeline(
+                        topic_input="Test",
+                        episode_id="ep_test",
+                        config=cfg,
+                        channel_id="hypogeum",
+                        output_dir=tmp_path,
+                    )
+        _, kwargs = mocks["pub"].call_args
+        assert kwargs.get("publishing_provider_by_platform") == {"youtube": "zernio"}
+
+    def test_explicit_caller_override_wins_over_persisted_preference(self, tmp_path):
+        """An explicit publishing_provider_by_platform argument must never be
+        silently overridden by the Channel Package's persisted preference."""
+        from tests.test_pipeline import _all_stubs_context, make_config, make_startup_report
+
+        cfg = make_config()
+        with patch(
+            "hypogeum.channel_config.load_channel_config",
+            return_value=_make_channel_config(
+                publishing_provider_by_platform={"youtube": "zernio"},
+            ),
+        ):
+            with patch("hypogeum.pipeline.run_startup_checks",
+                       return_value=make_startup_report()):
+                with _all_stubs_context() as mocks:
+                    run_pipeline(
+                        topic_input="Test",
+                        episode_id="ep_test",
+                        config=cfg,
+                        channel_id="hypogeum",
+                        output_dir=tmp_path,
+                        publishing_provider_by_platform={"youtube": "explicit_override"},
+                    )
+        _, kwargs = mocks["pub"].call_args
+        assert kwargs.get("publishing_provider_by_platform") == {"youtube": "explicit_override"}
+
+    def test_no_persisted_preference_preserves_direct_routing_default(self, tmp_path):
+        """A channel with no publishing preference (the default, empty dict)
+        must leave publishing_provider_by_platform as None -- unchanged
+        Factory-default direct-provider routing."""
+        from tests.test_pipeline import _all_stubs_context, make_config, make_startup_report
+
+        cfg = make_config()
+        with patch(
+            "hypogeum.channel_config.load_channel_config",
+            return_value=_make_channel_config(),  # no publishing profile at all
+        ):
+            with patch("hypogeum.pipeline.run_startup_checks",
+                       return_value=make_startup_report()):
+                with _all_stubs_context() as mocks:
+                    run_pipeline(
+                        topic_input="Test",
+                        episode_id="ep_test",
+                        config=cfg,
+                        channel_id="hypogeum",
+                        output_dir=tmp_path,
+                    )
+        _, kwargs = mocks["pub"].call_args
+        assert kwargs.get("publishing_provider_by_platform") is None
 
 
 # ===========================================================================

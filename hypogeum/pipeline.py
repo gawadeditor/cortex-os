@@ -850,6 +850,23 @@ def run_pipeline(
         if channel_config.channel.status != "active":
             raise ChannelNotActiveError(channel_id, channel_config.channel.status)
         config.apply_channel_config(channel_config)
+        # ADR-013 Decision 7, item 3: thread the Channel Package's persisted
+        # publishing-provider preference into the existing runtime
+        # parameter. Only applied when the caller did not already pass an
+        # explicit override (mirrors Config.apply_channel_config()'s own
+        # "only non-empty fields replace defaults" convention) -- an
+        # explicit caller-supplied publishing_provider_by_platform always
+        # wins. Empty dict on the profile (the default) means no override
+        # for any platform, so this is a no-op for every channel that
+        # hasn't set a preference.
+        if (
+            publishing_provider_by_platform is None
+            and channel_config.publishing is not None
+            and channel_config.publishing.publishing_provider_by_platform
+        ):
+            publishing_provider_by_platform = dict(
+                channel_config.publishing.publishing_provider_by_platform
+            )
 
     # -----------------------------------------------------------------------
     # -0.5. OIS factory/channel block check — before run registration

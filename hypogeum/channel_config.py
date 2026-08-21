@@ -152,6 +152,12 @@ CHANNEL_CONFIG_SCHEMA: dict[str, Any] = {
                 "ai_disclosure_required": {"type": "boolean", "default": True},
                 "auto_thumbnail":      {"type": "boolean", "default": True},
                 "auto_captions":       {"type": "boolean", "default": True},
+                # ADR-013 Decision 7, item 3 — logical provider preference,
+                # never a live external ID. {} (default) preserves current
+                # Factory-default direct-provider routing for every platform.
+                "publishing_provider_by_platform": {"type": "object"},
+                "analytics_provider_by_platform":  {"type": "object"},
+                "provider_alias_by_platform":       {"type": "object"},
             },
         },
         "models": {
@@ -205,6 +211,19 @@ class PublishingProfile:
     ai_disclosure_required: bool      = True
     auto_thumbnail:        bool       = True
     auto_captions:         bool       = True
+    # ADR-013 Decision 7, item 3: logical provider preference owned by the
+    # Channel Package. {platform: provider_id} -- e.g.
+    # {"youtube": "youtube_direct"} or a future registered provider_id.
+    # Empty dict (default) means "use Factory default routing for every
+    # platform" -- see hypogeum.publishing.provider_registry.DEFAULT_PROVIDER_ROUTING.
+    # Never stores a live external ID; only a logical provider selection.
+    publishing_provider_by_platform: dict = field(default_factory=dict)
+    analytics_provider_by_platform:  dict = field(default_factory=dict)
+    # {platform: logical_alias} -- resolved operationally via
+    # hypogeum.publishing.provider_repository.resolve_active_binding(...,
+    # logical_alias=provider_alias_by_platform[platform]). Empty dict means
+    # every platform uses the 'default' alias.
+    provider_alias_by_platform:      dict = field(default_factory=dict)
     created_at:            str        = ""
     metadata_version:      str        = METADATA_VERSION
 
@@ -354,6 +373,9 @@ def _ensure_tables(conn) -> None:
             ai_disclosure_required  INTEGER NOT NULL DEFAULT 1,
             auto_thumbnail          INTEGER NOT NULL DEFAULT 1,
             auto_captions           INTEGER NOT NULL DEFAULT 1,
+            publishing_provider_by_platform_json TEXT NOT NULL DEFAULT '{}',
+            analytics_provider_by_platform_json  TEXT NOT NULL DEFAULT '{}',
+            provider_alias_by_platform_json      TEXT NOT NULL DEFAULT '{}',
             created_at              TEXT    NOT NULL,
             metadata_version        TEXT    NOT NULL DEFAULT 'v1'
         );
@@ -418,6 +440,32 @@ def _ensure_tables(conn) -> None:
             ON channel_operations_profiles(operator_enabled);
     """)
     conn.commit()
+    _apply_publishing_profile_column_migrations(conn)
+
+
+# SQLite does not support ALTER TABLE ADD COLUMN IF NOT EXISTS. This table is
+# created by _ensure_tables() above, not by hypogeum.db.initialize_schema()
+# (channel_config.py's tables are a separate, lazily-created initialization
+# path -- see this module's docstring), so it cannot use hypogeum.db's own
+# _V2_COLUMN_MIGRATIONS map. Mirrors that same idempotent
+# PRAGMA-table_info-then-ALTER pattern, scoped locally to this module's own
+# tables (ADR-013 Decision 7, item 3 -- provider preference columns).
+_PUBLISHING_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("publishing_provider_by_platform_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("analytics_provider_by_platform_json",  "TEXT NOT NULL DEFAULT '{}'"),
+    ("provider_alias_by_platform_json",      "TEXT NOT NULL DEFAULT '{}'"),
+]
+
+
+def _apply_publishing_profile_column_migrations(conn) -> None:
+    existing = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(publishing_profiles)").fetchall()
+    }
+    for col_name, col_def in _PUBLISHING_PROFILE_COLUMN_MIGRATIONS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE publishing_profiles ADD COLUMN {col_name} {col_def}")
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +492,7 @@ def _row_to_brand(row) -> BrandProfile:
 
 
 def _row_to_publishing(row) -> PublishingProfile:
+    keys = row.keys()
     return PublishingProfile(
         publishing_profile_id  = row["publishing_profile_id"],
         name                   = row["name"],
@@ -453,6 +502,18 @@ def _row_to_publishing(row) -> PublishingProfile:
         ai_disclosure_required = bool(row["ai_disclosure_required"]),
         auto_thumbnail         = bool(row["auto_thumbnail"]),
         auto_captions          = bool(row["auto_captions"]),
+        publishing_provider_by_platform = (
+            _uj(row["publishing_provider_by_platform_json"], {})
+            if "publishing_provider_by_platform_json" in keys else {}
+        ),
+        analytics_provider_by_platform = (
+            _uj(row["analytics_provider_by_platform_json"], {})
+            if "analytics_provider_by_platform_json" in keys else {}
+        ),
+        provider_alias_by_platform = (
+            _uj(row["provider_alias_by_platform_json"], {})
+            if "provider_alias_by_platform_json" in keys else {}
+        ),
         created_at             = row["created_at"],
         metadata_version       = row["metadata_version"],
     )
@@ -671,6 +732,9 @@ def create_publishing_profile(
     ai_disclosure_required: bool               = True,
     auto_thumbnail:        bool                 = True,
     auto_captions:         bool                 = True,
+    publishing_provider_by_platform: Optional[dict] = None,
+    analytics_provider_by_platform:  Optional[dict] = None,
+    provider_alias_by_platform:      Optional[dict] = None,
     publishing_profile_id: Optional[str]        = None,
     db_path:               Optional[Path]       = None,
 ) -> PublishingProfile:
@@ -683,6 +747,9 @@ def create_publishing_profile(
         ai_disclosure_required = ai_disclosure_required,
         auto_thumbnail         = auto_thumbnail,
         auto_captions          = auto_captions,
+        publishing_provider_by_platform = publishing_provider_by_platform or {},
+        analytics_provider_by_platform  = analytics_provider_by_platform or {},
+        provider_alias_by_platform      = provider_alias_by_platform or {},
         created_at             = _now_iso(),
     )
     try:
@@ -693,8 +760,11 @@ def create_publishing_profile(
                 """INSERT INTO publishing_profiles
                    (publishing_profile_id, name, enabled_platforms_json,
                     schedule_json, default_tags_json, ai_disclosure_required,
-                    auto_thumbnail, auto_captions, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                    auto_thumbnail, auto_captions,
+                    publishing_provider_by_platform_json,
+                    analytics_provider_by_platform_json,
+                    provider_alias_by_platform_json, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (profile.publishing_profile_id, name,
                  _j(profile.enabled_platforms),
                  _j(profile.schedule),
@@ -702,6 +772,9 @@ def create_publishing_profile(
                  int(ai_disclosure_required),
                  int(auto_thumbnail),
                  int(auto_captions),
+                 _j(profile.publishing_provider_by_platform),
+                 _j(profile.analytics_provider_by_platform),
+                 _j(profile.provider_alias_by_platform),
                  profile.created_at),
             )
             conn.commit()
@@ -744,6 +817,9 @@ def update_publishing_profile(
         "ai_disclosure_required":("ai_disclosure_required",  int),
         "auto_thumbnail":        ("auto_thumbnail",          int),
         "auto_captions":         ("auto_captions",           int),
+        "publishing_provider_by_platform": ("publishing_provider_by_platform_json", _j),
+        "analytics_provider_by_platform":  ("analytics_provider_by_platform_json",  _j),
+        "provider_alias_by_platform":      ("provider_alias_by_platform_json",      _j),
     }
     try:
         assignments, params = [], []
@@ -1473,6 +1549,15 @@ def validate_channel_config(config_dict: dict) -> list[str]:
             bad = [p for p in platforms if p not in SUPPORTED_PLATFORMS]
             if bad:
                 errors.append(f"unsupported platforms: {bad}")
+        for _field in ("publishing_provider_by_platform", "analytics_provider_by_platform",
+                       "provider_alias_by_platform"):
+            _val = pub.get(_field)
+            if _val is not None and not isinstance(_val, dict):
+                errors.append(f"publishing.{_field} must be an object")
+            elif isinstance(_val, dict):
+                _bad_keys = [k for k in _val if k not in SUPPORTED_PLATFORMS]
+                if _bad_keys:
+                    errors.append(f"publishing.{_field} has unsupported platform keys: {_bad_keys}")
 
     brand = config_dict.get("brand", {})
     if isinstance(brand, dict) and "language" not in brand:
@@ -1542,6 +1627,9 @@ def bootstrap_channel(
         ai_disclosure_required = bool(pub_cfg.get("ai_disclosure_required", True)),
         auto_thumbnail         = bool(pub_cfg.get("auto_thumbnail", True)),
         auto_captions          = bool(pub_cfg.get("auto_captions", True)),
+        publishing_provider_by_platform = pub_cfg.get("publishing_provider_by_platform", {}),
+        analytics_provider_by_platform  = pub_cfg.get("analytics_provider_by_platform", {}),
+        provider_alias_by_platform      = pub_cfg.get("provider_alias_by_platform", {}),
         db_path                = db_path,
     )
 

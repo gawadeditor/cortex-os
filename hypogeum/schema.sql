@@ -1892,3 +1892,163 @@ CREATE TABLE IF NOT EXISTS publishing_receipts (
     raw_receipt_metadata_json                TEXT,
     UNIQUE(attempt_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- provider_profiles / provider_accounts / channel_provider_bindings /
+-- provider_content_mappings
+--
+-- Provider/account/profile/content OPERATIONAL mappings (ADR-013 Decision 7,
+-- item 3 -- DECISION_LOG.md). Owned by the operational database per Decision
+-- 3's boundary: external provider profile/account IDs, native platform
+-- account IDs, connection/reconnection status, provider/native content IDs,
+-- and their relationships to Cortex channels, publication_intents,
+-- publishing_attempts, and publishing_receipts. Provider-neutral -- never
+-- references a specific provider by name; provider_id is a free-text column
+-- populated by the caller (e.g. 'youtube_direct' today, other adapters
+-- later -- see ADR-013 Decision 1's provider-vs-platform distinction).
+--
+-- Explicitly NOT this section's job (kept out per Decision 3):
+--   - credential material / credential metadata -- secret_profiles owns
+--     that exclusively; secret_profiles.channel_id scopes a *credential*,
+--     never an account or profile identity.
+--   - logical channel configuration (enabled platforms, provider
+--     preference, publishing policy) -- owned by the Channel Package
+--     (hypogeum.channel_config.PublishingProfile); this section only
+--     records what a preference *resolved to operationally*, not the
+--     preference itself.
+--
+-- provider_profiles  -- one external provider-side profile/workspace
+--                        (e.g. a multi-platform provider's tenant/workspace
+--                        spanning several platform accounts).
+--                        UNIQUE(provider_id, external_profile_id) is the
+--                        provider/external-profile identity.
+-- provider_accounts   -- one external provider-side account for one
+--                        destination platform. provider_profile_id is
+--                        nullable (a provider need not always group
+--                        accounts under a profile). One profile can own
+--                        several platform accounts (one per platform, or
+--                        more). native_platform_account_id is distinct
+--                        from external_account_id -- the former is the
+--                        destination platform's own identity (e.g.
+--                        YouTube channel ID), the latter is the
+--                        provider's own internal identity for that account
+--                        -- never conflated.
+-- channel_provider_bindings -- the operational binding between one Cortex
+--                        channel and provider resources, for one
+--                        capability (publishing|analytics) and one
+--                        destination platform. A partial unique index
+--                        enforces at most one ENABLED binding per
+--                        (channel_id, capability, platform, logical_alias)
+--                        -- no automatic ordered-fallback is implemented in
+--                        this slice (none is defined by the architecture
+--                        yet); a conflicting bind attempt must be rejected
+--                        by the repository layer, not silently allowed to
+--                        race the unique index.
+-- provider_content_mappings -- links one published deliverable to its
+--                        provider-side and native-platform-side content
+--                        identity, plus the exact publication_intent /
+--                        publishing_attempt / publishing_receipt that
+--                        produced it. Deliberately NOT keyed by
+--                        (episode_id, platform, deliverable_id) alone --
+--                        a deliberate republish (new publication_intent_id)
+--                        produces a NEW mapping row; prior mapping rows for
+--                        the same episode/platform/deliverable are never
+--                        overwritten or deleted, preserving history for
+--                        audit. UNIQUE(receipt_id) ties at most one
+--                        mapping to the receipt that created it (NULLs are
+--                        distinct in SQLite, so mappings not tied to a
+--                        receipt are unaffected).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS provider_profiles (
+    provider_profile_id     TEXT NOT NULL PRIMARY KEY,
+    provider_id               TEXT NOT NULL,
+    external_profile_id         TEXT NOT NULL,
+    display_label                 TEXT,
+    status                          TEXT NOT NULL DEFAULT 'active'
+                                         CHECK(status IN ('active','disconnected','revoked','needs_reconnection')),
+    metadata_json                     TEXT,
+    created_at                          TEXT NOT NULL,
+    updated_at                            TEXT NOT NULL,
+    last_verified_at                       TEXT,
+    UNIQUE(provider_id, external_profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_profiles_provider
+    ON provider_profiles(provider_id);
+
+CREATE TABLE IF NOT EXISTS provider_accounts (
+    provider_account_id       TEXT NOT NULL PRIMARY KEY,
+    provider_profile_id         TEXT REFERENCES provider_profiles(provider_profile_id),
+    provider_id                   TEXT NOT NULL,
+    platform                        TEXT NOT NULL
+                                         CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    external_account_id               TEXT NOT NULL,
+    native_platform_account_id          TEXT,
+    display_label                         TEXT,
+    status                                  TEXT NOT NULL DEFAULT 'active'
+                                                 CHECK(status IN ('active','disconnected','revoked','needs_reconnection')),
+    needs_reconnection                        INTEGER NOT NULL DEFAULT 0,
+    metadata_json                               TEXT,
+    created_at                                    TEXT NOT NULL,
+    updated_at                                      TEXT NOT NULL,
+    last_verified_at                                  TEXT,
+    UNIQUE(provider_id, platform, external_account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_accounts_profile
+    ON provider_accounts(provider_profile_id);
+CREATE INDEX IF NOT EXISTS idx_provider_accounts_provider_platform
+    ON provider_accounts(provider_id, platform);
+
+CREATE TABLE IF NOT EXISTS channel_provider_bindings (
+    binding_id            TEXT NOT NULL PRIMARY KEY,
+    channel_id              TEXT NOT NULL,
+    capability                 TEXT NOT NULL CHECK(capability IN ('publishing','analytics')),
+    platform                     TEXT NOT NULL
+                                      CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    provider_id                    TEXT NOT NULL,
+    provider_profile_id              TEXT REFERENCES provider_profiles(provider_profile_id),
+    provider_account_id                TEXT REFERENCES provider_accounts(provider_account_id),
+    logical_alias                        TEXT NOT NULL DEFAULT 'default',
+    enabled                                 INTEGER NOT NULL DEFAULT 1,
+    created_at                                TEXT NOT NULL,
+    updated_at                                  TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_provider_bindings_one_active
+    ON channel_provider_bindings(channel_id, capability, platform, logical_alias)
+    WHERE enabled = 1;
+
+CREATE INDEX IF NOT EXISTS idx_channel_provider_bindings_lookup
+    ON channel_provider_bindings(channel_id, capability, platform);
+
+CREATE TABLE IF NOT EXISTS provider_content_mappings (
+    mapping_id               TEXT NOT NULL PRIMARY KEY,
+    provider_id                 TEXT NOT NULL,
+    platform                      TEXT NOT NULL
+                                       CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    provider_profile_id             TEXT REFERENCES provider_profiles(provider_profile_id),
+    provider_account_id               TEXT REFERENCES provider_accounts(provider_account_id),
+    provider_content_id                 TEXT,
+    native_platform_content_id            TEXT,
+    channel_id                              TEXT,
+    episode_id                                TEXT NOT NULL,
+    deliverable_id                              TEXT NOT NULL,
+    publication_intent_id                         TEXT REFERENCES publication_intents(publication_intent_id),
+    attempt_id                                      TEXT REFERENCES publishing_attempts(attempt_id),
+    receipt_id                                        TEXT REFERENCES publishing_receipts(receipt_id),
+    status                                              TEXT NOT NULL DEFAULT 'confirmed'
+                                                             CHECK(status IN ('confirmed','superseded','removed_externally')),
+    created_at                                              TEXT NOT NULL,
+    updated_at                                                TEXT NOT NULL,
+    last_verified_at                                            TEXT,
+    UNIQUE(receipt_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_content_mappings_episode
+    ON provider_content_mappings(episode_id, platform, deliverable_id);
+CREATE INDEX IF NOT EXISTS idx_provider_content_mappings_intent
+    ON provider_content_mappings(publication_intent_id);
+CREATE INDEX IF NOT EXISTS idx_provider_content_mappings_attempt
+    ON provider_content_mappings(attempt_id);

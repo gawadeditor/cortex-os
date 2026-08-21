@@ -424,6 +424,8 @@ def record_success(
     native_platform_content_id: Optional[str] = None,
     provider_status: Optional[str] = None,
     raw_receipt_metadata: Optional[dict] = None,
+    provider_profile_id: Optional[str] = None,
+    provider_account_id: Optional[str] = None,
 ) -> dict:
     """
     Record the acknowledged external result and close the attempt+intent as
@@ -432,7 +434,20 @@ def record_success(
     state it was transitioned to just before this call (acknowledged) --
     durably recorded, not silently lost -- so a subsequent guard call
     reports 'blocked' (reconcile) rather than permitting a blind resubmit.
+
+    Also persists a provider_content_mappings row (ADR-013 Decision 7, item
+    3) in the SAME transaction as the receipt insert -- see
+    hypogeum.publishing.provider_repository._insert_content_mapping_in_txn.
+    This is deliberate: only a confirmed receipt may ever produce a
+    confirmed mapping, so wiring it here (rather than as a separate call
+    some caller could forget) makes "failed/ambiguous attempts never
+    produce a mapping" true by construction. provider_profile_id/
+    provider_account_id are optional -- callers that have not yet resolved
+    a channel_provider_binding simply omit them (NULL is a legitimate,
+    "not yet known" value here, not an error).
     """
+    from hypogeum.publishing.provider_repository import _insert_content_mapping_in_txn
+
     initialize_schema(db_path)
     conn = get_connection(db_path)
     try:
@@ -456,6 +471,7 @@ def record_success(
                 attempt = _transition_attempt(conn, attempt_id, "acknowledged", now=now)
 
             import json as _json
+            receipt_id = _new_id("receipt")
             conn.execute(
                 """
                 INSERT INTO publishing_receipts
@@ -464,7 +480,7 @@ def record_success(
                      raw_receipt_metadata_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (_new_id("receipt"), attempt_id, attempt["provider_id"], attempt["platform"],
+                (receipt_id, attempt_id, attempt["provider_id"], attempt["platform"],
                  provider_publication_id, native_platform_content_id, provider_status, now,
                  _json.dumps(raw_receipt_metadata) if raw_receipt_metadata else None),
             )
@@ -473,6 +489,23 @@ def record_success(
                 "UPDATE publication_intents SET status = 'succeeded', updated_at = ? "
                 "WHERE publication_intent_id = ?",
                 (now, attempt["publication_intent_id"]),
+            )
+            _insert_content_mapping_in_txn(
+                conn,
+                provider_id=attempt["provider_id"],
+                platform=attempt["platform"],
+                channel_id=attempt["channel_id"],
+                episode_id=attempt["episode_id"],
+                deliverable_id=attempt["deliverable_id"],
+                provider_profile_id=provider_profile_id,
+                provider_account_id=provider_account_id,
+                provider_content_id=provider_publication_id,
+                native_platform_content_id=native_platform_content_id,
+                publication_intent_id=attempt["publication_intent_id"],
+                attempt_id=attempt_id,
+                receipt_id=receipt_id,
+                status="confirmed",
+                now=now,
             )
             conn.commit()
             return _row(conn, "publishing_attempts", "attempt_id", attempt_id)

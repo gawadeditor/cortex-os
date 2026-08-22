@@ -1114,10 +1114,19 @@ class ZernioProvider:
         docs/operations/audits/
         ZERNIO_PUT_CONTRACT_AND_DURATION_VERIFICATION_2026-08-22.md), so
         nothing about the existing schedule is ever left to an
-        undocumented default. Every existing platform entry NOT in
-        `platforms` is preserved untouched in the merged platforms[]
-        sent -- this call only ever adds/corrects, never silently drops
-        an existing destination.
+        undocumented default.
+
+        Platform entry preservation (2026-08-23 hardening): EVERY existing
+        platforms[] entry -- whether or not its platform is in `platforms`
+        -- is carried into the PUT body byte-for-byte, unmodified. This
+        call only ever APPENDS a freshly built entry for a platform
+        genuinely absent from the existing post; it never rebuilds,
+        replaces, or drops an entry that is already there. An existing
+        entry's account binding, `platformSpecificData`, `contentHash`,
+        provider-assigned `_id`, `status`, `publishAttempts`, and any
+        other undocumented/provider-internal field it carries all survive
+        untouched -- only genuinely missing platforms and the shared
+        title/content/mediaItems get corrected by this repair.
         """
         if not title or not title.strip():
             raise ValueError("repair_existing_post() requires a non-empty title")
@@ -1189,12 +1198,16 @@ class ZernioProvider:
             del credential
             return results
 
+        # Preserve every existing entry byte-for-byte -- never filter one
+        # out to rebuild it, even when its platform is also in `platforms`.
+        # Only a platform with NO existing entry at all gets a freshly
+        # built one appended.
         existing_platform_entries = list(existing_post.get("platforms") or [])
-        merged_platform_entries = [
-            e for e in existing_platform_entries if e.get("platform") not in platforms
-        ] + [
+        existing_platform_names = {e.get("platform") for e in existing_platform_entries}
+        missing_platforms = [p for p in platforms if p not in existing_platform_names]
+        merged_platform_entries = existing_platform_entries + [
             self._build_platform_entry(p, accounts[p], [], None)
-            for p in platforms
+            for p in missing_platforms
         ]
 
         headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}

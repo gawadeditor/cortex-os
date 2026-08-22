@@ -620,3 +620,124 @@ class TestRepairAlreadySucceededPlatform:
         for platform in ("tiktok", "instagram", "facebook"):
             assert results[platform]["status"] == "published"
             assert results[platform]["provider_content_id"] == "post_short_001"
+
+
+# ===========================================================================
+# 2026-08-23 hardening: existing platform entries (incl. undocumented
+# provider-internal fields) must survive a repair PUT byte-for-byte.
+# ===========================================================================
+
+_RICH_EXISTING_YOUTUBE_ENTRY = {
+    "platform": "youtube",
+    "accountId": {"_id": "6a83555477555aae01afa569", "platform": "youtube", "displayName": "The Hypogeum"},
+    "profileId": "6a8353affd55232edf6841c9",
+    "customMedia": [],
+    "scheduledFor": "2026-08-24T18:00:00.000Z",
+    "platformSpecificData": {
+        "__platformUserIdSnapshot": "UC6lbORr6RBYDPObPk80yGcQ",
+        "__usernameSnapshot": "thehypogeum",
+    },
+    "status": "pending",
+    "publishAttempts": 0,
+    "contentHash": "81780859187c104e6c154025f042f973",
+    "_id": "6a89752c7a56b107295b2b2e",
+}
+
+
+def _rich_existing_post_get_response(*, post_id="post_short_001"):
+    return ZernioTransportResponse(
+        status_code=200,
+        json_body={"post": {
+            "_id": post_id,
+            "scheduledFor": "2026-08-24T18:00:00.000Z",
+            "timezone": "UTC",
+            "platforms": [dict(_RICH_EXISTING_YOUTUBE_ENTRY)],
+        }},
+    )
+
+
+class TestRepairPreservesExistingPlatformEntriesByteForByte:
+    def test_existing_entry_with_undocumented_fields_survives_unchanged(self, db_path):
+        _bind_all(db_path)
+        guard = guard_and_prepare_attempt(
+            db_path, channel_id=CHANNEL_ID, episode_id=EPISODE_ID,
+            deliverable_id="short_001", platform="youtube", provider_id="zernio",
+        )
+        record_success(db_path, guard.attempt_id, provider_publication_id="post_short_001", provider_status="pending")
+
+        transport = FakeRepairTransport(
+            get_response=_rich_existing_post_get_response(),
+            put_response=_successful_put_response(post_id="post_short_001"),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(provider, db_path, post_id="post_short_001")
+
+        sent_platforms = transport.put_calls[0]["platforms"]
+        youtube_entries = [e for e in sent_platforms if e.get("platform") == "youtube"]
+        assert len(youtube_entries) == 1, "must never duplicate an existing platform entry"
+        assert youtube_entries[0] == _RICH_EXISTING_YOUTUBE_ENTRY, (
+            "an existing platform entry must survive the PUT byte-for-byte, "
+            "including undocumented/provider-internal fields"
+        )
+
+    def test_only_genuinely_missing_platforms_get_a_freshly_built_entry(self, db_path):
+        _bind_all(db_path)
+        guard = guard_and_prepare_attempt(
+            db_path, channel_id=CHANNEL_ID, episode_id=EPISODE_ID,
+            deliverable_id="short_001", platform="youtube", provider_id="zernio",
+        )
+        record_success(db_path, guard.attempt_id, provider_publication_id="post_short_001", provider_status="pending")
+
+        transport = FakeRepairTransport(
+            get_response=_rich_existing_post_get_response(),
+            put_response=_successful_put_response(post_id="post_short_001"),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(provider, db_path, post_id="post_short_001")
+
+        sent_platforms = transport.put_calls[0]["platforms"]
+        by_platform = {e["platform"]: e for e in sent_platforms}
+        assert set(by_platform) == set(ALL_PLATFORMS)
+        # youtube keeps its full rich shape -- never reduced to {platform, accountId}
+        assert "platformSpecificData" in by_platform["youtube"]
+        assert "contentHash" in by_platform["youtube"]
+        # the three genuinely new platforms get the minimal freshly built shape
+        for platform in ("tiktok", "instagram", "facebook"):
+            assert set(by_platform[platform].keys()) == {"platform", "accountId"}
+
+    def test_repaired_post_id_is_identical_and_no_post_call_occurs(self, db_path):
+        _bind_all(db_path)
+        guard = guard_and_prepare_attempt(
+            db_path, channel_id=CHANNEL_ID, episode_id=EPISODE_ID,
+            deliverable_id="short_001", platform="youtube", provider_id="zernio",
+        )
+        record_success(db_path, guard.attempt_id, provider_publication_id="post_short_001", provider_status="pending")
+
+        transport = FakeRepairTransport(
+            get_response=_rich_existing_post_get_response(),
+            put_response=_successful_put_response(post_id="post_short_001"),
+        )
+        provider = ZernioProvider(transport=transport)
+        results = _repair(provider, db_path, post_id="post_short_001")
+
+        assert transport.post_calls == []
+        assert transport.get_calls[0].endswith("post_short_001")
+        assert transport.put_urls[0].endswith("post_short_001")
+        for platform in ALL_PLATFORMS:
+            assert results[platform]["provider_content_id"] == "post_short_001"
+
+    def test_undocumented_existing_entry_survives_even_when_that_platform_is_not_retargeted(self, db_path):
+        # youtube is on the existing post but this repair call only targets
+        # tiktok/instagram/facebook -- youtube's rich entry must still be
+        # carried through untouched, never dropped.
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_rich_existing_post_get_response(),
+            put_response=_successful_put_response(post_id="post_short_001", platforms=["tiktok", "instagram", "facebook"]),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(provider, db_path, post_id="post_short_001", platforms=["tiktok", "instagram", "facebook"])
+
+        sent_platforms = transport.put_calls[0]["platforms"]
+        youtube_entries = [e for e in sent_platforms if e.get("platform") == "youtube"]
+        assert youtube_entries == [_RICH_EXISTING_YOUTUBE_ENTRY]

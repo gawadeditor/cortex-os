@@ -1,0 +1,187 @@
+{
+  "episode_id": "ep_f3619022",
+  "generated_at": "2026-08-23-phase2",
+  "entries": {
+    "main_episode": {
+      "deliverable_id": "main_episode",
+      "aspect_ratio": "16:9",
+      "dimensions": "1280x720",
+      "thumbnail_path": "docs/operations/repairs/thumbnails/main_episode.recomposed_v1.jpg",
+      "sha256": "d223fcf58d73a013a853dfef4b62c8ae237b5879ad664fa741d4f0c4142ad121",
+      "provenance": {
+        "source": "deterministic_recomposition",
+        "base_asset": "thumbnails/candidate_1.jpg",
+        "operation": "levels correction (gamma=1.5, black-floor lift=0.015, RGB, PIL) -- same pixel content, no new imagery generated, no MUAPI call, cost=$0.00"
+      },
+      "qa_report": {
+        "overall_status": "warn",
+        "failures": [],
+        "warnings": [
+          "thumbnail_text_overlay: generation_plan not provided \u2014 cannot verify"
+        ]
+      },
+      "identity_report": {
+        "verdict": "WARNING",
+        "blocking_count": 0,
+        "violations": [
+          {
+            "rule_id": "TIG-W02",
+            "severity": "WARNING",
+            "description": "The subtitle line 'IT SHOULDN'T FIT' appears to use a stone-textured decorative font rather than the specified Raleway Regular, reducing typographic consistency."
+          },
+          {
+            "rule_id": "TIG-W04",
+            "severity": "WARNING",
+            "description": "The silhouetted human figure standing in the tunnel passage is a prominent secondary subject that competes visually with the architectural/archaeological environment as the primary focus."
+          }
+        ]
+      },
+      "qa_status": "pass",
+      "identity_status": "pass",
+      "thumbnail_status": "pass",
+      "blocking_reasons": [],
+      "mutation_would_proceed": true
+    },
+    "short_001": {
+      "deliverable_id": "short_001",
+      "aspect_ratio": "9:16",
+      "dimensions": "720x1280",
+      "thumbnail_path": "docs/operations/repairs/thumbnails/short_001.recomposed_v1.jpg",
+      "sha256": "83a5a7c4d50462a2866f46744ff44843ce47252e8f263e0f0cc09ce26f4b1ff0",
+      "provenance": {
+        "source": "deterministic_recomposition",
+        "base_asset": "thumbnails/short_001.jpg",
+        "operation": "levels correction (gamma=1.5, black-floor lift=0.015, RGB, PIL) -- same pixel content, no new imagery generated, no MUAPI call, cost=$0.00"
+      },
+      "qa_report": {
+        "overall_status": "warn",
+        "failures": [],
+        "warnings": [
+          "thumbnail_text_overlay: generation_plan not provided \u2014 cannot verify"
+        ]
+      },
+      "identity_report": {
+        "verdict": "BLOCKED",
+        "blocking_count": 3,
+        "violations": [
+          {
+            "rule_id": "TIG-06",
+            "severity": "BLOCKING",
+            "description": "Image dimensions appear to be approximately 720\u00d71080 in portrait orientation, violating the required 1280\u00d7720 (16:9 landscape) aspect ratio."
+          },
+          {
+            "rule_id": "TIG-07",
+            "severity": "BLOCKING",
+            "description": "The wordmark 'THE HYPOGEUM CHRONICLES' is entirely absent from the thumbnail with no visible text overlay of any kind."
+          },
+          {
+            "rule_id": "TIG-05",
+            "severity": "BLOCKING",
+            "description": "No text overlay, title, or subtitle is present on the image, meaning the required three-line typographic hierarchy is completely missing."
+          }
+        ]
+      },
+      "qa_status": "pass",
+      "identity_status": "fail",
+      "thumbnail_status": "fail",
+      "blocking_reasons": [
+        "no thumbnail passes QA/identity gates (status='fail')"
+      ],
+      "mutation_would_proceed": false
+    },
+    "short_002": {
+      "deliverable_id": "short_002",
+      "aspect_ratio": "9:16",
+      "dimensions": "720x1280",
+      "thumbnail_path": "docs/operations/repairs/thumbnails/short_002.recomposed_v1.jpg",
+      "sha256": "7bdf1d9ffc6811e36dd54144d3da70d10cfd4ae44179584fa0c53e099b5090a3",
+      "provenance": {
+        "source": "deterministic_recomposition",
+        "base_asset": "thumbnails/short_002.jpg",
+        "operation": "levels correction (gamma=1.5, black-floor lift=0.015, RGB, PIL) -- same pixel content, no new imagery generated, no MUAPI call, cost=$0.00"
+      },
+      "qa_report": {
+        "overall_status": "warn",
+        "failures": [],
+        "warnings": [
+          "thumbnail_text_overlay: generation_plan not provided \u2014 cannot verify"
+        ]
+      },
+      "identity_report": {
+        "verdict": "BLOCKED",
+        "blocking_count": 3,
+        "violations": [
+          {
+            "rule_id": "TIG-06",
+            "severity": "BLOCKING",
+            "description": "Image dimensions appear to be approximately 720\u00d71280 (portrait/9:16), not the required 1280\u00d7720 (16:9 landscape) aspect ratio."
+          },
+          {
+            "rule_id": "TIG-07",
+            "severity": "BLOCKING",
+            "description": "The wordmark 'THE HYPOGEUM CHRONICLES' is entirely absent from the thumbnail; no channel branding or typography overlay is present."
+          },
+          {
+            "rule_id": "TIG-05",
+            "severity": "BLOCKING",
+            "description": "No text overlay of any kind is present on the image, including headline, subtitle, or episode title."
+          }
+        ]
+      },
+      "qa_status": "pass",
+      "identity_status": "fail",
+      "thumbnail_status": "fail",
+      "blocking_reasons": [
+        "no thumbnail passes QA/identity gates (status='fail')"
+      ],
+      "mutation_would_proceed": false
+    },
+    "short_003": {
+      "deliverable_id": "short_003",
+      "aspect_ratio": "9:16",
+      "dimensions": "720x1280",
+      "thumbnail_path": "docs/operations/repairs/thumbnails/short_003.recomposed_v1.jpg",
+      "sha256": "23b051a9cd9e71ae23ebcd076590bee7f7089bc15ad013f049a93f4eb1a88d5d",
+      "provenance": {
+        "source": "deterministic_recomposition",
+        "base_asset": "thumbnails/short_003.jpg",
+        "operation": "levels correction (gamma=1.5, black-floor lift=0.015, RGB, PIL) -- same pixel content, no new imagery generated, no MUAPI call, cost=$0.00"
+      },
+      "qa_report": {
+        "overall_status": "warn",
+        "failures": [],
+        "warnings": [
+          "thumbnail_text_overlay: generation_plan not provided \u2014 cannot verify"
+        ]
+      },
+      "identity_report": {
+        "verdict": "BLOCKED",
+        "blocking_count": 3,
+        "violations": [
+          {
+            "rule_id": "TIG-06",
+            "severity": "BLOCKING",
+            "description": "Image dimensions appear to be approximately 720\u00d71280 (9:16 portrait orientation) rather than the required 1280\u00d7720 (16:9 landscape) aspect ratio."
+          },
+          {
+            "rule_id": "TIG-07",
+            "severity": "BLOCKING",
+            "description": "The wordmark 'THE HYPOGEUM CHRONICLES' is entirely absent from the thumbnail with no visible text overlay of any kind."
+          },
+          {
+            "rule_id": "TIG-05",
+            "severity": "BLOCKING",
+            "description": "No text overlay, title, subtitle, or episode branding is present anywhere on the image."
+          }
+        ]
+      },
+      "qa_status": "pass",
+      "identity_status": "fail",
+      "thumbnail_status": "fail",
+      "blocking_reasons": [
+        "no thumbnail passes QA/identity gates (status='fail')"
+      ],
+      "mutation_would_proceed": false
+    }
+  }
+}

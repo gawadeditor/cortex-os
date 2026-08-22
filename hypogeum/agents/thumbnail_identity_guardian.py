@@ -68,7 +68,7 @@ from hypogeum.prompt_loader import load_prompt
 # ---------------------------------------------------------------------------
 
 _AGENT_NAME = "thumbnail_identity_guardian"
-_TIG_VERSION = "v1"
+_TIG_VERSION = "v2"
 _TIG_MODEL = "anthropic/claude-sonnet-4.6"
 _TIG_MAX_TOKENS = 2048
 
@@ -78,26 +78,128 @@ _PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "thumbnail_i
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
 
+# Rule catalog owned by Factory Core -- generic across every deliverable
+# class and every channel. TIG-05/07 are conditionally available (see
+# _build_system_prompt/_filter_inapplicable_violations) depending on
+# whether the channel's own rules for THIS deliverable class require a
+# wordmark/title hierarchy at all; every other rule id applies to any
+# deliverable class uniformly, parametrized by that class's own rules.
 _BLOCKING_RULES = {
-    "TIG-01": "Human face as primary subject",
-    "TIG-02": "Bright or high-key background",
-    "TIG-03": "Neon, cyberpunk, or sci-fi visual language",
+    "TIG-01": "Prohibited human figure/face per this deliverable's human-figure policy",
+    "TIG-02": "Background/palette violates the channel identity palette",
+    "TIG-03": "Forbidden style language present",
     "TIG-04": "Talking-head or interview framing",
-    "TIG-05": "Missing or illegible text overlay",
-    "TIG-06": "Wrong dimensions or aspect ratio",
-    "TIG-07": "Wordmark absent from composition",
+    "TIG-05": "Missing or illegible required text overlay (only when the deliverable class requires one)",
+    "TIG-06": "Wrong dimensions or aspect ratio for this deliverable class",
+    "TIG-07": "Required wordmark absent from composition (only when the deliverable class requires one)",
+    "TIG-08": "Unrelated or fabricated imagery not grounded in the actual episode/Short subject matter",
+    "TIG-09": "Placeholder, flat-fill, or logo-only imagery",
+    "TIG-10": "Composition/focal hierarchy unreadable at this deliverable's real feed scale",
 }
 
 _WARNING_RULES = {
     "TIG-W01": "Background brightness elevated",
     "TIG-W02": "Subtitle text weak or low-contrast",
-    "TIG-W03": "Wordmark scale smaller than ideal",
-    "TIG-W04": "Image subject competes with wordmark",
+    "TIG-W03": "Wordmark scale smaller than ideal (only when a wordmark is required)",
+    "TIG-W04": "Image subject competes with wordmark/text placement",
 }
 
-# System prompt loaded from disk — headers stripped by prompt_loader.
-# Source: hypogeum/prompts/thumbnail_identity_guardian.txt
-_SYSTEM_PROMPT: str = load_prompt(_PROMPT_FILE)
+# Generic, channel-agnostic template loaded from disk — headers stripped
+# by prompt_loader. Source: hypogeum/prompts/thumbnail_identity_guardian.txt.
+# Contains no channel-specific wordmark text, palette, or dimensions —
+# those come from hypogeum.brand.thumbnail_identity_rules (Channel
+# Package content) at call time via _build_system_prompt(), keyed by
+# deliverable_class.
+_GENERIC_TEMPLATE: str = load_prompt(_PROMPT_FILE)
+
+
+def _human_figure_policy_text(policy: str) -> str:
+    return {
+        "prohibited": "No human figures of any kind are permitted anywhere in the frame.",
+        "unrestricted": "Human figures are permitted without restriction.",
+        "silhouette_or_back_profile_only_no_frontal_face": (
+            "A human figure may appear only as a silhouette or from the back/profile — "
+            "as a scale anchor, never a frontal face or identifiable portrait."
+        ),
+    }.get(policy, policy)
+
+
+def _build_system_prompt(rules) -> str:
+    """
+    Merge the generic, channel-agnostic template with this channel's own
+    rules for `rules.deliverable_class` (hypogeum.brand.
+    thumbnail_identity_rules.ThumbnailIdentityRules) into the final
+    system prompt sent to the vision model. Factory Core (this module)
+    never hardcodes a channel's wordmark text, palette, or dimensions —
+    every such value below is read from `rules`.
+    """
+    lines = [
+        _GENERIC_TEMPLATE,
+        "",
+        f"Deliverable class for this image: {rules.deliverable_class!r} "
+        f"(expected {rules.expected_dimensions}, {rules.aspect_ratio} aspect ratio).",
+        "",
+        "Channel identity rules for THIS deliverable class:",
+        f"- Palette: {rules.palette_description}",
+        f"- Typography: {rules.typography_description}",
+        f"- Human figures: {_human_figure_policy_text(rules.human_figure_policy)}",
+        f"- Composition/focal hierarchy: {rules.focal_hierarchy_description}",
+    ]
+    if rules.wordmark_required:
+        lines.append(f"- Wordmark {rules.wordmark_text!r} must be present and legible (rule TIG-07 applies).")
+    else:
+        lines.append(
+            "- No wordmark is required for this deliverable class — its absence is NEVER a "
+            "violation; do not use rule TIG-07 for this image."
+        )
+    if rules.title_hierarchy_required:
+        lines.append("- The title/text hierarchy described above must be present (rule TIG-05 applies).")
+    else:
+        lines.append(
+            "- No mandatory title/text-overlay hierarchy is required for this deliverable class — "
+            "an image-only composition is NEVER a violation; do not use rule TIG-05 for this image."
+        )
+    if rules.forbidden_style_language:
+        lines.append(f"- Forbidden style language (rule TIG-03): {', '.join(rules.forbidden_style_language)}.")
+    if rules.additional_rules_text:
+        lines.append(rules.additional_rules_text)
+
+    lines.append("")
+    lines.append("Available BLOCKING rule_ids for this image:")
+    for rule_id, desc in _BLOCKING_RULES.items():
+        if rule_id == "TIG-05" and not rules.title_hierarchy_required:
+            continue
+        if rule_id == "TIG-07" and not rules.wordmark_required:
+            continue
+        lines.append(f"  {rule_id} ({desc})")
+    lines.append("")
+    lines.append("Available WARNING rule_ids for this image:")
+    for rule_id, desc in _WARNING_RULES.items():
+        if rule_id == "TIG-W03" and not rules.wordmark_required:
+            continue
+        lines.append(f"  {rule_id} ({desc})")
+    return "\n".join(lines)
+
+
+def _filter_inapplicable_violations(violations: list[dict], rules) -> list[dict]:
+    """
+    Deterministic backstop, independent of whether the vision model
+    actually honored the prompt's instructions: TIG-05/TIG-07 can never
+    block or warn a deliverable class whose own rules do not require a
+    text/title hierarchy or a wordmark. This makes "must not require a
+    wordmark layout / title hierarchy" a hard guarantee, not merely a
+    prompt suggestion.
+    """
+    out = []
+    for v in violations:
+        if v["rule_id"] == "TIG-05" and not rules.title_hierarchy_required:
+            continue
+        if v["rule_id"] == "TIG-07" and not rules.wordmark_required:
+            continue
+        if v["rule_id"] == "TIG-W03" and not rules.wordmark_required:
+            continue
+        out.append(v)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +276,7 @@ def _encode_image(image_path: Path) -> tuple[str, str]:
     return base64.b64encode(data).decode("ascii"), media_type
 
 
-def _default_tig_call(image_path: Path, episode_id: str, config) -> str:
+def _default_tig_call(image_path: Path, episode_id: str, config, system_prompt: str) -> str:
     """
     Default TIG implementation: encodes image and calls Claude with vision.
 
@@ -187,7 +289,7 @@ def _default_tig_call(image_path: Path, episode_id: str, config) -> str:
     data_url = f"data:{media_type};base64,{b64}"
 
     messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": [
@@ -228,19 +330,40 @@ def _write_report(report: dict, tig_dir: Path, episode_id: str) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _default_identity_rules_resolver(deliverable_class: str):
+    from hypogeum.brand.thumbnail_identity_rules import get_thumbnail_identity_rules
+    return get_thumbnail_identity_rules(deliverable_class)
+
+
 def run_thumbnail_identity_guardian(
     episode_id: str,
     image_path: Path,
     tig_client: Optional[Callable] = None,
     config=None,
     output_dir: Optional[Path] = None,
+    deliverable_class: str = "main_episode",
+    identity_rules_resolver: Optional[Callable[[str], object]] = None,
 ) -> dict:
     """
     Inspect a rendered thumbnail image for channel identity compliance.
 
     Calls Claude (or the injected tig_client) with the thumbnail image and
-    the channel identity rules. Parses violations, computes a verdict, and
-    writes a durable thumbnail_identity_{episode_id}.json report.
+    the channel's own identity rules FOR `deliverable_class`. Parses
+    violations, computes a verdict, and writes a durable
+    thumbnail_identity_{episode_id}.json report.
+
+    deliverable_class-aware, aspect-aware, and channel-agnostic (2026-08-23):
+    this function itself carries no channel-specific wordmark text,
+    palette, typography, or dimensions -- it resolves that content, per
+    deliverable_class, from `identity_rules_resolver` (a callable
+    deliverable_class -> ThumbnailIdentityRules; defaults to
+    hypogeum.brand.thumbnail_identity_rules.get_thumbnail_identity_rules,
+    this channel's own Channel Package module -- see that module's
+    docstring). A channel cloned from this template supplies its own
+    resolver/module; Factory Core (this file) never hardcodes which
+    deliverable classes exist or what any of them require. Existing
+    callers that omit deliverable_class get "main_episode" -- the
+    original long-form 16:9 rules, unchanged.
 
     Args:
         episode_id:   Episode identifier.
@@ -252,19 +375,32 @@ def run_thumbnail_identity_guardian(
         config:       Loaded Config instance. Required when tig_client is None.
         output_dir:   Override output directory.
                       Defaults to .hypogeum-assets/tig/.
+        deliverable_class: Which deliverable's own identity contract to
+                      evaluate against -- e.g. "main_episode" or "short".
+                      Determines expected aspect ratio/dimensions, whether
+                      a wordmark/title hierarchy is required, and the
+                      human-figure/palette/style rules applied.
+        identity_rules_resolver: Optional injectable callable
+                      (deliverable_class: str) -> ThumbnailIdentityRules.
+                      Tests inject a fake to avoid depending on the real
+                      Channel Package module's exact rule content.
 
     Returns:
         thumbnail_identity dict with keys:
             episode_id, image_path (str), verdict (APPROVED/WARNING/BLOCKED),
             violations (list), blocking_count (int), warning_count (int),
-            checked_at (ISO 8601), tig_version, metadata_version.
+            checked_at (ISO 8601), tig_version, metadata_version,
+            deliverable_class.
     """
     image_path = Path(image_path)
     resolved_dir = Path(output_dir) if output_dir is not None else _DEFAULT_TIG_DIR
+    resolver = identity_rules_resolver or _default_identity_rules_resolver
+    rules = resolver(deliverable_class)
 
     report: dict = {
         "episode_id": episode_id,
         "image_path": str(image_path),
+        "deliverable_class": deliverable_class,
         "verdict": "error",
         "violations": [],
         "blocking_count": 0,
@@ -278,7 +414,7 @@ def run_thumbnail_identity_guardian(
     if not image_path.exists():
         report["verdict"] = "BLOCKED"
         report["violations"] = [{
-            "rule_id": "TIG-05",
+            "rule_id": "TIG-09",
             "severity": "BLOCKING",
             "description": f"Thumbnail image not found at path: {image_path}",
         }]
@@ -292,7 +428,8 @@ def run_thumbnail_identity_guardian(
         if tig_client is not None:
             raw_response = tig_client(image_path, episode_id)
         else:
-            raw_response = _default_tig_call(image_path, episode_id, config)
+            system_prompt = _build_system_prompt(rules)
+            raw_response = _default_tig_call(image_path, episode_id, config, system_prompt)
     except Exception as exc:
         report["verdict"] = "error"
         report["error"] = str(exc)[:500]
@@ -305,6 +442,7 @@ def run_thumbnail_identity_guardian(
     # --- Parse and clean violations ---
     raw_violations = _parse_violations(raw_response)
     violations = _clean_violations(raw_violations)
+    violations = _filter_inapplicable_violations(violations, rules)
 
     blocking = [v for v in violations if v["severity"] == "BLOCKING"]
     warnings = [v for v in violations if v["severity"] == "WARNING"]

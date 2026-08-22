@@ -2960,3 +2960,112 @@ class TestShortsRendersNotPlaceholder:
         for ph in placeholder_shorts:
             assert ph["scene_count"] == 0
             assert ph["video_asset_id"] == ""
+
+
+class TestShortsMetadataGenerationWiring:
+    """
+    hypogeum.agents.assembly_agent's wiring to
+    hypogeum.agents.shorts_metadata.generate_shorts_titles() — replaces
+    the historical {"short_id": sid, "title": sid} placeholder with real,
+    grounded titles. Every test injects a fake shorts_title_llm_call (no
+    real OpenRouter/Claude call, no network, no cost).
+    """
+
+    SCRIPT_SHORTS = [
+        {
+            "short_id": "short_001",
+            "narration_beats": [{"beat_id": "b_1", "text": "The tunnel narrows to thirty centimetres wide."}],
+            "text_overlays": [{"text": "30 cm wide."}],
+        },
+        {
+            "short_id": "short_002",
+            "narration_beats": [{"beat_id": "b_2", "text": "A tomb six thousand years old was found beneath the site."}],
+            "text_overlays": [{"text": "6,000 years old."}],
+        },
+        {
+            "short_id": "short_003",
+            "narration_beats": [{"beat_id": "b_3", "text": "No medieval document ever mentions these structures."}],
+            "text_overlays": [{"text": "Zero documents."}],
+        },
+    ]
+
+    def _run(self, tmp_path, *, script_package=None, shorts_title_llm_call=None):
+        cfg = _make_config()
+        visual = _make_visual_package(episode_id="ep_sh_meta")
+        narration = _make_narration_package(episode_id="ep_sh_meta")
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh_meta")
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_sh_meta")
+        _setup_narration_on_disk(narration, assets_root)
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                return run_assembly_agent(
+                    visual_package=visual, narration_package=narration, thumbnail_package=thumbnails,
+                    config=cfg, episode_id="ep_sh_meta", output_dir=tmp_path / "ep_sh_meta",
+                    script_package=script_package,
+                    shorts_title_llm_call=shorts_title_llm_call,
+                )
+
+    def test_real_titles_replace_the_historical_placeholder(self, tmp_path):
+        # The real short_ids in this default visual package are
+        # sh_001/sh_002/sh_003 -- assembly re-keys script_package's
+        # positional shorts_scripts entries to these before calling the
+        # title generator, so the fake must respond keyed the same way.
+        def _fake(system_prompt, input_package, *, config, episode_id, channel_id):
+            return {"titles": [
+                {"short_id": s["short_id"], "title": f"A Real Title For {s['short_id']}"}
+                for s in input_package["shorts"]
+            ]}
+
+        result = self._run(
+            tmp_path,
+            script_package={"sections": [], "shorts_scripts": self.SCRIPT_SHORTS},
+            shorts_title_llm_call=_fake,
+        )
+        shorts_titles = result["metadata_source"]["shorts_titles"]
+        assert len(shorts_titles) == 3
+        for entry in shorts_titles:
+            assert entry["title"] != entry["short_id"], "must never be the historical placeholder"
+            assert entry["title"].startswith("A Real Title For")
+
+    def test_no_script_package_degrades_to_empty_title_never_placeholder(self, tmp_path):
+        result = self._run(tmp_path, script_package=None)
+        shorts_titles = result["metadata_source"]["shorts_titles"]
+        assert len(shorts_titles) == 3
+        for entry in shorts_titles:
+            assert entry["title"] == ""
+            assert entry["title"] != entry["short_id"]
+
+    def test_generation_failure_degrades_to_empty_title_never_placeholder(self, tmp_path):
+        def _raising(system_prompt, input_package, *, config, episode_id, channel_id):
+            raise RuntimeError("simulated provider failure")
+
+        result = self._run(
+            tmp_path,
+            script_package={"sections": [], "shorts_scripts": self.SCRIPT_SHORTS},
+            shorts_title_llm_call=_raising,
+        )
+        shorts_titles = result["metadata_source"]["shorts_titles"]
+        assert len(shorts_titles) == 3
+        for entry in shorts_titles:
+            assert entry["title"] == ""
+            assert entry["title"] != entry["short_id"]
+
+    def test_placeholder_returned_by_model_is_rejected_and_degrades_safely(self, tmp_path):
+        # A misbehaving model that returns the historical placeholder
+        # pattern itself must never leak through -- generate_shorts_titles
+        # rejects it, and assembly degrades to empty rather than accepting it.
+        def _placeholder_fake(system_prompt, input_package, *, config, episode_id, channel_id):
+            return {"titles": [{"short_id": s["short_id"], "title": s["short_id"]} for s in input_package["shorts"]]}
+
+        result = self._run(
+            tmp_path,
+            script_package={"sections": [], "shorts_scripts": self.SCRIPT_SHORTS},
+            shorts_title_llm_call=_placeholder_fake,
+        )
+        shorts_titles = result["metadata_source"]["shorts_titles"]
+        for entry in shorts_titles:
+            assert entry["title"] == ""

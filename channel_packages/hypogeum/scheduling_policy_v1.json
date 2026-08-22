@@ -1,8 +1,9 @@
 {
   "channel_id": "hypogeum",
   "policy_id": "hypogeum_scheduling_policy_v1",
-  "policy_version": "1.0.0",
+  "policy_version": "1.1.0",
   "created_at": "2026-08-21",
+  "updated_at": "2026-08-22",
   "status": "proposed_not_installed",
   "market_definition": "Global English-speaking history and archaeology audience, prioritizing practical overlap across North America, the UK, and Europe.",
   "evidence_type": "external_benchmark",
@@ -15,6 +16,18 @@
     "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
     "short_002": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
     "short_003": {"day_of_week": "friday", "time_of_day": "18:00", "timezone": "UTC"}
+  },
+  "bundle_cycle_policy": {
+    "hypogeum_weekly_release_v1": {
+      "anchor_deliverable_id": "main_episode",
+      "required_deliverable_ids": ["main_episode", "short_001", "short_002", "short_003"],
+      "deliverables": {
+        "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC"},
+        "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
+        "short_002": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
+        "short_003": {"day_of_week": "friday", "time_of_day": "18:00", "timezone": "UTC"}
+      }
+    }
   },
   "metrics_for_evaluation": [
     "impressions",
@@ -32,7 +45,8 @@
   "known_gaps": [
     "platform_analytics table has no geography/device/time-of-day columns today -- these metrics cannot be measured with the current schema; recording this is a later feedback-loop dependency, not implemented in this slice.",
     "ctr and impressions are null in every existing platform_analytics row -- the current YouTube Analytics sync never populated them.",
-    "Deliverable-specific schedule keys ('main_episode', 'short_001'/'short_002'/'short_003') match hypogeum.agents.publishing_agent._deliverable_id_for()'s already-established, channel-agnostic convention (f\"short_{short_id}\") and are the exact real values verified against ep_f3619022's own sealed publishing_record_ep_f3619022.json / publish_calendar.short_id -- not an invented scheme. A channel with a different bundle shape would use different keys -- Factory Core assigns no meaning to these strings."
+    "Deliverable-specific schedule keys ('main_episode', 'short_001'/'short_002'/'short_003') match hypogeum.agents.publishing_agent._deliverable_id_for()'s already-established, channel-agnostic convention (f\"short_{short_id}\") and are the exact real values verified against ep_f3619022's own sealed publishing_record_ep_f3619022.json / publish_calendar.short_id -- not an invented scheme. A channel with a different bundle shape would use different keys -- Factory Core assigns no meaning to these strings.",
+    "v1.0.0's flat deliverable_schedule computed every deliverable's next occurrence independently from wall-clock 'now', which could schedule a Short before its own main episode when activation happened shortly after the main's weekly slot (e.g. any time between Sunday 14:00 and the following Monday 18:00). v1.1.0 adds bundle_cycle_policy, which hypogeum.publishing.schedule_compiler now consults FIRST and which anchors every Short's slot to the main episode's own resolved occurrence, not to wall-clock 'now' independently -- this closes that gap. deliverable_schedule is retained for backward-compat/documentation purposes only; installation should use bundle_cycle_policy going forward."
   ],
-  "installation": "NOT applied to any database. To install (idempotent, preserves every other existing field -- see hypogeum.channel_config.update_channel_operations_profile()): update_channel_operations_profile(channel_id='hypogeum', deliverable_schedule_policy=<this file's 'deliverable_schedule' object>). Requires explicit operator approval -- not performed by this artifact's presence alone."
+  "installation": "NOT applied to any database. To install (idempotent, preserves every other existing field -- see hypogeum.channel_config.update_channel_operations_profile()): update_channel_operations_profile(channel_id='hypogeum', bundle_cycle_policy=<this file's 'bundle_cycle_policy' object>). Requires explicit operator approval -- not performed by this artifact's presence alone."
 }

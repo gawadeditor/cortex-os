@@ -13,28 +13,44 @@ states; never falls back to another channel's or a global default
 schedule. Missing or invalid configuration fails closed (blocked=True,
 schedule_plan=None) rather than guessing.
 
-ChannelOperationsProfile.deliverable_schedule_policy — an optional,
-channel-declared, generic dict keyed by an opaque deliverable_id (Factory
-Core assigns no meaning to the keys) — is now consulted FIRST for each
-requested deliverable_id, each entry independently resolved to its own
-slot via the same pure compute_next_publish_slot(). A deliverable_id with
-no entry in that policy falls back to the channel's single
-publishing_schedule slot (the original, still-supported behavior — a
-channel with no per-deliverable policy at all behaves exactly as before
-this field existed). A deliverable_id THAT HAS an entry which fails to
-resolve to a real slot (malformed day_of_week/time_of_day/timezone) fails
-the WHOLE compilation closed, rather than silently falling back — a
-configured-but-broken per-deliverable policy is a real configuration
-error, not an absence.
+Three resolution layers, consulted in this order for a given set of
+requested deliverable_ids, each independently opt-in and fully backward
+compatible with a channel that has none of it configured:
 
-SCHEMA GAP now narrowed, not fully closed: deliverable_schedule_policy
-still expresses at most one FIXED recurring slot per deliverable_id (no
-concept of "N days after the anchor deliverable", relative offsets, or
-per-cycle variation). See channel_packages/hypogeum/scheduling_policy_v1.json
-for the versioned, reviewable Hypogeum-specific values (market
-definition, evidence type, confidence, test cycles) — that data belongs
-to the Hypogeum Channel Package only and is never installed by this
-module itself.
+  1. ChannelOperationsProfile.bundle_cycle_policy — an optional, channel-
+     declared, generic dict keyed by an opaque bundle_cycle_id (Factory
+     Core assigns no meaning to the keys, the deliverable_ids inside them,
+     or which one is the "anchor"). When the requested deliverable_ids
+     overlap exactly one declared cycle's own deliverable set, EVERY
+     deliverable belonging to that cycle is resolved TOGETHER, relative to
+     the cycle's own declared anchor_deliverable_id's resolved slot — see
+     _compile_bundle_cycle() below for the ordering guarantee this
+     provides. This is the only layer aware of release-ORDER, not just
+     release-TIME.
+  2. ChannelOperationsProfile.deliverable_schedule_policy — an optional,
+     channel-declared, generic dict keyed by an opaque deliverable_id, each
+     entry independently resolved to its own FIXED recurring slot via the
+     same pure compute_next_publish_slot() — no ordering relationship to
+     any other deliverable. Consulted for any deliverable_id not covered
+     by layer 1.
+  3. The channel's single publishing_schedule fallback slot (the original,
+     still-supported behavior — a channel with no per-deliverable or
+     bundle-cycle policy at all behaves exactly as before either field
+     existed).
+
+A deliverable_id whose policy entry (bundle-cycle OR flat) exists but
+fails to resolve to a real slot, or whose bundle cycle is missing its
+anchor/a required member/has an invalid member ordering, or whose
+deliverable_ids are ambiguous across more than one declared cycle, fails
+the WHOLE compilation closed, rather than silently falling back — a
+configured-but-broken policy is a real configuration error, not an
+absence.
+
+See channel_packages/hypogeum/scheduling_policy_v1.json for the
+versioned, reviewable Hypogeum-specific values (market definition,
+evidence type, confidence, test cycles, the bundle_cycle_policy itself)
+— that data belongs to the Hypogeum Channel Package only and is never
+installed by this module itself.
 
 Public API:
     ScheduleCompilationResult
@@ -45,11 +61,20 @@ Public API:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
 from hypogeum.publishing.zernio_publish_runtime import DeliverableSchedule, SchedulePlan
+
+# One full period of the day_of_week/time_of_day recurrence primitive that
+# hypogeum.scheduler.compute_next_publish_slot() already implements (7
+# weekday values, 0-6). Reused here only to validate that a bundle-cycle
+# member's resolved slot falls within a single release cycle after its
+# anchor -- not a new cadence assumption of its own, and not Hypogeum-
+# specific (any channel's bundle cycle built on this same day/time
+# primitive shares the same one-week period).
+_RECURRENCE_PERIOD = timedelta(days=7)
 
 
 @dataclass
@@ -59,6 +84,192 @@ class ScheduleCompilationResult:
     blocked: bool
     blocked_reason: Optional[str] = None
     slot: Optional[datetime] = None
+
+
+class _BundleCycleBlocked(Exception):
+    """Internal control-flow only -- never escapes this module."""
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
+def _resolve_bundle_cycle_for_deliverables(
+    bundle_cycle_policy: dict,
+    deliverable_ids: Sequence[str],
+) -> Optional[tuple]:
+    """
+    Return (bundle_cycle_id, cycle_def) for the ONE declared cycle whose
+    own deliverable set overlaps `deliverable_ids`, or None if no cycle
+    overlaps at all (layer 1 does not apply -- caller falls through to
+    layers 2/3). Raises _BundleCycleBlocked if MORE THAN ONE cycle
+    overlaps (ambiguous) or if the requested ids straddle a cycle boundary
+    (some requested ids belong to the matched cycle, others don't).
+    """
+    requested = set(deliverable_ids)
+    matches = []
+    for cycle_id, cycle_def in (bundle_cycle_policy or {}).items():
+        cycle_deliverable_ids = set((cycle_def or {}).get("deliverables", {}).keys())
+        if requested & cycle_deliverable_ids:
+            matches.append((cycle_id, cycle_def, cycle_deliverable_ids))
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise _BundleCycleBlocked(
+            f"requested deliverable_ids {sorted(requested)} overlap {len(matches)} declared "
+            f"bundle_cycle_id entries ({sorted(m[0] for m in matches)}) -- this is an ambiguous "
+            f"bundle-cycle configuration, refusing to guess which cycle governs this release"
+        )
+
+    cycle_id, cycle_def, cycle_deliverable_ids = matches[0]
+    not_in_cycle = requested - cycle_deliverable_ids
+    if not_in_cycle:
+        raise _BundleCycleBlocked(
+            f"deliverable_id(s) {sorted(not_in_cycle)} were requested but are not declared as "
+            f"members of bundle_cycle_id={cycle_id!r} (which covers {sorted(cycle_deliverable_ids)})"
+        )
+    return cycle_id, cycle_def
+
+
+def _compile_bundle_cycle(
+    cycle_id: str,
+    cycle_def: dict,
+    deliverable_ids: Sequence[str],
+    *,
+    channel_timezone: str,
+    effective_now: datetime,
+    publish_now: bool,
+) -> dict:
+    """
+    Resolve every requested deliverable_id in one bundle cycle TOGETHER:
+    first the cycle's own declared anchor_deliverable_id's next future
+    slot (relative to effective_now, exactly like any other single-slot
+    schedule), then every other requested member's slot computed relative
+    to THAT SAME resolved anchor slot (not to effective_now again) -- this
+    is what guarantees a member never lands before its own bundle's
+    anchor purely because of independent per-deliverable "next occurrence
+    from wall-clock now" math (see module + this file's own docstring for
+    the motivating bug).
+
+    Returns {deliverable_id: DeliverableSchedule}. Raises
+    _BundleCycleBlocked on any missing anchor, missing required member,
+    invalid per-member schedule, or a resolved slot outside its single-
+    cycle ordering window relative to the anchor.
+    """
+    from hypogeum.scheduler import compute_next_publish_slot  # noqa: PLC0415
+
+    deliverables_decl = (cycle_def or {}).get("deliverables") or {}
+    anchor_id = (cycle_def or {}).get("anchor_deliverable_id")
+
+    if not anchor_id or anchor_id not in deliverables_decl:
+        raise _BundleCycleBlocked(
+            f"bundle_cycle_id={cycle_id!r} has no valid anchor_deliverable_id "
+            f"(declared: {anchor_id!r}) among its own deliverables {sorted(deliverables_decl)}"
+        )
+
+    required_ids = (cycle_def or {}).get("required_deliverable_ids")
+    if required_ids:
+        missing_required = set(required_ids) - set(deliverable_ids)
+        if missing_required:
+            raise _BundleCycleBlocked(
+                f"bundle_cycle_id={cycle_id!r} requires deliverable_id(s) "
+                f"{sorted(missing_required)} that were not requested — a partial bundle "
+                f"cannot be scheduled"
+            )
+
+    if anchor_id not in deliverable_ids:
+        raise _BundleCycleBlocked(
+            f"bundle_cycle_id={cycle_id!r}'s anchor_deliverable_id={anchor_id!r} was not "
+            f"itself requested — every other member of this cycle is defined relative to the "
+            f"anchor, so the anchor must always be included"
+        )
+
+    anchor_entry = deliverables_decl[anchor_id]
+    anchor_tz = anchor_entry.get("timezone") or channel_timezone
+    anchor_schedule = {"day_of_week": anchor_entry.get("day_of_week"), "time_of_day": anchor_entry.get("time_of_day")}
+    anchor_slot = compute_next_publish_slot(anchor_schedule, anchor_tz, effective_now)
+    if anchor_slot is None:
+        raise _BundleCycleBlocked(
+            f"bundle_cycle_id={cycle_id!r}'s anchor_deliverable_id={anchor_id!r} schedule entry "
+            f"is invalid or incomplete (entry={anchor_entry!r}) — refusing to invent a release time"
+        )
+
+    entries: dict = {anchor_id: DeliverableSchedule(scheduled_for=anchor_slot, timezone_name=anchor_tz, publish_now=publish_now)}
+
+    for deliverable_id in deliverable_ids:
+        if deliverable_id == anchor_id:
+            continue
+        member_entry = deliverables_decl[deliverable_id]
+        member_tz = member_entry.get("timezone") or channel_timezone
+        member_schedule = {"day_of_week": member_entry.get("day_of_week"), "time_of_day": member_entry.get("time_of_day")}
+        relation = member_entry.get("anchor_relation", "after")
+
+        if relation == "after":
+            # Resolved relative to the ANCHOR's own slot (not effective_now
+            # again) -- compute_next_publish_slot() always returns a value
+            # in (anchor_slot, anchor_slot + _RECURRENCE_PERIOD] by
+            # construction when given anchor_slot as its own reference, so
+            # this is what structurally guarantees "after its anchor,
+            # within the same cycle" without re-deriving cadence.
+            candidate = compute_next_publish_slot(member_schedule, member_tz, anchor_slot)
+            if candidate is None:
+                raise _BundleCycleBlocked(
+                    f"bundle_cycle_id={cycle_id!r} member deliverable_id={deliverable_id!r} schedule "
+                    f"entry is invalid or incomplete (entry={member_entry!r})"
+                )
+        elif relation == "before":
+            # A pre-anchor teaser airs in the cycle immediately preceding
+            # the anchor's own resolved occurrence -- found by searching
+            # forward from one full recurrence period before the anchor
+            # (never from effective_now, which may already be past this
+            # cycle's teaser slot and would otherwise skip straight to
+            # NEXT cycle's teaser, landing it after, not before, this
+            # cycle's anchor).
+            reference = anchor_slot - _RECURRENCE_PERIOD
+            candidate = compute_next_publish_slot(member_schedule, member_tz, reference)
+            if candidate is None:
+                raise _BundleCycleBlocked(
+                    f"bundle_cycle_id={cycle_id!r} member deliverable_id={deliverable_id!r} schedule "
+                    f"entry is invalid or incomplete (entry={member_entry!r})"
+                )
+            if not (reference <= candidate < anchor_slot):
+                raise _BundleCycleBlocked(
+                    f"bundle_cycle_id={cycle_id!r} member deliverable_id={deliverable_id!r} is declared "
+                    f"anchor_relation='before' but resolved to {candidate.isoformat()}, which is not "
+                    f"strictly before its anchor's slot {anchor_slot.isoformat()} within the immediately "
+                    f"preceding release cycle — invalid pre-anchor teaser ordering"
+                )
+        else:
+            raise _BundleCycleBlocked(
+                f"bundle_cycle_id={cycle_id!r} member deliverable_id={deliverable_id!r} declares "
+                f"unknown anchor_relation={relation!r} (must be 'after' or 'before')"
+            )
+
+        entries[deliverable_id] = DeliverableSchedule(scheduled_for=candidate, timezone_name=member_tz, publish_now=publish_now)
+
+    # Optional declared ORDERING/SEQUENCE (required_deliverable_ids, read
+    # as an ordered list when present): every consecutive pair of non-
+    # pre-anchor members in that declared order must resolve strictly
+    # chronologically increasing. This is the real, generically-checkable
+    # "invalid ordering" failure mode -- e.g. a cycle whose declared
+    # sequence says short_001 releases before short_002, but their
+    # configured day_of_week values would actually resolve the other way
+    # around.
+    required_ids = (cycle_def or {}).get("required_deliverable_ids")
+    if required_ids:
+        ordered_relevant = [
+            did for did in required_ids
+            if did in entries and deliverables_decl.get(did, {}).get("anchor_relation", "after") != "before"
+        ]
+        for prev_id, next_id in zip(ordered_relevant, ordered_relevant[1:]):
+            if entries[prev_id].scheduled_for >= entries[next_id].scheduled_for:
+                raise _BundleCycleBlocked(
+                    f"bundle_cycle_id={cycle_id!r} declared required_deliverable_ids order "
+                    f"{required_ids!r} is not chronologically increasing: {prev_id!r} resolves to "
+                    f"{entries[prev_id].scheduled_for.isoformat()}, which is not strictly before "
+                    f"{next_id!r}'s {entries[next_id].scheduled_for.isoformat()} — invalid ordering"
+                )
+
+    return entries
 
 
 def compile_schedule_plan_from_channel_package(
@@ -124,6 +335,34 @@ def compile_schedule_plan_from_channel_package(
 
     effective_now = now or datetime.now(timezone.utc)
     per_deliverable_policy = profile.deliverable_schedule_policy or {}
+
+    # Layer 1: bundle-cycle policy. Consulted first -- when it applies, it
+    # governs every requested deliverable_id itself (see
+    # _resolve_bundle_cycle_for_deliverables()'s contract: a match means
+    # ALL requested ids belong to that one cycle), so layers 2/3 below are
+    # never reached for this call.
+    try:
+        matched = _resolve_bundle_cycle_for_deliverables(profile.bundle_cycle_policy, deliverable_ids)
+    except _BundleCycleBlocked as exc:
+        return ScheduleCompilationResult(
+            channel_id=channel_id, schedule_plan=None, blocked=True,
+            blocked_reason=f"channel_id={channel_id!r} bundle-cycle scheduling failed: {exc.reason}",
+        )
+    if matched is not None:
+        cycle_id, cycle_def = matched
+        try:
+            entries = _compile_bundle_cycle(
+                cycle_id, cycle_def, deliverable_ids,
+                channel_timezone=profile.timezone, effective_now=effective_now, publish_now=publish_now,
+            )
+        except _BundleCycleBlocked as exc:
+            return ScheduleCompilationResult(
+                channel_id=channel_id, schedule_plan=None, blocked=True,
+                blocked_reason=f"channel_id={channel_id!r} bundle-cycle scheduling failed: {exc.reason}",
+            )
+        plan = SchedulePlan(channel_id=channel_id, entries=entries)
+        representative_slot = next(iter(entries.values())).scheduled_for if entries else None
+        return ScheduleCompilationResult(channel_id=channel_id, schedule_plan=plan, blocked=False, slot=representative_slot)
 
     # The fallback slot is only computed lazily (once, if any deliverable
     # actually needs it) so a channel whose deliverable_schedule_policy

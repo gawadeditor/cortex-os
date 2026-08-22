@@ -260,6 +260,313 @@ class TestRequireExplicitPolicy:
         assert set(result.schedule_plan.entries.keys()) == {"main_episode"}
 
 
+HYPOGEUM_BUNDLE_CYCLE_POLICY = {
+    "hypogeum_weekly_release_v1": {
+        "anchor_deliverable_id": "main_episode",
+        "required_deliverable_ids": ["main_episode", "short_001", "short_002", "short_003"],
+        "deliverables": {
+            "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC"},
+            "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
+            "short_002": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
+            "short_003": {"day_of_week": "friday", "time_of_day": "18:00", "timezone": "UTC"},
+        },
+    },
+}
+
+
+def _make_channel_with_bundle_cycle(db_path, channel_id, bundle_cycle_policy, *, timezone_name="UTC"):
+    brand = create_brand_profile(name=f"{channel_id} Brand", db_path=db_path)
+    model = create_model_profile(name=f"{channel_id} Model", db_path=db_path)
+    pub = create_publishing_profile(name=f"{channel_id} Publishing", db_path=db_path)
+    create_channel_profile(
+        channel_id=channel_id, name=channel_id,
+        brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
+        publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+    )
+    create_channel_operations_profile(
+        channel_id=channel_id, channel_name=channel_id, timezone=timezone_name,
+        bundle_cycle_policy=bundle_cycle_policy,
+        db_path=db_path,
+    )
+
+
+class TestBundleCycleScheduling:
+    """hypogeum.publishing.schedule_compiler's bundle-cycle layer (layer 1):
+    every member of a declared bundle_cycle_id is resolved TOGETHER,
+    relative to the cycle's own anchor's resolved slot -- proving Shorts
+    can never accidentally resolve to a slot before their own bundle's
+    main episode purely from independent per-deliverable 'next occurrence
+    from wall-clock now' math."""
+
+    ALL_IDS = ["main_episode", "short_001", "short_002", "short_003"]
+
+    def _compile(self, db_path, now):
+        return compile_schedule_plan_from_channel_package(
+            "hypogeum", self.ALL_IDS, db_path=db_path, now=now, require_explicit_policy=True,
+        )
+
+    def _assert_no_short_before_anchor(self, result):
+        assert result.blocked is False, result.blocked_reason
+        entries = result.schedule_plan.entries
+        anchor_slot = entries["main_episode"].scheduled_for
+        for short_id in ("short_001", "short_002", "short_003"):
+            assert entries[short_id].scheduled_for > anchor_slot, (
+                f"{short_id} resolved to {entries[short_id].scheduled_for.isoformat()}, "
+                f"which is not after its anchor's slot {anchor_slot.isoformat()}"
+            )
+        return entries
+
+    def test_saturday_before_anchor(self, db_path):
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        now = datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)  # Saturday
+        result = self._compile(db_path, now)
+        entries = self._assert_no_short_before_anchor(result)
+        assert entries["main_episode"].scheduled_for == datetime(2026, 8, 23, 14, 0, tzinfo=timezone.utc)
+        assert entries["short_001"].scheduled_for == datetime(2026, 8, 24, 18, 0, tzinfo=timezone.utc)
+        assert entries["short_002"].scheduled_for == datetime(2026, 8, 26, 18, 0, tzinfo=timezone.utc)
+        assert entries["short_003"].scheduled_for == datetime(2026, 8, 28, 18, 0, tzinfo=timezone.utc)
+
+    def test_sunday_one_minute_before_anchor(self, db_path):
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        now = datetime(2026, 8, 23, 13, 59, tzinfo=timezone.utc)  # Sunday, 1 min before 14:00
+        result = self._compile(db_path, now)
+        entries = self._assert_no_short_before_anchor(result)
+        # Anchor resolves to TODAY (still upcoming).
+        assert entries["main_episode"].scheduled_for == datetime(2026, 8, 23, 14, 0, tzinfo=timezone.utc)
+        assert entries["short_001"].scheduled_for == datetime(2026, 8, 24, 18, 0, tzinfo=timezone.utc)
+
+    def test_sunday_one_minute_after_anchor(self, db_path):
+        """The exact bug from the task description: activation just after
+        the anchor slot must roll BOTH the anchor AND every Short to next
+        week's cycle -- never leave a Short pinned to the just-passed
+        week while the anchor rolls forward alone."""
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        now = datetime(2026, 8, 23, 14, 1, tzinfo=timezone.utc)  # Sunday, 1 min after 14:00
+        result = self._compile(db_path, now)
+        entries = self._assert_no_short_before_anchor(result)
+        # Anchor rolls to NEXT Sunday...
+        assert entries["main_episode"].scheduled_for == datetime(2026, 8, 30, 14, 0, tzinfo=timezone.utc)
+        # ...and every Short rolls to the Mon/Wed/Fri AFTER that Sunday,
+        # not the Mon/Wed/Fri of the week that just started (which would
+        # be in the past relative to the anchor, or even absolutely if
+        # `now` is between Sunday 14:00 and the following Monday's slot).
+        assert entries["short_001"].scheduled_for == datetime(2026, 8, 31, 18, 0, tzinfo=timezone.utc)
+        assert entries["short_002"].scheduled_for == datetime(2026, 9, 2, 18, 0, tzinfo=timezone.utc)
+        assert entries["short_003"].scheduled_for == datetime(2026, 9, 4, 18, 0, tzinfo=timezone.utc)
+
+    def test_monday_after_anchor(self, db_path):
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)  # Monday, before that day's Short slot
+        result = self._compile(db_path, now)
+        entries = self._assert_no_short_before_anchor(result)
+        assert entries["main_episode"].scheduled_for == datetime(2026, 8, 30, 14, 0, tzinfo=timezone.utc)
+        assert entries["short_001"].scheduled_for == datetime(2026, 8, 31, 18, 0, tzinfo=timezone.utc)
+
+    def test_year_boundary(self, db_path):
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        now = datetime(2026, 12, 30, 20, 0, tzinfo=timezone.utc)  # Wednesday, late December
+        result = self._compile(db_path, now)
+        entries = self._assert_no_short_before_anchor(result)
+        # Next Sunday crosses into the new year.
+        assert entries["main_episode"].scheduled_for == datetime(2027, 1, 3, 14, 0, tzinfo=timezone.utc)
+        assert entries["short_001"].scheduled_for == datetime(2027, 1, 4, 18, 0, tzinfo=timezone.utc)
+        assert entries["short_002"].scheduled_for == datetime(2027, 1, 6, 18, 0, tzinfo=timezone.utc)
+        assert entries["short_003"].scheduled_for == datetime(2027, 1, 8, 18, 0, tzinfo=timezone.utc)
+
+    def test_another_timezone_with_dst(self, db_path):
+        # Europe/Berlin observes DST -- late October 2026 crosses the
+        # fall-back transition (2026-10-25). A channel whose own schedule
+        # is declared in Europe/Berlin wall-clock time must still resolve
+        # every member correctly across that transition, purely via the
+        # existing zoneinfo-based compute_next_publish_slot() -- no new
+        # DST-specific logic in the bundle-cycle layer itself.
+        policy = {
+            "weekly_v1": {
+                "anchor_deliverable_id": "main_episode",
+                "deliverables": {
+                    "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "Europe/Berlin"},
+                    "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "Europe/Berlin"},
+                },
+            },
+        }
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", policy, timezone_name="Europe/Berlin")
+        now = datetime(2026, 10, 22, 8, 0, tzinfo=timezone.utc)  # Thursday, before the Oct 25 DST transition
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "short_001"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is False, result.blocked_reason
+        entries = result.schedule_plan.entries
+        anchor_slot = entries["main_episode"].scheduled_for
+        short_slot = entries["short_001"].scheduled_for
+        assert short_slot > anchor_slot
+        # The EU fall-back transition happens at 01:00 UTC / 03:00 CEST on
+        # Oct 25 2026 -- by 14:00 local time that same day, Berlin has
+        # already moved to CET (UTC+1), so Sunday 14:00 CET = 13:00 UTC.
+        # Monday Oct 26 18:00 is also CET (UTC+1) = 17:00 UTC. Confirms
+        # real tz-aware conversion occurred, not a naive fixed UTC offset.
+        assert anchor_slot == datetime(2026, 10, 25, 13, 0, tzinfo=timezone.utc)
+        assert short_slot == datetime(2026, 10, 26, 17, 0, tzinfo=timezone.utc)
+
+    def test_shorts_only_channel_with_different_anchor(self, db_path):
+        """Factory Core must not assume main_episode is universally the
+        anchor -- another channel may anchor its bundle on a Short."""
+        policy = {
+            "shorts_only_v1": {
+                "anchor_deliverable_id": "short_001",
+                "required_deliverable_ids": ["short_001", "short_002"],
+                "deliverables": {
+                    "short_001": {"day_of_week": "tuesday", "time_of_day": "09:00", "timezone": "UTC"},
+                    "short_002": {"day_of_week": "thursday", "time_of_day": "09:00", "timezone": "UTC"},
+                },
+            },
+        }
+        _make_channel_with_bundle_cycle(db_path, "shorts_channel", policy)
+        now = datetime(2026, 8, 22, 0, 0, tzinfo=timezone.utc)  # Saturday
+        result = compile_schedule_plan_from_channel_package(
+            "shorts_channel", ["short_001", "short_002"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is False, result.blocked_reason
+        entries = result.schedule_plan.entries
+        assert entries["short_001"].scheduled_for == datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc)
+        assert entries["short_002"].scheduled_for == datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc)
+        assert entries["short_002"].scheduled_for > entries["short_001"].scheduled_for
+
+    def test_repeated_compilation_with_same_now_returns_identical_plan(self, db_path):
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        now = datetime(2026, 8, 23, 14, 1, tzinfo=timezone.utc)
+        result_1 = self._compile(db_path, now)
+        result_2 = self._compile(db_path, now)
+        assert result_1.blocked is False and result_2.blocked is False
+        entries_1 = {k: v.scheduled_for for k, v in result_1.schedule_plan.entries.items()}
+        entries_2 = {k: v.scheduled_for for k, v in result_2.schedule_plan.entries.items()}
+        assert entries_1 == entries_2
+
+    def test_missing_anchor_declaration_fails_closed(self, db_path):
+        policy = {
+            "broken_v1": {
+                "anchor_deliverable_id": "main_episode",
+                "deliverables": {
+                    # anchor_deliverable_id points to a deliverable that
+                    # isn't itself declared -- must fail closed, not
+                    # silently pick another member as the anchor.
+                    "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
+                },
+            },
+        }
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", policy)
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["short_001"], db_path=db_path, require_explicit_policy=True,
+        )
+        assert result.blocked is True
+        assert "anchor" in result.blocked_reason
+
+    def test_missing_required_deliverable_fails_closed(self, db_path):
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        # Only 2 of the 4 required members requested.
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "short_001"], db_path=db_path, require_explicit_policy=True,
+        )
+        assert result.blocked is True
+        assert result.schedule_plan is None
+        assert "short_002" in result.blocked_reason and "short_003" in result.blocked_reason
+
+    def test_invalid_ordering_fails_closed(self, db_path):
+        """The Channel Package declares an explicit required_deliverable_ids
+        SEQUENCE saying short_002 must release before short_001 -- but
+        their configured day_of_week values (short_001=Monday,
+        short_002=Wednesday) actually resolve the other way around. This
+        contradiction between declared sequence and configured times must
+        fail closed, never silently accepted."""
+        policy = {
+            "broken_v1": {
+                "anchor_deliverable_id": "main_episode",
+                "required_deliverable_ids": ["main_episode", "short_002", "short_001"],
+                "deliverables": {
+                    "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC"},
+                    "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
+                    "short_002": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
+                },
+            },
+        }
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", policy)
+        now = datetime(2026, 8, 22, 0, 0, tzinfo=timezone.utc)  # Saturday
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "short_001", "short_002"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is True
+        assert "invalid ordering" in result.blocked_reason
+
+    def test_ambiguous_cycle_fails_closed(self, db_path):
+        policy = {
+            "cycle_a": {
+                "anchor_deliverable_id": "main_episode",
+                "deliverables": {
+                    "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC"},
+                    "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
+                },
+            },
+            "cycle_b": {
+                "anchor_deliverable_id": "short_001",
+                "deliverables": {
+                    "short_001": {"day_of_week": "tuesday", "time_of_day": "09:00", "timezone": "UTC"},
+                },
+            },
+        }
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", policy)
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["short_001"], db_path=db_path, require_explicit_policy=True,
+        )
+        assert result.blocked is True
+        assert "ambiguous" in result.blocked_reason
+
+    def test_pre_anchor_teaser_declared_and_resolves_before_anchor(self, db_path):
+        policy = {
+            "teaser_v1": {
+                "anchor_deliverable_id": "main_episode",
+                "deliverables": {
+                    "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC"},
+                    "teaser": {
+                        "day_of_week": "friday", "time_of_day": "12:00", "timezone": "UTC",
+                        "anchor_relation": "before",
+                    },
+                },
+            },
+        }
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", policy)
+        now = datetime(2026, 8, 22, 0, 0, tzinfo=timezone.utc)  # Saturday
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "teaser"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is False, result.blocked_reason
+        entries = result.schedule_plan.entries
+        assert entries["teaser"].scheduled_for < entries["main_episode"].scheduled_for
+
+    def test_backward_compatible_when_no_bundle_cycle_policy_configured(self, db_path):
+        # A channel with only the flat deliverable_schedule_policy (no
+        # bundle_cycle_policy at all) must compile exactly as before this
+        # feature existed -- layer 1 never applies when bundle_cycle_policy
+        # is empty.
+        brand = create_brand_profile(name="Z Brand", db_path=db_path)
+        model = create_model_profile(name="Z Model", db_path=db_path)
+        pub = create_publishing_profile(name="Z Publishing", db_path=db_path)
+        create_channel_profile(
+            channel_id="channel_z", name="channel_z",
+            brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
+            publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+        )
+        create_channel_operations_profile(
+            channel_id="channel_z", channel_name="channel_z", timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+            deliverable_schedule_policy=HYPOGEUM_DELIVERABLE_POLICY,
+            db_path=db_path,
+        )
+        result = compile_schedule_plan_from_channel_package(
+            "channel_z", ["main_episode", "short_001", "short_002", "short_003"], db_path=db_path,
+        )
+        assert result.blocked is False
+        assert len({d.scheduled_for for d in result.schedule_plan.entries.values()}) == 4
+
+
 class TestFailsClosed:
     def test_no_channel_operations_profile_blocks(self, db_path):
         result = compile_schedule_plan_from_channel_package(

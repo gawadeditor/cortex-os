@@ -68,6 +68,7 @@ from typing import Dict, List, Optional, Tuple
 
 from hypogeum.agents.final_render_reviewer import run_final_render_reviewer
 from hypogeum.agents.music_agent import run_music_agent
+from hypogeum.agents.shorts_metadata import ShortsMetadataError, generate_shorts_titles
 from hypogeum.agents.timeline_qa import run_timeline_qa
 from hypogeum.agents.timeline_builder import (
     build_timelines,
@@ -137,6 +138,9 @@ def run_assembly_agent(
     topic_brief: Optional[dict] = None,
     research_package: Optional[dict] = None,
     narrative_package: Optional[dict] = None,
+    channel_id: Optional[str] = None,
+    shorts_title_editorial_rules: Optional[dict] = None,
+    shorts_title_llm_call=None,
 ) -> dict:
     """
     Execute the Assembly Agent end-to-end.
@@ -171,6 +175,23 @@ def run_assembly_agent(
                            Accepted for lineage validation; not consumed by Assembly.
         narrative_package: Optional Narrative Package from Narrative Architect.
                            Accepted for lineage validation; not consumed by Assembly.
+        channel_id:        Optional -- forwarded to generate_shorts_titles()'s
+                           model call for log correlation only; no channel-
+                           specific value is read from it here (any channel-
+                           specific editorial style must be passed explicitly
+                           via shorts_title_editorial_rules, resolved by the
+                           caller from that channel's own Channel Package).
+        shorts_title_editorial_rules: Optional dict overriding
+                           hypogeum.agents.shorts_metadata.DEFAULT_EDITORIAL_RULES
+                           (title length bounds, tone, forbidden patterns).
+                           Channel-specific values belong in the caller's
+                           Channel Package, never hardcoded here.
+        shorts_title_llm_call: Optional injectable callable forwarded to
+                           generate_shorts_titles()'s own llm_call parameter
+                           — tests supply a fake model fixture here; real
+                           callers omit it (defaults to a real, non-free
+                           OpenRouter call made only once per Short-titling
+                           attempt, never per retry of the whole episode).
 
     Returns:
         Final Render Package dict (schema-validated, written to disk).
@@ -836,6 +857,48 @@ def run_assembly_agent(
     # Source attribution: format source_registry entries for description inclusion
     formatted_sources = _format_sources(source_registry or [])
 
+    # Shorts publication titles: generated from each Short's OWN completed
+    # script content (narration_beats + text_overlays) only -- never the
+    # historical placeholder ({"short_id": sid, "title": sid}). Degrades
+    # to an empty title (never a placeholder, never a fabricated value)
+    # when script_package.shorts_scripts is absent/incomplete for this
+    # render, or when generation itself fails -- readiness's own
+    # A_METADATA check (hypogeum.publishing.readiness) is what actually
+    # blocks publishing on a missing title; this stage never silently
+    # papers over the gap with a fake-but-schema-valid value.
+    #
+    # Matched POSITIONALLY, not by short_id string equality: Script
+    # Engine's own shorts_scripts[] numbering (e.g. 'short_001') is
+    # independent of the Visual Package's per-scene short_id scheme (e.g.
+    # 'sh_001') that short_ids/shorts_renders is built from -- the Nth
+    # entry in each list is the same logical Short, confirmed by both
+    # always being produced in extraction order for the same episode. The
+    # output is re-keyed to short_ids' own values so shorts_titles lines
+    # up with shorts_renders/resolve_short_deliverable_id() downstream.
+    _shorts_scripts = (script_package or {}).get("shorts_scripts", []) or []
+
+    if _shorts_scripts and len(_shorts_scripts) == len(short_ids):
+        _requested_shorts_scripts = [
+            {**_shorts_scripts[i], "short_id": short_ids[i]}
+            for i in range(len(short_ids))
+        ]
+        try:
+            shorts_titles = generate_shorts_titles(
+                _requested_shorts_scripts, config=config, episode_id=episode_id,
+                channel_id=channel_id, editorial_rules=shorts_title_editorial_rules,
+                llm_call=shorts_title_llm_call,
+            )
+        except ShortsMetadataError as exc:
+            log.warn("shorts_metadata_generation_degraded", error=str(exc), short_ids=short_ids)
+            shorts_titles = [{"short_id": sid, "title": ""} for sid in short_ids]
+    else:
+        log.warn(
+            "shorts_metadata_generation_skipped",
+            reason="script_package_shorts_scripts_incomplete_or_absent",
+            short_ids=short_ids,
+        )
+        shorts_titles = [{"short_id": sid, "title": ""} for sid in short_ids]
+
     # Build metadata_source — ep_meta rarely carries title/logline (those live in
     # topic_brief), so fall back to topic_brief when ep_meta fields are empty.
     _tb = topic_brief or {}
@@ -844,10 +907,7 @@ def run_assembly_agent(
         "logline": ep_meta.get("logline") or _tb.get("logline", ""),
         "description": ep_meta.get("description") or _tb.get("logline", ""),
         "section_titles": computed_section_titles,
-        "shorts_titles": [
-            {"short_id": sid, "title": sid}
-            for sid in short_ids
-        ],
+        "shorts_titles": shorts_titles,
         "sources": formatted_sources,
         "ai_disclosure_text": (
             "This video was produced with AI assistance. "

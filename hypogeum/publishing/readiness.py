@@ -334,8 +334,29 @@ def _check_metadata(
             "description_candidates": description_candidates,
         }
 
-    # -- shorts_titles (must cover every expected Short with a non-empty title)
+    # -- shorts_titles (must cover every expected Short, by canonical
+    # deliverable_id, with a non-empty, non-placeholder title).
+    #
+    # Two accepted shapes, matched generically (never assumes which one a
+    # caller uses):
+    #   - a flat list of strings (legacy/override shape; matched
+    #     POSITIONALLY against shorts_renders — the original, pre-existing
+    #     behavior, unchanged for backward compatibility);
+    #   - a list of {"short_id": <canonical deliverable_id>, "title": ...}
+    #     dicts (the shape every real completed episode in production
+    #     history that ever populated this field actually uses — matched
+    #     by deliverable_id, robust to reordering).
+    #
+    # A title that is literally equal to its own deliverable_id/short_id
+    # (case-insensitive) is treated as the historical placeholder pattern
+    # (confirmed across every episode in production history that ever
+    # populated shorts_titles: 'short_001' -> title 'short_001', etc.) —
+    # never accepted as a real title.
+    from hypogeum.publishing.deliverable_ids import resolve_short_deliverable_id  # noqa: PLC0415
+
     shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
+    expected_short_ids = [resolve_short_deliverable_id(shorts_renders[i], i) for i in range(len(shorts_renders))]
+
     if metadata_override is not None and metadata_override.shorts_titles is not None:
         shorts_titles = metadata_override.shorts_titles
         shorts_titles_source = "metadata_override"
@@ -343,16 +364,49 @@ def _check_metadata(
         shorts_titles = metadata_source.get("shorts_titles") or []
         shorts_titles_source = "metadata_source"
 
+    def _is_placeholder(deliverable_id: str, candidate_title: str) -> bool:
+        return candidate_title.strip().lower() == deliverable_id.strip().lower()
+
     if shorts_renders:
-        if len(shorts_titles) != len(shorts_renders) or any(not (t or "").strip() for t in shorts_titles):
+        if shorts_titles and isinstance(shorts_titles[0], dict):
+            title_by_id = {
+                (entry.get("short_id") or "").strip(): (entry.get("title") or "").strip()
+                for entry in shorts_titles if isinstance(entry, dict)
+            }
+            missing = [sid for sid in expected_short_ids if not title_by_id.get(sid)]
+            placeholder = [
+                sid for sid in expected_short_ids
+                if title_by_id.get(sid) and _is_placeholder(sid, title_by_id[sid])
+            ]
+        else:
+            # Legacy positional shape: only count + non-empty is verifiable
+            # (no deliverable_id carried by a bare string), matching the
+            # original pre-existing behavior exactly.
+            missing = expected_short_ids if (len(shorts_titles) != len(shorts_renders) or any(not (t or "").strip() for t in shorts_titles)) else []
+            placeholder = [
+                expected_short_ids[i] for i, t in enumerate(shorts_titles)
+                if i < len(expected_short_ids) and _is_placeholder(expected_short_ids[i], (t or ""))
+            ]
+
+        if missing:
             return GateCheckResult(
                 capability="A_METADATA", status="fail",
                 reason=(
-                    f"shorts_titles ({len(shorts_titles)} from {shorts_titles_source}) does not cover all "
-                    f"{len(shorts_renders)} expected Short(s) with a non-empty title each"
+                    f"shorts_titles ({shorts_titles_source}) does not cover all {len(shorts_renders)} "
+                    f"expected Short(s) with a non-empty title each — missing: {missing}"
                 ),
-                evidence={"title": title, "shorts_expected": len(shorts_renders), "shorts_titles": shorts_titles},
-                remediation="Populate metadata_source.shorts_titles (one non-empty entry per Short), or supply a MetadataOverride(shorts_titles=...).",
+                evidence={"title": title, "shorts_expected": expected_short_ids, "shorts_titles": shorts_titles, "missing_deliverable_ids": missing},
+                remediation="Populate metadata_source.shorts_titles (one non-empty, non-placeholder entry per Short), or supply a MetadataOverride(shorts_titles=...).",
+            )
+        if placeholder:
+            return GateCheckResult(
+                capability="A_METADATA", status="fail",
+                reason=(
+                    f"shorts_titles ({shorts_titles_source}) contains placeholder title(s) equal to their "
+                    f"own deliverable_id — never a real title: {placeholder}"
+                ),
+                evidence={"title": title, "shorts_expected": expected_short_ids, "shorts_titles": shorts_titles, "placeholder_deliverable_ids": placeholder},
+                remediation="Replace the placeholder value(s) with real, accurate Short titles.",
             )
 
     return GateCheckResult(

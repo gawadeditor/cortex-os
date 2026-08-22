@@ -333,6 +333,30 @@ class ChannelOperationsProfile:
     # consumes for the single-slot case).
     deliverable_schedule_policy:  dict = field(default_factory=dict)
 
+    # Optional, per-BUNDLE (not per-deliverable) schedule policy. Empty
+    # dict (default) means "no bundle-cycle policy configured" --
+    # hypogeum.publishing.schedule_compiler falls back to
+    # deliverable_schedule_policy / the single publishing_schedule slot,
+    # exactly as before this field existed. Keyed by an opaque
+    # bundle_cycle_id this module assigns no meaning to. Each entry:
+    #   {
+    #     "anchor_deliverable_id": <opaque deliverable_id>,
+    #     "required_deliverable_ids": [<opaque deliverable_id>, ...],  # optional
+    #     "deliverables": {
+    #         <opaque deliverable_id>: {
+    #             "day_of_week": ..., "time_of_day": ..., "timezone": ...,
+    #             "anchor_relation": "after" | "before",  # optional, default "after"
+    #         }, ...
+    #     },
+    #   }
+    # Factory Core assigns no meaning to bundle_cycle_id, deliverable_id
+    # values, day_of_week, or the number of members -- a channel with a
+    # single-deliverable "bundle" or a Shorts-only bundle anchored on a
+    # Short is exactly as valid as Hypogeum's 4-member, main-anchored one.
+    # See channel_packages/{channel_id}/ for the versioned, reviewable
+    # definition of what should be installed here.
+    bundle_cycle_policy:          dict = field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -490,6 +514,7 @@ def _apply_publishing_profile_column_migrations(conn) -> None:
 # own docstring) without touching any existing row's other values.
 _CHANNEL_OPERATIONS_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("deliverable_schedule_policy_json", "TEXT"),
+    ("bundle_cycle_policy_json", "TEXT"),
 ]
 
 
@@ -613,6 +638,10 @@ def _row_to_operations(row) -> ChannelOperationsProfile:
         deliverable_schedule_policy  = (
             _uj(row["deliverable_schedule_policy_json"], {})
             if "deliverable_schedule_policy_json" in keys else {}
+        ),
+        bundle_cycle_policy          = (
+            _uj(row["bundle_cycle_policy_json"], {})
+            if "bundle_cycle_policy_json" in keys else {}
         ),
     )
 
@@ -1190,6 +1219,7 @@ _OPERATIONS_FIELD_MAP: dict[str, Any] = {
     "cost_ceiling_usd_per_episode": "cost_ceiling_usd_per_episode",
     "default_privacy_state":       "default_privacy_state",
     "deliverable_schedule_policy": ("deliverable_schedule_policy_json", _j),
+    "bundle_cycle_policy":         ("bundle_cycle_policy_json", _j),
 }
 
 
@@ -1288,6 +1318,7 @@ def create_channel_operations_profile(
     cost_ceiling_usd_per_episode: Optional[float] = None,
     default_privacy_state:        str            = "private",
     deliverable_schedule_policy:  Optional[dict] = None,
+    bundle_cycle_policy:          Optional[dict] = None,
     db_path:                      Optional[Path] = None,
 ) -> ChannelOperationsProfile:
     """
@@ -1322,6 +1353,7 @@ def create_channel_operations_profile(
     retry_policy = retry_policy or {}
     failure_halt_policy = failure_halt_policy or {}
     deliverable_schedule_policy = deliverable_schedule_policy or {}
+    bundle_cycle_policy = bundle_cycle_policy or {}
 
     _validate_operations_fields(
         timezone_=timezone,
@@ -1357,6 +1389,7 @@ def create_channel_operations_profile(
         created_at=now,
         updated_at=now,
         deliverable_schedule_policy=deliverable_schedule_policy,
+        bundle_cycle_policy=bundle_cycle_policy,
     )
     try:
         conn = get_connection(_resolve_db_path(db_path))
@@ -1372,8 +1405,8 @@ def create_channel_operations_profile(
                     max_concurrent_episodes, retry_policy_json, failure_halt_policy_json,
                     cost_ceiling_usd_per_episode, default_privacy_state,
                     created_at, updated_at, metadata_version,
-                    deliverable_schedule_policy_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    deliverable_schedule_policy_json, bundle_cycle_policy_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (channel_id, channel_name, timezone, int(operator_enabled),
                  _j(production_cadence), _j(publishing_schedule),
                  _j(enabled_platforms), _j(blocked_platform_reasons),
@@ -1382,7 +1415,7 @@ def create_channel_operations_profile(
                  max_concurrent_episodes, _j(retry_policy), _j(failure_halt_policy),
                  cost_ceiling_usd_per_episode, default_privacy_state,
                  now, now, profile.metadata_version,
-                 _j(deliverable_schedule_policy)),
+                 _j(deliverable_schedule_policy), _j(bundle_cycle_policy)),
             )
             conn.commit()
         finally:

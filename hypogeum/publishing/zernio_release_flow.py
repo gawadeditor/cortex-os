@@ -45,6 +45,7 @@ Public API:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +83,7 @@ def publish_channel_release(
     require_explicit_schedule_policy: bool = False,
     media_staging_provider: Optional[MediaStagingProvider] = None,
     publishing_provider: Optional[PublishingProvider] = None,
+    now: Optional[datetime] = None,
 ) -> ReleasePublishResult:
     """
     Read-only through stages 1–2; stage 3 is the only stage that can ever
@@ -100,6 +102,18 @@ def publish_channel_release(
     callers (hypogeum.publishing.zernio_channel_release_trigger) pass
     True, disabling that fallback entirely — see
     compile_schedule_plan_from_channel_package()'s own docstring.
+
+    now is forwarded unchanged to compile_schedule_plan_from_channel_package()
+    (None means "real wall clock", the default for every real caller).
+    Exposed here only so a test/replay caller can deterministically prove
+    that a schedule recomputed with a LATER now (simulating time passing
+    across a worker restart) never moves an already-persisted attempt —
+    the pre-existing hypogeum.publishing.submission_ledger write-ahead
+    guard (invoked inside stage 3's publisher.publish()) refuses a second
+    external call once an attempt already exists for this
+    (channel_id, episode_id, deliverable_id, platform, provider_id), so a
+    freshly recomputed (and possibly different) schedule_result.slot is
+    never actually submitted a second time.
     """
     readiness = check_publish_readiness(
         episode_id, channel_id=channel_id, assets_root=assets_root, db_path=db_path,
@@ -117,7 +131,7 @@ def publish_channel_release(
     deliverable_ids = [d.deliverable_id for d in package.all_deliverables()]
     schedule_result = compile_schedule_plan_from_channel_package(
         channel_id, deliverable_ids, db_path=db_path, publish_now=publish_now,
-        require_explicit_policy=require_explicit_schedule_policy,
+        require_explicit_policy=require_explicit_schedule_policy, now=now,
     )
     if schedule_result.blocked:
         return ReleasePublishResult(

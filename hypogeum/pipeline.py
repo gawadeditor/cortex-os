@@ -1372,6 +1372,7 @@ def run_pipeline(
             script_package=script_package,
             source_registry=research_package.get("source_registry", []),
             topic_brief=topic_brief,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -2420,6 +2421,7 @@ def _run_assembly_agent(
     script_package: Optional[dict] = None,
     source_registry: Optional[list] = None,
     topic_brief: Optional[dict] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Assembly Agent (M4.2–M4.8 — implemented).
@@ -2455,6 +2457,7 @@ def _run_assembly_agent(
         script_package=script_package,
         source_registry=source_registry,
         topic_brief=topic_brief,
+        channel_id=channel_id,
     )
 
 

@@ -176,7 +176,7 @@ class TestFullChain:
         publisher = ZernioProvider(transport=publish_transport)
 
         result = publish_episode_package(
-            _package(main_file, short_files), platform="youtube", channel_id="hypogeum",
+            _package(main_file, short_files), platforms=["youtube"], channel_id="hypogeum",
             db_path=db_path, schedule_plan=_full_schedule_plan(),
             media_staging_provider=staging, publishing_provider=publisher,
         )
@@ -196,7 +196,7 @@ class TestFullChain:
         publisher = ZernioProvider(transport=publish_transport)
 
         kwargs = dict(
-            platform="youtube", channel_id="hypogeum", db_path=db_path,
+            platforms=["youtube"], channel_id="hypogeum", db_path=db_path,
             schedule_plan=_full_schedule_plan(), media_staging_provider=staging, publishing_provider=publisher,
         )
         first = publish_episode_package(_package(main_file, short_files), **kwargs)
@@ -216,7 +216,7 @@ class TestSchedulePlanGating:
         publish_transport = FakePublishTransport()
 
         result = publish_episode_package(
-            _package(main_file, short_files), platform="youtube", channel_id="hypogeum", db_path=db_path,
+            _package(main_file, short_files), platforms=["youtube"], channel_id="hypogeum", db_path=db_path,
             schedule_plan=None,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -235,7 +235,7 @@ class TestSchedulePlanGating:
         incomplete_plan = SchedulePlan(channel_id=CHANNEL_ID, entries={"main_episode": DeliverableSchedule(publish_now=True)})
 
         result = publish_episode_package(
-            _package(main_file, short_files), platform="youtube", channel_id="hypogeum", db_path=db_path,
+            _package(main_file, short_files), platforms=["youtube"], channel_id="hypogeum", db_path=db_path,
             schedule_plan=incomplete_plan,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -248,7 +248,7 @@ class TestSchedulePlanGating:
 
     def test_wrong_type_schedule_plan_blocks(self, db_path, main_file, short_files):
         result = publish_episode_package(
-            _package(main_file, short_files), platform="youtube", channel_id="hypogeum", db_path=db_path,
+            _package(main_file, short_files), platforms=["youtube"], channel_id="hypogeum", db_path=db_path,
             schedule_plan={"main_episode": "not a real plan"},
         )
         assert result.blocked is True
@@ -270,7 +270,7 @@ class TestChannelIsolation:
 
         package = _package(main_file, short_files, channel_id="channel_b")  # package says channel_b...
         result = publish_episode_package(
-            package, platform="youtube", channel_id="channel_a",  # ...call asserts channel_a
+            package, platforms=["youtube"], channel_id="channel_a",  # ...call asserts channel_a
             db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_a"),
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -288,7 +288,7 @@ class TestChannelIsolation:
 
         package = _package(main_file, short_files, channel_id="channel_a")
         result = publish_episode_package(
-            package, platform="youtube", channel_id="channel_a",
+            package, platforms=["youtube"], channel_id="channel_a",
             db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_b"),  # wrong channel's schedule
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -307,7 +307,7 @@ class TestChannelIsolation:
 
         package = _package(main_file, short_files, channel_id="channel_b")
         result = publish_episode_package(
-            package, platform="youtube", channel_id="channel_b",
+            package, platforms=["youtube"], channel_id="channel_b",
             db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_b"),
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -332,7 +332,7 @@ class TestChannelIsolation:
         publisher = ZernioProvider(transport=publish_transport)
 
         result_a = publish_episode_package(
-            _package(main_file, short_files, channel_id="channel_a"), platform="youtube", channel_id="channel_a",
+            _package(main_file, short_files, channel_id="channel_a"), platforms=["youtube"], channel_id="channel_a",
             db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_a"),
             media_staging_provider=staging, publishing_provider=publisher,
         )
@@ -343,7 +343,7 @@ class TestChannelIsolation:
         # because sha256/staging dedup is scoped by episode_id/deliverable_id/
         # provider, not by file identity; channel_id flows through separately).
         result_b = publish_episode_package(
-            _package(main_file, short_files, channel_id="channel_b"), platform="youtube", channel_id="channel_b",
+            _package(main_file, short_files, channel_id="channel_b"), platforms=["youtube"], channel_id="channel_b",
             db_path=db_path, schedule_plan=_full_schedule_plan(channel_id="channel_b"),
             media_staging_provider=staging, publishing_provider=publisher,
         )
@@ -361,7 +361,7 @@ class TestNoLiveCallsOrProductionMutation:
         publish_transport = FakePublishTransport()
 
         result = publish_episode_package(
-            _package(main_file, short_files), platform="youtube", channel_id="hypogeum", db_path=db_path,
+            _package(main_file, short_files), platforms=["youtube"], channel_id="hypogeum", db_path=db_path,
             schedule_plan=_full_schedule_plan(),
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),

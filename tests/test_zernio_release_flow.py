@@ -207,14 +207,14 @@ class TestFullSequenceViaFakes:
         publish_transport = FakePublishTransport()
 
         result = publish_channel_release(
-            CHANNEL_ID, EPISODE_ID, "youtube", _package(assets_root),
+            CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root),
             assets_root=assets_root, db_path=db_path,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
 
         assert result.status == "published"
-        assert result.readiness.passed is True
+        assert result.readiness_by_platform["youtube"].passed is True
         assert result.schedule.blocked is False
         assert result.publish.all_published is True
         assert len(media_transport.presign_calls) == 4  # main + 3 shorts
@@ -234,14 +234,14 @@ class TestBlockedAtReadiness:
         _write_bundle_files(assets_root, title="")  # no title, no binding at all
 
         result = publish_channel_release(
-            CHANNEL_ID, EPISODE_ID, "youtube", _package(assets_root),
+            CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root),
             assets_root=assets_root, db_path=db_path,
         )
 
         assert result.status == "blocked_readiness"
         assert result.schedule is None
         assert result.publish is None
-        failed = {c.capability for c in result.readiness.checks if c.status == "fail"}
+        failed = {c.capability for c in result.readiness_by_platform["youtube"].checks if c.status == "fail"}
         assert "A_METADATA" in failed
         assert "D_PUBLISHING_BINDING" in failed
 
@@ -251,12 +251,12 @@ class TestBlockedAtReadiness:
         _write_bundle_files(assets_root, title="")
 
         result = publish_channel_release(
-            CHANNEL_ID, EPISODE_ID, "youtube", _package(assets_root),
+            CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root),
             assets_root=assets_root, db_path=db_path,
             metadata_override=MetadataOverride(title="Operator Title", description="d", shorts_titles=["a", "b", "c"]),
         )
         assert result.status == "blocked_readiness"
-        failed = {c.capability for c in result.readiness.checks if c.status == "fail"}
+        failed = {c.capability for c in result.readiness_by_platform["youtube"].checks if c.status == "fail"}
         assert "A_METADATA" not in failed
         assert "D_PUBLISHING_BINDING" in failed
 
@@ -282,14 +282,14 @@ class TestBlockedAtSchedule:
         publish_transport = FakePublishTransport()
 
         result = publish_channel_release(
-            CHANNEL_ID, EPISODE_ID, "youtube", _package(assets_root),
+            CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root),
             assets_root=assets_root, db_path=db_path,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
 
         assert result.status == "blocked_schedule"
-        assert result.readiness.passed is True
+        assert result.readiness_by_platform["youtube"].passed is True
         assert result.publish is None
         assert media_transport.presign_calls == []
         assert publish_transport.post_calls == []
@@ -337,7 +337,7 @@ class TestRestartDoesNotMoveAlreadyPersistedSchedule:
 
         now_1 = _dt.datetime(2026, 8, 22, 10, 0, tzinfo=_dt.timezone.utc)  # Saturday -> next slot: Sun Aug 23 14:00
         result_1 = publish_channel_release(
-            CHANNEL_ID, EPISODE_ID, "youtube", _package(assets_root, n_shorts=0),
+            CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root, n_shorts=0),
             assets_root=assets_root, db_path=db_path, now=now_1,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -354,7 +354,7 @@ class TestRestartDoesNotMoveAlreadyPersistedSchedule:
         # a mismatch.
         now_2 = now_1 + _dt.timedelta(days=8)
         result_2 = publish_channel_release(
-            CHANNEL_ID, EPISODE_ID, "youtube", _package(assets_root, n_shorts=0),
+            CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root, n_shorts=0),
             assets_root=assets_root, db_path=db_path, now=now_2,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -387,7 +387,7 @@ class TestNoLiveCalls:
         media_transport = FakeMediaTransport()
         publish_transport = FakePublishTransport()
         result = publish_channel_release(
-            CHANNEL_ID, EPISODE_ID, "youtube", _package(assets_root),
+            CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root),
             assets_root=assets_root, db_path=db_path,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),

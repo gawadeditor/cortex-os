@@ -702,7 +702,7 @@ class TestEndToEndThroughPublishEpisodePackage:
         publish_transport = FakePublishTransport()
 
         outcome = publish_episode_package(
-            package, platform="youtube", channel_id="channel_a", db_path=db_path,
+            package, platforms=["youtube"], channel_id="channel_a", db_path=db_path,
             schedule_plan=result.schedule_plan,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),

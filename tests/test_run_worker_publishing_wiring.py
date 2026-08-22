@@ -187,12 +187,20 @@ class FakePublishTransport:
         FakePublishTransport._counter[0] += 1
         FakePublishTransport.post_calls.append(json_body)
         n = FakePublishTransport._counter[0]
-        platform = json_body["platforms"][0]["platform"]
+        # 2026-08-22 (Zernio aggregation model): echo a platforms[] entry
+        # for EVERY requested platform, not just the first -- a real
+        # aggregated post's response carries one PlatformTarget per
+        # requested platform (see ZernioProvider._parse_post_response()),
+        # and this adapter now calls it once per platform in the group.
+        requested_platforms = [p["platform"] for p in json_body["platforms"]]
         return ZernioTransportResponse(
             status_code=201,
             json_body={"message": "created", "post": {
                 "_id": f"post_{n}",
-                "platforms": [{"platform": platform, "platformPostId": f"native_{n}", "status": "published"}],
+                "platforms": [
+                    {"platform": p, "platformPostId": f"native_{p}_{n}", "status": "published"}
+                    for p in requested_platforms
+                ],
             }},
         )
 
@@ -203,6 +211,24 @@ def _reset_fake_transport_state():
     FakeMediaTransport._counter = [0]
     FakePublishTransport.post_calls = []
     FakePublishTransport._counter = [0]
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _skip_production_output_gate(monkeypatch):
+    """Every fixture in this file writes fake (non-playable) media bytes
+    -- production_output_gate's real ffprobe/pixel checks are covered by
+    tests/test_production_output_gate.py, not here. This file tests
+    run_worker.py's own wiring/idempotency/isolation contract, not the
+    gate's own logic."""
+    from hypogeum.agents.production_output_gate import ProductionOutputGateResult
+
+    def _fake_pass(episode_id, assets_root, config, log):
+        return ProductionOutputGateResult(passed=True, episode_id=episode_id, evaluated_at="", checks=[])
+
+    monkeypatch.setattr(
+        "hypogeum.publishing.zernio_channel_release_trigger.run_production_output_gate", _fake_pass,
+    )
     yield
 
 

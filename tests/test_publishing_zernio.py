@@ -1262,7 +1262,16 @@ class TestPublishMultiPlatformPartialFailureRetry:
             status_code=200,
             json_body={"post": _multi_post_object(post_id="zpost_shared", platforms=("youtube", "tiktok"))},
         ))
-        transport._responses.append(_multi_success_201(post_id="zpost_shared", platforms=_ALL_PLATFORMS))
+        # PUT's own verified success envelope (docs.zernio.com/posts/
+        # update-post, 2026-08-22): HTTP 200, body {"message": ...,
+        # "post": Post} -- the "post" key, same as POST's 201, NEVER
+        # "existingPost" (that key is exclusive to POST's own idempotent-
+        # replay case). This is the exact shape ZernioProvider._handle_put_response()
+        # parses.
+        transport._responses.append(ZernioTransportResponse(
+            status_code=200,
+            json_body={"message": "Post updated successfully", "post": _multi_post_object(post_id="zpost_shared", platforms=_ALL_PLATFORMS)},
+        ))
         second = _publish_multi(provider, db_path, platforms=_ALL_PLATFORMS)
 
         assert second["youtube"]["reused_existing_attempt"] is True
@@ -1277,3 +1286,72 @@ class TestPublishMultiPlatformPartialFailureRetry:
         put_body = transport.calls[2]["json_body"]
         put_platforms = {p["platform"] for p in put_body["platforms"]}
         assert put_platforms == set(_ALL_PLATFORMS)
+
+
+class TestHandlePutResponseVerifiedContract:
+    """
+    Verified live 2026-08-22 against docs.zernio.com/posts/update-post:
+    PUT success is HTTP 200, body {"message": ..., "post": Post} -- the
+    SAME "post" key POST's 201 uses, never "existingPost" (that key is
+    exclusive to POST's own 200-idempotent-replay case and must never be
+    checked for a PUT response).
+    """
+
+    def test_200_with_post_key_is_parsed_as_success(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[
+            _multi_success_201(post_id="zpost_a", platforms=("youtube",)),
+            ZernioTransportResponse(
+                status_code=200,
+                json_body={"post": _multi_post_object(post_id="zpost_a", platforms=("youtube",))},
+            ),
+            ZernioTransportResponse(
+                status_code=200,
+                json_body={"message": "Post updated successfully", "post": _multi_post_object(post_id="zpost_a", platforms=("youtube", "tiktok"))},
+            ),
+        ])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(provider, db_path, platforms=("youtube",))
+        second = _publish_multi(provider, db_path, platforms=("youtube", "tiktok"))
+        assert second["tiktok"]["status"] == "published"
+        assert second["tiktok"]["provider_content_id"] == "zpost_a"
+
+    def test_200_with_existingpost_key_never_treated_as_success_for_put(self, db_path):
+        """A PUT response using POST's OWN 'existingPost' key (the wrong
+        key for this endpoint) must never be accepted -- proves
+        _handle_put_response() checks specifically for 'post', not
+        'existingPost'."""
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[
+            _multi_success_201(post_id="zpost_b", platforms=("youtube",)),
+            ZernioTransportResponse(
+                status_code=200,
+                json_body={"post": _multi_post_object(post_id="zpost_b", platforms=("youtube",))},
+            ),
+            ZernioTransportResponse(
+                status_code=200,
+                json_body={"existingPost": _multi_post_object(post_id="zpost_b", platforms=("youtube", "tiktok"))},
+            ),
+        ])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(provider, db_path, platforms=("youtube",))
+        second = _publish_multi(provider, db_path, platforms=("youtube", "tiktok"))
+        assert second["tiktok"]["status"] == "ambiguous"
+
+    def test_undocumented_207_status_is_ambiguous_never_asserted_as_success(self, db_path):
+        """HTTP 207 is documented by name only ('partial success
+        scenarios') with NO example response body anywhere in the docs --
+        fail closed, never guessed at."""
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[
+            _multi_success_201(post_id="zpost_c", platforms=("youtube",)),
+            ZernioTransportResponse(
+                status_code=200,
+                json_body={"post": _multi_post_object(post_id="zpost_c", platforms=("youtube",))},
+            ),
+            ZernioTransportResponse(status_code=207, json_body={"message": "partial"}),
+        ])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(provider, db_path, platforms=("youtube",))
+        second = _publish_multi(provider, db_path, platforms=("youtube", "tiktok"))
+        assert second["tiktok"]["status"] == "ambiguous"

@@ -67,11 +67,16 @@ Public API:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Sequence
 
+from hypogeum.agents.production_output_gate import run_production_output_gate
+from hypogeum.agents.shorts_metadata import ShortsMetadataError, generate_shorts_captions, generate_shorts_titles
 from hypogeum.buffer import DeliverableBundleDefinition, gather_channel_demand_items, resolve_complete_item_ids_for_channel
+from hypogeum.config import Config
+from hypogeum.logger import get_logger
 from hypogeum.publishing.deliverable_ids import MAIN_EPISODE_DELIVERABLE_ID, classify_deliverable_class, resolve_short_deliverable_id
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
@@ -97,6 +102,163 @@ class ReadyBundle:
     result: ReleasePublishResult
 
 
+def _backfill_shorts_metadata(
+    episode_id: str,
+    episode_dir: Path,
+    final_render_package: dict,
+    *,
+    config: Config,
+    channel_id: Optional[str] = None,
+    titles_llm_call=None,
+    captions_llm_call=None,
+) -> dict:
+    """
+    2026-08-22 fix (mandatory written metadata): before
+    resolve_canonical_metadata()/resolve_canonical_captions() are ever
+    consulted, generate and persist real, script-grounded shorts_titles/
+    shorts_captions into the canonical final_render_package_{episode_id}.json
+    for any Short still missing one -- this is what let ep_f3619022's 3
+    Shorts stay indefinitely blocked with content="" (0 chars, "No
+    content" in the Zernio UI): titles/captions were only ever generated
+    at Assembly-render time, so an episode rendered before
+    generate_shorts_captions() existed (or whose generation failed then)
+    had no path back to a resolved value short of a full re-render.
+
+    Read-only if nothing is missing (the common case for a healthy
+    episode) -- never re-generates a title/caption that already resolves.
+    When generation IS needed, uses hypogeum.agents.shorts_metadata.
+    generate_shorts_titles()/generate_shorts_captions() (the SAME
+    functions Assembly Agent itself calls, never a second implementation)
+    against script_package_{episode_id}.json's shorts_scripts[], matched
+    POSITIONALLY to shorts_renders (Script Engine's own numbering, e.g.
+    'short_001', is independent of the Visual Package's per-scene
+    short_id/deliverable_id scheme -- see build_publish_package_from_episode_dir()'s
+    own docstring for the same convention) and re-keyed to each Short's
+    real canonical deliverable_id before being written back.
+
+    Never fails open: a ShortsMetadataError from either generator is
+    caught per-field (title vs. caption) and simply leaves that field
+    unresolved in the written package -- resolve_canonical_metadata()/
+    resolve_canonical_captions() are the actual gates that block on a
+    still-missing value; this function only ever tries to fill a gap, it
+    never invents a placeholder and never blocks by itself. Persists a
+    timestamped backup of the previous final_render_package before
+    writing, matching this episode directory's own established backup
+    convention.
+
+    titles_llm_call/captions_llm_call: injectable, forwarded unchanged to
+    the two generators -- tests supply a fake (no real OpenRouter/Claude
+    call, no network, no cost); production callers omit them and accept
+    each generator's own real default.
+
+    Returns the (possibly updated) final_render_package dict. Callers
+    that already loaded it from disk must use THIS return value, not
+    their own stale copy, for any subsequent resolution.
+    """
+    shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
+    if not shorts_renders:
+        return final_render_package
+
+    expected_short_ids = [resolve_short_deliverable_id(shorts_renders[i], i) for i in range(len(shorts_renders))]
+    metadata_source = dict((final_render_package or {}).get("metadata_source") or {})
+
+    def _is_placeholder(deliverable_id: str, value: str) -> bool:
+        return value.strip().lower() == deliverable_id.strip().lower()
+
+    def _needs_generation(field_name: str, value_key: str) -> bool:
+        entries = metadata_source.get(field_name) or []
+        by_id = {
+            (e.get("short_id") or "").strip(): (e.get(value_key) or "").strip()
+            for e in entries if isinstance(e, dict)
+        }
+        for sid in expected_short_ids:
+            val = by_id.get(sid, "")
+            if not val or _is_placeholder(sid, val):
+                return True
+        return False
+
+    needs_titles = _needs_generation("shorts_titles", "title")
+    needs_captions = _needs_generation("shorts_captions", "caption")
+    if not needs_titles and not needs_captions:
+        return final_render_package
+
+    script_package = _load_json_if_exists(episode_dir / f"script_package_{episode_id}.json")
+    shorts_scripts = (script_package or {}).get("shorts_scripts") or []
+    if len(shorts_scripts) != len(expected_short_ids):
+        # Positional matching is only safe when the counts agree -- never
+        # guess an alignment; leave both fields exactly as they were and
+        # let the downstream resolver report the real blocker.
+        return final_render_package
+    requested_shorts_scripts = [
+        {**shorts_scripts[i], "short_id": expected_short_ids[i]} for i in range(len(expected_short_ids))
+    ]
+
+    changed = False
+    if needs_titles:
+        try:
+            generated = generate_shorts_titles(
+                requested_shorts_scripts, config=config, episode_id=episode_id,
+                channel_id=channel_id, llm_call=titles_llm_call,
+            )
+            metadata_source["shorts_titles"] = [
+                {"short_id": e["short_id"], "title": e["title"]} for e in generated
+            ]
+            changed = True
+        except ShortsMetadataError:
+            pass  # left unresolved -- resolve_canonical_metadata() is the real gate
+
+    if needs_captions:
+        try:
+            generated = generate_shorts_captions(
+                requested_shorts_scripts, config=config, episode_id=episode_id,
+                channel_id=channel_id, llm_call=captions_llm_call,
+            )
+            metadata_source["shorts_captions"] = [
+                {
+                    "short_id": e["short_id"], "caption": e["caption"],
+                    "source": "generate_shorts_captions_v1",
+                    "version": datetime.now(timezone.utc).isoformat(),
+                }
+                for e in generated
+            ]
+            changed = True
+        except ShortsMetadataError:
+            pass  # left unresolved -- resolve_canonical_captions() is the real gate
+
+    if not changed:
+        return final_render_package
+
+    updated_package = {**final_render_package, "metadata_source": metadata_source}
+    _write_final_render_package_with_backup(episode_id, episode_dir, final_render_package, updated_package)
+    return updated_package
+
+
+def _load_json_if_exists(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_final_render_package_with_backup(
+    episode_id: str, episode_dir: Path, previous: dict, updated: dict,
+) -> None:
+    """Backs up the previous final_render_package before overwriting it —
+    matching this episode directory's own established
+    `.backup_<UTC-timestamp>.json` convention (used throughout this
+    episode's production history for every other canonical-file mutation)
+    — never overwrites the canonical file without a recoverable prior
+    copy on disk."""
+    package_path = episode_dir / f"final_render_package_{episode_id}.json"
+    if package_path.exists():
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = episode_dir / f"final_render_package_{episode_id}.backup_{ts}.json"
+        backup_path.write_text(json.dumps(previous, indent=2, ensure_ascii=False), encoding="utf-8")
+    package_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def build_publish_package_from_episode_dir(
     channel_id: str,
     episode_id: str,
@@ -105,18 +267,36 @@ def build_publish_package_from_episode_dir(
     *,
     db_path: Optional[Path] = None,
     metadata_override: Optional[MetadataOverride] = None,
+    enable_metadata_backfill: bool = False,
+    config: Optional[Config] = None,
+    titles_llm_call=None,
+    captions_llm_call=None,
 ) -> PublishPackage:
     """
-    Read-only. Constructs a PublishPackage from the standard on-disk
-    deliverable-file convention — never invents a file that isn't there;
-    hypogeum.publishing.readiness's own checks are what actually verify
-    each file exists and is non-empty before any staging call is allowed
-    to proceed. Physical file paths are always resolved by 0-indexed
-    position (short_{i}_{episode_id}.mp4, matching Assembly Agent's own
-    output convention); deliverable_id (the ledger identity, independent
-    of file naming) is resolved by hypogeum.publishing.deliverable_ids —
-    the SAME shared resolver hypogeum.buffer uses to determine bundle
-    completeness, so the two can never disagree on identity.
+    Read-only UNLESS enable_metadata_backfill=True. Constructs a
+    PublishPackage from the standard on-disk deliverable-file convention —
+    never invents a file that isn't there; hypogeum.publishing.readiness's
+    own checks are what actually verify each file exists and is non-empty
+    before any staging call is allowed to proceed. Physical file paths are
+    always resolved by 0-indexed position (short_{i}_{episode_id}.mp4,
+    matching Assembly Agent's own output convention); deliverable_id (the
+    ledger identity, independent of file naming) is resolved by
+    hypogeum.publishing.deliverable_ids — the SAME shared resolver
+    hypogeum.buffer uses to determine bundle completeness, so the two can
+    never disagree on identity.
+
+    enable_metadata_backfill=False (default) preserves this function's
+    original read-only contract exactly — the right default for a manual/
+    read-only caller or a test that wants no filesystem side effects.
+    process_channel_ready_bundles() (the real autonomous path) passes
+    True, so a Short still missing its title/caption gets one generated
+    and durably written to final_render_package_{episode_id}.json (see
+    _backfill_shorts_metadata()'s own docstring) BEFORE resolution is
+    attempted — this is what "No autonomous post may be created with
+    empty visible content" actually requires: a real path back to a
+    resolved value, not just a readiness check that blocks forever.
+    config/titles_llm_call/captions_llm_call are forwarded unchanged to
+    _backfill_shorts_metadata() (ignored when backfill is disabled).
 
     Each deliverable's title/description is populated via
     hypogeum.publishing.readiness.resolve_canonical_metadata() — the EXACT
@@ -142,6 +322,14 @@ def build_publish_package_from_episode_dir(
             final_render_package = json.loads(render_path.read_text(encoding="utf-8"))
         except Exception:
             final_render_package = {}
+
+    if enable_metadata_backfill:
+        final_render_package = _backfill_shorts_metadata(
+            episode_id, episode_dir, final_render_package,
+            config=config or Config(), channel_id=channel_id,
+            titles_llm_call=titles_llm_call, captions_llm_call=captions_llm_call,
+        )
+
     shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
 
     resolved = resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
@@ -268,6 +456,42 @@ def _allowed_deliverable_ids_for_platform(
     return allowed
 
 
+def _status_for_platform(result: ReleasePublishResult, platform: str) -> str:
+    """
+    2026-08-22 fix (Zernio aggregation model): result.status is computed
+    across the WHOLE aggregated call (every platform in the group
+    together) -- correct for "did the group's staging/schedule/publish
+    call succeed at all", but NOT correct for "did THIS platform's own
+    submission succeed", since a single aggregated post can legitimately
+    carry a MIX of per-platform outcomes (see ZernioProvider.
+    _handle_success_envelope()'s own 2026-08-22 fix for the
+    PlatformTarget.errorMessage check this depends on). Derives the
+    real per-platform status from
+    result.publish.deliverables[].platform_results[platform] instead --
+    "published" only when every deliverable in the group reports this
+    platform as published; a platform that itself failed while its
+    group-mates succeeded is never reported as anything but its own
+    real outcome.
+    """
+    if result.status in ("blocked_readiness", "blocked_schedule", "blocked_metadata", "blocked_output_gate"):
+        return result.status
+    if result.publish is None or result.publish.blocked:
+        return result.status
+    per_platform_statuses = []
+    for outcome in result.publish.deliverables:
+        if outcome.platform_results:
+            per_platform_statuses.append(outcome.platform_results.get(platform, {}).get("status", "ambiguous"))
+        else:
+            per_platform_statuses.append(outcome.status)
+    if not per_platform_statuses:
+        return result.status
+    if all(s == "published" for s in per_platform_statuses):
+        return "published"
+    if any(s == "published" for s in per_platform_statuses):
+        return "partial"
+    return "blocked_publish"
+
+
 def _resolve_platform_settings_for_call(
     package: PublishPackage, platform: str, allowed_deliverable_ids: List[str], platform_deliverable_policy: dict,
 ) -> Optional[dict]:
@@ -310,6 +534,11 @@ def process_channel_ready_bundles(
     current_cycle_item_ids: FrozenSet[str] = frozenset(),
     media_staging_provider: Optional[MediaStagingProvider] = None,
     publishing_provider: Optional[PublishingProvider] = None,
+    config: Optional[Config] = None,
+    log=None,
+    enable_production_output_gate: bool = True,
+    titles_llm_call=None,
+    captions_llm_call=None,
 ) -> List[ReadyBundle]:
     """
     Find this channel's not-yet-published, complete items for
@@ -327,10 +556,43 @@ def process_channel_ready_bundles(
     one place a human-resolved title/description/shorts_titles decision
     for a SPECIFIC item is threaded through; this function never invents
     or chooses one on its own.
+
+    2026-08-22 fixes:
+      - Mandatory written metadata: build_publish_package_from_episode_dir()
+        is now called with enable_metadata_backfill=True — a Short still
+        missing its title/caption gets one generated (via
+        hypogeum.agents.shorts_metadata) and durably written before
+        resolution is attempted, instead of staying indefinitely blocked.
+      - production_output_gate wiring: hypogeum.agents.production_output_gate.
+        run_production_output_gate() is now run ONCE per item, BEFORE any
+        staging/intent/provider call for ANY platform/deliverable in that
+        item (enable_production_output_gate=True, the default) — real
+        burned-caption pixel verification, thumbnail verification, and
+        every other real-output check now actually gates the Zernio write
+        path, not just the legacy direct-YouTube path
+        (hypogeum.agents.publishing_agent.py) it was previously wired into
+        exclusively. A failed gate blocks the WHOLE item (every platform,
+        every deliverable) — zero staging, zero POST, zero PUT — and is
+        reported via ReadyBundle.result.status == "blocked_output_gate".
+      - Zernio aggregation model: deliverables are grouped by their own
+        identical resolved platform-set (main_episode -> {youtube} alone;
+        every Short -> every enabled platform together) and
+        publish_channel_release() is called ONCE per group with the
+        group's full platforms list — never once per platform. One Short
+        targeting 4 platforms therefore reaches ONE provider POST, not 4;
+        see publish_channel_release()/publish_episode_package()/
+        ZernioProvider.publish_multi_platform() for the rest of the chain.
+        The external ReadyBundle contract is unchanged (still one entry
+        per (item_id, platform), for run_worker.py's own per-platform
+        logging) — internally, every ReadyBundle for platforms in the
+        same group shares the exact same underlying ReleasePublishResult.
     """
     resolved_platforms = list(platforms) if platforms is not None else _resolve_target_platforms(channel_id, db_path)
     if not resolved_platforms:
         return []
+
+    resolved_config = config or Config()
+    resolved_log = log or get_logger(episode_id=None, agent="zernio_channel_release_trigger")
 
     item_ids = resolve_complete_item_ids_for_channel(channel_id, db_path=db_path)
     demand_items = gather_channel_demand_items(
@@ -348,6 +610,8 @@ def process_channel_ready_bundles(
             package = build_publish_package_from_episode_dir(
                 channel_id, item.item_id, bundle_definition.bundle_id, assets_root,
                 db_path=db_path, metadata_override=metadata_override_by_item.get(item.item_id),
+                enable_metadata_backfill=True, config=resolved_config,
+                titles_llm_call=titles_llm_call, captions_llm_call=captions_llm_call,
             )
         except MetadataResolutionError as exc:
             # Fail closed, per item — never silently proceed with a
@@ -358,11 +622,37 @@ def process_channel_ready_bundles(
                 results.append(ReadyBundle(
                     item_id=item.item_id, platform=platform,
                     result=ReleasePublishResult(
-                        channel_id=channel_id, episode_id=item.item_id, platform=platform,
+                        channel_id=channel_id, episode_id=item.item_id, platforms=[platform],
                         status="blocked_metadata", blocked_reason=exc.reason,
                     ),
                 ))
             continue
+
+        # production_output_gate -- called ONCE per item, BEFORE any
+        # staging/intent/provider call for ANY platform/deliverable below.
+        # Real burned-caption pixel checks, real thumbnail QA/identity
+        # re-checks, and every other real-output check this gate already
+        # implements now actually block the Zernio write path -- exactly
+        # the gap the 2026-08-22 forensic audit found (this gate was
+        # previously wired ONLY into the legacy direct-YouTube
+        # publishing_agent.py path). A failure blocks the ENTIRE item for
+        # every platform -- zero staging, zero POST, zero PUT -- never a
+        # partial submission of only the deliverables the gate didn't
+        # check.
+        if enable_production_output_gate:
+            gate_result = run_production_output_gate(item.item_id, assets_root, resolved_config, resolved_log)
+            if not gate_result.passed:
+                failed_capabilities = [c.capability for c in gate_result.checks if c.status == "fail"]
+                for platform in resolved_platforms:
+                    results.append(ReadyBundle(
+                        item_id=item.item_id, platform=platform,
+                        result=ReleasePublishResult(
+                            channel_id=channel_id, episode_id=item.item_id, platforms=[platform],
+                            status="blocked_output_gate",
+                            blocked_reason=f"production_output_gate failed: {failed_capabilities}",
+                        ),
+                    ))
+                continue
 
         # Cross-platform readiness — called ONCE per item, BEFORE any
         # staging/intent/provider call for ANY platform below. A failed
@@ -374,6 +664,24 @@ def process_channel_ready_bundles(
         # check_cross_platform_readiness() -- previously only reachable
         # as an independently-called checker, never consulted by this
         # real submission loop.
+        #
+        # 2026-08-22 partial-retry grouping fix: check_cross_platform_
+        # readiness() reports status="fail" (evidence["existing_intent_
+        # status"] set) for a (deliverable, platform) that already has a
+        # succeeded/open publication_intent — correct for its own "is this
+        # ready for a FRESH attempt" contract, but under the aggregation
+        # model that "fail" must NOT remove the platform from this
+        # deliverable's grouping set, or an already-succeeded platform
+        # (e.g. youtube/tiktok from a prior poll) silently drops out of
+        # every group once new platforms (e.g. instagram/facebook) are
+        # enabled — producing a fresh {instagram,facebook}-only POST
+        # instead of a GET+PUT retry against the existing post. Grouping
+        # eligibility only needs "is this platform relevant to this
+        # deliverable at all" — ZernioProvider.publish_multi_platform()'s
+        # own per-platform guard_and_prepare_attempt() ledger check (not
+        # this readiness check) is what actually decides use_existing
+        # (PUT-add) vs to_submit (new attempt within the same post) once
+        # the platform is included in the group.
         cross_platform_passed_ids_by_platform: Dict[str, set] = {}
         if platform_deliverable_policy:
             cp_result = check_cross_platform_readiness(
@@ -383,9 +691,12 @@ def process_channel_ready_bundles(
             )
             for platform in resolved_platforms:
                 cross_platform_passed_ids_by_platform[platform] = {
-                    c.deliverable_id for c in cp_result.for_platform(platform) if c.status == "pass"
+                    c.deliverable_id for c in cp_result.for_platform(platform)
+                    if c.status == "pass"
+                    or c.evidence.get("existing_intent_status") in ("succeeded", "open")
                 }
 
+        allowed_deliverable_ids_by_platform: Dict[str, List[str]] = {}
         for platform in resolved_platforms:
             allowed_deliverable_ids = _allowed_deliverable_ids_for_platform(
                 package, platform, platform_deliverable_policy,
@@ -395,14 +706,36 @@ def process_channel_ready_bundles(
                     d for d in allowed_deliverable_ids
                     if d in cross_platform_passed_ids_by_platform.get(platform, set())
                 ]
-            if not allowed_deliverable_ids:
-                # No deliverable in this item is routed to this platform
-                # by the Channel Package's own policy -- deliberately not
-                # attempted (never a call, never an intent, never a
-                # "blocked" result to reconcile).
-                continue
+            allowed_deliverable_ids_by_platform[platform] = allowed_deliverable_ids
+
+        # Zernio aggregation model: group deliverables by their own
+        # IDENTICAL resolved platform-set (e.g. main_episode -> {youtube};
+        # every Short -> {youtube, tiktok, instagram, facebook}), then
+        # call publish_channel_release() ONCE per group with that group's
+        # full platforms list -- never once per platform. A deliverable
+        # allowed on zero platforms is excluded entirely (never a call,
+        # never an intent -- unchanged from before this grouping existed).
+        platforms_by_deliverable: Dict[str, set] = {}
+        for platform, ids in allowed_deliverable_ids_by_platform.items():
+            for did in ids:
+                platforms_by_deliverable.setdefault(did, set()).add(platform)
+
+        groups: Dict[frozenset, List[str]] = {}
+        for did, plats in platforms_by_deliverable.items():
+            groups.setdefault(frozenset(plats), []).append(did)
+
+        for platform_set, deliverable_ids_in_group in groups.items():
+            group_platforms = sorted(platform_set)
+            platform_settings_by_platform = {
+                p: _resolve_platform_settings_for_call(
+                    package, p, deliverable_ids_in_group, platform_deliverable_policy,
+                )
+                for p in group_platforms
+            }
+            platform_settings_by_platform = {p: s for p, s in platform_settings_by_platform.items() if s}
+
             result = publish_channel_release(
-                channel_id, item.item_id, platform, package,
+                channel_id, item.item_id, group_platforms, package,
                 assets_root=assets_root, db_path=db_path,
                 metadata_override=metadata_override_by_item.get(item.item_id),
                 publish_now=publish_now, logical_alias=logical_alias, provider_id=provider_id,
@@ -416,20 +749,21 @@ def process_channel_ready_bundles(
                 # deliberately disables here.
                 require_explicit_schedule_policy=True,
                 media_staging_provider=media_staging_provider, publishing_provider=publishing_provider,
-                # Route ONLY the deliverables this platform is actually
-                # enabled for, per platform_deliverable_policy -- see
-                # _allowed_deliverable_ids_for_platform()'s own docstring.
-                # An empty (unconfigured) policy allows every deliverable,
-                # preserving the original whole-package-per-platform
-                # behavior exactly.
-                deliverable_ids=allowed_deliverable_ids if platform_deliverable_policy else None,
-                # The exact settings object (e.g. TikTok's privacy_level)
-                # readiness's own check validates against -- resolved from
-                # the SAME platform_deliverable_policy, never re-derived
-                # independently.
-                platform_settings=_resolve_platform_settings_for_call(
-                    package, platform, allowed_deliverable_ids, platform_deliverable_policy,
-                ),
+                deliverable_ids=deliverable_ids_in_group,
+                platform_settings=platform_settings_by_platform or None,
             )
-            results.append(ReadyBundle(item_id=item.item_id, platform=platform, result=result))
+            # One ReadyBundle per platform in the group -- preserves the
+            # external (item_id, platform) contract run_worker.py's own
+            # logging already relies on, while the underlying network
+            # call was made exactly once for the whole group. Each
+            # bundle's .result is a shallow copy of the SAME shared
+            # ReleasePublishResult with .status recomputed to that one
+            # platform's own real outcome (_status_for_platform()) --
+            # every other field (readiness_by_platform, schedule,
+            # publish, blocked_reason) still points at the identical
+            # shared data, so a caller inspecting .publish.deliverables
+            # still sees the whole group exactly as it was.
+            for platform in group_platforms:
+                per_platform_result = _dc_replace(result, status=_status_for_platform(result, platform))
+                results.append(ReadyBundle(item_id=item.item_id, platform=platform, result=per_platform_result))
     return results

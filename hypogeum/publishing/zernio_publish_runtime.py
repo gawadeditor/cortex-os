@@ -231,8 +231,23 @@ class PublishPackage:
 @dataclass
 class DeliverablePublishOutcome:
     deliverable_id: str
-    status: str  # "published" | "ambiguous" | "blocked"
+    status: str  # "published" | "partial" | "ambiguous" | "blocked"
     stage_result: Optional[dict] = None
+    # 2026-08-22 (Zernio aggregation model): one deliverable is staged and
+    # submitted to ALL its requested platforms via ONE provider call
+    # (ZernioProvider.publish_multi_platform() when the injected provider
+    # supports it), never one call per platform. platform_results carries
+    # that call's own per-platform result dict (the exact same shape
+    # publish_result used to hold for a single platform), keyed by
+    # platform -- e.g. {"youtube": {...}, "tiktok": {...}, ...}. Every
+    # platform-specific local publication_intent/publishing_attempt/
+    # publishing_receipt this produces still references the SAME shared
+    # provider_publication_id -- see ZernioProvider.publish_multi_platform()'s
+    # own docstring. publish_result (singular) is kept for a provider that
+    # does NOT support publish_multi_platform (the single-platform
+    # fallback path) -- exactly one platform, exactly one result, unchanged
+    # from before this field existed.
+    platform_results: Dict[str, dict] = field(default_factory=dict)
     publish_result: Optional[dict] = None
     error: Optional[str] = None
 
@@ -240,14 +255,22 @@ class DeliverablePublishOutcome:
 @dataclass
 class PublishPackageResult:
     episode_id: str
-    platform: str
+    platforms: List[str]
     blocked: bool
     blocked_reason: Optional[str] = None
     deliverables: List[DeliverablePublishOutcome] = field(default_factory=list)
 
     @property
     def all_published(self) -> bool:
-        return bool(self.deliverables) and all(d.status == "published" for d in self.deliverables)
+        if not self.deliverables:
+            return False
+        for d in self.deliverables:
+            if d.platform_results:
+                if not all(r.get("status") == "published" for r in d.platform_results.values()):
+                    return False
+            elif d.status != "published":
+                return False
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +280,7 @@ class PublishPackageResult:
 def publish_episode_package(
     package: PublishPackage,
     *,
-    platform: str,
+    platforms: List[str],
     channel_id: str,
     db_path: Optional[Path] = None,
     schedule_plan: Optional[SchedulePlan] = None,
@@ -265,16 +288,27 @@ def publish_episode_package(
     publishing_provider: Optional[PublishingProvider] = None,
     logical_alias: str = "default",
     deliverable_ids: Optional[List[str]] = None,
-    platform_settings: Optional[dict] = None,
+    platform_settings: Optional[Dict[str, dict]] = None,
 ) -> PublishPackageResult:
     """
     Stage and publish every deliverable in `package` (main episode + every
-    Short) to `platform`, through the existing generic provider
-    abstractions — no local orchestration bypasses
+    Short) to every platform in `platforms`, through the existing generic
+    provider abstractions — no local orchestration bypasses
     hypogeum.publishing.media_staging's guard_and_prepare_staging_attempt()
     write-ahead boundary or hypogeum.publishing.submission_ledger's
-    equivalent inside ZernioProvider.publish(); this module only sequences
-    calls into them.
+    equivalent inside ZernioProvider.publish()/publish_multi_platform();
+    this module only sequences calls into them.
+
+    2026-08-22 (Zernio aggregation model): each deliverable is staged
+    ONCE (not once per platform) and submitted to ALL of `platforms` via
+    ONE provider call — publisher.publish_multi_platform(platforms=...)
+    when the injected provider exposes it (ZernioProvider does), so one
+    Short targeting 4 platforms produces exactly one provider POST/PUT,
+    never 4. A provider that does NOT expose publish_multi_platform (any
+    non-Zernio PublishingProvider implementation) falls back to the
+    original one-call-per-platform loop via .publish() — this preserves
+    the generic PublishingProvider contract exactly for every other
+    provider; nothing here assumes every provider supports aggregation.
 
     Defaults to real ZernioMediaStagingProvider()/ZernioProvider() — both
     construct without making any network call (matching their own
@@ -301,17 +335,28 @@ def publish_episode_package(
     original, still-supported behavior — every deliverable in `package`
     is attempted. When given, ONLY deliverables whose deliverable_id is
     in this list are staged/published for this call; every other
-    deliverable in `package` is silently excluded from THIS platform
-    call (not reported as blocked/failed — it was never requested for
-    this platform in the first place). This is what lets a caller
-    (hypogeum.publishing.zernio_channel_release_trigger.
-    process_channel_ready_bundles()) route the main episode to one
-    platform and Shorts to a different set of platforms from the SAME
-    PublishPackage, without submitting deliverables a Channel Package's
-    platform_deliverable_policy never enabled for that platform.
-    schedule_plan coverage is validated against this SAME filtered set,
-    not the full package.
+    deliverable in `package` is silently excluded from THIS call (not
+    reported as blocked/failed — it was never requested in the first
+    place). This is what lets a caller (hypogeum.publishing.
+    zernio_channel_release_trigger.process_channel_ready_bundles()) route
+    the main episode to one platform-set and Shorts to a different
+    platform-set from the SAME PublishPackage, without submitting
+    deliverables a Channel Package's platform_deliverable_policy never
+    enabled for that combination. schedule_plan coverage is validated
+    against this SAME filtered set, not the full package.
+
+    platform_settings: {platform: settings_dict}, e.g. {"tiktok": {...}}
+    -- matches publish_multi_platform()'s own shape. Ignored by the
+    single-platform .publish() fallback path (that provider contract
+    never had a per-platform settings concept).
     """
+    if not platforms:
+        return PublishPackageResult(
+            episode_id=package.episode_id, platforms=[],
+            blocked=True, blocked_reason="publish_episode_package() requires at least one platform",
+            deliverables=[],
+        )
+
     all_deliverables = package.all_deliverables()
     deliverables = (
         all_deliverables if deliverable_ids is None
@@ -324,12 +369,13 @@ def publish_episode_package(
         _validate_channel_scope(package, schedule_plan, channel_id)
     except ZernioPublishRuntimeError as exc:
         return PublishPackageResult(
-            episode_id=package.episode_id, platform=platform,
+            episode_id=package.episode_id, platforms=platforms,
             blocked=True, blocked_reason=str(exc), deliverables=[],
         )
 
     staging = media_staging_provider if media_staging_provider is not None else ZernioMediaStagingProvider()
     publisher = publishing_provider if publishing_provider is not None else ZernioProvider()
+    supports_aggregation = hasattr(publisher, "publish_multi_platform")
 
     outcomes: List[DeliverablePublishOutcome] = []
     for deliverable in deliverables:
@@ -389,42 +435,96 @@ def publish_episode_package(
             thumbnail_url=resolved_thumbnail_url, title=deliverable.title,
             alt_text=deliverable.alt_text,
         )
+        deliverable_type = "main_episode" if deliverable is package.main_episode else "short"
 
-        try:
-            publish_result = publisher.publish(
-                platform=platform,
-                deliverable_type=("main_episode" if deliverable is package.main_episode else "short"),
-                episode_id=package.episode_id,
-                channel_id=channel_id,
-                deliverable_id=deliverable.deliverable_id,
-                db_path=db_path,
-                logical_alias=logical_alias,
-                media=[media_ref],
-                title=deliverable.title,
-                content=deliverable.description,
-                scheduled_for=sched.scheduled_for,
-                platform_scheduled_for=sched.platform_scheduled_for,
-                timezone_name=sched.timezone_name,
-                publish_now=sched.publish_now,
-                is_draft=sched.is_draft,
-                platform_settings=platform_settings,
+        if supports_aggregation:
+            try:
+                platform_results = publisher.publish_multi_platform(
+                    platforms=platforms,
+                    deliverable_type=deliverable_type,
+                    episode_id=package.episode_id,
+                    channel_id=channel_id,
+                    deliverable_id=deliverable.deliverable_id,
+                    db_path=db_path,
+                    logical_alias=logical_alias,
+                    media=[media_ref],
+                    title=deliverable.title,
+                    content=deliverable.description,
+                    scheduled_for=sched.scheduled_for,
+                    platform_scheduled_for=sched.platform_scheduled_for,
+                    timezone_name=sched.timezone_name,
+                    publish_now=sched.publish_now,
+                    is_draft=sched.is_draft,
+                    platform_settings=platform_settings,
+                )
+            except Exception as exc:
+                outcomes.append(DeliverablePublishOutcome(
+                    deliverable_id=deliverable.deliverable_id, status="blocked",
+                    stage_result=_staged_to_dict(staged), error=str(exc),
+                ))
+                continue
+
+            statuses = {r.get("status", "ambiguous") for r in platform_results.values()}
+            overall = "published" if statuses == {"published"} else (
+                "partial" if "published" in statuses else "ambiguous"
             )
-        except Exception as exc:
             outcomes.append(DeliverablePublishOutcome(
-                deliverable_id=deliverable.deliverable_id, status="blocked",
-                stage_result=_staged_to_dict(staged), error=str(exc),
+                deliverable_id=deliverable.deliverable_id,
+                status=overall,
+                stage_result=_staged_to_dict(staged),
+                platform_results=platform_results,
             ))
             continue
 
+        # Fallback: provider does not support aggregation -- one .publish()
+        # call per platform, exactly the pre-2026-08-22 behavior, just
+        # scoped to this one deliverable's single staged media instead of
+        # re-staging per platform.
+        per_platform_results: Dict[str, dict] = {}
+        stage_failed = False
+        for platform in platforms:
+            try:
+                per_platform_results[platform] = publisher.publish(
+                    platform=platform,
+                    deliverable_type=deliverable_type,
+                    episode_id=package.episode_id,
+                    channel_id=channel_id,
+                    deliverable_id=deliverable.deliverable_id,
+                    db_path=db_path,
+                    logical_alias=logical_alias,
+                    media=[media_ref],
+                    title=deliverable.title,
+                    content=deliverable.description,
+                    scheduled_for=sched.scheduled_for,
+                    platform_scheduled_for=sched.platform_scheduled_for,
+                    timezone_name=sched.timezone_name,
+                    publish_now=sched.publish_now,
+                    is_draft=sched.is_draft,
+                    platform_settings=(platform_settings or {}).get(platform),
+                )
+            except Exception as exc:
+                outcomes.append(DeliverablePublishOutcome(
+                    deliverable_id=deliverable.deliverable_id, status="blocked",
+                    stage_result=_staged_to_dict(staged), error=str(exc),
+                ))
+                stage_failed = True
+                break
+        if stage_failed:
+            continue
+
+        statuses = {r.get("status", "ambiguous") for r in per_platform_results.values()}
+        overall = "published" if statuses == {"published"} else (
+            "partial" if "published" in statuses else "ambiguous"
+        )
         outcomes.append(DeliverablePublishOutcome(
             deliverable_id=deliverable.deliverable_id,
-            status=publish_result.get("status", "ambiguous"),
+            status=overall,
             stage_result=_staged_to_dict(staged),
-            publish_result=publish_result,
+            platform_results=per_platform_results,
         ))
 
     return PublishPackageResult(
-        episode_id=package.episode_id, platform=platform,
+        episode_id=package.episode_id, platforms=platforms,
         blocked=False, deliverables=outcomes,
     )
 

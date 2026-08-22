@@ -204,22 +204,67 @@ class FakePublishTransport:
 
     def __init__(self, fail_platforms=()):
         self.post_calls = []
+        self.put_calls = []
+        self.get_calls = []
         self._counter = 0
         self._fail_platforms = set(fail_platforms)
+        self._posts_by_id: dict = {}
 
     def post(self, *, url, headers, json_body, timeout):
         self._counter += 1
         self.post_calls.append(json_body)
-        platform = json_body["platforms"][0]["platform"]
-        if platform in self._fail_platforms:
+        requested_platforms = [p["platform"] for p in json_body["platforms"]]
+        # 2026-08-22 (Zernio aggregation model): a real multi-platform post
+        # returns one platforms[] entry PER requested platform in the
+        # SAME response -- echo all of them, not just the first, so
+        # ZernioProvider._parse_post_response(platform=p) resolves
+        # correctly for every platform in an aggregated request. A
+        # platform in fail_platforms gets its OWN PlatformTarget marked
+        # status="failed"/errorMessage set -- a real per-platform
+        # rejection WITHIN an otherwise-successful 201, never a whole-
+        # request transport failure -- proving one platform's failure
+        # never affects another sharing the same aggregated post.
+        primary = requested_platforms[0]
+        post_id = f"post_{primary}_{self._counter}"
+        post_obj = {
+            "_id": post_id,
+            "platforms": [
+                (
+                    {"platform": p, "platformPostId": None, "status": "failed", "errorMessage": "simulated platform failure"}
+                    if p in self._fail_platforms
+                    else {"platform": p, "platformPostId": f"native_{p}_{self._counter}", "status": "published"}
+                )
+                for p in requested_platforms
+            ],
+        }
+        self._posts_by_id[post_id] = post_obj
+        return ZernioTransportResponse(status_code=201, json_body={"message": "created", "post": post_obj})
+
+    def get(self, *, url, headers, timeout):
+        self.get_calls.append(url)
+        post_id = url.rsplit("/", 1)[-1]
+        post_obj = self._posts_by_id.get(post_id)
+        if post_obj is None:
+            return ZernioTransportResponse(status_code=404, json_body={"error": "not found"})
+        return ZernioTransportResponse(status_code=200, json_body={"post": post_obj})
+
+    def put(self, *, url, headers, json_body, timeout):
+        self._counter += 1
+        self.put_calls.append(json_body)
+        post_id = url.rsplit("/", 1)[-1]
+        merged_platforms = json_body.get("platforms", [])
+        requested_platforms = [p["platform"] for p in merged_platforms]
+        if any(p in self._fail_platforms for p in requested_platforms):
             return ZernioTransportResponse(status_code=500, json_body={"error": "simulated platform failure"})
-        return ZernioTransportResponse(
-            status_code=201,
-            json_body={"message": "created", "post": {
-                "_id": f"post_{platform}_{self._counter}",
-                "platforms": [{"platform": platform, "platformPostId": f"native_{self._counter}", "status": "published"}],
-            }},
-        )
+        post_obj = {
+            "_id": post_id,
+            "platforms": [
+                {"platform": p, "platformPostId": f"native_{p}_{self._counter}", "status": "published"}
+                for p in requested_platforms
+            ],
+        }
+        self._posts_by_id[post_id] = post_obj
+        return ZernioTransportResponse(status_code=200, json_body={"message": "updated", "post": post_obj})
 
 
 def _run(db_path, assets_root, *, publish_transport=None, media_transport=None):
@@ -230,6 +275,10 @@ def _run(db_path, assets_root, *, publish_transport=None, media_transport=None):
         platforms=list(ALL_PLATFORMS),
         media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
         publishing_provider=ZernioProvider(transport=publish_transport),
+        # This file's fixtures write fake (non-playable) media bytes --
+        # production_output_gate's real ffprobe/pixel checks are covered
+        # by tests/test_production_output_gate.py, not here.
+        enable_production_output_gate=False,
     )
     return results, publish_transport, media_transport
 
@@ -245,6 +294,19 @@ class TestDeliverableRoutingMatrix:
         assert main_platforms == {"youtube"}
 
     def test_each_short_routes_to_all_four_platforms(self, db_path, assets_root):
+        """
+        2026-08-22 (Zernio aggregation model): main_episode ({youtube}
+        alone) and the 3 Shorts (all 4 platforms together) are two
+        DIFFERENT deliverable-groups that both happen to include
+        "youtube" -- so "youtube" now legitimately appears in results
+        TWICE (one ReadyBundle per group it belongs to), each pointing at
+        its OWN group's ReleasePublishResult. This test checks across
+        ALL of a platform's entries (not just the first, which used to be
+        a safe assumption pre-aggregation), matching how the real,
+        already-scheduled Hypogeum posts work: the main-episode Zernio
+        post and the Shorts' Zernio post(s) are genuinely separate posts,
+        even though both include a youtube platforms[] entry.
+        """
         _setup_channel(db_path)
         _seed_episode(db_path, assets_root)
         _bind_all_platforms(db_path)
@@ -253,8 +315,11 @@ class TestDeliverableRoutingMatrix:
         platforms_attempted = {r.platform for r in results}
         assert platforms_attempted == set(ALL_PLATFORMS)
         for platform in ALL_PLATFORMS:
-            entry = next(r for r in results if r.platform == platform)
-            deliverable_ids = {d.deliverable_id for d in entry.result.publish.deliverables} if entry.result.publish else set()
+            entries = [r for r in results if r.platform == platform]
+            deliverable_ids: set = set()
+            for entry in entries:
+                if entry.result.publish:
+                    deliverable_ids |= {d.deliverable_id for d in entry.result.publish.deliverables}
             for short_id in SHORT_DELIVERABLE_IDS:
                 assert short_id in deliverable_ids, f"{short_id} missing from platform={platform}"
 
@@ -315,6 +380,7 @@ class TestIdempotityIdentityIncludesPlatform:
             CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, platforms=["youtube"],
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
+            enable_production_output_gate=False,
         )
         assert any(r.platform == "youtube" and r.result.status == "published" for r in results1)
 
@@ -327,6 +393,7 @@ class TestIdempotityIdentityIncludesPlatform:
             CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, platforms=list(ALL_PLATFORMS),
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
+            enable_production_output_gate=False,
         )
         tiktok_result = next(r for r in results2 if r.platform == "tiktok")
         assert tiktok_result.result.status == "published"
@@ -550,7 +617,7 @@ class TestCaptionsAndPlatformSettingsReachTheRealRequest:
         publish_transport = FakePublishTransport()
         _run(db_path, assets_root, publish_transport=publish_transport)
 
-        tiktok_calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == "tiktok"]
+        tiktok_calls = [c for c in publish_transport.post_calls if any(p["platform"] == "tiktok" for p in c["platforms"])]
         assert len(tiktok_calls) == 3
         for call in tiktok_calls:
             assert call["content"].startswith("A real, script-grounded caption for short")
@@ -568,7 +635,7 @@ class TestCaptionsAndPlatformSettingsReachTheRealRequest:
         # test instead proves the LOWER-level guarantee already in place:
         # a Short whose caption never resolved carries no content at
         # all, never a fabricated or server-defaulted one.
-        tiktok_calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == "tiktok"]
+        tiktok_calls = [c for c in publish_transport.post_calls if any(p["platform"] == "tiktok" for p in c["platforms"])]
         for call in tiktok_calls:
             assert "content" not in call or not call.get("content")
 
@@ -579,7 +646,7 @@ class TestCaptionsAndPlatformSettingsReachTheRealRequest:
         publish_transport = FakePublishTransport()
         _run(db_path, assets_root, publish_transport=publish_transport)
 
-        tiktok_calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == "tiktok"]
+        tiktok_calls = [c for c in publish_transport.post_calls if any(p["platform"] == "tiktok" for p in c["platforms"])]
         assert len(tiktok_calls) == 3
         for call in tiktok_calls:
             assert call["tiktokSettings"]["privacy_level"] == "PUBLIC_TO_EVERYONE"
@@ -589,17 +656,35 @@ class TestCaptionsAndPlatformSettingsReachTheRealRequest:
             assert call["tiktokSettings"]["content_preview_confirmed"] is True
             assert call["tiktokSettings"]["express_consent_given"] is True
 
-    def test_instagram_facebook_calls_carry_no_tiktok_settings(self, db_path, assets_root):
+    def test_tiktok_settings_never_attached_to_instagram_or_facebook_platform_entries(self, db_path, assets_root):
+        """
+        2026-08-22 (Zernio aggregation model): instagram/facebook/tiktok
+        now legitimately share ONE request body (one deliverable, one
+        group, one POST per the aggregation model) -- so `tiktokSettings`
+        DOES legitimately appear at the request ROOT whenever tiktok is
+        one of the group's platforms; that alone is correct per the
+        verified contract ("merged into each platform's
+        platformSpecificData" server-side), not a leak. What must still
+        never happen is tiktokSettings-shaped data attached to
+        instagram/facebook's OWN platforms[] entries specifically -- this
+        checks THAT, the real isolation guarantee, instead of the
+        pre-aggregation assumption that whole request bodies stay
+        single-platform.
+        """
         _setup_channel(db_path)
         _seed_episode(db_path, assets_root)
         _bind_all_platforms(db_path)
         publish_transport = FakePublishTransport()
         _run(db_path, assets_root, publish_transport=publish_transport)
 
-        for platform in ("instagram", "facebook"):
-            calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == platform]
-            for call in calls:
-                assert "tiktokSettings" not in call
+        calls_with_tiktok = [c for c in publish_transport.post_calls if any(p["platform"] == "tiktok" for p in c["platforms"])]
+        assert calls_with_tiktok, "expected at least one aggregated call including tiktok"
+        for call in calls_with_tiktok:
+            for platform in ("instagram", "facebook"):
+                entry = next((p for p in call["platforms"] if p["platform"] == platform), None)
+                if entry is not None:
+                    assert "tiktokSettings" not in entry
+                    assert "privacy_level" not in entry
 
     def test_scheduled_timestamp_and_timezone_reach_each_platform_call(self, db_path, assets_root):
         _setup_channel(db_path)
@@ -634,11 +719,11 @@ class TestCrossPlatformReadinessWiredIntoTheRealWritePath:
         # reaching staging, not merely an independent checker reporting
         # failure on the side.
         for platform in ("tiktok", "instagram", "facebook"):
-            assert not any(c["platforms"][0]["platform"] == platform for c in publish_transport.post_calls)
+            assert not any(any(p["platform"] == platform for p in c["platforms"]) for c in publish_transport.post_calls)
         thumbnail_and_video_only = {c["filename"] for c in media_transport.presign_calls}
         assert not any("short" in f and f not in (f"short_{i}_{EPISODE_ID}.mp4" for i in range(3)) for f in thumbnail_and_video_only)
         # YouTube is unaffected -- captions are not required there.
-        assert any(c["platforms"][0]["platform"] == "youtube" for c in publish_transport.post_calls)
+        assert any(any(p["platform"] == "youtube" for p in c["platforms"]) for c in publish_transport.post_calls)
 
     def test_missing_tiktok_privacy_produces_zero_tiktok_writes_only(self, db_path, assets_root):
         policy = json.loads(json.dumps(HYPOGEUM_MATRIX))
@@ -649,9 +734,9 @@ class TestCrossPlatformReadinessWiredIntoTheRealWritePath:
         publish_transport = FakePublishTransport()
         _run(db_path, assets_root, publish_transport=publish_transport)
 
-        assert not any(c["platforms"][0]["platform"] == "tiktok" for c in publish_transport.post_calls)
-        assert any(c["platforms"][0]["platform"] == "instagram" for c in publish_transport.post_calls)
-        assert any(c["platforms"][0]["platform"] == "facebook" for c in publish_transport.post_calls)
+        assert not any(any(p["platform"] == "tiktok" for p in c["platforms"]) for c in publish_transport.post_calls)
+        assert any(any(p["platform"] == "instagram" for p in c["platforms"]) for c in publish_transport.post_calls)
+        assert any(any(p["platform"] == "facebook" for p in c["platforms"]) for c in publish_transport.post_calls)
 
 
 class TestBufferPlatformSpecificCompletion:
@@ -685,3 +770,211 @@ class TestBufferPlatformSpecificCompletion:
             db_path=db_path, assets_root=assets_root, platforms=("tiktok",),
         )
         assert items[0].already_published is True, "tiktok must be complete with only its 3 Shorts succeeded -- no main_episode required"
+
+
+class TestAggregationThroughTheRealTrigger:
+    """
+    2026-08-22 (Zernio aggregation model) -- integration-level proofs
+    through process_channel_ready_bundles() itself (the real autonomous
+    trigger run_worker.py invokes), not only direct ZernioProvider unit
+    tests (see tests/test_publishing_zernio.py's
+    TestPublishMultiPlatformSinglePost/PartialFailureRetry for those).
+    """
+
+    def test_one_short_targeting_four_platforms_causes_exactly_one_post(self, db_path, assets_root):
+        """
+        2026-08-22: request identity must never be inferred from platform
+        order or a tautological condition. Each of the 4 canonical
+        deliverables in _seed_episode resolves a DISTINCT, real title
+        ("A Real Episode Title" for main; "A Real Short Title {0,1,2}" for
+        each Short -- see zernio_channel_release_trigger.py's
+        build_publish_package_from_episode_dir(), which threads
+        DeliverableFile.title into both the POST's top-level "title" and
+        every mediaItems[].title via _serialize_media_item()). That title
+        is used here as the unambiguous per-deliverable correlation key,
+        cross-checked against mediaItems[].title independently, so a
+        Short's media can never be silently attributed to another
+        deliverable's POST.
+        """
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        expected_titles = {
+            "main_episode": "A Real Episode Title",
+            "short_sh_0": "A Real Short Title 0",
+            "short_sh_1": "A Real Short Title 1",
+            "short_sh_2": "A Real Short Title 2",
+        }
+
+        # Exactly 4 total POST calls for main(1) + 3 Shorts(1 each), never
+        # 4 (main) + 12 (3 shorts x 4 platforms each) = 16 the pre-
+        # aggregation architecture would have produced.
+        assert len(publish_transport.post_calls) == 4, (
+            f"expected exactly 4 total POST calls (1 main + 3 Shorts, each Short "
+            f"aggregated across all 4 platforms in ONE call), got {len(publish_transport.post_calls)}"
+        )
+
+        calls_by_title: dict = {}
+        for call in publish_transport.post_calls:
+            title = call.get("title")
+            assert title in expected_titles.values(), f"unexpected/untraceable POST title: {title!r}"
+            assert title not in calls_by_title, (
+                f"more than one POST shares title {title!r} -- deliverable identity is ambiguous"
+            )
+            calls_by_title[title] = call
+            # mediaItems[].title must independently agree with the POST's
+            # own top-level title -- proves the media inside this POST
+            # belongs to the SAME deliverable this POST is for, never a
+            # different one bundled in by mistake.
+            for item in call.get("mediaItems", []):
+                assert item.get("title") == title, (
+                    f"mediaItems title {item.get('title')!r} disagrees with enclosing POST "
+                    f"title {title!r} -- media may belong to a different deliverable"
+                )
+
+        assert set(calls_by_title) == set(expected_titles.values()), (
+            "did not find exactly one POST per canonical deliverable "
+            f"(main_episode + 3 Shorts): got titles {sorted(calls_by_title)}"
+        )
+
+        main_call = calls_by_title[expected_titles["main_episode"]]
+        assert {p["platform"] for p in main_call["platforms"]} == {"youtube"}, (
+            "main episode POST must contain YouTube only"
+        )
+
+        for short_id in ("short_sh_0", "short_sh_1", "short_sh_2"):
+            short_call = calls_by_title[expected_titles[short_id]]
+            assert {p["platform"] for p in short_call["platforms"]} == set(ALL_PLATFORMS), (
+                f"Short {short_id} POST did not target exactly the four intended platforms"
+            )
+
+    def test_the_aggregated_short_request_contains_all_four_platform_account_entries(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        short_call = next(
+            c for c in publish_transport.post_calls
+            if any(p["platform"] == "tiktok" for p in c["platforms"])
+        )
+        sent_platforms = {p["platform"] for p in short_call["platforms"]}
+        assert sent_platforms == set(ALL_PLATFORMS)
+        for entry in short_call["platforms"]:
+            assert entry["accountId"] == f"acct_{entry['platform']}"
+
+    def test_title_and_content_are_non_empty_in_the_real_aggregated_request(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        for call in publish_transport.post_calls:
+            assert (call.get("title") or "").strip() != "", f"empty title in real request: {call}"
+            assert (call.get("content") or "").strip() != "", f"empty content in real request: {call}"
+
+    def test_correct_media_and_thumbnail_references_included(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        main_call = next(c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == "youtube" and len(c["platforms"]) == 1)
+        assert main_call["mediaItems"], "main episode call must carry its video mediaItem"
+        assert main_call["mediaItems"][0]["thumbnail"], "main episode call must carry its canonical thumbnail reference"
+
+    def test_missing_title_causes_zero_external_calls(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        # Overwrite the episode_title with an empty string -- unresolvable title.
+        ep_dir = assets_root / "episodes" / EPISODE_ID
+        pkg = json.loads((ep_dir / f"final_render_package_{EPISODE_ID}.json").read_text())
+        pkg["metadata_source"]["episode_title"] = ""
+        (ep_dir / f"final_render_package_{EPISODE_ID}.json").write_text(json.dumps(pkg), encoding="utf-8")
+        _bind_all_platforms(db_path)
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+        results, _, _ = _run(db_path, assets_root, publish_transport=publish_transport, media_transport=media_transport)
+
+        assert all(r.result.status == "blocked_metadata" for r in results)
+        assert media_transport.presign_calls == []
+        assert publish_transport.post_calls == []
+        assert publish_transport.put_calls == []
+
+    def test_production_output_gate_failure_causes_zero_staging_post_and_put_calls(self, db_path, assets_root, monkeypatch):
+        from hypogeum.agents.production_output_gate import GateCheckResult, ProductionOutputGateResult
+
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        def _fake_fail(episode_id, assets_root_arg, config, log):
+            return ProductionOutputGateResult(
+                passed=False, episode_id=episode_id, evaluated_at="",
+                checks=[GateCheckResult(capability="D_SHORTS_CAPTIONS", status="fail", reason="simulated burned-caption failure")],
+            )
+
+        monkeypatch.setattr(
+            "hypogeum.publishing.zernio_channel_release_trigger.run_production_output_gate", _fake_fail,
+        )
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            platforms=list(ALL_PLATFORMS),
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+            enable_production_output_gate=True,
+        )
+
+        assert results, "expected a blocked result for every requested platform"
+        assert all(r.result.status == "blocked_output_gate" for r in results)
+        assert media_transport.presign_calls == []
+        assert publish_transport.post_calls == []
+        assert publish_transport.put_calls == []
+
+    def test_partial_retry_through_the_real_trigger_targets_the_same_provider_post(self, db_path, assets_root):
+        """First poll: only youtube+tiktok enabled. Second poll (simulating
+        instagram/facebook being enabled afterward): the real trigger must
+        add them to the SAME existing Zernio post via GET+PUT, never a
+        second POST -- proven end-to-end through process_channel_ready_bundles(),
+        not only ZernioProvider directly."""
+        partial_policy = json.loads(json.dumps(HYPOGEUM_MATRIX))
+        partial_policy["instagram"]["shorts"]["enabled"] = False
+        partial_policy["facebook"]["shorts"]["enabled"] = False
+        _setup_channel(db_path, platform_deliverable_policy=partial_policy)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        first = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            platforms=list(ALL_PLATFORMS),
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+            enable_production_output_gate=False,
+        )
+        assert any(r.platform == "tiktok" and r.result.status == "published" for r in first)
+        post_calls_after_first = len(publish_transport.post_calls)
+
+        # Second poll: full policy now enables instagram/facebook too.
+        from hypogeum.channel_config import update_channel_operations_profile
+        update_channel_operations_profile(CHANNEL_ID, db_path=db_path, platform_deliverable_policy=HYPOGEUM_MATRIX)
+        second = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            platforms=list(ALL_PLATFORMS),
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+            enable_production_output_gate=False,
+        )
+        assert any(r.platform == "instagram" and r.result.status == "published" for r in second)
+        # No NEW post call was made for the retry -- only a GET+PUT pair.
+        assert len(publish_transport.post_calls) == post_calls_after_first, "retry must never create a second POST"
+        assert len(publish_transport.put_calls) > 0, "retry must add the new platforms via PUT"

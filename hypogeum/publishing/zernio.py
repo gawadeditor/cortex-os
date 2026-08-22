@@ -999,10 +999,13 @@ class ZernioProvider:
         }
         del credential
 
-        if existing_post_id is not None:
-            # PUT's documented `platforms` field is the same full array
-            # POST accepts -- treated as a full replacement (never
-            # confirmed as a merge by the audit), so the existing post's
+        is_put = existing_post_id is not None
+        if is_put:
+            # PUT's `platforms` field merge-vs-replace semantics are NOT
+            # documented (verified live via docs.zernio.com/posts/
+            # update-post, 2026-08-22 -- the page states only "Each item
+            # must include platform and accountId", never clarifying
+            # partial-merge vs full-replacement) -- so the existing post's
             # CURRENT platforms[] is fetched first and the new entries are
             # appended to it, never sent as a bare partial list that could
             # silently drop the already-succeeded platforms.
@@ -1055,15 +1058,9 @@ class ZernioProvider:
                     results[p] = self._ambiguous_result(p, deliverable_type, g)
                 return results
 
-        # NOTE (known gap, never guessed at): _handle_response() assumes the
-        # POST-documented 200/201 envelope shapes (existingPost/post). The
-        # PUT response envelope for this add-platforms retry path has not
-        # been independently confirmed against a live PUT call -- if it
-        # differs, this correctly falls through to "malformed_response" ->
-        # ambiguous (fail closed, never a false success), never a false
-        # positive. Verify live before relying on this specific retry path.
         for p, g in to_submit.items():
-            results[p] = self._handle_response(
+            handler = self._handle_put_response if is_put else self._handle_response
+            results[p] = handler(
                 response, platform=p, deliverable_type=deliverable_type,
                 attempt_id=g.attempt_id, guard=g, db_path=db_path,
                 provider_account_id=accounts[p]["provider_account_id"],
@@ -1278,6 +1275,53 @@ class ZernioProvider:
         )
         return self._ambiguous_result(platform, deliverable_type, guard)
 
+    def _handle_put_response(
+        self, response: ZernioTransportResponse, *, platform, deliverable_type, attempt_id, guard,
+        db_path, provider_account_id,
+    ) -> dict:
+        """
+        PUT /v1/posts/{postId} response handling -- verified live against
+        docs.zernio.com/posts/update-post (2026-08-22), DISTINCT from
+        _handle_response() (which is POST-only: its own 200 branch is the
+        CREATE endpoint's idempotent-replay case, keyed "existingPost").
+
+        Verified: a successful update is HTTP 200 with body
+        {"message": ..., "post": Post} -- the SAME "post" key POST's 201
+        uses, never "existingPost" (that key is exclusive to POST's replay
+        case and does not apply here). Confirmed via a second, targeted
+        fetch of the same page requesting the exact request/response field
+        list.
+
+        Documented but genuinely unconfirmed: HTTP 207 is listed as a
+        possible status ("partial success scenarios") with NO example
+        response body shown anywhere in the documentation. Never guessed
+        at -- falls through to the same undocumented-status ambiguous
+        handling _handle_response() uses for anything it doesn't
+        recognize, fail closed, never asserted as a partial success this
+        adapter has no evidence for.
+
+        400/403/409/429/5xx handling is otherwise identical to
+        _handle_response() (the update endpoint documents "the same
+        per-platform validation as post creation"), so those branches are
+        reused verbatim via delegation below rather than duplicated.
+        """
+        if response.status_code == 200:
+            return self._handle_success_envelope(
+                response.json_body, envelope_key="post", platform=platform,
+                deliverable_type=deliverable_type, attempt_id=attempt_id, guard=guard, db_path=db_path,
+            )
+        # Every other status (400/403/409/429/5xx/undocumented incl. 207)
+        # shares _handle_response()'s own handling exactly -- it never
+        # special-cases status==200 differently from how THIS method
+        # already handled it above, so delegating is safe: reaching this
+        # line means status != 200, and _handle_response()'s own 200
+        # branch will therefore never execute for a PUT call.
+        return self._handle_response(
+            response, platform=platform, deliverable_type=deliverable_type,
+            attempt_id=attempt_id, guard=guard, db_path=db_path,
+            provider_account_id=provider_account_id,
+        )
+
     def _handle_success_envelope(
         self, body, *, envelope_key: str, platform, deliverable_type, attempt_id, guard, db_path,
     ) -> dict:
@@ -1304,6 +1348,32 @@ class ZernioProvider:
                 error_message=f"could not parse {envelope_key} object: {exc}",
             )
             return self._ambiguous_result(platform, deliverable_type, guard)
+
+        # 2026-08-22 fix (Zernio aggregation model): a single aggregated
+        # post can legitimately carry a MIX of per-platform outcomes in
+        # its own platforms[] array -- one platform's own PlatformTarget.
+        # errorMessage being set is that platform's own definitive
+        # rejection signal, independent of the overall 200/201 the WHOLE
+        # post received. Never call this platform "published" just
+        # because the envelope parsed; "partial per-platform failure
+        # remains observable and retryable without duplicating successful
+        # destinations" requires exactly this per-platform distinction.
+        if parsed.get("error_message"):
+            record_definitive_failure(
+                db_path, attempt_id, error_category="platform_target_rejected",
+                error_message=f"platform={platform!r} PlatformTarget.errorMessage={parsed['error_message']!r} "
+                               f"(status={parsed.get('platform_status')!r}) within provider_post_id="
+                               f"{parsed['provider_post_id']!r}",
+            )
+            return {
+                "platform": platform,
+                "deliverable_type": deliverable_type,
+                "status": "failed",
+                "provider_content_id": parsed["provider_post_id"],
+                "publication_intent_id": guard.publication_intent_id,
+                "attempt_id": attempt_id,
+                "error": parsed["error_message"],
+            }
 
         record_success(
             db_path, attempt_id,

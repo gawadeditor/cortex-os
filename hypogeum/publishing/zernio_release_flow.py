@@ -44,10 +44,10 @@ Public API:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
@@ -60,18 +60,19 @@ from hypogeum.publishing.zernio_publish_runtime import PublishPackage, PublishPa
 class ReleasePublishResult:
     channel_id: str
     episode_id: str
-    platform: str
+    platforms: List[str]
     status: str  # "blocked_readiness" | "blocked_schedule" | "blocked_publish" | "published" | "partial"
-    readiness: Optional[ReadinessCheckResult] = None
+    readiness_by_platform: Dict[str, ReadinessCheckResult] = field(default_factory=dict)
     schedule: Optional[ScheduleCompilationResult] = None
     publish: Optional[PublishPackageResult] = None
     blocked_reason: Optional[str] = None
+    blocked_platforms: List[str] = field(default_factory=list)
 
 
 def publish_channel_release(
     channel_id: str,
     episode_id: str,
-    platform: str,
+    platforms: List[str],
     package: PublishPackage,
     *,
     assets_root: Path,
@@ -85,13 +86,32 @@ def publish_channel_release(
     publishing_provider: Optional[PublishingProvider] = None,
     now: Optional[datetime] = None,
     deliverable_ids: Optional[List[str]] = None,
-    platform_settings: Optional[dict] = None,
+    platform_settings: Optional[Dict[str, dict]] = None,
 ) -> ReleasePublishResult:
     """
     Read-only through stages 1–2; stage 3 is the only stage that can ever
     write anything (staging attempts, publishing attempts/receipts — all
     via the pre-existing write-ahead boundaries those modules already
     own), and only after both prior gates pass.
+
+    2026-08-22 (Zernio aggregation model): `platforms` (plural) — one
+    deliverable-group release now targets every platform in this list via
+    ONE staging pass and ONE provider call (see publish_episode_package()'s
+    own docstring), never one call per platform.
+
+    check_publish_readiness() is still called ONCE PER PLATFORM in
+    `platforms`, never once with the whole list combined — its
+    F_THUMBNAIL check ("main-episode thumbnail required whenever
+    'youtube' is among the requested platforms") is scoped to the
+    EPISODE, not to which deliverables this specific call is actually
+    submitting, so combining e.g. youtube+tiktok+instagram+facebook into
+    one readiness call would incorrectly let an unapproved YouTube
+    main-episode thumbnail block a Facebook Shorts-only submission that
+    has nothing to do with YouTube. Each platform's own readiness result
+    is preserved in readiness_by_platform; a platform that fails
+    readiness is excluded from the aggregated publish call entirely
+    (never partially staged) and reported in blocked_platforms — it does
+    NOT block the platforms that passed.
 
     channel_id is required and flows unchanged into every stage — this
     function performs no channel-scope resolution of its own beyond what
@@ -111,8 +131,8 @@ def publish_channel_release(
     that a schedule recomputed with a LATER now (simulating time passing
     across a worker restart) never moves an already-persisted attempt —
     the pre-existing hypogeum.publishing.submission_ledger write-ahead
-    guard (invoked inside stage 3's publisher.publish()) refuses a second
-    external call once an attempt already exists for this
+    guard (invoked inside stage 3's publisher.publish()/publish_multi_platform())
+    refuses a second external call once an attempt already exists for this
     (channel_id, episode_id, deliverable_id, platform, provider_id), so a
     freshly recomputed (and possibly different) schedule_result.slot is
     never actually submitted a second time.
@@ -122,22 +142,39 @@ def publish_channel_release(
     `package`) to determine which deliverables' slots this call needs
     from the schedule compiler — None (default) preserves the original
     behavior of covering the whole package. This is the mechanism that
-    lets a caller route the main episode to one platform and Shorts to a
-    different platform set from the same PublishPackage (see
+    lets a caller route the main episode to one platform-set and Shorts
+    to a different platform-set from the same PublishPackage (see
     hypogeum.publishing.zernio_channel_release_trigger.
     process_channel_ready_bundles()).
     """
-    readiness = check_publish_readiness(
-        episode_id, channel_id=channel_id, assets_root=assets_root, db_path=db_path,
-        platforms=(platform,), logical_alias=logical_alias, provider_id=provider_id,
-        metadata_override=metadata_override,
-    )
-    if not readiness.passed:
-        failed = [c.capability for c in readiness.checks if c.status == "fail"]
+    if not platforms:
         return ReleasePublishResult(
-            channel_id=channel_id, episode_id=episode_id, platform=platform,
-            status="blocked_readiness", readiness=readiness,
-            blocked_reason=f"readiness check failed: {failed}",
+            channel_id=channel_id, episode_id=episode_id, platforms=[],
+            status="blocked_readiness", blocked_reason="no platforms requested",
+        )
+
+    readiness_by_platform: Dict[str, ReadinessCheckResult] = {}
+    passed_platforms: List[str] = []
+    blocked_platforms: List[str] = []
+    for platform in platforms:
+        readiness = check_publish_readiness(
+            episode_id, channel_id=channel_id, assets_root=assets_root, db_path=db_path,
+            platforms=(platform,), logical_alias=logical_alias, provider_id=provider_id,
+            metadata_override=metadata_override,
+        )
+        readiness_by_platform[platform] = readiness
+        if readiness.passed:
+            passed_platforms.append(platform)
+        else:
+            blocked_platforms.append(platform)
+
+    if not passed_platforms:
+        failed = {p: [c.capability for c in r.checks if c.status == "fail"] for p, r in readiness_by_platform.items()}
+        return ReleasePublishResult(
+            channel_id=channel_id, episode_id=episode_id, platforms=platforms,
+            status="blocked_readiness", readiness_by_platform=readiness_by_platform,
+            blocked_reason=f"readiness check failed for every requested platform: {failed}",
+            blocked_platforms=blocked_platforms,
         )
 
     target_deliverable_ids = (
@@ -150,13 +187,13 @@ def publish_channel_release(
     )
     if schedule_result.blocked:
         return ReleasePublishResult(
-            channel_id=channel_id, episode_id=episode_id, platform=platform,
-            status="blocked_schedule", readiness=readiness, schedule=schedule_result,
-            blocked_reason=schedule_result.blocked_reason,
+            channel_id=channel_id, episode_id=episode_id, platforms=platforms,
+            status="blocked_schedule", readiness_by_platform=readiness_by_platform, schedule=schedule_result,
+            blocked_reason=schedule_result.blocked_reason, blocked_platforms=blocked_platforms,
         )
 
     outcome = publish_episode_package(
-        package, platform=platform, channel_id=channel_id, db_path=db_path,
+        package, platforms=passed_platforms, channel_id=channel_id, db_path=db_path,
         schedule_plan=schedule_result.schedule_plan, logical_alias=logical_alias,
         media_staging_provider=media_staging_provider, publishing_provider=publishing_provider,
         deliverable_ids=deliverable_ids, platform_settings=platform_settings,
@@ -164,12 +201,13 @@ def publish_channel_release(
     if outcome.blocked:
         status = "blocked_publish"
     elif outcome.all_published:
-        status = "published"
+        status = "published" if not blocked_platforms else "partial"
     else:
         status = "partial"
 
     return ReleasePublishResult(
-        channel_id=channel_id, episode_id=episode_id, platform=platform,
-        status=status, readiness=readiness, schedule=schedule_result, publish=outcome,
+        channel_id=channel_id, episode_id=episode_id, platforms=platforms,
+        status=status, readiness_by_platform=readiness_by_platform, schedule=schedule_result, publish=outcome,
         blocked_reason=outcome.blocked_reason if outcome.blocked else None,
+        blocked_platforms=blocked_platforms,
     )

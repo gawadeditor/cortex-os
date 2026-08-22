@@ -192,7 +192,7 @@ class TestFullSequence:
         publish_transport = FakePublishTransport()
 
         results = process_channel_ready_bundles(
-            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
@@ -213,7 +213,7 @@ class TestIdempotencyAcrossRepeatedPolling:
         media_transport = FakeMediaTransport()
         publish_transport = FakePublishTransport()
         kwargs = dict(
-            db_path=db_path, assets_root=assets_root,
+            db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
@@ -232,8 +232,8 @@ class TestIdempotencyAcrossRepeatedPolling:
         _setup_channel(db_path)
         _seed_complete_episode(db_path, assets_root, "ep_unready")
 
-        first = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root)
-        second = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root)
+        first = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False)
+        second = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False)
 
         assert len(first) == 1 and first[0].result.status == "blocked_readiness"
         assert len(second) == 1 and second[0].result.status == "blocked_readiness"
@@ -254,7 +254,7 @@ class TestChannelIsolation:
         media_transport = FakeMediaTransport()
         publish_transport = FakePublishTransport()
         kwargs = dict(
-            db_path=db_path, assets_root=assets_root,
+            db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
@@ -270,7 +270,7 @@ class TestPlatformResolutionFromChannelPackage:
     def test_no_enabled_platform_means_nothing_to_do(self, db_path, assets_root):
         _setup_channel(db_path, platforms_enabled=())
         _seed_complete_episode(db_path, assets_root, "ep_ready")
-        results = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root)
+        results = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False)
         assert results == []
 
     def test_no_channel_operations_profile_means_nothing_to_do(self, db_path, assets_root):
@@ -283,7 +283,7 @@ class TestPlatformResolutionFromChannelPackage:
             publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
         )
         _seed_complete_episode(db_path, assets_root, "ep_ready")
-        results = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root)
+        results = process_channel_ready_bundles(CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False)
         assert results == []
 
 
@@ -297,7 +297,7 @@ class TestMetadataOverridePerItem:
         publish_transport = FakePublishTransport()
 
         results = process_channel_ready_bundles(
-            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
             metadata_override_by_item={"ep_f3619022": MetadataOverride(title="Operator-Confirmed Title", description="d", shorts_titles=[])},
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
@@ -321,7 +321,7 @@ class TestNoLiveCalls:
         media_transport = FakeMediaTransport()
         publish_transport = FakePublishTransport()
         results = process_channel_ready_bundles(
-            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
@@ -373,7 +373,7 @@ class TestBuildPublishPackageResolvesTitleAndDescription:
         media_transport = FakeMediaTransport()
         publish_transport = FakePublishTransport()
         results = process_channel_ready_bundles(
-            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
             media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
             publishing_provider=ZernioProvider(transport=publish_transport),
         )

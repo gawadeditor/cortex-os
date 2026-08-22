@@ -265,6 +265,7 @@ def publish_episode_package(
     publishing_provider: Optional[PublishingProvider] = None,
     logical_alias: str = "default",
     deliverable_ids: Optional[List[str]] = None,
+    platform_settings: Optional[dict] = None,
 ) -> PublishPackageResult:
     """
     Stage and publish every deliverable in `package` (main episode + every
@@ -406,6 +407,7 @@ def publish_episode_package(
                 timezone_name=sched.timezone_name,
                 publish_now=sched.publish_now,
                 is_draft=sched.is_draft,
+                platform_settings=platform_settings,
             )
         except Exception as exc:
             outcomes.append(DeliverablePublishOutcome(

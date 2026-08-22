@@ -297,10 +297,39 @@ def gather_channel_demand_items(
     deliverable_id never inflate completeness (SELECT DISTINCT).
     """
     from hypogeum.db import get_connection, initialize_schema  # noqa: PLC0415
-    from hypogeum.publishing.deliverable_ids import resolve_required_deliverable_ids  # noqa: PLC0415
+    from hypogeum.publishing.deliverable_ids import classify_deliverable_class, resolve_required_deliverable_ids  # noqa: PLC0415
     from hypogeum.publishing.readiness import check_publish_readiness  # noqa: PLC0415
 
     initialize_schema(db_path)
+
+    # Per-PLATFORM required deliverable set, from the channel's own
+    # platform_deliverable_policy (never a fixed set reused across every
+    # platform) -- main_episode is never required on a platform whose
+    # policy never routes it there (e.g. TikTok/Instagram/Facebook, whose
+    # policy enables 'shorts' only), so that platform can genuinely
+    # become complete without ever needing a main_episode intent that
+    # will never exist. An empty/unconfigured policy (no platform_
+    # deliverable_policy at all) preserves the original behavior: every
+    # platform requires every resolved deliverable_id, unchanged.
+    platform_deliverable_policy: dict = {}
+    if platforms:
+        try:
+            from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
+            profile = get_channel_operations_profile(definition.channel_id, db_path=db_path)
+            if profile is not None:
+                platform_deliverable_policy = profile.platform_deliverable_policy or {}
+        except RuntimeError:
+            platform_deliverable_policy = {}
+
+    def _required_ids_for_platform(all_required_ids: set, platform: str) -> set:
+        if not platform_deliverable_policy:
+            return all_required_ids
+        policy_for_platform = platform_deliverable_policy.get(platform) or {}
+        return {
+            did for did in all_required_ids
+            if bool((policy_for_platform.get(classify_deliverable_class(did)) or {}).get("enabled"))
+        }
+
     conn = get_connection(db_path)
     try:
         result: List[ChannelDemandItem] = []
@@ -314,21 +343,30 @@ def gather_channel_demand_items(
                 (item_id,),
             ).fetchone()
 
-            required_deliverable_ids = set(resolve_required_deliverable_ids(item_id, assets_root))
+            all_required_deliverable_ids = set(resolve_required_deliverable_ids(item_id, assets_root))
             if platforms:
                 # Platform is part of the idempotency identity (ADR-013):
                 # a succeeded YouTube intent must never be read as "this
                 # item is fully done" for a DIFFERENT platform this call
                 # is also requesting (e.g. TikTok/Instagram/Facebook) --
                 # so zernio_fully_published is computed PER REQUESTED
-                # PLATFORM and the item counts as fully published only
-                # when EVERY platform in `platforms` independently has
-                # every required deliverable succeeded on THAT platform.
-                # A call that requests only platforms=("youtube",) is
-                # therefore unaffected by whether any other platform has
-                # ever been attempted at all.
-                zernio_fully_published = bool(required_deliverable_ids)
+                # PLATFORM, against THAT platform's OWN required set (see
+                # _required_ids_for_platform above), and the item counts
+                # as fully published only when EVERY platform in
+                # `platforms` independently has every ITS OWN required
+                # deliverable succeeded on THAT platform. A call that
+                # requests only platforms=("youtube",) is therefore
+                # unaffected by whether any other platform has ever been
+                # attempted at all.
+                zernio_fully_published = bool(all_required_deliverable_ids)
                 for platform in platforms:
+                    required_deliverable_ids = _required_ids_for_platform(all_required_deliverable_ids, platform)
+                    if not required_deliverable_ids:
+                        # This platform's policy routes NOTHING from this
+                        # item (e.g. a policy that only ever enables
+                        # 'shorts' but this item genuinely has none) --
+                        # nothing to wait for, never blocks completeness.
+                        continue
                     succeeded_rows = conn.execute(
                         """
                         SELECT DISTINCT deliverable_id FROM publication_intents
@@ -353,7 +391,7 @@ def gather_channel_demand_items(
                     (item_id, definition.channel_id),
                 ).fetchall()
                 succeeded_deliverable_ids = {r["deliverable_id"] for r in succeeded_rows}
-                zernio_fully_published = bool(required_deliverable_ids) and required_deliverable_ids.issubset(succeeded_deliverable_ids)
+                zernio_fully_published = bool(all_required_deliverable_ids) and all_required_deliverable_ids.issubset(succeeded_deliverable_ids)
 
             already_published = bool(published_row or live_calendar_row or zernio_fully_published)
 

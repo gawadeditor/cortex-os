@@ -76,12 +76,16 @@ from hypogeum.publishing.deliverable_ids import MAIN_EPISODE_DELIVERABLE_ID, cla
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
 from hypogeum.publishing.readiness import (
+    CaptionResolutionError,
     MetadataOverride,
     MetadataResolutionError,
     ThumbnailResolutionError,
+    resolve_canonical_captions,
     resolve_canonical_main_thumbnail,
     resolve_canonical_metadata,
 )
+from hypogeum.publishing.cross_platform_readiness import check_cross_platform_readiness
+from hypogeum.publishing.zernio_platform_contracts import build_platform_settings
 from hypogeum.publishing.zernio_publish_runtime import DeliverableFile, PublishPackage
 from hypogeum.publishing.zernio_release_flow import ReleasePublishResult, publish_channel_release
 
@@ -156,6 +160,23 @@ def build_publish_package_from_episode_dir(
     except ThumbnailResolutionError:
         pass
 
+    # Best-effort caption resolution per Short, same discipline as
+    # title/description/thumbnail above: cross_platform_readiness's own
+    # per-(deliverable, platform) caption check is the actual gate that
+    # blocks a Short from ever reaching staging on a non-YouTube platform
+    # when its caption is unresolved. This is what makes the resolved
+    # caption text actually REACH the real Zernio `content` field (via
+    # DeliverableFile.description, the SAME field `_build_publish_body()`
+    # already sends as `content`) instead of only existing inside a
+    # separate, never-consulted readiness check.
+    short_ids_in_order = [resolve_short_deliverable_id(shorts_renders[i], i) for i in range(len(shorts_renders))]
+    resolved_captions: dict = {}
+    for short_id in short_ids_in_order:
+        try:
+            resolved_captions.update(resolve_canonical_captions(final_render_package, [short_id]))
+        except CaptionResolutionError:
+            pass  # this specific Short's caption is unresolved -- readiness blocks it per-deliverable
+
     main_path = episode_dir / f"main_{episode_id}.mp4"
     return PublishPackage(
         channel_id=channel_id, episode_id=episode_id, bundle_id=bundle_id,
@@ -167,11 +188,12 @@ def build_publish_package_from_episode_dir(
         ),
         shorts=[
             DeliverableFile(
-                deliverable_id=resolve_short_deliverable_id(shorts_renders[i], i),
+                deliverable_id=short_ids_in_order[i],
                 local_path=episode_dir / f"short_{i}_{episode_id}.mp4",
                 mime_type="video/mp4", media_type="video",
                 filename=f"short_{i}_{episode_id}.mp4",
-                title=resolved_shorts_titles.get(resolve_short_deliverable_id(shorts_renders[i], i)),
+                title=resolved_shorts_titles.get(short_ids_in_order[i]),
+                description=resolved_captions.get(short_ids_in_order[i]),
             )
             for i in range(len(shorts_renders))
         ],
@@ -246,6 +268,34 @@ def _allowed_deliverable_ids_for_platform(
     return allowed
 
 
+def _resolve_platform_settings_for_call(
+    package: PublishPackage, platform: str, allowed_deliverable_ids: List[str], platform_deliverable_policy: dict,
+) -> Optional[dict]:
+    """
+    Resolves the ONE platform-settings object (e.g. TikTok's
+    {"privacy_level": ..., "content_preview_confirmed": True, ...})
+    actually sent for this platform call — the exact same
+    build_platform_settings() readiness's own privacy check validates
+    against, so a readiness pass can never diverge from what the real
+    request contains.
+
+    One call submits one settings object shared by every allowed
+    deliverable on this platform (not per-deliverable) — correct for
+    every policy this codebase installs today, where every deliverable
+    routed to a given non-YouTube platform shares one deliverable_class
+    ('shorts'). Uses the FIRST allowed deliverable's own class/policy
+    entry; a future Channel Package mixing deliverable classes with
+    DIFFERENT settings on the SAME platform in one call is out of this
+    function's scope (documented, not silently mishandled: it would
+    apply the first deliverable's settings to all of them).
+    """
+    if not platform_deliverable_policy or not allowed_deliverable_ids:
+        return None
+    deliverable_class = classify_deliverable_class(allowed_deliverable_ids[0])
+    policy_entry = (platform_deliverable_policy.get(platform) or {}).get(deliverable_class) or {}
+    return build_platform_settings(platform, policy_entry)
+
+
 def process_channel_ready_bundles(
     channel_id: str,
     bundle_definition: DeliverableBundleDefinition,
@@ -313,10 +363,38 @@ def process_channel_ready_bundles(
                     ),
                 ))
             continue
+
+        # Cross-platform readiness — called ONCE per item, BEFORE any
+        # staging/intent/provider call for ANY platform below. A failed
+        # (deliverable, platform) combination is removed from that
+        # platform's allowed set entirely; it is never staged, never
+        # uploaded, never given a publication_intent, never POSTed. This
+        # is the actual write-path wiring for
+        # hypogeum.publishing.cross_platform_readiness.
+        # check_cross_platform_readiness() -- previously only reachable
+        # as an independently-called checker, never consulted by this
+        # real submission loop.
+        cross_platform_passed_ids_by_platform: Dict[str, set] = {}
+        if platform_deliverable_policy:
+            cp_result = check_cross_platform_readiness(
+                item.item_id, channel_id=channel_id, assets_root=assets_root, db_path=db_path,
+                provider_id=provider_id, logical_alias=logical_alias,
+                metadata_override=metadata_override_by_item.get(item.item_id),
+            )
+            for platform in resolved_platforms:
+                cross_platform_passed_ids_by_platform[platform] = {
+                    c.deliverable_id for c in cp_result.for_platform(platform) if c.status == "pass"
+                }
+
         for platform in resolved_platforms:
             allowed_deliverable_ids = _allowed_deliverable_ids_for_platform(
                 package, platform, platform_deliverable_policy,
             )
+            if platform_deliverable_policy:
+                allowed_deliverable_ids = [
+                    d for d in allowed_deliverable_ids
+                    if d in cross_platform_passed_ids_by_platform.get(platform, set())
+                ]
             if not allowed_deliverable_ids:
                 # No deliverable in this item is routed to this platform
                 # by the Channel Package's own policy -- deliberately not
@@ -345,6 +423,13 @@ def process_channel_ready_bundles(
                 # preserving the original whole-package-per-platform
                 # behavior exactly.
                 deliverable_ids=allowed_deliverable_ids if platform_deliverable_policy else None,
+                # The exact settings object (e.g. TikTok's privacy_level)
+                # readiness's own check validates against -- resolved from
+                # the SAME platform_deliverable_policy, never re-derived
+                # independently.
+                platform_settings=_resolve_platform_settings_for_call(
+                    package, platform, allowed_deliverable_ids, platform_deliverable_policy,
+                ),
             )
             results.append(ReadyBundle(item_id=item.item_id, platform=platform, result=result))
     return results

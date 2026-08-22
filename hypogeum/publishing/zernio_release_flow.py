@@ -85,6 +85,7 @@ def publish_channel_release(
     publishing_provider: Optional[PublishingProvider] = None,
     now: Optional[datetime] = None,
     deliverable_ids: Optional[List[str]] = None,
+    platform_settings: Optional[dict] = None,
 ) -> ReleasePublishResult:
     """
     Read-only through stages 1–2; stage 3 is the only stage that can ever
@@ -158,7 +159,7 @@ def publish_channel_release(
         package, platform=platform, channel_id=channel_id, db_path=db_path,
         schedule_plan=schedule_result.schedule_plan, logical_alias=logical_alias,
         media_staging_provider=media_staging_provider, publishing_provider=publishing_provider,
-        deliverable_ids=deliverable_ids,
+        deliverable_ids=deliverable_ids, platform_settings=platform_settings,
     )
     if outcome.blocked:
         status = "blocked_publish"

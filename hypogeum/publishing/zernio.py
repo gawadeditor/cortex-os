@@ -432,6 +432,7 @@ def _build_publish_body(
     scheduled_for: Optional[datetime], platform_scheduled_for: Optional[datetime],
     timezone_name: Optional[str], publish_now: bool, is_draft: bool,
     title: Optional[str] = None, content: Optional[str] = None,
+    platform_settings: Optional[dict] = None,
 ) -> dict:
     """
     Audit §2: POST /v1/posts requires `platforms[].platform` +
@@ -461,6 +462,17 @@ def _build_publish_body(
     never invents one; a caller with no resolved title/description simply
     omits the field and accepts Zernio's own documented default.
 
+    `platform_settings`: verified live via docs.zernio.com/posts/
+    create-post (2026-08-22) — a platform-specific settings OBJECT
+    (already shaped by hypogeum.publishing.zernio_platform_contracts.
+    build_platform_settings(), never constructed here) sent at the
+    request ROOT under the key matching the platform (e.g.
+    `tiktokSettings`, `facebookSettings` for platform in {tiktok,
+    facebook} — confirmed root-level, "merged into each platform's
+    platformSpecificData" server-side). Included only when both
+    `platform_settings` is non-empty AND this platform has a documented
+    root-level settings key; never invents a key for a platform whose
+    contract doesn't define one.
     """
     platform_entry: dict = {"platform": platform, "accountId": external_account_id}
     if platform_media:
@@ -483,6 +495,10 @@ def _build_publish_body(
         body["publishNow"] = True
     if is_draft:
         body["isDraft"] = True
+    if platform_settings:
+        settings_key = {"tiktok": "tiktokSettings", "facebook": "facebookSettings"}.get(platform)
+        if settings_key:
+            body[settings_key] = platform_settings
     return body
 
 
@@ -669,6 +685,7 @@ class ZernioProvider:
         is_draft = bool(kwargs.get("is_draft", False))
         title = kwargs.get("title")
         content = kwargs.get("content")
+        platform_settings = kwargs.get("platform_settings")
 
         # -- pure input validation, before any DB/credential/ledger access --
         if not media and not platform_media:
@@ -724,7 +741,7 @@ class ZernioProvider:
             media=media, platform_media=platform_media,
             scheduled_for=scheduled_for, platform_scheduled_for=platform_scheduled_for,
             timezone_name=timezone_name, publish_now=publish_now, is_draft=is_draft,
-            title=title, content=content,
+            title=title, content=content, platform_settings=platform_settings,
         )
         headers = {
             "Authorization": f"Bearer {credential}",

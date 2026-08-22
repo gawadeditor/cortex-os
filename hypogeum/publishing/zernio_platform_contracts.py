@@ -152,3 +152,36 @@ ZERNIO_PLATFORM_CONTRACTS: dict = {
 
 def get_platform_contract(platform: str) -> Optional[PlatformContract]:
     return ZERNIO_PLATFORM_CONTRACTS.get(platform)
+
+
+def build_platform_settings(platform: str, policy_entry: dict) -> Optional[dict]:
+    """
+    Translates a Channel Package's generic platform_deliverable_policy
+    entry (e.g. {"enabled": true, "privacy": "PUBLIC_TO_EVERYONE"}) into
+    the EXACT Zernio field names/shape this platform's verified contract
+    requires -- the ONE place that mapping lives, so readiness's own
+    validation (which checks contract.privacy_field/privacy_allowed_values
+    against the SAME policy_entry) and the real request body can never
+    silently diverge.
+
+    Returns None when this platform has no settings object to build
+    (Instagram/Facebook today — no required_settings, no privacy field).
+    Never invents a policy VALUE that isn't in policy_entry; only adds
+    the contract's own documented required_settings (fixed operational
+    flags with no per-episode data source, e.g. TikTok's consent
+    acknowledgements) when this platform is genuinely being targeted.
+    """
+    contract = get_platform_contract(platform)
+    if contract is None or not contract.verified:
+        return None
+
+    settings: dict = dict(contract.required_settings)
+    if contract.privacy_field and policy_entry.get("privacy"):
+        # contract.privacy_field is a dotted path like
+        # 'tiktokSettings.privacy_level' -- only the leaf name is needed
+        # here since `settings` IS the tiktokSettings/facebookSettings
+        # object itself.
+        leaf = contract.privacy_field.split(".")[-1]
+        settings[leaf] = policy_entry["privacy"]
+
+    return settings or None

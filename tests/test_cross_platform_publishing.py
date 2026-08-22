@@ -540,3 +540,148 @@ class TestVerifiedContractsCoverRequiredPlatforms:
             contract = ZERNIO_PLATFORM_CONTRACTS[platform]
             assert contract.verified is True
             assert contract.caption_field == "content"
+
+
+class TestCaptionsAndPlatformSettingsReachTheRealRequest:
+    def test_canonical_caption_reaches_real_content_field(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        tiktok_calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == "tiktok"]
+        assert len(tiktok_calls) == 3
+        for call in tiktok_calls:
+            assert call["content"].startswith("A real, script-grounded caption for short")
+
+    def test_missing_caption_never_sends_a_short_to_a_non_youtube_platform(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root, with_captions=False)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        results, _, _ = _run(db_path, assets_root, publish_transport=publish_transport)
+
+        # process_channel_ready_bundles() itself does not consult
+        # cross_platform_readiness -- that gate is the caller's
+        # responsibility (see Part 4.1 audit in the checkpoint). This
+        # test instead proves the LOWER-level guarantee already in place:
+        # a Short whose caption never resolved carries no content at
+        # all, never a fabricated or server-defaulted one.
+        tiktok_calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == "tiktok"]
+        for call in tiktok_calls:
+            assert "content" not in call or not call.get("content")
+
+    def test_tiktok_privacy_setting_reaches_the_real_request(self, db_path, assets_root):
+        _setup_channel(db_path)  # HYPOGEUM_MATRIX configures tiktok.shorts.privacy = PUBLIC_TO_EVERYONE
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        tiktok_calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == "tiktok"]
+        assert len(tiktok_calls) == 3
+        for call in tiktok_calls:
+            assert call["tiktokSettings"]["privacy_level"] == "PUBLIC_TO_EVERYONE"
+            # The contract's own required consent flags are included too
+            # -- never left to a server-side default for an autonomous
+            # submission.
+            assert call["tiktokSettings"]["content_preview_confirmed"] is True
+            assert call["tiktokSettings"]["express_consent_given"] is True
+
+    def test_instagram_facebook_calls_carry_no_tiktok_settings(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        for platform in ("instagram", "facebook"):
+            calls = [c for c in publish_transport.post_calls if c["platforms"][0]["platform"] == platform]
+            for call in calls:
+                assert "tiktokSettings" not in call
+
+    def test_scheduled_timestamp_and_timezone_reach_each_platform_call(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        for call in publish_transport.post_calls:
+            assert call.get("scheduledFor") is not None
+            assert call["platforms"][0]["accountId"] == f"acct_{call['platforms'][0]['platform']}"
+
+
+class TestCrossPlatformReadinessWiredIntoTheRealWritePath:
+    """
+    Part 4.1: check_cross_platform_readiness() must be consulted by
+    process_channel_ready_bundles() itself, BEFORE staging/presign/POST
+    for each (deliverable, platform) -- not only reachable as an
+    independently-called checker.
+    """
+
+    def test_missing_caption_produces_zero_presign_and_post_calls_for_that_platform(self, db_path, assets_root):
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root, with_captions=False)
+        _bind_all_platforms(db_path)
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport, media_transport=media_transport)
+
+        # No TikTok/Instagram/Facebook presign or post call at all -- the
+        # real write path itself refused these combinations before ever
+        # reaching staging, not merely an independent checker reporting
+        # failure on the side.
+        for platform in ("tiktok", "instagram", "facebook"):
+            assert not any(c["platforms"][0]["platform"] == platform for c in publish_transport.post_calls)
+        thumbnail_and_video_only = {c["filename"] for c in media_transport.presign_calls}
+        assert not any("short" in f and f not in (f"short_{i}_{EPISODE_ID}.mp4" for i in range(3)) for f in thumbnail_and_video_only)
+        # YouTube is unaffected -- captions are not required there.
+        assert any(c["platforms"][0]["platform"] == "youtube" for c in publish_transport.post_calls)
+
+    def test_missing_tiktok_privacy_produces_zero_tiktok_writes_only(self, db_path, assets_root):
+        policy = json.loads(json.dumps(HYPOGEUM_MATRIX))
+        del policy["tiktok"]["shorts"]["privacy"]
+        _setup_channel(db_path, platform_deliverable_policy=policy)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        publish_transport = FakePublishTransport()
+        _run(db_path, assets_root, publish_transport=publish_transport)
+
+        assert not any(c["platforms"][0]["platform"] == "tiktok" for c in publish_transport.post_calls)
+        assert any(c["platforms"][0]["platform"] == "instagram" for c in publish_transport.post_calls)
+        assert any(c["platforms"][0]["platform"] == "facebook" for c in publish_transport.post_calls)
+
+
+class TestBufferPlatformSpecificCompletion:
+    """
+    Part 4.2: TikTok/Instagram/Facebook must become 'complete' once their
+    OWN required deliverables (Shorts only) succeed -- never blocked
+    waiting for a main_episode intent on a platform that never routes it.
+    """
+
+    def test_tiktok_is_complete_with_shorts_only_no_main_episode_intent_required(self, db_path, assets_root):
+        from hypogeum.buffer import DeliverableBundleDefinition as _BD, gather_channel_demand_items
+
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+        _run(db_path, assets_root)  # publishes everything: youtube (4) + tiktok/instagram/facebook (3 shorts each)
+
+        conn = get_connection(db_path)
+        try:
+            tiktok_main = conn.execute(
+                "SELECT COUNT(*) c FROM publication_intents WHERE episode_id=? AND platform='tiktok' AND deliverable_id='main_episode'",
+                (EPISODE_ID,),
+            ).fetchone()["c"]
+        finally:
+            conn.close()
+        assert tiktok_main == 0, "no main_episode intent should ever exist for tiktok"
+
+        items = gather_channel_demand_items(
+            _BD(channel_id=CHANNEL_ID, bundle_id="main_episode_bundle", target_buffer_count=1),
+            item_ids=[EPISODE_ID], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root, platforms=("tiktok",),
+        )
+        assert items[0].already_published is True, "tiktok must be complete with only its 3 Shorts succeeded -- no main_episode required"

@@ -22,6 +22,7 @@ Public API:
     MAIN_EPISODE_DELIVERABLE_ID = "main_episode"
     resolve_short_deliverable_id(short_entry, index) -> str
     resolve_required_deliverable_ids(item_id, assets_root) -> list[str]
+    classify_deliverable_class(deliverable_id) -> str  # 'main_episode' | 'shorts'
 """
 
 from __future__ import annotations
@@ -57,6 +58,21 @@ def resolve_short_deliverable_id(short_entry: Optional[dict], index: int) -> str
     if raw_short_id and "_placeholder" not in raw_short_id:
         return f"short_{raw_short_id}"
     return f"short_{index + 1:03d}"
+
+
+def classify_deliverable_class(deliverable_id: str) -> str:
+    """
+    Generic, channel-agnostic deliverable CLASS ('main_episode' or
+    'shorts') derived purely from the canonical deliverable_id convention
+    this module itself owns -- MAIN_EPISODE_DELIVERABLE_ID is the one
+    long-form id; every other deliverable_id (any 'short_<...>' value
+    resolve_short_deliverable_id() ever produces) is a Short. Used by
+    Channel Package platform-distribution policy
+    (ChannelOperationsProfile.platform_deliverable_policy) to apply one
+    rule to "the main episode" and a separate rule to "every Short"
+    without the policy needing to enumerate individual short_ids.
+    """
+    return MAIN_EPISODE_DELIVERABLE_ID if deliverable_id == MAIN_EPISODE_DELIVERABLE_ID else "shorts"
 
 
 def resolve_required_deliverable_ids(item_id: str, assets_root: Path) -> List[str]:

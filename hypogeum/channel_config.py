@@ -357,6 +357,24 @@ class ChannelOperationsProfile:
     # definition of what should be installed here.
     bundle_cycle_policy:          dict = field(default_factory=dict)
 
+    # Optional, per-(platform, deliverable CLASS) distribution policy.
+    # Empty dict (default) means "no platform-distribution policy
+    # configured" -- callers that need per-platform routing (e.g.
+    # hypogeum.publishing.buffer_multi_platform, once installed) must fail
+    # closed rather than guess a default matrix. Keyed by an opaque
+    # platform string (Factory Core assigns no meaning to which platform
+    # names appear, or how many) -> deliverable CLASS
+    # ('main_episode' | 'shorts', see
+    # hypogeum.publishing.deliverable_ids.classify_deliverable_class() --
+    # the one place Factory Core defines what a "deliverable class" is) ->
+    # {"enabled": bool}. A platform/class combination absent from this
+    # dict is treated as NOT enabled (fail closed on omission, never an
+    # implicit "everything is allowed" default). See
+    # channel_packages/{channel_id}/ for the versioned, reviewable
+    # definition of what should be installed here -- this field never
+    # carries a Hypogeum-specific default itself.
+    platform_deliverable_policy: dict = field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -515,6 +533,7 @@ def _apply_publishing_profile_column_migrations(conn) -> None:
 _CHANNEL_OPERATIONS_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("deliverable_schedule_policy_json", "TEXT"),
     ("bundle_cycle_policy_json", "TEXT"),
+    ("platform_deliverable_policy_json", "TEXT"),
 ]
 
 
@@ -642,6 +661,10 @@ def _row_to_operations(row) -> ChannelOperationsProfile:
         bundle_cycle_policy          = (
             _uj(row["bundle_cycle_policy_json"], {})
             if "bundle_cycle_policy_json" in keys else {}
+        ),
+        platform_deliverable_policy  = (
+            _uj(row["platform_deliverable_policy_json"], {})
+            if "platform_deliverable_policy_json" in keys else {}
         ),
     )
 
@@ -1220,6 +1243,7 @@ _OPERATIONS_FIELD_MAP: dict[str, Any] = {
     "default_privacy_state":       "default_privacy_state",
     "deliverable_schedule_policy": ("deliverable_schedule_policy_json", _j),
     "bundle_cycle_policy":         ("bundle_cycle_policy_json", _j),
+    "platform_deliverable_policy": ("platform_deliverable_policy_json", _j),
 }
 
 
@@ -1319,6 +1343,7 @@ def create_channel_operations_profile(
     default_privacy_state:        str            = "private",
     deliverable_schedule_policy:  Optional[dict] = None,
     bundle_cycle_policy:          Optional[dict] = None,
+    platform_deliverable_policy:  Optional[dict] = None,
     db_path:                      Optional[Path] = None,
 ) -> ChannelOperationsProfile:
     """
@@ -1354,6 +1379,7 @@ def create_channel_operations_profile(
     failure_halt_policy = failure_halt_policy or {}
     deliverable_schedule_policy = deliverable_schedule_policy or {}
     bundle_cycle_policy = bundle_cycle_policy or {}
+    platform_deliverable_policy = platform_deliverable_policy or {}
 
     _validate_operations_fields(
         timezone_=timezone,
@@ -1390,6 +1416,7 @@ def create_channel_operations_profile(
         updated_at=now,
         deliverable_schedule_policy=deliverable_schedule_policy,
         bundle_cycle_policy=bundle_cycle_policy,
+        platform_deliverable_policy=platform_deliverable_policy,
     )
     try:
         conn = get_connection(_resolve_db_path(db_path))
@@ -1405,8 +1432,9 @@ def create_channel_operations_profile(
                     max_concurrent_episodes, retry_policy_json, failure_halt_policy_json,
                     cost_ceiling_usd_per_episode, default_privacy_state,
                     created_at, updated_at, metadata_version,
-                    deliverable_schedule_policy_json, bundle_cycle_policy_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    deliverable_schedule_policy_json, bundle_cycle_policy_json,
+                    platform_deliverable_policy_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (channel_id, channel_name, timezone, int(operator_enabled),
                  _j(production_cadence), _j(publishing_schedule),
                  _j(enabled_platforms), _j(blocked_platform_reasons),
@@ -1415,7 +1443,8 @@ def create_channel_operations_profile(
                  max_concurrent_episodes, _j(retry_policy), _j(failure_halt_policy),
                  cost_ceiling_usd_per_episode, default_privacy_state,
                  now, now, profile.metadata_version,
-                 _j(deliverable_schedule_policy), _j(bundle_cycle_policy)),
+                 _j(deliverable_schedule_policy), _j(bundle_cycle_policy),
+                 _j(platform_deliverable_policy)),
             )
             conn.commit()
         finally:

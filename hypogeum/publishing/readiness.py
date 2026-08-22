@@ -462,6 +462,81 @@ def resolve_canonical_metadata(
     )
 
 
+class CaptionResolutionError(RuntimeError):
+    """
+    Raised by resolve_canonical_captions() when a required caption cannot
+    be resolved for one or more requested deliverable_ids. Never falls
+    back to Zernio's own server-side default (silently omitting the
+    `content` field would let the provider substitute its own copy,
+    exactly the fail-open behavior this exists to prevent) and never
+    fabricates one — a genuinely missing caption is reported as an
+    explicit human-content blocker, the same discipline
+    resolve_canonical_metadata() already applies to title/description.
+    """
+    def __init__(self, reason: str, missing_deliverable_ids: List[str]):
+        super().__init__(reason)
+        self.reason = reason
+        self.missing_deliverable_ids = missing_deliverable_ids
+
+
+def resolve_canonical_captions(
+    final_render_package: dict,
+    requested_deliverable_ids: Sequence[str],
+) -> dict:
+    """
+    Resolves a canonical, non-YouTube publication caption per
+    deliverable_id from `metadata_source.shorts_captions` — a list of
+    {"short_id": <canonical deliverable_id>, "caption": <text>,
+    "source": <str>, "version": <str>} entries, the SAME shape convention
+    as the already-established `shorts_titles` (matched by deliverable_id,
+    never position). This is a SEPARATE, additive field from
+    `shorts_titles`/`description` — YouTube already has its own
+    title/description via resolve_canonical_metadata() and does not
+    consult this function; TikTok/Instagram/Facebook (whose `content`
+    field is the caption Zernio actually submits) do.
+
+    `caption` must never equal its own deliverable_id (the same
+    placeholder pattern shorts_titles guards against) and must be a
+    non-empty, non-whitespace string; `source`/`version` are carried as
+    provenance evidence only (never validated for a specific value) so a
+    caption's origin (e.g. "short_script_grounded_v1", the script/beat
+    revision it was drawn from) is always attributable, per the
+    versioned-and-attributable requirement.
+
+    Returns {deliverable_id: caption} covering ONLY
+    `requested_deliverable_ids` that actually need one. Raises
+    CaptionResolutionError (never a partial silent result) naming every
+    requested deliverable_id with no resolvable caption — this module
+    never falls back to a Zernio-server-side default caption for a
+    deliverable a caller has explicitly requested one for.
+    """
+    metadata_source = (final_render_package or {}).get("metadata_source", {}) or {}
+    raw_entries = metadata_source.get("shorts_captions") or []
+    caption_by_id: dict = {}
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        sid = (entry.get("short_id") or "").strip()
+        caption = (entry.get("caption") or "").strip()
+        if not sid or not caption:
+            continue
+        if caption.strip().lower() == sid.strip().lower():
+            continue  # the historical placeholder pattern -- never a real caption
+        caption_by_id[sid] = caption
+
+    missing = [did for did in requested_deliverable_ids if did not in caption_by_id]
+    if missing:
+        raise CaptionResolutionError(
+            reason=(
+                f"no canonical caption found in metadata_source.shorts_captions for "
+                f"deliverable_id(s): {missing} — an approved, script-grounded caption must "
+                f"exist before these deliverables can be submitted to a non-YouTube platform"
+            ),
+            missing_deliverable_ids=missing,
+        )
+    return {did: caption_by_id[did] for did in requested_deliverable_ids}
+
+
 def _check_metadata(
     episode_id: str,
     episode_dir: Path,

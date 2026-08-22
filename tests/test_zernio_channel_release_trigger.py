@@ -32,7 +32,7 @@ from hypogeum.publishing.provider_repository import (
     upsert_provider_account,
     upsert_provider_profile,
 )
-from hypogeum.publishing.readiness import MetadataOverride
+from hypogeum.publishing.readiness import MetadataOverride, MetadataResolutionError
 from hypogeum.publishing.zernio import ZernioProvider, ZernioTransportResponse
 from hypogeum.publishing.zernio_channel_release_trigger import build_publish_package_from_episode_dir, process_channel_ready_bundles
 from hypogeum.publishing.zernio_media_staging import (
@@ -336,10 +336,35 @@ class TestBuildPublishPackageResolvesTitleAndDescription:
         titles_by_id = {d.deliverable_id: d.title for d in package.shorts}
         assert titles_by_id == {"short_sh_0": "s0", "short_sh_1": "s1"}
 
-    def test_missing_metadata_leaves_title_and_description_none_never_fabricated(self, db_path, assets_root):
+    def test_missing_metadata_raises_never_fails_open_to_none(self, db_path, assets_root):
+        # Fail-closed, per the cross-platform readiness correction: the
+        # autonomous production path must know explicitly that metadata
+        # is unresolved BEFORE any staging/provider call, never silently
+        # proceed with title=None/description=None and accept whatever
+        # Zernio's server-side default happens to be.
         _seed_complete_episode(db_path, assets_root, "ep_empty", title="", n_shorts=0)
-        package = build_publish_package_from_episode_dir(
-            CHANNEL_ID, "ep_empty", "bundle_x", assets_root, db_path=db_path,
+        with pytest.raises(MetadataResolutionError):
+            build_publish_package_from_episode_dir(
+                CHANNEL_ID, "ep_empty", "bundle_x", assets_root, db_path=db_path,
+            )
+
+    def test_process_channel_ready_bundles_isolates_a_metadata_failure_per_item(self, db_path, assets_root):
+        # One item's unresolved metadata must report a blocked result for
+        # that item's platforms, never raise and abort the whole channel
+        # tick (which would silently skip every OTHER ready item too).
+        _setup_channel(db_path)
+        _seed_complete_episode(db_path, assets_root, "ep_good", title="A Real Title", n_shorts=0)
+        _seed_complete_episode(db_path, assets_root, "ep_bad", title="", n_shorts=0)
+        _fully_bind(db_path)
+
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
         )
-        assert package.main_episode.title is None
-        assert package.main_episode.description is None
+        by_item = {r.item_id: r for r in results}
+        assert by_item["ep_good"].result.status == "published"
+        assert by_item["ep_bad"].result.status == "blocked_metadata"
+        assert by_item["ep_bad"].result.blocked_reason is not None

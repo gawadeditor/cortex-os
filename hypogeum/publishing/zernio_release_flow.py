@@ -47,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
@@ -84,6 +84,7 @@ def publish_channel_release(
     media_staging_provider: Optional[MediaStagingProvider] = None,
     publishing_provider: Optional[PublishingProvider] = None,
     now: Optional[datetime] = None,
+    deliverable_ids: Optional[List[str]] = None,
 ) -> ReleasePublishResult:
     """
     Read-only through stages 1–2; stage 3 is the only stage that can ever
@@ -114,6 +115,16 @@ def publish_channel_release(
     (channel_id, episode_id, deliverable_id, platform, provider_id), so a
     freshly recomputed (and possibly different) schedule_result.slot is
     never actually submitted a second time.
+
+    deliverable_ids: optional filter forwarded unchanged to
+    publish_episode_package() and used (instead of every deliverable in
+    `package`) to determine which deliverables' slots this call needs
+    from the schedule compiler — None (default) preserves the original
+    behavior of covering the whole package. This is the mechanism that
+    lets a caller route the main episode to one platform and Shorts to a
+    different platform set from the same PublishPackage (see
+    hypogeum.publishing.zernio_channel_release_trigger.
+    process_channel_ready_bundles()).
     """
     readiness = check_publish_readiness(
         episode_id, channel_id=channel_id, assets_root=assets_root, db_path=db_path,
@@ -128,9 +139,12 @@ def publish_channel_release(
             blocked_reason=f"readiness check failed: {failed}",
         )
 
-    deliverable_ids = [d.deliverable_id for d in package.all_deliverables()]
+    target_deliverable_ids = (
+        deliverable_ids if deliverable_ids is not None
+        else [d.deliverable_id for d in package.all_deliverables()]
+    )
     schedule_result = compile_schedule_plan_from_channel_package(
-        channel_id, deliverable_ids, db_path=db_path, publish_now=publish_now,
+        channel_id, target_deliverable_ids, db_path=db_path, publish_now=publish_now,
         require_explicit_policy=require_explicit_schedule_policy, now=now,
     )
     if schedule_result.blocked:
@@ -144,6 +158,7 @@ def publish_channel_release(
         package, platform=platform, channel_id=channel_id, db_path=db_path,
         schedule_plan=schedule_result.schedule_plan, logical_alias=logical_alias,
         media_staging_provider=media_staging_provider, publishing_provider=publishing_provider,
+        deliverable_ids=deliverable_ids,
     )
     if outcome.blocked:
         status = "blocked_publish"

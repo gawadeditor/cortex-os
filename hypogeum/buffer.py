@@ -315,17 +315,45 @@ def gather_channel_demand_items(
             ).fetchone()
 
             required_deliverable_ids = set(resolve_required_deliverable_ids(item_id, assets_root))
-            succeeded_rows = conn.execute(
-                """
-                SELECT DISTINCT deliverable_id FROM publication_intents
-                WHERE episode_id = ? AND channel_id = ? AND status = 'succeeded'
-                """,
-                (item_id, definition.channel_id),
-            ).fetchall()
-            succeeded_deliverable_ids = {r["deliverable_id"] for r in succeeded_rows}
-            zernio_fully_published = bool(required_deliverable_ids) and required_deliverable_ids.issubset(
-                succeeded_deliverable_ids
-            )
+            if platforms:
+                # Platform is part of the idempotency identity (ADR-013):
+                # a succeeded YouTube intent must never be read as "this
+                # item is fully done" for a DIFFERENT platform this call
+                # is also requesting (e.g. TikTok/Instagram/Facebook) --
+                # so zernio_fully_published is computed PER REQUESTED
+                # PLATFORM and the item counts as fully published only
+                # when EVERY platform in `platforms` independently has
+                # every required deliverable succeeded on THAT platform.
+                # A call that requests only platforms=("youtube",) is
+                # therefore unaffected by whether any other platform has
+                # ever been attempted at all.
+                zernio_fully_published = bool(required_deliverable_ids)
+                for platform in platforms:
+                    succeeded_rows = conn.execute(
+                        """
+                        SELECT DISTINCT deliverable_id FROM publication_intents
+                        WHERE episode_id = ? AND channel_id = ? AND platform = ? AND status = 'succeeded'
+                        """,
+                        (item_id, definition.channel_id, platform),
+                    ).fetchall()
+                    succeeded_deliverable_ids = {r["deliverable_id"] for r in succeeded_rows}
+                    if not required_deliverable_ids.issubset(succeeded_deliverable_ids):
+                        zernio_fully_published = False
+                        break
+            else:
+                # No specific platform requested (legacy/platform-agnostic
+                # callers) -- preserve the original behavior: any
+                # succeeded intent for a deliverable counts, regardless of
+                # which platform it succeeded on.
+                succeeded_rows = conn.execute(
+                    """
+                    SELECT DISTINCT deliverable_id FROM publication_intents
+                    WHERE episode_id = ? AND channel_id = ? AND status = 'succeeded'
+                    """,
+                    (item_id, definition.channel_id),
+                ).fetchall()
+                succeeded_deliverable_ids = {r["deliverable_id"] for r in succeeded_rows}
+                zernio_fully_published = bool(required_deliverable_ids) and required_deliverable_ids.issubset(succeeded_deliverable_ids)
 
             already_published = bool(published_row or live_calendar_row or zernio_fully_published)
 

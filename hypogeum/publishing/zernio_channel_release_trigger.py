@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Sequence
 
 from hypogeum.buffer import DeliverableBundleDefinition, gather_channel_demand_items, resolve_complete_item_ids_for_channel
-from hypogeum.publishing.deliverable_ids import MAIN_EPISODE_DELIVERABLE_ID, resolve_short_deliverable_id
+from hypogeum.publishing.deliverable_ids import MAIN_EPISODE_DELIVERABLE_ID, classify_deliverable_class, resolve_short_deliverable_id
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
 from hypogeum.publishing.readiness import MetadataOverride, MetadataResolutionError, resolve_canonical_metadata
@@ -113,13 +113,16 @@ def build_publish_package_from_episode_dir(
     same resolution check_publish_readiness()'s A_METADATA gate already
     performs, reused here (never re-derived independently) so the real
     submitted title/description can never diverge from what readiness
-    validated. Best-effort only: this function never blocks or raises on
-    an unresolvable title/description (a genuinely missing/ambiguous one
-    is readiness's job to catch, always run first by
-    publish_channel_release()) — on MetadataResolutionError, every
-    deliverable simply carries title=None/description=None and Zernio's
-    own documented server-side default applies (never a fabricated
-    value).
+    validated.
+
+    Raises MetadataResolutionError (never fails open to title=None/
+    description=None) when canonical release metadata cannot be resolved
+    unambiguously — the autonomous production path must know explicitly
+    that metadata is unresolved BEFORE any staging/provider call, not
+    silently proceed with a Zernio-server-default title. Callers that
+    process multiple items in a loop (e.g. process_channel_ready_bundles())
+    catch this per item so one item's unresolved metadata never aborts
+    another item's processing.
     """
     episode_dir = Path(assets_root) / "episodes" / episode_id
     render_path = episode_dir / f"final_render_package_{episode_id}.json"
@@ -131,14 +134,8 @@ def build_publish_package_from_episode_dir(
             final_render_package = {}
     shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
 
-    resolved_title: Optional[str] = None
-    resolved_description: Optional[str] = None
-    resolved_shorts_titles: dict = {}
-    try:
-        resolved = resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
-        resolved_title, resolved_description, resolved_shorts_titles = resolved.title, resolved.description, resolved.shorts_titles
-    except MetadataResolutionError:
-        pass
+    resolved = resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
+    resolved_title, resolved_description, resolved_shorts_titles = resolved.title, resolved.description, resolved.shorts_titles
 
     main_path = episode_dir / f"main_{episode_id}.mp4"
     return PublishPackage(
@@ -180,6 +177,53 @@ def _resolve_target_platforms(channel_id: str, db_path: Optional[Path]) -> List[
         # or run_worker.py at all.
         return []
     return sorted(p for p, enabled in (profile.enabled_platforms or {}).items() if enabled)
+
+
+def _resolve_platform_deliverable_policy(channel_id: str, db_path: Optional[Path]) -> dict:
+    """Read-only. Empty dict when no ChannelOperationsProfile exists or
+    none is configured -- callers treat an empty policy as "no per-
+    deliverable routing restriction configured" (see
+    _allowed_deliverable_ids_for_platform()'s own docstring for the exact
+    backward-compatible semantics this produces)."""
+    from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
+
+    try:
+        profile = get_channel_operations_profile(channel_id, db_path=db_path)
+    except RuntimeError:
+        return {}
+    if profile is None:
+        return {}
+    return profile.platform_deliverable_policy or {}
+
+
+def _allowed_deliverable_ids_for_platform(
+    package: PublishPackage, platform: str, platform_deliverable_policy: dict,
+) -> List[str]:
+    """
+    Which of `package`'s deliverable_ids are permitted on `platform`,
+    per the channel's own platform_deliverable_policy
+    (deliverable CLASS -- 'main_episode' | 'shorts', see
+    hypogeum.publishing.deliverable_ids.classify_deliverable_class() --
+    -> platform -> {"enabled": bool}).
+
+    Backward compatible: an EMPTY platform_deliverable_policy (the
+    default for a channel that has never configured one) means "no per-
+    deliverable routing restriction" -- every deliverable in `package` is
+    allowed on every requested platform, exactly as before this
+    mechanism existed. A NON-empty policy is authoritative and fails
+    closed on omission: a (deliverable_class, platform) combination
+    genuinely absent from it is NOT allowed, never silently permitted.
+    """
+    all_ids = [d.deliverable_id for d in package.all_deliverables()]
+    if not platform_deliverable_policy:
+        return all_ids
+    allowed = []
+    for deliverable_id in all_ids:
+        deliverable_class = classify_deliverable_class(deliverable_id)
+        class_entry = (platform_deliverable_policy.get(platform) or {}).get(deliverable_class) or {}
+        if bool(class_entry.get("enabled")):
+            allowed.append(deliverable_id)
+    return allowed
 
 
 def process_channel_ready_bundles(
@@ -224,16 +268,41 @@ def process_channel_ready_bundles(
         db_path=db_path, assets_root=assets_root, platforms=tuple(resolved_platforms), provider_id=provider_id,
     )
     metadata_override_by_item = metadata_override_by_item or {}
+    platform_deliverable_policy = _resolve_platform_deliverable_policy(channel_id, db_path)
 
     results: List[ReadyBundle] = []
     for item in demand_items:
         if item.already_published:
             continue
-        package = build_publish_package_from_episode_dir(
-            channel_id, item.item_id, bundle_definition.bundle_id, assets_root,
-            db_path=db_path, metadata_override=metadata_override_by_item.get(item.item_id),
-        )
+        try:
+            package = build_publish_package_from_episode_dir(
+                channel_id, item.item_id, bundle_definition.bundle_id, assets_root,
+                db_path=db_path, metadata_override=metadata_override_by_item.get(item.item_id),
+            )
+        except MetadataResolutionError as exc:
+            # Fail closed, per item — never silently proceed with a
+            # missing/ambiguous title (no fallback to a Zernio server
+            # default), and never let one item's unresolved metadata
+            # abort another item's processing in the same channel tick.
+            for platform in resolved_platforms:
+                results.append(ReadyBundle(
+                    item_id=item.item_id, platform=platform,
+                    result=ReleasePublishResult(
+                        channel_id=channel_id, episode_id=item.item_id, platform=platform,
+                        status="blocked_metadata", blocked_reason=exc.reason,
+                    ),
+                ))
+            continue
         for platform in resolved_platforms:
+            allowed_deliverable_ids = _allowed_deliverable_ids_for_platform(
+                package, platform, platform_deliverable_policy,
+            )
+            if not allowed_deliverable_ids:
+                # No deliverable in this item is routed to this platform
+                # by the Channel Package's own policy -- deliberately not
+                # attempted (never a call, never an intent, never a
+                # "blocked" result to reconcile).
+                continue
             result = publish_channel_release(
                 channel_id, item.item_id, platform, package,
                 assets_root=assets_root, db_path=db_path,
@@ -249,6 +318,13 @@ def process_channel_ready_bundles(
                 # deliberately disables here.
                 require_explicit_schedule_policy=True,
                 media_staging_provider=media_staging_provider, publishing_provider=publishing_provider,
+                # Route ONLY the deliverables this platform is actually
+                # enabled for, per platform_deliverable_policy -- see
+                # _allowed_deliverable_ids_for_platform()'s own docstring.
+                # An empty (unconfigured) policy allows every deliverable,
+                # preserving the original whole-package-per-platform
+                # behavior exactly.
+                deliverable_ids=allowed_deliverable_ids if platform_deliverable_policy else None,
             )
             results.append(ReadyBundle(item_id=item.item_id, platform=platform, result=result))
     return results

@@ -1,0 +1,31 @@
+{
+  "channel_id": "hypogeum",
+  "policy_id": "hypogeum_platform_distribution_policy_v1",
+  "policy_version": "1.0.0",
+  "created_at": "2026-08-22",
+  "status": "proposed_not_installed",
+  "rationale": "Zernio was introduced primarily to reach TikTok, Instagram, and Facebook -- platforms the prior YouTube-only direct adapter never covered. The main long-form episode is a documentary-style YouTube asset; it is not edited for the short-form-native platforms and has no approved editorial plan for Facebook long-form distribution. Shorts are already produced as 9:16 short-form content and are the natural fit for all four platforms. Facebook is deliberately excluded for the main episode pending a separate editorial/distribution decision -- this is NOT because Facebook lacks technical video support.",
+  "platform_deliverable_policy": {
+    "youtube": {
+      "main_episode": {"enabled": true},
+      "shorts": {"enabled": true}
+    },
+    "tiktok": {
+      "main_episode": {"enabled": false},
+      "shorts": {"enabled": true}
+    },
+    "instagram": {
+      "main_episode": {"enabled": false},
+      "shorts": {"enabled": true}
+    },
+    "facebook": {
+      "main_episode": {"enabled": false},
+      "shorts": {"enabled": true}
+    }
+  },
+  "known_gaps": [
+    "Facebook main_episode=false is a deliberate scope decision for this policy version, not a technical limitation -- see rationale.",
+    "This policy only declares WHICH platform/deliverable-class combinations are permitted. It does not itself declare per-platform schedule times (see scheduling_policy_v1.json's bundle_cycle_policy, which remains deliverable_id-keyed and applies to every platform that deliverable is routed to) or canonical captions (see shorts_captions -- not yet approved, see the cross-platform readiness checkpoint)."
+  ],
+  "installation": "NOT applied to any database. To install (idempotent, preserves every other existing field -- see hypogeum.channel_config.update_channel_operations_profile()): update_channel_operations_profile(channel_id='hypogeum', platform_deliverable_policy=<this file's 'platform_deliverable_policy' object>). Requires explicit operator approval -- not performed by this artifact's presence alone."
+}

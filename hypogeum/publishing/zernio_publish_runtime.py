@@ -250,6 +250,7 @@ def publish_episode_package(
     media_staging_provider: Optional[MediaStagingProvider] = None,
     publishing_provider: Optional[PublishingProvider] = None,
     logical_alias: str = "default",
+    deliverable_ids: Optional[List[str]] = None,
 ) -> PublishPackageResult:
     """
     Stage and publish every deliverable in `package` (main episode + every
@@ -280,8 +281,27 @@ def publish_episode_package(
     every deliverable in the package is always attempted once the
     package-level schedule-plan gate passes; a partial-failure package
     reports each deliverable's own outcome for the caller to reconcile.
+
+    deliverable_ids: optional filter. None (default) preserves the
+    original, still-supported behavior — every deliverable in `package`
+    is attempted. When given, ONLY deliverables whose deliverable_id is
+    in this list are staged/published for this call; every other
+    deliverable in `package` is silently excluded from THIS platform
+    call (not reported as blocked/failed — it was never requested for
+    this platform in the first place). This is what lets a caller
+    (hypogeum.publishing.zernio_channel_release_trigger.
+    process_channel_ready_bundles()) route the main episode to one
+    platform and Shorts to a different set of platforms from the SAME
+    PublishPackage, without submitting deliverables a Channel Package's
+    platform_deliverable_policy never enabled for that platform.
+    schedule_plan coverage is validated against this SAME filtered set,
+    not the full package.
     """
-    deliverables = package.all_deliverables()
+    all_deliverables = package.all_deliverables()
+    deliverables = (
+        all_deliverables if deliverable_ids is None
+        else [d for d in all_deliverables if d.deliverable_id in deliverable_ids]
+    )
     expected_ids = [d.deliverable_id for d in deliverables]
 
     try:

@@ -481,13 +481,15 @@ class TestAssetsRootResolution:
             result = _run_iteration(db_path, auto_publishing_enabled=True)  # assets_root omitted
 
         # The episode is still discovered via the DB (episodes table,
-        # independent of assets_root) but readiness correctly reports it
-        # BLOCKED -- proving the canonical (empty) root was consulted, not
+        # independent of assets_root) but building its publish package
+        # correctly reports it BLOCKED (unresolvable canonical metadata,
+        # since no final_render_package.json exists at the canonical
+        # root) -- proving the canonical (empty) root was consulted, not
         # the decoy files sitting right under db_path.parent. If the old
         # buggy Path(db_path).parent behavior were still active, this
         # would instead report "published".
         entries = result["publishing"]["results_by_channel"]["hypogeum"]
-        assert entries[0]["status"] == "blocked_readiness"
+        assert entries[0]["status"] == "blocked_metadata"
         assert FakePublishTransport.post_calls == []
 
 

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from hypogeum.publishing.zernio import _normalize_platform_entry_account_id as _normalize_entry_account_id
+
 
 def validate_repair_preconditions(
     *,
@@ -121,16 +123,29 @@ def build_proposed_update_body(
     existing schedule is always explicitly restated, never left to an
     undocumented default.
 
-    Every existing platforms[] entry not in target_platforms is preserved
-    untouched -- this body only ever adds/corrects, never drops an
-    existing destination.
+    Every existing platforms[] entry -- whether or not its platform is in
+    target_platforms -- is preserved into this body, with only its
+    accountId normalized (see below); only a platform genuinely absent
+    from the existing post gets a freshly built entry appended. Matches
+    ZernioProvider.repair_existing_post()'s own merge logic exactly, so
+    this preview body is an accurate prediction of what that call sends.
+
+    accountId normalization (2026-08-23, confirmed via a real diagnostic
+    PUT against the live API): GET's platforms[].accountId is an
+    expanded object ({_id, platform, profileId, displayName, ...}); PUT
+    rejects that shape for the same field ("Invalid input: expected
+    string, received object", param="platforms.N.accountId"). Every
+    existing entry's accountId is reduced to its plain id string here;
+    every other field on that entry is left untouched.
     """
-    existing_entries = list(existing_post.get("platforms") or [])
-    merged_platforms = [
-        e for e in existing_entries if e.get("platform") not in target_platforms
-    ] + [
+    existing_entries = [
+        _normalize_entry_account_id(e) for e in (existing_post.get("platforms") or [])
+    ]
+    existing_platform_names = {e.get("platform") for e in existing_entries}
+    missing_platforms = [p for p in target_platforms if p not in existing_platform_names]
+    merged_platforms = existing_entries + [
         {"platform": p, "accountId": accounts[p]["external_account_id"]}
-        for p in sorted(target_platforms)
+        for p in sorted(missing_platforms)
     ]
 
     media_item: dict = {"type": "video", "title": title}

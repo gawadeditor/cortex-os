@@ -423,6 +423,24 @@ def _serialize_media_item(media: MediaReference) -> dict:
     return item
 
 
+def _normalize_platform_entry_account_id(entry: dict) -> dict:
+    """
+    GET's platforms[].accountId is an EXPANDED object ({_id, platform,
+    profileId, displayName, ...}); PUT rejects that same field ("Invalid
+    input: expected string, received object", param="platforms.N.
+    accountId") -- confirmed 2026-08-23 via a real diagnostic PUT.
+    Returns a shallow copy of `entry` with accountId reduced to its
+    plain id string when it was an expanded object (entry["accountId"]
+    already a string, e.g. from a freshly built entry, is returned
+    unchanged) -- every OTHER field on `entry` is preserved exactly.
+    """
+    account_id = entry.get("accountId")
+    if isinstance(account_id, dict):
+        entry = dict(entry)
+        entry["accountId"] = account_id.get("_id", account_id)
+    return entry
+
+
 # ---------------------------------------------------------------------------
 # Request / response construction -- only evidenced fields, nothing guessed
 # ---------------------------------------------------------------------------
@@ -1202,7 +1220,21 @@ class ZernioProvider:
         # out to rebuild it, even when its platform is also in `platforms`.
         # Only a platform with NO existing entry at all gets a freshly
         # built one appended.
-        existing_platform_entries = list(existing_post.get("platforms") or [])
+        #
+        # 2026-08-23 fix (live PUT 400 diagnosed): GET's platforms[].
+        # accountId is an EXPANDED object ({_id, platform, profileId,
+        # displayName, ...}) but PUT rejects that shape for the same
+        # field ("Invalid input: expected string, received object",
+        # param="platforms.0.accountId") -- confirmed via a direct
+        # diagnostic PUT against the real API, 2026-08-23. accountId is
+        # normalized to its plain id string on every existing entry
+        # before sending; every OTHER field on that entry (customMedia,
+        # scheduledFor, platformSpecificData, contentHash, provider _id,
+        # status, publishAttempts, and any undocumented field) is still
+        # carried through completely untouched.
+        existing_platform_entries = [
+            _normalize_platform_entry_account_id(e) for e in (existing_post.get("platforms") or [])
+        ]
         existing_platform_names = {e.get("platform") for e in existing_platform_entries}
         missing_platforms = [p for p in platforms if p not in existing_platform_names]
         merged_platform_entries = existing_platform_entries + [

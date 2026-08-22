@@ -656,6 +656,16 @@ def _rich_existing_post_get_response(*, post_id="post_short_001"):
     )
 
 
+# 2026-08-23: confirmed via a real diagnostic PUT against the live API that
+# GET's expanded accountId object is rejected by PUT ("Invalid input:
+# expected string, received object", param="platforms.0.accountId") --
+# repair_existing_post() normalizes accountId to its plain id string on an
+# existing entry before sending, while every OTHER field (including
+# undocumented ones) still survives untouched. This is what a repair PUT
+# actually sends for _RICH_EXISTING_YOUTUBE_ENTRY.
+_RICH_EXISTING_YOUTUBE_ENTRY_AS_SENT = dict(_RICH_EXISTING_YOUTUBE_ENTRY, accountId="6a83555477555aae01afa569")
+
+
 class TestRepairPreservesExistingPlatformEntriesByteForByte:
     def test_existing_entry_with_undocumented_fields_survives_unchanged(self, db_path):
         _bind_all(db_path)
@@ -675,9 +685,10 @@ class TestRepairPreservesExistingPlatformEntriesByteForByte:
         sent_platforms = transport.put_calls[0]["platforms"]
         youtube_entries = [e for e in sent_platforms if e.get("platform") == "youtube"]
         assert len(youtube_entries) == 1, "must never duplicate an existing platform entry"
-        assert youtube_entries[0] == _RICH_EXISTING_YOUTUBE_ENTRY, (
-            "an existing platform entry must survive the PUT byte-for-byte, "
-            "including undocumented/provider-internal fields"
+        assert youtube_entries[0] == _RICH_EXISTING_YOUTUBE_ENTRY_AS_SENT, (
+            "an existing platform entry must survive the PUT with every field "
+            "unchanged except accountId, which is normalized to a plain string "
+            "(PUT rejects the expanded object GET returns)"
         )
 
     def test_only_genuinely_missing_platforms_get_a_freshly_built_entry(self, db_path):
@@ -740,4 +751,4 @@ class TestRepairPreservesExistingPlatformEntriesByteForByte:
 
         sent_platforms = transport.put_calls[0]["platforms"]
         youtube_entries = [e for e in sent_platforms if e.get("platform") == "youtube"]
-        assert youtube_entries == [_RICH_EXISTING_YOUTUBE_ENTRY]
+        assert youtube_entries == [_RICH_EXISTING_YOUTUBE_ENTRY_AS_SENT]

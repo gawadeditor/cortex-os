@@ -635,7 +635,21 @@ def _check_shorts_captions(
     for i, short in enumerate(shorts):
         short_id = short.get("short_id", f"sh_{i:03d}")
         video_asset_id = short.get("video_asset_id", "")
-        mp4_path = episode_dir / f"short_{i}_{episode_id}.mp4"
+        # 2026-08-23 fix: this function already read video_asset_id but
+        # never used it -- always assumed the generation-time index
+        # filename, so a repaired render promoted under its own immutable
+        # versioned asset id (the original short_{i}_{episode_id}.mp4
+        # preserved untouched alongside it) was silently invisible to this
+        # check. Resolve from video_asset_id first (same assets_root-
+        # relative, extension-less convention caption_asset_id already
+        # uses), falling back to the index convention only when it is
+        # empty -- matches every other Short deliverable still on the
+        # original render.
+        mp4_path = (
+            (episode_dir.parent.parent / f"{video_asset_id}.mp4")
+            if video_asset_id
+            else episode_dir / f"short_{i}_{episode_id}.mp4"
+        )
         srt_asset_id = short.get("caption_asset_id", "")
         srt_path = (episode_dir.parent.parent / f"{srt_asset_id}.srt") if srt_asset_id else None
 
@@ -805,7 +819,14 @@ def _check_shorts_visual_coverage(
     failures: List[str] = []
     for i, short in enumerate(shorts):
         short_id = short.get("short_id", f"sh_{i:03d}")
-        mp4_path = episode_dir / f"short_{i}_{episode_id}.mp4"
+        video_asset_id = short.get("video_asset_id", "")
+        # 2026-08-23 fix: same video_asset_id resolution as
+        # _check_shorts_captions() above -- see that function's comment.
+        mp4_path = (
+            (episode_dir.parent.parent / f"{video_asset_id}.mp4")
+            if video_asset_id
+            else episode_dir / f"short_{i}_{episode_id}.mp4"
+        )
         srt_asset_id = short.get("caption_asset_id", "")
         srt_path = (episode_dir.parent.parent / f"{srt_asset_id}.srt") if srt_asset_id else None
 

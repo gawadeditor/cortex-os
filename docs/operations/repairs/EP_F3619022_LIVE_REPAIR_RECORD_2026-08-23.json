@@ -1,0 +1,206 @@
+{
+  "episode_id": "ep_f3619022",
+  "operation": "live_repair_2026-08-23",
+  "post_ids": {
+    "main_episode": "6a89751ca12350d9b38baf7c",
+    "short_001": "6a89752c7a56b107295b2b2c",
+    "short_002": "6a897539c2f26fb88c8c21c9",
+    "short_003": "6a897546c2f26fb88c8c2a16"
+  },
+  "post_count": {
+    "post_calls_issued": 0,
+    "put_calls_issued": 8,
+    "put_calls_per_post": 2,
+    "note": "1st attempt per post returned HTTP 400 (accountId shape bug, diagnosed+fixed), 2nd attempt per post succeeded and verified"
+  },
+  "attempt_1_result": "ambiguous (all 4) -- HTTP 400 'Invalid input: expected string, received object', param=platforms.0.accountId -- root cause: GET returns accountId as an expanded object, PUT requires plain string. Zero ledger mutation occurred (to_submit was empty for all 4, since youtube already succeeded locally).",
+  "code_fix": "hypogeum/publishing/zernio.py: added _normalize_platform_entry_account_id(), applied to every existing platforms[] entry before PUT. Every other field on each entry preserved untouched.",
+  "attempt_2_result": {
+    "main_episode": {
+      "youtube": {
+        "platform": "youtube",
+        "deliverable_type": "main_episode",
+        "status": "content_corrected",
+        "provider_content_id": "6a89751ca12350d9b38baf7c",
+        "publication_intent_id": "intent_0271881c7eb249f6931de1f7151aa67f",
+        "attempt_id": "attempt_26ee7810fda640d392a59baed6716087",
+        "note": "already succeeded locally -- this call corrected the shared post's content/media only, no new attempt row created"
+      }
+    },
+    "short_001": {
+      "youtube": {
+        "platform": "youtube",
+        "deliverable_type": "short",
+        "status": "content_corrected",
+        "provider_content_id": "6a89752c7a56b107295b2b2c",
+        "publication_intent_id": "intent_a18ac48b62de40a4bb7b8a82ece22f2b",
+        "attempt_id": "attempt_c7f1286972e94e9399c33eace8b69257",
+        "note": "already succeeded locally -- this call corrected the shared post's content/media only, no new attempt row created"
+      }
+    },
+    "short_002": {
+      "youtube": {
+        "platform": "youtube",
+        "deliverable_type": "short",
+        "status": "content_corrected",
+        "provider_content_id": "6a897539c2f26fb88c8c21c9",
+        "publication_intent_id": "intent_fcdab24470a7429ca54e0d1fcafc0570",
+        "attempt_id": "attempt_b2fd098190ff49a2816a0b91b85425e5",
+        "note": "already succeeded locally -- this call corrected the shared post's content/media only, no new attempt row created"
+      }
+    },
+    "short_003": {
+      "youtube": {
+        "platform": "youtube",
+        "deliverable_type": "short",
+        "status": "content_corrected",
+        "provider_content_id": "6a897546c2f26fb88c8c2a16",
+        "publication_intent_id": "intent_c022211f9dd64dcb8a6ca3eb013952de",
+        "attempt_id": "attempt_d4acfe07cb8c4902895f892619ab5e61",
+        "note": "already succeeded locally -- this call corrected the shared post's content/media only, no new attempt row created"
+      }
+    }
+  },
+  "staged_assets": {
+    "short_001": {
+      "local_path": ".hypogeum-assets/episodes/ep_f3619022/short_0_ep_f3619022.repaired_v1.mp4",
+      "sha256": "c56fae165d9b6b3dd11e5e5fbd7500adbcd2597162c3408c87879c3d89eaba97",
+      "size_bytes": 55990086,
+      "public_url": "https://media.zernio.com/temp/1787435290979_q2kgxekj_short_0_ep_f3619022.repaired_v1.mp4",
+      "remote_object_id": "temp/1787435290979_q2kgxekj_short_0_ep_f3619022.repaired_v1.mp4",
+      "status": "uploaded",
+      "created_at": "2026-08-22T21:48:10.174772+00:00"
+    },
+    "short_002": {
+      "local_path": ".hypogeum-assets/episodes/ep_f3619022/short_1_ep_f3619022.repaired_v1.mp4",
+      "sha256": "4487458499925d3eb8a8b115691f7f73dace6696233ab40be6eaf253258cdfc7",
+      "size_bytes": 46299920,
+      "public_url": "https://media.zernio.com/temp/1787435297969_0dad42p0_short_1_ep_f3619022.repaired_v1.mp4",
+      "remote_object_id": "temp/1787435297969_0dad42p0_short_1_ep_f3619022.repaired_v1.mp4",
+      "status": "uploaded",
+      "created_at": "2026-08-22T21:48:17.239011+00:00"
+    },
+    "short_003": {
+      "local_path": ".hypogeum-assets/episodes/ep_f3619022/short_2_ep_f3619022.repaired_v1.mp4",
+      "sha256": "b0a124bbb8ab7f30fc1997611970d3e97b245a00806479da4e1f79e20d265f65",
+      "size_bytes": 32787905,
+      "public_url": "https://media.zernio.com/temp/1787435304922_2lhd4zlw_short_2_ep_f3619022.repaired_v1.mp4",
+      "remote_object_id": "temp/1787435304922_2lhd4zlw_short_2_ep_f3619022.repaired_v1.mp4",
+      "status": "uploaded",
+      "created_at": "2026-08-22T21:48:24.208537+00:00"
+    },
+    "main_episode_thumbnail": {
+      "local_path": ".hypogeum-assets/episodes/ep_f3619022/thumbnails/main_episode.recomposed_v1.jpg",
+      "sha256": "d223fcf58d73a013a853dfef4b62c8ae237b5879ad664fa741d4f0c4142ad121",
+      "size_bytes": 248098,
+      "public_url": "https://media.zernio.com/temp/1787435310723_0ujq5o6z_main_episode.recomposed_v1.jpg",
+      "remote_object_id": "temp/1787435310723_0ujq5o6z_main_episode.recomposed_v1.jpg",
+      "status": "uploaded",
+      "created_at": "2026-08-22T21:48:30.067740+00:00"
+    },
+    "short_001_thumbnail": {
+      "local_path": ".hypogeum-assets/episodes/ep_f3619022/thumbnails/short_001.recomposed_v1.jpg",
+      "sha256": "83a5a7c4d50462a2866f46744ff44843ce47252e8f263e0f0cc09ce26f4b1ff0",
+      "size_bytes": 229185,
+      "public_url": "https://media.zernio.com/temp/1787435312901_48tqtbg8_short_001.recomposed_v1.jpg",
+      "remote_object_id": "temp/1787435312901_48tqtbg8_short_001.recomposed_v1.jpg",
+      "status": "uploaded",
+      "created_at": "2026-08-22T21:48:32.243362+00:00"
+    },
+    "short_002_thumbnail": {
+      "local_path": ".hypogeum-assets/episodes/ep_f3619022/thumbnails/short_002.recomposed_v1.jpg",
+      "sha256": "7bdf1d9ffc6811e36dd54144d3da70d10cfd4ae44179584fa0c53e099b5090a3",
+      "size_bytes": 307533,
+      "public_url": "https://media.zernio.com/temp/1787435314790_pubcjvz1_short_002.recomposed_v1.jpg",
+      "remote_object_id": "temp/1787435314790_pubcjvz1_short_002.recomposed_v1.jpg",
+      "status": "uploaded",
+      "created_at": "2026-08-22T21:48:34.160966+00:00"
+    },
+    "short_003_thumbnail": {
+      "local_path": ".hypogeum-assets/episodes/ep_f3619022/thumbnails/short_003.recomposed_v1.jpg",
+      "sha256": "23b051a9cd9e71ae23ebcd076590bee7f7089bc15ad013f049a93f4eb1a88d5d",
+      "size_bytes": 215075,
+      "public_url": "https://media.zernio.com/temp/1787435317204_hjyeytp4_short_003.recomposed_v1.jpg",
+      "remote_object_id": "temp/1787435317204_hjyeytp4_short_003.recomposed_v1.jpg",
+      "status": "uploaded",
+      "created_at": "2026-08-22T21:48:36.543685+00:00"
+    }
+  },
+  "platform_scope_blocker": {
+    "requested": [
+      "youtube",
+      "tiktok",
+      "instagram",
+      "facebook"
+    ],
+    "applied": [
+      "youtube"
+    ],
+    "reason": "channel_operations_profiles.enabled_platforms_json (updated 2026-08-22) has tiktok=false, instagram=false, facebook=false with documented blocked_platform_reasons_json: tiktok='upload-init endpoint HTTP 404', instagram='public staging URL not configured', facebook='Meta app permission/configuration'. Treated as a genuine credential/permission failure per the explicit stop condition -- these three platforms were never added to any post."
+  },
+  "next_episode_worker_blocker": {
+    "status": "not started",
+    "reason": "worker_control.queue_paused='1' (set 2026-08-01T10:47:30Z, ~3 weeks standing). Every phase of this task chain has repeated 'no queue or production unpause' as a standing prohibition. Unpausing it to start a next-episode run would directly violate that -- treated as a genuine, deliberate operational safety blocker, not something to work around.",
+    "existing_worker": {
+      "pid": 845,
+      "worker_id": "a235fd98-638c-49a5-a65d-9c617d80aadf",
+      "status": "idle",
+      "started": "2026-08-12T13:28:23Z (unchanged, not restarted)"
+    }
+  },
+  "generated_at": "2026-08-22T21:59:48.578321+00:00",
+  "post_mutation_verification_get": {
+    "main_episode": {
+      "status_code": 200,
+      "post_id_returned": "6a89751ca12350d9b38baf7c",
+      "title": "The Erdstall Tunnels: Europe's Secret Underground Mystery",
+      "content_length": 303,
+      "media_url": "https://media.zernio.com/media/1787393272365_v9es2pk1_main_ep_f3619022.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435310723_0ujq5o6z_main_episode.recomposed_v1.jpg",
+      "platforms": [
+        "youtube"
+      ],
+      "scheduledFor": "2026-08-23T14:00:00.000Z",
+      "timezone": "UTC"
+    },
+    "short_001": {
+      "status_code": 200,
+      "post_id_returned": "6a89752c7a56b107295b2b2c",
+      "title": "Europe's Erdstall Tunnels Hide a Passage No One Can Explain",
+      "content_length": 1090,
+      "media_url": "https://media.zernio.com/media/1787435290979_q2kgxekj_short_0_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435312901_48tqtbg8_short_001.recomposed_v1.jpg",
+      "platforms": [
+        "youtube"
+      ],
+      "scheduledFor": "2026-08-24T18:00:00.000Z",
+      "timezone": "UTC"
+    },
+    "short_002": {
+      "status_code": 200,
+      "post_id_returned": "6a897539c2f26fb88c8c21c9",
+      "title": "The Erdstall Tunnel Cut Into a 6,000-Year-Old Stone Age Tomb",
+      "content_length": 1012,
+      "media_url": "https://media.zernio.com/media/1787435297969_0dad42p0_short_1_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435314790_pubcjvz1_short_002.recomposed_v1.jpg",
+      "platforms": [
+        "youtube"
+      ],
+      "scheduledFor": "2026-08-26T18:00:00.000Z",
+      "timezone": "UTC"
+    },
+    "short_003": {
+      "status_code": 200,
+      "post_id_returned": "6a897546c2f26fb88c8c2a16",
+      "title": "Medieval Europe Recorded Everything, Except the Erdstall Tunnels",
+      "content_length": 1154,
+      "media_url": "https://media.zernio.com/media/1787435304922_2lhd4zlw_short_2_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435317204_hjyeytp4_short_003.recomposed_v1.jpg",
+      "platforms": [
+        "youtube"
+      ],
+      "scheduledFor": "2026-08-28T18:00:00.000Z",
+      "timezone": "UTC"
+    }
+  }
+}

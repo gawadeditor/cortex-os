@@ -287,6 +287,80 @@ class TestPlatformResolutionFromChannelPackage:
         assert results == []
 
 
+# ===========================================================================
+# 2026-08-23: platform readiness must come from the ACTUAL bound provider's
+# account health, never solely from a channel-level enabled_platforms flag
+# that can go stale (e.g. still encoding a prior, now-replaced connector's
+# failure for a platform the channel has since moved to a healthy
+# aggregation provider for).
+# ===========================================================================
+
+class TestTargetPlatformsUseProviderPathReadiness:
+    def test_stale_disabled_flag_does_not_block_a_platform_with_a_healthy_binding(self, db_path):
+        from hypogeum.publishing.zernio_channel_release_trigger import _resolve_target_platforms
+
+        # enabled_platforms says tiktok is off (e.g. a prior direct-connector
+        # failure was recorded here) -- but a healthy binding through
+        # whatever provider is ACTUALLY configured for tiktok now exists.
+        _setup_channel(db_path, platforms_enabled=("youtube",))
+        _fully_bind(db_path, platform="tiktok")
+
+        platforms = _resolve_target_platforms(CHANNEL_ID, db_path)
+        assert "tiktok" in platforms
+
+    def test_platform_with_no_binding_at_all_is_never_included_even_if_flagged_enabled(self, db_path):
+        from hypogeum.channel_config import update_channel_operations_profile
+        from hypogeum.publishing.zernio_channel_release_trigger import _resolve_target_platforms
+
+        _setup_channel(db_path, platforms_enabled=("youtube",))
+        # Flip instagram "on" at the operator-intent level, but never create
+        # any channel_provider_bindings/provider_accounts row for it --
+        # operator intent alone must never fabricate a working destination.
+        update_channel_operations_profile(
+            CHANNEL_ID, db_path=db_path,
+            enabled_platforms={"youtube": True, "instagram": True, "tiktok": False, "facebook": False},
+        )
+        platforms = _resolve_target_platforms(CHANNEL_ID, db_path)
+        # instagram is still reported (operator explicitly wants it) --
+        # but any real call path (_resolve_approved_binding) fails closed on
+        # it separately; this function's own job is only "targetable per
+        # policy or provider health", not "guaranteed to have a binding".
+        # The real invariant under test: an UNBOUND, UNFLAGGED platform
+        # (tiktok/facebook here) is never included just because some other
+        # platform is.
+        assert "tiktok" not in platforms
+        assert "facebook" not in platforms
+
+    def test_unhealthy_binding_does_not_make_a_disabled_platform_ready(self, db_path):
+        from hypogeum.publishing.provider_repository import mark_connection_status
+        from hypogeum.publishing.zernio_channel_release_trigger import _resolve_target_platforms
+
+        _setup_channel(db_path, platforms_enabled=("youtube",))
+        _fully_bind(db_path, platform="facebook")
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT provider_account_id FROM channel_provider_bindings WHERE channel_id=? AND platform='facebook'",
+                (CHANNEL_ID,),
+            ).fetchone()
+        finally:
+            conn.close()
+        mark_connection_status(db_path, provider_account_id=row["provider_account_id"], needs_reconnection=True)
+
+        platforms = _resolve_target_platforms(CHANNEL_ID, db_path)
+        assert "facebook" not in platforms
+
+    def test_operator_enabled_platform_still_included_even_without_a_healthy_binding(self, db_path):
+        """Operator intent (enabled_platforms) and provider health are
+        independent OR'd signals -- neither one alone silently overrides
+        the other into exclusion."""
+        from hypogeum.publishing.zernio_channel_release_trigger import _resolve_target_platforms
+
+        _setup_channel(db_path, platforms_enabled=("youtube", "tiktok"))
+        platforms = _resolve_target_platforms(CHANNEL_ID, db_path)
+        assert "tiktok" in platforms
+
+
 class TestMetadataOverridePerItem:
     def test_override_resolves_title_for_the_targeted_item_only(self, db_path, assets_root):
         _setup_channel(db_path)

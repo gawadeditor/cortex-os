@@ -30,6 +30,7 @@ from hypogeum.publishing.provider_repository import (
     persist_content_mapping,
     resolve_active_binding,
     resolve_content_mapping,
+    resolve_provider_ready_platforms,
     upsert_provider_account,
     upsert_provider_profile,
 )
@@ -544,3 +545,86 @@ class TestConnectionStatus:
         assert len(pub_yt) == 1
         all_pub = list_bindings(db_path, channel_id="hypogeum", capability="publishing")
         assert len(all_pub) == 2
+
+
+# ===========================================================================
+# resolve_provider_ready_platforms — 2026-08-23 provider-path readiness.
+#
+# A platform's REAL targetability must come from its actual bound
+# provider's account health (channel_provider_bindings + provider_accounts),
+# never from a channel-level flag that may still encode a prior/different
+# connector's failure. These tests use a fake, non-Hypogeum-specific
+# provider_id ("some_direct_connector" vs "some_aggregator") to prove the
+# function itself has no notion of Zernio or any particular provider.
+# ===========================================================================
+
+class TestResolveProviderReadyPlatforms:
+    def _bind_and_activate(self, db_path, *, channel_id="chan_x", platform, provider_id,
+                            status="active", needs_reconnection=False, enabled=True,
+                            external_account_id=None):
+        profile = upsert_provider_profile(db_path, provider_id=provider_id, external_profile_id=f"prof_{provider_id}")
+        account = upsert_provider_account(
+            db_path, provider_id=provider_id, platform=platform,
+            external_account_id=external_account_id or f"acct_{provider_id}_{platform}",
+            provider_profile_id=profile["provider_profile_id"], status=status,
+            needs_reconnection=needs_reconnection,
+        )
+        binding = bind_channel_provider(
+            db_path, channel_id=channel_id, capability="publishing", platform=platform,
+            provider_id=provider_id, provider_profile_id=profile["provider_profile_id"],
+            provider_account_id=account["provider_account_id"],
+        )
+        if not enabled:
+            disable_binding(db_path, binding_id=binding["binding_id"])
+        return binding, account
+
+    def test_healthy_binding_makes_platform_ready(self, db_path):
+        self._bind_and_activate(db_path, platform="tiktok", provider_id="some_aggregator")
+        assert resolve_provider_ready_platforms(db_path, channel_id="chan_x") == ["tiktok"]
+
+    def test_a_failed_prior_connector_does_not_block_a_healthy_new_one(self, db_path):
+        """
+        The exact real-world scenario: a channel's OLD direct connector for
+        a platform failed (account marked needs_reconnection under its own
+        provider_id) but the channel has since bound the SAME platform
+        through a different, healthy provider (an aggregator). Only one
+        binding can be ENABLED at a time per (channel, capability,
+        platform, logical_alias) -- disabling the old one and enabling the
+        new one is exactly what a real migration does.
+        """
+        old_binding, old_account = self._bind_and_activate(
+            db_path, platform="tiktok", provider_id="some_direct_connector",
+            status="needs_reconnection", needs_reconnection=True,
+        )
+        disable_binding(db_path, binding_id=old_binding["binding_id"])
+        self._bind_and_activate(db_path, platform="tiktok", provider_id="some_aggregator")
+
+        assert resolve_provider_ready_platforms(db_path, channel_id="chan_x") == ["tiktok"]
+
+    def test_unhealthy_binding_never_reported_ready(self, db_path):
+        self._bind_and_activate(
+            db_path, platform="instagram", provider_id="some_aggregator",
+            status="needs_reconnection", needs_reconnection=True,
+        )
+        assert resolve_provider_ready_platforms(db_path, channel_id="chan_x") == []
+
+    def test_disabled_binding_never_reported_ready(self, db_path):
+        self._bind_and_activate(db_path, platform="facebook", provider_id="some_aggregator", enabled=False)
+        assert resolve_provider_ready_platforms(db_path, channel_id="chan_x") == []
+
+    def test_no_binding_at_all_never_reported_ready(self, db_path):
+        assert resolve_provider_ready_platforms(db_path, channel_id="chan_with_nothing") == []
+
+    def test_multiple_healthy_platforms_all_reported(self, db_path):
+        for platform in ("youtube", "tiktok", "instagram", "facebook"):
+            self._bind_and_activate(db_path, platform=platform, provider_id="some_aggregator")
+        assert resolve_provider_ready_platforms(db_path, channel_id="chan_x") == [
+            "facebook", "instagram", "tiktok", "youtube",
+        ]
+
+    def test_never_hardcodes_a_specific_provider_id(self, db_path):
+        """Proves the function has no built-in notion of 'zernio' or any
+        other specific provider -- an entirely made-up provider_id works
+        identically."""
+        self._bind_and_activate(db_path, platform="youtube", provider_id="totally_made_up_provider_xyz")
+        assert resolve_provider_ready_platforms(db_path, channel_id="chan_x") == ["youtube"]

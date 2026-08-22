@@ -633,7 +633,31 @@ def run_iteration(
     # Step 3: poll — claim one item from run_queue and execute.
     # Skip poll entirely when the queue is paused by operator, or when the
     # factory is not cleared for a new run.
-    if queue_paused or not clearance.cleared:
+    #
+    # 2026-08-23 scoped pause exemption: an explicitly authorized, still-
+    # active bounded_run_id may claim through queue_paused WITHOUT ever
+    # touching the global flag itself -- the global pause otherwise stays
+    # in full effect for every unbounded caller, exactly as before. This
+    # never widens what a bounded run can do: claim_next_bounded() (Step
+    # 3's own claim path when bounded_run_id is set) already enforces its
+    # own max_episode_claims allowance and publishing_allowed gate
+    # independently of this check -- the exemption only decides WHETHER
+    # this one, already-capped run is allowed to attempt a claim at all
+    # while the queue is paused for everyone else. Re-validated here
+    # (not merely trusted from run_worker()'s own startup check) so a
+    # caller invoking run_iteration() directly, out of band, can never
+    # exercise this exemption with an unknown/inactive/exhausted
+    # bounded_run_id.
+    bypass_pause_for_bounded_run = (
+        queue_paused and bounded_run_id is not None
+        and _validate_bounded_run_ready(bounded_run_id, db_path) is None
+    )
+    if bypass_pause_for_bounded_run:
+        log.warning(
+            "poll queue_paused_but_bounded_run_exempted bounded_run_id=%s",
+            bounded_run_id,
+        )
+    if (queue_paused and not bypass_pause_for_bounded_run) or not clearance.cleared:
         if queue_paused:
             log.info("poll queue_paused skipping_claim")
         else:
@@ -716,7 +740,8 @@ def run_iteration(
         analytics_synced = True
 
     poll_status = proc.status if proc else (
-        "paused" if queue_paused else ("not_cleared" if not clearance.cleared else "empty")
+        "paused" if (queue_paused and not bypass_pause_for_bounded_run)
+        else ("not_cleared" if not clearance.cleared else "empty")
     )
     return {
         "scheduled_runs_created": len(sr_ids),

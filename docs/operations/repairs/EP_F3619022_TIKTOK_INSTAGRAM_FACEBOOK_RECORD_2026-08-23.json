@@ -1,0 +1,104 @@
+{
+  "episode_id": "ep_f3619022",
+  "operation": "tiktok_instagram_facebook_2026-08-23",
+  "zernio_accounts_live_get": [
+    {
+      "_id": "6a8354b977555aae01af8a0b",
+      "platform": "facebook",
+      "isActive": true,
+      "needsReconnection": false
+    },
+    {
+      "_id": "6a83553277555aae01afa275",
+      "platform": "instagram",
+      "isActive": true,
+      "needsReconnection": false
+    },
+    {
+      "_id": "6a83540477555aae01af46ca",
+      "platform": "tiktok",
+      "isActive": true,
+      "needsReconnection": false
+    },
+    {
+      "_id": "6a83555477555aae01afa569",
+      "platform": "youtube",
+      "isActive": true,
+      "needsReconnection": false
+    }
+  ],
+  "post_ids": {
+    "short_001": "6a89752c7a56b107295b2b2c",
+    "short_002": "6a897539c2f26fb88c8c21c9",
+    "short_003": "6a897546c2f26fb88c8c2a16"
+  },
+  "put_count": 3,
+  "post_calls_issued": 0,
+  "platforms_added": [
+    "instagram",
+    "facebook"
+  ],
+  "platform_deliberately_not_added": {
+    "tiktok": "privacy_level not configured anywhere in platform_deliverable_policy; TikTok's own consent flags cannot be honestly asserted without a real consent flow -- genuine missing-configuration blocker, not the stale direct-connector reason."
+  },
+  "post_mutation_verification_get": {
+    "short_001": {
+      "post_id": "6a89752c7a56b107295b2b2c",
+      "platforms": [
+        "youtube",
+        "instagram",
+        "facebook"
+      ],
+      "facebook_platform_specific_data": {
+        "contentType": "reel",
+        "__platformUserIdSnapshot": "122270111498254511:page:1176612708858828",
+        "__usernameSnapshot": "The Hypogeum"
+      },
+      "title": "Europe's Erdstall Tunnels Hide a Passage No One Can Explain",
+      "content_length": 1090,
+      "media_url": "https://media.zernio.com/media/1787435290979_q2kgxekj_short_0_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435312901_48tqtbg8_short_001.recomposed_v1.jpg",
+      "scheduledFor": "2026-08-24T18:00:00.000Z",
+      "timezone": "UTC"
+    },
+    "short_002": {
+      "post_id": "6a897539c2f26fb88c8c21c9",
+      "platforms": [
+        "youtube",
+        "instagram",
+        "facebook"
+      ],
+      "facebook_platform_specific_data": {
+        "contentType": "reel",
+        "__platformUserIdSnapshot": "122270111498254511:page:1176612708858828",
+        "__usernameSnapshot": "The Hypogeum"
+      },
+      "title": "The Erdstall Tunnel Cut Into a 6,000-Year-Old Stone Age Tomb",
+      "content_length": 1012,
+      "media_url": "https://media.zernio.com/media/1787435297969_0dad42p0_short_1_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435314790_pubcjvz1_short_002.recomposed_v1.jpg",
+      "scheduledFor": "2026-08-26T18:00:00.000Z",
+      "timezone": "UTC"
+    },
+    "short_003": {
+      "post_id": "6a897546c2f26fb88c8c2a16",
+      "platforms": [
+        "youtube",
+        "instagram",
+        "facebook"
+      ],
+      "facebook_platform_specific_data": {
+        "contentType": "reel",
+        "__platformUserIdSnapshot": "122270111498254511:page:1176612708858828",
+        "__usernameSnapshot": "The Hypogeum"
+      },
+      "title": "Medieval Europe Recorded Everything, Except the Erdstall Tunnels",
+      "content_length": 1154,
+      "media_url": "https://media.zernio.com/media/1787435304922_2lhd4zlw_short_2_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435317204_hjyeytp4_short_003.recomposed_v1.jpg",
+      "scheduledFor": "2026-08-28T18:00:00.000Z",
+      "timezone": "UTC"
+    }
+  },
+  "generated_at": "2026-08-22T22:50:23.195093+00:00"
+}

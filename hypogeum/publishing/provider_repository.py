@@ -494,6 +494,49 @@ def list_bindings(
         conn.close()
 
 
+def resolve_provider_ready_platforms(
+    db_path: Optional[Path], *, channel_id: str, capability: str = "publishing", logical_alias: str = "default",
+) -> list:
+    """
+    Provider-agnostic, read-only: every platform for which `channel_id`
+    currently has an ENABLED channel_provider_bindings row (matching
+    `capability`/`logical_alias`) whose linked provider_accounts row is
+    'active' and does not need reconnection -- regardless of which
+    provider_id actually backs it (Zernio today, potentially a different
+    provider for a different channel or a future re-platforming).
+
+    This is the real, live-checkable "can we actually publish to this
+    platform right now" signal, independent of any channel-level
+    enabled_platforms flag on ChannelOperationsProfile -- that flag can
+    go stale (e.g. it may still encode a PRIOR, now-replaced connector's
+    failure reason after the channel has since moved to a healthy
+    aggregation provider like Zernio for the same platform). Callers
+    that want "is this platform targetable" should treat operator intent
+    (enabled_platforms) and this function's provider-path health as two
+    independent signals, never conflate a stale flag with actual
+    provider health.
+
+    Never hardcodes which platforms exist or which provider backs any of
+    them -- entirely driven by whatever bindings/accounts are actually
+    on file for this channel.
+    """
+    ready: set = set()
+    for binding in list_bindings(db_path, channel_id=channel_id, capability=capability):
+        if not binding.get("enabled"):
+            continue
+        if binding.get("logical_alias") != logical_alias:
+            continue
+        account = get_provider_account(db_path, provider_account_id=binding["provider_account_id"])
+        if account is None:
+            continue
+        if account.get("status") != "active":
+            continue
+        if account.get("needs_reconnection"):
+            continue
+        ready.add(binding["platform"])
+    return sorted(ready)
+
+
 def disable_binding(db_path: Optional[Path], *, binding_id: str) -> dict:
     """Disable a binding without deleting it -- history is preserved and
     remains queryable via list_bindings(). Fails closed if unknown."""

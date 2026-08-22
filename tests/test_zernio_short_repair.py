@@ -752,3 +752,54 @@ class TestRepairPreservesExistingPlatformEntriesByteForByte:
         sent_platforms = transport.put_calls[0]["platforms"]
         youtube_entries = [e for e in sent_platforms if e.get("platform") == "youtube"]
         assert youtube_entries == [_RICH_EXISTING_YOUTUBE_ENTRY_AS_SENT]
+
+
+class TestRepairFacebookPlatformSpecificData:
+    """
+    2026-08-23: Facebook's required contentType='reel' marker belongs in
+    platforms[].platformSpecificData for the NEW facebook entry -- confirmed
+    live via docs.zernio.com/platforms/facebook, distinct from the
+    unrelated root-level facebookSettings object (draft/carouselCards/
+    textFormatPresetId). Never applied to tiktok (which uses the existing
+    root-level tiktokSettings path instead).
+    """
+
+    def test_facebook_gets_platform_specific_data_on_the_new_entry(self, db_path):
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(platforms=["youtube"]),
+            put_response=_successful_put_response(),
+        )
+        provider = ZernioProvider(transport=transport)
+        provider.repair_existing_post(
+            "post_short_001", channel_id=CHANNEL_ID, deliverable_id="short_001", episode_id=EPISODE_ID,
+            deliverable_type="short", platforms=["youtube", "facebook"],
+            media=[MediaReference(url="https://media.zernio.com/repaired.mp4", media_type="video", title="T")],
+            title="A Real Short Title", content="A real caption.",
+            platform_settings={"facebook": {"contentType": "reel"}},
+            db_path=db_path,
+        )
+        sent = transport.put_calls[0]["platforms"]
+        fb_entry = next(p for p in sent if p["platform"] == "facebook")
+        assert fb_entry["platformSpecificData"] == {"contentType": "reel"}
+        assert "platformSpecificData" not in transport.put_calls[0].get("facebookSettings", {})
+
+    def test_tiktok_settings_never_leak_into_platform_specific_data(self, db_path):
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(platforms=["youtube"]),
+            put_response=_successful_put_response(),
+        )
+        provider = ZernioProvider(transport=transport)
+        provider.repair_existing_post(
+            "post_short_001", channel_id=CHANNEL_ID, deliverable_id="short_001", episode_id=EPISODE_ID,
+            deliverable_type="short", platforms=["youtube", "tiktok"],
+            media=[MediaReference(url="https://media.zernio.com/repaired.mp4", media_type="video", title="T")],
+            title="A Real Short Title", content="A real caption.",
+            platform_settings={"tiktok": {"privacy_level": "PUBLIC_TO_EVERYONE"}},
+            db_path=db_path,
+        )
+        put_body = transport.put_calls[0]
+        assert put_body["tiktokSettings"] == {"privacy_level": "PUBLIC_TO_EVERYONE"}
+        tiktok_entry = next(p for p in put_body["platforms"] if p["platform"] == "tiktok")
+        assert "platformSpecificData" not in tiktok_entry

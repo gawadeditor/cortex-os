@@ -907,6 +907,116 @@ class TestQueuePauseResume:
         # conditions.
         assert result["factory_cleared"] is True
 
+    def test_bounded_run_can_claim_while_queue_paused(self, tmp_path):
+        """
+        2026-08-23 scoped pause exemption: an explicitly authorized, still-
+        active bounded_run_id may claim through a paused queue, without
+        the global queue_paused flag itself ever being touched.
+        """
+        from hypogeum.db import set_worker_control, get_worker_control
+        from hypogeum.queue import provision_bounded_run
+        db = _db(tmp_path)
+        set_worker_control("queue_paused", "1", db_path=db)
+        provision_bounded_run("test_bounded_1", max_episode_claims=1, db_path=db)
+        _enqueue(db, channel_id=None)
+
+        from run_worker import run_iteration
+        result = run_iteration(
+            worker_id=str(uuid.uuid4()),
+            db_path=db,
+            dry_run=True,
+            channel_id=None,
+            config=MagicMock(),
+            bounded_run_id="test_bounded_1",
+        )
+
+        assert result["poll_status"] != "paused"
+        # The core property under test: an actual claim ATTEMPT was made
+        # (the item left "queued") -- not "paused" and not silently
+        # skipped. What the dry-run pipeline execution does with it next
+        # is a separate concern from this pause-exemption fix.
+        from hypogeum.queue import get_queue_stats
+        stats = get_queue_stats(db_path=db)
+        assert stats.get("queued", 0) == 0, "the item must have left the queued state (claim was attempted)"
+        # The global flag itself is untouched -- still paused for everyone else.
+        assert get_worker_control("queue_paused", db_path=db) == "1"
+
+    def test_unbounded_run_still_fully_blocked_by_pause_even_with_items_queued(self, tmp_path):
+        """The exemption never leaks to an unbounded caller -- no bounded_run_id
+        means the pre-existing, unconditional pause behavior is unchanged."""
+        from hypogeum.db import set_worker_control
+        db = _db(tmp_path)
+        set_worker_control("queue_paused", "1", db_path=db)
+        _enqueue(db, channel_id=None)
+
+        from run_worker import run_iteration
+        result = run_iteration(
+            worker_id=str(uuid.uuid4()),
+            db_path=db,
+            dry_run=True,
+            channel_id=None,
+            config=MagicMock(),
+        )
+        assert result["poll_status"] == "paused"
+        from hypogeum.queue import get_queue_stats
+        assert get_queue_stats(db_path=db)["claimed"] == 0
+
+    def test_unknown_bounded_run_id_does_not_bypass_pause(self, tmp_path):
+        """A bounded_run_id that was never provisioned (or is otherwise not
+        'active') must never grant the exemption -- re-validated inside
+        run_iteration() itself, not merely trusted from the caller."""
+        from hypogeum.db import set_worker_control
+        db = _db(tmp_path)
+        set_worker_control("queue_paused", "1", db_path=db)
+        _enqueue(db, channel_id=None)
+
+        from run_worker import run_iteration
+        result = run_iteration(
+            worker_id=str(uuid.uuid4()),
+            db_path=db,
+            dry_run=True,
+            channel_id=None,
+            config=MagicMock(),
+            bounded_run_id="never_provisioned_bounded_run_id",
+        )
+        assert result["poll_status"] == "paused"
+        from hypogeum.queue import get_queue_stats
+        assert get_queue_stats(db_path=db)["claimed"] == 0
+
+    def test_exhausted_bounded_run_id_does_not_bypass_pause(self, tmp_path):
+        """
+        A bounded run that has already used its entire claim allowance
+        must not be granted a further exemption. claim_next_bounded()
+        flips the bounded run's own status to 'exhausted' the instant its
+        last allowed claim is consumed (proven directly here, at the same
+        layer run_iteration()'s docstring says is the real, authoritative
+        enforcement) -- _validate_bounded_run_ready() (the re-validation
+        run_iteration()'s pause-bypass gate performs) then correctly
+        reports it as not-ready, so the SAME code path that granted the
+        exemption while active refuses to grant it once exhausted.
+        """
+        from hypogeum.db import get_connection, get_bounded_run
+        from hypogeum.queue import provision_bounded_run, claim_next_bounded
+        from run_worker import _validate_bounded_run_ready
+        db = _db(tmp_path)
+        provision_bounded_run("test_bounded_exhausted", max_episode_claims=1, db_path=db)
+
+        assert _validate_bounded_run_ready("test_bounded_exhausted", db) is None
+
+        _enqueue(db, channel_id=None)
+        claimed = claim_next_bounded(worker_id="w1", db_path=db, bounded_run_id="test_bounded_exhausted")
+        assert claimed is not None
+
+        conn = get_connection(db)
+        try:
+            bounded_run = get_bounded_run(conn, "test_bounded_exhausted")
+        finally:
+            conn.close()
+        assert bounded_run["status"] == "exhausted"
+
+        reason = _validate_bounded_run_ready("test_bounded_exhausted", db)
+        assert reason is not None and "exhausted" in reason
+
     def test_pause_does_not_affect_current_run(self, tmp_path):
         """Setting queue_paused=1 while a run is executing must not interrupt it."""
         from hypogeum.db import set_worker_control, is_cancel_requested

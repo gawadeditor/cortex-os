@@ -389,9 +389,28 @@ def build_publish_package_from_episode_dir(
 
 
 def _resolve_target_platforms(channel_id: str, db_path: Optional[Path]) -> List[str]:
-    """Read-only. Empty list (never a global default) when no
-    ChannelOperationsProfile exists or no platform is enabled."""
+    """
+    Read-only. Empty list (never a global default) when no
+    ChannelOperationsProfile exists, publishing is off, or no platform
+    is targetable.
+
+    2026-08-23 (provider-path readiness): a platform is targetable when
+    EITHER the operator has explicitly enabled it
+    (ChannelOperationsProfile.enabled_platforms), OR
+    hypogeum.publishing.provider_repository.resolve_provider_ready_platforms()
+    reports it as currently healthy through its actual bound provider.
+    enabled_platforms can go stale -- it may still encode a PRIOR
+    connector's failure for a platform that has since moved to a healthy
+    provider path (e.g. a direct-integration outage recorded before the
+    channel switched to publishing that platform through Zernio) -- a
+    live, verified provider binding is authoritative evidence over a
+    stale flag, never the reverse: a platform with NO healthy binding is
+    never included just because enabled_platforms says so, since
+    _resolve_approved_binding() (every real publish/repair call path)
+    would fail closed on it anyway.
+    """
     from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
+    from hypogeum.publishing.provider_repository import resolve_provider_ready_platforms  # noqa: PLC0415
 
     try:
         profile = get_channel_operations_profile(channel_id, db_path=db_path)
@@ -406,7 +425,9 @@ def _resolve_target_platforms(channel_id: str, db_path: Optional[Path]) -> List[
         # taken out of autonomous publishing without touching Factory Core
         # or run_worker.py at all.
         return []
-    return sorted(p for p, enabled in (profile.enabled_platforms or {}).items() if enabled)
+    operator_enabled = {p for p, enabled in (profile.enabled_platforms or {}).items() if enabled}
+    provider_ready = set(resolve_provider_ready_platforms(db_path, channel_id=channel_id))
+    return sorted(operator_enabled | provider_ready)
 
 
 def _resolve_platform_deliverable_policy(channel_id: str, db_path: Optional[Path]) -> dict:

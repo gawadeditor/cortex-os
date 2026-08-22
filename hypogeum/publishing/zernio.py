@@ -1238,7 +1238,10 @@ class ZernioProvider:
         existing_platform_names = {e.get("platform") for e in existing_platform_entries}
         missing_platforms = [p for p in platforms if p not in existing_platform_names]
         merged_platform_entries = existing_platform_entries + [
-            self._build_platform_entry(p, accounts[p], [], None)
+            self._build_platform_entry(
+                p, accounts[p], [], None,
+                platform_specific_data=(platform_settings or {}).get(p) if p != "tiktok" else None,
+            )
             for p in missing_platforms
         ]
 
@@ -1304,6 +1307,7 @@ class ZernioProvider:
     def _build_platform_entry(
         self, platform: str, account: dict, platform_media: list,
         platform_scheduled_for: Optional[datetime],
+        platform_specific_data: Optional[dict] = None,
     ) -> dict:
         """platforms[] entry construction used by publish_multi_platform().
         Mirrors _build_publish_body()'s own inline platform_entry shape
@@ -1311,12 +1315,23 @@ class ZernioProvider:
         separate function here only because publish_multi_platform() needs
         to build N of these per call while _build_publish_body() builds
         exactly one; both must be changed together if the shape ever
-        changes."""
+        changes.
+
+        platform_specific_data (2026-08-23): per-platform-entry required
+        settings that have NO documented root-level settings key --
+        confirmed live via docs.zernio.com/platforms/facebook: Facebook's
+        required Reel marker (contentType: 'reel') belongs in
+        platforms[].platformSpecificData specifically, distinct from the
+        root-level facebookSettings object (draft/carouselCards/
+        textFormatPresetId -- an unrelated, optional field set). Included
+        only when the caller actually supplies it; never invented here."""
         entry: dict = {"platform": platform, "accountId": account["external_account_id"]}
         if platform_media:
             entry["customMedia"] = [_serialize_media_item(m) for m in platform_media]
         if platform_scheduled_for is not None:
             entry["scheduledFor"] = _serialize_datetime_utc(platform_scheduled_for)
+        if platform_specific_data:
+            entry["platformSpecificData"] = platform_specific_data
         return entry
 
     # -- internals -----------------------------------------------------

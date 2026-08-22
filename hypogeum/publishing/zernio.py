@@ -401,6 +401,7 @@ def _build_publish_body(
     media: list, platform_media: list,
     scheduled_for: Optional[datetime], platform_scheduled_for: Optional[datetime],
     timezone_name: Optional[str], publish_now: bool, is_draft: bool,
+    title: Optional[str] = None, content: Optional[str] = None,
 ) -> dict:
     """
     Audit §2: POST /v1/posts requires `platforms[].platform` +
@@ -419,6 +420,16 @@ def _build_publish_body(
     never invents a default beyond what the verified contract itself
     defaults to server-side (e.g. omitting `timezone` lets Zernio's own
     default of UTC apply).
+
+    `title`/`content`: top-level request fields, verified live via
+    docs.zernio.com/posts/create-post and docs.zernio.com/platforms/
+    youtube (2026-08-22) -- for platform=youtube, `title` becomes the
+    video title (server-side max 100 chars; server defaults to the first
+    line of `content`, or "Untitled Video", when omitted) and `content`
+    becomes the video description (server-side max 5,000 chars). Included
+    only when the caller supplies a non-empty value -- this function still
+    never invents one; a caller with no resolved title/description simply
+    omits the field and accepts Zernio's own documented default.
     """
     platform_entry: dict = {"platform": platform, "accountId": external_account_id}
     if platform_media:
@@ -429,6 +440,10 @@ def _build_publish_body(
     body: dict = {"platforms": [platform_entry]}
     if media:
         body["mediaItems"] = [_serialize_media_item(m) for m in media]
+    if title:
+        body["title"] = title
+    if content:
+        body["content"] = content
     if scheduled_for is not None:
         body["scheduledFor"] = _serialize_datetime_utc(scheduled_for)
     if timezone_name is not None:
@@ -548,6 +563,18 @@ class ZernioProvider:
                               credential call (test isolation).
             logical_alias:    Defaults to 'default' -- matches
                               channel_provider_bindings.logical_alias.
+            title:            Optional[str] -- top-level `title`. For
+                              platform=youtube this becomes the video
+                              title (contract audit, 2026-08-22 addendum:
+                              docs.zernio.com/posts/create-post +
+                              /platforms/youtube). Omitted (never a fake
+                              default) when not supplied -- Zernio's own
+                              documented fallback (first line of
+                              `content`, else "Untitled Video") applies
+                              server-side in that case.
+            content:          Optional[str] -- top-level `content`. For
+                              platform=youtube this becomes the video
+                              description. Same omit-if-absent rule.
 
         Returns a dict compatible with
         hypogeum.publishing.record.make_result_entry()'s field names
@@ -578,6 +605,8 @@ class ZernioProvider:
         timezone_name = kwargs.get("timezone_name")
         publish_now = bool(kwargs.get("publish_now", False))
         is_draft = bool(kwargs.get("is_draft", False))
+        title = kwargs.get("title")
+        content = kwargs.get("content")
 
         # -- pure input validation, before any DB/credential/ledger access --
         if not media and not platform_media:
@@ -633,6 +662,7 @@ class ZernioProvider:
             media=media, platform_media=platform_media,
             scheduled_for=scheduled_for, platform_scheduled_for=platform_scheduled_for,
             timezone_name=timezone_name, publish_now=publish_now, is_draft=is_draft,
+            title=title, content=content,
         )
         headers = {
             "Authorization": f"Bearer {credential}",

@@ -55,7 +55,7 @@ placeholder.
 Public API:
     ReadyBundle
     build_publish_package_from_episode_dir(channel_id, episode_id, bundle_id,
-        assets_root) -> PublishPackage
+        assets_root, *, db_path=None, metadata_override=None) -> PublishPackage
     process_channel_ready_bundles(channel_id, bundle_definition, *,
         db_path=None, assets_root, platforms=None, provider_id="zernio",
         logical_alias="default", publish_now=False,
@@ -75,7 +75,7 @@ from hypogeum.buffer import DeliverableBundleDefinition, gather_channel_demand_i
 from hypogeum.publishing.deliverable_ids import MAIN_EPISODE_DELIVERABLE_ID, resolve_short_deliverable_id
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
-from hypogeum.publishing.readiness import MetadataOverride
+from hypogeum.publishing.readiness import MetadataOverride, MetadataResolutionError, resolve_canonical_metadata
 from hypogeum.publishing.zernio_publish_runtime import DeliverableFile, PublishPackage
 from hypogeum.publishing.zernio_release_flow import ReleasePublishResult, publish_channel_release
 
@@ -92,6 +92,9 @@ def build_publish_package_from_episode_dir(
     episode_id: str,
     bundle_id: Optional[str],
     assets_root: Path,
+    *,
+    db_path: Optional[Path] = None,
+    metadata_override: Optional[MetadataOverride] = None,
 ) -> PublishPackage:
     """
     Read-only. Constructs a PublishPackage from the standard on-disk
@@ -104,6 +107,19 @@ def build_publish_package_from_episode_dir(
     of file naming) is resolved by hypogeum.publishing.deliverable_ids —
     the SAME shared resolver hypogeum.buffer uses to determine bundle
     completeness, so the two can never disagree on identity.
+
+    Each deliverable's title/description is populated via
+    hypogeum.publishing.readiness.resolve_canonical_metadata() — the EXACT
+    same resolution check_publish_readiness()'s A_METADATA gate already
+    performs, reused here (never re-derived independently) so the real
+    submitted title/description can never diverge from what readiness
+    validated. Best-effort only: this function never blocks or raises on
+    an unresolvable title/description (a genuinely missing/ambiguous one
+    is readiness's job to catch, always run first by
+    publish_channel_release()) — on MetadataResolutionError, every
+    deliverable simply carries title=None/description=None and Zernio's
+    own documented server-side default applies (never a fabricated
+    value).
     """
     episode_dir = Path(assets_root) / "episodes" / episode_id
     render_path = episode_dir / f"final_render_package_{episode_id}.json"
@@ -115,12 +131,22 @@ def build_publish_package_from_episode_dir(
             final_render_package = {}
     shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
 
+    resolved_title: Optional[str] = None
+    resolved_description: Optional[str] = None
+    resolved_shorts_titles: dict = {}
+    try:
+        resolved = resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
+        resolved_title, resolved_description, resolved_shorts_titles = resolved.title, resolved.description, resolved.shorts_titles
+    except MetadataResolutionError:
+        pass
+
     main_path = episode_dir / f"main_{episode_id}.mp4"
     return PublishPackage(
         channel_id=channel_id, episode_id=episode_id, bundle_id=bundle_id,
         main_episode=DeliverableFile(
             deliverable_id=MAIN_EPISODE_DELIVERABLE_ID, local_path=main_path, mime_type="video/mp4",
             media_type="video", filename=main_path.name,
+            title=resolved_title, description=resolved_description,
         ),
         shorts=[
             DeliverableFile(
@@ -128,6 +154,7 @@ def build_publish_package_from_episode_dir(
                 local_path=episode_dir / f"short_{i}_{episode_id}.mp4",
                 mime_type="video/mp4", media_type="video",
                 filename=f"short_{i}_{episode_id}.mp4",
+                title=resolved_shorts_titles.get(resolve_short_deliverable_id(shorts_renders[i], i)),
             )
             for i in range(len(shorts_renders))
         ],
@@ -204,6 +231,7 @@ def process_channel_ready_bundles(
             continue
         package = build_publish_package_from_episode_dir(
             channel_id, item.item_id, bundle_definition.bundle_id, assets_root,
+            db_path=db_path, metadata_override=metadata_override_by_item.get(item.item_id),
         )
         for platform in resolved_platforms:
             result = publish_channel_release(

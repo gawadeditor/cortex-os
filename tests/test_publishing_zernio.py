@@ -315,6 +315,44 @@ class TestPayloadConstruction:
         with pytest.raises(UnsupportedPlatformError):
             _publish(provider, db_path, platform="pinterest")
 
+    def test_title_and_content_included_when_supplied(self):
+        # Verified live (docs.zernio.com/posts/create-post +
+        # /platforms/youtube, 2026-08-22): top-level title -> YouTube
+        # video title (max 100 chars); top-level content -> YouTube
+        # description (max 5,000 chars). Neither was ever included in the
+        # request body before this fix.
+        body = _build_publish_body(
+            platform="youtube", external_account_id="acct_123", media=[], platform_media=[],
+            scheduled_for=None, platform_scheduled_for=None, timezone_name=None,
+            publish_now=False, is_draft=False,
+            title="A Real Title", content="A real description.",
+        )
+        assert body["title"] == "A Real Title"
+        assert body["content"] == "A real description."
+
+    def test_title_and_content_omitted_when_none_never_fabricated(self):
+        body = _build_publish_body(
+            platform="youtube", external_account_id="acct_123", media=[], platform_media=[],
+            scheduled_for=None, platform_scheduled_for=None, timezone_name=None,
+            publish_now=False, is_draft=False,
+        )
+        assert "title" not in body
+        assert "content" not in body
+
+    def test_provider_publish_threads_title_and_content_into_the_real_request(self, db_path):
+        _setup_approved_binding(db_path)
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(responses=[
+            ZernioTransportResponse(status_code=201, json_body={"post": {
+                "_id": "post_1", "platforms": [_platform_target()],
+            }}),
+        ])
+        provider = ZernioProvider(transport=transport)
+        _publish(provider, db_path, title="A Real Episode Title", content="A real episode description.")
+        sent_body = transport.calls[0]["json_body"]
+        assert sent_body["title"] == "A Real Episode Title"
+        assert sent_body["content"] == "A real episode description."
+
 
 # ===========================================================================
 # 5/6. Binding/account resolution: happy path + fail-closed variants

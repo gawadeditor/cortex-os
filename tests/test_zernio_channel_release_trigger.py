@@ -34,7 +34,7 @@ from hypogeum.publishing.provider_repository import (
 )
 from hypogeum.publishing.readiness import MetadataOverride
 from hypogeum.publishing.zernio import ZernioProvider, ZernioTransportResponse
-from hypogeum.publishing.zernio_channel_release_trigger import process_channel_ready_bundles
+from hypogeum.publishing.zernio_channel_release_trigger import build_publish_package_from_episode_dir, process_channel_ready_bundles
 from hypogeum.publishing.zernio_media_staging import (
     PresignTransportResponse,
     UploadTransportResponse,
@@ -313,3 +313,33 @@ class TestNoLiveCalls:
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
         assert results[0].result.status == "published"
+
+
+class TestBuildPublishPackageResolvesTitleAndDescription:
+    """
+    build_publish_package_from_episode_dir() must populate each
+    deliverable's title/description via readiness.resolve_canonical_
+    metadata() -- the same resolution the A_METADATA gate already
+    validated -- never leave the package's real submission content empty
+    when a real title/description/shorts_titles exists on disk. Fixes the
+    prior gap where the real Zernio request never carried any title/
+    description at all.
+    """
+
+    def test_main_and_shorts_get_real_titles_and_main_gets_description(self, db_path, assets_root):
+        _seed_complete_episode(db_path, assets_root, "ep_meta", title="A Real Episode Title", n_shorts=2)
+        package = build_publish_package_from_episode_dir(
+            CHANNEL_ID, "ep_meta", "bundle_x", assets_root, db_path=db_path,
+        )
+        assert package.main_episode.title == "A Real Episode Title"
+        assert package.main_episode.description == "A real description."
+        titles_by_id = {d.deliverable_id: d.title for d in package.shorts}
+        assert titles_by_id == {"short_sh_0": "s0", "short_sh_1": "s1"}
+
+    def test_missing_metadata_leaves_title_and_description_none_never_fabricated(self, db_path, assets_root):
+        _seed_complete_episode(db_path, assets_root, "ep_empty", title="", n_shorts=0)
+        package = build_publish_package_from_episode_dir(
+            CHANNEL_ID, "ep_empty", "bundle_x", assets_root, db_path=db_path,
+        )
+        assert package.main_episode.title is None
+        assert package.main_episode.description is None

@@ -174,6 +174,16 @@ class DeliverableFile:
     thumbnail_url: Optional[str] = None
     title: Optional[str] = None
     alt_text: Optional[str] = None
+    # This deliverable's own publication description/caption text — Zernio's
+    # POST /v1/posts top-level `content` field, which for platform=youtube
+    # becomes the video's description (verified via docs.zernio.com/posts/
+    # create-post and docs.zernio.com/platforms/youtube). `title` above is
+    # sent as the POST's top-level `title` (-> the YouTube video title, max
+    # 100 chars) in ADDITION to its existing use as this media item's own
+    # `mediaItems[].title`. Both were previously constructed but never
+    # actually threaded into the request body at all -- see
+    # ZernioProvider.publish()/_build_publish_body()'s own docstrings.
+    description: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -325,6 +335,8 @@ def publish_episode_package(
                 db_path=db_path,
                 logical_alias=logical_alias,
                 media=[media_ref],
+                title=deliverable.title,
+                content=deliverable.description,
                 scheduled_for=sched.scheduled_for,
                 platform_scheduled_for=sched.platform_scheduled_for,
                 timezone_name=sched.timezone_name,

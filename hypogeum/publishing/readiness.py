@@ -226,13 +226,51 @@ def _lookup_episode_topic_from_db(db_path: Optional[Path], episode_id: str) -> O
         conn.close()
 
 
-def _check_metadata(
+class MetadataResolutionError(RuntimeError):
+    """
+    Raised by resolve_canonical_metadata() when title/description/any
+    required Short title cannot be resolved unambiguously. Carries the
+    same reason/evidence/remediation _check_metadata() reports as a
+    failed GateCheckResult — factored out into one shared resolver so a
+    real publish call (hypogeum.publishing.zernio_channel_release_trigger.
+    build_publish_package_from_episode_dir()) uses the EXACT SAME
+    resolution readiness already validated, rather than risking a second,
+    independently-written implementation that could silently diverge
+    (readiness saying "pass, title is X" while the real request sends a
+    different or empty value).
+    """
+    def __init__(self, reason: str, evidence: dict, remediation: str = ""):
+        super().__init__(reason)
+        self.reason = reason
+        self.evidence = evidence
+        self.remediation = remediation
+
+
+@dataclass(frozen=True)
+class ResolvedMetadata:
+    title: str
+    description: str
+    shorts_titles: dict  # {canonical deliverable_id: title}
+    title_evidence: dict = field(default_factory=dict)
+    description_evidence: dict = field(default_factory=dict)
+    shorts_titles_source: str = "metadata_source"
+
+
+def resolve_canonical_metadata(
     episode_id: str,
     episode_dir: Path,
     db_path: Optional[Path],
     metadata_override: Optional[MetadataOverride],
     final_render_package: dict,
-) -> GateCheckResult:
+) -> ResolvedMetadata:
+    """
+    The exact title/description/shorts_titles resolution _check_metadata()
+    performs, minus the pass/fail packaging — see that function and
+    MetadataResolutionError's own docstrings. Raises
+    MetadataResolutionError (never returns a partial/guessed result) on
+    any of the same conditions _check_metadata() would report as a
+    failure.
+    """
     metadata_source = (final_render_package or {}).get("metadata_source", {}) or {}
 
     # -- title: resolved from canonical completed-release-package sources
@@ -264,15 +302,13 @@ def _check_metadata(
 
         distinct_canonical_values = sorted(set(canonical_candidates.values()))
         if not distinct_canonical_values:
-            return GateCheckResult(
-                capability="A_METADATA", status="fail",
+            raise MetadataResolutionError(
                 reason="no canonical publication title found in metadata_source.episode_title or topic_brief.episode_title",
                 evidence={"canonical_candidates": canonical_candidates, "discovery_topic_provenance": discovery_topic_provenance},
                 remediation="Supply a MetadataOverride(title=...) with an operator-confirmed title, or populate metadata_source.episode_title.",
             )
         if len(distinct_canonical_values) > 1:
-            return GateCheckResult(
-                capability="A_METADATA", status="fail",
+            raise MetadataResolutionError(
                 reason=f"{len(distinct_canonical_values)} conflicting CANONICAL title candidates found (metadata_source vs. topic_brief) — this check never auto-selects one",
                 evidence={"canonical_candidates": canonical_candidates, "discovery_topic_provenance": discovery_topic_provenance},
                 remediation="Supply a MetadataOverride(title=...) with the operator-confirmed correct title.",
@@ -312,8 +348,7 @@ def _check_metadata(
 
         distinct_description_values = sorted(set(description_candidates.values()))
         if not distinct_description_values:
-            return GateCheckResult(
-                capability="A_METADATA", status="fail",
+            raise MetadataResolutionError(
                 reason=(
                     "no canonical description found in metadata_source.description, "
                     "metadata_source.logline, or topic_brief.logline"
@@ -322,8 +357,7 @@ def _check_metadata(
                 remediation="Populate metadata_source.description (or topic_brief.logline), or supply a MetadataOverride(description=...).",
             )
         if len(distinct_description_values) > 1:
-            return GateCheckResult(
-                capability="A_METADATA", status="fail",
+            raise MetadataResolutionError(
                 reason=f"{len(distinct_description_values)} conflicting CANONICAL description candidates found — this check never auto-selects one",
                 evidence={"title": title, **title_evidence, "description_candidates": description_candidates},
                 remediation="Supply a MetadataOverride(description=...) with the operator-confirmed correct description.",
@@ -389,8 +423,7 @@ def _check_metadata(
             ]
 
         if missing:
-            return GateCheckResult(
-                capability="A_METADATA", status="fail",
+            raise MetadataResolutionError(
                 reason=(
                     f"shorts_titles ({shorts_titles_source}) does not cover all {len(shorts_renders)} "
                     f"expected Short(s) with a non-empty title each — missing: {missing}"
@@ -399,8 +432,7 @@ def _check_metadata(
                 remediation="Populate metadata_source.shorts_titles (one non-empty, non-placeholder entry per Short), or supply a MetadataOverride(shorts_titles=...).",
             )
         if placeholder:
-            return GateCheckResult(
-                capability="A_METADATA", status="fail",
+            raise MetadataResolutionError(
                 reason=(
                     f"shorts_titles ({shorts_titles_source}) contains placeholder title(s) equal to their "
                     f"own deliverable_id — never a real title: {placeholder}"
@@ -409,13 +441,48 @@ def _check_metadata(
                 remediation="Replace the placeholder value(s) with real, accurate Short titles.",
             )
 
+    # Build the canonical {deliverable_id: title} shorts_titles map,
+    # regardless of which input shape was supplied — this is the shape a
+    # real publish call actually needs (one title per deliverable_id), not
+    # the raw list/dict-list a package file happens to store on disk.
+    if not shorts_renders:
+        resolved_shorts_titles: dict = {}
+    elif shorts_titles and isinstance(shorts_titles[0], dict):
+        resolved_shorts_titles = {sid: title_by_id[sid] for sid in expected_short_ids}
+    else:
+        resolved_shorts_titles = {
+            expected_short_ids[i]: (shorts_titles[i] or "").strip() for i in range(len(expected_short_ids))
+        }
+
+    shorts_titles_source_final = "metadata_override" if (metadata_override is not None and metadata_override.shorts_titles is not None) else "metadata_source"
+    return ResolvedMetadata(
+        title=title, description=description, shorts_titles=resolved_shorts_titles,
+        title_evidence=title_evidence, description_evidence=description_evidence,
+        shorts_titles_source=shorts_titles_source_final,
+    )
+
+
+def _check_metadata(
+    episode_id: str,
+    episode_dir: Path,
+    db_path: Optional[Path],
+    metadata_override: Optional[MetadataOverride],
+    final_render_package: dict,
+) -> GateCheckResult:
+    try:
+        resolved = resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
+    except MetadataResolutionError as exc:
+        return GateCheckResult(
+            capability="A_METADATA", status="fail",
+            reason=exc.reason, evidence=exc.evidence, remediation=exc.remediation,
+        )
     return GateCheckResult(
         capability="A_METADATA", status="pass",
         reason="title, description, and shorts_titles all present and unambiguous",
         evidence={
-            "title": title, **title_evidence,
-            "description_length": len(description), "description_resolved_by": description_evidence["resolved_by"],
-            "shorts_titles_count": len(shorts_titles), "shorts_titles_source": shorts_titles_source,
+            "title": resolved.title, **resolved.title_evidence,
+            "description_length": len(resolved.description), "description_resolved_by": resolved.description_evidence["resolved_by"],
+            "shorts_titles_count": len(resolved.shorts_titles), "shorts_titles_source": resolved.shorts_titles_source,
         },
     )
 

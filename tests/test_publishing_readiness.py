@@ -25,7 +25,12 @@ from hypogeum.publishing.provider_repository import (
     upsert_provider_account,
     upsert_provider_profile,
 )
-from hypogeum.publishing.readiness import MetadataOverride, check_publish_readiness
+from hypogeum.publishing.readiness import (
+    MetadataOverride,
+    MetadataResolutionError,
+    check_publish_readiness,
+    resolve_canonical_metadata,
+)
 
 EPISODE_ID = "ep_test01"
 CHANNEL_ID = "channel_a"
@@ -498,3 +503,73 @@ class TestMediaStagingReadyBlocking:
         result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         staging = next(c for c in result.checks if c.capability == "E_MEDIA_STAGING_READY")
         assert staging.status == "fail"
+
+
+class TestResolveCanonicalMetadata:
+    """
+    hypogeum.publishing.readiness.resolve_canonical_metadata() — the
+    public resolver _check_metadata() itself now calls internally.
+    Factored out so a real publish call (hypogeum.publishing.
+    zernio_channel_release_trigger.build_publish_package_from_episode_dir())
+    can use the EXACT SAME resolution readiness already validated, instead
+    of risking a second, independently-written implementation.
+    """
+
+    def test_resolves_the_same_values_check_publish_readiness_validated(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
+        _write_render_package(
+            episode_dir,
+            metadata_source={
+                "episode_title": "T", "logline": "", "description": "",
+                "shorts_titles": [{"short_id": "short_001", "title": "Real Short Title"}],
+            },
+            shorts_renders=[{"short_id": "001"}],
+        )
+        (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
+            json.dumps({"episode_title": "T", "logline": "A real description."}), encoding="utf-8",
+        )
+        _write_main_render(episode_dir)
+        _write_short_render(episode_dir, 0)
+
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        meta_check = next(c for c in result.checks if c.capability == "A_METADATA")
+        assert meta_check.status == "pass", meta_check.reason
+
+        resolved = resolve_canonical_metadata(EPISODE_ID, episode_dir, db_path, None, {
+            "metadata_source": {"episode_title": "T", "logline": "", "description": "", "shorts_titles": [{"short_id": "short_001", "title": "Real Short Title"}]},
+            "shorts_renders": [{"short_id": "001"}],
+        })
+        assert resolved.title == "T"
+        assert resolved.description == "A real description."
+        assert resolved.shorts_titles == {"short_001": "Real Short Title"}
+
+    def test_raises_on_missing_title_never_returns_a_partial_result(self, episode_dir, db_path):
+        _write_render_package(episode_dir, metadata_source={"episode_title": "", "description": "d", "shorts_titles": []})
+        with pytest.raises(MetadataResolutionError, match="no canonical publication title found"):
+            resolve_canonical_metadata(EPISODE_ID, episode_dir, db_path, None, {
+                "metadata_source": {"episode_title": "", "description": "d", "shorts_titles": []},
+            })
+
+    def test_raises_on_placeholder_shorts_title(self, episode_dir, db_path):
+        pkg = {
+            "metadata_source": {
+                "episode_title": "T", "description": "d",
+                "shorts_titles": [{"short_id": "short_001", "title": "short_001"}],
+            },
+            "shorts_renders": [{"short_id": "001"}],
+        }
+        with pytest.raises(MetadataResolutionError, match="placeholder"):
+            resolve_canonical_metadata(EPISODE_ID, episode_dir, db_path, None, pkg)
+
+    def test_no_shorts_expected_returns_empty_shorts_titles_dict(self, episode_dir, db_path):
+        pkg = {"metadata_source": {"episode_title": "T", "description": "d", "shorts_titles": []}, "shorts_renders": []}
+        resolved = resolve_canonical_metadata(EPISODE_ID, episode_dir, db_path, None, pkg)
+        assert resolved.shorts_titles == {}
+
+    def test_legacy_flat_string_shape_resolves_to_deliverable_id_keyed_dict(self, episode_dir, db_path):
+        pkg = {
+            "metadata_source": {"episode_title": "T", "description": "d", "shorts_titles": ["First Real Title", "Second Real Title"]},
+            "shorts_renders": [{"short_id": "sh_0"}, {"short_id": "sh_1"}],
+        }
+        resolved = resolve_canonical_metadata(EPISODE_ID, episode_dir, db_path, None, pkg)
+        assert resolved.shorts_titles == {"short_sh_0": "First Real Title", "short_sh_1": "Second Real Title"}

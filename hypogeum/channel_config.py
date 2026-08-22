@@ -1189,6 +1189,7 @@ _OPERATIONS_FIELD_MAP: dict[str, Any] = {
     "failure_halt_policy":         ("failure_halt_policy_json", _j),
     "cost_ceiling_usd_per_episode": "cost_ceiling_usd_per_episode",
     "default_privacy_state":       "default_privacy_state",
+    "deliverable_schedule_policy": ("deliverable_schedule_policy_json", _j),
 }
 
 

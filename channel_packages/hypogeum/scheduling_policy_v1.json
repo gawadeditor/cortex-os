@@ -12,9 +12,9 @@
   "rationale": "External large-sample benchmark evidence favors Sunday morning in US Eastern Time for long-form documentary/educational content. Sunday 14:00 UTC also reaches the UK and Europe during afternoon viewing hours, giving practical overlap across the three target regions without over-optimizing for any single one. Shorts use separate evening-oriented distribution windows and are spread across the week (Monday/Wednesday/Friday) to sustain discovery for the published main episode between long-form releases. Friday receives the final Short because Friday evening is the strongest general Shorts benchmark. This is a provisional experiment, not a permanent optimum -- it has zero Hypogeum-specific analytics backing it (channel has one published episode, <200 lifetime views, no geography/device/time-of-day data ever captured).",
   "deliverable_schedule": {
     "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC"},
-    "short_0": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
-    "short_1": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
-    "short_2": {"day_of_week": "friday", "time_of_day": "18:00", "timezone": "UTC"}
+    "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
+    "short_002": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
+    "short_003": {"day_of_week": "friday", "time_of_day": "18:00", "timezone": "UTC"}
   },
   "metrics_for_evaluation": [
     "impressions",
@@ -32,7 +32,7 @@
   "known_gaps": [
     "platform_analytics table has no geography/device/time-of-day columns today -- these metrics cannot be measured with the current schema; recording this is a later feedback-loop dependency, not implemented in this slice.",
     "ctr and impressions are null in every existing platform_analytics row -- the current YouTube Analytics sync never populated them.",
-    "Deliverable-specific schedule keys ('main_episode', 'short_0'/'short_1'/'short_2') match this channel's own file-naming convention (see hypogeum.publishing.zernio_channel_release_trigger); a channel with a different bundle shape would use different keys -- Factory Core assigns no meaning to these strings."
+    "Deliverable-specific schedule keys ('main_episode', 'short_001'/'short_002'/'short_003') match hypogeum.agents.publishing_agent._deliverable_id_for()'s already-established, channel-agnostic convention (f\"short_{short_id}\") and are the exact real values verified against ep_f3619022's own sealed publishing_record_ep_f3619022.json / publish_calendar.short_id -- not an invented scheme. A channel with a different bundle shape would use different keys -- Factory Core assigns no meaning to these strings."
   ],
-  "installation": "NOT applied to any database. To install: create_channel_operations_profile(...) or an update path passing deliverable_schedule_policy=<this file's 'deliverable_schedule' object> for channel_id='hypogeum'. Requires explicit operator approval -- not performed by this artifact's presence alone."
+  "installation": "NOT applied to any database. To install (idempotent, preserves every other existing field -- see hypogeum.channel_config.update_channel_operations_profile()): update_channel_operations_profile(channel_id='hypogeum', deliverable_schedule_policy=<this file's 'deliverable_schedule' object>). Requires explicit operator approval -- not performed by this artifact's presence alone."
 }

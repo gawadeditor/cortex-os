@@ -68,6 +68,7 @@ def compile_schedule_plan_from_channel_package(
     db_path: Optional[Path] = None,
     now: Optional[datetime] = None,
     publish_now: bool = False,
+    require_explicit_policy: bool = False,
 ) -> ScheduleCompilationResult:
     """
     Read-only. Never mutates any file or database row, never makes a
@@ -77,16 +78,29 @@ def compile_schedule_plan_from_channel_package(
       - no ChannelOperationsProfile exists for channel_id;
       - the profile's publishing_schedule/timezone is missing or cannot
         resolve to a real slot (compute_next_publish_slot() returns None
-        for exactly this reason — never fabricates a value itself).
+        for exactly this reason — never fabricates a value itself);
+      - require_explicit_policy=True and ANY requested deliverable_id has
+        no entry in deliverable_schedule_policy (see below).
 
     On success, returns a SchedulePlan covering every deliverable_id in
     `deliverable_ids`, each either at its own per-deliverable slot (when
     ChannelOperationsProfile.deliverable_schedule_policy has an entry for
-    it) or at the channel's single fallback slot, with publish_now as
-    given (default False — this compiler is for scheduling ahead, not
-    publishing immediately; combining publish_now=True with a future
-    scheduled_for would itself be rejected downstream by
-    ZernioProvider.publish()'s own validation).
+    it) or, when require_explicit_policy=False (the default), at the
+    channel's single fallback slot, with publish_now as given (default
+    False — this compiler is for scheduling ahead, not publishing
+    immediately; combining publish_now=True with a future scheduled_for
+    would itself be rejected downstream by ZernioProvider.publish()'s own
+    validation).
+
+    require_explicit_policy=True disables the single-slot fallback
+    entirely for this call: every requested deliverable_id must have its
+    own explicit deliverable_schedule_policy entry, or the WHOLE
+    compilation fails closed before returning anything — the channel's
+    old single fallback slot is never silently applied to a deliverable
+    missing from a configured bundle policy. Set by
+    hypogeum.publishing.zernio_channel_release_trigger's autonomous
+    publishing path; backward-compatible fallback (the default, False)
+    remains available for legacy/manual callers unchanged.
     """
     from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
     from hypogeum.scheduler import compute_next_publish_slot  # noqa: PLC0415
@@ -141,6 +155,17 @@ def compile_schedule_plan_from_channel_package(
                 scheduled_for=slot_dt, timezone_name=entry_tz, publish_now=publish_now,
             )
             continue
+
+        if require_explicit_policy:
+            return ScheduleCompilationResult(
+                channel_id=channel_id, schedule_plan=None, blocked=True,
+                blocked_reason=(
+                    f"channel_id={channel_id!r} has no deliverable_schedule_policy entry for "
+                    f"deliverable_id={deliverable_id!r} — autonomous publishing requires an explicit "
+                    f"schedule for every deliverable; the single fallback publishing_schedule slot is "
+                    f"never applied in this mode"
+                ),
+            )
 
         if not fallback_computed:
             fallback_slot_dt = compute_next_publish_slot(profile.publishing_schedule, profile.timezone, effective_now)

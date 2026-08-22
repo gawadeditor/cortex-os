@@ -269,20 +269,35 @@ def gather_channel_demand_items(
 
     already_published checks BOTH the legacy direct-adapter tables
     (publishing_outcomes.publishing_status='success',
-    publish_calendar.publish_status='live') AND the ADR-013
-    publication_intents.status='succeeded' signal that
-    hypogeum.publishing.submission_ledger.record_success() writes on a
-    confirmed Zernio publish — scoped by BOTH episode_id AND channel_id
-    (publication_intents has its own channel_id column; this is a
-    WHERE-clause channel-isolation guarantee, not a post-hoc filter).
-    Without this second check, a real Zernio-confirmed publish would never
-    be recognized here at all (Zernio writes to publication_intents/
-    publishing_receipts/provider_content_mappings, never to the legacy
-    publishing_outcomes/publish_calendar tables) — the buffer would keep
-    counting an already-published item as spare buffer forever, and
-    refill would never correctly trigger after a real advance.
+    publish_calendar.publish_status='live' — unchanged, any single row is
+    still treated as sufficient there, matching that legacy path's own
+    long-established, loose per-deliverable semantics, which this module
+    does not redefine) AND the ADR-013 publication_intents.status=
+    'succeeded' signal that hypogeum.publishing.submission_ledger.
+    record_success() writes on a confirmed Zernio publish — scoped by
+    BOTH episode_id AND channel_id (publication_intents has its own
+    channel_id column; this is a WHERE-clause channel-isolation
+    guarantee, not a post-hoc filter). Without the Zernio check, a real
+    Zernio-confirmed publish would never be recognized here at all
+    (Zernio writes to publication_intents/publishing_receipts/
+    provider_content_mappings, never to the legacy tables) — the buffer
+    would keep counting an already-published item as spare buffer
+    forever, and refill would never correctly trigger after a real
+    advance.
+
+    The Zernio signal requires EVERY required deliverable_id for the item
+    (resolved via hypogeum.publishing.deliverable_ids.
+    resolve_required_deliverable_ids() — the SAME resolver
+    build_publish_package_from_episode_dir() uses to build what actually
+    gets staged, so the two can never disagree) to have its own confirmed
+    'succeeded' publication_intents row — a single succeeded deliverable
+    out of a four-deliverable bundle (main + 3 Shorts) does NOT mark the
+    whole item published; it remains correctly counted as not-yet-fully-
+    published buffer supply. Duplicate intent rows for the same
+    deliverable_id never inflate completeness (SELECT DISTINCT).
     """
     from hypogeum.db import get_connection, initialize_schema  # noqa: PLC0415
+    from hypogeum.publishing.deliverable_ids import resolve_required_deliverable_ids  # noqa: PLC0415
     from hypogeum.publishing.readiness import check_publish_readiness  # noqa: PLC0415
 
     initialize_schema(db_path)
@@ -298,14 +313,21 @@ def gather_channel_demand_items(
                 "SELECT 1 FROM publish_calendar WHERE episode_id = ? AND publish_status = 'live' LIMIT 1",
                 (item_id,),
             ).fetchone()
-            zernio_succeeded_row = conn.execute(
+
+            required_deliverable_ids = set(resolve_required_deliverable_ids(item_id, assets_root))
+            succeeded_rows = conn.execute(
                 """
-                SELECT 1 FROM publication_intents
-                WHERE episode_id = ? AND channel_id = ? AND status = 'succeeded' LIMIT 1
+                SELECT DISTINCT deliverable_id FROM publication_intents
+                WHERE episode_id = ? AND channel_id = ? AND status = 'succeeded'
                 """,
                 (item_id, definition.channel_id),
-            ).fetchone()
-            already_published = bool(published_row or live_calendar_row or zernio_succeeded_row)
+            ).fetchall()
+            succeeded_deliverable_ids = {r["deliverable_id"] for r in succeeded_rows}
+            zernio_fully_published = bool(required_deliverable_ids) and required_deliverable_ids.issubset(
+                succeeded_deliverable_ids
+            )
+
+            already_published = bool(published_row or live_calendar_row or zernio_fully_published)
 
             readiness = check_publish_readiness(
                 item_id, assets_root=assets_root, db_path=db_path,

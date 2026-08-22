@@ -184,18 +184,27 @@ class TestMetadataBlocking:
         result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "fail"
-        assert "no title candidate" in meta.reason
+        assert "no canonical publication title found" in meta.reason
         assert result.passed is False
 
-    def test_conflicting_title_candidates_block_and_never_auto_select(self, episode_dir, db_path):
+    def test_discovery_topic_conflict_does_not_block_reproduces_real_ep_f3619022_shape(self, episode_dir, db_path):
+        """The exact real ep_f3619022 shape: topic_brief.episode_title
+        populated (the canonical, historically-published title) vs.
+        episodes.topic holding a DIFFERENT discovery-stage label. Per the
+        operator-approved rule, episodes.topic is provenance only and must
+        never conflict-block a real canonical title -- the title check
+        must resolve to topic_brief's value with no override needed."""
         _attribute_to_channel(db_path)
         _write_render_package(episode_dir, metadata_source={"episode_title": "", "description": "d", "shorts_titles": []})
         (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
-            json.dumps({"episode_title": "Candidate A"}), encoding="utf-8",
+            json.dumps({"episode_title": "The Erdstall Tunnels: Europe's Secret Underground Mystery"}), encoding="utf-8",
         )
         conn = get_connection(db_path)
         try:
-            insert_episode(conn, episode_id=EPISODE_ID, created_at="2026-01-01T00:00:00+00:00", topic="Candidate B", status="complete")
+            insert_episode(
+                conn, episode_id=EPISODE_ID, created_at="2026-01-01T00:00:00+00:00",
+                topic="The Erdstall Tunnels: Europe's Most Baffling Medieval Underground Network", status="complete",
+            )
             conn.commit()
         finally:
             conn.close()
@@ -203,10 +212,31 @@ class TestMetadataBlocking:
 
         result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
+        assert meta.status == "pass", meta.reason
+        assert meta.evidence["title"] == "The Erdstall Tunnels: Europe's Secret Underground Mystery"
+        assert meta.evidence["resolved_by"] == "single_consistent_canonical_candidate"
+        # The discovery-topic conflict is retained as provenance evidence,
+        # never as a blocking candidate.
+        assert meta.evidence["discovery_topic_provenance"] == "The Erdstall Tunnels: Europe's Most Baffling Medieval Underground Network"
+
+    def test_genuine_canonical_conflict_still_blocks(self, episode_dir, db_path):
+        """metadata_source.episode_title and topic_brief.episode_title
+        disagreeing IS a real canonical conflict and must still block --
+        this rule only exempts episodes.topic, not the two canonical
+        release-package sources from each other."""
+        _attribute_to_channel(db_path)
+        _write_render_package(episode_dir, metadata_source={"episode_title": "Canonical A", "description": "d", "shorts_titles": []})
+        (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
+            json.dumps({"episode_title": "Canonical B"}), encoding="utf-8",
+        )
+        _write_main_render(episode_dir)
+
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "fail"
-        assert "conflicting title candidates" in meta.reason
-        assert "Candidate A" in json.dumps(meta.evidence)
-        assert "Candidate B" in json.dumps(meta.evidence)
+        assert "conflicting CANONICAL title candidates" in meta.reason
+        assert "Canonical A" in json.dumps(meta.evidence)
+        assert "Canonical B" in json.dumps(meta.evidence)
         assert result.passed is False
 
     def test_metadata_override_resolves_title_without_choosing_one_itself(self, episode_dir, db_path):
@@ -261,6 +291,90 @@ class TestMetadataBlocking:
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
         assert meta.status == "fail"
         assert "shorts_titles" in meta.reason
+
+    def test_description_resolves_from_topic_brief_logline_reproduces_real_ep_f3619022_shape(self, episode_dir, db_path):
+        """The exact real ep_f3619022 shape: metadata_source.description and
+        metadata_source.logline are both empty (confirmed via the sealed
+        publishing_record and final_render_package on disk), but
+        topic_brief.logline holds the Executive Producer's real,
+        already-generated logline. This is the same completed-package
+        text that every other real production episode copies verbatim into
+        metadata_source.description/.logline -- reusing it here is not
+        inventing copy, it is resolving the canonical value from where it
+        already lives."""
+        _attribute_to_channel(db_path)
+        _write_render_package(
+            episode_dir,
+            metadata_source={"episode_title": "T", "logline": "", "description": "", "shorts_titles": []},
+            shorts_renders=[{"short_id": "short_001"}, {"short_id": "short_002"}, {"short_id": "short_003"}],
+        )
+        (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
+            json.dumps({
+                "episode_title": "T",
+                "logline": (
+                    "Thousands of hand-carved medieval tunnels too narrow for normal human "
+                    "movement honeycomb Europe from Bavaria to Ireland, yet no tools, no "
+                    "artefacts, no written records, and no historical mention explain who "
+                    "built them, why, or how they share identical construction signatures "
+                    "across an entire continent."
+                ),
+            }),
+            encoding="utf-8",
+        )
+        _write_main_render(episode_dir)
+
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        meta = next(c for c in result.checks if c.capability == "A_METADATA")
+        # description itself resolves cleanly from topic_brief.logline...
+        assert "no canonical description found" not in meta.reason
+        assert "conflicting CANONICAL description" not in meta.reason
+        # ...but shorts_titles is a genuine, unresolved content gap in this
+        # real episode -- no artifact anywhere contains a real Shorts title
+        # (every episode in production history that ever populated
+        # shorts_titles used the short_id itself as a placeholder), so
+        # A_METADATA still fails closed, reported exactly for that reason,
+        # never fabricated.
+        assert meta.status == "fail"
+        assert "shorts_titles" in meta.reason
+
+    def test_missing_description_blocks_when_no_candidate_source_exists(self, episode_dir, db_path):
+        """Absence of ALL three description sources (metadata_source.
+        description, metadata_source.logline, topic_brief.logline) must
+        report the exact absence, never fabricate a value."""
+        _attribute_to_channel(db_path)
+        _write_render_package(episode_dir, metadata_source={"episode_title": "T", "logline": "", "description": "", "shorts_titles": []})
+        _write_main_render(episode_dir)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        meta = next(c for c in result.checks if c.capability == "A_METADATA")
+        assert meta.status == "fail"
+        assert "no canonical description found" in meta.reason
+        assert meta.evidence["description_candidates"] == {}
+
+    def test_conflicting_description_candidates_still_blocks(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
+        _write_render_package(episode_dir, metadata_source={"episode_title": "T", "logline": "", "description": "Description A", "shorts_titles": []})
+        (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
+            json.dumps({"episode_title": "T", "logline": "Description B"}), encoding="utf-8",
+        )
+        _write_main_render(episode_dir)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        meta = next(c for c in result.checks if c.capability == "A_METADATA")
+        assert meta.status == "fail"
+        assert "conflicting CANONICAL description candidates" in meta.reason
+        assert "Description A" in json.dumps(meta.evidence)
+        assert "Description B" in json.dumps(meta.evidence)
+
+    def test_metadata_override_resolves_description_without_choosing_one_itself(self, episode_dir, db_path):
+        _attribute_to_channel(db_path)
+        _write_render_package(episode_dir, metadata_source={"episode_title": "T", "logline": "", "description": "", "shorts_titles": []})
+        _write_main_render(episode_dir)
+        override = MetadataOverride(description="Operator-confirmed description.")
+        result = check_publish_readiness(
+            EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, metadata_override=override,
+        )
+        meta = next(c for c in result.checks if c.capability == "A_METADATA")
+        assert "no canonical description found" not in meta.reason
+        assert "conflicting CANONICAL description" not in meta.reason
 
 
 class TestRenderAvailabilityBlocking:

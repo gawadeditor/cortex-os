@@ -79,6 +79,7 @@ def publish_channel_release(
     publish_now: bool = False,
     logical_alias: str = "default",
     provider_id: str = "zernio",
+    require_explicit_schedule_policy: bool = False,
     media_staging_provider: Optional[MediaStagingProvider] = None,
     publishing_provider: Optional[PublishingProvider] = None,
 ) -> ReleasePublishResult:
@@ -92,6 +93,13 @@ def publish_channel_release(
     function performs no channel-scope resolution of its own beyond what
     each stage already enforces (CHANNEL_SCOPE in readiness,
     ChannelScopeMismatchError in the publish runtime).
+
+    require_explicit_schedule_policy=False (default) preserves the
+    schedule compiler's own backward-compatible fallback-to-single-slot
+    behavior — the right default for a manual/legacy caller. Autonomous
+    callers (hypogeum.publishing.zernio_channel_release_trigger) pass
+    True, disabling that fallback entirely — see
+    compile_schedule_plan_from_channel_package()'s own docstring.
     """
     readiness = check_publish_readiness(
         episode_id, channel_id=channel_id, assets_root=assets_root, db_path=db_path,
@@ -109,6 +117,7 @@ def publish_channel_release(
     deliverable_ids = [d.deliverable_id for d in package.all_deliverables()]
     schedule_result = compile_schedule_plan_from_channel_package(
         channel_id, deliverable_ids, db_path=db_path, publish_now=publish_now,
+        require_explicit_policy=require_explicit_schedule_policy,
     )
     if schedule_result.blocked:
         return ReleasePublishResult(

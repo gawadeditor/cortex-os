@@ -33,10 +33,21 @@ evidence, never silent):
                              a caller asserting the wrong channel can never
                              observe another channel's episode data through
                              this function.
-    A_METADATA             — title (conflict-checked across
-                             metadata_source.episode_title / topic_brief /
-                             episodes.topic, unless overridden), description,
-                             shorts_titles.
+    A_METADATA             — title (canonical release-package sources only:
+                             metadata_source.episode_title / topic_brief.
+                             episode_title, conflict-checked against EACH
+                             OTHER unless overridden; episodes.topic is a
+                             discovery/topic label retained only as
+                             provenance evidence, never a blocking
+                             candidate), description (canonical sources only:
+                             metadata_source.description / metadata_source.
+                             logline / topic_brief.logline, conflict-checked
+                             the same way), shorts_titles. None of these are
+                             ever invented — a genuinely missing field (e.g.
+                             no episode in production history has ever had a
+                             real, non-placeholder shorts_titles entry) fails
+                             closed and is reported as the exact missing
+                             field rather than fabricated.
     B_LONG_RENDER          — main_{episode_id}.mp4 exists and is non-empty.
     C_SHORTS_RENDERS       — one real, non-empty short_{i}_{episode_id}.mp4
                              per final_render_package.shorts_renders[] entry.
@@ -224,56 +235,104 @@ def _check_metadata(
 ) -> GateCheckResult:
     metadata_source = (final_render_package or {}).get("metadata_source", {}) or {}
 
-    # -- title: conflict-checked across every known candidate source unless
-    # an operator override is explicitly supplied. Never auto-picks one.
+    # -- title: resolved from canonical completed-release-package sources
+    # only (metadata_source.episode_title, topic_brief.episode_title) —
+    # conflict-checked against EACH OTHER, unless an operator override is
+    # explicitly supplied. episodes.topic is a discovery/topic label, not
+    # canonical publication metadata — it is retained below purely as
+    # provenance evidence and can NEVER conflict-block a real canonical
+    # title, and never contributes a candidate value when the canonical
+    # sources are silent (a discovery label is not a publication title).
+    # This check never auto-picks between two conflicting CANONICAL
+    # candidates; only a genuine metadata_source/topic_brief disagreement
+    # blocks.
     if metadata_override is not None and metadata_override.title:
         title = metadata_override.title
         title_evidence = {"resolved_by": "metadata_override"}
     else:
-        candidates: dict = {}
+        canonical_candidates: dict = {}
         ms_title = (metadata_source.get("episode_title") or "").strip()
         if ms_title:
-            candidates["metadata_source.episode_title"] = ms_title
+            canonical_candidates["metadata_source.episode_title"] = ms_title
         topic_brief = _load_json(episode_dir / f"topic_brief_{episode_id}.json")
         tb_title = (topic_brief.get("episode_title") or "").strip()
         if tb_title:
-            candidates["topic_brief.episode_title"] = tb_title
-        db_topic = _lookup_episode_topic_from_db(db_path, episode_id)
-        if db_topic and db_topic.strip():
-            candidates["episodes.topic"] = db_topic.strip()
+            canonical_candidates["topic_brief.episode_title"] = tb_title
 
-        distinct_values = sorted(set(candidates.values()))
-        if not distinct_values:
+        db_topic = _lookup_episode_topic_from_db(db_path, episode_id)
+        discovery_topic_provenance = db_topic.strip() if db_topic and db_topic.strip() else None
+
+        distinct_canonical_values = sorted(set(canonical_candidates.values()))
+        if not distinct_canonical_values:
             return GateCheckResult(
                 capability="A_METADATA", status="fail",
-                reason="no title candidate found in metadata_source.episode_title, topic_brief, or episodes.topic",
-                evidence={"candidates": candidates},
+                reason="no canonical publication title found in metadata_source.episode_title or topic_brief.episode_title",
+                evidence={"canonical_candidates": canonical_candidates, "discovery_topic_provenance": discovery_topic_provenance},
                 remediation="Supply a MetadataOverride(title=...) with an operator-confirmed title, or populate metadata_source.episode_title.",
             )
-        if len(distinct_values) > 1:
+        if len(distinct_canonical_values) > 1:
             return GateCheckResult(
                 capability="A_METADATA", status="fail",
-                reason=f"{len(distinct_values)} conflicting title candidates found — this check never auto-selects one",
-                evidence={"candidates": candidates},
+                reason=f"{len(distinct_canonical_values)} conflicting CANONICAL title candidates found (metadata_source vs. topic_brief) — this check never auto-selects one",
+                evidence={"canonical_candidates": canonical_candidates, "discovery_topic_provenance": discovery_topic_provenance},
                 remediation="Supply a MetadataOverride(title=...) with the operator-confirmed correct title.",
             )
-        title = distinct_values[0]
-        title_evidence = {"resolved_by": "single_consistent_candidate", "candidates": candidates}
+        title = distinct_canonical_values[0]
+        title_evidence = {
+            "resolved_by": "single_consistent_canonical_candidate",
+            "canonical_candidates": canonical_candidates,
+            "discovery_topic_provenance": discovery_topic_provenance,
+        }
 
-    # -- description
+    # -- description: resolved from canonical completed-release-package
+    # sources only (metadata_source.description, metadata_source.logline,
+    # topic_brief.logline), conflict-checked against EACH OTHER exactly like
+    # title above, unless an operator override is explicitly supplied.
+    # metadata_source.logline and topic_brief.logline are real, existing,
+    # already-generated package fields (the Executive Producer's logline is
+    # copied into metadata_source.description/.logline by every real
+    # production episode observed to date) — never a fabricated value. This
+    # check never invents or regenerates copy; it only reuses what an
+    # earlier agent already produced.
     if metadata_override is not None and metadata_override.description:
         description = metadata_override.description
         description_evidence = {"resolved_by": "metadata_override"}
     else:
-        description = (metadata_source.get("description") or "").strip()
-        if not description:
+        description_candidates: dict = {}
+        ms_description = (metadata_source.get("description") or "").strip()
+        if ms_description:
+            description_candidates["metadata_source.description"] = ms_description
+        ms_logline = (metadata_source.get("logline") or "").strip()
+        if ms_logline:
+            description_candidates["metadata_source.logline"] = ms_logline
+        topic_brief = _load_json(episode_dir / f"topic_brief_{episode_id}.json")
+        tb_logline = (topic_brief.get("logline") or "").strip()
+        if tb_logline:
+            description_candidates["topic_brief.logline"] = tb_logline
+
+        distinct_description_values = sorted(set(description_candidates.values()))
+        if not distinct_description_values:
             return GateCheckResult(
                 capability="A_METADATA", status="fail",
-                reason="metadata_source.description is empty and no MetadataOverride.description supplied",
-                evidence={"title": title, **title_evidence},
-                remediation="Populate metadata_source.description, or supply a MetadataOverride(description=...).",
+                reason=(
+                    "no canonical description found in metadata_source.description, "
+                    "metadata_source.logline, or topic_brief.logline"
+                ),
+                evidence={"title": title, **title_evidence, "description_candidates": description_candidates},
+                remediation="Populate metadata_source.description (or topic_brief.logline), or supply a MetadataOverride(description=...).",
             )
-        description_evidence = {"resolved_by": "metadata_source"}
+        if len(distinct_description_values) > 1:
+            return GateCheckResult(
+                capability="A_METADATA", status="fail",
+                reason=f"{len(distinct_description_values)} conflicting CANONICAL description candidates found — this check never auto-selects one",
+                evidence={"title": title, **title_evidence, "description_candidates": description_candidates},
+                remediation="Supply a MetadataOverride(description=...) with the operator-confirmed correct description.",
+            )
+        description = distinct_description_values[0]
+        description_evidence = {
+            "resolved_by": "single_consistent_canonical_candidate",
+            "description_candidates": description_candidates,
+        }
 
     # -- shorts_titles (must cover every expected Short with a non-empty title)
     shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []

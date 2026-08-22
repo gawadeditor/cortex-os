@@ -68,11 +68,18 @@ def _make_channel(db_path, channel_id, *, timezone_name, day_of_week, time_of_da
     )
 
 
+# Canonical deliverable_id convention: 'main_episode' for the long-form,
+# 'short_<short_id>' for each Short -- matching
+# hypogeum.agents.publishing_agent._deliverable_id_for()'s own,
+# already-established convention (see hypogeum.publishing.deliverable_ids).
+# 'short_001'/'short_002'/'short_003' are the REAL values verified against
+# ep_f3619022's own sealed publishing_record_ep_f3619022.json and
+# publish_calendar.short_id -- not an invented short_0/1/2 scheme.
 HYPOGEUM_DELIVERABLE_POLICY = {
     "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC"},
-    "short_0": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
-    "short_1": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
-    "short_2": {"day_of_week": "friday", "time_of_day": "18:00", "timezone": "UTC"},
+    "short_001": {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"},
+    "short_002": {"day_of_week": "wednesday", "time_of_day": "18:00", "timezone": "UTC"},
+    "short_003": {"day_of_week": "friday", "time_of_day": "18:00", "timezone": "UTC"},
 }
 
 
@@ -95,15 +102,15 @@ class TestPerDeliverableSchedulePolicy:
 
         now = datetime(2026, 8, 21, 0, 0, tzinfo=timezone.utc)  # a Friday
         result = compile_schedule_plan_from_channel_package(
-            "hypogeum", ["main_episode", "short_0", "short_1", "short_2"], db_path=db_path, now=now,
+            "hypogeum", ["main_episode", "short_001", "short_002", "short_003"], db_path=db_path, now=now,
         )
         assert result.blocked is False
         entries = result.schedule_plan.entries
         assert entries["main_episode"].scheduled_for.weekday() == 6  # Sunday
         assert entries["main_episode"].scheduled_for.hour == 14
-        assert entries["short_0"].scheduled_for.weekday() == 0  # Monday
-        assert entries["short_1"].scheduled_for.weekday() == 2  # Wednesday
-        assert entries["short_2"].scheduled_for.weekday() == 4  # Friday
+        assert entries["short_001"].scheduled_for.weekday() == 0  # Monday
+        assert entries["short_002"].scheduled_for.weekday() == 2  # Wednesday
+        assert entries["short_003"].scheduled_for.weekday() == 4  # Friday
         for d in entries.values():
             assert d.scheduled_for.hour in (14, 18)
         # Every deliverable's own slot is distinct -- not the single
@@ -174,6 +181,83 @@ class TestPerDeliverableSchedulePolicy:
         assert result.blocked is False
         slots = {d.scheduled_for for d in result.schedule_plan.entries.values()}
         assert len(slots) == 1
+
+
+class TestRequireExplicitPolicy:
+    """The autonomous publishing path (require_explicit_policy=True) must
+    never silently fall back to the channel's single legacy schedule slot
+    for a deliverable missing from deliverable_schedule_policy."""
+
+    def test_full_hypogeum_policy_compiles_with_four_distinct_slots(self, db_path):
+        brand = create_brand_profile(name="hypogeum Brand", db_path=db_path)
+        model = create_model_profile(name="hypogeum Model", db_path=db_path)
+        pub = create_publishing_profile(name="hypogeum Publishing", db_path=db_path)
+        create_channel_profile(
+            channel_id="hypogeum", name="hypogeum",
+            brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
+            publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+        )
+        create_channel_operations_profile(
+            channel_id="hypogeum", channel_name="hypogeum", timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+            deliverable_schedule_policy=HYPOGEUM_DELIVERABLE_POLICY,
+            db_path=db_path,
+        )
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "short_001", "short_002", "short_003"],
+            db_path=db_path, require_explicit_policy=True,
+        )
+        assert result.blocked is False
+        slots = {d.scheduled_for for d in result.schedule_plan.entries.values()}
+        assert len(slots) == 4, "the Channel Package declares 4 distinct release times -- all 4 must compile distinctly"
+
+    def test_deliverable_missing_from_policy_blocks_before_staging(self, db_path):
+        brand = create_brand_profile(name="X Brand", db_path=db_path)
+        model = create_model_profile(name="X Model", db_path=db_path)
+        pub = create_publishing_profile(name="X Publishing", db_path=db_path)
+        create_channel_profile(
+            channel_id="channel_x", name="channel_x",
+            brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
+            publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+        )
+        create_channel_operations_profile(
+            channel_id="channel_x", channel_name="channel_x", timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},  # legacy fallback exists...
+            deliverable_schedule_policy={"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}},  # ...but short_001 has no entry
+            db_path=db_path,
+        )
+        result = compile_schedule_plan_from_channel_package(
+            "channel_x", ["main_episode", "short_001"], db_path=db_path, require_explicit_policy=True,
+        )
+        assert result.blocked is True
+        assert result.schedule_plan is None
+        assert "short_001" in result.blocked_reason
+        assert "never applied" in result.blocked_reason
+
+    def test_extra_unrelated_policy_entries_do_not_affect_the_selected_bundle(self, db_path):
+        brand = create_brand_profile(name="X Brand", db_path=db_path)
+        model = create_model_profile(name="X Model", db_path=db_path)
+        pub = create_publishing_profile(name="X Publishing", db_path=db_path)
+        create_channel_profile(
+            channel_id="channel_x", name="channel_x",
+            brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
+            publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+        )
+        create_channel_operations_profile(
+            channel_id="channel_x", channel_name="channel_x", timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+            deliverable_schedule_policy={
+                "main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"},
+                "some_other_bundle_deliverable": {"day_of_week": "tuesday", "time_of_day": "09:00"},
+                "yet_another_unrelated_entry": {"day_of_week": "not_even_valid"},
+            },
+            db_path=db_path,
+        )
+        result = compile_schedule_plan_from_channel_package(
+            "channel_x", ["main_episode"], db_path=db_path, require_explicit_policy=True,
+        )
+        assert result.blocked is False
+        assert set(result.schedule_plan.entries.keys()) == {"main_episode"}
 
 
 class TestFailsClosed:

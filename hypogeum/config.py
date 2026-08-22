@@ -729,6 +729,14 @@ class Config:
         # operator review. Defaults False — requires explicit opt-in for full autonomy.
         self.AUTO_DISCOVERY_AUTO_APPROVE = _get_bool("AUTO_DISCOVERY_AUTO_APPROVE", default=False)
 
+        # --- Autonomous Publishing (Zernio release-flow trigger) ---
+        # Master switch — defaults off so existing deployments are unaffected.
+        # Channel-scoped fail-closed behavior (no bindings/schedule policy/
+        # publishing_enabled=False) applies underneath regardless of this
+        # flag; this only controls whether run_worker.py ever calls the
+        # trigger at all. See run_worker.py::_process_channel_publishing().
+        self.AUTO_ZERNIO_PUBLISHING_ENABLED = _get_bool("AUTO_ZERNIO_PUBLISHING_ENABLED", default=False)
+
         # --- Discovery Director (v2) ---
         # Controls which engine run_discovery_cycle() dispatches to.
         # 'v1' = legacy heuristic (default — no behaviour change for existing deployments).

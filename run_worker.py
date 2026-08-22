@@ -210,6 +210,91 @@ def _resolve_bundle_definitions_for_channel(channel_id: str) -> list:
     return []
 
 
+def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
+    """
+    Autonomous publishing step: for each active channel with a resolvable
+    bundle definition, find its not-yet-published, complete bundles and
+    submit them through hypogeum.publishing.zernio_channel_release_trigger.
+    process_channel_ready_bundles() — the SAME function an operator could
+    call manually, now invoked automatically on every worker iteration
+    (gated by Config.AUTO_ZERNIO_PUBLISHING_ENABLED — see run_iteration()).
+
+    Fail-closed contract:
+      - Absent configuration (no ChannelOperationsProfile, no enabled
+        platforms, publishing_enabled=False) or missing provider bindings
+        are handled INSIDE process_channel_ready_bundles()/
+        publish_channel_release() — every such case returns a
+        "blocked_*" result per item, never an exception, so this function
+        never needs to distinguish "not configured" from "configured and
+        working" to stay safe.
+      - An UNEXPECTED exception for one channel (a real bug, a transient
+        I/O error, etc.) is caught and logged HERE, per channel, so one
+        channel's failure can never stop another channel's processing or
+        crash the worker loop. This is the one thing
+        process_channel_ready_bundles() itself cannot guarantee on its
+        own, since it has no outer try/except of its own by design (it is
+        also called directly by operators, who want a raised exception to
+        actually surface).
+
+    No Hypogeum-specific branch: every channel returned by
+    list_channel_profiles(status="active") is treated identically;
+    _resolve_bundle_definitions_for_channel() (unchanged by this function)
+    is the one, already-existing, documented seam where a real
+    Channel-Package compiler will eventually replace the current
+    Hypogeum-only stand-in — this function never special-cases 'hypogeum'
+    itself, and a channel with no resolvable bundle definition is simply
+    skipped (same fail-closed-by-omission behavior _check_and_refill_queue()
+    already uses for its own buffer gate).
+
+    Idempotency across repeated calls (every worker iteration, or a fresh
+    call after a worker restart) is inherited entirely from
+    process_channel_ready_bundles()'s own contract — this function adds no
+    state or tracking of its own.
+    """
+    from hypogeum.channel_config import list_channel_profiles
+    from hypogeum.publishing.zernio_channel_release_trigger import process_channel_ready_bundles
+
+    result: dict = {"channels_checked": 0, "channels_with_activity": 0, "results_by_channel": {}}
+
+    try:
+        channels = list_channel_profiles(status="active", db_path=db_path)
+    except Exception as exc:
+        log.error("publishing_channel_list_error error=%s", exc)
+        return result
+
+    for ch in channels:
+        channel_id = ch.channel_id
+        result["channels_checked"] += 1
+
+        bundle_definitions = _resolve_bundle_definitions_for_channel(channel_id)
+        if not bundle_definitions:
+            continue
+
+        try:
+            channel_results = []
+            for bundle_def in bundle_definitions:
+                channel_results.extend(process_channel_ready_bundles(
+                    channel_id, bundle_def, db_path=db_path, assets_root=assets_root,
+                ))
+        except Exception as exc:
+            log.error("publishing_channel_error channel=%s error=%s", channel_id, exc, exc_info=True)
+            continue
+
+        if channel_results:
+            result["channels_with_activity"] += 1
+            result["results_by_channel"][channel_id] = [
+                {"item_id": r.item_id, "platform": r.platform, "status": r.result.status}
+                for r in channel_results
+            ]
+            for r in channel_results:
+                log.info(
+                    "publishing_attempt channel=%s item=%s platform=%s status=%s",
+                    channel_id, r.item_id, r.platform, r.result.status,
+                )
+
+    return result
+
+
 def _check_and_refill_queue(
     db_path: Path,
     threshold: int,
@@ -448,9 +533,22 @@ def run_iteration(
     iteration: int = 1,
     validation_mode: bool = False,
     bounded_run_id: str | None = None,
+    assets_root: Path | None = None,
 ) -> dict:
     """
     Execute one scheduler → consume → poll cycle.
+
+    assets_root: Optional. None (default) resolves to this module's own
+        canonical _DEFAULT_DB.parent (_PROJECT_ROOT / ".hypogeum-assets")
+        — the SAME constant every other Factory Core module
+        (hypogeum.agent, hypogeum.episode_artifacts, hypogeum.pipeline,
+        hypogeum.openrouter, hypogeum.perplexity, hypogeum.source_enhancement
+        all independently define their own identical _ASSETS_ROOT this
+        same way) already treats as canonical — NEVER derived from the
+        caller's own db_path, which may legitimately point somewhere else
+        entirely (a test's isolated tmp_path database, a bounded run's
+        alternate location) without the episode asset tree living
+        alongside it. An explicit assets_root always wins when given.
 
     validation_mode: narrow, explicit exemption from the monthly
         budget-ceiling clearance check ONLY (added 2026-07-18) — see
@@ -571,6 +669,45 @@ def run_iteration(
         else:
             log.debug("poll queue_empty")
 
+    # Step 3.5: autonomous Zernio publishing — submit any channel's
+    # newly-completed, not-yet-published bundle. Runs regardless of
+    # queue_paused (publishing already-completed content is a different
+    # concern than pausing NEW paid production — see
+    # _process_channel_publishing()'s own docstring) but is HARD-GATED by
+    # `not dry_run` FIRST, before even checking the master switch — a
+    # worker dry run must never stage, upload, submit, publish, schedule,
+    # or create any real provider write, and this gate does not rely on
+    # the global factory-clearance check alone (clearance answers a
+    # different question — "is the factory allowed to run at all" — not
+    # "is this specific iteration a dry run"). Only when NOT a dry run AND
+    # the master switch is enabled AND the factory is cleared (the SAME
+    # clearance check Step 3 already computed, reused not duplicated) does
+    # this step ever call into the trigger. Absent configuration/bindings
+    # fail closed per-channel inside the function itself — never raised
+    # here, never crashes this loop.
+    publishing_result: dict = {}
+    if dry_run:
+        publishing_result = {"skipped_reason": "dry_run"}
+        log.debug("publishing_skipped_dry_run")
+    elif getattr(config, "AUTO_ZERNIO_PUBLISHING_ENABLED", False):
+        if clearance.cleared:
+            try:
+                effective_assets_root = Path(assets_root) if assets_root is not None else _DEFAULT_DB.parent
+                publishing_result = _process_channel_publishing(db_path=db_path, assets_root=effective_assets_root)
+                if publishing_result.get("channels_with_activity"):
+                    log.info(
+                        "publishing_summary channels_with_activity=%d results=%s",
+                        publishing_result["channels_with_activity"],
+                        publishing_result["results_by_channel"],
+                    )
+            except Exception as exc:
+                log.error("publishing_error error=%s", exc, exc_info=True)
+        else:
+            publishing_result = {"skipped_reason": "not_cleared"}
+            log.info("publishing_skipped_not_cleared reason=%s", clearance.reason)
+    else:
+        publishing_result = {"skipped_reason": "auto_zernio_publishing_disabled"}
+
     # Step 4: background analytics sync — every _ANALYTICS_SYNC_EVERY_N iterations
     analytics_synced = False
     if not dry_run and iteration % _ANALYTICS_SYNC_EVERY_N == 0:
@@ -588,6 +725,7 @@ def run_iteration(
         "poll_stop_reason":       poll_result.stop_reason,
         "dry_run":                dry_run,
         "discovery":              discovery_result,
+        "publishing":             publishing_result,
         "analytics_synced":       analytics_synced,
         "queue_paused":           queue_paused,
         "factory_cleared":        clearance.cleared,
@@ -607,9 +745,14 @@ def run_worker(
     once: bool,
     channel_id: str | None,
     bounded_run_id: str | None = None,
+    assets_root: Path | None = None,
 ) -> int:
     """
     Run the worker loop. Returns exit code.
+
+    assets_root: Optional. None (default) preserves the canonical
+        _DEFAULT_DB.parent resolution — see run_iteration()'s own
+        docstring. Forwarded unchanged into every run_iteration() call.
 
     bounded_run_id: Optional. None (default, every existing caller)
         preserves prior behavior exactly — unbounded claim_next() every
@@ -758,6 +901,7 @@ def run_worker(
                 config=config,
                 iteration=iteration,
                 bounded_run_id=bounded_run_id,
+                assets_root=assets_root,
             )
             log.info(
                 "iteration=%d done sr_created=%d q_created=%d poll=%s%s%s",

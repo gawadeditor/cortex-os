@@ -64,7 +64,7 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _setup_channel(db_path, channel_id=CHANNEL_ID, *, platforms_enabled=("youtube",)):
+def _setup_channel(db_path, channel_id=CHANNEL_ID, *, platforms_enabled=("youtube",), deliverable_schedule_policy=None):
     brand = create_brand_profile(name=f"{channel_id} Brand", db_path=db_path)
     model = create_model_profile(name=f"{channel_id} Model", db_path=db_path)
     pub = create_publishing_profile(name=f"{channel_id} Publishing", db_path=db_path)
@@ -73,10 +73,17 @@ def _setup_channel(db_path, channel_id=CHANNEL_ID, *, platforms_enabled=("youtub
         brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
         publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
     )
+    # The autonomous trigger requires an EXPLICIT deliverable_schedule_policy
+    # entry for every deliverable it publishes (require_explicit_schedule_policy=True)
+    # -- the single publishing_schedule fallback below exists only for
+    # legacy/manual callers and is deliberately never relied on by these tests.
+    if deliverable_schedule_policy is None:
+        deliverable_schedule_policy = {"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}}
     create_channel_operations_profile(
         channel_id=channel_id, channel_name=channel_id, timezone="UTC",
         publishing_schedule={"day_of_week": "sunday", "time_of_day": "14:00"},
         enabled_platforms={p: True for p in platforms_enabled},
+        deliverable_schedule_policy=deliverable_schedule_policy,
         db_path=db_path,
     )
 

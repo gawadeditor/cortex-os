@@ -293,6 +293,156 @@ class TestGatherChannelDemandItems:
 
 
 # ---------------------------------------------------------------------------
+def _seed_complete_bundle_with_shorts(db_path, assets_root, item_id, *, channel_id, n_shorts=3):
+    """Same as _seed_complete_item but with n_shorts real (non-placeholder)
+    Shorts, so resolve_required_deliverable_ids() returns 'main_episode'
+    plus 'short_001'..'short_{n_shorts:03d}' -- a real 4-deliverable bundle
+    shape, matching ep_f3619022's own (1 main + 3 Shorts)."""
+    conn = get_connection(db_path)
+    try:
+        insert_episode(conn, episode_id=item_id, created_at=_now_iso(), topic="T", status="complete")
+        insert_episode_topic(
+            conn, topic_id=f"topic_{item_id}", channel_id=channel_id, topic_text="A topic",
+            created_at=_now_iso(), updated_at=_now_iso(), episode_id=item_id,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ep_dir = assets_root / "episodes" / item_id
+    ep_dir.mkdir(parents=True)
+    pkg = {
+        "metadata_source": {"episode_title": "T", "description": "d", "shorts_titles": [f"s{i}" for i in range(n_shorts)]},
+        "shorts_renders": [{"short_id": f"{i + 1:03d}"} for i in range(n_shorts)],
+    }
+    (ep_dir / f"final_render_package_{item_id}.json").write_text(json.dumps(pkg), encoding="utf-8")
+    (ep_dir / f"main_{item_id}.mp4").write_bytes(b"x" * 1024)
+
+
+def _insert_succeeded_intent(db_path, *, intent_id, channel_id, episode_id, deliverable_id):
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO publication_intents
+                (publication_intent_id, channel_id, episode_id, deliverable_id, platform, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'youtube', 'succeeded', ?, ?)
+            """,
+            (intent_id, channel_id, episode_id, deliverable_id, _now_iso(), _now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestPartialPublicationBundleSemantics:
+    """A bundle (main + 3 Shorts = 4 required deliverables) must only be
+    treated as already_published when EVERY required deliverable has its
+    own confirmed 'succeeded' publication_intents row -- not when any
+    single one does."""
+
+    def test_zero_succeeded_deliverables_bundle_unpublished(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
+    def test_one_of_four_succeeded_is_partial_not_published(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        _insert_succeeded_intent(db_path, intent_id="pi_1", channel_id="channel_a", episode_id="ep_bundle", deliverable_id="main_episode")
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
+    def test_two_of_four_succeeded_is_partial_not_published(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        _insert_succeeded_intent(db_path, intent_id="pi_1", channel_id="channel_a", episode_id="ep_bundle", deliverable_id="main_episode")
+        _insert_succeeded_intent(db_path, intent_id="pi_2", channel_id="channel_a", episode_id="ep_bundle", deliverable_id="short_001")
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
+    def test_three_of_four_succeeded_is_partial_not_published(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        for i, deliverable_id in enumerate(["main_episode", "short_001", "short_002"]):
+            _insert_succeeded_intent(db_path, intent_id=f"pi_{i}", channel_id="channel_a", episode_id="ep_bundle", deliverable_id=deliverable_id)
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
+    def test_all_four_succeeded_marks_bundle_fully_published(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        for i, deliverable_id in enumerate(["main_episode", "short_001", "short_002", "short_003"]):
+            _insert_succeeded_intent(db_path, intent_id=f"pi_{i}", channel_id="channel_a", episode_id="ep_bundle", deliverable_id=deliverable_id)
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is True
+
+    def test_failed_or_ambiguous_deliverables_do_not_count(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO publication_intents
+                    (publication_intent_id, channel_id, episode_id, deliverable_id, platform, status, created_at, updated_at)
+                VALUES ('pi_failed', 'channel_a', 'ep_bundle', 'short_001', 'youtube', 'failed_closed', ?, ?)
+                """,
+                (_now_iso(), _now_iso()),
+            )
+            conn.execute(
+                """
+                INSERT INTO publication_intents
+                    (publication_intent_id, channel_id, episode_id, deliverable_id, platform, status, created_at, updated_at)
+                VALUES ('pi_open', 'channel_a', 'ep_bundle', 'short_002', 'youtube', 'open', ?, ?)
+                """,
+                (_now_iso(), _now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        for deliverable_id in ["main_episode", "short_003"]:
+            _insert_succeeded_intent(db_path, intent_id=f"pi_ok_{deliverable_id}", channel_id="channel_a", episode_id="ep_bundle", deliverable_id=deliverable_id)
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
+    def test_duplicate_succeeded_intent_rows_do_not_inflate_completeness(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        # Two duplicate 'succeeded' rows for the SAME deliverable_id --
+        # must not be mistaken for two distinct deliverables completing.
+        _insert_succeeded_intent(db_path, intent_id="pi_dup_1", channel_id="channel_a", episode_id="ep_bundle", deliverable_id="main_episode")
+        _insert_succeeded_intent(db_path, intent_id="pi_dup_2", channel_id="channel_a", episode_id="ep_bundle", deliverable_id="main_episode")
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
+    def test_another_channels_intents_never_count_even_all_four(self, db_path, assets_root):
+        _seed_complete_bundle_with_shorts(db_path, assets_root, "ep_bundle", channel_id="channel_a")
+        for i, deliverable_id in enumerate(["main_episode", "short_001", "short_002", "short_003"]):
+            _insert_succeeded_intent(db_path, intent_id=f"pi_wrong_{i}", channel_id="channel_b", episode_id="ep_bundle", deliverable_id=deliverable_id)
+        items = gather_channel_demand_items(
+            CHANNEL_A, item_ids=["ep_bundle"], current_cycle_item_ids=frozenset(),
+            db_path=db_path, assets_root=assets_root,
+        )
+        assert items[0].already_published is False
+
+
+# ---------------------------------------------------------------------------
 # End-to-end cross-channel isolation via run_worker.py's real Step 0 wiring
 # ---------------------------------------------------------------------------
 

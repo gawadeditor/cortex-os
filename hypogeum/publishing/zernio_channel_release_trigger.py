@@ -6,11 +6,13 @@ channel's newly-completed, publish-ready bundles actually get submitted —
 without ever re-submitting a bundle that already succeeded, across any
 number of repeated polls or a worker restart.
 
-NOT wired into run_worker.py's automatic loop — same deliberate boundary
-hypogeum.publishing.zernio_release_flow already documents for itself.
-This module is the next composable layer up; wiring it into an automatic
-trigger point (which iteration, at what cadence) is a distinct,
-separately-authorized operational decision this module does not make.
+Wired into run_worker.py's automatic loop as a new, explicitly-gated step
+(run_worker.py::_process_channel_publishing(), called from
+run_iteration() only when Config.AUTO_ZERNIO_PUBLISHING_ENABLED is set —
+defaults off) — see that function's own docstring for the exact seam and
+its channel-level fail-closed/exception-isolation contract. This module
+itself still makes no automatic-trigger-cadence decision beyond "the
+caller decides when to call me"; run_worker.py owns the cadence.
 
 Idempotency, by construction (no new state of its own):
     1. Only items with hypogeum.buffer.ChannelDemandItem.already_published
@@ -40,7 +42,15 @@ Deliverable file paths are resolved by the same on-disk naming convention
 hypogeum.publishing.readiness and hypogeum.agents.production_output_gate
 already use (main_{episode_id}.mp4, short_{i}_{episode_id}.mp4) — this
 convention is the shared Assembly Agent's own output shape, not
-Hypogeum-specific.
+Hypogeum-specific. Deliverable_id (the ledger identity — staging attempt,
+publication_intent, receipt) is a SEPARATE concern from file naming:
+'main_episode' for the long-form, 'short_<short_id>' for each Short —
+matching hypogeum.agents.publishing_agent._deliverable_id_for()'s own,
+already-established, channel-agnostic convention exactly (never a new
+scheme invented by this module) — see _resolve_short_deliverable_id()'s
+own docstring for the one narrow, generic fallback it applies when a
+render package's own short_id is missing or still a generation-time
+placeholder.
 
 Public API:
     ReadyBundle
@@ -62,6 +72,7 @@ from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Sequence
 
 from hypogeum.buffer import DeliverableBundleDefinition, gather_channel_demand_items, resolve_complete_item_ids_for_channel
+from hypogeum.publishing.deliverable_ids import MAIN_EPISODE_DELIVERABLE_ID, resolve_short_deliverable_id
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
 from hypogeum.publishing.readiness import MetadataOverride
@@ -87,7 +98,12 @@ def build_publish_package_from_episode_dir(
     deliverable-file convention — never invents a file that isn't there;
     hypogeum.publishing.readiness's own checks are what actually verify
     each file exists and is non-empty before any staging call is allowed
-    to proceed.
+    to proceed. Physical file paths are always resolved by 0-indexed
+    position (short_{i}_{episode_id}.mp4, matching Assembly Agent's own
+    output convention); deliverable_id (the ledger identity, independent
+    of file naming) is resolved by hypogeum.publishing.deliverable_ids —
+    the SAME shared resolver hypogeum.buffer uses to determine bundle
+    completeness, so the two can never disagree on identity.
     """
     episode_dir = Path(assets_root) / "episodes" / episode_id
     render_path = episode_dir / f"final_render_package_{episode_id}.json"
@@ -97,23 +113,23 @@ def build_publish_package_from_episode_dir(
             final_render_package = json.loads(render_path.read_text(encoding="utf-8"))
         except Exception:
             final_render_package = {}
-    n_shorts = len((final_render_package or {}).get("shorts_renders", []) or [])
+    shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
 
     main_path = episode_dir / f"main_{episode_id}.mp4"
     return PublishPackage(
         channel_id=channel_id, episode_id=episode_id, bundle_id=bundle_id,
         main_episode=DeliverableFile(
-            deliverable_id="main_episode", local_path=main_path, mime_type="video/mp4",
+            deliverable_id=MAIN_EPISODE_DELIVERABLE_ID, local_path=main_path, mime_type="video/mp4",
             media_type="video", filename=main_path.name,
         ),
         shorts=[
             DeliverableFile(
-                deliverable_id=f"short_{i}",
+                deliverable_id=resolve_short_deliverable_id(shorts_renders[i], i),
                 local_path=episode_dir / f"short_{i}_{episode_id}.mp4",
                 mime_type="video/mp4", media_type="video",
                 filename=f"short_{i}_{episode_id}.mp4",
             )
-            for i in range(n_shorts)
+            for i in range(len(shorts_renders))
         ],
     )
 
@@ -128,6 +144,13 @@ def _resolve_target_platforms(channel_id: str, db_path: Optional[Path]) -> List[
     except RuntimeError:
         return []
     if profile is None:
+        return []
+    if not profile.publishing_enabled:
+        # Existing, generic ChannelOperationsProfile field -- the one
+        # already-established per-channel "autonomous publishing wanted
+        # right now" switch. Respecting it here means a channel can be
+        # taken out of autonomous publishing without touching Factory Core
+        # or run_worker.py at all.
         return []
     return sorted(p for p, enabled in (profile.enabled_platforms or {}).items() if enabled)
 
@@ -188,6 +211,15 @@ def process_channel_ready_bundles(
                 assets_root=assets_root, db_path=db_path,
                 metadata_override=metadata_override_by_item.get(item.item_id),
                 publish_now=publish_now, logical_alias=logical_alias, provider_id=provider_id,
+                # Autonomous path: never silently fall back to the
+                # channel's single legacy schedule slot -- every required
+                # deliverable must have its own explicit
+                # deliverable_schedule_policy entry, or this blocks closed
+                # before any staging/provider call. See
+                # compile_schedule_plan_from_channel_package()'s own
+                # docstring for the manual-caller-only fallback this
+                # deliberately disables here.
+                require_explicit_schedule_policy=True,
                 media_staging_provider=media_staging_provider, publishing_provider=publishing_provider,
             )
             results.append(ReadyBundle(item_id=item.item_id, platform=platform, result=result))

@@ -23,11 +23,25 @@ else (no episode-wide research, no other Shorts' content) -- so a title
 cannot reference a fact, name, date, or claim that Short does not already
 state itself.
 
+2026-08-22 addition: generate_shorts_captions() is the sibling function for
+the OTHER historically-empty field -- the social-platform publication
+caption/content sent through Zernio's top-level `content` field (distinct
+from burned-in video-pixel captions, owned by hypogeum.agents.video_renderer,
+and distinct from the YouTube title generate_shorts_titles() already
+produces). Fixes the same class of defect this module's docstring above
+describes for titles: ep_f3619022's 3 Short posts had content="" (0 chars,
+"No content" in the Zernio UI) with no mechanism anywhere in the pipeline
+that ever attempted to fill it. Same grounding discipline: only that
+Short's own narration_beats/text_overlays are given to the model.
+
 Public API:
     DEFAULT_EDITORIAL_RULES
+    DEFAULT_CAPTION_RULES
     ShortsMetadataError
     generate_shorts_titles(shorts_scripts, *, config, episode_id,
         channel_id=None, editorial_rules=None, llm_call=None) -> list[dict]
+    generate_shorts_captions(shorts_scripts, *, config, episode_id,
+        channel_id=None, caption_rules=None, llm_call=None) -> list[dict]
 """
 
 from __future__ import annotations
@@ -50,6 +64,15 @@ DEFAULT_EDITORIAL_RULES = {
     "max_length": 80,
     "tone": "accurate, curiosity-driven, no fabrication, no clickbait exaggeration",
     "forbidden_patterns": ["Part 1", "Part 2", "Part 3", "#"],
+}
+
+
+DEFAULT_CAPTION_RULES = {
+    "min_length": 20,
+    "preferred_max_length": 300,
+    "max_length": 2200,  # matches every verified Zernio platform contract's caption_field limit
+    "tone": "accurate, curiosity-driven, no fabrication, no clickbait exaggeration, no hashtag spam",
+    "forbidden_patterns": ["Part 1", "Part 2", "Part 3"],
 }
 
 
@@ -80,6 +103,31 @@ Never output a title equal to its own short_id.
 Return ONLY a JSON object of this exact shape, one entry per input Short, using
 each Short's own short_id unchanged:
 {{"titles": [{{"short_id": "...", "title": "..."}}, ...]}}"""
+
+
+_CAPTION_SYSTEM_PROMPT = """You are an editorial assistant writing social-media
+publication captions for short-form video posts (YouTube Shorts, TikTok,
+Instagram Reels, Facebook Reels).
+
+You will receive a JSON object with a "shorts" list. Each entry has a short_id
+and its own narration_beats (the exact spoken script) and text_overlays (the
+exact on-screen text already used in that Short). These are the ONLY facts you
+may use -- do not introduce any fact, name, date, or claim that is not already
+present in that Short's own narration_beats or text_overlays.
+
+For EACH Short, write exactly ONE caption (the text shown alongside the post,
+never burned into the video itself) following these rules:
+{rules}
+
+The caption should read as a real social post: it may pose the hook/question
+the Short opens with, or summarize its core claim, but it must never simply
+repeat the on-screen text_overlays verbatim as a bullet list. Captions must be
+distinct from each other and from any other Short's caption. Never output a
+caption equal to its own short_id, and never output an empty caption.
+
+Return ONLY a JSON object of this exact shape, one entry per input Short, using
+each Short's own short_id unchanged:
+{{"captions": [{{"short_id": "...", "caption": "..."}}, ...]}}"""
 
 
 def _default_llm_call(
@@ -207,3 +255,128 @@ def generate_shorts_titles(
         raise ShortsMetadataError("model returned two or more identical titles across distinct Shorts")
 
     return [{"short_id": sid, "title": result_by_id[sid]} for sid in requested_ids]
+
+
+def _default_caption_llm_call(
+    system_prompt: str,
+    input_package: dict,
+    *,
+    config: Config,
+    episode_id: str,
+    channel_id: Optional[str],
+) -> dict:
+    from hypogeum.openrouter import call_claude  # noqa: PLC0415
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(input_package, ensure_ascii=False)},
+    ]
+    result = call_claude(
+        model_slug=getattr(config, "SHORTS_METADATA_MODEL_SLUG", "anthropic/claude-sonnet-4.6"),
+        messages=messages, max_tokens=2048, config=config,
+        episode_id=episode_id, agent=_AGENT_NAME, channel_id=channel_id,
+    )
+    raw = result.content.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw)
+
+
+def generate_shorts_captions(
+    shorts_scripts: List[dict],
+    *,
+    config: Config,
+    episode_id: str,
+    channel_id: Optional[str] = None,
+    caption_rules: Optional[dict] = None,
+    llm_call: Optional[Callable[..., dict]] = None,
+) -> List[dict]:
+    """
+    Returns [{"short_id": ..., "caption": ...}, ...] -- exactly one entry
+    per input Short, covering every short_id in `shorts_scripts`.
+
+    Sibling of generate_shorts_titles() (see this module's own docstring
+    for the 2026-08-22 context) -- same grounding discipline, same
+    fail-closed contract, same injectable llm_call for tests. Produces the
+    social-platform PUBLICATION caption (Zernio's top-level `content`
+    field), never burned-in video-pixel captions (hypogeum.agents.
+    video_renderer's concern) and never the YouTube title
+    (generate_shorts_titles()'s own concern) -- these three are
+    independently generated and independently required.
+
+    Raises ShortsMetadataError (never falls back to a placeholder, an
+    empty string, or a fabricated value) under the same conditions
+    generate_shorts_titles() does, adapted to captions: shorts_scripts
+    empty or with a duplicate/missing short_id, the model call raises, the
+    response is not valid JSON or lacks a 'captions' list, the response is
+    missing an entry for any requested short_id, a returned caption is
+    empty, a returned caption equals its own short_id, or a returned
+    caption violates caption_rules' length bounds.
+    """
+    log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
+    if not shorts_scripts:
+        raise ShortsMetadataError("no shorts_scripts supplied -- nothing to caption")
+
+    rules = {**DEFAULT_CAPTION_RULES, **(caption_rules or {})}
+
+    input_shorts = [
+        {
+            "short_id": s.get("short_id", ""),
+            "narration_beats": [
+                (b.get("text") or b.get("narration_text") or "") for b in s.get("narration_beats", [])
+            ],
+            "text_overlays": [ov.get("text", "") for ov in s.get("text_overlays", [])],
+        }
+        for s in shorts_scripts
+    ]
+    requested_ids = [s["short_id"] for s in input_shorts]
+    if any(not sid for sid in requested_ids):
+        raise ShortsMetadataError("shorts_scripts contains an entry with a missing/empty short_id")
+    if len(set(requested_ids)) != len(requested_ids):
+        raise ShortsMetadataError(f"shorts_scripts contains duplicate short_id(s): {requested_ids}")
+
+    call = llm_call or _default_caption_llm_call
+    try:
+        response = call(
+            _CAPTION_SYSTEM_PROMPT.format(rules=json.dumps(rules)),
+            {"shorts": input_shorts},
+            config=config, episode_id=episode_id, channel_id=channel_id,
+        )
+    except Exception as exc:
+        log.error("shorts_caption_generation_failed", error=str(exc))
+        raise ShortsMetadataError(f"shorts caption generation failed: {exc}") from exc
+
+    captions = response.get("captions") if isinstance(response, dict) else None
+    if not isinstance(captions, list):
+        raise ShortsMetadataError("model response did not contain a 'captions' list")
+
+    result_by_id: dict = {}
+    for entry in captions:
+        if not isinstance(entry, dict):
+            continue
+        sid = (entry.get("short_id") or "").strip()
+        caption = (entry.get("caption") or "").strip()
+        if sid:
+            result_by_id[sid] = caption
+
+    missing = [sid for sid in requested_ids if sid not in result_by_id]
+    if missing:
+        raise ShortsMetadataError(f"model response missing caption(s) for short_id(s): {missing}")
+
+    min_len = rules.get("min_length", 0)
+    max_len = rules.get("max_length", 10_000)
+    for sid in requested_ids:
+        caption = result_by_id[sid]
+        if not caption:
+            raise ShortsMetadataError(f"model returned an empty caption for short_id={sid!r}")
+        if caption.strip().lower() == sid.strip().lower():
+            raise ShortsMetadataError(f"model returned a placeholder caption (equal to short_id) for short_id={sid!r}")
+        if not (min_len <= len(caption) <= max_len):
+            raise ShortsMetadataError(
+                f"model returned a caption of length {len(caption)} for short_id={sid!r}, "
+                f"outside the allowed [{min_len}, {max_len}] range"
+            )
+
+    return [{"short_id": sid, "caption": result_by_id[sid]} for sid in requested_ids]

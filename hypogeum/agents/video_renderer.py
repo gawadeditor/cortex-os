@@ -95,6 +95,74 @@ class InsufficientCoverageError(Exception):
     """
 
 
+class SubtitleFilterUnavailableError(Exception):
+    """
+    Raised when a caller supplied srt_path (burned-in captions were
+    required, not optional) but the resolved ffmpeg binary's build has no
+    'subtitles'/'ass' filter (no libass) to burn them with.
+
+    2026-08-22 incident this fixes: ep_f3619022's 3 Shorts were rendered
+    successfully (exit 0, valid playable output) with zero burned-in
+    caption pixels and no error anywhere in the pipeline — the caption
+    .srt/.ass assets existed and were correctly timed, but the renderer's
+    ffmpeg build silently could not have burned them in even if the
+    filtergraph reached it. See docs/operations/audits/
+    EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md.
+    Never catch this and fall back to a caption-less render — per this
+    codebase's fail-closed convention, an environment that cannot fulfill
+    a required capability must block, not degrade silently.
+    """
+
+
+class CaptionBurnInError(Exception):
+    """
+    Raised when srt_path was supplied (captions were required for this
+    Short) but _build_caption_ass() failed to produce a usable .ass file.
+    Never silently proceed to render without captions in this case.
+    """
+
+
+def _probe_subtitle_filter_available(ffmpeg_binary: str) -> bool:
+    """
+    Read-only capability probe: does `ffmpeg_binary -filters` list both the
+    'ass' and 'subtitles' filters (both come from the same libass build
+    flag, but checking both is cheap and avoids depending on ffmpeg
+    exposing exactly one alias)? Not cached — called at most a handful of
+    times per episode (once per Short), and caching across the process
+    lifetime would make it untestable against multiple simulated ffmpeg
+    binaries/capability states within the same test run.
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg_binary, "-filters"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    out = result.stdout
+    return (" subtitles " in out or "subtitles " in out) and (" ass " in out or "ass " in out)
+
+
+def assert_subtitle_filter_available(ffmpeg_binary: str) -> None:
+    """
+    Fail closed before ever attempting a caption burn-in: raises
+    SubtitleFilterUnavailableError if `ffmpeg_binary` lacks libass. Called
+    by _build_ffmpeg_concat_command() the moment a real srt_path is
+    supplied — never after the fact, never caught-and-ignored by a caller
+    that still proceeds to render without captions.
+    """
+    if not _probe_subtitle_filter_available(ffmpeg_binary):
+        raise SubtitleFilterUnavailableError(
+            f"ffmpeg binary {ffmpeg_binary!r} has no 'subtitles'/'ass' filter "
+            f"(no libass in its build) -- burned-in captions were required for "
+            f"this render and cannot be produced by this ffmpeg build. Set "
+            f"Config.FFMPEG_BINARY to a libass-enabled build (e.g. Homebrew's "
+            f"ffmpeg-full keg: /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg)."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Internal constants
 # ---------------------------------------------------------------------------
@@ -153,6 +221,7 @@ def render_episode(
     end_page_duration: float = 20.0,
     music_segments: Optional[List[dict]] = None,
     short_srt_paths: Optional[Dict[str, Optional[Path]]] = None,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> dict:
     """
     Execute all ffmpeg renders for one episode and return a render_output_manifest.
@@ -251,6 +320,7 @@ def render_episode(
             timeout=ffmpeg_timeout,
             log=log,
             music_segments=main_music_segments,
+            ffmpeg_binary=ffmpeg_binary,
         )
     if not main_timeline:
         pass
@@ -272,6 +342,7 @@ def render_episode(
             music_track=end_page_music_track,
             body_duration=body_duration,
             music_segment_start_seconds=end_page_music_segment_start,
+            ffmpeg_binary=ffmpeg_binary,
         )
         if not end_page_ok:
             # Non-fatal: log the failure but keep the body render as-is.
@@ -295,6 +366,7 @@ def render_episode(
             episode_id=episode_id,
             timeout=ffmpeg_timeout,
             log=log,
+            ffmpeg_binary=ffmpeg_binary,
         )
 
     # --- Shorts renders ---
@@ -317,6 +389,7 @@ def render_episode(
             timeout=ffmpeg_timeout,
             log=log,
             srt_path=(short_srt_paths or {}).get(short_id),
+            ffmpeg_binary=ffmpeg_binary,
         )
         if not (short_success and short_output_path.exists() and short_output_path.stat().st_size > 0):
             if render_status != "failed":
@@ -392,6 +465,7 @@ def _render_main_episode(
     timeout: int,
     log,
     music_segments: Optional[List[dict]] = None,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> bool:
     """
     Render main episode (16:9) using ffmpeg.
@@ -437,6 +511,7 @@ def _render_main_episode(
         episode_id=episode_id,
         music_tail_seconds=_MUSIC_TAIL_SECONDS,
         music_segments=music_segments,
+        ffmpeg_binary=ffmpeg_binary,
     )
     ok = _run_ffmpeg(
         cmd=cmd,
@@ -489,6 +564,7 @@ def _render_main_episode(
         episode_id=episode_id,
         timeout=timeout,
         log=log,
+        ffmpeg_binary=ffmpeg_binary,
     )
     if not trimmed:
         # Trim failed; fall back to raw (may be overlong)
@@ -577,6 +653,7 @@ def _run_blackdetect_qa(
     episode_id: str,
     timeout: int,
     log,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> None:
     """
     Post-render blackdetect QA gate.
@@ -588,7 +665,7 @@ def _run_blackdetect_qa(
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-i", str(output_path),
+                ffmpeg_binary, "-i", str(output_path),
                 "-vf", "blackdetect=d=0.5:pix_th=0.10",
                 "-f", "null", "-",
             ],
@@ -619,7 +696,7 @@ def _run_blackdetect_qa(
         )
 
 
-def _probe_music_usable_duration(music_path: Path) -> float:
+def _probe_music_usable_duration(music_path: Path, ffmpeg_binary: str = "ffmpeg") -> float:
     """
     Return the usable looping duration of a music track — i.e., the duration
     BEFORE any end-of-track fade-out silence.
@@ -636,7 +713,7 @@ def _probe_music_usable_duration(music_path: Path) -> float:
         return 0.0
     try:
         r = subprocess.run(
-            ["ffmpeg", "-i", str(music_path),
+            [ffmpeg_binary, "-i", str(music_path),
              "-af", "silencedetect=noise=-50dB:d=0.5",
              "-f", "null", "-"],
             capture_output=True, text=True, timeout=60,
@@ -674,6 +751,7 @@ def _trim_video_to_duration(
     timeout: int,
     log,
     output_path: Optional[Path] = None,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> bool:
     """
     Trim a rendered video to target_duration seconds via re-encode with -t flag.
@@ -704,7 +782,7 @@ def _trim_video_to_duration(
         # seeing frames beyond the target and flushing them after the output -t cutoff.
         # Output-side -t is a redundant second guard.
         cmd = [
-            "ffmpeg", "-y",
+            ffmpeg_binary, "-y",
             "-t", f"{target_duration:.6f}",   # INPUT: stop reading input at target
             "-i", str(input_path),
             "-t", f"{target_duration:.6f}",   # OUTPUT: second guard
@@ -775,6 +853,7 @@ def _render_short(
     timeout: int,
     log,
     srt_path: Optional[Path] = None,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> bool:
     """
     Render one Short (9:16) using ffmpeg.
@@ -802,6 +881,7 @@ def _render_short(
         episode_id=episode_id,
         is_short=True,
         srt_path=srt_path,
+        ffmpeg_binary=ffmpeg_binary,
     )
     return _run_ffmpeg(
         cmd=cmd,
@@ -1050,6 +1130,7 @@ def _build_ffmpeg_concat_command(
     music_tail_seconds: float = 0.0,
     music_segments: Optional[List[dict]] = None,
     srt_path: Optional[Path] = None,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> List[str]:
     """
     Build an ffmpeg command list for concatenating scenes with audio.
@@ -1261,12 +1342,25 @@ def _build_ffmpeg_concat_command(
         video_map = "0:v"
 
     if srt_path is not None and srt_path.exists():
+        # Fail closed rather than silently produce a caption-less render: a
+        # caller that supplied srt_path explicitly wants burned-in captions,
+        # so an ffmpeg build without the subtitles/ass filter (no libass)
+        # must never be allowed to quietly drop them -- see
+        # assert_subtitle_filter_available()'s own docstring for the
+        # 2026-08-22 incident this fixes (ep_f3619022's 3 Shorts rendered
+        # successfully with zero burned-in captions and no error anywhere).
+        assert_subtitle_filter_available(ffmpeg_binary)
         ass_path = srt_path.with_suffix(".ass")
-        if _build_caption_ass(srt_path, resolution, ass_path):
-            filter_parts.append(
-                f"{video_map}{_build_subtitles_filter(ass_path)}[vsub]"
+        if not _build_caption_ass(srt_path, resolution, ass_path):
+            raise CaptionBurnInError(
+                f"srt_path={srt_path} was supplied but _build_caption_ass() failed to "
+                f"produce a valid .ass file at {ass_path} -- captions were required, "
+                f"not optional, for this render"
             )
-            video_map = "[vsub]"
+        filter_parts.append(
+            f"{video_map}{_build_subtitles_filter(ass_path)}[vsub]"
+        )
+        video_map = "[vsub]"
 
     # Audio inputs
     # Count actual -i arguments (not len//2 — lavfi adds "-f lavfi -i" = 4 items for 1 input)
@@ -1419,7 +1513,7 @@ def _build_ffmpeg_concat_command(
         )
         audio_map = "[aout_final]"
 
-    cmd: List[str] = ["ffmpeg", "-y"]
+    cmd: List[str] = [ffmpeg_binary, "-y"]
     cmd += inputs
 
     if filter_parts:

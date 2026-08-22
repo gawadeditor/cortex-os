@@ -88,7 +88,7 @@ import json as _json
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone as _dt_timezone
-from typing import Optional, Protocol
+from typing import Dict, List, Optional, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from hypogeum.credential_manager import list_secret_profiles, resolve_credential
@@ -99,6 +99,7 @@ from hypogeum.publishing.provider_repository import (
     resolve_active_binding,
 )
 from hypogeum.publishing.submission_ledger import (
+    AttemptGuard,
     guard_and_prepare_attempt,
     record_ambiguous,
     record_definitive_failure,
@@ -502,6 +503,62 @@ def _build_publish_body(
     return body
 
 
+def _build_multi_platform_publish_body(
+    *, platform_entries: List[dict],
+    media: list,
+    scheduled_for: Optional[datetime],
+    timezone_name: Optional[str], publish_now: bool, is_draft: bool,
+    title: Optional[str] = None, content: Optional[str] = None,
+    platform_root_settings: Optional[Dict[str, dict]] = None,
+) -> dict:
+    """
+    2026-08-22 fix (Zernio aggregation model): one deliverable -> one Zernio
+    post whose `platforms[]` contains one entry per enabled destination
+    account, never one post per platform. `_build_publish_body()` above
+    stays as the single-platform primitive (still correct, still used
+    directly by anything that only ever targets one platform); this
+    function is the multi-entry sibling ZernioProvider.publish_multi_platform()
+    calls.
+
+    platform_entries: list of already-built platforms[] dicts, one per
+    destination -- each must already contain "platform"/"accountId" and
+    may contain "customMedia"/"scheduledFor"/settings keys
+    (tiktokSettings/facebookSettings belong at the request ROOT per the
+    verified contract, not nested in the platform entry -- see
+    _build_publish_body()'s own docstring; this function accepts an
+    optional top-level settings map merged in by the caller via
+    platform_root_settings, kept separate from platform_entries on
+    purpose so a caller can never accidentally nest a root-level key
+    inside one platform's entry).
+    """
+    body: dict = {"platforms": list(platform_entries)}
+    if media:
+        body["mediaItems"] = [_serialize_media_item(m) for m in media]
+    if title:
+        body["title"] = title
+    if content:
+        body["content"] = content
+    if scheduled_for is not None:
+        body["scheduledFor"] = _serialize_datetime_utc(scheduled_for)
+    if timezone_name is not None:
+        body["timezone"] = timezone_name
+    if publish_now:
+        body["publishNow"] = True
+    if is_draft:
+        body["isDraft"] = True
+    # tiktokSettings/facebookSettings live at the request ROOT (verified
+    # contract), keyed by the settings dict's own name -- e.g.
+    # {"tiktok": {...}} -> body["tiktokSettings"] = {...}. Never invents a
+    # key for a platform whose contract doesn't define a root settings key.
+    for plat, settings in (platform_root_settings or {}).items():
+        if not settings:
+            continue
+        settings_key = {"tiktok": "tiktokSettings", "facebook": "facebookSettings"}.get(plat)
+        if settings_key:
+            body[settings_key] = settings
+    return body
+
+
 def _parse_post_response(response_body: dict, *, platform: str) -> dict:
     """
     Parse a `Post` object (the value at `body["post"]` for a 201, or
@@ -771,6 +828,265 @@ class ZernioProvider:
             attempt_id=attempt_id, guard=guard, db_path=db_path,
             provider_account_id=account["provider_account_id"],
         )
+
+    def publish_multi_platform(
+        self,
+        *,
+        platforms: List[str],
+        deliverable_type: str,
+        episode_id: str,
+        **kwargs,
+    ) -> Dict[str, dict]:
+        """
+        2026-08-22 fix (Zernio aggregation model): submit ONE deliverable to
+        every requested platform via a SINGLE Zernio post (one POST call,
+        `platforms[]` containing one entry per destination account) instead
+        of N separate posts -- one Short is one Zernio post with
+        YouTube+TikTok+Instagram+Facebook all selected on it, matching what
+        the Zernio scheduled-post editor itself represents as one post. See
+        docs/operations/audits/EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md
+        for the incident this closes (each Short was a separate, YouTube-
+        only post with the other 3 platforms never selected at all).
+
+        Local idempotency stays per-platform: this guards EVERY requested
+        platform with the SAME guard_and_prepare_attempt() publish() uses
+        (keyed by (channel_id, episode_id, deliverable_id, platform,
+        provider_id)) BEFORE making any external call, so a partial local
+        history is respected exactly as publish() respects it. What changes
+        is that every platform whose guard says "proceed" for THIS call
+        shares ONE real network request and, on success, ONE
+        provider_publication_id recorded across each of their own
+        publishing_attempts/publishing_receipts rows -- never a separate
+        provider post per platform.
+
+        Retry semantics: if one or more of the requested platforms already
+        has a successful receipt carrying a provider_publication_id (a
+        prior partial success), the platforms still needing submission are
+        added to that SAME existing post via PUT (see update_post()) rather
+        than creating a second, duplicate post -- "partial per-platform
+        failure remains observable and retryable without duplicating
+        successful destinations."
+
+        Required/optional kwargs: identical to publish() (channel_id,
+        deliverable_id, media/platform_media, scheduled_for, timezone_name,
+        publish_now, is_draft, title, content, db_path, logical_alias) plus:
+            platform_settings: Optional[Dict[str, dict]] -- {platform:
+                settings_dict}, e.g. {"tiktok": {"privacy_level": ...}}.
+                Replaces publish()'s single flat platform_settings (which
+                only ever served ONE platform per call).
+
+        Returns {platform: result_dict}, each result_dict matching
+        publish()'s own single-platform return shape -- existing callers
+        that key results by platform need no changes.
+        """
+        if not platforms:
+            raise ValueError("publish_multi_platform() requires at least one platform")
+        seen = set()
+        deduped_platforms: List[str] = []
+        for p in platforms:
+            if p not in seen:
+                seen.add(p)
+                deduped_platforms.append(p)
+        platforms = deduped_platforms
+        for p in platforms:
+            if not self.supports_platform(p):
+                raise UnsupportedPlatformError(f"'zernio' does not support platform {p!r}")
+
+        channel_id = kwargs.get("channel_id")
+        deliverable_id = kwargs.get("deliverable_id")
+        db_path = kwargs.get("db_path")
+        logical_alias = kwargs.get("logical_alias", "default")
+        if not channel_id:
+            raise ValueError("ZernioProvider.publish_multi_platform() requires channel_id")
+        if not deliverable_id:
+            raise ValueError("ZernioProvider.publish_multi_platform() requires deliverable_id")
+
+        media = list(kwargs.get("media") or [])
+        platform_media = list(kwargs.get("platform_media") or [])
+        scheduled_for = kwargs.get("scheduled_for")
+        platform_scheduled_for = kwargs.get("platform_scheduled_for")
+        timezone_name = kwargs.get("timezone_name")
+        publish_now = bool(kwargs.get("publish_now", False))
+        is_draft = bool(kwargs.get("is_draft", False))
+        title = kwargs.get("title")
+        content = kwargs.get("content")
+        platform_settings_by_platform: dict = kwargs.get("platform_settings") or {}
+
+        if not media and not platform_media:
+            raise ZernioMediaRequiredError(
+                "ZernioProvider.publish_multi_platform() requires at least one MediaReference "
+                "(media= or platform_media=) -- every Cortex deliverable published "
+                "through this adapter is video content"
+            )
+        for i, m in enumerate(media):
+            _validate_media_reference(m, field_label=f"media[{i}]")
+        for i, m in enumerate(platform_media):
+            _validate_media_reference(m, field_label=f"platform_media[{i}]")
+        _validate_timezone_name(timezone_name)
+        _validate_schedule(
+            scheduled_for=scheduled_for, platform_scheduled_for=platform_scheduled_for,
+            publish_now=publish_now, is_draft=is_draft,
+        )
+
+        # Resolve every platform's approved binding/account BEFORE any
+        # guard or external call -- a missing/disabled binding for ANY
+        # requested platform fails the whole call closed, never a partial
+        # silent subset.
+        accounts: Dict[str, dict] = {}
+        for p in platforms:
+            _binding, account = self._resolve_approved_binding(
+                channel_id=channel_id, platform=p, logical_alias=logical_alias, db_path=db_path,
+            )
+            accounts[p] = account
+
+        credential = _resolve_zernio_credential(db_path)
+        if credential is None:
+            raise ZernioCredentialNotFoundError(
+                "no active provider='zernio' secret profile found in Credential Manager"
+            )
+
+        # Guard every platform BEFORE any external call -- identical
+        # semantics to publish(), just N times, all still before the
+        # network boundary.
+        guards: Dict[str, AttemptGuard] = {}
+        for p in platforms:
+            guards[p] = guard_and_prepare_attempt(
+                db_path, channel_id=channel_id, episode_id=episode_id,
+                deliverable_id=deliverable_id, platform=p, provider_id=self.provider_id,
+            )
+
+        blocked = {p: g for p, g in guards.items() if g.action == "blocked"}
+        if blocked:
+            raise ZernioAmbiguousRetryBlockedError(
+                f"platforms requiring reconciliation before any new call: {sorted(blocked)} -- "
+                f"{next(iter(blocked.values())).reason}"
+            )
+
+        results: Dict[str, dict] = {}
+        already_succeeded: Dict[str, AttemptGuard] = {}
+        for p, g in guards.items():
+            if g.action == "use_existing":
+                already_succeeded[p] = g
+                receipt = g.existing_receipt or {}
+                results[p] = {
+                    "platform": p, "deliverable_type": deliverable_type,
+                    "status": "published" if g.existing_attempt_state == "succeeded" else "ambiguous",
+                    "platform_video_id": receipt.get("native_platform_content_id"),
+                    "provider_content_id": receipt.get("provider_publication_id"),
+                    "publication_intent_id": g.publication_intent_id,
+                    "attempt_id": g.attempt_id,
+                    "reused_existing_attempt": True,
+                }
+
+        to_submit = {p: g for p, g in guards.items() if g.action == "proceed"}
+        if not to_submit:
+            del credential
+            return results  # every requested platform already has a terminal result
+
+        # Retry case: one of the ALREADY-succeeded platforms carries a real
+        # provider_publication_id -- add the still-pending platforms to
+        # THAT SAME post via PUT rather than creating a second post.
+        existing_post_id = None
+        for g in already_succeeded.values():
+            ppid = (g.existing_receipt or {}).get("provider_publication_id")
+            if ppid:
+                existing_post_id = ppid
+                break
+
+        headers = {
+            "Authorization": f"Bearer {credential}",
+            "Content-Type": "application/json",
+        }
+        del credential
+
+        if existing_post_id is not None:
+            # PUT's documented `platforms` field is the same full array
+            # POST accepts -- treated as a full replacement (never
+            # confirmed as a merge by the audit), so the existing post's
+            # CURRENT platforms[] is fetched first and the new entries are
+            # appended to it, never sent as a bare partial list that could
+            # silently drop the already-succeeded platforms.
+            get_result = self.get_post(existing_post_id, db_path=db_path)
+            existing_post = get_result.get("post")
+            if not isinstance(existing_post, dict) or not isinstance(existing_post.get("platforms"), list):
+                for p, g in to_submit.items():
+                    record_ambiguous(
+                        db_path, g.attempt_id, error_category="malformed_response",
+                        error_message=f"could not GET existing post {existing_post_id!r} before "
+                                      f"appending platforms -- refusing to PUT a partial platforms[] array",
+                    )
+                    results[p] = self._ambiguous_result(p, deliverable_type, g)
+                return results
+            merged_platform_entries = list(existing_post["platforms"]) + [
+                self._build_platform_entry(p, accounts[p], platform_media, platform_scheduled_for)
+                for p in to_submit
+            ]
+            try:
+                response = self._transport.put(
+                    url=f"{_ZERNIO_POSTS_URL}/{existing_post_id}",
+                    headers=headers,
+                    json_body={"platforms": merged_platform_entries},
+                    timeout=_DEFAULT_TIMEOUT_SECONDS,
+                )
+            except ZernioTransportError as exc:
+                for p, g in to_submit.items():
+                    record_ambiguous(db_path, g.attempt_id, error_category="transport_error", error_message=str(exc))
+                    results[p] = self._ambiguous_result(p, deliverable_type, g)
+                return results
+        else:
+            platform_entries = [
+                self._build_platform_entry(p, accounts[p], platform_media, platform_scheduled_for)
+                for p in to_submit
+            ]
+            body = _build_multi_platform_publish_body(
+                platform_entries=platform_entries, media=media,
+                scheduled_for=scheduled_for, timezone_name=timezone_name,
+                publish_now=publish_now, is_draft=is_draft,
+                title=title, content=content,
+                platform_root_settings=platform_settings_by_platform,
+            )
+            try:
+                response = self._transport.post(
+                    url=_ZERNIO_POSTS_URL, headers=headers, json_body=body, timeout=_DEFAULT_TIMEOUT_SECONDS,
+                )
+            except ZernioTransportError as exc:
+                for p, g in to_submit.items():
+                    record_ambiguous(db_path, g.attempt_id, error_category="transport_error", error_message=str(exc))
+                    results[p] = self._ambiguous_result(p, deliverable_type, g)
+                return results
+
+        # NOTE (known gap, never guessed at): _handle_response() assumes the
+        # POST-documented 200/201 envelope shapes (existingPost/post). The
+        # PUT response envelope for this add-platforms retry path has not
+        # been independently confirmed against a live PUT call -- if it
+        # differs, this correctly falls through to "malformed_response" ->
+        # ambiguous (fail closed, never a false success), never a false
+        # positive. Verify live before relying on this specific retry path.
+        for p, g in to_submit.items():
+            results[p] = self._handle_response(
+                response, platform=p, deliverable_type=deliverable_type,
+                attempt_id=g.attempt_id, guard=g, db_path=db_path,
+                provider_account_id=accounts[p]["provider_account_id"],
+            )
+        return results
+
+    def _build_platform_entry(
+        self, platform: str, account: dict, platform_media: list,
+        platform_scheduled_for: Optional[datetime],
+    ) -> dict:
+        """platforms[] entry construction used by publish_multi_platform().
+        Mirrors _build_publish_body()'s own inline platform_entry shape
+        exactly (platform/accountId/customMedia/scheduledFor) -- kept as a
+        separate function here only because publish_multi_platform() needs
+        to build N of these per call while _build_publish_body() builds
+        exactly one; both must be changed together if the shape ever
+        changes."""
+        entry: dict = {"platform": platform, "accountId": account["external_account_id"]}
+        if platform_media:
+            entry["customMedia"] = [_serialize_media_item(m) for m in platform_media]
+        if platform_scheduled_for is not None:
+            entry["scheduledFor"] = _serialize_datetime_utc(platform_scheduled_for)
+        return entry
 
     # -- internals -----------------------------------------------------
 

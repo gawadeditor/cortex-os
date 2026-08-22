@@ -138,6 +138,27 @@ def _success_201(*, post_id="zpost_abc123", platform="youtube", platform_post_id
     )
 
 
+def _multi_post_object(*, post_id="zpost_multi", platforms=("youtube", "tiktok", "instagram", "facebook"), status="published"):
+    """A Post object whose platforms[] carries one entry per requested
+    platform -- the shape a real aggregated multi-platform post returns."""
+    return {
+        "_id": post_id,
+        "content": "test",
+        "status": status,
+        "platforms": [
+            _platform_target(platform=p, platform_post_id=f"native_{p}_xyz", status=status)
+            for p in platforms
+        ],
+    }
+
+
+def _multi_success_201(*, post_id="zpost_multi", platforms=("youtube", "tiktok", "instagram", "facebook")):
+    return ZernioTransportResponse(
+        status_code=201,
+        json_body={"message": "Post published successfully", "post": _multi_post_object(post_id=post_id, platforms=platforms)},
+    )
+
+
 def _idempotent_replay_200(*, post_id="zpost_abc123", platform="youtube", platform_post_id="native_yt_xyz789"):
     """Verified envelope: {..., existingPost: Post} (audit §6)."""
     return ZernioTransportResponse(
@@ -1098,3 +1119,161 @@ class TestGetPost:
         call = transport.calls[0]
         assert call["headers"]["Authorization"] == "Bearer sk_test_fake_credential_value_never_real"
         assert "sk_test_fake_credential_value_never_real" not in call["url"]
+
+
+# ===========================================================================
+# publish_multi_platform() -- Zernio aggregation model (2026-08-22 fix)
+# ===========================================================================
+
+_ALL_PLATFORMS = ("youtube", "tiktok", "instagram", "facebook")
+
+
+def _setup_all_platform_bindings(db_path, *, channel_id="test_channel"):
+    for p in _ALL_PLATFORMS:
+        _setup_approved_binding(db_path, channel_id=channel_id, platform=p, external_account_id=f"zernio_acct_{p}")
+    _setup_credential(db_path)
+
+
+def _publish_multi(provider, db_path, *, media=None, episode_id="ep_1", deliverable_id="short_001",
+                    platforms=_ALL_PLATFORMS, channel_id="test_channel", **kwargs):
+    if media is None:
+        media = [_video_media()]
+    return provider.publish_multi_platform(
+        platforms=list(platforms), deliverable_type="short", episode_id=episode_id,
+        channel_id=channel_id, deliverable_id=deliverable_id, db_path=db_path,
+        media=media, **kwargs,
+    )
+
+
+class TestPublishMultiPlatformSinglePost:
+    """
+    2026-08-22 fix: one deliverable targeting N platforms must produce
+    exactly ONE Zernio POST containing all N platform/account entries --
+    never one post per platform. See docs/operations/audits/
+    EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md.
+    """
+
+    def test_one_post_call_not_four(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201()])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(provider, db_path)
+        assert len(transport.calls) == 1
+
+    def test_request_contains_all_four_platform_account_entries(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201()])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(provider, db_path)
+
+        body = transport.calls[0]["json_body"]
+        assert len(body["platforms"]) == 4
+        sent_platforms = {p["platform"] for p in body["platforms"]}
+        assert sent_platforms == set(_ALL_PLATFORMS)
+        for entry in body["platforms"]:
+            assert entry["accountId"] == f"zernio_acct_{entry['platform']}"
+
+    def test_every_platform_result_carries_the_same_provider_post_id(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201(post_id="zpost_shared")])
+        provider = ZernioProvider(transport=transport)
+        results = _publish_multi(provider, db_path)
+
+        assert set(results.keys()) == set(_ALL_PLATFORMS)
+        for p in _ALL_PLATFORMS:
+            assert results[p]["provider_content_id"] == "zpost_shared"
+            assert results[p]["status"] == "published"
+
+    def test_every_local_intent_maps_to_the_shared_post_id_via_receipts(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201(post_id="zpost_shared")])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(provider, db_path)
+
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT publishing_attempts.platform AS platform, provider_publication_id "
+                "FROM publishing_receipts JOIN publishing_attempts USING (attempt_id) "
+                "WHERE publishing_attempts.episode_id=?",
+                ("ep_1",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 4
+        for row in rows:
+            assert row["provider_publication_id"] == "zpost_shared"
+
+    def test_rerun_after_success_does_not_create_a_duplicate_post(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201(post_id="zpost_shared")])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(provider, db_path)
+
+        # Second call: every platform already succeeded -- guard returns
+        # use_existing for all four, so publish_multi_platform() must never
+        # issue a second network call at all.
+        second_results = _publish_multi(provider, db_path)
+        assert len(transport.calls) == 1  # still just the one call from the first run
+        for p in _ALL_PLATFORMS:
+            assert second_results[p]["reused_existing_attempt"] is True
+            assert second_results[p]["provider_content_id"] == "zpost_shared"
+
+    def test_no_platforms_raises(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        provider = ZernioProvider(transport=FakeZernioTransport())
+        with pytest.raises(ValueError):
+            _publish_multi(provider, db_path, platforms=[])
+
+    def test_missing_binding_for_one_platform_fails_the_whole_call_closed(self, db_path):
+        # Only 3 of 4 platforms have an approved binding.
+        for p in ("youtube", "tiktok", "instagram"):
+            _setup_approved_binding(db_path, platform=p, external_account_id=f"zernio_acct_{p}")
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201()])
+        provider = ZernioProvider(transport=transport)
+        with pytest.raises(ZernioBindingNotFoundError):
+            _publish_multi(provider, db_path)
+        assert transport.calls == []  # never called -- resolved BEFORE any guard/network call
+
+
+class TestPublishMultiPlatformPartialFailureRetry:
+    """
+    'Partial per-platform failure remains observable and retryable without
+    duplicating successful destinations.'
+    """
+
+    def test_partial_success_then_retry_adds_missing_platforms_to_same_post_via_put(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        # First call: only youtube+tiktok succeed (simulated by only
+        # requesting those two platforms the first time).
+        transport = FakeZernioTransport(responses=[
+            _multi_success_201(post_id="zpost_shared", platforms=("youtube", "tiktok")),
+        ])
+        provider = ZernioProvider(transport=transport)
+        first = _publish_multi(provider, db_path, platforms=("youtube", "tiktok"))
+        assert first["youtube"]["provider_content_id"] == "zpost_shared"
+
+        # Retry with all 4 platforms: youtube/tiktok already succeeded
+        # (use_existing), instagram/facebook are new -- must PUT to the
+        # SAME zpost_shared post (a GET to fetch its current platforms[]
+        # first, then a PUT), never a second POST.
+        transport._responses.append(ZernioTransportResponse(
+            status_code=200,
+            json_body={"post": _multi_post_object(post_id="zpost_shared", platforms=("youtube", "tiktok"))},
+        ))
+        transport._responses.append(_multi_success_201(post_id="zpost_shared", platforms=_ALL_PLATFORMS))
+        second = _publish_multi(provider, db_path, platforms=_ALL_PLATFORMS)
+
+        assert second["youtube"]["reused_existing_attempt"] is True
+        assert second["tiktok"]["reused_existing_attempt"] is True
+        assert second["instagram"]["provider_content_id"] == "zpost_shared"
+        assert second["facebook"]["provider_content_id"] == "zpost_shared"
+        # Calls so far: 1 (first POST) + 1 (GET before PUT) + 1 (PUT) = 3 --
+        # never a second, duplicate POST for instagram/facebook.
+        assert len(transport.calls) == 3
+        assert transport.calls[1]["url"].endswith("/posts/zpost_shared")  # the GET
+        assert transport.calls[2]["url"].endswith("/posts/zpost_shared")  # the PUT
+        put_body = transport.calls[2]["json_body"]
+        put_platforms = {p["platform"] for p in put_body["platforms"]}
+        assert put_platforms == set(_ALL_PLATFORMS)

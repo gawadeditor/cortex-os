@@ -30,6 +30,7 @@ from hypogeum.agents.video_renderer import (
     MAIN_RESOLUTION,
     SHORT_RESOLUTION,
     InsufficientCoverageError,
+    SubtitleFilterUnavailableError,
     _MUSIC_AMPLITUDE_FACTOR,
     _build_caption_ass,
     _build_ffmpeg_concat_command,
@@ -37,6 +38,7 @@ from hypogeum.agents.video_renderer import (
     _parse_srt_cues,
     _run_ffmpeg,
     _srt_timestamp_to_ass,
+    assert_subtitle_filter_available,
     render_episode,
 )
 from hypogeum.agents.timeline_builder import TimelineEntry, TimelinePlan
@@ -1009,18 +1011,23 @@ class TestBurnedInCaptions:
     def test_short_render_burns_captions_when_srt_provided(self, tmp_path):
         """End-to-end command construction: a Short with srt_path produces a
         subtitles filter chained onto the video output; no subtitle filter
-        appears when srt_path is omitted."""
+        appears when srt_path is omitted.
+
+        Patches the libass capability probe True — this test is about filter
+        CONSTRUCTION, not about the 2026-08-22 capability GATE itself (see
+        TestSubtitleFilterCapabilityGate for that dedicated coverage)."""
         clip_path = tmp_path / "clip.mp4"
         clip_path.write_bytes(b"FAKEVIDEO")
         srt_path = tmp_path / "cap.srt"
         srt_path.write_text("1\n00:00:00,000 --> 00:00:04,000\nHello world\n")
         entry = _make_entry(duration_seconds=4.0, clip_duration_seconds=4.0, clip_path=clip_path)
 
-        cmd_with = _build_ffmpeg_concat_command(
-            timeline=[entry], narration_path=None, music_track=None,
-            output_path=tmp_path / "out.mp4", resolution=SHORT_RESOLUTION,
-            episode_id="ep_test", is_short=True, srt_path=srt_path,
-        )
+        with patch("hypogeum.agents.video_renderer._probe_subtitle_filter_available", return_value=True):
+            cmd_with = _build_ffmpeg_concat_command(
+                timeline=[entry], narration_path=None, music_track=None,
+                output_path=tmp_path / "out.mp4", resolution=SHORT_RESOLUTION,
+                episode_id="ep_test", is_short=True, srt_path=srt_path,
+            )
         cmd_without = _build_ffmpeg_concat_command(
             timeline=[entry], narration_path=None, music_track=None,
             output_path=tmp_path / "out2.mp4", resolution=SHORT_RESOLUTION,
@@ -1034,6 +1041,60 @@ class TestBurnedInCaptions:
         assert "subtitles=filename=" not in cmd_without_str
         # The .ass sidecar file must actually be written alongside the .srt
         assert (tmp_path / "cap.ass").exists()
+
+
+class TestSubtitleFilterCapabilityGate:
+    """
+    2026-08-22 fix: an ffmpeg build without libass must never be allowed to
+    silently produce a caption-less Short render. See the forensic audit
+    (docs/operations/audits/EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md)
+    this closes — ep_f3619022's 3 Shorts rendered successfully (exit 0,
+    valid output) with zero burned-in caption pixels and no error anywhere.
+    """
+
+    def test_assert_raises_when_probe_reports_no_libass(self):
+        with patch("hypogeum.agents.video_renderer._probe_subtitle_filter_available", return_value=False):
+            with pytest.raises(SubtitleFilterUnavailableError):
+                assert_subtitle_filter_available("ffmpeg")
+
+    def test_assert_passes_silently_when_probe_reports_libass(self):
+        with patch("hypogeum.agents.video_renderer._probe_subtitle_filter_available", return_value=True):
+            assert_subtitle_filter_available("ffmpeg")  # must not raise
+
+    def test_build_command_raises_before_any_filter_construction_when_libass_missing(self, tmp_path):
+        """The gate must fire the moment srt_path is supplied -- before
+        _build_caption_ass() ever writes a file or the filtergraph is built."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        srt_path = tmp_path / "cap.srt"
+        srt_path.write_text("1\n00:00:00,000 --> 00:00:04,000\nHello world\n")
+        entry = _make_entry(duration_seconds=4.0, clip_duration_seconds=4.0, clip_path=clip_path)
+
+        with patch("hypogeum.agents.video_renderer._probe_subtitle_filter_available", return_value=False):
+            with pytest.raises(SubtitleFilterUnavailableError):
+                _build_ffmpeg_concat_command(
+                    timeline=[entry], narration_path=None, music_track=None,
+                    output_path=tmp_path / "out.mp4", resolution=SHORT_RESOLUTION,
+                    episode_id="ep_test", is_short=True, srt_path=srt_path,
+                )
+        # The gate fired before _build_caption_ass() ever ran.
+        assert not (tmp_path / "cap.ass").exists()
+
+    def test_no_srt_path_never_probes_capability_at_all(self, tmp_path):
+        """A Short with no srt_path (no captions required for it) must never
+        even consult the capability probe -- proves the gate is scoped
+        exactly to when captions were actually requested."""
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"FAKEVIDEO")
+        entry = _make_entry(duration_seconds=4.0, clip_duration_seconds=4.0, clip_path=clip_path)
+
+        with patch("hypogeum.agents.video_renderer._probe_subtitle_filter_available") as mock_probe:
+            _build_ffmpeg_concat_command(
+                timeline=[entry], narration_path=None, music_track=None,
+                output_path=tmp_path / "out.mp4", resolution=SHORT_RESOLUTION,
+                episode_id="ep_test", is_short=True, srt_path=None,
+            )
+        mock_probe.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

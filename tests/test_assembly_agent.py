@@ -34,6 +34,7 @@ from hypogeum.config import Config
 from hypogeum.elevenlabs import MusicTrackResult, ElevenLabsError, ElevenLabsAuthFailure
 from hypogeum.agents.assembly_agent import (
     AssemblyAgentError,
+    ShortIdentityLinkageError,
     _collect_thumbnail_references,
     _compute_chapter_timestamps,
     _find_caption_asset_id,
@@ -59,6 +60,10 @@ def _make_config() -> Config:
         # narration/clip duration alignment and predate the 2026-08-01 coverage
         # policy. The gate itself is covered by tests/test_coverage_check.py.
         "COVERAGE_CHECK_ENABLED": "false",
+        # Disable the 2026-08-22 mandatory-burned-caption fail-closed gate here —
+        # these fixtures predate it and don't construct caption fixtures; the
+        # gate itself is covered by TestBurnedCaptionsRequired below.
+        "REQUIRE_SHORT_BURNED_CAPTIONS": "false",
     }
     with patch.dict(os.environ, env, clear=True):
         return Config()
@@ -408,9 +413,34 @@ def _setup_narration_on_disk(narration_package: dict, assets_root: Path) -> None
             p.write_bytes(b"\xff\xfb" * 100)
 
 
+def _setup_captions_on_disk(narration_package: dict, assets_root: Path) -> None:
+    """Create dummy .srt caption files on disk for every real caption entry."""
+    for cap in narration_package.get("captions", []):
+        srt_id = cap.get("srt_asset_id", "")
+        if srt_id:
+            p = assets_root / f"{srt_id}.srt"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("1\n00:00:00,000 --> 00:00:02,000\nTest caption\n")
+
+
 def _mock_ffmpeg_success(output_path_arg_index=-1):
-    """Return a mock that simulates successful ffmpeg by creating the output file."""
+    """Return a mock that simulates successful ffmpeg by creating the output file.
+
+    Also answers the libass capability probe (`ffmpeg -filters`,
+    hypogeum.agents.video_renderer._probe_subtitle_filter_available()) as if
+    the mocked binary supports burned-in captions — real subprocess/ffmpeg
+    calls are never made in this test file, so this fixture must simulate a
+    libass-enabled build for the many tests that don't specifically test the
+    2026-08-22 SubtitleFilterUnavailableError gate (see
+    TestBurnedCaptionsRequired for that dedicated coverage).
+    """
     def _side_effect(cmd, capture_output, text, timeout):
+        if len(cmd) >= 2 and cmd[1] == "-filters":
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            result.stdout = " .. subtitles          V->V       Render text subtitles.\n .. ass                V->V       Render ASS subtitles.\n"
+            return result
         # Find output path in cmd (last positional argument before flags)
         # The output is the last element in the command
         out = Path(cmd[-1])
@@ -2894,10 +2924,15 @@ class TestShortsRendersNotPlaceholder:
                 f"when clip assets exist on disk"
             )
 
-    def test_no_short_scenes_produces_all_placeholder_shorts(self, tmp_path):
+    def test_no_short_scenes_produces_zero_shorts_never_placeholders(self, tmp_path):
         """
-        When visual_package has only main_episode scenes (no source_type=short),
-        all 3 shorts_renders slots must be placeholder stubs.
+        2026-08-22 fix: when visual_package has only main_episode scenes (no
+        source_type=short), shorts_renders must be genuinely empty (valid
+        per schemas.py's _req_exact(..., allow_zero=True) -- a main-only
+        episode legitimately has zero Shorts) -- never padded to 3 fake
+        sh_00N_placeholder entries. See ShortIdentityLinkageError and the
+        2026-08-22 forensic audit this closes: a completed production
+        artifact must never retain a placeholder identity.
         """
         cfg = _make_config()
         # Main-only visual package — no short scenes
@@ -2926,15 +2961,10 @@ class TestShortsRendersNotPlaceholder:
         result = self._run(cfg, visual, narration, thumbnails, tmp_path)
 
         shorts_renders = result.get("shorts_renders", [])
-        assert len(shorts_renders) == 3
-
-        for sr in shorts_renders:
-            assert "_placeholder" in sr["short_id"], (
-                f"Expected placeholder short_id, got {sr['short_id']!r}"
-            )
-            assert sr["video_asset_id"] == "", (
-                f"Placeholder short must have empty video_asset_id, got {sr['video_asset_id']!r}"
-            )
+        assert shorts_renders == [], (
+            f"Main-only episode must produce zero shorts_renders entries, "
+            f"never placeholders, got {shorts_renders!r}"
+        )
 
     def test_placeholder_short_ids_not_counted_as_successful_deliverables(self, tmp_path):
         """
@@ -2960,6 +2990,177 @@ class TestShortsRendersNotPlaceholder:
         for ph in placeholder_shorts:
             assert ph["scene_count"] == 0
             assert ph["video_asset_id"] == ""
+
+    def test_partial_manifest_raises_short_identity_linkage_error(self, tmp_path):
+        """
+        2026-08-22 fix: if render_episode() attempted fewer Shorts than
+        short_ids promised (an identity/timeline_plan mismatch), assembly
+        must raise ShortIdentityLinkageError -- never silently pad the gap
+        with sh_00N_placeholder entries. Simulated by patching render_episode
+        to return a manifest with only 1 shorts_renders entry although the
+        visual package defines 1 Short (matches) -- so instead we drop the
+        manifest to 0 entries to force the exact "never attempted" branch.
+        """
+        cfg = _make_config()
+        visual = _make_visual_package(episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_sh")
+        _setup_narration_on_disk(narration, assets_root)
+
+        def _broken_render_episode(*args, **kwargs):
+            return {
+                "manifest_id": "rom_ep_sh",
+                "episode_id": "ep_sh",
+                "generated_at": "2026-08-22T00:00:00+00:00",
+                "render_status": "success",
+                "main_render": {"file_path": "main.mp4", "file_exists": True, "file_size_bytes": 100},
+                "main_resolution": "1920x1080",
+                "short_resolution": "1080x1920",
+                "frame_rate": 30,
+                "shorts_renders": [],  # promised 1 Short, attempted 0
+                "clip_availability_rate": 1.0,
+                "missing_clips": [],
+                "sections_without_music": [],
+                "ffmpeg_errors": [],
+                "duration_coverage_gap_seconds": 0.0,
+                "max_scene_hold_seconds": 0.0,
+                "total_narration_seconds": 0.0,
+                "covered_narration_seconds": 0.0,
+            }
+
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            with patch("hypogeum.agents.assembly_agent.render_episode", side_effect=_broken_render_episode):
+                with pytest.raises(ShortIdentityLinkageError):
+                    run_assembly_agent(
+                        visual_package=visual,
+                        narration_package=narration,
+                        thumbnail_package=thumbnails,
+                        config=cfg,
+                        episode_id="ep_sh",
+                        output_dir=tmp_path / "ep_sh",
+                    )
+
+
+class TestBurnedCaptionsRequired:
+    """
+    2026-08-22 fix: REQUIRE_SHORT_BURNED_CAPTIONS=True (the default) must
+    fail closed rather than silently render a Short without its burned-in
+    captions -- see ShortIdentityLinkageError and the forensic audit
+    (docs/operations/audits/EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md)
+    this closes.
+    """
+
+    def _run(self, cfg, visual, narration, thumbnails, tmp_path, *, with_captions_on_disk=True):
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_sh")
+        _setup_narration_on_disk(narration, assets_root)
+        if with_captions_on_disk:
+            _setup_captions_on_disk(narration, assets_root)
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()) as mock_sub:
+                result = run_assembly_agent(
+                    visual_package=visual,
+                    narration_package=narration,
+                    thumbnail_package=thumbnails,
+                    config=cfg,
+                    episode_id="ep_sh",
+                    output_dir=tmp_path / "ep_sh",
+                )
+                return result, mock_sub
+
+    def test_required_and_resolvable_captions_render_successfully(self, tmp_path):
+        """Default fixture's captions DO resolve (srt_asset_id substring-matches
+        every real short_id) and DO exist on disk -- REQUIRE_SHORT_BURNED_CAPTIONS=True
+        must not block this normal, healthy case."""
+        cfg = _make_config()
+        with patch.dict(os.environ, {"REQUIRE_SHORT_BURNED_CAPTIONS": "true"}, clear=False):
+            cfg.REQUIRE_SHORT_BURNED_CAPTIONS = True
+        visual = _make_visual_package(episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+
+        result, _ = self._run(cfg, visual, narration, thumbnails, tmp_path)
+        assert result["package_integrity"]["production_ready"] is True
+        for sr in result["shorts_renders"]:
+            assert sr["caption_asset_id"] != ""
+
+    def test_unresolvable_caption_raises_before_any_ffmpeg_call(self, tmp_path):
+        """When a Short's caption cannot be resolved at all (no matching
+        narration_package['captions'] entry), REQUIRE_SHORT_BURNED_CAPTIONS=True
+        must raise before render_episode() is ever reached -- proving zero
+        ffmpeg ENCODE calls occur (read-only ffprobe asset-inventory calls,
+        which run earlier during upstream validation, are unrelated and
+        expected), not just that the final package is blocked after the fact."""
+        cfg = _make_config()
+        cfg.REQUIRE_SHORT_BURNED_CAPTIONS = True
+        visual = _make_visual_package(episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        narration["captions"] = [
+            c for c in narration["captions"] if c.get("source_type") != "short"
+        ]
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_sh")
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch(
+            "hypogeum.agents.music_agent.generate_music_track",
+            return_value=_make_music_track_result(tmp_path=tmp_path),
+        ):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()) as mock_sub:
+                with pytest.raises(ShortIdentityLinkageError):
+                    run_assembly_agent(
+                        visual_package=visual,
+                        narration_package=narration,
+                        thumbnail_package=thumbnails,
+                        config=cfg,
+                        episode_id="ep_sh",
+                        output_dir=tmp_path / "ep_sh",
+                    )
+                encode_calls = [
+                    c for c in mock_sub.call_args_list
+                    if "-y" in c.args[0] or (c.args and "ffmpeg" in str(c.args[0][0]))
+                ]
+                assert encode_calls == [], f"expected zero ffmpeg encode calls, got {encode_calls!r}"
+
+    def test_caption_referenced_but_file_missing_on_disk_also_raises(self, tmp_path):
+        """A caption entry that resolves by asset-id but whose .srt file was
+        never actually written to disk must be treated identically to an
+        unresolved caption -- never rendered as if it existed."""
+        cfg = _make_config()
+        cfg.REQUIRE_SHORT_BURNED_CAPTIONS = True
+        visual = _make_visual_package(episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+
+        with pytest.raises(ShortIdentityLinkageError):
+            self._run(cfg, visual, narration, thumbnails, tmp_path, with_captions_on_disk=False)
+
+    def test_require_flag_disabled_allows_missing_captions(self, tmp_path):
+        """REQUIRE_SHORT_BURNED_CAPTIONS=False (opt-out) must still allow a
+        Short to render without captions -- this flag exists for non-Hypogeum
+        Channel Packages that don't mandate burned-in captions."""
+        cfg = _make_config()
+        cfg.REQUIRE_SHORT_BURNED_CAPTIONS = False
+        visual = _make_visual_package(episode_id="ep_sh")
+        narration = _make_narration_package(episode_id="ep_sh")
+        narration["captions"] = [
+            c for c in narration["captions"] if c.get("source_type") != "short"
+        ]
+        thumbnails = _make_thumbnail_package(episode_id="ep_sh")
+
+        result, _ = self._run(cfg, visual, narration, thumbnails, tmp_path, with_captions_on_disk=False)
+        assert result["package_integrity"]["production_ready"] is True
+        for sr in result["shorts_renders"]:
+            assert sr["caption_asset_id"] == ""
 
 
 class TestShortsMetadataGenerationWiring:

@@ -512,6 +512,18 @@ class Config:
         )
 
         # --- Assembly / Render ---
+        # FFMPEG_BINARY: path/name of the ffmpeg executable Assembly/Video Renderer
+        # invoke. Defaults to "ffmpeg" (resolved via PATH). Must be a build with
+        # libass (the "subtitles"/"ass" filters) for burned-in Short captions to
+        # work at all -- see hypogeum.agents.video_renderer.assert_subtitle_filter_available().
+        # Never hardcode "ffmpeg" in a subprocess call; always read this.
+        self.FFMPEG_BINARY = _get_optional("FFMPEG_BINARY", default="ffmpeg")
+        # REQUIRE_SHORT_BURNED_CAPTIONS: fail closed (raise, never silently
+        # render without them) when a Short's caption asset cannot be
+        # resolved to its own canonical short_id. Default True -- burned-in
+        # captions are a Hypogeum Channel Package requirement, not optional.
+        # See docs/operations/audits/EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md.
+        self.REQUIRE_SHORT_BURNED_CAPTIONS = _get_bool("REQUIRE_SHORT_BURNED_CAPTIONS", default=True)
         # END_PAGE_DURATION_SECONDS: how long the static end-page card is held (default 20s).
         self.END_PAGE_DURATION_SECONDS = _get_int("END_PAGE_DURATION_SECONDS", default=20)
         # CLIP_REPAIR_ENABLED: run the clip repair pipeline before QA rejection (default True).

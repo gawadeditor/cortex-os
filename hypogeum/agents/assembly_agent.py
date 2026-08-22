@@ -121,6 +121,20 @@ class AssemblyAgentError(RuntimeError):
     """Raised for Assembly Agent configuration or orchestration errors that halt assembly."""
 
 
+class ShortIdentityLinkageError(AssemblyAgentError):
+    """
+    Raised when timeline_plan.short_ids does not have exactly as many real
+    entries as this episode's Shorts actually require, or when a resolved
+    short_id cannot be matched to its own caption asset. Never silently
+    padded with a placeholder identity (sh_00N_placeholder) and never
+    silently rendered without its required caption path -- see the
+    2026-08-22 forensic audit (docs/operations/audits/
+    EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md)
+    this closes. A completed production artifact must never retain a
+    placeholder identity.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -715,9 +729,23 @@ def run_assembly_agent(
     short_srt_paths: dict = {}
     for short_id in short_ids:
         _srt_asset_id = _find_caption_asset_id(_captions, "short", short_id)
-        short_srt_paths[short_id] = (
-            assets_root / f"{_srt_asset_id}.srt" if _srt_asset_id else None
-        )
+        _srt_path = assets_root / f"{_srt_asset_id}.srt" if _srt_asset_id else None
+        if _srt_path is not None and not _srt_path.exists():
+            _srt_path = None
+        short_srt_paths[short_id] = _srt_path
+        # Fail closed (2026-08-22 fix): a Short whose caption asset cannot be
+        # resolved to its own canonical short_id must never render "successfully"
+        # with a silently omitted caption path -- this is exactly how
+        # ep_f3619022's 3 Shorts ended up with zero burned-in captions and no
+        # error anywhere. See docs/operations/audits/
+        # EP_F3619022_ASSET_CONTINUITY_AND_BURNED_CAPTIONS_AUDIT_2026-08-22.md.
+        if _srt_path is None and getattr(config, "REQUIRE_SHORT_BURNED_CAPTIONS", True):
+            raise ShortIdentityLinkageError(
+                f"short_id={short_id!r} has no resolvable caption asset in "
+                f"narration_package['captions'] (looked up via _find_caption_asset_id) "
+                f"-- REQUIRE_SHORT_BURNED_CAPTIONS is True, so this Short cannot be "
+                f"rendered without its burned-in captions. Never silently proceed."
+            )
 
     render_manifest = render_episode(
         timeline_plan=timeline_plan,
@@ -735,6 +763,7 @@ def run_assembly_agent(
         end_page_duration=_end_page_duration,
         music_segments=music_segments,
         short_srt_paths=short_srt_paths,
+        ffmpeg_binary=config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg",
     )
     render_status = render_manifest["render_status"]
 
@@ -798,15 +827,34 @@ def run_assembly_agent(
         "caption_asset_id": main_caption_asset_id or "",
     }
 
-    # shorts_renders entries
+    # shorts_renders entries -- fail closed, never a placeholder identity.
+    # short_ids (0 or exactly 3, per schemas.py's _req_exact(..., allow_zero=True))
+    # is the single canonical source for every Short's identity in this
+    # package: render_episode() rendered these SAME short_ids (it derives its
+    # own short_ids from the identical timeline_plan.short_ids this function
+    # read at the top), so a short_id here whose file render_episode() didn't
+    # actually produce is a genuine linkage break, not something to paper
+    # over with an empty asset_id. See ShortIdentityLinkageError's own
+    # docstring and the 2026-08-22 forensic audit this closes.
     shorts_renders: List[dict] = []
     _manifest_shorts = render_manifest.get("shorts_renders", [])
     for short_index, short_id in enumerate(short_ids):
-        _short_file_exists = (
-            _manifest_shorts[short_index]["file_exists"]
-            if short_index < len(_manifest_shorts)
-            else False
-        )
+        if short_index >= len(_manifest_shorts):
+            # render_episode() never even attempted this short_id -- this is
+            # the genuine identity-linkage break (short_ids promised more
+            # Shorts than render_episode() itself iterated), never a normal
+            # ffmpeg failure. A normal ffmpeg failure for an ATTEMPTED short
+            # (in-bounds, file_exists=False) is handled below exactly as
+            # before -- render_status becomes "partial"/"failed" and a PDR
+            # is issued; that path is unrelated to this identity defect.
+            raise ShortIdentityLinkageError(
+                f"short_id={short_id!r} (index {short_index}) was never attempted by "
+                f"render_episode() -- render_manifest['shorts_renders'] has only "
+                f"{len(_manifest_shorts)} entries. This is a genuine short_ids/"
+                f"timeline_plan mismatch, never a normal render failure. Never silently "
+                f"recorded as an empty video_asset_id."
+            )
+        _short_file_exists = _manifest_shorts[short_index]["file_exists"]
         short_video_asset_id = (
             f"episodes/{episode_id}/short_{short_index}_{episode_id}"
             if _short_file_exists
@@ -826,20 +874,17 @@ def run_assembly_agent(
             "text_overlays_skipped": [],
         })
 
-    # Pad shorts_renders to exactly 3 if needed (schema requires exactly 3)
-    while len(shorts_renders) < 3:
-        idx = len(shorts_renders)
-        shorts_renders.append({
-            "short_id": f"sh_{idx:03d}_placeholder",
-            "video_asset_id": "",
-            "duration_seconds": 0.0,
-            "resolution": render_manifest["short_resolution"],
-            "frame_rate": render_manifest["frame_rate"],
-            "scene_count": 0,
-            "caption_asset_id": "",
-            "text_overlays_applied": 0,
-            "text_overlays_skipped": [],
-        })
+    # A partial count (neither 0 -- genuinely no Shorts planned, e.g. a smoke
+    # test -- nor exactly 3, per schemas.py's own _req_exact(allow_zero=True))
+    # is exactly the state the old "pad to exactly 3 with placeholders"
+    # fallback used to mask. Fail closed instead: never fabricate a
+    # placeholder identity to satisfy the schema.
+    if shorts_renders and len(shorts_renders) != 3:
+        raise ShortIdentityLinkageError(
+            f"short_ids produced {len(shorts_renders)} real Short(s), not 0 or 3 -- "
+            f"schemas.py requires exactly 3 (or 0). timeline_plan.short_ids={short_ids!r}. "
+            f"This must block the render, never be padded with sh_00N_placeholder entries."
+        )
 
     # metadata_source from Visual Package episode_metadata + Narration Package
     ep_meta = visual_package.get("episode_metadata", {})

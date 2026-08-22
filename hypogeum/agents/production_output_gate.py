@@ -152,7 +152,10 @@ def run_production_output_gate(
     checks.append(_check_video(clip_evidence))
     checks.append(_check_visual_playback(final_render_package, episode_dir, episode_id, log))
     checks.append(_check_thumbnail(thumbnail_package, assets_root))
-    checks.append(_check_shorts_captions(final_render_package, narration_package, episode_dir, episode_id))
+    checks.append(_check_shorts_captions(
+        final_render_package, narration_package, episode_dir, episode_id,
+        ffmpeg_binary=config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg",
+    ))
     checks.append(_check_shorts_visual_coverage(final_render_package, episode_dir, episode_id))
     checks.append(_check_end_page(final_render_package, episode_dir, episode_id, log))
     checks.append(_check_artifact_compatibility(
@@ -563,20 +566,27 @@ _CAPTION_BRIGHT_THRESHOLD = 200     # near-white pixel value (white fill + black
 _CAPTION_MIN_BRIGHT_DELTA = 0.01    # required increase in bright-pixel fraction, active vs gap
 
 
-def _check_ffmpeg_subtitle_support() -> Optional[str]:
+def _check_ffmpeg_subtitle_support(ffmpeg_binary: str = "ffmpeg") -> Optional[str]:
     """
-    Real environment capability check: does this ffmpeg build actually
-    have the 'subtitles' filter (the exact filter hypogeum.agents.
+    Real environment capability check: does `ffmpeg_binary` actually have
+    the 'subtitles' filter (the exact filter hypogeum.agents.
     video_renderer._build_subtitles_filter() emits, libass-backed)? A
     caption burn-in step that silently no-ops because the filter is
     missing would otherwise pass through undetected until the pixel check
     below — checking the environment directly gives a much clearer
     failure reason than a generic "no bright pixels found."
+
+    2026-08-22: confirmed this machine's bare "ffmpeg" (the historical
+    default and still this function's own default when no config is
+    threaded through) has no libass -- see hypogeum.config.Config.
+    FFMPEG_BINARY and hypogeum.agents.video_renderer.
+    assert_subtitle_filter_available() for the same check, now applied at
+    render time too, both configurable to point at a libass-enabled build.
     Returns None if supported, else a failure reason string.
     """
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
+            [ffmpeg_binary, "-hide_banner", "-filters"],
             capture_output=True, text=True, timeout=30,
         )
     except Exception as exc:
@@ -590,6 +600,7 @@ def _check_ffmpeg_subtitle_support() -> Optional[str]:
 
 def _check_shorts_captions(
     final_render_package: dict, narration_package: dict, episode_dir: Path, episode_id: str,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> GateCheckResult:
     if not final_render_package:
         return GateCheckResult(
@@ -605,14 +616,18 @@ def _check_shorts_captions(
             evidence={}, remediation="",
         )
 
-    ffmpeg_subtitle_issue = _check_ffmpeg_subtitle_support()
+    ffmpeg_subtitle_issue = _check_ffmpeg_subtitle_support(ffmpeg_binary)
     if ffmpeg_subtitle_issue:
         return GateCheckResult(
             capability="D_SHORTS_CAPTIONS",
             status="fail",
             reason="ffmpeg environment does not support the required subtitle filter",
-            evidence={"ffmpeg_capability_check": ffmpeg_subtitle_issue},
-            remediation="Install/rebuild ffmpeg with libass (--enable-libass) before any caption burn-in can be trusted.",
+            evidence={"ffmpeg_capability_check": ffmpeg_subtitle_issue, "ffmpeg_binary": ffmpeg_binary},
+            remediation=(
+                "Set Config.FFMPEG_BINARY to a libass-enabled build (e.g. Homebrew's ffmpeg-full "
+                "keg: /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg) -- see hypogeum.agents.video_renderer."
+                "assert_subtitle_filter_available() for the same check applied at render time."
+            ),
         )
 
     per_short: List[dict] = []

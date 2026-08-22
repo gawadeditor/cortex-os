@@ -1067,6 +1067,195 @@ class ZernioProvider:
             )
         return results
 
+    def repair_existing_post(
+        self,
+        provider_post_id: str,
+        *,
+        channel_id: str,
+        deliverable_id: str,
+        episode_id: str,
+        deliverable_type: str,
+        platforms: List[str],
+        media: List[MediaReference],
+        title: str,
+        content: str,
+        logical_alias: str = "default",
+        platform_settings: Optional[Dict[str, dict]] = None,
+        db_path: Optional[Path] = None,
+    ) -> Dict[str, dict]:
+        """
+        Repair path -- for an EXISTING post whose title/content/media/
+        thumbnail is wrong (e.g. Zernio's own editor shows "No content"),
+        never publish_multi_platform()'s "new deliverable, aggregate every
+        platform into one fresh post" path. Corrects the post's title/
+        content/mediaItems (POST-level fields, shared by every platform
+        already on the post) AND adds any of `platforms` not yet on the
+        post, all in ONE PUT against provider_post_id -- never a POST,
+        never a second post for the same deliverable.
+
+        Fails closed BEFORE any network call when title or content is
+        empty, `platforms` is empty, or no MediaReference is supplied --
+        mirrors publish_multi_platform()'s own pre-call validation
+        discipline exactly.
+
+        Guards only the platforms not already terminally succeeded (via
+        the same guard_and_prepare_attempt() ledger every other publish
+        path uses) -- a platform already 'succeeded' locally (e.g.
+        youtube here) has its shared post content corrected by this SAME
+        PUT but is never given a new local attempt row, since no new
+        publish action occurred for it; its own ledger state is never
+        touched by this call, only reported. A platform whose local
+        guard is 'blocked' (ambiguous prior attempt) fails the WHOLE call
+        closed before any network call, same as publish_multi_platform().
+
+        The post's own current scheduledFor/timezone are read back via
+        get_post() and echoed VERBATIM in the PUT body -- schedule
+        omission semantics on PUT are undocumented (see
+        docs/operations/audits/
+        ZERNIO_PUT_CONTRACT_AND_DURATION_VERIFICATION_2026-08-22.md), so
+        nothing about the existing schedule is ever left to an
+        undocumented default. Every existing platform entry NOT in
+        `platforms` is preserved untouched in the merged platforms[]
+        sent -- this call only ever adds/corrects, never silently drops
+        an existing destination.
+        """
+        if not title or not title.strip():
+            raise ValueError("repair_existing_post() requires a non-empty title")
+        if not content or not content.strip():
+            raise ValueError("repair_existing_post() requires non-empty content")
+        if not platforms:
+            raise ValueError("repair_existing_post() requires at least one platform")
+        if not media:
+            raise ZernioMediaRequiredError("repair_existing_post() requires at least one MediaReference")
+        for i, m in enumerate(media):
+            _validate_media_reference(m, field_label=f"media[{i}]")
+
+        seen = set()
+        deduped_platforms: List[str] = []
+        for p in platforms:
+            if p not in seen:
+                seen.add(p)
+                deduped_platforms.append(p)
+        platforms = deduped_platforms
+        for p in platforms:
+            if not self.supports_platform(p):
+                raise UnsupportedPlatformError(f"'zernio' does not support platform {p!r}")
+
+        accounts: Dict[str, dict] = {}
+        for p in platforms:
+            _binding, account = self._resolve_approved_binding(
+                channel_id=channel_id, platform=p, logical_alias=logical_alias, db_path=db_path,
+            )
+            accounts[p] = account
+
+        credential = _resolve_zernio_credential(db_path)
+        if credential is None:
+            raise ZernioCredentialNotFoundError(
+                "no active provider='zernio' secret profile found in Credential Manager"
+            )
+
+        guards: Dict[str, AttemptGuard] = {}
+        for p in platforms:
+            guards[p] = guard_and_prepare_attempt(
+                db_path, channel_id=channel_id, episode_id=episode_id,
+                deliverable_id=deliverable_id, platform=p, provider_id=self.provider_id,
+            )
+        blocked = {p: g for p, g in guards.items() if g.action == "blocked"}
+        if blocked:
+            del credential
+            raise ZernioAmbiguousRetryBlockedError(
+                f"platforms requiring reconciliation before any repair call: {sorted(blocked)} -- "
+                f"{next(iter(blocked.values())).reason}"
+            )
+
+        already_succeeded = {p: g for p, g in guards.items() if g.action == "use_existing"}
+        to_submit = {p: g for p, g in guards.items() if g.action == "proceed"}
+
+        get_result = self.get_post(provider_post_id, db_path=db_path)
+        existing_post = get_result.get("post")
+        results: Dict[str, dict] = {}
+        if not isinstance(existing_post, dict) or not isinstance(existing_post.get("platforms"), list):
+            for p, g in to_submit.items():
+                record_ambiguous(
+                    db_path, g.attempt_id, error_category="malformed_response",
+                    error_message=f"could not GET existing post {provider_post_id!r} before repairing it",
+                )
+                results[p] = self._ambiguous_result(p, deliverable_type, g)
+            for p in already_succeeded:
+                results[p] = {
+                    "platform": p, "deliverable_type": deliverable_type, "status": "ambiguous",
+                    "note": f"could not GET existing post {provider_post_id!r} -- repair not attempted",
+                }
+            del credential
+            return results
+
+        existing_platform_entries = list(existing_post.get("platforms") or [])
+        merged_platform_entries = [
+            e for e in existing_platform_entries if e.get("platform") not in platforms
+        ] + [
+            self._build_platform_entry(p, accounts[p], [], None)
+            for p in platforms
+        ]
+
+        headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
+        del credential
+
+        body: Dict[str, object] = {
+            "title": title,
+            "content": content,
+            "mediaItems": [_serialize_media_item(m) for m in media],
+            "platforms": merged_platform_entries,
+        }
+        if existing_post.get("scheduledFor"):
+            body["scheduledFor"] = existing_post["scheduledFor"]
+        if existing_post.get("timezone"):
+            body["timezone"] = existing_post["timezone"]
+        tiktok_root_settings = (platform_settings or {}).get("tiktok")
+        if tiktok_root_settings and "tiktok" in platforms:
+            body["tiktokSettings"] = tiktok_root_settings
+
+        try:
+            response = self._transport.put(
+                url=f"{_ZERNIO_POSTS_URL}/{provider_post_id}", headers=headers, json_body=body,
+                timeout=_DEFAULT_TIMEOUT_SECONDS,
+            )
+        except ZernioTransportError as exc:
+            for p, g in to_submit.items():
+                record_ambiguous(db_path, g.attempt_id, error_category="transport_error", error_message=str(exc))
+                results[p] = self._ambiguous_result(p, deliverable_type, g)
+            for p, g in already_succeeded.items():
+                results[p] = {
+                    "platform": p, "deliverable_type": deliverable_type, "status": "ambiguous",
+                    "note": f"PUT transport error while repairing shared post content: {exc}",
+                }
+            return results
+
+        for p, g in to_submit.items():
+            results[p] = self._handle_put_response(
+                response, platform=p, deliverable_type=deliverable_type,
+                attempt_id=g.attempt_id, guard=g, db_path=db_path,
+                provider_account_id=accounts[p]["provider_account_id"],
+            )
+        content_corrected = response.status_code == 200 and isinstance(response.json_body, dict) \
+            and isinstance(response.json_body.get("post"), dict)
+        for p, g in already_succeeded.items():
+            receipt = g.existing_receipt or {}
+            results[p] = {
+                "platform": p, "deliverable_type": deliverable_type,
+                "status": "content_corrected" if content_corrected else "ambiguous",
+                "provider_content_id": receipt.get("provider_publication_id"),
+                "publication_intent_id": g.publication_intent_id,
+                "attempt_id": g.attempt_id,
+                "note": (
+                    "already succeeded locally -- this call corrected the shared post's "
+                    "content/media only, no new attempt row created"
+                    if content_corrected else
+                    "already succeeded locally -- PUT response did not confirm the shared "
+                    "post's content/media correction; local ledger state left untouched"
+                ),
+            }
+        return results
+
     def _build_platform_entry(
         self, platform: str, account: dict, platform_media: list,
         platform_scheduled_for: Optional[datetime],

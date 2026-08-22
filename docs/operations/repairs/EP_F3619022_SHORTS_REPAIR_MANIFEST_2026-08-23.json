@@ -1,0 +1,304 @@
+{
+  "episode_id": "ep_f3619022",
+  "generated_at": "2026-08-23",
+  "entries": {
+    "short_001": {
+      "deliverable_id": "short_001",
+      "provider_post_id": "6a89752c7a56b107295b2b2c",
+      "preserved_schedule": {
+        "scheduledFor": "2026-08-24T18:00:00.000Z",
+        "timezone": "UTC"
+      },
+      "existing_platforms": [
+        "youtube"
+      ],
+      "target_platforms": [
+        "facebook",
+        "instagram",
+        "tiktok",
+        "youtube"
+      ],
+      "current_title": "Europe's Erdstall Tunnels Hide a Passage No One Can Explain",
+      "current_content": "",
+      "generated_title": "Europe's Erdstall Tunnels Hide a Passage No One Can Explain",
+      "generated_content": "Somewhere beneath Central Europe, there are passages so narrow you have to exhale just to squeeze through them. They're called schlupfs \u2014 roughly the width of your torso \u2014 and they appear in every single one of the 2,000+ Erdstall tunnels built by hand during the High Middle Ages. The main corridors aren't much bigger: about the width and height of a crouching person. You move through them on your hands and knees, in complete darkness. Archaeologists have excavated dozens of these tunnels. They found nothing inside \u2014 no burials, no stored goods, no inscriptions. The schlupf itself serves no structural purpose. It doesn't reinforce anything, improve drainage, or help with ventilation. It just exists, consistently, across every known system. And here's what makes it stranger: not one medieval document \u2014 no charter, no church record, no construction note \u2014 ever mentions these tunnels at all. Two thousand passages, built beneath one of the most thoroughly documented civilizations in European history, and the written record is completely silent. Nobody knows why they were built.",
+      "repaired_local_media_path": ".hypogeum-assets/episodes/ep_f3619022/repair/short_001.repaired.mp4",
+      "media_staging_status": "not staged in this phase -- no live upload was performed",
+      "repair_verification": {
+        "status": "repaired",
+        "source_mp4": ".hypogeum-assets/episodes/ep_f3619022/short_0_ep_f3619022.mp4",
+        "output_mp4": ".hypogeum-assets/episodes/ep_f3619022/repair/short_001.repaired.mp4",
+        "cutoff_plan": {
+          "kept_cue_count": 22,
+          "total_cue_count": 33,
+          "last_kept_cue_end_s": 58.24,
+          "trim_seconds": 58.84
+        },
+        "measured_duration_s": 58.875,
+        "duration_within_60s": true,
+        "burned_caption_verification": {
+          "status": "pass",
+          "reason": "bright-pixel fraction in caption zone: active=0.0119 gap=0.0000 delta=0.0119 (threshold 0.01)",
+          "active_t": 0.34,
+          "gap_t": 58.74
+        },
+        "visual_coverage_verification": {
+          "status": "pass",
+          "reason": "black-pixel fraction at required coverage point (57.94s, last caption ends 58.24s): 0.1955 (threshold 0.9)",
+          "required_end_s": 58.24,
+          "checked_at_s": 57.94
+        },
+        "has_audio_stream": true
+      },
+      "thumbnail_verdict": {
+        "status": "fail",
+        "candidate": "thumbnails/short_001.jpg",
+        "reason": "placeholder_detection fail + feed_scale_legibility fail (near-flat/near-black)"
+      },
+      "blocking_reasons": [
+        "no thumbnail passes QA/identity gates (status='fail')"
+      ],
+      "mutation_would_proceed": false,
+      "proposed_update_body": {
+        "title": "Europe's Erdstall Tunnels Hide a Passage No One Can Explain",
+        "content": "Somewhere beneath Central Europe, there are passages so narrow you have to exhale just to squeeze through them. They're called schlupfs \u2014 roughly the width of your torso \u2014 and they appear in every single one of the 2,000+ Erdstall tunnels built by hand during the High Middle Ages. The main corridors aren't much bigger: about the width and height of a crouching person. You move through them on your hands and knees, in complete darkness. Archaeologists have excavated dozens of these tunnels. They found nothing inside \u2014 no burials, no stored goods, no inscriptions. The schlupf itself serves no structural purpose. It doesn't reinforce anything, improve drainage, or help with ventilation. It just exists, consistently, across every known system. And here's what makes it stranger: not one medieval document \u2014 no charter, no church record, no construction note \u2014 ever mentions these tunnels at all. Two thousand passages, built beneath one of the most thoroughly documented civilizations in European history, and the written record is completely silent. Nobody knows why they were built.",
+        "mediaItems": [
+          {
+            "type": "video",
+            "title": "Europe's Erdstall Tunnels Hide a Passage No One Can Explain"
+          }
+        ],
+        "platforms": [
+          {
+            "platform": "facebook",
+            "accountId": "6a8354b977555aae01af8a0b"
+          },
+          {
+            "platform": "instagram",
+            "accountId": "6a83553277555aae01afa275"
+          },
+          {
+            "platform": "tiktok",
+            "accountId": "6a83540477555aae01af46ca"
+          },
+          {
+            "platform": "youtube",
+            "accountId": "6a83555477555aae01afa569"
+          }
+        ],
+        "scheduledFor": "2026-08-24T18:00:00.000Z",
+        "timezone": "UTC",
+        "tiktokSettings": {
+          "privacy_level": "PUBLIC_TO_EVERYONE"
+        },
+        "media_staging_required": true
+      }
+    },
+    "short_002": {
+      "deliverable_id": "short_002",
+      "provider_post_id": "6a897539c2f26fb88c8c21c9",
+      "preserved_schedule": {
+        "scheduledFor": "2026-08-26T18:00:00.000Z",
+        "timezone": "UTC"
+      },
+      "existing_platforms": [
+        "youtube"
+      ],
+      "target_platforms": [
+        "facebook",
+        "instagram",
+        "tiktok",
+        "youtube"
+      ],
+      "current_title": "The Erdstall Tunnel Cut Into a 6,000-Year-Old Stone Age Tomb",
+      "current_content": "",
+      "generated_title": "The Erdstall Tunnel Cut Into a 6,000-Year-Old Stone Age Tomb",
+      "generated_content": "In 2026, archaeologists near Reinstedt in Saxony-Anhalt found something that reframed how we think about the Erdstall tunnels. A medieval tunnel entrance had been cut directly into the wall of a Stone Age tomb \u2014 not near it, not beside it, but through it. The tomb is Baalberg culture, roughly six thousand years old. The tunnel is medieval. The gap between them is four thousand years, and the placement was not accidental. Reinstedt isn't an isolated case either. Across the known distribution of these 2,000+ tunnels, entrances consistently cluster beneath churches, near cemeteries, and under farmsteads on ground with older ritual associations. Medieval builders weren't stumbling onto ancient sacred sites by chance \u2014 they were deliberately seeking them out and digging into them. What belief would drive someone to tunnel into a six-thousand-year-old tomb, crawl through a passage barely wide enough to breathe in, and then seal the entrance behind them? No document has ever come close to answering that.",
+      "repaired_local_media_path": ".hypogeum-assets/episodes/ep_f3619022/repair/short_002.repaired.mp4",
+      "media_staging_status": "not staged in this phase -- no live upload was performed",
+      "repair_verification": {
+        "status": "repaired",
+        "source_mp4": ".hypogeum-assets/episodes/ep_f3619022/short_1_ep_f3619022.mp4",
+        "output_mp4": ".hypogeum-assets/episodes/ep_f3619022/repair/short_002.repaired.mp4",
+        "cutoff_plan": {
+          "kept_cue_count": 22,
+          "total_cue_count": 31,
+          "last_kept_cue_end_s": 57.58,
+          "trim_seconds": 58.18
+        },
+        "measured_duration_s": 58.208,
+        "duration_within_60s": true,
+        "burned_caption_verification": {
+          "status": "pass",
+          "reason": "bright-pixel fraction in caption zone: active=0.1599 gap=0.0002 delta=0.1598 (threshold 0.01)",
+          "active_t": 0.33,
+          "gap_t": 58.08
+        },
+        "visual_coverage_verification": {
+          "status": "pass",
+          "reason": "black-pixel fraction at required coverage point (57.28s, last caption ends 57.58s): 0.1507 (threshold 0.9)",
+          "required_end_s": 57.58,
+          "checked_at_s": 57.28
+        },
+        "has_audio_stream": true
+      },
+      "thumbnail_verdict": {
+        "status": "fail",
+        "candidate": "thumbnails/short_002.jpg",
+        "reason": "feed_scale_legibility fail (near-black at feed scale)"
+      },
+      "blocking_reasons": [
+        "no thumbnail passes QA/identity gates (status='fail')"
+      ],
+      "mutation_would_proceed": false,
+      "proposed_update_body": {
+        "title": "The Erdstall Tunnel Cut Into a 6,000-Year-Old Stone Age Tomb",
+        "content": "In 2026, archaeologists near Reinstedt in Saxony-Anhalt found something that reframed how we think about the Erdstall tunnels. A medieval tunnel entrance had been cut directly into the wall of a Stone Age tomb \u2014 not near it, not beside it, but through it. The tomb is Baalberg culture, roughly six thousand years old. The tunnel is medieval. The gap between them is four thousand years, and the placement was not accidental. Reinstedt isn't an isolated case either. Across the known distribution of these 2,000+ tunnels, entrances consistently cluster beneath churches, near cemeteries, and under farmsteads on ground with older ritual associations. Medieval builders weren't stumbling onto ancient sacred sites by chance \u2014 they were deliberately seeking them out and digging into them. What belief would drive someone to tunnel into a six-thousand-year-old tomb, crawl through a passage barely wide enough to breathe in, and then seal the entrance behind them? No document has ever come close to answering that.",
+        "mediaItems": [
+          {
+            "type": "video",
+            "title": "The Erdstall Tunnel Cut Into a 6,000-Year-Old Stone Age Tomb"
+          }
+        ],
+        "platforms": [
+          {
+            "platform": "facebook",
+            "accountId": "6a8354b977555aae01af8a0b"
+          },
+          {
+            "platform": "instagram",
+            "accountId": "6a83553277555aae01afa275"
+          },
+          {
+            "platform": "tiktok",
+            "accountId": "6a83540477555aae01af46ca"
+          },
+          {
+            "platform": "youtube",
+            "accountId": "6a83555477555aae01afa569"
+          }
+        ],
+        "scheduledFor": "2026-08-26T18:00:00.000Z",
+        "timezone": "UTC",
+        "tiktokSettings": {
+          "privacy_level": "PUBLIC_TO_EVERYONE"
+        },
+        "media_staging_required": true
+      }
+    },
+    "short_003": {
+      "deliverable_id": "short_003",
+      "provider_post_id": "6a897546c2f26fb88c8c2a16",
+      "preserved_schedule": {
+        "scheduledFor": "2026-08-28T18:00:00.000Z",
+        "timezone": "UTC"
+      },
+      "existing_platforms": [
+        "youtube"
+      ],
+      "target_platforms": [
+        "facebook",
+        "instagram",
+        "tiktok",
+        "youtube"
+      ],
+      "current_title": "Medieval Europe Recorded Everything, Except the Erdstall Tunnels",
+      "current_content": "",
+      "generated_title": "Medieval Europe Recorded Everything, Except the Erdstall Tunnels",
+      "generated_content": "Medieval Europe was obsessive about documentation. Land sales, church disputes, tax payments, the price of grain, the names of people who owed money to monasteries \u2014 if something happened in a village around the year 1150, there's a reasonable chance it ended up in a ledger somewhere. So how do you explain this: over two thousand underground tunnels, carved by hand across Central Europe during the High Middle Ages, and not a single medieval document mentions any of them? No charter, no sermon, no court record, no construction order. Nothing. The word 'Erdstall' itself doesn't even appear until a Bavarian tax record from 1449 \u2014 centuries after the tunnels were built and long after they'd been sealed. And when it does appear, it refers to the land above the tunnels, not the tunnels themselves. Even the name arrived late and missed the point. Some of these tunnels were built directly beneath church floors. The Church documented heresies and folk practices with considerable energy. It said nothing about these either. This wasn't an oversight. The people who built them chose not to write it down \u2014 and whatever they knew, they took with them.",
+      "repaired_local_media_path": ".hypogeum-assets/episodes/ep_f3619022/repair/short_003.repaired.mp4",
+      "media_staging_status": "not staged in this phase -- no live upload was performed",
+      "repair_verification": {
+        "status": "repaired",
+        "source_mp4": ".hypogeum-assets/episodes/ep_f3619022/short_2_ep_f3619022.mp4",
+        "output_mp4": ".hypogeum-assets/episodes/ep_f3619022/repair/short_003.repaired.mp4",
+        "cutoff_plan": {
+          "kept_cue_count": 19,
+          "total_cue_count": 39,
+          "last_kept_cue_end_s": 51.54,
+          "trim_seconds": 52.14
+        },
+        "measured_duration_s": 52.167,
+        "duration_within_60s": true,
+        "burned_caption_verification": {
+          "status": "pass",
+          "reason": "bright-pixel fraction in caption zone: active=0.0216 gap=0.0003 delta=0.0213 (threshold 0.01)",
+          "active_t": 0.33,
+          "gap_t": 52.04
+        },
+        "visual_coverage_verification": {
+          "status": "pass",
+          "reason": "black-pixel fraction at required coverage point (51.24s, last caption ends 51.54s): 0.1643 (threshold 0.9)",
+          "required_end_s": 51.54,
+          "checked_at_s": 51.24
+        },
+        "has_audio_stream": true
+      },
+      "thumbnail_verdict": {
+        "status": "fail",
+        "candidate": "thumbnails/short_003.jpg",
+        "reason": "feed_scale_legibility fail (near-black at feed scale)"
+      },
+      "blocking_reasons": [
+        "no thumbnail passes QA/identity gates (status='fail')"
+      ],
+      "mutation_would_proceed": false,
+      "proposed_update_body": {
+        "title": "Medieval Europe Recorded Everything, Except the Erdstall Tunnels",
+        "content": "Medieval Europe was obsessive about documentation. Land sales, church disputes, tax payments, the price of grain, the names of people who owed money to monasteries \u2014 if something happened in a village around the year 1150, there's a reasonable chance it ended up in a ledger somewhere. So how do you explain this: over two thousand underground tunnels, carved by hand across Central Europe during the High Middle Ages, and not a single medieval document mentions any of them? No charter, no sermon, no court record, no construction order. Nothing. The word 'Erdstall' itself doesn't even appear until a Bavarian tax record from 1449 \u2014 centuries after the tunnels were built and long after they'd been sealed. And when it does appear, it refers to the land above the tunnels, not the tunnels themselves. Even the name arrived late and missed the point. Some of these tunnels were built directly beneath church floors. The Church documented heresies and folk practices with considerable energy. It said nothing about these either. This wasn't an oversight. The people who built them chose not to write it down \u2014 and whatever they knew, they took with them.",
+        "mediaItems": [
+          {
+            "type": "video",
+            "title": "Medieval Europe Recorded Everything, Except the Erdstall Tunnels"
+          }
+        ],
+        "platforms": [
+          {
+            "platform": "facebook",
+            "accountId": "6a8354b977555aae01af8a0b"
+          },
+          {
+            "platform": "instagram",
+            "accountId": "6a83553277555aae01afa275"
+          },
+          {
+            "platform": "tiktok",
+            "accountId": "6a83540477555aae01af46ca"
+          },
+          {
+            "platform": "youtube",
+            "accountId": "6a83555477555aae01afa569"
+          }
+        ],
+        "scheduledFor": "2026-08-28T18:00:00.000Z",
+        "timezone": "UTC",
+        "tiktokSettings": {
+          "privacy_level": "PUBLIC_TO_EVERYONE"
+        },
+        "media_staging_required": true
+      }
+    },
+    "main_episode": {
+      "deliverable_id": "main_episode",
+      "provider_post_id": "6a89751ca12350d9b38baf7c",
+      "preserved_schedule": {
+        "scheduledFor": "2026-08-23T14:00:00.000Z",
+        "timezone": "UTC"
+      },
+      "existing_platforms": [
+        "youtube"
+      ],
+      "video_content_repair_needed": false,
+      "reason": "title and content are already real and non-empty on the live post -- no Short-style repair required",
+      "thumbnail_verdict": {
+        "status": "fail",
+        "candidate": "thumbnails/candidate_1.jpg",
+        "reason": "thumbnail_feed_scale_legibility fail (near-black at feed scale)"
+      },
+      "mutation_would_proceed": false,
+      "blocking_reasons": [
+        "no thumbnail passes QA/identity gates (status='fail')"
+      ]
+    }
+  }
+}

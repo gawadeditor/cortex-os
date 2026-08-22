@@ -143,6 +143,19 @@ def _seed_ready_episode(db_path, assets_root, episode_id, *, channel_id, title="
     (ep_dir / f"final_render_package_{episode_id}.json").write_text(json.dumps(pkg), encoding="utf-8")
     (ep_dir / f"main_{episode_id}.mp4").write_bytes(b"main bytes" * 500)
 
+    from PIL import Image
+    thumbs_dir = ep_dir / "thumbnails"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (1280, 720), color=(60, 60, 60)).save(thumbs_dir / "candidate_1.jpg", "JPEG")
+    thumb_pkg = {
+        "thumbnail_package_id": f"tp_{episode_id}", "episode_id": episode_id,
+        "main_thumbnail": {"asset_id": f"episodes/{episode_id}/thumbnails/candidate_1"},
+        "candidates": [{"candidate_id": "tsc_test_1", "rank": 1, "selected": True, "status": "generated", "asset_id": f"episodes/{episode_id}/thumbnails/candidate_1"}],
+        "thumbnail_qa_report": {"overall_status": "pass", "checks": [], "failures": []},
+        "thumbnail_identity_report": {"verdict": "APPROVED", "violations": []},
+    }
+    (ep_dir / f"thumbnail_package_{episode_id}.json").write_text(json.dumps(thumb_pkg), encoding="utf-8")
+
 
 class FakeMediaTransport:
     """No-arg constructible, matching RequestsZernioMediaTransport()'s own
@@ -248,7 +261,12 @@ class TestWorkerLoopInvokesTriggerAutomatically:
         # fakes at their own module level) -- proves the actual production
         # call chain, not a specially-injected test double.
         assert len(FakePublishTransport.post_calls) == 1
-        assert len(FakeMediaTransport._presign_calls) == 1
+        # 2 presign calls: the main video AND its canonical thumbnail,
+        # staged separately -- proves the mandatory-thumbnail path is
+        # genuinely reached through the REAL automatic worker call chain,
+        # not just the isolated readiness check.
+        assert len(FakeMediaTransport._presign_calls) == 2
+        assert {c["contentType"] for c in FakeMediaTransport._presign_calls} == {"video/mp4", "image/jpeg"}
 
     def test_flag_disabled_never_invokes_trigger(self, db_path, assets_root, patch_real_transports):
         _make_channel(db_path, "hypogeum")

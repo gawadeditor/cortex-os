@@ -84,6 +84,22 @@ class FakeZernioTransport:
             return self._responses.pop(0)
         return ZernioTransportResponse(status_code=201, json_body={})
 
+    def get(self, *, url, headers, timeout):
+        self.calls.append({"url": url, "headers": headers, "timeout": timeout})
+        if self._error is not None:
+            raise self._error
+        if self._responses:
+            return self._responses.pop(0)
+        return ZernioTransportResponse(status_code=200, json_body={})
+
+    def put(self, *, url, headers, json_body, timeout):
+        self.calls.append({"url": url, "headers": headers, "json_body": json_body, "timeout": timeout})
+        if self._error is not None:
+            raise self._error
+        if self._responses:
+            return self._responses.pop(0)
+        return ZernioTransportResponse(status_code=200, json_body={})
+
 
 def _video_media(url="https://cdn.example.com/episode.mp4", **kwargs):
     return MediaReference(url=url, media_type="video", **kwargs)
@@ -997,3 +1013,88 @@ class TestNoRealNetworkOrProductionAccess:
         provider = ZernioProvider(transport=FakeZernioTransport())
         with pytest.raises(ZernioBindingNotFoundError):
             _publish(provider, db_b)
+
+
+# ===========================================================================
+# get_post() -- read-only provider-side verification path
+# ===========================================================================
+
+class TestGetPost:
+    """Covers ZernioProvider.get_post(), the read-only GET used to prove
+    provider-side state (e.g. whether a thumbnail actually landed on the
+    post) rather than trusting only a locally-recorded 'succeeded' status.
+    Never mutates, never logs the credential."""
+
+    def test_200_response_returns_parsed_post(self, db_path):
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(responses=[
+            ZernioTransportResponse(status_code=200, json_body={"post": _post_object(post_id="zpost_xyz")}),
+        ])
+        provider = ZernioProvider(transport=transport)
+        result = provider.get_post("zpost_xyz", db_path=db_path)
+        assert result["status_code"] == 200
+        assert result["error"] is None
+        assert result["post"]["_id"] == "zpost_xyz"
+
+    def test_200_response_without_post_wrapper_returns_body_itself(self, db_path):
+        _setup_credential(db_path)
+        body = _post_object(post_id="zpost_bare")
+        transport = FakeZernioTransport(responses=[ZernioTransportResponse(status_code=200, json_body=body)])
+        provider = ZernioProvider(transport=transport)
+        result = provider.get_post("zpost_bare", db_path=db_path)
+        assert result["status_code"] == 200
+        assert result["post"] == body
+
+    def test_404_response_is_returned_not_raised(self, db_path):
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(responses=[
+            ZernioTransportResponse(status_code=404, json_body={"error": "post not found"}),
+        ])
+        provider = ZernioProvider(transport=transport)
+        result = provider.get_post("zpost_missing", db_path=db_path)
+        assert result["status_code"] == 404
+        assert result["post"] is None
+        assert result["error"] == {"error": "post not found"}
+
+    def test_malformed_non_dict_body_is_treated_as_error(self, db_path):
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(responses=[ZernioTransportResponse(status_code=200, json_body=None)])
+        provider = ZernioProvider(transport=transport)
+        result = provider.get_post("zpost_bad", db_path=db_path)
+        assert result["post"] is None
+        assert result["status_code"] == 200
+
+    def test_missing_credential_raises_before_any_transport_call(self, db_path):
+        transport = FakeZernioTransport()
+        provider = ZernioProvider(transport=transport)
+        with pytest.raises(ZernioCredentialNotFoundError):
+            provider.get_post("zpost_xyz", db_path=db_path)
+        assert transport.calls == []
+
+    def test_transport_error_propagates(self, db_path):
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(error=ZernioTransportError("network unreachable"))
+        provider = ZernioProvider(transport=transport)
+        with pytest.raises(ZernioTransportError):
+            provider.get_post("zpost_xyz", db_path=db_path)
+
+    def test_never_calls_post_or_put(self, db_path):
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(responses=[
+            ZernioTransportResponse(status_code=200, json_body={"post": _post_object()}),
+        ])
+        provider = ZernioProvider(transport=transport)
+        provider.get_post("zpost_xyz", db_path=db_path)
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["url"].endswith("/posts/zpost_xyz")
+
+    def test_credential_is_sent_only_as_bearer_header_never_in_url_or_body(self, db_path):
+        _setup_credential(db_path)
+        transport = FakeZernioTransport(responses=[
+            ZernioTransportResponse(status_code=200, json_body={"post": _post_object()}),
+        ])
+        provider = ZernioProvider(transport=transport)
+        provider.get_post("zpost_xyz", db_path=db_path)
+        call = transport.calls[0]
+        assert call["headers"]["Authorization"] == "Bearer sk_test_fake_credential_value_never_real"
+        assert "sk_test_fake_credential_value_never_real" not in call["url"]

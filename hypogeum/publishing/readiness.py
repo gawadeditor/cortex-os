@@ -562,6 +562,204 @@ def _check_metadata(
     )
 
 
+class ThumbnailResolutionError(RuntimeError):
+    """
+    Raised by resolve_canonical_main_thumbnail() when no approved,
+    unambiguous, valid canonical thumbnail can be proven for an episode's
+    main_episode deliverable. Never falls back to a candidate that hasn't
+    been explicitly selected, never accepts a selected candidate whose own
+    QA/identity gates failed, and never treats file existence alone as
+    approval — a thumbnail package can be "generated" and even
+    "selected" (rank 1) while still carrying a BLOCKING identity
+    violation or a failed feed-scale-legibility check; both must be
+    clean before this resolves.
+    """
+    def __init__(self, reason: str, evidence: dict):
+        super().__init__(reason)
+        self.reason = reason
+        self.evidence = evidence
+
+
+@dataclass(frozen=True)
+class ResolvedThumbnail:
+    local_path: Path
+    asset_id: str
+    candidate_id: str
+    width: int
+    height: int
+    size_bytes: int
+    mime_type: str
+    sha256: str
+
+
+_THUMBNAIL_MIME_BY_SUFFIX = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+_THUMBNAIL_MAX_SIZE_BYTES = 2 * 1024 * 1024  # YouTube's own documented custom-thumbnail limit
+
+
+def resolve_canonical_main_thumbnail(episode_id: str, episode_dir: Path) -> ResolvedThumbnail:
+    """
+    Traces the FULL canonical lineage — generated candidates ->
+    thumbnail_package.candidates[].selected -> main_thumbnail.asset_id ->
+    the resolved file on disk -> thumbnail_qa_report.overall_status ->
+    thumbnail_identity_report.verdict — and returns the resolved
+    thumbnail ONLY when every link is clean and unambiguous. Raises
+    ThumbnailResolutionError (never guesses, never silently picks an
+    alternate candidate) otherwise.
+
+    Approval bar (all required):
+      - thumbnail_package_{episode_id}.json exists and has a
+        main_thumbnail.asset_id;
+      - EXACTLY one candidate in thumbnail_package.candidates has
+        selected=True, and its asset_id matches main_thumbnail.asset_id
+        (an asset_id that doesn't correspond to the one selected
+        candidate is an unresolvable conflict, not a guess to paper
+        over);
+      - the resolved local file exists, is non-empty, and is a real,
+        readable image in a YouTube-supported format;
+      - aspect ratio is 16:9 (YouTube's documented main-thumbnail
+        requirement) and file size is within YouTube's documented 2MB
+        custom-thumbnail limit;
+      - thumbnail_package.thumbnail_qa_report.overall_status == "pass"
+        (never "warn" or "fail" — a feed-scale-legibility or other QA
+        failure on the SELECTED candidate blocks, even though the file
+        itself is well-formed);
+      - thumbnail_package.thumbnail_identity_report.verdict == "APPROVED"
+        (never "WARNING" or "BLOCKED" — hypogeum.agents.
+        thumbnail_identity_guardian's own three-value enum; a BLOCKED
+        identity violation on the SELECTED candidate blocks even though
+        every other check passed).
+    """
+    package_path = episode_dir / f"thumbnail_package_{episode_id}.json"
+    if not package_path.exists():
+        raise ThumbnailResolutionError(
+            reason=f"no thumbnail_package_{episode_id}.json found — no canonical thumbnail was ever generated",
+            evidence={"package_path": str(package_path)},
+        )
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ThumbnailResolutionError(
+            reason=f"thumbnail_package_{episode_id}.json could not be parsed: {exc}",
+            evidence={"package_path": str(package_path)},
+        )
+
+    main_thumbnail = package.get("main_thumbnail") or {}
+    main_asset_id = (main_thumbnail.get("asset_id") or "").strip()
+    if not main_asset_id:
+        raise ThumbnailResolutionError(
+            reason="thumbnail_package.main_thumbnail.asset_id is missing or empty",
+            evidence={},
+        )
+
+    candidates = package.get("candidates") or []
+    selected = [c for c in candidates if isinstance(c, dict) and c.get("selected") is True]
+    if len(selected) == 0:
+        raise ThumbnailResolutionError(
+            reason="no candidate in thumbnail_package.candidates has selected=True — no approved selection exists",
+            evidence={"candidate_count": len(candidates)},
+        )
+    if len(selected) > 1:
+        raise ThumbnailResolutionError(
+            reason=f"{len(selected)} candidates are simultaneously selected=True — ambiguous, refusing to auto-pick one",
+            evidence={"selected_candidate_ids": [c.get("candidate_id") for c in selected]},
+        )
+    selected_candidate = selected[0]
+    if (selected_candidate.get("asset_id") or "").strip() != main_asset_id:
+        raise ThumbnailResolutionError(
+            reason=(
+                f"main_thumbnail.asset_id ({main_asset_id!r}) does not match the selected candidate's own "
+                f"asset_id ({selected_candidate.get('asset_id')!r}) — conflicting canonical reference"
+            ),
+            evidence={"main_asset_id": main_asset_id, "selected_candidate_asset_id": selected_candidate.get("asset_id")},
+        )
+
+    # asset_id is a path fragment relative to assets_root (e.g.
+    # 'episodes/ep_.../thumbnails/candidate_1') -- resolve it the same
+    # way every other asset_id in this codebase is resolved: relative to
+    # episode_dir's own parent (assets_root), never guessed from a
+    # filename convention.
+    assets_root = episode_dir.parent.parent
+    candidate_stem = assets_root / main_asset_id
+    resolved_path = None
+    for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+        candidate_path = candidate_stem.with_suffix(suffix)
+        if candidate_path.exists():
+            resolved_path = candidate_path
+            break
+    if resolved_path is None:
+        raise ThumbnailResolutionError(
+            reason=f"no image file found on disk for canonical asset_id={main_asset_id!r}",
+            evidence={"searched": str(candidate_stem) + ".{jpg,jpeg,png,webp}"},
+        )
+    size_bytes = resolved_path.stat().st_size
+    if size_bytes == 0:
+        raise ThumbnailResolutionError(
+            reason=f"canonical thumbnail file is empty (0 bytes): {resolved_path.name}",
+            evidence={"path": str(resolved_path)},
+        )
+    mime_type = _THUMBNAIL_MIME_BY_SUFFIX.get(resolved_path.suffix.lower())
+    if mime_type is None:
+        raise ThumbnailResolutionError(
+            reason=f"unsupported thumbnail file extension: {resolved_path.suffix!r}",
+            evidence={"path": str(resolved_path)},
+        )
+    if size_bytes > _THUMBNAIL_MAX_SIZE_BYTES:
+        raise ThumbnailResolutionError(
+            reason=f"{size_bytes} bytes exceeds YouTube's documented 2MB custom-thumbnail size limit",
+            evidence={"size_bytes": size_bytes},
+        )
+
+    try:
+        from PIL import Image  # noqa: PLC0415
+        with Image.open(resolved_path) as im:
+            width, height = im.size
+            im.verify()
+    except Exception as exc:
+        raise ThumbnailResolutionError(
+            reason=f"canonical thumbnail file could not be read as a valid image: {exc}",
+            evidence={"path": str(resolved_path)},
+        )
+    if width <= 0 or height <= 0:
+        raise ThumbnailResolutionError(
+            reason=f"canonical thumbnail has invalid dimensions {width}x{height}",
+            evidence={"path": str(resolved_path)},
+        )
+    aspect = width / height
+    if abs(aspect - (16 / 9)) > 0.02:
+        raise ThumbnailResolutionError(
+            reason=f"canonical thumbnail is {width}x{height} (aspect {aspect:.3f}), not the required 16:9",
+            evidence={"width": width, "height": height},
+        )
+
+    qa_report = package.get("thumbnail_qa_report") or {}
+    qa_status = qa_report.get("overall_status")
+    if qa_status != "pass":
+        raise ThumbnailResolutionError(
+            reason=f"thumbnail_qa_report.overall_status is {qa_status!r}, not 'pass' — {qa_report.get('failures')}",
+            evidence={"qa_status": qa_status, "failures": qa_report.get("failures")},
+        )
+
+    identity_report = package.get("thumbnail_identity_report") or {}
+    identity_verdict = identity_report.get("verdict")
+    if identity_verdict != "APPROVED":
+        raise ThumbnailResolutionError(
+            reason=(
+                f"thumbnail_identity_report.verdict is {identity_verdict!r}, not 'APPROVED' — "
+                f"{[v.get('description') for v in (identity_report.get('violations') or [])]}"
+            ),
+            evidence={"verdict": identity_verdict, "violations": identity_report.get("violations")},
+        )
+
+    import hashlib  # noqa: PLC0415
+    sha256 = hashlib.sha256(resolved_path.read_bytes()).hexdigest()
+
+    return ResolvedThumbnail(
+        local_path=resolved_path, asset_id=main_asset_id,
+        candidate_id=selected_candidate.get("candidate_id", ""),
+        width=width, height=height, size_bytes=size_bytes, mime_type=mime_type, sha256=sha256,
+    )
+
+
 # ---------------------------------------------------------------------------
 # B. LONG RENDER
 # ---------------------------------------------------------------------------
@@ -708,6 +906,44 @@ def _check_media_staging_ready(
 
 
 # ---------------------------------------------------------------------------
+# F. MAIN-EPISODE THUMBNAIL
+# ---------------------------------------------------------------------------
+
+def _check_main_episode_thumbnail(episode_id: str, episode_dir: Path, platforms: Sequence[str]) -> GateCheckResult:
+    """
+    Every YouTube main_episode requires one canonical, APPROVED custom
+    thumbnail — see resolve_canonical_main_thumbnail()'s own docstring
+    for the exact approval bar. Only evaluated when 'youtube' is among
+    the requested platforms (passes trivially, with an explicit reason,
+    otherwise) — Shorts never require a separate custom thumbnail under
+    this check; a Channel Package wanting that would add its own,
+    separate policy, not extend this one.
+    """
+    if "youtube" not in platforms:
+        return GateCheckResult(
+            capability="F_THUMBNAIL", status="pass",
+            reason="youtube not requested for this check — main-episode thumbnail requirement not evaluated",
+            evidence={},
+        )
+    try:
+        resolved = resolve_canonical_main_thumbnail(episode_id, episode_dir)
+    except ThumbnailResolutionError as exc:
+        return GateCheckResult(
+            capability="F_THUMBNAIL", status="fail",
+            reason=exc.reason, evidence=exc.evidence,
+            remediation="Resolve the canonical thumbnail's QA/identity blocker, or generate and approve a new candidate — never auto-select an unapproved one.",
+        )
+    return GateCheckResult(
+        capability="F_THUMBNAIL", status="pass",
+        reason="canonical main-episode thumbnail approved (QA pass, identity APPROVED, 16:9, within size limit)",
+        evidence={
+            "asset_id": resolved.asset_id, "candidate_id": resolved.candidate_id,
+            "width": resolved.width, "height": resolved.height, "size_bytes": resolved.size_bytes,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -758,6 +994,7 @@ def check_publish_readiness(
         _check_shorts_renders(episode_id, episode_dir, final_render_package),
         _check_publishing_binding(channel_id, platforms, logical_alias, provider_id, db_path),
         _check_media_staging_ready(episode_id, episode_dir, final_render_package, provider_id, db_path),
+        _check_main_episode_thumbnail(episode_id, episode_dir, platforms),
     ]
 
     return ReadinessCheckResult(

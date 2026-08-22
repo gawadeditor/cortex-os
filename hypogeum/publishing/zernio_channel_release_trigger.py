@@ -75,7 +75,13 @@ from hypogeum.buffer import DeliverableBundleDefinition, gather_channel_demand_i
 from hypogeum.publishing.deliverable_ids import MAIN_EPISODE_DELIVERABLE_ID, classify_deliverable_class, resolve_short_deliverable_id
 from hypogeum.publishing.media_staging import MediaStagingProvider
 from hypogeum.publishing.provider import PublishingProvider
-from hypogeum.publishing.readiness import MetadataOverride, MetadataResolutionError, resolve_canonical_metadata
+from hypogeum.publishing.readiness import (
+    MetadataOverride,
+    MetadataResolutionError,
+    ThumbnailResolutionError,
+    resolve_canonical_main_thumbnail,
+    resolve_canonical_metadata,
+)
 from hypogeum.publishing.zernio_publish_runtime import DeliverableFile, PublishPackage
 from hypogeum.publishing.zernio_release_flow import ReleasePublishResult, publish_channel_release
 
@@ -137,6 +143,19 @@ def build_publish_package_from_episode_dir(
     resolved = resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
     resolved_title, resolved_description, resolved_shorts_titles = resolved.title, resolved.description, resolved.shorts_titles
 
+    # Best-effort, same discipline as title/description above: readiness's
+    # own F_THUMBNAIL check (hypogeum.publishing.readiness.
+    # check_publish_readiness()) is the actual gate that blocks BEFORE
+    # this package is ever staged if the main episode requires a
+    # thumbnail and none can be resolved -- this is not a second,
+    # independent enforcement point, only best-effort population using
+    # the EXACT SAME resolver readiness itself calls.
+    resolved_thumbnail_path = None
+    try:
+        resolved_thumbnail_path = resolve_canonical_main_thumbnail(episode_id, episode_dir).local_path
+    except ThumbnailResolutionError:
+        pass
+
     main_path = episode_dir / f"main_{episode_id}.mp4"
     return PublishPackage(
         channel_id=channel_id, episode_id=episode_id, bundle_id=bundle_id,
@@ -144,6 +163,7 @@ def build_publish_package_from_episode_dir(
             deliverable_id=MAIN_EPISODE_DELIVERABLE_ID, local_path=main_path, mime_type="video/mp4",
             media_type="video", filename=main_path.name,
             title=resolved_title, description=resolved_description,
+            thumbnail_local_path=resolved_thumbnail_path,
         ),
         shorts=[
             DeliverableFile(

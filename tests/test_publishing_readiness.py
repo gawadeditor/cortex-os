@@ -91,6 +91,31 @@ def _write_short_render(episode_dir, index, size=512):
     (episode_dir / f"short_{index}_{EPISODE_ID}.mp4").write_bytes(b"x" * size)
 
 
+def _write_approved_thumbnail(episode_dir, *, qa_status="pass", identity_verdict="APPROVED", n_candidates=1, selected_index=0):
+    """Writes a real, valid 1280x720 16:9 JPEG plus a thumbnail_package_*.json
+    whose lineage resolve_canonical_main_thumbnail() can trace end to end."""
+    from PIL import Image
+
+    thumbs_dir = episode_dir / "thumbnails"
+    thumbs_dir.mkdir(exist_ok=True)
+    candidates = []
+    for i in range(n_candidates):
+        Image.new("RGB", (1280, 720), color=(60, 60, 60)).save(thumbs_dir / f"candidate_{i+1}.jpg", "JPEG")
+        candidates.append({
+            "candidate_id": f"tsc_test_{i+1}", "rank": i + 1, "selected": i == selected_index,
+            "status": "generated", "asset_id": f"episodes/{EPISODE_ID}/thumbnails/candidate_{i+1}",
+        })
+    main_asset_id = candidates[selected_index]["asset_id"]
+    pkg = {
+        "thumbnail_package_id": f"tp_{EPISODE_ID}", "episode_id": EPISODE_ID,
+        "main_thumbnail": {"asset_id": main_asset_id},
+        "candidates": candidates,
+        "thumbnail_qa_report": {"overall_status": qa_status, "checks": [], "failures": [] if qa_status == "pass" else ["simulated failure"]},
+        "thumbnail_identity_report": {"verdict": identity_verdict, "violations": [] if identity_verdict == "APPROVED" else [{"description": "simulated violation"}]},
+    }
+    (episode_dir / f"thumbnail_package_{EPISODE_ID}.json").write_text(json.dumps(pkg), encoding="utf-8")
+
+
 def _make_fully_ready(episode_dir, db_path, *, n_shorts=2, platforms=(), channel_id=CHANNEL_ID, attribute=True):
     if attribute:
         _attribute_to_channel(db_path, channel_id=channel_id)
@@ -106,6 +131,8 @@ def _make_fully_ready(episode_dir, db_path, *, n_shorts=2, platforms=(), channel
     _write_main_render(episode_dir)
     for i in range(n_shorts):
         _write_short_render(episode_dir, i)
+    if "youtube" in platforms:
+        _write_approved_thumbnail(episode_dir)
     create_secret_profile(
         provider="zernio", label="test key", credential_type="api_key",
         credential_data="sk_test_never_real", scope="factory", db_path=db_path,
@@ -170,7 +197,7 @@ class TestFullPass:
         )
         assert result.passed is True
         assert {c.capability for c in result.checks} == {
-            "CHANNEL_SCOPE", "A_METADATA", "B_LONG_RENDER", "C_SHORTS_RENDERS", "D_PUBLISHING_BINDING", "E_MEDIA_STAGING_READY",
+            "CHANNEL_SCOPE", "A_METADATA", "B_LONG_RENDER", "C_SHORTS_RENDERS", "D_PUBLISHING_BINDING", "E_MEDIA_STAGING_READY", "F_THUMBNAIL",
         }
         assert all(c.status == "pass" for c in result.checks)
 
@@ -573,3 +600,91 @@ class TestResolveCanonicalMetadata:
         }
         resolved = resolve_canonical_metadata(EPISODE_ID, episode_dir, db_path, None, pkg)
         assert resolved.shorts_titles == {"short_sh_0": "First Real Title", "short_sh_1": "Second Real Title"}
+
+
+class TestMandatoryMainEpisodeThumbnail:
+    """
+    F_THUMBNAIL: every YouTube main_episode requires one canonical,
+    APPROVED custom thumbnail. Reproduces the exact real ep_f3619022
+    shape found live: a SELECTED (rank-1) candidate that nonetheless
+    fails its own QA and/or identity gates must still block -- file
+    existence and "selected" status alone are never approval.
+    """
+
+    def test_missing_thumbnail_package_blocks(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=("youtube",), channel_id=CHANNEL_ID)
+        (episode_dir / f"thumbnail_package_{EPISODE_ID}.json").unlink()
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "fail"
+        assert "no thumbnail_package" in thumb.reason
+        assert result.passed is False
+
+    def test_no_platforms_requested_skips_the_check(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=(), channel_id=CHANNEL_ID)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "pass"
+        assert "not requested" in thumb.reason
+
+    def test_ambiguous_multiple_selected_candidates_blocks(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=("youtube",), channel_id=CHANNEL_ID)
+        pkg_path = episode_dir / f"thumbnail_package_{EPISODE_ID}.json"
+        pkg = json.loads(pkg_path.read_text())
+        # Force a second candidate to also be selected.
+        from PIL import Image
+        Image.new("RGB", (1280, 720), color=(10, 10, 10)).save(episode_dir / "thumbnails" / "candidate_2.jpg", "JPEG")
+        pkg["candidates"].append({"candidate_id": "tsc_test_2", "rank": 2, "selected": True, "status": "generated", "asset_id": f"episodes/{EPISODE_ID}/thumbnails/candidate_2"})
+        pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "fail"
+        assert "ambiguous" in thumb.reason
+
+    def test_qa_failure_on_selected_candidate_blocks_even_though_file_exists(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=(), channel_id=CHANNEL_ID)
+        _write_approved_thumbnail(episode_dir, qa_status="fail")
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "fail"
+        assert "thumbnail_qa_report" in thumb.reason
+
+    def test_identity_blocked_on_selected_candidate_blocks(self, episode_dir, db_path):
+        # Reproduces the real ep_f3619022 shape: verdict='BLOCKED' with a
+        # human-figure violation on the selected, otherwise-valid candidate.
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=(), channel_id=CHANNEL_ID)
+        _write_approved_thumbnail(episode_dir, identity_verdict="BLOCKED")
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "fail"
+        assert "thumbnail_identity_report" in thumb.reason
+        assert result.passed is False
+
+    def test_invalid_image_file_blocks(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=("youtube",), channel_id=CHANNEL_ID)
+        (episode_dir / "thumbnails" / "candidate_1.jpg").write_bytes(b"not a real image")
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "fail"
+        assert "could not be read as a valid image" in thumb.reason
+
+    def test_no_selected_candidate_blocks(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=(), channel_id=CHANNEL_ID)
+        _write_approved_thumbnail(episode_dir)
+        pkg_path = episode_dir / f"thumbnail_package_{EPISODE_ID}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["candidates"][0]["selected"] = False
+        pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "fail"
+        assert "no candidate" in thumb.reason
+
+    def test_approved_thumbnail_passes_with_evidence(self, episode_dir, db_path):
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=(), channel_id=CHANNEL_ID)
+        _write_approved_thumbnail(episode_dir)
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "pass"
+        assert thumb.evidence["width"] == 1280
+        assert thumb.evidence["height"] == 720

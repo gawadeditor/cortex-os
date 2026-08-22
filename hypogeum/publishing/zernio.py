@@ -218,6 +218,12 @@ class ZernioTransport(Protocol):
     def post(self, *, url: str, headers: dict, json_body: dict, timeout: float) -> ZernioTransportResponse:
         ...
 
+    def put(self, *, url: str, headers: dict, json_body: dict, timeout: float) -> ZernioTransportResponse:
+        ...
+
+    def get(self, *, url: str, headers: dict, timeout: float) -> ZernioTransportResponse:
+        ...
+
 
 class RequestsZernioTransport:
     """
@@ -237,6 +243,30 @@ class RequestsZernioTransport:
         import requests
         try:
             response = requests.post(url, headers=headers, json=json_body, timeout=timeout)
+        except requests.RequestException as exc:
+            raise ZernioTransportError(str(exc)) from exc
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        return ZernioTransportResponse(status_code=response.status_code, json_body=body)
+
+    def put(self, *, url: str, headers: dict, json_body: dict, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> ZernioTransportResponse:
+        import requests
+        try:
+            response = requests.put(url, headers=headers, json=json_body, timeout=timeout)
+        except requests.RequestException as exc:
+            raise ZernioTransportError(str(exc)) from exc
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        return ZernioTransportResponse(status_code=response.status_code, json_body=body)
+
+    def get(self, *, url: str, headers: dict, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> ZernioTransportResponse:
+        import requests
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
         except requests.RequestException as exc:
             raise ZernioTransportError(str(exc)) from exc
         try:
@@ -430,6 +460,7 @@ def _build_publish_body(
     only when the caller supplies a non-empty value -- this function still
     never invents one; a caller with no resolved title/description simply
     omits the field and accepts Zernio's own documented default.
+
     """
     platform_entry: dict = {"platform": platform, "accountId": external_account_id}
     if platform_media:
@@ -503,6 +534,37 @@ class ZernioProvider:
 
     def supports_platform(self, platform: str) -> bool:
         return platform in self.supported_platforms
+
+    def get_post(self, provider_post_id: str, *, db_path: Optional[Path] = None) -> dict:
+        """
+        Read-only GET /v1/posts/{postId} -- returns the parsed Post
+        object exactly as Zernio returns it (never mutates, never
+        credentials-logs). The sole intended use is PROVIDER-SIDE
+        verification: confirming what Zernio/the destination platform
+        actually has recorded (status, scheduledFor, mediaItems[].
+        thumbnail, platforms[].platformPostId, ...) rather than trusting
+        only Cortex's own locally-recorded 'succeeded' status. A local
+        publishing_attempts row being 'succeeded' means the SUBMISSION
+        was accepted, never that every requested field (e.g. a
+        thumbnail) was actually applied -- this is the read path that
+        proves the difference.
+
+        Raises ZernioTransportError on a network failure. A non-200
+        response is returned as-is (status_code + json_body) for the
+        caller to interpret; this method itself never raises on a
+        provider-side error response, only on a transport failure.
+        """
+        credential = _resolve_zernio_credential(db_path)
+        if credential is None:
+            raise ZernioCredentialNotFoundError(
+                "no active provider='zernio' secret profile found in Credential Manager"
+            )
+        headers = {"Authorization": f"Bearer {credential}"}
+        del credential
+        response = self._transport.get(url=f"{_ZERNIO_POSTS_URL}/{provider_post_id}", headers=headers, timeout=_DEFAULT_TIMEOUT_SECONDS)
+        if response.status_code != 200 or not isinstance(response.json_body, dict):
+            return {"status_code": response.status_code, "post": None, "error": response.json_body}
+        return {"status_code": response.status_code, "post": response.json_body.get("post", response.json_body), "error": None}
 
     def publish(
         self,

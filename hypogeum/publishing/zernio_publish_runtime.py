@@ -184,6 +184,20 @@ class DeliverableFile:
     # actually threaded into the request body at all -- see
     # ZernioProvider.publish()/_build_publish_body()'s own docstrings.
     description: Optional[str] = None
+    # Local path to this deliverable's OWN canonical thumbnail image, not
+    # yet staged (unlike thumbnail_url above, which is already a public
+    # URL). publish_episode_package() stages this file separately from
+    # the main media (its own SourceMedia/staged deliverable identity,
+    # deliverable_id + '_thumbnail') and passes the resulting public URL
+    # as thumbnail_url when building the MediaReference actually sent to
+    # the provider. None means no thumbnail requirement for this
+    # deliverable (e.g. every Short, by default) or one could not be
+    # resolved -- readiness (hypogeum.publishing.readiness.
+    # check_publish_readiness()'s F_THUMBNAIL check) is the actual gate
+    # that blocks BEFORE this ever reaches staging; this field is
+    # populated best-effort by the package builder, never a second,
+    # independent enforcement point.
+    thumbnail_local_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -339,9 +353,39 @@ def publish_episode_package(
             ))
             continue
 
+        # A canonical thumbnail resolved by the package builder (best-
+        # effort; readiness's F_THUMBNAIL check is the actual gate that
+        # blocked BEFORE this call if one was required and missing) is
+        # staged as its OWN distinct deliverable identity
+        # (f"{deliverable_id}_thumbnail") -- a separate media upload from
+        # the video itself, never a re-upload of the video, and never
+        # skipped silently if staging fails: a thumbnail staging failure
+        # blocks this deliverable exactly like a main-media staging
+        # failure would.
+        resolved_thumbnail_url = deliverable.thumbnail_url
+        if deliverable.thumbnail_local_path is not None:
+            try:
+                thumb_source = SourceMedia(
+                    local_path=deliverable.thumbnail_local_path,
+                    sha256=compute_sha256(deliverable.thumbnail_local_path),
+                    size_bytes=deliverable.thumbnail_local_path.stat().st_size,
+                    mime_type="image/jpeg", media_type="image",
+                    filename=deliverable.thumbnail_local_path.name,
+                    channel_id=channel_id, episode_id=package.episode_id,
+                    deliverable_id=f"{deliverable.deliverable_id}_thumbnail",
+                )
+                staged_thumbnail = staging.stage(thumb_source, db_path=db_path)
+                resolved_thumbnail_url = staged_thumbnail.public_url
+            except Exception as exc:
+                outcomes.append(DeliverablePublishOutcome(
+                    deliverable_id=deliverable.deliverable_id, status="blocked",
+                    stage_result=_staged_to_dict(staged), error=f"thumbnail staging failed: {exc}",
+                ))
+                continue
+
         media_ref = staged_result_to_media_reference(
             staged, media_type=deliverable.media_type,
-            thumbnail_url=deliverable.thumbnail_url, title=deliverable.title,
+            thumbnail_url=resolved_thumbnail_url, title=deliverable.title,
             alt_text=deliverable.alt_text,
         )
 

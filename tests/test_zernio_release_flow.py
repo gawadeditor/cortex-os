@@ -87,6 +87,26 @@ def _attribute_episode(db_path, episode_id=EPISODE_ID, channel_id=CHANNEL_ID):
         conn.close()
 
 
+def _write_approved_thumbnail(assets_root, episode_id=EPISODE_ID):
+    """Real, valid 1280x720 16:9 JPEG plus an APPROVED thumbnail_package_*.json
+    -- see hypogeum.publishing.readiness.resolve_canonical_main_thumbnail()'s
+    own docstring for the exact approval bar this satisfies."""
+    from PIL import Image
+
+    ep_dir = assets_root / "episodes" / episode_id
+    thumbs_dir = ep_dir / "thumbnails"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (1280, 720), color=(60, 60, 60)).save(thumbs_dir / "candidate_1.jpg", "JPEG")
+    pkg = {
+        "thumbnail_package_id": f"tp_{episode_id}", "episode_id": episode_id,
+        "main_thumbnail": {"asset_id": f"episodes/{episode_id}/thumbnails/candidate_1"},
+        "candidates": [{"candidate_id": "tsc_test_1", "rank": 1, "selected": True, "status": "generated", "asset_id": f"episodes/{episode_id}/thumbnails/candidate_1"}],
+        "thumbnail_qa_report": {"overall_status": "pass", "checks": [], "failures": []},
+        "thumbnail_identity_report": {"verdict": "APPROVED", "violations": []},
+    }
+    (ep_dir / f"thumbnail_package_{episode_id}.json").write_text(json.dumps(pkg), encoding="utf-8")
+
+
 def _write_bundle_files(assets_root, episode_id=EPISODE_ID, *, n_shorts=3, title="", shorts_titles=None):
     ep_dir = assets_root / "episodes" / episode_id
     pkg = {
@@ -100,6 +120,8 @@ def _write_bundle_files(assets_root, episode_id=EPISODE_ID, *, n_shorts=3, title
     (ep_dir / f"main_{episode_id}.mp4").write_bytes(b"main bytes" * 500)
     for i in range(n_shorts):
         (ep_dir / f"short_{i}_{episode_id}.mp4").write_bytes(f"short {i}".encode() * 500)
+    if title:
+        _write_approved_thumbnail(assets_root, episode_id)
 
 
 def _package(assets_root, episode_id=EPISODE_ID, channel_id=CHANNEL_ID, n_shorts=3):

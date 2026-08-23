@@ -259,6 +259,140 @@ def _write_final_render_package_with_backup(
     package_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _backfill_canonical_platform_metadata(
+    episode_id: str,
+    episode_dir: Path,
+    final_render_package: dict,
+    *,
+    config: Config,
+    channel_id: Optional[str],
+    target_platforms: List[str],
+    platform_deliverable_policy: dict,
+    llm_call=None,
+) -> dict:
+    """
+    Permanent workflow fix (2026-08-23, see docs/operations/audits/
+    ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md item 1): generates
+    and persists a real canonical_platform_metadata entry for every
+    ENABLED (deliverable_id, platform) pair still missing one -- this is
+    what makes "no human writes a repair artifact by hand" true for every
+    future episode, not just this one. Read-only if nothing is missing
+    (the common case once an episode's metadata has already been
+    generated once). Mirrors _backfill_shorts_metadata()'s own structure
+    and fail-closed-per-item discipline exactly.
+
+    "Enabled" is read from platform_deliverable_policy, the SAME policy
+    dict _allowed_deliverable_ids_for_platform() already uses -- a
+    (platform, deliverable_class) combination the channel has not
+    enabled is never generated for for (no wasted generation, no
+    canonical entry for a platform this deliverable will never target).
+
+    Never fails open: a CanonicalMetadataGenerationError for one
+    deliverable is caught and simply leaves that deliverable's still-
+    missing platform(s) unresolved -- hypogeum.publishing.
+    cross_platform_readiness is the real gate that fails a still-missing
+    entry closed; this function only ever tries to fill a gap.
+    """
+    from hypogeum.agents.canonical_metadata_agent import (
+        CanonicalMetadataGenerationError,
+        generate_canonical_platform_metadata_for_deliverable,
+    )
+    from hypogeum.publishing.canonical_metadata import resolve_canonical_platform_metadata
+
+    shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
+    short_ids = [resolve_short_deliverable_id(shorts_renders[i], i) for i in range(len(shorts_renders))]
+    all_deliverable_ids = [MAIN_EPISODE_DELIVERABLE_ID, *short_ids]
+
+    metadata_source = dict((final_render_package or {}).get("metadata_source") or {})
+    existing_entries = list(metadata_source.get("canonical_platform_metadata") or [])
+    changed = False
+
+    for deliverable_id in all_deliverable_ids:
+        deliverable_class = classify_deliverable_class(deliverable_id)
+        missing_platforms = [
+            p for p in target_platforms
+            if bool((((platform_deliverable_policy or {}).get(p) or {}).get(deliverable_class) or {}).get("enabled"))
+            and resolve_canonical_platform_metadata(final_render_package, deliverable_id, p) is None
+        ]
+        if not missing_platforms:
+            continue
+        try:
+            new_entries = generate_canonical_platform_metadata_for_deliverable(
+                episode_id, episode_dir, deliverable_id, deliverable_class, missing_platforms,
+                final_render_package, config=config, channel_id=channel_id,
+                platform_deliverable_policy=platform_deliverable_policy, llm_call=llm_call,
+            )
+        except CanonicalMetadataGenerationError:
+            continue  # left unresolved -- cross_platform_readiness is the real gate
+
+        # The generator deliberately leaves thumbnail_ref unset for a
+        # main_episode entry (it is not itself in the business of
+        # resolving thumbnails) -- filled in here from the SAME resolver
+        # hypogeum.publishing.readiness.check_publish_readiness()'s own
+        # F_THUMBNAIL gate uses, so the canonical package always points
+        # at the real, already-selected thumbnail, never a second,
+        # independently-guessed one. Best-effort: a Short has no
+        # thumbnail requirement by default (see canonical_metadata.py's
+        # own validation) and is left as None.
+        if deliverable_id == MAIN_EPISODE_DELIVERABLE_ID:
+            try:
+                thumb = resolve_canonical_main_thumbnail(episode_id, episode_dir)
+                for entry in new_entries:
+                    entry["thumbnail_ref"] = thumb.asset_id
+            except ThumbnailResolutionError:
+                pass  # left unresolved -- readiness's own F_THUMBNAIL check is the real gate
+
+        existing_entries.extend(new_entries)
+        changed = True
+
+    if not changed:
+        return final_render_package
+
+    metadata_source["canonical_platform_metadata"] = existing_entries
+    updated_package = {**final_render_package, "metadata_source": metadata_source}
+    _write_final_render_package_with_backup(episode_id, episode_dir, final_render_package, updated_package)
+    return updated_package
+
+
+def _pick_root_title_description(
+    final_render_package: dict, deliverable_id: str,
+    fallback_title: Optional[str], fallback_description: Optional[str],
+):
+    """
+    Permanent workflow fix (2026-08-23, item 3 of docs/operations/audits/
+    ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md: "the production
+    Zernio path must consume the canonical package directly"): when a
+    real canonical_platform_metadata entry exists for this deliverable,
+    its own title/description become the shared, root-level Zernio
+    title/content -- never the older resolve_canonical_metadata()/
+    resolve_canonical_captions() value once a real canonical package
+    exists. Falls back to the caller-supplied (legacy-resolved) values
+    only when no canonical entry exists at all for this deliverable, on
+    any platform -- preserving exact prior behavior for an episode that
+    genuinely has no canonical package.
+
+    Zernio's aggregation model (one deliverable -> one post covering
+    every target platform) means the root title/content are inherently
+    SHARED across all of that deliverable's platforms -- true per-
+    platform caption variance lives in platforms[].platformSpecificData
+    (see hypogeum.publishing.canonical_metadata.build_zernio_platform_specific_data()),
+    a smaller, structured field set, not a second full alternate
+    description. 'youtube' is preferred as the root source when present
+    (matches every real Hypogeum topology: main_episode targets YouTube
+    only, and a Short's YouTube variant is generally its most complete/
+    representative one); otherwise the first available platform's entry
+    is used -- never fabricated, never re-derived independently of what
+    was actually generated/approved.
+    """
+    from hypogeum.publishing.canonical_metadata import resolve_canonical_platform_metadata
+
+    for platform in ("youtube", "tiktok", "instagram", "facebook"):
+        metadata = resolve_canonical_platform_metadata(final_render_package, deliverable_id, platform)
+        if metadata is not None:
+            return metadata.title or fallback_title, metadata.description
+    return fallback_title, fallback_description
+
+
 def build_publish_package_from_episode_dir(
     channel_id: str,
     episode_id: str,
@@ -271,6 +405,9 @@ def build_publish_package_from_episode_dir(
     config: Optional[Config] = None,
     titles_llm_call=None,
     captions_llm_call=None,
+    platform_deliverable_policy: Optional[dict] = None,
+    target_platforms: Optional[List[str]] = None,
+    canonical_metadata_llm_call=None,
 ) -> PublishPackage:
     """
     Read-only UNLESS enable_metadata_backfill=True. Constructs a
@@ -329,6 +466,25 @@ def build_publish_package_from_episode_dir(
             config=config or Config(), channel_id=channel_id,
             titles_llm_call=titles_llm_call, captions_llm_call=captions_llm_call,
         )
+        # Permanent workflow fix (2026-08-23, see docs/operations/audits/
+        # ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md): auto-generate
+        # any missing canonical_platform_metadata entry for every enabled
+        # (deliverable_id, platform) pair BEFORE this package is ever
+        # staged -- must run AFTER _backfill_shorts_metadata() above, since
+        # a Short's canonical generation grounds itself in the REAL,
+        # already-resolved shorts_captions entry that call may have just
+        # produced. Never runs when target_platforms/platform_deliverable_policy
+        # were not supplied (a caller that doesn't pass them gets the
+        # exact prior behavior -- this is additive, not a forced new
+        # requirement on every caller of this function).
+        if target_platforms:
+            final_render_package = _backfill_canonical_platform_metadata(
+                episode_id, episode_dir, final_render_package,
+                config=config or Config(), channel_id=channel_id,
+                target_platforms=target_platforms,
+                platform_deliverable_policy=platform_deliverable_policy or {},
+                llm_call=canonical_metadata_llm_call,
+            )
 
     shorts_renders = (final_render_package or {}).get("shorts_renders", []) or []
 
@@ -365,27 +521,86 @@ def build_publish_package_from_episode_dir(
         except CaptionResolutionError:
             pass  # this specific Short's caption is unresolved -- readiness blocks it per-deliverable
 
+    main_title, main_description = _pick_root_title_description(
+        final_render_package, MAIN_EPISODE_DELIVERABLE_ID, resolved_title, resolved_description,
+    )
     main_path = episode_dir / f"main_{episode_id}.mp4"
+
+    short_deliverables: List[DeliverableFile] = []
+    for i in range(len(shorts_renders)):
+        short_id = short_ids_in_order[i]
+        short_title, short_description = _pick_root_title_description(
+            final_render_package, short_id,
+            resolved_shorts_titles.get(short_id), resolved_captions.get(short_id),
+        )
+        short_deliverables.append(DeliverableFile(
+            deliverable_id=short_id,
+            local_path=episode_dir / f"short_{i}_{episode_id}.mp4",
+            mime_type="video/mp4", media_type="video",
+            filename=f"short_{i}_{episode_id}.mp4",
+            title=short_title, description=short_description,
+            **_resolve_zernio_wiring(final_render_package, short_id),
+        ))
+
     return PublishPackage(
         channel_id=channel_id, episode_id=episode_id, bundle_id=bundle_id,
         main_episode=DeliverableFile(
             deliverable_id=MAIN_EPISODE_DELIVERABLE_ID, local_path=main_path, mime_type="video/mp4",
             media_type="video", filename=main_path.name,
-            title=resolved_title, description=resolved_description,
+            title=main_title, description=main_description,
             thumbnail_local_path=resolved_thumbnail_path,
+            **_resolve_zernio_wiring(final_render_package, MAIN_EPISODE_DELIVERABLE_ID),
         ),
-        shorts=[
-            DeliverableFile(
-                deliverable_id=short_ids_in_order[i],
-                local_path=episode_dir / f"short_{i}_{episode_id}.mp4",
-                mime_type="video/mp4", media_type="video",
-                filename=f"short_{i}_{episode_id}.mp4",
-                title=resolved_shorts_titles.get(short_ids_in_order[i]),
-                description=resolved_captions.get(short_ids_in_order[i]),
-            )
-            for i in range(len(shorts_renders))
-        ],
+        shorts=short_deliverables,
     )
+
+
+# All platforms this Factory Core module knows how to resolve
+# per-platform canonical metadata for -- NOT a channel-specific
+# topology assumption (a channel's own platform_deliverable_policy is
+# what actually decides which of these get targeted for a given
+# deliverable; resolving all four here unconditionally is cheap local
+# JSON lookups, never a provider call).
+_ALL_KNOWN_PLATFORMS = ("youtube", "tiktok", "instagram", "facebook")
+
+
+def _resolve_zernio_wiring(final_render_package: dict, deliverable_id: str) -> dict:
+    """
+    Real production wiring for hypogeum.publishing.canonical_metadata
+    (2026-08-23, see docs/operations/audits/
+    ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md item 5): resolves
+    each platform's own CanonicalPlatformMetadata for this deliverable
+    and builds the platform_specific_data/root_fields DeliverableFile
+    kwargs the real publish_multi_platform() call site
+    (hypogeum.publishing.zernio_publish_runtime.publish_episode_package())
+    now actually consumes -- closing the gap where the provider accepted
+    these fields but no real caller ever supplied them.
+
+    Best-effort per platform: a platform with no resolved canonical
+    metadata simply contributes nothing (never a fabricated default) --
+    hypogeum.publishing.cross_platform_readiness's own canonical-
+    metadata gate is what blocks a submission missing a REQUIRED field
+    before this is ever reached; this function only wires through
+    whatever real, already-approved metadata exists.
+    """
+    from hypogeum.publishing.canonical_metadata import (
+        build_zernio_platform_specific_data,
+        build_zernio_root_fields,
+        resolve_canonical_platform_metadata,
+    )
+
+    platform_specific_data: dict = {}
+    root_fields: dict = {}
+    for platform in _ALL_KNOWN_PLATFORMS:
+        metadata = resolve_canonical_platform_metadata(final_render_package, deliverable_id, platform)
+        if metadata is None:
+            continue
+        data = build_zernio_platform_specific_data(metadata, platform)
+        if data:
+            platform_specific_data[platform] = data
+        if platform == "youtube":
+            root_fields = build_zernio_root_fields(metadata)
+    return {"platform_specific_data": platform_specific_data, "root_fields": root_fields}
 
 
 def _resolve_target_platforms(channel_id: str, db_path: Optional[Path]) -> List[str]:
@@ -560,6 +775,7 @@ def process_channel_ready_bundles(
     enable_production_output_gate: bool = True,
     titles_llm_call=None,
     captions_llm_call=None,
+    canonical_metadata_llm_call=None,
 ) -> List[ReadyBundle]:
     """
     Find this channel's not-yet-published, complete items for
@@ -633,6 +849,9 @@ def process_channel_ready_bundles(
                 db_path=db_path, metadata_override=metadata_override_by_item.get(item.item_id),
                 enable_metadata_backfill=True, config=resolved_config,
                 titles_llm_call=titles_llm_call, captions_llm_call=captions_llm_call,
+                platform_deliverable_policy=platform_deliverable_policy,
+                target_platforms=resolved_platforms,
+                canonical_metadata_llm_call=canonical_metadata_llm_call,
             )
         except MetadataResolutionError as exc:
             # Fail closed, per item — never silently proceed with a

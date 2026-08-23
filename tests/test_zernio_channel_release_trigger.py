@@ -14,6 +14,7 @@ default.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -202,6 +203,314 @@ class TestFullSequence:
         assert results[0].platform == "youtube"
         assert results[0].result.status == "published"
         assert len(publish_transport.post_calls) == 1
+
+
+class TestCanonicalMetadataReachesTheRealSerializedRequestBody:
+    """
+    Fixed 2026-08-23, item 5 of docs/operations/audits/
+    ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md: "the provider
+    accepts platform_specific_data and root_fields, but that does not
+    prove the production workflow supplies them." End-to-end,
+    deterministic, starting from a real-shaped canonical_platform_metadata
+    artifact on disk -- never a test calling publish_multi_platform()
+    directly with manually-supplied kwargs -- through the REAL chain:
+    canonical metadata artifact -> check_cross_platform_readiness() ->
+    process_channel_ready_bundles() -> build_publish_package_from_episode_dir()
+    -> publish_episode_package() -> ZernioProvider.publish_multi_platform()
+    -> the actual serialized Zernio request body a fake transport
+    captures, asserted field-by-field.
+    """
+
+    def test_youtube_platform_specific_data_and_root_fields_reach_the_real_request(self, db_path, assets_root):
+        import hashlib
+
+        episode_id = "ep_e2e_canonical"
+        deliverable_schedule_policy = {"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}}
+        # _setup_channel() builds its own brand/model/pub profiles --
+        # reuse it, then separately install platform_deliverable_policy
+        # (the real gate for check_cross_platform_readiness() to fire at
+        # all -- see that call site's own "if platform_deliverable_policy:"
+        # guard in zernio_channel_release_trigger.py).
+        _setup_channel(db_path, deliverable_schedule_policy=deliverable_schedule_policy)
+        from hypogeum.channel_config import update_channel_operations_profile
+        update_channel_operations_profile(
+            CHANNEL_ID, db_path=db_path,
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27"}}},
+        )
+        _seed_complete_episode(db_path, assets_root, episode_id, title="A Real Title")
+        _fully_bind(db_path)
+
+        ep_dir = assets_root / "episodes" / episode_id
+        # canonical_metadata's chapter validation ffprobes the REAL
+        # deliverable file -- _seed_complete_episode()'s own fixture
+        # writes a fake byte blob (0s measured duration), which would
+        # fail closed here. A short, real, moving-content video is
+        # required for this test to reach a genuine "published" result.
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=30",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(ep_dir / f"main_{episode_id}.mp4"),
+            ],
+            check=True, capture_output=True,
+        )
+        research_pkg = {
+            "source_registry": [{"source_id": "src_001", "url": "https://example.com/source", "inferred_type": "test"}],
+            "claims": [{"claim_id": "clm_001", "text": "A real claim.", "sources": ["src_001"]}],
+        }
+        research_path = ep_dir / f"research_package_{episode_id}.json"
+        research_path.write_text(json.dumps(research_pkg), encoding="utf-8")
+        research_sha256 = hashlib.sha256(research_path.read_bytes()).hexdigest()
+
+        render_path = ep_dir / f"final_render_package_{episode_id}.json"
+        pkg = json.loads(render_path.read_text())
+        now_iso = _now_iso()
+        pkg["metadata_source"]["canonical_platform_metadata"] = [{
+            "deliverable_id": "main_episode", "platform": "youtube",
+            "title": "A Real Title", "description": "A real description. #TestTag",
+            "visible_hashtags": ["#TestTag"], "backend_tags": ["real tag one", "real tag two"],
+            "sources": [{"title": "Example Source", "url": "https://example.com/source"}],
+            "claim_source_map": {"clm_001": {"sources": ["src_001"]}},
+            "cta": "Subscribe for more.", "language": "en", "metadata_version": "v1",
+            "source_artifact_ids": [f"research_package_{episode_id}.json"],
+            "input_fingerprint": {f"research_package_{episode_id}.json": research_sha256},
+            "generated_at": now_iso, "approved_at": now_iso,
+            "first_comment": "A real first comment.",
+            "category_id": "27", "thumbnail_ref": f"episodes/{episode_id}/thumbnails/candidate_1",
+            "ai_disclosure": True,
+            "chapters": [
+                {"start_seconds": 0.0, "title": "Intro"},
+                {"start_seconds": 12.0, "title": "Middle"},
+                {"start_seconds": 24.0, "title": "End"},
+            ],
+        }]
+        render_path.write_text(json.dumps(pkg), encoding="utf-8")
+
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+        )
+
+        assert len(results) == 1, results
+        assert results[0].result.status == "published", results[0].result
+
+        assert len(publish_transport.post_calls) == 1
+        body = publish_transport.post_calls[0]
+
+        # Generic fields never the ONLY thing sent.
+        assert body.get("title") == "A Real Title"
+        assert "A real description" in body.get("content", "")
+
+        # Root-level tags/hashtags -- sourced from the youtube canonical entry.
+        assert body.get("tags") == ["real tag one", "real tag two"]
+        assert body.get("hashtags") == ["#TestTag"]
+
+        # Per-platform platformSpecificData -- the actual field mapping fix
+        # reaching the real request body, not just accepted by the provider.
+        youtube_entry = next(p for p in body["platforms"] if p["platform"] == "youtube")
+        assert youtube_entry["platformSpecificData"] == {
+            "categoryId": "27", "containsSyntheticMedia": True, "firstComment": "A real first comment.",
+        }
+
+    def test_no_canonical_metadata_means_no_platform_specific_data_sent(self, db_path, assets_root):
+        # Regression guard for the OTHER direction: an episode with no
+        # canonical_platform_metadata at all must not fabricate
+        # platformSpecificData -- and, since platform_deliverable_policy
+        # is configured here, readiness genuinely blocks it (proving the
+        # gate is load-bearing, not bypassed).
+        deliverable_schedule_policy = {"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}}
+        _setup_channel(db_path, deliverable_schedule_policy=deliverable_schedule_policy)
+        from hypogeum.channel_config import update_channel_operations_profile
+        update_channel_operations_profile(
+            CHANNEL_ID, db_path=db_path,
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27"}}},
+        )
+        _seed_complete_episode(db_path, assets_root, "ep_no_canonical", title="A Real Title")
+        _fully_bind(db_path)
+
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+        )
+
+        assert publish_transport.post_calls == []
+        assert results == [] or all(r.result.status != "published" for r in results)
+
+
+class TestCanonicalMetadataAutoGeneration:
+    """
+    Permanent workflow, fixed 2026-08-23 (item 1 of docs/operations/audits/
+    ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md): the metadata/SEO
+    stage must produce canonical_platform_metadata AUTOMATICALLY for every
+    enabled deliverable/platform pair -- no human-written repair artifact.
+    Proves the auto-generation actually runs (a fresh episode, no
+    canonical entry, reaches a real "published" result and a real
+    serialized request body through a fake llm_call), and proves it makes
+    ZERO real network/LLM calls when generation is never actually needed
+    or never actually reachable.
+    """
+
+    def _seed_with_real_research_and_script(self, db_path, assets_root, episode_id):
+        deliverable_schedule_policy = {"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}}
+        _setup_channel(db_path, deliverable_schedule_policy=deliverable_schedule_policy)
+        from hypogeum.channel_config import update_channel_operations_profile
+        update_channel_operations_profile(
+            CHANNEL_ID, db_path=db_path,
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "ai_disclosure": True}}},
+        )
+        _seed_complete_episode(db_path, assets_root, episode_id, title="A Real Title")
+        _fully_bind(db_path)
+
+        ep_dir = assets_root / "episodes" / episode_id
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=30",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(ep_dir / f"main_{episode_id}.mp4"),
+            ],
+            check=True, capture_output=True,
+        )
+        (ep_dir / f"research_package_{episode_id}.json").write_text(json.dumps({
+            "source_registry": [{"source_id": "src_001", "url": "https://example.com/source", "inferred_type": "academic"}],
+            "claims": [{"claim_id": "clm_001", "text": "A real claim.", "sources": ["src_001"]}],
+        }), encoding="utf-8")
+        (ep_dir / f"script_package_{episode_id}.json").write_text(json.dumps({
+            "sections": [
+                {"section_id": "s1", "narration_beats": [{"text": "A real narrated fact about the episode's subject."}]},
+                {"section_id": "s2", "narration_beats": [{"text": "A second real narrated fact."}]},
+                {"section_id": "s3", "narration_beats": [{"text": "A third real narrated fact."}]},
+            ],
+            "chapter_markers": [
+                {"section_id": "s1", "title": "Intro"},
+                {"section_id": "s2", "title": "Middle"},
+                {"section_id": "s3", "title": "End"},
+            ],
+        }), encoding="utf-8")
+        # Real per-section start times -- _resolve_chapters() refuses to
+        # fabricate timestamps without one of these (or a real
+        # narration_package) as an actual timing source; this mirrors
+        # what an earlier pipeline step (shorts/section metadata
+        # generation) already writes for a real production episode.
+        render_path = ep_dir / f"final_render_package_{episode_id}.json"
+        render_pkg = json.loads(render_path.read_text())
+        render_pkg["metadata_source"]["section_titles"] = [
+            {"section_id": "s1", "start_seconds": 0.0},
+            {"section_id": "s2", "start_seconds": 12.0},
+            {"section_id": "s3", "start_seconds": 24.0},
+        ]
+        render_path.write_text(json.dumps(render_pkg), encoding="utf-8")
+        return ep_dir
+
+    @staticmethod
+    def _fake_canonical_llm_call(system_prompt, input_package, *, config, episode_id, channel_id):
+        return {"platforms": {
+            platform: {
+                "title": f"A Real Generated Title ({platform})",
+                "description": f"A real, generated, platform-specific description for {platform}. #TestTag",
+                "visible_hashtags": ["#TestTag"],
+                "backend_tags": ["generated tag one", "generated tag two"] if platform == "youtube" else [],
+                "cta": "Subscribe for more.",
+                "first_comment": "A real generated first comment." if platform == "youtube" else "",
+            }
+            for platform in input_package["platforms"]
+        }}
+
+    def test_auto_generated_metadata_reaches_a_real_published_result(self, db_path, assets_root):
+        episode_id = "ep_auto_gen"
+        self._seed_with_real_research_and_script(db_path, assets_root, episode_id)
+
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+            canonical_metadata_llm_call=self._fake_canonical_llm_call,
+        )
+
+        assert len(results) == 1, results
+        assert results[0].result.status == "published", results[0].result
+        assert len(publish_transport.post_calls) == 1
+        body = publish_transport.post_calls[0]
+        youtube_entry = next(p for p in body["platforms"] if p["platform"] == "youtube")
+        assert youtube_entry["platformSpecificData"]["categoryId"] == "27"
+        assert youtube_entry["platformSpecificData"]["containsSyntheticMedia"] is True
+        assert body["tags"] == ["generated tag one", "generated tag two"]
+        assert "generated, platform-specific description" in body["content"]
+
+        # Persisted back to disk -- a SECOND run against the same episode
+        # must not need to generate again (no human repair artifact, and
+        # no unnecessary repeated generation either).
+        ep_dir = assets_root / "episodes" / episode_id
+        pkg = json.loads((ep_dir / f"final_render_package_{episode_id}.json").read_text())
+        assert len(pkg["metadata_source"]["canonical_platform_metadata"]) == 1
+        assert pkg["metadata_source"]["canonical_platform_metadata"][0]["deliverable_id"] == "main_episode"
+
+    def test_missing_canonical_metadata_makes_zero_real_network_calls_when_ungenerable(self, db_path, assets_root, monkeypatch):
+        # A spy that fails loudly if ever reached -- proves generation
+        # never attempts a real network/LLM call for an episode this
+        # session provides no fake llm_call for AND no real grounding
+        # artifacts for (the honest "cannot generate" case).
+        def _must_not_be_called(*args, **kwargs):
+            raise AssertionError("hypogeum.openrouter.call_claude must never be reached in this test")
+        monkeypatch.setattr("hypogeum.openrouter.call_claude", _must_not_be_called)
+
+        deliverable_schedule_policy = {"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}}
+        _setup_channel(db_path, deliverable_schedule_policy=deliverable_schedule_policy)
+        from hypogeum.channel_config import update_channel_operations_profile
+        update_channel_operations_profile(
+            CHANNEL_ID, db_path=db_path,
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27"}}},
+        )
+        # No research_package/script_package written -- generation cannot
+        # ground itself in anything real and must fail closed BEFORE ever
+        # reaching the model call.
+        _seed_complete_episode(db_path, assets_root, "ep_ungenerable", title="A Real Title")
+        _fully_bind(db_path)
+
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+            # canonical_metadata_llm_call deliberately omitted -- proves
+            # the REAL default path is never reached either.
+        )
+        assert publish_transport.post_calls == []
+        assert results == [] or all(r.result.status != "published" for r in results)
+
+    def test_disabled_platform_never_triggers_generation(self, db_path, assets_root, monkeypatch):
+        # A platform genuinely disabled in the Channel Package must never
+        # be generated for, even with real grounding artifacts present.
+        def _must_not_be_called(*args, **kwargs):
+            raise AssertionError("hypogeum.openrouter.call_claude must never be reached for a disabled platform")
+        monkeypatch.setattr("hypogeum.openrouter.call_claude", _must_not_be_called)
+
+        episode_id = "ep_disabled_platform"
+        self._seed_with_real_research_and_script(db_path, assets_root, episode_id)
+        from hypogeum.channel_config import update_channel_operations_profile
+        update_channel_operations_profile(
+            CHANNEL_ID, db_path=db_path,
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": False}}},
+        )
+
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()
+        process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+        )
+        assert publish_transport.post_calls == []
 
 
 class TestIdempotencyAcrossRepeatedPolling:

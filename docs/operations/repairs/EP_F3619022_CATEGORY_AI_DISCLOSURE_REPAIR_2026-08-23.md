@@ -75,8 +75,21 @@ A second fresh GET immediately after the rejected PUT confirmed **zero
 mutation**: title, content, tags, hashtags, `platformSpecificData`, and
 `mediaItems` are byte-for-byte identical to the pre-attempt GET. No
 partial write occurred. The local `publication_intent`/attempt ledger
-was left untouched (`status: "ambiguous"`, "PUT response did not confirm
-the shared post's content/media correction").
+was left untouched.
+
+Correction (2026-08-23, same day): this repair record originally
+described the attempt's result as `status: "ambiguous"`. That was a real
+classification bug in `ZernioProvider.repair_existing_post()`, since
+fixed (see commit for `fix(publishing): classify deterministic Zernio
+PUT rejections`) — a confirmed, synchronous HTTP 400 is a deterministic
+**rejection**, not an ambiguous/unknown outcome; ambiguity is reserved
+for a genuinely unclear result (timeout, connection loss, response
+loss). Under the corrected classification this attempt's real status is
+`"rejected"` (`"HTTP 400: {"error": "Published posts can only have
+their recycling config updated"}"`) — the rejected PUT attempt itself is
+distinct from the unchanged publication intent: the intent was, and
+remains, `"succeeded"` (from the original 2026-08-22/23 publish), never
+flipped by this rejected repair attempt in either direction.
 
 This is a genuine, structural blocker requiring an operator decision,
 not a code defect: main_episode's live post cannot receive the new

@@ -399,6 +399,15 @@ def _successful_put_response(*, post_id="post_short_001", platforms=ALL_PLATFORM
     )
 
 
+def _published_post_locked_put_response():
+    # The EXACT real response confirmed live against ep_f3619022's main
+    # post (2026-08-23): a published post's PUT is rejected outright.
+    return ZernioTransportResponse(
+        status_code=400,
+        json_body={"error": "Published posts can only have their recycling config updated"},
+    )
+
+
 def _repair(provider, db_path, *, platforms=ALL_PLATFORMS, title="A Real Short Title", content="A real caption.",
             post_id="post_short_001", deliverable_id="short_001",
             platform_specific_data=None, root_fields=None):
@@ -773,6 +782,94 @@ class TestRepairAlreadySucceededPlatform:
         for platform in ("tiktok", "instagram", "facebook"):
             assert results[platform]["status"] == "published"
             assert results[platform]["provider_content_id"] == "post_short_001"
+
+
+class TestRepairPutRejectionClassification:
+    """
+    Real bug fixed 2026-08-23, discovered live against ep_f3619022's main
+    post: a confirmed HTTP 400 ("Published posts can only have their
+    recycling config updated") was previously classified "ambiguous" --
+    the SAME label as a genuinely unknown outcome (timeout, connection
+    loss). A confirmed, synchronous, non-retryable provider rejection
+    must be reported as a real rejection, distinct from ambiguity, and
+    must never be silently retried or mistaken for success.
+    """
+
+    def test_confirmed_400_rejection_is_classified_rejected_not_ambiguous(self, db_path):
+        _bind_all(db_path)
+        guard = guard_and_prepare_attempt(
+            db_path, channel_id=CHANNEL_ID, episode_id=EPISODE_ID,
+            deliverable_id="short_001", platform="youtube", provider_id="zernio",
+        )
+        record_success(db_path, guard.attempt_id, provider_publication_id="post_short_001", provider_status="published")
+
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(post_id="post_short_001", platforms=["youtube"]),
+            put_response=_published_post_locked_put_response(),
+        )
+        provider = ZernioProvider(transport=transport)
+        results = _repair(provider, db_path, platforms=["youtube"], post_id="post_short_001")
+
+        assert results["youtube"]["status"] == "rejected"
+        assert results["youtube"]["status"] != "ambiguous"
+        assert "400" in results["youtube"]["note"]
+        assert "recycling config" in results["youtube"]["note"]
+
+    def test_rejected_put_never_marks_the_publication_intent_succeeded_or_creates_a_new_attempt(self, db_path):
+        _bind_all(db_path)
+        guard = guard_and_prepare_attempt(
+            db_path, channel_id=CHANNEL_ID, episode_id=EPISODE_ID,
+            deliverable_id="short_001", platform="youtube", provider_id="zernio",
+        )
+        record_success(db_path, guard.attempt_id, provider_publication_id="post_short_001", provider_status="published")
+
+        conn = get_connection(db_path)
+        try:
+            before_attempts = conn.execute(
+                "SELECT COUNT(*) AS n FROM publishing_attempts WHERE episode_id=? AND deliverable_id=? AND platform='youtube'",
+                (EPISODE_ID, "short_001"),
+            ).fetchone()["n"]
+            before_status = conn.execute(
+                "SELECT status FROM publication_intents WHERE episode_id=? AND deliverable_id=? AND platform='youtube'",
+                (EPISODE_ID, "short_001"),
+            ).fetchone()["status"]
+        finally:
+            conn.close()
+
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(post_id="post_short_001", platforms=["youtube"]),
+            put_response=_published_post_locked_put_response(),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(provider, db_path, platforms=["youtube"], post_id="post_short_001")
+
+        conn = get_connection(db_path)
+        try:
+            after_attempts = conn.execute(
+                "SELECT COUNT(*) AS n FROM publishing_attempts WHERE episode_id=? AND deliverable_id=? AND platform='youtube'",
+                (EPISODE_ID, "short_001"),
+            ).fetchone()["n"]
+            after_status = conn.execute(
+                "SELECT status FROM publication_intents WHERE episode_id=? AND deliverable_id=? AND platform='youtube'",
+                (EPISODE_ID, "short_001"),
+            ).fetchone()["status"]
+        finally:
+            conn.close()
+        assert after_attempts == before_attempts  # no new attempt row for a rejected content correction
+        assert after_status == before_status == "succeeded"  # never flipped by this call either way
+
+    def test_genuinely_ambiguous_transport_timeout_is_still_ambiguous_not_rejected(self, db_path):
+        # The DISTINCT case a confirmed 400 must never be conflated with:
+        # a transport-level failure where the provider's actual
+        # application of the request is genuinely unknown.
+        _bind_all(db_path)
+        transport = FakeRepairTransport(get_response=_existing_post_get_response())
+        from hypogeum.publishing.zernio import ZernioTransportError
+        transport._put_error = ZernioTransportError("timed out waiting for response")
+        provider = ZernioProvider(transport=transport)
+        results = _repair(provider, db_path)
+        assert all(r["status"] == "ambiguous" for r in results.values())
+        assert all(r["status"] != "rejected" for r in results.values())
 
 
 # ===========================================================================

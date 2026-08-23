@@ -1420,20 +1420,23 @@ class ZernioProvider:
                 attempt_id=g.attempt_id, guard=g, db_path=db_path,
                 provider_account_id=accounts[p]["provider_account_id"],
             )
-        content_corrected = response.status_code == 200 and isinstance(response.json_body, dict) \
-            and isinstance(response.json_body.get("post"), dict)
+        status_label, status_detail = _classify_shared_content_put_result(response)
         for p, g in already_succeeded.items():
             receipt = g.existing_receipt or {}
             results[p] = {
                 "platform": p, "deliverable_type": deliverable_type,
-                "status": "content_corrected" if content_corrected else "ambiguous",
+                "status": status_label,
                 "provider_content_id": receipt.get("provider_publication_id"),
                 "publication_intent_id": g.publication_intent_id,
                 "attempt_id": g.attempt_id,
                 "note": (
                     "already succeeded locally -- this call corrected the shared post's "
                     "content/media only, no new attempt row created"
-                    if content_corrected else
+                    if status_label == "content_corrected" else
+                    f"already succeeded locally -- the shared post's content/media correction was "
+                    f"REJECTED by the provider ({status_detail}); local ledger state left untouched, "
+                    f"never automatically retried"
+                    if status_label == "rejected" else
                     "already succeeded locally -- PUT response did not confirm the shared "
                     "post's content/media correction; local ledger state left untouched"
                 ),
@@ -1785,3 +1788,39 @@ def _safe_error_text(body: Optional[dict]) -> str:
         return _json.dumps(body)[:500]
     except Exception:
         return "<unserializable body>"
+
+
+def _classify_shared_content_put_result(response: "ZernioTransportResponse") -> "tuple[str, str]":
+    """
+    Classifies a repair_existing_post() PUT response for an
+    already-succeeded platform's shared post-content correction, WITHOUT
+    touching any local ledger row (that platform's publication_intent
+    stays untouched either way -- it was already terminally succeeded
+    before this call).
+
+    Real bug fixed 2026-08-23: this branch previously used its own crude
+    'status_code == 200' check and labeled EVERY other outcome
+    "ambiguous" -- including a confirmed HTTP 400
+    ("Published posts can only have their recycling config updated",
+    discovered live against ep_f3619022's main post), which is a
+    deterministic, synchronous, non-retryable provider REJECTION, not an
+    unknown/ambiguous outcome. Now mirrors _handle_response()'s own
+    definitive-vs-ambiguous taxonomy for the same status codes (400/403
+    = confirmed rejection; everything else here -- 409/429/5xx/
+    undocumented -- stays genuinely ambiguous, matching that a
+    transport-level timeout/connection-loss is handled completely
+    separately, one level up, before this function is ever reached).
+
+    Returns (status_label, detail):
+      - ("content_corrected", ...) -- HTTP 200 with a valid {"post": {...}} envelope.
+      - ("rejected", "HTTP <code>: <body>") -- HTTP 400 or 403: a
+        confirmed, non-retryable provider rejection. Callers must report
+        this as a failure and must never automatically retry it.
+      - ("ambiguous", ...) -- any other status: genuinely unclear whether
+        the correction applied; safe to reconcile/retry later.
+    """
+    if response.status_code == 200 and isinstance(response.json_body, dict) and isinstance(response.json_body.get("post"), dict):
+        return "content_corrected", "content/media correction confirmed by a valid post envelope"
+    if response.status_code in (400, 403):
+        return "rejected", f"HTTP {response.status_code}: {_safe_error_text(response.json_body)}"
+    return "ambiguous", f"HTTP {response.status_code}: PUT response did not confirm the shared post's content/media correction"

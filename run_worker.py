@@ -928,7 +928,21 @@ def run_iteration(
     else:
         _wc_set("worker_status", "claiming", db_path)
         from hypogeum.worker_integration import build_gated_pipeline_executor
-        gated_executor = build_gated_pipeline_executor(db_path=db_path, bounded_run_id=bounded_run_id)
+        # project_root is ONE LEVEL UP from assets_root: worker_integration's
+        # _episode_dir() joins project_root / ".hypogeum-assets" / "episodes"
+        # / episode_id, while this module's own assets_root convention
+        # already POINTS AT ".hypogeum-assets" itself (see run_iteration()'s
+        # own docstring). Never threading this through left every
+        # WorkerAttempt write falling back to worker_integration's own
+        # _PROJECT_ROOT default (the real repository) regardless of what
+        # assets_root a caller supplied -- silently ignoring test isolation
+        # and writing real files under the real .hypogeum-assets/episodes/
+        # tree for whatever episode_id the caller was using, even a
+        # throwaway/synthetic one.
+        _project_root = Path(assets_root).parent if assets_root is not None else None
+        gated_executor = build_gated_pipeline_executor(
+            db_path=db_path, bounded_run_id=bounded_run_id, project_root=_project_root,
+        )
         poll_result = poll(
             worker_id=worker_id,
             db_path=db_path,

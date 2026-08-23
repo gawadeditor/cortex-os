@@ -2441,12 +2441,13 @@ class TestConsumerHygiene:
 
 class TestAutoRetry:
     """
-    Verifies hypogeum.queue._maybe_schedule_retry(), wired into
-    process_next()'s exception handler. TRANSIENT (default) failures get a
-    bounded, backed-off auto-retry topic+queue pair; TERMINAL failures
-    (FailurePolicy.TERMINAL, read via getattr — no isinstance taxonomy in
-    queue.py) never do. Original topic release/skip handling is unaffected
-    either way — topic quality and execution reliability are independent.
+    Verifies hypogeum.queue._retry_eligible()/_schedule_retry_queue_item(),
+    wired into process_next()'s exception handler. TRANSIENT (default)
+    failures get a bounded, backed-off auto-retry run_queue item and reuse
+    the original topic row as the retry identity (topics.mark_topic_retry());
+    TERMINAL failures (FailurePolicy.TERMINAL, read via getattr — no
+    isinstance taxonomy in queue.py) never do. See TestAutoRetryIdentity
+    for the single-identity invariant this reuse enforces.
     """
 
     def _active_channel(self, db_path, channel_id="ch_retry"):
@@ -2488,6 +2489,13 @@ class TestAutoRetry:
         assert retries[0]["next_attempt_at"] > _iso(_now())
 
     def test_auto_retry_creates_matching_topic(self, db_path):
+        """
+        Historical name kept for git-blame continuity; the mechanism
+        changed 2026-08-23 (see TestAutoRetryIdentity) -- this no longer
+        CREATES a second row, it reuses the original topic's own row
+        (source stamped 'auto_retry' in place). The row-count/content/
+        episode_id assertions below hold either way.
+        """
         self._setup(db_path, topic_text="unique retry content")
 
         with patch("hypogeum.pipeline.run_pipeline",
@@ -2578,10 +2586,12 @@ class TestAutoRetry:
 
     def test_original_topic_release_unaffected_by_retry_scheduling(self, db_path):
         """
-        Topic quality and execution reliability are independent: the
-        original topic must still be released to 'queued' (existing
-        behavior for non-content failures) regardless of whether an
-        auto-retry topic+queue pair was also created.
+        The original topic still ends up 'queued' whether or not an
+        auto-retry was scheduled -- via mark_topic_retry() (reusing this
+        SAME row, source='auto_retry') when eligible, or plain
+        release_topic() otherwise. See TestAutoRetryIdentity for the
+        stronger claim that eligible-retry reuses this exact row rather
+        than creating a second one.
         """
         topic_id, _ = self._setup(db_path)
 
@@ -2611,3 +2621,154 @@ class TestAutoRetry:
         next_attempt = datetime.fromisoformat(retry_row["next_attempt_at"])
         delta_minutes = (next_attempt - before).total_seconds() / 60.0
         assert 0.9 <= delta_minutes <= 1.5  # ~1 minute, first configured value
+
+
+class TestAutoRetryIdentity:
+    """
+    Fixed 2026-08-23: exactly one claimable episode_topics row ever exists
+    per failed episode. The previous design released the original topic
+    row to plain 'queued' AND separately enqueue_topic()'d a second
+    'auto_retry' row for the same episode_id -- both simultaneously
+    'queued', both claimable by claim_next_topic() (channel-scoped only,
+    no per-episode awareness), so an unrelated schedule tick reaching
+    topic resolution during that window could claim the stale original
+    row and re-execute an episode a real retry was already handling or
+    had already completed. hypogeum.topics.mark_topic_retry() now reuses
+    the SAME row as the one and only retry identity; see its own
+    docstring and hypogeum.queue._retry_eligible()/_schedule_retry_queue_item().
+    """
+
+    def _active_channel(self, db_path, channel_id="ch_retry_identity"):
+        from hypogeum.calog import set_channel_state
+        set_channel_state(channel_id, "active", db_path=db_path)
+        return channel_id
+
+    def _config(self, max_retries=2, backoff="0,0"):
+        return MagicMock(
+            FINANCE_BUDGET_CEILING_USD=10.0,
+            QUEUE_MAX_AUTO_RETRIES=max_retries,
+            QUEUE_RETRY_BACKOFF_MINUTES=backoff,
+        )
+
+    def test_one_failure_leaves_exactly_one_claimable_topic_identity(self, db_path):
+        channel_id = self._active_channel(db_path)
+        original_topic_id = enqueue_topic(channel_id, "single identity topic", db_path=db_path)
+        enqueue(db_path=db_path, channel_id=channel_id)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT topic_id, status, source FROM episode_topics WHERE topic_text = ?",
+                ("single identity topic",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1, rows
+        assert rows[0]["topic_id"] == original_topic_id
+        assert rows[0]["status"] == "queued"
+        assert rows[0]["source"] == "auto_retry"
+
+    def test_retry_uses_the_same_episode_id(self, db_path):
+        channel_id = self._active_channel(db_path)
+        topic_id = enqueue_topic(channel_id, "same episode id topic", db_path=db_path)
+        enqueue(db_path=db_path, channel_id=channel_id)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        topic_after = get_topic(topic_id, db_path=db_path)
+        retry_queue_row = [r for r in _all_queue_rows(db_path) if r["source"] == "auto_retry"][0]
+        assert topic_after["episode_id"] is not None
+        assert topic_after["episode_id"] == retry_queue_row["episode_id"]
+
+    def test_repeated_retry_scheduling_creates_no_duplicate_queue_item(self, db_path):
+        from hypogeum.queue import _schedule_retry_queue_item
+
+        channel_id = self._active_channel(db_path)
+        episode_id = "ep_dup_guard"
+        kwargs = dict(
+            channel_id=channel_id, episode_id=episode_id, retry_count=0,
+            priority=0, config=self._config(), db_path=db_path,
+        )
+        first = _schedule_retry_queue_item(**kwargs)
+        second = _schedule_retry_queue_item(**kwargs)
+
+        assert first is True
+        assert second is False, "repeated retry scheduling for the same episode must not duplicate"
+        rows = [
+            r for r in _all_queue_rows(db_path)
+            if r["source"] == "auto_retry" and r["episode_id"] == episode_id
+        ]
+        assert len(rows) == 1
+
+    def test_successful_retry_closes_the_retry_identity_no_future_reclaim(self, db_path, tmp_path):
+        """
+        End-to-end: failure -> reused retry identity -> the REAL production
+        completion path (hypogeum.run_registry.register_run()/
+        complete_run(), exactly as hypogeum.pipeline.run_pipeline() itself
+        calls them) -> reconcile_stale_topics_for_episode() fires
+        automatically inside complete_run() -> nothing claimable remains
+        for this episode -> a subsequent claim on the channel finds
+        nothing at all, proving a future schedule tick cannot reclaim the
+        original row and re-execute an already-published episode.
+        """
+        from hypogeum.run_registry import complete_run, register_run
+        from hypogeum.topics import claim_next_topic
+
+        channel_id = self._active_channel(db_path)
+        enqueue_topic(channel_id, "closes on success topic", db_path=db_path)
+        enqueue(db_path=db_path, channel_id=channel_id)
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("provider timeout")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+
+        retry_queue_row = [r for r in _all_queue_rows(db_path) if r["source"] == "auto_retry"][0]
+        episode_id = retry_queue_row["episode_id"]
+        assert episode_id is not None
+
+        runs_dir = tmp_path / "runs"
+
+        # register_run() snapshots model assignments via getattr(config,
+        # "EP_MODEL", ...) etc. -- a bare MagicMock() auto-creates those
+        # attributes as MagicMock instances rather than raising, which then
+        # fail JSON serialization inside complete_run()'s own run-record
+        # write. A real pipeline run always carries a real Config with
+        # real string model IDs, so this fixture matches that shape rather
+        # than relying on getattr's default (only reached for a genuinely
+        # *missing* attribute, not one MagicMock auto-vivifies).
+        succeed_config = self._config()
+        for _attr in ("EP_MODEL", "RD_MODEL", "TD_PLANNING_MODEL", "BGA_PASS1_MODEL", "BGA_PASS2_MODEL"):
+            setattr(succeed_config, _attr, "test/model")
+
+        def _succeed(*, topic_input, episode_id, config, channel_id, cancel_check=None, **_kwargs):
+            run_id = register_run(
+                episode_id=episode_id, config=succeed_config, db_path=db_path,
+                runs_dir=runs_dir, channel_id=channel_id,
+            )
+            complete_run(run_id=run_id, episode_id=episode_id, db_path=db_path, runs_dir=runs_dir)
+
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=_succeed):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=self._config(),
+            )
+        assert result.status == "completed"
+
+        # Nothing claimable remains for this channel -- a subsequent
+        # schedule-triggered claim finds no topic (never re-executes ep_X).
+        assert claim_next_topic(channel_id, db_path=db_path) is None

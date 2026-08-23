@@ -762,19 +762,20 @@ def _lookup_latest_run_id(episode_id: Optional[str], db_path: Optional[Path]) ->
     return row["run_id"] if row else None
 
 
-def _maybe_schedule_retry(
+def _retry_eligible(
     exc: Optional[BaseException],
     *,
     channel_id: Optional[str],
     episode_id: Optional[str],
     topic_text: Optional[str],
     retry_count: int,
-    priority: int,
     config=None,
-    db_path: Optional[Path] = None,
 ) -> bool:
     """
-    Decide whether to schedule a bounded auto-retry for a failed attempt.
+    Pure decision: should a bounded auto-retry be scheduled for this failed
+    attempt? No DB access, no side effects — safe to call before deciding
+    how to handle the topic row itself (see mark_topic_retry() vs.
+    release_topic() at this function's call site in process_next()).
 
     exc: the exception that caused the failure (live process_next() path),
     or None (orphan reconciliation path — infrastructure interruption, not
@@ -785,19 +786,11 @@ def _maybe_schedule_retry(
     to TRANSIENT when the attribute is absent, so any current or future
     exception class is retryable unless it explicitly opts out.
 
-    Creates both a fresh episode_topics row and a fresh run_queue row (via
-    topics.enqueue_topic() + this module's own enqueue()) — mirroring
-    exactly how run_dashboard.py::api_run_rerun already reruns an episode,
-    so claim_next_topic() reliably resolves the same content on the next
-    claim rather than an unrelated backlog topic. Never touches the
-    original topic's own release/skip handling — topic-quality
-    classification and execution-reliability retries are independent
-    concerns.
-
-    Returns True if a retry topic+queue pair was created, False otherwise
-    (terminal classification, retry budget exhausted, or missing enough
-    context to safely recreate the attempt). Never raises — best-effort,
-    matching the surrounding failure-handling code's own philosophy.
+    Never raises — best-effort, matching the surrounding failure-handling
+    code's own philosophy (e.g. a malformed/partially-mocked config whose
+    QUEUE_MAX_AUTO_RETRIES isn't a real int is treated as "cannot safely
+    decide" -> no retry, same as this function's predecessor
+    _maybe_schedule_retry() did via its own try/except).
     """
     try:
         if exc is not None and getattr(
@@ -812,19 +805,77 @@ def _maybe_schedule_retry(
         if retry_count >= max_retries:
             return False
 
+        return True
+    except Exception:
+        return False
+
+
+def _has_active_auto_retry_queue_item(
+    channel_id: str,
+    episode_id: str,
+    db_path: Optional[Path],
+) -> bool:
+    """
+    True if a not-yet-terminal ('queued' or 'claimed') source='auto_retry'
+    run_queue row already exists for this (channel_id, episode_id).
+
+    Belt-and-suspenders idempotency for _schedule_retry_queue_item(): the
+    topic-identity fix (mark_topic_retry() reusing one row) is what makes a
+    duplicate RETRY IDENTITY structurally impossible; this guard additionally
+    makes a duplicate run_queue ITEM impossible if failure handling for the
+    same claim were ever invoked twice (e.g. a future caller re-running the
+    except block), per the "repeated retry scheduling creates no duplicate"
+    requirement.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT 1 FROM run_queue
+            WHERE channel_id = ? AND episode_id = ? AND source = 'auto_retry'
+              AND status IN ('queued', 'claimed')
+            LIMIT 1
+            """,
+            (channel_id, episode_id),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def _schedule_retry_queue_item(
+    *,
+    channel_id: str,
+    episode_id: str,
+    retry_count: int,
+    priority: int,
+    config=None,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """
+    Create the bounded, backed-off run_queue retry item for an
+    already-eligible retry (see _retry_eligible()). Never creates a second
+    episode_topics row — the caller is responsible for reusing the
+    original topic's own identity via topics.mark_topic_retry() so
+    claim_next_topic() resolves the SAME content on the next claim rather
+    than an unrelated backlog topic; this function only owns the run_queue
+    side (backoff scheduling, retry_count, recovery_from_run_id lineage).
+
+    Returns True if a retry run_queue item was created, False if one was
+    already active for this (channel_id, episode_id) (idempotency guard —
+    see _has_active_auto_retry_queue_item()) or the write failed. Never
+    raises — best-effort, matching the surrounding failure-handling code's
+    own philosophy.
+    """
+    try:
+        if _has_active_auto_retry_queue_item(channel_id, episode_id, db_path):
+            return False
+
         next_retry_count = retry_count + 1
         backoff_minutes = _resolve_backoff_minutes(config, next_retry_count)
         next_attempt_at = _iso(_now_utc() + timedelta(minutes=backoff_minutes))
         recovery_from_run_id = _lookup_latest_run_id(episode_id, db_path)
 
-        from hypogeum.topics import enqueue_topic
-        enqueue_topic(
-            channel_id, topic_text,
-            priority=priority,
-            source="auto_retry",
-            episode_id=episode_id,
-            db_path=db_path,
-        )
         enqueue(
             db_path=db_path,
             channel_id=channel_id,
@@ -1333,17 +1384,39 @@ def process_next(
         error_msg = str(exc)[:4096]
         fail(queue_id, worker_id, error_message=error_msg, db_path=db_path)
 
-        # Topic hygiene: release or skip the topic based on failure type.
-        # PipelineRejectedError means the EP scored the topic below threshold —
-        # the topic content itself is the problem, so skip it permanently.
-        # All other exceptions are infrastructure failures — release for retry.
-        # Unaffected by and independent of the auto-retry decision below —
-        # topic quality and execution reliability are different concerns.
+        # Retry eligibility is decided FIRST (pure, no DB writes) so the
+        # topic-hygiene step immediately below can pick the correct one of
+        # three mutually exclusive outcomes for the SAME topic row —
+        # never two of them, which is what previously let a released
+        # original row and a freshly-enqueued auto_retry row exist
+        # simultaneously (see topics.mark_topic_retry()'s own docstring
+        # for the exact duplicate-claim race this closes).
+        retry_eligible = _retry_eligible(
+            exc,
+            channel_id=channel_id,
+            episode_id=episode_id,
+            topic_text=topic_text,
+            retry_count=claimed.get("retry_count") or 0,
+            config=config,
+        )
+
+        # Topic hygiene — exactly one of skip / mark-as-retry / release:
+        #   - PipelineRejectedError: the EP scored the topic below
+        #     threshold — the topic content itself is the problem, skip
+        #     it permanently regardless of retry eligibility.
+        #   - Retry-eligible: reuse this SAME row as the one and only
+        #     retry identity (mark_topic_retry) — never a second,
+        #     separately-enqueued row.
+        #   - Otherwise (terminal failure, or retry budget exhausted):
+        #     plain release back to the ordinary backlog.
         if topic_id is not None and using_backlog:
             try:
                 if isinstance(exc, _pipeline_module.PipelineRejectedError):
                     from hypogeum.topics import skip_topic
                     skip_topic(topic_id, reason="ep_rejected", db_path=db_path)
+                elif retry_eligible:
+                    from hypogeum.topics import mark_topic_retry
+                    mark_topic_retry(topic_id, db_path=db_path)
                 else:
                     from hypogeum.topics import release_topic
                     release_topic(topic_id, db_path=db_path)
@@ -1351,17 +1424,20 @@ def process_next(
                 pass  # never let cleanup block the result
 
         # Auto-retry (Roadmap priority 3 — recovery hardening): bounded,
-        # backed-off, execution-level retry — see _maybe_schedule_retry().
-        # Independent of the topic hygiene above; never raises.
-        retry_scheduled = _maybe_schedule_retry(
-            exc,
-            channel_id=channel_id,
-            episode_id=episode_id,
-            topic_text=topic_text,
-            retry_count=claimed.get("retry_count") or 0,
-            priority=claimed.get("priority") or 0,
-            config=config,
-            db_path=db_path,
+        # backed-off, execution-level retry — see _schedule_retry_queue_item().
+        # Only the run_queue side; the topic side was already handled above.
+        # Never raises.
+        retry_scheduled = (
+            _schedule_retry_queue_item(
+                channel_id=channel_id,
+                episode_id=episode_id,
+                retry_count=claimed.get("retry_count") or 0,
+                priority=claimed.get("priority") or 0,
+                config=config,
+                db_path=db_path,
+            )
+            if retry_eligible and channel_id and episode_id
+            else False
         )
         if retry_scheduled:
             from hypogeum.logger import get_logger

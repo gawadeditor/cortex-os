@@ -661,14 +661,24 @@ class TestQueueAndStageReconciliation:
 def _insert_episode_topic(
     db: Path, channel_id: str, episode_id: str, topic_text: str,
 ) -> str:
-    """Minimal episode_topics row so Tier 3 can resolve topic_text for retry."""
+    """
+    Minimal episode_topics row so Tier 3 can resolve topic_text for retry.
+
+    status='claimed' — matches what a real orphaned run actually leaves
+    behind: a worker that crashes mid-pipeline never reaches the normal
+    failure handler's topic hygiene (release_topic()/mark_topic_retry()),
+    so its claimed topic row stays 'claimed' until Tier 3 reconciliation
+    reuses it (topics.mark_topic_retry() in
+    orphan_runs._schedule_orphan_retries()). 'consumed' would mean the
+    episode already finished successfully — not an orphan scenario at all.
+    """
     topic_id = str(uuid.uuid4())
     conn = sqlite3.connect(str(db))
     try:
         conn.execute(
             "INSERT INTO episode_topics (topic_id, channel_id, topic_text, "
             "status, created_at, updated_at, episode_id) "
-            "VALUES (?, ?, ?, 'consumed', datetime('now'), datetime('now'), ?)",
+            "VALUES (?, ?, ?, 'claimed', datetime('now'), datetime('now'), ?)",
             (topic_id, channel_id, topic_text, episode_id),
         )
         conn.commit()
@@ -697,7 +707,7 @@ class TestOrphanAutoRetryTier3:
         run_id = _insert_run(db, "running")
         episode_id = f"ep_{run_id[:8]}"
         _insert_queue_item(db, episode_id, "claimed")
-        _insert_episode_topic(db, "hypogeum", episode_id, "orphan retry topic")
+        original_topic_id = _insert_episode_topic(db, "hypogeum", episode_id, "orphan retry topic")
 
         reconcile_orphaned_runs(db_path=db, worker_process_alive=False)
 
@@ -706,16 +716,26 @@ class TestOrphanAutoRetryTier3:
         assert retries[0]["retry_count"] == 1
         assert retries[0]["next_attempt_at"] is not None
 
+        # Exactly one claimable identity: the ORIGINAL topic row reused as
+        # the retry (topics.mark_topic_retry()), never a second row
+        # created alongside it — same invariant as
+        # tests/test_queue.py::TestAutoRetryIdentity.
         conn = sqlite3.connect(str(db))
         conn.row_factory = sqlite3.Row
         try:
+            all_rows_for_episode = conn.execute(
+                "SELECT * FROM episode_topics WHERE episode_id = ?", (episode_id,),
+            ).fetchall()
             topic_rows = conn.execute(
                 "SELECT * FROM episode_topics WHERE source = 'auto_retry'"
             ).fetchall()
         finally:
             conn.close()
+        assert len(all_rows_for_episode) == 1, all_rows_for_episode
         assert len(topic_rows) == 1
+        assert topic_rows[0]["topic_id"] == original_topic_id
         assert topic_rows[0]["topic_text"] == "orphan retry topic"
+        assert topic_rows[0]["status"] == "queued"
 
     def test_orphaned_item_without_resolvable_topic_gets_no_retry(self, tmp_path):
         """

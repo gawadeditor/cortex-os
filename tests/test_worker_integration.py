@@ -833,3 +833,73 @@ class TestNoSchedulerBehavior:
 
         after = get_channel_operations_profile("hypogeum", db_path=db_path)
         assert before == after
+
+
+# ===========================================================================
+# TestRunIterationAssetsRootPropagation — fixed 2026-08-23. run_iteration()
+# accepted an assets_root param but never threaded it into
+# build_gated_pipeline_executor()'s own project_root param, so every
+# WorkerAttempt write (save_worker_attempt()) silently fell back to
+# worker_integration._PROJECT_ROOT (the REAL repository), regardless of
+# what isolated assets_root a caller — including a test — supplied.
+# Confirmed live: 38 stray fake-episode directories were found and deleted
+# from the real .hypogeum-assets/episodes/ tree earlier this session,
+# written by exactly this gap. run_iteration() now derives project_root as
+# assets_root.parent (worker_integration._episode_dir() joins
+# project_root/".hypogeum-assets"/"episodes"/episode_id, one level above
+# what this module's own assets_root convention already points at — see
+# run_iteration()'s own docstring).
+# ===========================================================================
+
+class TestRunIterationAssetsRootPropagation:
+    def test_worker_attempts_write_under_the_supplied_isolated_root_only(
+        self, db_path, project_root, monkeypatch,
+    ):
+        from tests.test_worker import _seed_cleared_factory
+        _seed_cleared_factory(db_path)
+        _make_operations_profile(db_path)
+        _write_episode_target(db_path, "ep_root_propagation", _TARGET.isoformat())
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue_topic(
+            "hypogeum", "Root Propagation Topic", db_path=db_path,
+            episode_id="ep_root_propagation",
+        )
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_root_propagation")
+
+        real_project_root = run_worker.Path(__file__).resolve().parent.parent
+        real_episode_dir = real_project_root / ".hypogeum-assets" / "episodes" / "ep_root_propagation"
+        # Sanity precondition: this episode_id must not already exist for
+        # any reason (e.g. a prior failed test run) before asserting on it.
+        assert not real_episode_dir.exists(), (
+            f"{real_episode_dir} already exists before the test ran — "
+            "cannot prove this test doesn't pollute it"
+        )
+
+        isolated_assets_root = project_root / ".hypogeum-assets"
+        result = run_worker.run_iteration(
+            worker_id="w_root_propagation", db_path=db_path, dry_run=False,
+            channel_id="hypogeum", config=object(), assets_root=isolated_assets_root,
+        )
+
+        try:
+            assert result["poll_status"] == "completed"
+            assert call_log, "pipeline was never reached — nothing to assert isolation on"
+
+            attempts = wi.list_worker_attempts("ep_root_propagation", project_root=project_root)
+            assert len(attempts) == 1, attempts
+            attempt_path = (
+                project_root / ".hypogeum-assets" / "episodes" / "ep_root_propagation"
+                / "worker_attempts" / f"{attempts[0].worker_run_id}.json"
+            )
+            assert attempt_path.exists()
+
+            # The real repository must receive exactly zero files for this
+            # episode_id — the entire point of this regression test.
+            assert not real_episode_dir.exists(), (
+                f"run_iteration(assets_root=...) leaked a write to the real "
+                f"repository at {real_episode_dir}"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(real_episode_dir, ignore_errors=True)

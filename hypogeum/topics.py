@@ -8,7 +8,9 @@ pipeline completion the topic is consumed.
 Topic lifecycle:
     queued   → claimed   (claim_next_topic — atomic conditional UPDATE)
     claimed  → consumed  (consume_topic — called after successful pipeline run)
-    claimed  → queued    (release_topic — pipeline failed; topic retry on next pass)
+    claimed  → queued    (release_topic — pipeline failed, no auto-retry scheduled)
+    claimed  → queued    (mark_topic_retry — pipeline failed, auto-retry scheduled;
+                          SAME row reused as the retry identity, source stamped 'auto_retry')
     claimed  → skipped   (skip_topic w/ reason="ep_rejected" — EP scored REJECT)
     queued   → skipped   (skip_topic — operator skips a specific topic)
     queued   → cancelled (cancel_topic — operator removes before claim)
@@ -40,6 +42,7 @@ Public API:
     claim_next_topic(channel_id, db_path=None)          -> dict | None
     consume_topic(topic_id, db_path=None)               -> None
     release_topic(topic_id, db_path=None)               -> None
+    mark_topic_retry(topic_id, db_path=None)            -> bool
     skip_topic(topic_id, reason=None, db_path=None)     -> None
     cancel_topic(topic_id, db_path=None)                -> None
     get_topic(topic_id, db_path=None)                   -> dict | None
@@ -452,6 +455,63 @@ def release_topic(
             (now, topic_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_topic_retry(
+    topic_id: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """
+    Reuse a claimed topic AS its own retry identity, instead of releasing
+    it to plain 'queued' (release_topic()) and having the caller separately
+    enqueue_topic() a second, freshly-created row for the same episode.
+
+    That two-row pattern (used by an earlier version of
+    hypogeum.queue._maybe_schedule_retry()) left the ORIGINAL row and the
+    new 'auto_retry' row simultaneously 'queued' with the same episode_id.
+    claim_next_topic()/claim_next_episode_topic() have no per-episode
+    awareness — they claim whichever queued row sorts first for the
+    channel — so any unrelated run_queue item reaching topic resolution
+    during that window (e.g. a genuinely new schedule tick for other
+    content) could claim the stale original row and re-execute an
+    episode_id that the real intended retry was already handling or had
+    already completed. Reusing the SAME topic_id as the one and only
+    retryable identity makes that duplicate-claim window structurally
+    impossible: at most one 'queued' episode_topics row for this
+    episode_id/topic_text ever exists at a time.
+
+    Transitions 'claimed' -> 'queued' (same guard as release_topic()) and
+    stamps source='auto_retry' on that SAME row so the retry is
+    observable in provenance without ever creating a second row. A
+    repeated call against a topic already moved out of 'claimed' (already
+    released/marked-retry/skipped, or already reclaimed) is a safe no-op
+    — the WHERE-clause guard this module already uses everywhere else
+    gives this idempotency for free, so repeated failure handling for the
+    same claim can never produce a duplicate retry identity.
+
+    Args:
+        topic_id: Topic to reuse as the retry identity.
+        db_path:  Override DB path (for tests).
+
+    Returns:
+        True if the row was transitioned, False if it was already in a
+        different state (no-op).
+    """
+    now = _now_iso()
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE episode_topics
+            SET status = 'queued', source = 'auto_retry', claimed_at = NULL, updated_at = ?
+            WHERE topic_id = ? AND status = 'claimed'
+            """,
+            (now, topic_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()
 

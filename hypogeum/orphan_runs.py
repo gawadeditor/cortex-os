@@ -238,8 +238,9 @@ def _reconcile_queue_and_stage_state(
     # orphan is, by definition, an infrastructure interruption (crash,
     # kill, power loss) — never a business/content decision — so every
     # orphaned item is retry-eligible, bounded by the same cap/backoff as
-    # a live failure (hypogeum.queue._maybe_schedule_retry(), called here
-    # with exc=None). Additive to Tier 1/Tier 2 above; never replaces them.
+    # a live failure (hypogeum.queue._retry_eligible()/
+    # _schedule_retry_queue_item(), called here with exc=None). Additive
+    # to Tier 1/Tier 2 above; never replaces them.
     _schedule_orphan_retries(tier1_queue_ids + tier2_queue_ids, db_path, log)
 
 
@@ -254,7 +255,8 @@ def _schedule_orphan_retries(
 
     from hypogeum.config import Config
     from hypogeum.db import get_connection
-    from hypogeum.queue import _maybe_schedule_retry
+    from hypogeum.queue import _retry_eligible, _schedule_retry_queue_item
+    from hypogeum.topics import mark_topic_retry
 
     try:
         config = Config()
@@ -279,15 +281,40 @@ def _schedule_orphan_retries(
             episode_id = row["episode_id"]
             topic_text = _lookup_topic_text(episode_id, db_path)
 
-            scheduled = _maybe_schedule_retry(
+            eligible = _retry_eligible(
                 None,  # orphan — no exception object, always retry-eligible
                 channel_id=channel_id,
                 episode_id=episode_id,
                 topic_text=topic_text,
                 retry_count=row["retry_count"] or 0,
-                priority=row["priority"] or 0,
                 config=config,
-                db_path=db_path,
+            )
+
+            # Reuse the SAME topic row the orphaned run was working from —
+            # never a freshly-enqueued duplicate (see topics.mark_topic_retry()'s
+            # own docstring). A worker that crashes mid-run leaves its topic
+            # row 'claimed' (never released or consumed); mark it as the
+            # retry identity directly. If no such row is found (already
+            # released/reclaimed by another path), there is nothing to mark
+            # — the run_queue side below is still scheduled as long as one
+            # is genuinely eligible, so a later claim resolves a topic
+            # normally rather than through this recovery path.
+            if eligible and episode_id:
+                topic_id = _find_claimed_topic_id_for_episode(episode_id, db_path)
+                if topic_id is not None:
+                    mark_topic_retry(topic_id, db_path=db_path)
+
+            scheduled = (
+                _schedule_retry_queue_item(
+                    channel_id=channel_id,
+                    episode_id=episode_id,
+                    retry_count=row["retry_count"] or 0,
+                    priority=row["priority"] or 0,
+                    config=config,
+                    db_path=db_path,
+                )
+                if eligible and channel_id and episode_id
+                else False
             )
             if scheduled:
                 log.info(
@@ -304,14 +331,38 @@ def _schedule_orphan_retries(
             pass  # never let retry scheduling affect reconciliation's own result
 
 
+def _find_claimed_topic_id_for_episode(
+    episode_id: str,
+    db_path: Optional[Path],
+) -> Optional[str]:
+    """
+    Find the 'claimed' episode_topics row for this episode_id, if any — the
+    row an orphaned worker was working from when it crashed. Used so
+    Tier 3 retry scheduling reuses this SAME row (topics.mark_topic_retry())
+    instead of creating a second one. None if no 'claimed' row exists
+    (already released/reclaimed by another path, or never had one).
+    """
+    from hypogeum.db import get_connection
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT topic_id FROM episode_topics WHERE episode_id = ? AND status = 'claimed' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (episode_id,),
+        ).fetchone()
+        return row["topic_id"] if row is not None else None
+    finally:
+        conn.close()
+
+
 def _lookup_topic_text(episode_id: Optional[str], db_path: Optional[Path]) -> Optional[str]:
     """
-    Recover the topic content an orphaned episode was about — needed to
-    recreate an equivalent episode_topics row for the retry (see
-    hypogeum.queue._maybe_schedule_retry()). Prefers episode_topics (the
-    identity contract established by H2 links episode_id -> topic_text
-    directly); falls back to episodes.topic. Best-effort — None on any
-    miss, which _maybe_schedule_retry() treats as "cannot retry safely."
+    Recover the topic content an orphaned episode was about — needed for
+    retry-eligibility classification (see hypogeum.queue._retry_eligible()).
+    Prefers episode_topics (the identity contract established by H2 links
+    episode_id -> topic_text directly); falls back to episodes.topic.
+    Best-effort — None on any miss, which _retry_eligible() treats as
+    "cannot retry safely."
     """
     if not episode_id:
         return None

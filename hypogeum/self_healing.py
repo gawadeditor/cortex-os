@@ -26,7 +26,7 @@ existing, unmodified reconcile_orphaned_runs(); this module adds no new
 reconciliation logic of its own for that part.
 
 Also wires exhausted-retry escalation into Runtime Observability's
-alerting (P0.3) — a give-up event (hypogeum.queue._maybe_schedule_retry()
+alerting (P0.3) — a give-up event (hypogeum.queue._retry_eligible()
 declining to reschedule because QUEUE_MAX_AUTO_RETRIES is reached) must
 never be silent. Reuses the same hypogeum.ois.emit_signal() substrate as
 P0.3 — no parallel alerting path.

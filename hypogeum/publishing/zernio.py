@@ -1186,6 +1186,7 @@ class ZernioProvider:
         platform_settings: Optional[Dict[str, dict]] = None,
         platform_specific_data: Optional[Dict[str, dict]] = None,
         root_fields: Optional[dict] = None,
+        scheduled_for: Optional[str] = None,
         db_path: Optional[Path] = None,
     ) -> Dict[str, dict]:
         """
@@ -1249,6 +1250,14 @@ class ZernioProvider:
         `root_fields` (e.g. tags/hashtags): merged into the request body
         the same way `title`/`content` are -- corrects the shared,
         non-platform-specific metadata for the whole post.
+
+        `scheduled_for` (2026-08-24): ISO 8601 UTC string. When omitted
+        (default), the existing post's own scheduledFor is echoed back
+        VERBATIM as before -- this call never silently changes a
+        schedule by default. When provided, it REPLACES the echoed
+        value -- the one sanctioned way to reschedule an already-created
+        post (e.g. moving Shorts to slots after a corrected main-episode
+        schedule) without a delete+recreate.
         """
         if not title or not title.strip():
             raise ValueError("repair_existing_post() requires a non-empty title")
@@ -1390,7 +1399,9 @@ class ZernioProvider:
         }
         if root_fields:
             body.update(root_fields)
-        if existing_post.get("scheduledFor"):
+        if scheduled_for is not None:
+            body["scheduledFor"] = scheduled_for
+        elif existing_post.get("scheduledFor"):
             body["scheduledFor"] = existing_post["scheduledFor"]
         if existing_post.get("timezone"):
             body["timezone"] = existing_post["timezone"]

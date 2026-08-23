@@ -34,6 +34,11 @@ Public API:
         class_entry, final_duration_seconds, episode_dir, episode_id) -> List[str]
     build_zernio_platform_specific_data(metadata, platform) -> Optional[dict]
     build_zernio_root_fields(metadata) -> dict
+    materialize_youtube_main_episode_description(metadata) -> str -- the
+        ONE deterministic function building the final, complete,
+        viewer-facing description (base + chapters + sources) for a
+        YouTube main_episode, used identically by readiness validation
+        and the real Zernio serialization path
     extract_hashtag_tokens(text) -> set -- the ONE shared hashtag-token
         validator, real complete-token matching (never substring), also
         used by hypogeum.agents.canonical_metadata_agent's generation-time
@@ -240,8 +245,19 @@ def validate_canonical_platform_metadata(
         failures.append("description/caption is missing or placeholder text")
     else:
         caption_max = getattr(contract, "caption_max_chars", None)
-        if caption_max is not None and len(metadata.description) > caption_max:
-            failures.append(f"description/caption is {len(metadata.description)} chars, exceeding {platform}'s {caption_max}-char limit")
+        # A YouTube main_episode's ACTUAL published content is the
+        # materialized description (base + chapters + sources), never
+        # the raw base text alone -- validate that, the same value the
+        # real Zernio request body ends up sending, not a shorter one
+        # that would pass here and still be rejected/truncated live.
+        if deliverable_class == "main_episode" and platform == "youtube":
+            check_text = materialize_youtube_main_episode_description(metadata)
+            check_label = "materialized description (base + chapters + sources)"
+        else:
+            check_text = metadata.description
+            check_label = "description/caption"
+        if caption_max is not None and len(check_text) > caption_max:
+            failures.append(f"{check_label} is {len(check_text)} chars, exceeding {platform}'s {caption_max}-char limit")
 
         topic_brief = _load_json(episode_dir / f"topic_brief_{episode_id}.json")
         pre_writing_texts = {
@@ -415,6 +431,81 @@ def validate_canonical_platform_metadata(
             failures.extend(_validate_chapters(metadata.chapters, final_duration_seconds))
 
     return failures
+
+
+def _format_chapter_timestamp(seconds: float) -> str:
+    """M:SS or H:MM:SS, matching YouTube's own chapter-timestamp
+    convention (the first chapter must read 0:00 for YouTube to
+    recognize the block at all)."""
+    total = round(seconds)
+    m, s = divmod(total, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+_CHAPTERS_HEADING = "⏱ Chapters:"
+_SOURCES_HEADING = "\U0001f4da Sources & Further Reading:"
+
+
+def materialize_youtube_main_episode_description(metadata: CanonicalPlatformMetadata) -> str:
+    """
+    The ONE deterministic function that builds the FINAL, complete,
+    viewer-facing description for a YouTube main_episode -- canonical
+    base description + canonical chapters (formatted as real YouTube
+    timestamp lines, first at 0:00) + canonical sources -- used
+    identically by validate_canonical_platform_metadata() (readiness)
+    and by the real Zernio serialization path
+    (hypogeum.publishing.zernio_channel_release_trigger._pick_root_title_description()),
+    so the two can never drift apart.
+
+    Deliberately does NOT touch visible_hashtags: generation-time
+    validation (hypogeum.agents.canonical_metadata_agent) already
+    requires every declared hashtag to be embedded as a real token in
+    metadata.description before an entry is ever accepted, so by the
+    time this function runs, hashtags are already present -- appending
+    them again here would risk exactly the duplication this function
+    must avoid. Likewise never touches backend_tags (a Zernio root
+    `tags` field, never part of visible description text at all).
+
+    Idempotent: calling this twice on the same metadata (e.g. metadata
+    whose .description somehow already contains the chapters/sources
+    blocks) never duplicates either block -- a chapter block is skipped
+    if its exact formatted lines are already present verbatim; a source
+    is skipped individually if its URL already appears anywhere in the
+    text (whether from a prior materialization or because the model
+    itself chose to cite it inline).
+
+    For a Short, or any platform other than YouTube, or a main_episode
+    with no chapters/sources at all, this returns metadata.description
+    completely unchanged -- callers decide WHEN to invoke this (only for
+    deliverable_class == "main_episode" and platform == "youtube");
+    this function itself has no such gate so it stays a pure, reusable
+    text operation.
+    """
+    text = metadata.description or ""
+
+    if metadata.chapters:
+        chapter_lines = "\n".join(
+            f"{_format_chapter_timestamp(c['start_seconds'])} {c['title']}" for c in metadata.chapters
+        )
+        if chapter_lines not in text:
+            text = f"{text.rstrip()}\n\n{_CHAPTERS_HEADING}\n{chapter_lines}"
+
+    if metadata.sources:
+        missing = [s for s in metadata.sources if s.get("url") and s["url"] not in text]
+        if missing:
+            source_lines = "\n".join(f"• {s.get('title', 'Source')}: {s['url']}" for s in missing)
+            if _SOURCES_HEADING in text:
+                # A sources heading already exists (e.g. the model wrote
+                # its own partial list) -- append only the missing
+                # sources to that same block rather than starting a
+                # second, duplicate heading.
+                before, heading, after = text.partition(_SOURCES_HEADING)
+                text = f"{before}{heading}{after.rstrip()}\n{source_lines}"
+            else:
+                text = f"{text.rstrip()}\n\n{_SOURCES_HEADING}\n{source_lines}"
+
+    return text
 
 
 def build_zernio_platform_specific_data(metadata: CanonicalPlatformMetadata, platform: str) -> Optional[dict]:

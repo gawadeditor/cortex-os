@@ -27,7 +27,12 @@ from hypogeum.agents.canonical_metadata_agent import (
 )
 from hypogeum.config import Config
 from hypogeum.openrouter import CallResult
-from hypogeum.publishing.canonical_metadata import is_required_policy_field_present
+from hypogeum.publishing.canonical_metadata import (
+    CanonicalPlatformMetadata,
+    is_required_policy_field_present,
+    materialize_youtube_main_episode_description,
+    validate_canonical_platform_metadata,
+)
 
 EPISODE_ID = "ep_test"
 
@@ -98,9 +103,40 @@ def _seed_short_grounding(episode_dir, deliverable_id="short_001"):
     return final_render_package
 
 
+def _seed_main_episode_grounding(episode_dir, *, sources=None):
+    (episode_dir / f"script_package_{EPISODE_ID}.json").write_text(json.dumps({
+        "sections": [
+            {"section_id": "s1", "narration_beats": [{"text": "A real narrated fact about the tunnels."}]},
+            {"section_id": "s2", "narration_beats": [{"text": "A second real narrated fact."}]},
+            {"section_id": "s3", "narration_beats": [{"text": "A third real narrated fact."}]},
+        ],
+        "chapter_markers": [
+            {"section_id": "s1", "title": "Intro"},
+            {"section_id": "s2", "title": "Middle"},
+            {"section_id": "s3", "title": "End"},
+        ],
+    }), encoding="utf-8")
+    (episode_dir / f"research_package_{EPISODE_ID}.json").write_text(json.dumps({
+        "source_registry": sources or [
+            {"source_id": "src_001", "url": "https://example.com/source", "inferred_type": "academic"},
+        ],
+        "claims": [{"claim_id": "clm_001", "sources": ["src_001"]}],
+    }), encoding="utf-8")
+    return {
+        "metadata_source": {
+            "section_titles": [
+                {"section_id": "s1", "start_seconds": 0.0},
+                {"section_id": "s2", "start_seconds": 12.0},
+                {"section_id": "s3", "start_seconds": 24.0},
+            ],
+        },
+    }
+
+
 _HYPOGEUM_POLICY = {
     "youtube": {"shorts": {"enabled": True, "categoryId": "27", "ai_disclosure": True}},
 }
+_MAIN_EPISODE_POLICY = {"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "ai_disclosure": True}}}
 
 _VALID_YOUTUBE_RESPONSE = {
     "platforms": {
@@ -455,3 +491,185 @@ class TestRequiredPolicyFieldPresenceValidator:
 
     def test_none_class_entry_is_missing(self):
         assert is_required_policy_field_present(None, "categoryId") is False
+
+
+def _base_metadata(**overrides) -> CanonicalPlatformMetadata:
+    kwargs = dict(
+        deliverable_id="main_episode", platform="youtube", description="A real base description.",
+        metadata_version="v1", source_artifact_ids=["research_package_ep_test.json"],
+        input_fingerprint={}, generated_at="2026-08-23T00:00:00+00:00",
+    )
+    kwargs.update(overrides)
+    return CanonicalPlatformMetadata(**kwargs)
+
+
+class TestMaterializeYoutubeMainEpisodeDescription:
+    """
+    Direct unit coverage for hypogeum.publishing.canonical_metadata.
+    materialize_youtube_main_episode_description() -- the ONE
+    deterministic function weaving canonical chapters/sources into the
+    final visible description, used identically by readiness validation
+    and the real Zernio serialization path.
+    """
+
+    def test_no_chapters_or_sources_returns_description_unchanged(self):
+        metadata = _base_metadata()
+        assert materialize_youtube_main_episode_description(metadata) == "A real base description."
+
+    def test_chapters_are_appended_with_correct_timestamps(self):
+        metadata = _base_metadata(chapters=[
+            {"start_seconds": 0.0, "title": "Intro"},
+            {"start_seconds": 65.479, "title": "The Middle"},
+            {"start_seconds": 588.775, "title": "The End"},
+        ])
+        result = materialize_youtube_main_episode_description(metadata)
+        assert "0:00 Intro" in result
+        assert "1:05 The Middle" in result
+        assert "9:49 The End" in result
+        assert result.count("Chapters:") == 1
+
+    def test_sources_are_appended(self):
+        metadata = _base_metadata(sources=[
+            {"title": "Academic", "url": "https://example.com/a"},
+            {"title": "News", "url": "https://example.com/b"},
+        ])
+        result = materialize_youtube_main_episode_description(metadata)
+        assert "https://example.com/a" in result
+        assert "https://example.com/b" in result
+        assert result.count("Sources & Further Reading:") == 1
+
+    def test_calling_twice_never_duplicates_chapters_or_sources(self):
+        metadata = _base_metadata(
+            chapters=[{"start_seconds": 0.0, "title": "Intro"}, {"start_seconds": 12.0, "title": "End"}],
+            sources=[{"title": "Academic", "url": "https://example.com/a"}],
+        )
+        once = materialize_youtube_main_episode_description(metadata)
+        twice = materialize_youtube_main_episode_description(_base_metadata(
+            description=once, chapters=metadata.chapters, sources=metadata.sources,
+        ))
+        assert once == twice
+        assert twice.count("Chapters:") == 1
+        assert twice.count("Sources & Further Reading:") == 1
+
+    def test_a_source_the_model_already_cited_inline_is_not_duplicated(self):
+        # The model is explicitly permitted (never guaranteed) to cite a
+        # source inline -- materialization must not re-list it.
+        metadata = _base_metadata(
+            description="A description that already cites https://example.com/a inline.",
+            sources=[
+                {"title": "Academic", "url": "https://example.com/a"},
+                {"title": "News", "url": "https://example.com/b"},
+            ],
+        )
+        result = materialize_youtube_main_episode_description(metadata)
+        assert result.count("https://example.com/a") == 1
+        assert "https://example.com/b" in result
+
+    def test_visible_hashtags_are_never_touched_or_duplicated(self):
+        metadata = _base_metadata(
+            description="A real description with #Erdstall embedded.",
+            visible_hashtags=["#Erdstall"],
+            chapters=[{"start_seconds": 0.0, "title": "Intro"}],
+        )
+        result = materialize_youtube_main_episode_description(metadata)
+        assert result.count("#Erdstall") == 1
+
+    def test_backend_tags_never_appear_in_the_materialized_description(self):
+        metadata = _base_metadata(backend_tags=["a search phrase", "another search phrase"])
+        result = materialize_youtube_main_episode_description(metadata)
+        assert "a search phrase" not in result
+
+
+class TestMaterializationWiredIntoGeneration:
+    """
+    Proves the materialized (not raw) length is what generation-time
+    validation checks for a main_episode/youtube entry, and that
+    exceeding the limit only after chapters/sources are appended feeds
+    real shortening guidance back into the bounded retry loop -- never a
+    silent truncation.
+    """
+
+    def test_materialized_overflow_retries_with_shortening_guidance(self, tmp_path):
+        episode_dir = tmp_path
+        final_render_package = _seed_main_episode_grounding(episode_dir)
+        # A base description safely under 5000 chars on its own, but
+        # chapters + a long sources block push the MATERIALIZED result
+        # over the limit.
+        oversized_base = "x" * 4950 + " #Mystery"
+        many_sources = [
+            {"source_id": f"src_{i:03d}", "url": f"https://example.com/very/long/path/{i}", "inferred_type": "academic"}
+            for i in range(30)
+        ]
+        (episode_dir / f"research_package_{EPISODE_ID}.json").write_text(json.dumps({
+            "source_registry": many_sources,
+            "claims": [{"claim_id": "clm_001", "sources": [many_sources[0]["source_id"]]}],
+        }), encoding="utf-8")
+        calls = []
+
+        def fake_llm_call(system_prompt, input_package, **kw):
+            calls.append(system_prompt)
+            if len(calls) == 1:
+                return {"platforms": {"youtube": {
+                    "title": "T", "cta": "c",
+                    "description": oversized_base, "visible_hashtags": ["#Mystery"],
+                }}}
+            return {"platforms": {"youtube": {
+                "title": "T", "cta": "c",
+                "description": "A real, short, grounded description. #Mystery",
+                "visible_hashtags": ["#Mystery"],
+            }}}
+
+        entries = generate_canonical_platform_metadata_for_deliverable(
+            EPISODE_ID, episode_dir, "main_episode", "main_episode", ["youtube"], final_render_package,
+            config=Config(), channel_id="hypogeum", platform_deliverable_policy=_MAIN_EPISODE_POLICY,
+            llm_call=fake_llm_call,
+        )
+        assert len(calls) == 2
+        assert "materialized description" in calls[1]
+        assert "exceeding" in calls[1]
+        # The final, accepted, persisted description is the short one --
+        # never the oversized base truncated down to fit.
+        assert entries[0]["description"] == "A real, short, grounded description. #Mystery"
+
+    def test_shorts_are_never_materialized_even_with_a_short_base_description(self, tmp_path):
+        episode_dir = tmp_path
+        final_render_package = _seed_short_grounding(episode_dir)
+
+        def fake_llm_call(*a, **kw):
+            return _VALID_YOUTUBE_RESPONSE
+
+        entries = generate_canonical_platform_metadata_for_deliverable(
+            EPISODE_ID, episode_dir, "short_001", "shorts", ["youtube"], final_render_package,
+            config=Config(), channel_id="hypogeum", platform_deliverable_policy=_HYPOGEUM_POLICY,
+            llm_call=fake_llm_call,
+        )
+        # A Short never computes chapters at all (deliverable_class !=
+        # "main_episode") -- the stored/returned description is exactly
+        # the model's own text, no Chapters/Sources block appended.
+        assert entries[0]["chapters"] == []
+        assert "Chapters:" not in entries[0]["description"]
+        assert "Sources & Further Reading:" not in entries[0]["description"]
+
+    def test_readiness_never_materializes_for_a_short_even_with_chapters_present(self, tmp_path):
+        # Defense in depth: the real generator never populates chapters
+        # for a Short, but validate_canonical_platform_metadata()'s own
+        # length check must still gate materialization on
+        # (deliverable_class, platform), not merely "chapters is
+        # non-empty" -- an oversized-if-materialized Short must be judged
+        # on its own raw description length, which here is well within
+        # any real caption limit.
+        from hypogeum.publishing.zernio_platform_contracts import get_platform_contract
+
+        metadata = _base_metadata(
+            deliverable_id="short_001", description="A short, real, grounded caption.",
+            chapters=[{"start_seconds": 0.0, "title": "Intro"}],
+            sources=[{"title": "Academic", "url": "https://example.com/a"}],
+            visible_hashtags=["#Mystery"], cta="Subscribe.", ai_disclosure=True,
+        )
+        failures = validate_canonical_platform_metadata(
+            metadata, deliverable_class="shorts", platform="youtube",
+            class_entry={"categoryId": "27"}, final_duration_seconds=30.0,
+            episode_dir=tmp_path, episode_id=EPISODE_ID,
+            contract=get_platform_contract("youtube"),
+        )
+        assert not any("exceeding" in f for f in failures), failures

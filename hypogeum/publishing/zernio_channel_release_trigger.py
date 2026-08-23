@@ -384,12 +384,26 @@ def _pick_root_title_description(
     is used -- never fabricated, never re-derived independently of what
     was actually generated/approved.
     """
-    from hypogeum.publishing.canonical_metadata import resolve_canonical_platform_metadata
+    from hypogeum.publishing.canonical_metadata import (
+        materialize_youtube_main_episode_description,
+        resolve_canonical_platform_metadata,
+    )
 
+    deliverable_class = classify_deliverable_class(deliverable_id)
     for platform in ("youtube", "tiktok", "instagram", "facebook"):
         metadata = resolve_canonical_platform_metadata(final_render_package, deliverable_id, platform)
         if metadata is not None:
-            return metadata.title or fallback_title, metadata.description
+            # The real, complete, viewer-facing description -- base +
+            # deterministic chapters + sources -- for a YouTube
+            # main_episode, using the SAME function readiness validates
+            # against, so what gets sent can never diverge from what was
+            # approved as ready. Every other (deliverable_class,
+            # platform) combination is unaffected: this returns
+            # metadata.description unchanged.
+            description = metadata.description
+            if deliverable_class == "main_episode" and platform == "youtube":
+                description = materialize_youtube_main_episode_description(metadata)
+            return metadata.title or fallback_title, description
     return fallback_title, fallback_description
 
 

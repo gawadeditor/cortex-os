@@ -454,6 +454,20 @@ class TestCanonicalMetadataAutoGeneration:
         assert body["tags"] == ["generated tag one", "generated tag two"]
         assert "generated, platform-specific description" in body["content"]
 
+        # Chapters and sources reach the REAL request body automatically
+        # -- 2026-08-23 fix: these were previously validated/stored but
+        # never materialized into any published description anywhere in
+        # the pipeline; a human had to compose them by hand in a one-off
+        # repair script. This fake llm_call never mentions either -- if
+        # they are in the body, materialize_youtube_main_episode_description()
+        # put them there deterministically, not the model.
+        assert "0:00 Intro" in body["content"]
+        assert "0:12 Middle" in body["content"]
+        assert "0:24 End" in body["content"]
+        assert "https://example.com/source" in body["content"]
+        assert body["content"].count("Chapters:") == 1
+        assert body["content"].count("Sources & Further Reading:") == 1
+
         # Persisted back to disk -- a SECOND run against the same episode
         # must not need to generate again (no human repair artifact, and
         # no unnecessary repeated generation either).

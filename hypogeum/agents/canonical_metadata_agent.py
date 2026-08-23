@@ -333,7 +333,11 @@ def _validate_and_build_entries(
     (entries, errors) -- entries is [] whenever errors is non-empty; a
     partially-valid response is never partially accepted.
     """
-    from hypogeum.publishing.canonical_metadata import extract_hashtag_tokens
+    from hypogeum.publishing.canonical_metadata import (
+        CanonicalPlatformMetadata,
+        extract_hashtag_tokens,
+        materialize_youtube_main_episode_description,
+    )
     from hypogeum.publishing.zernio_platform_contracts import get_platform_contract
 
     errors: List[str] = []
@@ -366,12 +370,32 @@ def _validate_and_build_entries(
                 f"platform={platform!r}: description is the raw grounding text verbatim -- write "
                 f"real publication copy, never echo the source text"
             )
-        elif contract and contract.caption_max_chars is not None and len(description) > contract.caption_max_chars:
-            platform_errors.append(
-                f"platform={platform!r}: description is {len(description)} chars, exceeding the "
-                f"documented {contract.caption_max_chars}-char limit -- shorten it while keeping it real, "
-                f"grounded copy; never truncate mid-sentence"
-            )
+        elif contract and contract.caption_max_chars is not None:
+            # A YouTube main_episode's ACTUAL published content is the
+            # materialized description (base + deterministic chapters +
+            # sources), never the raw base text alone -- validate THAT
+            # length, using the SAME shared function readiness and the
+            # real Zernio request use, so a base description that looks
+            # fine here can never still blow the limit once chapters/
+            # sources are appended downstream.
+            if deliverable_class == "main_episode" and platform == "youtube":
+                materialized = materialize_youtube_main_episode_description(CanonicalPlatformMetadata(
+                    deliverable_id=deliverable_id, platform=platform, description=description,
+                    metadata_version="v1", source_artifact_ids=source_artifact_ids,
+                    input_fingerprint=input_fingerprint, generated_at=now_iso,
+                    chapters=chapters, sources=sources,
+                ))
+                check_len, check_label = len(materialized), "materialized description (base + chapters + sources)"
+            else:
+                check_len, check_label = len(description), "description"
+            if check_len > contract.caption_max_chars:
+                overflow = check_len - contract.caption_max_chars
+                platform_errors.append(
+                    f"platform={platform!r}: {check_label} is {check_len} chars, exceeding the documented "
+                    f"{contract.caption_max_chars}-char limit by {overflow} -- shorten the BASE description "
+                    f"by at least {overflow} characters (chapters and sources are appended automatically and "
+                    f"cannot be shortened); never truncate mid-sentence"
+                )
 
         visible_hashtags = [h for h in (raw.get("visible_hashtags") or []) if isinstance(h, str) and h.startswith("#")]
         if not visible_hashtags:

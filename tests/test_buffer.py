@@ -486,7 +486,7 @@ class TestCrossChannelBundleIsolationViaRunWorker:
         # this test exercises both channels through the SAME real
         # gate/loop code by patching the resolver to return each
         # channel's own declared bundle).
-        def _resolve(channel_id):
+        def _resolve(channel_id, db_path=None):
             if channel_id == "channel_a":
                 return [DeliverableBundleDefinition(channel_id="channel_a", bundle_id="main_episode_bundle", target_buffer_count=1)]
             if channel_id == "channel_b":
@@ -535,7 +535,7 @@ class TestCrossChannelBundleIsolationViaRunWorker:
             credential_data="sk_test", scope="factory", db_path=db_path,
         )
 
-        def _resolve(channel_id):
+        def _resolve(channel_id, db_path=None):
             if channel_id == "channel_a":
                 return [DeliverableBundleDefinition(channel_id="channel_a", bundle_id="main_episode_bundle", target_buffer_count=1)]
             if channel_id == "channel_b":

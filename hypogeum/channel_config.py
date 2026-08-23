@@ -375,6 +375,42 @@ class ChannelOperationsProfile:
     # carries a Hypogeum-specific default itself.
     platform_deliverable_policy: dict = field(default_factory=dict)
 
+    # Optional, channel-declared list of deliverable/bundle definitions --
+    # the generic Channel Package contract that replaces run_worker.py's
+    # previous hardcoded Hypogeum-only bundle shape (see
+    # run_worker.py::_resolve_bundle_definitions_for_channel()'s own
+    # docstring, and hypogeum/buffer.py's SCHEMA GAP note, both of which
+    # this field closes). Empty list (default) means "no bundle
+    # definitions declared" -- a channel with none configured is never
+    # buffer-gated at all (falls through to queue-depth-only discovery
+    # refill, unaffected), exactly the same fail-closed-by-omission
+    # behavior the stand-in already used. Each entry:
+    #   {"bundle_id": <opaque str>, "target_buffer_count": <int>}
+    # Factory Core assigns no meaning to bundle_id or how many entries a
+    # channel declares -- hypogeum.buffer.DeliverableBundleDefinition is
+    # built from exactly these two fields, unchanged.
+    deliverable_bundle_definitions: list = field(default_factory=list)
+
+    # Optional, per-(deliverable CLASS, platform) evidence-based
+    # publication-slot optimizer policy (hypogeum.schedule_optimizer).
+    # Empty dict (default) means "analytics scheduling not configured" --
+    # the optimizer is never consulted; scheduling behaves exactly as
+    # before this field existed (deliverable_schedule_policy /
+    # bundle_cycle_policy / publishing_schedule only). Keyed by an opaque
+    # deliverable_class ('main_episode' | 'shorts') -> platform ->
+    #   {"enabled": bool, "evidence_window_days": int,
+    #    "min_sample_size": int, "min_confidence": float,
+    #    "allowed_days": [<'monday'..'sunday'>, ...],
+    #    "allowed_hours": [<0-23>, ...],
+    #    "min_spacing_hours": int}.
+    # A (deliverable_class, platform) combination absent from this dict,
+    # or present with "enabled": false, is never optimized -- the
+    # existing static schedule layers are consulted unchanged. See
+    # hypogeum.schedule_optimizer.optimize_publication_slot()'s own
+    # docstring for exactly how each of these fields is used, and its
+    # fail-closed fallback contract when evidence is insufficient.
+    analytics_scheduling_policy: dict = field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -534,6 +570,16 @@ _CHANNEL_OPERATIONS_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("deliverable_schedule_policy_json", "TEXT"),
     ("bundle_cycle_policy_json", "TEXT"),
     ("platform_deliverable_policy_json", "TEXT"),
+    # 2026-08-23 (autonomous weekly runtime): channel-agnostic replacement
+    # for run_worker.py's hardcoded Hypogeum bundle shape (see
+    # _resolve_bundle_definitions_for_channel()'s own docstring for the
+    # gap this closes) and the opt-in evidence-based scheduling policy
+    # consumed by hypogeum.schedule_optimizer. Both default to
+    # NULL/empty -- a channel with neither configured behaves exactly as
+    # before either field existed (no bundle gating, static
+    # deliverable_schedule_policy/publishing_schedule only).
+    ("deliverable_bundle_definitions_json", "TEXT"),
+    ("analytics_scheduling_policy_json", "TEXT"),
 ]
 
 
@@ -665,6 +711,14 @@ def _row_to_operations(row) -> ChannelOperationsProfile:
         platform_deliverable_policy  = (
             _uj(row["platform_deliverable_policy_json"], {})
             if "platform_deliverable_policy_json" in keys else {}
+        ),
+        deliverable_bundle_definitions = (
+            _uj(row["deliverable_bundle_definitions_json"], [])
+            if "deliverable_bundle_definitions_json" in keys else []
+        ),
+        analytics_scheduling_policy  = (
+            _uj(row["analytics_scheduling_policy_json"], {})
+            if "analytics_scheduling_policy_json" in keys else {}
         ),
     )
 
@@ -1244,6 +1298,8 @@ _OPERATIONS_FIELD_MAP: dict[str, Any] = {
     "deliverable_schedule_policy": ("deliverable_schedule_policy_json", _j),
     "bundle_cycle_policy":         ("bundle_cycle_policy_json", _j),
     "platform_deliverable_policy": ("platform_deliverable_policy_json", _j),
+    "deliverable_bundle_definitions": ("deliverable_bundle_definitions_json", _j),
+    "analytics_scheduling_policy": ("analytics_scheduling_policy_json", _j),
 }
 
 
@@ -1344,6 +1400,8 @@ def create_channel_operations_profile(
     deliverable_schedule_policy:  Optional[dict] = None,
     bundle_cycle_policy:          Optional[dict] = None,
     platform_deliverable_policy:  Optional[dict] = None,
+    deliverable_bundle_definitions: Optional[list] = None,
+    analytics_scheduling_policy:  Optional[dict] = None,
     db_path:                      Optional[Path] = None,
 ) -> ChannelOperationsProfile:
     """
@@ -1380,6 +1438,8 @@ def create_channel_operations_profile(
     deliverable_schedule_policy = deliverable_schedule_policy or {}
     bundle_cycle_policy = bundle_cycle_policy or {}
     platform_deliverable_policy = platform_deliverable_policy or {}
+    deliverable_bundle_definitions = deliverable_bundle_definitions or []
+    analytics_scheduling_policy = analytics_scheduling_policy or {}
 
     _validate_operations_fields(
         timezone_=timezone,
@@ -1417,6 +1477,8 @@ def create_channel_operations_profile(
         deliverable_schedule_policy=deliverable_schedule_policy,
         bundle_cycle_policy=bundle_cycle_policy,
         platform_deliverable_policy=platform_deliverable_policy,
+        deliverable_bundle_definitions=deliverable_bundle_definitions,
+        analytics_scheduling_policy=analytics_scheduling_policy,
     )
     try:
         conn = get_connection(_resolve_db_path(db_path))
@@ -1433,8 +1495,9 @@ def create_channel_operations_profile(
                     cost_ceiling_usd_per_episode, default_privacy_state,
                     created_at, updated_at, metadata_version,
                     deliverable_schedule_policy_json, bundle_cycle_policy_json,
-                    platform_deliverable_policy_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    platform_deliverable_policy_json,
+                    deliverable_bundle_definitions_json, analytics_scheduling_policy_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (channel_id, channel_name, timezone, int(operator_enabled),
                  _j(production_cadence), _j(publishing_schedule),
                  _j(enabled_platforms), _j(blocked_platform_reasons),
@@ -1444,7 +1507,8 @@ def create_channel_operations_profile(
                  cost_ceiling_usd_per_episode, default_privacy_state,
                  now, now, profile.metadata_version,
                  _j(deliverable_schedule_policy), _j(bundle_cycle_policy),
-                 _j(platform_deliverable_policy)),
+                 _j(platform_deliverable_policy),
+                 _j(deliverable_bundle_definitions), _j(analytics_scheduling_policy)),
             )
             conn.commit()
         finally:

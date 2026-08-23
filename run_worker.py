@@ -177,37 +177,54 @@ def _sync_analytics_background(db_path: Path, config) -> None:
         log.error("analytics_sync_error error=%s", exc)
 
 
-def _resolve_bundle_definitions_for_channel(channel_id: str) -> list:
+def _resolve_bundle_definitions_for_channel(channel_id: str, db_path: Path | None = None) -> list:
     """
-    TEMPORARY, EXPLICIT stand-in for a real Channel-Package-driven bundle
-    compiler — see hypogeum/buffer.py's own SCHEMA GAP note. The current
-    Channel Package schema (channel_operations_profiles.
-    production_cadence_json / publishing_schedule_json) has no generic,
-    formalized concept of "deliverable/bundle definitions" or their target
-    buffer counts for an arbitrary channel, so nothing here is compiled
-    from the database — only Hypogeum's own single known real bundle is
-    hardcoded, here, at this one call site (never inside hypogeum/buffer.py
-    itself, which stays fully channel-agnostic and knows nothing about
-    "episode", "Shorts", or Hypogeum at all).
+    Real Channel-Package-driven bundle compiler (2026-08-23 — closes the
+    gap this function's own docstring previously documented, and
+    hypogeum/buffer.py's SCHEMA GAP note references). Compiles
+    ChannelOperationsProfile.deliverable_bundle_definitions — a generic,
+    channel-declared list of {"bundle_id": str, "target_buffer_count": int}
+    entries (see that field's own docstring in hypogeum/channel_config.py)
+    — into hypogeum.buffer.DeliverableBundleDefinition objects. Factory
+    Core assigns no meaning to bundle_id or how many entries a channel
+    declares; hypogeum/buffer.py itself remains fully channel-agnostic and
+    is never touched by this function's existence.
 
-    Any channel_id not explicitly listed here returns [] — the buffer gate
-    in _check_and_refill_queue() is then skipped entirely for it (falls
+    A channel with no ChannelOperationsProfile, or with an empty/absent
+    deliverable_bundle_definitions, returns [] — the buffer gate in
+    _check_and_refill_queue() is then skipped entirely for it (falls
     through to the existing queue-depth-only refill logic, unaffected),
-    which is the correct, fail-closed behavior for a channel whose bundle
-    shape has not been compiled: never guess a Hypogeum-shaped bundle onto
-    a channel we know nothing about.
-
-    A real multi-channel factory replaces this function's body with a
-    genuine Channel Package compiler once that schema exists — this
-    function's docstring is the exact, load-bearing seam where that plugs
-    in; nothing else in this file (or hypogeum/buffer.py) needs to change.
+    the same fail-closed-by-omission behavior this function always had:
+    never guess a bundle shape onto a channel that hasn't declared one.
+    Malformed entries (missing bundle_id or a non-positive
+    target_buffer_count) are skipped individually, never silently
+    defaulted and never crashing the whole compilation.
     """
-    if channel_id == "hypogeum":
-        from hypogeum.buffer import DeliverableBundleDefinition
-        return [DeliverableBundleDefinition(
-            channel_id="hypogeum", bundle_id="main_episode_bundle", target_buffer_count=1,
-        )]
-    return []
+    from hypogeum.buffer import DeliverableBundleDefinition
+    from hypogeum.channel_config import get_channel_operations_profile
+
+    try:
+        profile = get_channel_operations_profile(channel_id, db_path=db_path)
+    except RuntimeError as exc:
+        log.error("bundle_definitions_profile_read_error channel=%s error=%s", channel_id, exc)
+        return []
+    if profile is None:
+        return []
+
+    definitions = []
+    for entry in (profile.deliverable_bundle_definitions or []):
+        bundle_id = entry.get("bundle_id") if isinstance(entry, dict) else None
+        target = entry.get("target_buffer_count") if isinstance(entry, dict) else None
+        if not bundle_id or not isinstance(target, int) or isinstance(target, bool) or target <= 0:
+            log.warning(
+                "bundle_definitions_invalid_entry channel=%s entry=%r — skipped",
+                channel_id, entry,
+            )
+            continue
+        definitions.append(DeliverableBundleDefinition(
+            channel_id=channel_id, bundle_id=bundle_id, target_buffer_count=target,
+        ))
+    return definitions
 
 
 def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
@@ -266,7 +283,21 @@ def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
         channel_id = ch.channel_id
         result["channels_checked"] += 1
 
-        bundle_definitions = _resolve_bundle_definitions_for_channel(channel_id)
+        # Per-channel operator pause -- same operator_enabled check as
+        # _check_and_refill_queue()'s own (see that call site's comment
+        # for the full rationale); an operator-disabled channel's already-
+        # complete deliverables are never auto-published either.
+        from hypogeum.channel_config import get_channel_operations_profile
+        try:
+            ops_profile = get_channel_operations_profile(channel_id, db_path=db_path)
+        except RuntimeError as exc:
+            log.error("publishing_operator_enabled_check_error channel=%s error=%s", channel_id, exc)
+            ops_profile = None
+        if ops_profile is not None and not ops_profile.operator_enabled:
+            log.info("publishing_operator_disabled channel=%s — skipping", channel_id)
+            continue
+
+        bundle_definitions = _resolve_bundle_definitions_for_channel(channel_id, db_path=db_path)
         if not bundle_definitions:
             continue
 
@@ -378,11 +409,34 @@ def _check_and_refill_queue(
         channel_id = ch.channel_id
         result["channels_checked"] += 1
 
+        # ── Per-channel operator pause (2026-08-23) ─────────────────────
+        # ChannelOperationsProfile.operator_enabled already gates real
+        # pipeline execution (hypogeum.worker_integration.
+        # build_gated_pipeline_executor()'s own operator_enabled check) --
+        # closing the same gap here means a channel an operator has
+        # disabled never even triggers a fresh (paid) discovery cycle or
+        # auto-approves a new topic in the first place, rather than
+        # discovering/queuing work that would only be refused later at
+        # claim time. A channel with no ChannelOperationsProfile at all
+        # (operator_enabled defaults meaningless without one) is treated
+        # as enabled -- unchanged, fail-open-on-absence behavior, matching
+        # every other optional-profile gate in this same loop (buffer
+        # gate, bundle definitions).
+        from hypogeum.channel_config import get_channel_operations_profile
+        try:
+            ops_profile = get_channel_operations_profile(channel_id, db_path=db_path)
+        except RuntimeError as exc:
+            log.error("discovery_operator_enabled_check_error channel=%s error=%s", channel_id, exc)
+            ops_profile = None
+        if ops_profile is not None and not ops_profile.operator_enabled:
+            log.info("discovery_operator_disabled channel=%s — skipping refill", channel_id)
+            continue
+
         # ── Deliverable/bundle buffer gate (Step 0 discovery-refill gate
         # for THIS channel only — tick()/consume_scheduled_runs()/poll()
         # below, and every other channel's own iteration of this loop, are
         # never touched by this) ────────────────────────────────────────
-        bundle_definitions = _resolve_bundle_definitions_for_channel(channel_id)
+        bundle_definitions = _resolve_bundle_definitions_for_channel(channel_id, db_path=db_path)
         if bundle_definitions:
             try:
                 bundle_states = []
@@ -839,6 +893,50 @@ def run_worker(
     except Exception as exc:
         log.warning("startup_preflight_error error=%s", exc)
 
+    # Singleton enforcement (2026-08-23): refuse to start a second
+    # concurrent worker against the same DB. The PID file already existed
+    # (see below) but was write-only -- nothing ever checked it before
+    # writing, so two `run_worker.py` processes could run concurrently
+    # with nothing stopping it. A PID file whose recorded process is no
+    # longer alive is stale (the prior worker crashed or was killed
+    # without a clean atexit) and is safely overwritten -- os.kill(pid, 0)
+    # is the standard liveness probe (raises ProcessLookupError for a dead
+    # PID, PermissionError for a live PID owned by another user — both
+    # distinguishable from "no such process"). This check is bypassed
+    # entirely for --once/gated/bounded one-shot invocations, which are
+    # designed to run alongside (or instead of) a long-running daemon
+    # for a single supervised operation and were never the process this
+    # lock is protecting against.
+    if not once:
+        try:
+            if _WORKER_PID_FILE.exists():
+                existing_pid_str = _WORKER_PID_FILE.read_text().strip()
+                if existing_pid_str:
+                    existing_pid = int(existing_pid_str)
+                    try:
+                        _os.kill(existing_pid, 0)
+                    except ProcessLookupError:
+                        log.warning(
+                            "worker_pid_file_stale existing_pid=%d — no such process, overwriting",
+                            existing_pid,
+                        )
+                    except PermissionError:
+                        log.error(
+                            "worker_singleton_conflict existing_pid=%d is alive (owned by another "
+                            "user) — refusing to start a second worker",
+                            existing_pid,
+                        )
+                        return 1
+                    else:
+                        log.error(
+                            "worker_singleton_conflict existing_pid=%d is alive — refusing to "
+                            "start a second worker against the same DB",
+                            existing_pid,
+                        )
+                        return 1
+        except (ValueError, OSError) as exc:
+            log.warning("worker_pid_file_check_error error=%s — proceeding", exc)
+
     # Write PID file so the dashboard can detect this worker regardless of whether
     # it was started via the dashboard UI or directly from the CLI. Without this,
     # _get_worker_pid() returns None for CLI workers, causing the dashboard's
@@ -916,6 +1014,17 @@ def run_worker(
         except Exception as exc:
             log.warning("self_healing_sweep_error error=%s", exc)
 
+        # Heartbeat (2026-08-23): a periodic liveness timestamp distinct
+        # from worker_status -- a worker hung or crashed mid-iteration
+        # (no atexit, no signal) leaves worker_status stuck at its last
+        # written value forever, indistinguishable from "still working
+        # normally on something slow". Writing wall-clock "now" every
+        # iteration, unconditionally, before any step that could hang or
+        # raise, lets any external monitor (dashboard, launchd health
+        # check) detect a stalled worker by comparing this timestamp's
+        # age against the configured --interval, without needing to
+        # reason about worker_status's own value at all.
+        _wc_set("worker_heartbeat_at", _now_utc().isoformat(), db_path)
         _wc_set("worker_status", "claiming", db_path)
         try:
             result = run_iteration(
@@ -959,6 +1068,17 @@ def run_worker(
         iteration,
         stop_reason if not _shutdown_requested else "signal",
     )
+    # Explicit cleanup on the normal graceful-exit path (2026-08-23) --
+    # the atexit handler registered above is a safety net for a crash or
+    # an unhandled signal that skips past this point, but it only fires
+    # at real PROCESS exit. A caller that invokes run_worker() directly
+    # and keeps running afterward (e.g. many sequential calls within one
+    # long-lived test process) would otherwise leave a stale-but-still-
+    # matching PID file on disk indefinitely, since atexit never fires
+    # between such calls -- exactly what the new singleton check above
+    # now depends on being accurate. Same guard as _remove_pid_file(): only
+    # removes the file if it still names THIS process's own PID.
+    _remove_pid_file()
     return 0
 
 

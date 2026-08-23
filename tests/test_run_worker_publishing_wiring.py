@@ -101,6 +101,14 @@ def _make_channel(db_path, channel_id, *, timezone_name="UTC"):
         publishing_schedule={"day_of_week": "sunday", "time_of_day": "14:00"},
         enabled_platforms={"youtube": True},
         deliverable_schedule_policy={"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}},
+        # 2026-08-23: _resolve_bundle_definitions_for_channel() now compiles
+        # from this field instead of hardcoding a bundle for channel_id ==
+        # "hypogeum" -- this test file's channels need their own explicit
+        # declaration to keep exercising the real publishing-sweep bundle
+        # gate exactly as before.
+        deliverable_bundle_definitions=[
+            {"bundle_id": "main_episode_bundle", "target_buffer_count": 1},
+        ],
         db_path=db_path,
     )
 
@@ -336,7 +344,7 @@ class TestOneChannelFailureNeverAffectsAnother:
         import run_worker
         from hypogeum.buffer import DeliverableBundleDefinition
 
-        def _resolve(channel_id):
+        def _resolve(channel_id, db_path=None):
             if channel_id in ("channel_a", "channel_b"):
                 return [DeliverableBundleDefinition(channel_id=channel_id, bundle_id="main_episode_bundle", target_buffer_count=1)]
             return []
@@ -408,6 +416,9 @@ class TestMissingBindingOrScheduleBlocksWithoutCrashing:
             channel_id="hypogeum", channel_name="hypogeum", timezone="UTC",
             publishing_schedule={"day_of_week": "sunday", "time_of_day": "14:00"},
             enabled_platforms={"youtube": True},
+            deliverable_bundle_definitions=[
+                {"bundle_id": "main_episode_bundle", "target_buffer_count": 1},
+            ],
             db_path=db_path,  # no deliverable_schedule_policy
         )
         _bind_provider(db_path, "hypogeum")

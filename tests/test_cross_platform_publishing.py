@@ -781,29 +781,57 @@ class TestCanonicalMetadataReadinessReproducesEpF3619022Incident:
         assert yt_short.status == "fail"
         assert "ai_disclosure is absent" in yt_short.reason
 
-    def test_categoryid_enforcement_is_intentionally_conditional_on_channel_policy_declaring_one(self, db_path, assets_root):
-        # Documents a real, deliberate architectural asymmetry between
-        # categoryId and ai_disclosure, so it is never mistaken for a bug:
-        # categoryId is a channel EDITORIAL PREFERENCE (a channel may
-        # legitimately have none), so Factory Core only validates a MATCH
-        # once the channel has declared one approved value (line
-        # "if approved_category:" in validate_canonical_platform_metadata)
-        # -- removing categoryId from the Channel Package reverts to "no
-        # opinion enforced", not a failure. ai_disclosure is a disclosure
-        # OBLIGATION, never optional once the platform is youtube, so it
-        # is unconditionally required regardless of what the policy says
-        # (see test_missing_ai_disclosure_fails_closed_for_a_short_not_
-        # just_main_episode above, and resolve to True/False, never
-        # omitted, at the canonical-entry level).
+    def test_missing_categoryid_in_channel_package_fails_closed_with_zero_external_calls(self, db_path, assets_root):
+        # 2026-08-23 operator decision: Factory Core does not need to know
+        # WHICH categoryId a channel uses (never hardcoded -- see
+        # hypogeum.publishing.zernio_platform_contracts.ZERNIO_PLATFORM_CONTRACTS
+        # ["youtube"].required_policy_fields=("categoryId",)), but it MUST
+        # enforce that the Channel Package declares one once youtube is
+        # enabled for a deliverable class. Proves the full chain:
+        #   1. remove categoryId from the Channel Package policy
+        #   2. compile/sync the policy (here: pass it straight to
+        #      _setup_channel, which is this test file's own equivalent of
+        #      sync_platform_distribution_policy_to_runtime -- both write
+        #      the same platform_deliverable_policy_json column)
+        #   3. readiness fails closed
+        #   4. canonical metadata generation makes ZERO external calls
+        #      (the model is never invoked) -- proven directly against the
+        #      real generate_canonical_platform_metadata_for_deliverable(),
+        #      not a fake standing in for the whole pipeline.
         policy = json.loads(json.dumps(HYPOGEUM_MATRIX))
         del policy["youtube"]["main_episode"]["categoryId"]
         _setup_channel(db_path, platform_deliverable_policy=policy)
         ep_dir = _seed_episode(db_path, assets_root)
         _bind_all_platforms(db_path)
 
+        # 3. Readiness fails closed.
         result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
         yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
-        assert "categoryId" not in yt_main.reason
+        assert yt_main.status == "fail"
+        assert "categoryId" in yt_main.reason
+
+        # 4. Zero external calls: the real generator refuses to call the
+        # model at all once its own policy-completeness pre-check finds
+        # youtube's required categoryId missing for main_episode.
+        from hypogeum.agents.canonical_metadata_agent import (
+            CanonicalMetadataGenerationError, generate_canonical_platform_metadata_for_deliverable,
+        )
+        from hypogeum.config import Config
+
+        model_calls = []
+
+        def _spy_llm_call(*a, **kw):
+            model_calls.append(1)
+            raise AssertionError("the model must never be called when the Channel Package is incomplete")
+
+        final_render_package = json.loads((ep_dir / f"final_render_package_{EPISODE_ID}.json").read_text())
+        with pytest.raises(CanonicalMetadataGenerationError, match="categoryId"):
+            generate_canonical_platform_metadata_for_deliverable(
+                EPISODE_ID, ep_dir, "main_episode", "main_episode", ["youtube"], final_render_package,
+                config=Config(), channel_id=CHANNEL_ID, platform_deliverable_policy=policy,
+                llm_call=_spy_llm_call,
+            )
+        assert model_calls == []
 
     def test_category_matching_a_different_channel_approved_value_passes(self, db_path, assets_root):
         # Proves item 1's own point directly: "22" is accepted when the

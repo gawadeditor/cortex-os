@@ -220,7 +220,19 @@ ZERNIO_PLATFORM_CONTRACTS: dict = {
         policy_passthrough_fields=(
             "categoryId", "madeForKids", "containsSyntheticMedia", "firstComment", "playlistId",
         ),
-        required_policy_fields=(),  # readiness enforces "not blank" directly on the canonical metadata package, not via this generic policy-passthrough path
+        # categoryId is mandatory once youtube is enabled for a deliverable
+        # class (2026-08-23 operator decision) -- Factory Core enforces
+        # only that the Channel Package DECLARES a category, never which
+        # value it is (the value itself stays channel-owned, versioned in
+        # channel_packages/{channel_id}/platform_distribution_policy_v1.json,
+        # never hardcoded here). This is the SAME generic required-field
+        # mechanism TikTok's consent fields already use -- reusing it
+        # rather than inventing a youtube-specific check. Both the
+        # readiness-time check (hypogeum.publishing.canonical_metadata's
+        # generic required_fields loop) AND the pre-generation check in
+        # hypogeum.agents.canonical_metadata_agent (skips the model call
+        # entirely, zero external calls) key off this same tuple.
+        required_policy_fields=("categoryId",),
         settings_body_key=None,  # YouTube has no ROOT-level settings object (unlike tiktokSettings/facebookSettings) -- its fields live in platforms[].platformSpecificData, a PER-ENTRY dict, so build_platform_settings()'s root-key mechanism does not apply; see build_youtube_platform_specific_data() instead
         known_gaps=(
             "tags/hashtags are documented as ROOT-level request fields (array<string>), "

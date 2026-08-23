@@ -136,53 +136,37 @@ def _load_json_if_exists(path: Path) -> dict:
         return {}
 
 
-_LLM_JSON_RETRY_ATTEMPTS = 3
-
-
 def _default_llm_call(
     system_prompt: str, input_package: dict, *, config: Config,
     episode_id: str, channel_id: Optional[str],
 ) -> dict:
+    """
+    Single-shot: one real model call, parsed once. Bounded retry (JSON
+    parse failures AND validation failures alike, with the exact error
+    fed back into the next attempt's system_prompt) lives in the CALLER,
+    generate_canonical_platform_metadata_for_deliverable() -- consolidated
+    there 2026-08-23 so "max 3 attempts" is one real bound across both
+    failure classes, not two independently-bounded retry loops stacked on
+    top of each other (which would allow up to 9 raw calls for a single
+    deliverable). See that function's _MAX_GENERATION_ATTEMPTS.
+    """
     from hypogeum.openrouter import call_claude  # noqa: PLC0415
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(input_package, ensure_ascii=False)},
     ]
-    last_error: Optional[json.JSONDecodeError] = None
-    for attempt in range(_LLM_JSON_RETRY_ATTEMPTS):
-        call_messages = list(messages)
-        if attempt > 0:
-            # A prior attempt returned text that failed to parse as JSON --
-            # most commonly an unescaped literal quote character inside a
-            # string value (e.g. the model quoting source material with "
-            # instead of an escaped \"). Retrying with an explicit reminder
-            # resolves this in practice; this never changes what content is
-            # requested, only how strictly it must be JSON-escaped.
-            call_messages.append({
-                "role": "user",
-                "content": (
-                    "Your previous response was not valid JSON "
-                    f"({last_error}). Return ONLY the JSON object again, "
-                    "with every literal double-quote character inside a "
-                    "string value properly escaped as \\\"."
-                ),
-            })
-        result = call_claude(
-            model_slug=getattr(config, "CANONICAL_METADATA_MODEL_SLUG", "anthropic/claude-sonnet-4.6"),
-            messages=call_messages, max_tokens=4096, config=config,
-            episode_id=episode_id, agent=_AGENT_NAME, channel_id=channel_id,
-        )
-        raw = result.content.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            if raw.lower().startswith("json"):
-                raw = raw[4:]
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            last_error = exc
-    raise last_error
+    result = call_claude(
+        model_slug=getattr(config, "CANONICAL_METADATA_MODEL_SLUG", "anthropic/claude-sonnet-4.6"),
+        messages=messages, max_tokens=4096, config=config,
+        episode_id=episode_id, agent=_AGENT_NAME, channel_id=channel_id,
+    )
+    raw = result.content.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw)
 
 
 def _resolve_grounding_text(
@@ -333,6 +317,131 @@ def _resolve_chapters(episode_id: str, episode_dir: Path, final_render_package: 
     return chapters
 
 
+_MAX_GENERATION_ATTEMPTS = 3
+
+
+def _validate_and_build_entries(
+    response, *, target_platforms: List[str], grounding_text: str, sources, claim_source_map,
+    source_artifact_ids: List[str], input_fingerprint: dict, chapters: List[dict],
+    deliverable_id: str, deliverable_class: str,
+    platform_deliverable_policy: Optional[dict], now_iso: str,
+) -> "tuple[List[dict], List[str]]":
+    """
+    Validates one raw model response against every requested platform's
+    rules, collecting EVERY problem found (never stopping at the first)
+    so a retry can be told everything wrong in one pass. Returns
+    (entries, errors) -- entries is [] whenever errors is non-empty; a
+    partially-valid response is never partially accepted.
+    """
+    from hypogeum.publishing.zernio_platform_contracts import get_platform_contract
+
+    errors: List[str] = []
+    by_platform = response.get("platforms") if isinstance(response, dict) else None
+    if not isinstance(by_platform, dict):
+        return [], ["model response did not contain a 'platforms' object"]
+
+    missing = [p for p in target_platforms if p not in by_platform]
+    if missing:
+        errors.append(f"model response is missing platform(s) entirely: {missing}")
+
+    now_iso = now_iso
+    entries: List[dict] = []
+    for platform in target_platforms:
+        if platform not in by_platform:
+            continue
+        raw = by_platform[platform]
+        if not isinstance(raw, dict):
+            errors.append(f"platform={platform!r}: model response entry is not an object")
+            continue
+
+        platform_errors: List[str] = []
+        contract = get_platform_contract(platform)
+
+        description = (raw.get("description") or "").strip()
+        if not description:
+            platform_errors.append(f"platform={platform!r}: description is empty")
+        elif description.strip() == grounding_text.strip():
+            platform_errors.append(
+                f"platform={platform!r}: description is the raw grounding text verbatim -- write "
+                f"real publication copy, never echo the source text"
+            )
+        elif contract and contract.caption_max_chars is not None and len(description) > contract.caption_max_chars:
+            platform_errors.append(
+                f"platform={platform!r}: description is {len(description)} chars, exceeding the "
+                f"documented {contract.caption_max_chars}-char limit -- shorten it while keeping it real, "
+                f"grounded copy; never truncate mid-sentence"
+            )
+
+        visible_hashtags = [h for h in (raw.get("visible_hashtags") or []) if isinstance(h, str) and h.startswith("#")]
+        if not visible_hashtags:
+            platform_errors.append(f"platform={platform!r}: visible_hashtags is empty")
+        else:
+            missing_tokens = [h for h in visible_hashtags if h.lower() not in description.lower()]
+            if missing_tokens:
+                platform_errors.append(
+                    f"platform={platform!r}: hashtag(s) {missing_tokens} were listed in visible_hashtags "
+                    f"but do not appear as real tokens inside the description text itself"
+                )
+
+        title = (raw.get("title") or "").strip() or None
+        if contract and contract.title_supported and not title:
+            platform_errors.append(f"platform={platform!r}: title is required but missing")
+        if title and platform == "youtube" and len(title) > 100:
+            platform_errors.append(
+                f"platform={platform!r}: title is {len(title)} chars, exceeding YouTube's 100-char limit -- "
+                f"shorten it, never truncate mid-word"
+            )
+
+        backend_tags = [t for t in (raw.get("backend_tags") or []) if isinstance(t, str)] if platform in _PLATFORMS_WITH_BACKEND_TAGS else []
+        overlap = {t.lower().lstrip("#") for t in backend_tags} & {h.lower().lstrip("#") for h in visible_hashtags}
+        if overlap:
+            platform_errors.append(
+                f"platform={platform!r}: backend_tags and visible_hashtags overlap (must stay separate "
+                f"concepts): {sorted(overlap)}"
+            )
+
+        if platform_errors:
+            errors.extend(platform_errors)
+            continue
+
+        cta = (raw.get("cta") or "").strip() or None
+        first_comment = (raw.get("first_comment") or "").strip() or None
+        if platform not in _PLATFORMS_WITH_FIRST_COMMENT:
+            first_comment = None
+
+        class_entry = ((platform_deliverable_policy or {}).get(platform) or {}).get(deliverable_class, {})
+
+        entries.append({
+            "deliverable_id": deliverable_id, "platform": platform,
+            "title": title, "description": description,
+            "visible_hashtags": visible_hashtags, "backend_tags": backend_tags,
+            "sources": sources, "claim_source_map": claim_source_map,
+            "cta": cta, "language": "en", "metadata_version": "v1",
+            "source_artifact_ids": source_artifact_ids, "input_fingerprint": input_fingerprint,
+            "generated_at": now_iso, "approved_at": now_iso,
+            "first_comment": first_comment,
+            "category_id": class_entry.get("categoryId"),
+            "thumbnail_ref": None,  # caller fills in from its own already-resolved thumbnail path
+            "ai_disclosure": class_entry.get("ai_disclosure"),
+            "chapters": chapters if platform == "youtube" and deliverable_class == "main_episode" else [],
+        })
+
+    if errors:
+        return [], errors
+
+    # Distinct-across-platforms check, matching shorts_metadata.py's own
+    # "distinct across Shorts" discipline -- silent reuse of one generic
+    # caption across all platforms is exactly the defect item 3 prohibits.
+    distinct_descriptions = {e["description"].strip().lower() for e in entries}
+    if len(distinct_descriptions) != len(entries) and len(entries) > 1:
+        return [], [
+            "two or more platforms received identical descriptions -- each platform requires "
+            "its own genuine variant, never a copy-pasted one"
+        ]
+
+    return entries, []
+
+
 def generate_canonical_platform_metadata_for_deliverable(
     episode_id: str,
     episode_dir: Path,
@@ -349,28 +458,76 @@ def generate_canonical_platform_metadata_for_deliverable(
     """
     Generates one CanonicalPlatformMetadata dict (see
     hypogeum.publishing.canonical_metadata) per platform in
-    target_platforms, all in ONE model call (cheaper and more internally
-    consistent than one call per platform).
+    target_platforms, all in ONE model call per attempt (cheaper and more
+    internally consistent than one call per platform).
 
     `platform_deliverable_policy`: the channel's own
     ChannelOperationsProfile.platform_deliverable_policy -- category_id/
     ai_disclosure/platform_policy_fields are read from here (per
-    (platform, deliverable_class)), never generated by the model. A
-    platform whose policy entry has no explicit "categoryId"/
-    "ai_disclosure" simply gets None for that field -- readiness (not
-    this function) is what decides whether that blocks submission.
+    (platform, deliverable_class)), never generated by the model.
 
-    Raises CanonicalMetadataGenerationError (never returns a partial/
-    fabricated result) when grounding content, real sources, the model
-    call, or the model's own response for any requested platform is
-    unavailable or invalid -- matching hypogeum.agents.shorts_metadata's
-    own fail-closed discipline exactly.
+    Policy-completeness pre-check (2026-08-23, zero wasted model calls):
+    before ANY model call, every requested platform's declared
+    PlatformContract.required_policy_fields (e.g. youtube's "categoryId",
+    mandatory once youtube is enabled -- see
+    hypogeum.publishing.zernio_platform_contracts) is checked against
+    platform_deliverable_policy. A platform missing a required field is
+    silently dropped from generation (never generated for, never
+    fabricated) -- if EVERY requested platform fails this check, the
+    function raises immediately without ever calling the model. This is
+    "before metadata generation, zero external calls", not merely "before
+    the Zernio call" -- Factory Core never spends a real model call
+    producing metadata for a platform whose Channel Package is already
+    known to be incomplete.
+
+    Bounded automatic regeneration (2026-08-23, replaces the earlier
+    manual-rerun requirement): up to _MAX_GENERATION_ATTEMPTS (3) real
+    model calls. A JSON parse failure OR any field-validation failure
+    (description/title length, missing required fields, invalid hashtag
+    formatting, backend/hashtag overlap, verbatim-grounding reuse,
+    non-distinct-across-platforms) is fed back into the NEXT attempt's
+    prompt as an explicit, itemized list of exactly what to fix -- never
+    silently truncates or patches an invalid value itself. Only a fully
+    validated response is ever persisted; after the final failed attempt,
+    raises CanonicalMetadataGenerationError with the precise, complete
+    list of what still failed. Deterministic fields (sources,
+    claim_source_map, chapters, source_artifact_ids, input_fingerprint)
+    are computed once, outside the retry loop -- they never come from the
+    model, so there is nothing about them for a retry to "fix".
     """
     log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
     if not target_platforms:
         raise CanonicalMetadataGenerationError("target_platforms is empty -- nothing to generate")
 
     from hypogeum.publishing.zernio_platform_contracts import get_platform_contract
+
+    # Policy-completeness pre-check -- BEFORE any grounding resolution or
+    # model call. A platform whose Channel Package lacks a field its own
+    # contract declares mandatory is dropped from this generation attempt
+    # entirely; Factory Core never invents the missing value.
+    generatable_platforms: List[str] = []
+    policy_incomplete: Dict[str, List[str]] = {}
+    for platform in target_platforms:
+        contract = get_platform_contract(platform)
+        required_fields = getattr(contract, "required_policy_fields", ()) or ()
+        class_entry = ((platform_deliverable_policy or {}).get(platform) or {}).get(deliverable_class, {})
+        missing_fields = [f for f in required_fields if not class_entry.get(f)]
+        if missing_fields:
+            policy_incomplete[platform] = missing_fields
+        else:
+            generatable_platforms.append(platform)
+
+    if policy_incomplete:
+        log.warn(
+            "canonical_metadata_policy_incomplete", deliverable_id=deliverable_id,
+            deliverable_class=deliverable_class, policy_incomplete=policy_incomplete,
+        )
+    if not generatable_platforms:
+        raise CanonicalMetadataGenerationError(
+            f"channel policy is missing required field(s) for every requested platform -- refusing "
+            f"to call the model: {policy_incomplete}"
+        )
+    target_platforms = generatable_platforms
 
     grounding_text = _resolve_grounding_text(episode_id, episode_dir, deliverable_id, deliverable_class, final_render_package)
     sources, claim_source_map = _resolve_sources_and_claim_map(episode_dir, episode_id)
@@ -395,105 +552,65 @@ def generate_canonical_platform_metadata_for_deliverable(
             "first_comment_supported": platform in _PLATFORMS_WITH_FIRST_COMMENT,
         }
 
+    base_system_prompt = _SYSTEM_PROMPT.format(
+        platform_rules=json.dumps(platform_rules, indent=2), youtube_title_limit=100,
+    )
+    input_package = {
+        "deliverable_class": deliverable_class,
+        "grounding_text": grounding_text,
+        "sources": sources,
+        "platforms": target_platforms,
+    }
     call = llm_call or _default_llm_call
-    try:
-        response = call(
-            _SYSTEM_PROMPT.format(
-                platform_rules=json.dumps(platform_rules, indent=2), youtube_title_limit=100,
-            ),
-            {
-                "deliverable_class": deliverable_class,
-                "grounding_text": grounding_text,
-                "sources": sources,
-                "platforms": target_platforms,
-            },
-            config=config, episode_id=episode_id, channel_id=channel_id,
-        )
-    except Exception as exc:
-        log.error("canonical_metadata_generation_failed", deliverable_id=deliverable_id, error=str(exc))
-        raise CanonicalMetadataGenerationError(f"canonical metadata generation failed: {exc}") from exc
-
-    by_platform = response.get("platforms") if isinstance(response, dict) else None
-    if not isinstance(by_platform, dict):
-        raise CanonicalMetadataGenerationError("model response did not contain a 'platforms' object")
-
-    missing = [p for p in target_platforms if p not in by_platform]
-    if missing:
-        raise CanonicalMetadataGenerationError(f"model response missing platform(s): {missing}")
-
     now_iso = datetime.now(timezone.utc).isoformat()
-    entries: List[dict] = []
-    for platform in target_platforms:
-        raw = by_platform[platform]
-        if not isinstance(raw, dict):
-            raise CanonicalMetadataGenerationError(f"model response for platform={platform!r} is not an object")
 
-        description = (raw.get("description") or "").strip()
-        if not description:
-            raise CanonicalMetadataGenerationError(f"model returned an empty description for platform={platform!r}")
-        if description.strip() == grounding_text.strip():
-            raise CanonicalMetadataGenerationError(
-                f"model returned the raw grounding text verbatim as the description for "
-                f"platform={platform!r} -- not real publication copy"
+    last_errors: List[str] = []
+    for attempt in range(1, _MAX_GENERATION_ATTEMPTS + 1):
+        system_prompt = base_system_prompt
+        if last_errors:
+            system_prompt += (
+                "\n\nYour previous attempt failed validation. Fix EXACTLY these problems in this "
+                "response -- do not repeat any of them:\n" + "\n".join(f"- {e}" for e in last_errors)
             )
-        contract = get_platform_contract(platform)
-        if contract and contract.caption_max_chars is not None and len(description) > contract.caption_max_chars:
-            raise CanonicalMetadataGenerationError(
-                f"model returned a {len(description)}-char description for platform={platform!r}, "
-                f"exceeding its documented {contract.caption_max_chars}-char limit"
+        try:
+            response = call(
+                system_prompt, input_package,
+                config=config, episode_id=episode_id, channel_id=channel_id,
             )
-
-        visible_hashtags = [h for h in (raw.get("visible_hashtags") or []) if isinstance(h, str) and h.startswith("#")]
-        if not visible_hashtags:
-            raise CanonicalMetadataGenerationError(f"model returned no visible_hashtags for platform={platform!r}")
-        missing_tokens = [h for h in visible_hashtags if h.lower() not in description.lower()]
-        if missing_tokens:
-            raise CanonicalMetadataGenerationError(
-                f"model claimed hashtag(s) {missing_tokens} for platform={platform!r} but they do not "
-                f"appear as real tokens in its own description"
+        except Exception as exc:
+            last_errors = [f"response could not be parsed as valid JSON: {exc}"]
+            log.warn(
+                "canonical_metadata_generation_attempt_failed", deliverable_id=deliverable_id,
+                attempt=attempt, max_attempts=_MAX_GENERATION_ATTEMPTS, error=last_errors[0],
             )
+            continue
 
-        title = (raw.get("title") or "").strip() or None
-        if contract and contract.title_supported and not title:
-            raise CanonicalMetadataGenerationError(f"model returned no title for platform={platform!r}, which requires one")
-        if title and platform == "youtube" and len(title) > 100:
-            raise CanonicalMetadataGenerationError(f"model returned a {len(title)}-char YouTube title, exceeding the 100-char limit")
+        entries, errors = _validate_and_build_entries(
+            response, target_platforms=target_platforms, grounding_text=grounding_text,
+            sources=sources, claim_source_map=claim_source_map,
+            source_artifact_ids=source_artifact_ids, input_fingerprint=input_fingerprint,
+            chapters=chapters, deliverable_id=deliverable_id, deliverable_class=deliverable_class,
+            platform_deliverable_policy=platform_deliverable_policy, now_iso=now_iso,
+        )
+        if not errors:
+            if attempt > 1:
+                log.info(
+                    "canonical_metadata_generation_recovered", deliverable_id=deliverable_id,
+                    attempt=attempt, max_attempts=_MAX_GENERATION_ATTEMPTS,
+                )
+            return entries
 
-        backend_tags = [t for t in (raw.get("backend_tags") or []) if isinstance(t, str)] if platform in _PLATFORMS_WITH_BACKEND_TAGS else []
-        overlap = {t.lower().lstrip("#") for t in backend_tags} & {h.lower().lstrip("#") for h in visible_hashtags}
-        if overlap:
-            raise CanonicalMetadataGenerationError(f"model returned overlapping backend_tags/visible_hashtags for platform={platform!r}: {sorted(overlap)}")
-
-        cta = (raw.get("cta") or "").strip() or None
-        first_comment = (raw.get("first_comment") or "").strip() or None
-        if platform not in _PLATFORMS_WITH_FIRST_COMMENT:
-            first_comment = None
-
-        class_entry = ((platform_deliverable_policy or {}).get(platform) or {}).get(deliverable_class, {})
-
-        entries.append({
-            "deliverable_id": deliverable_id, "platform": platform,
-            "title": title, "description": description,
-            "visible_hashtags": visible_hashtags, "backend_tags": backend_tags,
-            "sources": sources, "claim_source_map": claim_source_map,
-            "cta": cta, "language": "en", "metadata_version": "v1",
-            "source_artifact_ids": source_artifact_ids, "input_fingerprint": input_fingerprint,
-            "generated_at": now_iso, "approved_at": now_iso,
-            "first_comment": first_comment,
-            "category_id": class_entry.get("categoryId"),
-            "thumbnail_ref": None,  # caller fills in from its own already-resolved thumbnail path
-            "ai_disclosure": class_entry.get("ai_disclosure"),
-            "chapters": chapters if platform == "youtube" and deliverable_class == "main_episode" else [],
-        })
-
-    # Distinct-across-platforms check, matching shorts_metadata.py's own
-    # "distinct across Shorts" discipline -- silent reuse of one generic
-    # caption across all platforms is exactly the defect item 3 prohibits.
-    distinct_descriptions = {e["description"].strip().lower() for e in entries}
-    if len(distinct_descriptions) != len(entries) and len(entries) > 1:
-        raise CanonicalMetadataGenerationError(
-            "model returned two or more identical descriptions across distinct platforms -- "
-            "each platform requires its own genuine variant"
+        last_errors = errors
+        log.warn(
+            "canonical_metadata_generation_attempt_failed", deliverable_id=deliverable_id,
+            attempt=attempt, max_attempts=_MAX_GENERATION_ATTEMPTS, errors=errors,
         )
 
-    return entries
+    log.error(
+        "canonical_metadata_generation_failed", deliverable_id=deliverable_id,
+        attempts=_MAX_GENERATION_ATTEMPTS, errors=last_errors,
+    )
+    raise CanonicalMetadataGenerationError(
+        f"canonical metadata generation failed after {_MAX_GENERATION_ATTEMPTS} attempts for "
+        f"deliverable_id={deliverable_id!r}: {last_errors}"
+    )

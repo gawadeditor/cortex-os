@@ -3,6 +3,28 @@ hypogeum/publishing/zernio_platform_contracts.py — Verified, versioned
 Zernio-per-platform publishing contract data (media constraints, caption/
 title field mapping, privacy requirements, platform-specific settings).
 
+YouTube field mapping (2026-08-23, live incident correction — see
+docs/operations/audits/ZERNIO_YOUTUBE_FIELD_MAPPING_2026-08-23.md):
+this module's own comment previously stated "YouTube's contract is not
+duplicated here ... no platform-specific settings object" -- confirmed
+WRONG by (1) live Zernio UI evidence (a real scheduled post's editor
+showing dedicated, empty YouTube title/tags/category/first-comment
+fields, distinct from the generic content field) and (2) a fresh live
+fetch of docs.zernio.com/platforms/youtube: YouTube DOES have a real
+per-platform-entry field surface at `platforms[].platformSpecificData`
+(title, visibility, categoryId, madeForKids, containsSyntheticMedia,
+firstComment, playlistId), plus real ROOT-level `tags`/`hashtags`
+fields never populated by any caller of _build_publish_body()/
+_build_multi_platform_publish_body() before this fix. The root-level
+`title`/`content` fields this codebase already sends DO still work as
+YouTube's actual title/description (confirmed: the live post's real,
+reasonable title came through this path) -- they are not being
+replaced, only supplemented with the fields above that were previously
+never sent at all, silently defaulting to Zernio's own platform
+defaults (categoryId="22"/People & Blogs, confirmed live; empty tags;
+no first comment; no AI-content disclosure).
+
+
 Provider-specific (Zernio), NOT channel-specific: nothing here mentions
 "hypogeum" or any Hypogeum editorial decision. Which platforms a channel
 actually uses, and which deliverable classes go to which platform, is a
@@ -10,14 +32,15 @@ Channel Package concern (ChannelOperationsProfile.platform_deliverable_policy) �
 this module only records what ZERNIO'S OWN API requires/supports for a
 platform once a caller has already decided to target it.
 
-Source of truth: docs.zernio.com/platforms/{tiktok,instagram,facebook}
-and docs.zernio.com/posts/create-post, read live on 2026-08-22 (see
-docs/operations/checkpoints/HYPOGEUM_ZERNIO_CROSS_PLATFORM_READINESS_2026-08-22.md
-for the full audit trail and exact quotes). YouTube's contract is not
-duplicated here — it is already implicitly encoded in
-hypogeum.publishing.zernio._build_publish_body()/hypogeum.publishing.
-zernio_media_staging (title/content top-level fields, no platform-specific
-settings object, no required privacy field).
+Source of truth: docs.zernio.com/platforms/{tiktok,instagram,facebook,youtube}
+and docs.zernio.com/posts/create-post, read live on 2026-08-22 (tiktok/
+instagram/facebook -- see docs/operations/checkpoints/
+HYPOGEUM_ZERNIO_CROSS_PLATFORM_READINESS_2026-08-22.md for that audit
+trail) and 2026-08-23 (youtube -- see docs/operations/audits/
+ZERNIO_YOUTUBE_FIELD_MAPPING_2026-08-23.md). YouTube DOES have its own
+verified contract entry below, corrected 2026-08-23 -- see this
+docstring's own note above for what the prior "no platform-specific
+settings object" claim got wrong and how it was found.
 
 Every field below is either a confirmed value from the live documentation
 fetch, or explicitly `None`/marked unconfirmed when the documentation did
@@ -29,6 +52,9 @@ Public API:
     PlatformContract (dataclass)
     ZERNIO_PLATFORM_CONTRACTS: dict[str, PlatformContract]
     get_platform_contract(platform) -> Optional[PlatformContract]
+    build_platform_settings(platform, policy_entry) -> Optional[dict]
+    build_youtube_platform_specific_data(metadata) -> Optional[dict]
+    build_youtube_root_fields(metadata) -> dict
 """
 
 from __future__ import annotations
@@ -162,6 +188,54 @@ ZERNIO_PLATFORM_CONTRACTS: dict = {
             "account TYPE, only connection/active status via GET /v1/accounts",
         ),
     ),
+    # Confirmed live via docs.zernio.com/platforms/youtube (2026-08-23).
+    # NOT used by hypogeum.publishing.cross_platform_readiness's existing
+    # `if platform != "youtube":` duration/caption gate loop (that gate
+    # is scoped to the three genuinely-verified-as-having-no-generic-
+    # fallback platforms) -- this entry exists so build_youtube_
+    # platform_specific_data() below has one place to read documented
+    # field names from, matching every other platform's own pattern.
+    "youtube": PlatformContract(
+        platform="youtube",
+        verified=True,
+        duration_seconds_range=None,  # main episodes and Shorts both go through YouTube; no single range applies
+        max_size_bytes=None,  # not documented in the fetched excerpt
+        aspect_ratio=None,
+        caption_field="content",  # top-level `content` becomes the YouTube description
+        caption_max_chars=5000,
+        title_supported=True,
+        title_field="platformSpecificData.title",  # optional per-platform override; root-level `title` already works as the real fallback (confirmed live) and is left untouched by this contract
+        privacy_required=False,  # Zernio defaults privacy; Cortex always sets it explicitly via platformSpecificData.visibility, never relies on the default
+        privacy_field="platformSpecificData.visibility",
+        privacy_allowed_values=("public", "private", "unlisted"),
+        scheduling_supported=True,
+        thumbnail_supported=True,
+        thumbnail_field="mediaItems[].thumbnail",  # NOT platformSpecificData -- lives on the media item itself
+        required_settings={},
+        # categoryId/madeForKids/containsSyntheticMedia/firstComment/
+        # playlistId are all real, documented platformSpecificData
+        # fields -- passthrough here mirrors every other platform's own
+        # policy_passthrough_fields mechanism (values live in the
+        # Channel Package, this module only records the field names).
+        policy_passthrough_fields=(
+            "categoryId", "madeForKids", "containsSyntheticMedia", "firstComment", "playlistId",
+        ),
+        required_policy_fields=(),  # readiness enforces "not blank" directly on the canonical metadata package, not via this generic policy-passthrough path
+        settings_body_key=None,  # YouTube has no ROOT-level settings object (unlike tiktokSettings/facebookSettings) -- its fields live in platforms[].platformSpecificData, a PER-ENTRY dict, so build_platform_settings()'s root-key mechanism does not apply; see build_youtube_platform_specific_data() instead
+        known_gaps=(
+            "tags/hashtags are documented as ROOT-level request fields (array<string>), "
+            "not platformSpecificData -- outside this PlatformContract's own "
+            "per-platform-entry shape; built separately, see build_youtube_tags()",
+            "hashtags field is 'stored for reference only' per docs.zernio.com/"
+            "posts/create-post -- does NOT render visibly in the description; "
+            "visible hashtags must be embedded in the content string itself",
+            "no per-platform custom-caption/content-override field could be "
+            "confirmed for YouTube via live documentation fetch (2026-08-23) -- "
+            "the live UI's 'custom caption' field for YouTube remains unmapped; "
+            "never guessed at, never sent",
+            "max_size_bytes not stated in the fetched documentation excerpt",
+        ),
+    ),
     "facebook": PlatformContract(
         platform="facebook",
         verified=True,
@@ -243,3 +317,74 @@ def build_platform_settings(platform: str, policy_entry: dict) -> Optional[dict]
             settings[field_name] = policy_entry[field_name]
 
     return settings or None
+
+
+# YouTube's own dotted-path leaf names, kept as a module-level constant
+# so build_youtube_platform_specific_data() and any test asserting on
+# it read from the SAME list ZERNIO_PLATFORM_CONTRACTS["youtube"] itself
+# declares (policy_passthrough_fields), rather than a second, potentially
+# drifting copy.
+_YOUTUBE_PLATFORM_SPECIFIC_DATA_FIELDS = (
+    "visibility", "categoryId", "madeForKids", "containsSyntheticMedia",
+    "firstComment", "playlistId", "title",
+)
+
+
+def build_youtube_platform_specific_data(metadata: dict) -> Optional[dict]:
+    """
+    Builds the `platforms[].platformSpecificData` dict for a YouTube
+    platform entry -- YouTube's real, per-platform-entry field surface
+    (confirmed live via docs.zernio.com/platforms/youtube, 2026-08-23;
+    NOT a root-level settings object like tiktokSettings/facebookSettings,
+    so build_platform_settings() above does not apply here).
+
+    `metadata` is the caller's already-resolved canonical values --
+    this function does no defaulting, no channel-policy lookup, no
+    fallback logic of its own. It only copies whichever of
+    _YOUTUBE_PLATFORM_SPECIFIC_DATA_FIELDS keys are present and
+    non-None in `metadata`, verbatim, under the exact same key name
+    (these ARE already the correct Zernio field names -- confirmed live,
+    never guessed from the UI). A field the caller does not supply is
+    simply absent -- readiness (check_cross_platform_readiness), not
+    this function, is what decides whether an absent field blocks
+    submission.
+
+    Returns None when metadata supplies none of these fields (matching
+    build_platform_settings()'s own "empty -> None" convention, so a
+    caller can uniformly skip an empty platformSpecificData the same way
+    it already skips an empty tiktokSettings/facebookSettings).
+    """
+    settings: dict = {}
+    for field_name in _YOUTUBE_PLATFORM_SPECIFIC_DATA_FIELDS:
+        value = metadata.get(field_name)
+        if value is not None:
+            settings[field_name] = value
+    return settings or None
+
+
+def build_youtube_root_fields(metadata: dict) -> dict:
+    """
+    Builds the ROOT-level `tags`/`hashtags` request fields -- confirmed
+    live via docs.zernio.com/posts/create-post (2026-08-23) as real,
+    documented fields distinct from platformSpecificData and from each
+    other (tags = YouTube backend search tags, each <=100 chars,
+    combined <=500 chars, duplicates auto-removed server-side; hashtags
+    = "stored for reference only... does NOT automatically create
+    @mentions when publishing" -- i.e. does NOT render visibly in the
+    description, so a caller wanting VISIBLE hashtags must also embed
+    them in the `content` string itself; this function does not do that
+    embedding, it only builds these two metadata-only root fields).
+
+    `metadata`: expects optional "tags" (list[str]) and "hashtags"
+    (list[str]) keys, already resolved by the caller. Returns only the
+    keys that were actually supplied and non-empty -- never invents an
+    empty list for a field the caller didn't set.
+    """
+    body: dict = {}
+    tags = metadata.get("tags")
+    if tags:
+        body["tags"] = list(tags)
+    hashtags = metadata.get("hashtags")
+    if hashtags:
+        body["hashtags"] = list(hashtags)
+    return body

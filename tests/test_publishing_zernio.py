@@ -1237,6 +1237,88 @@ class TestPublishMultiPlatformSinglePost:
         assert transport.calls == []  # never called -- resolved BEFORE any guard/network call
 
 
+class TestPublishMultiPlatformYoutubeFieldsReachTheRealRequestBody:
+    """
+    Payload-level contract test, fixed 2026-08-23 -- see docs/operations/
+    audits/ZERNIO_YOUTUBE_FIELD_MAPPING_2026-08-23.md. Proves the ACTUAL
+    request body sent to Zernio (not just that the call was made)
+    contains every supported YouTube-dedicated field when the caller
+    supplies canonical values, and that the generic title/content fields
+    are never the ONLY thing sent -- guarding against a future refactor
+    silently dropping platform_specific_data/root_fields back to the
+    pre-fix "generic content only" state that produced the live
+    ep_f3619022 incident.
+    """
+
+    def test_youtube_platform_specific_data_reaches_the_youtube_platforms_entry(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201()])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(
+            provider, db_path,
+            title="A Real Title", content="A real description.",
+            platform_specific_data={
+                "youtube": {
+                    "categoryId": "27", "madeForKids": False, "containsSyntheticMedia": True,
+                    "firstComment": "A real first comment.",
+                },
+            },
+        )
+        body = transport.calls[0]["json_body"]
+        youtube_entry = next(p for p in body["platforms"] if p["platform"] == "youtube")
+        assert youtube_entry["platformSpecificData"] == {
+            "categoryId": "27", "madeForKids": False, "containsSyntheticMedia": True,
+            "firstComment": "A real first comment.",
+        }
+
+    def test_root_tags_and_hashtags_reach_the_request_body(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201()])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(
+            provider, db_path,
+            title="A Real Title", content="A real description.",
+            root_fields={"tags": ["erdstall", "medieval tunnels"], "hashtags": ["#Erdstall"]},
+        )
+        body = transport.calls[0]["json_body"]
+        assert body["tags"] == ["erdstall", "medieval tunnels"]
+        assert body["hashtags"] == ["#Erdstall"]
+
+    def test_generic_content_is_never_the_only_youtube_metadata_sent(self, db_path):
+        # Guards against exactly the live incident: a request body where
+        # title/content are populated but every YouTube-dedicated field
+        # is silently absent.
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201()])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(
+            provider, db_path,
+            title="A Real Title", content="A real description.",
+            platform_specific_data={"youtube": {"categoryId": "27"}},
+            root_fields={"tags": ["erdstall"], "hashtags": ["#Erdstall"]},
+        )
+        body = transport.calls[0]["json_body"]
+        assert body.get("title")
+        assert body.get("content")
+        assert body.get("tags")
+        youtube_entry = next(p for p in body["platforms"] if p["platform"] == "youtube")
+        assert youtube_entry.get("platformSpecificData")
+
+    def test_other_platforms_entries_unaffected_by_youtube_platform_specific_data(self, db_path):
+        _setup_all_platform_bindings(db_path)
+        transport = FakeZernioTransport(responses=[_multi_success_201()])
+        provider = ZernioProvider(transport=transport)
+        _publish_multi(
+            provider, db_path,
+            title="A Real Title", content="A real description.",
+            platform_specific_data={"youtube": {"categoryId": "27"}},
+        )
+        body = transport.calls[0]["json_body"]
+        for entry in body["platforms"]:
+            if entry["platform"] != "youtube":
+                assert "platformSpecificData" not in entry
+
+
 class TestPublishMultiPlatformPartialFailureRetry:
     """
     'Partial per-platform failure remains observable and retryable without

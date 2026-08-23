@@ -367,14 +367,21 @@ def _bind_all(db_path, *, channel_id=CHANNEL_ID):
         )
 
 
-def _existing_post_get_response(*, post_id="post_short_001", platforms=("youtube",)):
+def _existing_post_get_response(*, post_id="post_short_001", platforms=("youtube",), platform_specific_data=None):
+    psd_by_platform = platform_specific_data or {}
+    entries = []
+    for p in platforms:
+        entry = {"platform": p, "accountId": f"acct_{p}", "status": "pending"}
+        if p in psd_by_platform:
+            entry["platformSpecificData"] = dict(psd_by_platform[p])
+        entries.append(entry)
     return ZernioTransportResponse(
         status_code=200,
         json_body={"post": {
             "_id": post_id,
             "scheduledFor": "2026-08-24T18:00:00.000Z",
             "timezone": "UTC",
-            "platforms": [{"platform": p, "accountId": f"acct_{p}", "status": "pending"} for p in platforms],
+            "platforms": entries,
         }},
     )
 
@@ -393,12 +400,14 @@ def _successful_put_response(*, post_id="post_short_001", platforms=ALL_PLATFORM
 
 
 def _repair(provider, db_path, *, platforms=ALL_PLATFORMS, title="A Real Short Title", content="A real caption.",
-            post_id="post_short_001", deliverable_id="short_001"):
+            post_id="post_short_001", deliverable_id="short_001",
+            platform_specific_data=None, root_fields=None):
     return provider.repair_existing_post(
         post_id, channel_id=CHANNEL_ID, deliverable_id=deliverable_id, episode_id=EPISODE_ID,
         deliverable_type="short", platforms=list(platforms),
         media=[MediaReference(url="https://media.zernio.com/repaired.mp4", media_type="video", title=title)],
         title=title, content=content, db_path=db_path,
+        platform_specific_data=platform_specific_data, root_fields=root_fields,
     )
 
 
@@ -472,6 +481,150 @@ class TestRepairExistingPostUpdatesNotCreates:
         put_body = transport.put_calls[0]
         assert put_body["title"].strip() != ""
         assert put_body["content"].strip() != ""
+
+
+class TestRepairExistingPostCorrectsPlatformSpecificData:
+    """
+    Fixed 2026-08-23 (Zernio YouTube field mapping incident, see
+    docs/operations/audits/ZERNIO_YOUTUBE_FIELD_MAPPING_2026-08-23.md):
+    repair_existing_post() previously preserved every existing
+    platforms[] entry byte-for-byte, which made it structurally
+    impossible to ever correct a wrong/blank platformSpecificData
+    (categoryId, tags, firstComment, etc.) on a post whose platform
+    entries already exist -- exactly the situation for an already-
+    created Short post. It now performs a scoped merge, proven here.
+    """
+
+    def test_platform_specific_data_is_applied_to_an_existing_entry(self, db_path):
+        # youtube already has an entry on the post (no platformSpecificData
+        # at all) -- proves new data reaches an EXISTING entry, not just
+        # a freshly-appended one.
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(platforms=("youtube",)),
+            put_response=_successful_put_response(platforms=["youtube"]),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(
+            provider, db_path, platforms=["youtube"],
+            platform_specific_data={"youtube": {"categoryId": "27", "firstComment": "Real first comment"}},
+        )
+        put_body = transport.put_calls[0]
+        youtube_entries = [p for p in put_body["platforms"] if p["platform"] == "youtube"]
+        assert len(youtube_entries) == 1
+        assert youtube_entries[0]["platformSpecificData"] == {
+            "categoryId": "27", "firstComment": "Real first comment",
+        }
+
+    def test_merge_preserves_existing_platform_specific_data_keys_not_mentioned(self, db_path):
+        # youtube's existing entry already carries a real, previously-set
+        # field (visibility) -- the merge must NOT drop it just because
+        # this repair call only supplies categoryId.
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(
+                platforms=("youtube",),
+                platform_specific_data={"youtube": {"visibility": "private"}},
+            ),
+            put_response=_successful_put_response(platforms=["youtube"]),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(
+            provider, db_path, platforms=["youtube"],
+            platform_specific_data={"youtube": {"categoryId": "27"}},
+        )
+        put_body = transport.put_calls[0]
+        youtube_entry = next(p for p in put_body["platforms"] if p["platform"] == "youtube")
+        assert youtube_entry["platformSpecificData"] == {"visibility": "private", "categoryId": "27"}
+
+    def test_new_value_wins_on_key_collision(self, db_path):
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(
+                platforms=("youtube",),
+                platform_specific_data={"youtube": {"categoryId": "22"}},  # stale/default
+            ),
+            put_response=_successful_put_response(platforms=["youtube"]),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(
+            provider, db_path, platforms=["youtube"],
+            platform_specific_data={"youtube": {"categoryId": "27"}},
+        )
+        put_body = transport.put_calls[0]
+        youtube_entry = next(p for p in put_body["platforms"] if p["platform"] == "youtube")
+        assert youtube_entry["platformSpecificData"]["categoryId"] == "27"
+
+    def test_platform_not_mentioned_in_platform_specific_data_is_untouched(self, db_path):
+        # tiktok's existing entry (with its own real settings) must be
+        # byte-for-byte unaffected when platform_specific_data only
+        # targets youtube.
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(
+                platforms=("youtube", "tiktok"),
+                platform_specific_data={"tiktok": {"unrelated_field": "unchanged"}},
+            ),
+            put_response=_successful_put_response(platforms=["youtube", "tiktok"]),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(
+            provider, db_path, platforms=["youtube", "tiktok"],
+            platform_specific_data={"youtube": {"categoryId": "27"}},
+        )
+        put_body = transport.put_calls[0]
+        tiktok_entry = next(p for p in put_body["platforms"] if p["platform"] == "tiktok")
+        assert tiktok_entry["platformSpecificData"] == {"unrelated_field": "unchanged"}
+
+    def test_missing_platform_still_gets_platform_specific_data_on_its_new_entry(self, db_path):
+        # instagram has NO existing entry -- platform_specific_data for
+        # it must still reach the freshly-appended entry (the original,
+        # already-correct append path).
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(platforms=("youtube",)),
+            put_response=_successful_put_response(platforms=["youtube", "instagram"]),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(
+            provider, db_path, platforms=["youtube", "instagram"],
+            platform_specific_data={"instagram": {"aiGenerated": True}},
+        )
+        put_body = transport.put_calls[0]
+        instagram_entry = next(p for p in put_body["platforms"] if p["platform"] == "instagram")
+        assert instagram_entry["platformSpecificData"] == {"aiGenerated": True}
+
+    def test_root_fields_tags_and_hashtags_reach_the_put_body(self, db_path):
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(),
+            put_response=_successful_put_response(),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(
+            provider, db_path,
+            root_fields={"tags": ["erdstall", "medieval tunnels"], "hashtags": ["#Erdstall"]},
+        )
+        put_body = transport.put_calls[0]
+        assert put_body["tags"] == ["erdstall", "medieval tunnels"]
+        assert put_body["hashtags"] == ["#Erdstall"]
+
+    def test_no_platform_specific_data_leaves_existing_entries_exactly_as_before(self, db_path):
+        # Regression guard: omitting platform_specific_data entirely must
+        # reproduce the pre-fix byte-for-byte preservation exactly.
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(
+                platforms=("youtube",),
+                platform_specific_data={"youtube": {"categoryId": "22"}},
+            ),
+            put_response=_successful_put_response(platforms=["youtube"]),
+        )
+        provider = ZernioProvider(transport=transport)
+        _repair(provider, db_path, platforms=["youtube"])
+        put_body = transport.put_calls[0]
+        youtube_entry = next(p for p in put_body["platforms"] if p["platform"] == "youtube")
+        assert youtube_entry["platformSpecificData"] == {"categoryId": "22"}
 
 
 class TestRepairFailsClosedBeforeAnyCall:
@@ -656,18 +809,34 @@ def _rich_existing_post_get_response(*, post_id="post_short_001"):
     )
 
 
-# 2026-08-23: confirmed via a real diagnostic PUT against the live API that
-# GET's expanded accountId object is rejected by PUT ("Invalid input:
-# expected string, received object", param="platforms.0.accountId") --
-# repair_existing_post() normalizes accountId to its plain id string on an
-# existing entry before sending, while every OTHER field (including
-# undocumented ones) still survives untouched. This is what a repair PUT
-# actually sends for _RICH_EXISTING_YOUTUBE_ENTRY.
-_RICH_EXISTING_YOUTUBE_ENTRY_AS_SENT = dict(_RICH_EXISTING_YOUTUBE_ENTRY, accountId="6a83555477555aae01afa569")
+# 2026-08-23 (item 6, PUT editable-field whitelist -- see
+# docs/operations/audits/ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md):
+# confirmed via a real diagnostic PUT against the live API that GET's
+# expanded accountId object is rejected by PUT ("Invalid input: expected
+# string, received object", param="platforms.0.accountId") -- direct
+# evidence Zernio's update endpoint performs strict schema validation,
+# not silent tolerance of arbitrary echoed fields. repair_existing_post()
+# now reduces every existing entry to ONLY its documented-editable fields
+# (platform, accountId normalized to a plain string, customMedia,
+# scheduledFor, platformSpecificData) via
+# ZernioProvider._whitelist_platform_entry_for_put() -- response-only/
+# provider-internal fields (profileId, status, publishAttempts,
+# contentHash, provider _id) are dropped, never echoed back. This is
+# what a repair PUT actually sends for _RICH_EXISTING_YOUTUBE_ENTRY.
+_RICH_EXISTING_YOUTUBE_ENTRY_AS_SENT = {
+    "platform": "youtube",
+    "accountId": "6a83555477555aae01afa569",
+    "customMedia": [],
+    "scheduledFor": "2026-08-24T18:00:00.000Z",
+    "platformSpecificData": {
+        "__platformUserIdSnapshot": "UC6lbORr6RBYDPObPk80yGcQ",
+        "__usernameSnapshot": "thehypogeum",
+    },
+}
 
 
-class TestRepairPreservesExistingPlatformEntriesByteForByte:
-    def test_existing_entry_with_undocumented_fields_survives_unchanged(self, db_path):
+class TestRepairWhitelistsExistingPlatformEntries:
+    def test_existing_entry_is_reduced_to_the_editable_field_whitelist(self, db_path):
         _bind_all(db_path)
         guard = guard_and_prepare_attempt(
             db_path, channel_id=CHANNEL_ID, episode_id=EPISODE_ID,
@@ -686,10 +855,15 @@ class TestRepairPreservesExistingPlatformEntriesByteForByte:
         youtube_entries = [e for e in sent_platforms if e.get("platform") == "youtube"]
         assert len(youtube_entries) == 1, "must never duplicate an existing platform entry"
         assert youtube_entries[0] == _RICH_EXISTING_YOUTUBE_ENTRY_AS_SENT, (
-            "an existing platform entry must survive the PUT with every field "
-            "unchanged except accountId, which is normalized to a plain string "
-            "(PUT rejects the expanded object GET returns)"
+            "an existing platform entry must be reduced to the documented-"
+            "editable whitelist (platform/accountId/customMedia/scheduledFor/"
+            "platformSpecificData); response-only fields must never be echoed back"
         )
+        for response_only_field in ("profileId", "status", "publishAttempts", "contentHash", "_id"):
+            assert response_only_field not in youtube_entries[0], (
+                f"{response_only_field!r} is response-only/provider-internal and "
+                f"must never be echoed back in a PUT body"
+            )
 
     def test_only_genuinely_missing_platforms_get_a_freshly_built_entry(self, db_path):
         _bind_all(db_path)
@@ -709,9 +883,10 @@ class TestRepairPreservesExistingPlatformEntriesByteForByte:
         sent_platforms = transport.put_calls[0]["platforms"]
         by_platform = {e["platform"]: e for e in sent_platforms}
         assert set(by_platform) == set(ALL_PLATFORMS)
-        # youtube keeps its full rich shape -- never reduced to {platform, accountId}
+        # youtube keeps its documented-editable fields -- never reduced
+        # further than the whitelist, and never carrying response-only fields.
         assert "platformSpecificData" in by_platform["youtube"]
-        assert "contentHash" in by_platform["youtube"]
+        assert "contentHash" not in by_platform["youtube"]
         # the three genuinely new platforms get the minimal freshly built shape
         for platform in ("tiktok", "instagram", "facebook"):
             assert set(by_platform[platform].keys()) == {"platform", "accountId"}

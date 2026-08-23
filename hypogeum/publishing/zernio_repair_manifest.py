@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from hypogeum.publishing.zernio import _normalize_platform_entry_account_id as _normalize_entry_account_id
+from hypogeum.publishing.zernio import _whitelist_platform_entry_for_put
 
 
 def validate_repair_preconditions(
@@ -124,22 +124,29 @@ def build_proposed_update_body(
     undocumented default.
 
     Every existing platforms[] entry -- whether or not its platform is in
-    target_platforms -- is preserved into this body, with only its
-    accountId normalized (see below); only a platform genuinely absent
-    from the existing post gets a freshly built entry appended. Matches
-    ZernioProvider.repair_existing_post()'s own merge logic exactly, so
-    this preview body is an accurate prediction of what that call sends.
+    target_platforms -- is preserved into this body, reduced to its
+    editable-field whitelist (see below); only a platform genuinely
+    absent from the existing post gets a freshly built entry appended.
+    Matches ZernioProvider.repair_existing_post()'s own merge logic
+    exactly, so this preview body is an accurate prediction of what that
+    call sends -- the whole point of a "mandatory preview before
+    external creation."
 
-    accountId normalization (2026-08-23, confirmed via a real diagnostic
-    PUT against the live API): GET's platforms[].accountId is an
-    expanded object ({_id, platform, profileId, displayName, ...}); PUT
-    rejects that shape for the same field ("Invalid input: expected
-    string, received object", param="platforms.N.accountId"). Every
-    existing entry's accountId is reduced to its plain id string here;
-    every other field on that entry is left untouched.
+    Editable-field whitelist (2026-08-23, see
+    hypogeum.publishing.zernio._PLATFORM_ENTRY_PUT_WHITELIST's own
+    docstring): a real diagnostic PUT against the live API proved
+    Zernio's update endpoint performs strict schema validation --
+    accountId's GET-expanded object shape ({_id, platform, profileId,
+    displayName, ...}) is actively REJECTED ("Invalid input: expected
+    string, received object", param="platforms.N.accountId"), not
+    silently tolerated. Every existing entry is therefore reduced to
+    only its documented-editable fields (platform, accountId normalized
+    to a plain string, customMedia, scheduledFor, platformSpecificData)
+    -- response-only/provider-internal fields (contentHash, provider
+    _id, status, publishAttempts, ...) are dropped, never echoed back.
     """
     existing_entries = [
-        _normalize_entry_account_id(e) for e in (existing_post.get("platforms") or [])
+        _whitelist_platform_entry_for_put(e) for e in (existing_post.get("platforms") or [])
     ]
     existing_platform_names = {e.get("platform") for e in existing_entries}
     missing_platforms = [p for p in target_platforms if p not in existing_platform_names]

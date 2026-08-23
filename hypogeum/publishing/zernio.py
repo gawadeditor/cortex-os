@@ -437,22 +437,39 @@ def _serialize_media_item(media: MediaReference) -> dict:
     return item
 
 
-def _normalize_platform_entry_account_id(entry: dict) -> dict:
+# Editable-field whitelist for a platforms[] entry echoed back in a PUT
+# body -- confirmed 2026-08-23 (see docs/operations/audits/
+# ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md item 6): a real
+# diagnostic PUT proved Zernio's update endpoint performs STRICT schema
+# validation and actively REJECTS a wrong-shaped field (accountId as an
+# expanded object) rather than silently ignoring it. That is direct
+# evidence this endpoint is not merge-tolerant of arbitrary echoed
+# fields in general -- GET's own response-only/provider-internal fields
+# (_id, status, publishAttempts, contentHash, __platformUserIdSnapshot,
+# __usernameSnapshot inside platformSpecificData, and any other
+# undocumented key) must never be blindly echoed back on the strength
+# of "it worked for accountId once we fixed its shape." Only the
+# documented, genuinely editable per-platform-entry fields are kept:
+# platform, accountId (normalized to a plain string), customMedia,
+# scheduledFor, platformSpecificData.
+_PLATFORM_ENTRY_PUT_WHITELIST = frozenset({
+    "platform", "accountId", "customMedia", "scheduledFor", "platformSpecificData",
+})
+
+
+def _whitelist_platform_entry_for_put(entry: dict) -> dict:
     """
-    GET's platforms[].accountId is an EXPANDED object ({_id, platform,
-    profileId, displayName, ...}); PUT rejects that same field ("Invalid
-    input: expected string, received object", param="platforms.N.
-    accountId") -- confirmed 2026-08-23 via a real diagnostic PUT.
-    Returns a shallow copy of `entry` with accountId reduced to its
-    plain id string when it was an expanded object (entry["accountId"]
-    already a string, e.g. from a freshly built entry, is returned
-    unchanged) -- every OTHER field on `entry` is preserved exactly.
+    Builds the PUT-safe version of one existing platforms[] entry: only
+    _PLATFORM_ENTRY_PUT_WHITELIST fields survive, and accountId is
+    normalized from GET's expanded-object shape to the plain id string
+    PUT requires (see _PLATFORM_ENTRY_PUT_WHITELIST's own docstring for
+    why neither of these is optional). Never mutates the input dict.
     """
-    account_id = entry.get("accountId")
+    whitelisted = {k: v for k, v in entry.items() if k in _PLATFORM_ENTRY_PUT_WHITELIST}
+    account_id = whitelisted.get("accountId")
     if isinstance(account_id, dict):
-        entry = dict(entry)
-        entry["accountId"] = account_id.get("_id", account_id)
-    return entry
+        whitelisted["accountId"] = account_id.get("_id", account_id)
+    return whitelisted
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +483,7 @@ def _build_publish_body(
     timezone_name: Optional[str], publish_now: bool, is_draft: bool,
     title: Optional[str] = None, content: Optional[str] = None,
     platform_settings: Optional[dict] = None,
+    root_fields: Optional[dict] = None,
 ) -> dict:
     """
     Audit §2: POST /v1/posts requires `platforms[].platform` +
@@ -506,6 +524,13 @@ def _build_publish_body(
     `platform_settings` is non-empty AND this platform has a documented
     root-level settings key; never invents a key for a platform whose
     contract doesn't define one.
+
+    `root_fields`: verified live via docs.zernio.com/posts/create-post
+    (2026-08-23) — real root-level request fields with no platform-
+    specific nesting, e.g. `tags`/`hashtags` (already shaped by
+    hypogeum.publishing.zernio_platform_contracts.build_youtube_root_fields(),
+    never constructed here). Merged into the body verbatim; empty/absent
+    is simply omitted, same discipline as every other field here.
     """
     platform_entry: dict = {"platform": platform, "accountId": external_account_id}
     if platform_media:
@@ -528,6 +553,8 @@ def _build_publish_body(
         body["publishNow"] = True
     if is_draft:
         body["isDraft"] = True
+    if root_fields:
+        body.update(root_fields)
     if platform_settings:
         settings_key = {"tiktok": "tiktokSettings", "facebook": "facebookSettings"}.get(platform)
         if settings_key:
@@ -542,6 +569,7 @@ def _build_multi_platform_publish_body(
     timezone_name: Optional[str], publish_now: bool, is_draft: bool,
     title: Optional[str] = None, content: Optional[str] = None,
     platform_root_settings: Optional[Dict[str, dict]] = None,
+    root_fields: Optional[dict] = None,
 ) -> dict:
     """
     2026-08-22 fix (Zernio aggregation model): one deliverable -> one Zernio
@@ -578,6 +606,8 @@ def _build_multi_platform_publish_body(
         body["publishNow"] = True
     if is_draft:
         body["isDraft"] = True
+    if root_fields:
+        body.update(root_fields)
     # tiktokSettings/facebookSettings live at the request ROOT (verified
     # contract), keyed by the settings dict's own name -- e.g.
     # {"tiktok": {...}} -> body["tiktokSettings"] = {...}. Never invents a
@@ -905,7 +935,21 @@ class ZernioProvider:
             platform_settings: Optional[Dict[str, dict]] -- {platform:
                 settings_dict}, e.g. {"tiktok": {"privacy_level": ...}}.
                 Replaces publish()'s single flat platform_settings (which
-                only ever served ONE platform per call).
+                only ever served ONE platform per call). ROOT-level
+                settings objects only (tiktokSettings/facebookSettings) --
+                see platform_specific_data below for per-platform-ENTRY
+                data.
+            platform_specific_data: Optional[Dict[str, dict]] -- {platform:
+                platformSpecificData_dict}, e.g. {"youtube":
+                {"categoryId": "27", "firstComment": "..."}}. Merged into
+                that platform's own platforms[] entry (see
+                hypogeum.publishing.zernio_platform_contracts.
+                build_youtube_platform_specific_data(), never constructed
+                here). Distinct from platform_settings above (root-level).
+            root_fields: Optional[dict] -- real ROOT-level, non-platform-
+                specific request fields (e.g. tags/hashtags -- see
+                build_youtube_root_fields()). Merged into the request body
+                verbatim.
 
         Returns {platform: result_dict}, each result_dict matching
         publish()'s own single-platform return shape -- existing callers
@@ -946,6 +990,18 @@ class ZernioProvider:
         title = kwargs.get("title")
         content = kwargs.get("content")
         platform_settings_by_platform: dict = kwargs.get("platform_settings") or {}
+        # Per-platform-ENTRY data (e.g. YouTube's platformSpecificData --
+        # categoryId/madeForKids/containsSyntheticMedia/firstComment/
+        # playlistId/title/visibility, see hypogeum.publishing.
+        # zernio_platform_contracts.build_youtube_platform_specific_data())
+        # -- distinct from platform_settings_by_platform above, which is
+        # ROOT-level settings (tiktokSettings/facebookSettings). Never
+        # invented here; the caller supplies already-built dicts.
+        platform_entry_data_by_platform: dict = kwargs.get("platform_specific_data") or {}
+        # Root-level, non-platform-specific fields (tags/hashtags -- see
+        # build_youtube_root_fields()). Merged verbatim into the request
+        # body; empty/absent is simply omitted.
+        root_fields: dict = kwargs.get("root_fields") or {}
 
         if not media and not platform_media:
             raise ZernioMediaRequiredError(
@@ -1056,10 +1112,13 @@ class ZernioProvider:
                     )
                     results[p] = self._ambiguous_result(p, deliverable_type, g)
                 return results
-            merged_platform_entries = list(existing_post["platforms"]) + [
+            merged_platform_entries = [
+                _whitelist_platform_entry_for_put(e) for e in existing_post["platforms"]
+            ] + [
                 self._build_platform_entry(
                     p, accounts[p], platform_media,
                     platform_scheduled_for_by_platform.get(p, platform_scheduled_for),
+                    platform_specific_data=platform_entry_data_by_platform.get(p),
                 )
                 for p in to_submit
             ]
@@ -1080,6 +1139,7 @@ class ZernioProvider:
                 self._build_platform_entry(
                     p, accounts[p], platform_media,
                     platform_scheduled_for_by_platform.get(p, platform_scheduled_for),
+                    platform_specific_data=platform_entry_data_by_platform.get(p),
                 )
                 for p in to_submit
             ]
@@ -1089,6 +1149,7 @@ class ZernioProvider:
                 publish_now=publish_now, is_draft=is_draft,
                 title=title, content=content,
                 platform_root_settings=platform_settings_by_platform,
+                root_fields=root_fields,
             )
             try:
                 response = self._transport.post(
@@ -1123,6 +1184,8 @@ class ZernioProvider:
         content: str,
         logical_alias: str = "default",
         platform_settings: Optional[Dict[str, dict]] = None,
+        platform_specific_data: Optional[Dict[str, dict]] = None,
+        root_fields: Optional[dict] = None,
         db_path: Optional[Path] = None,
     ) -> Dict[str, dict]:
         """
@@ -1158,17 +1221,34 @@ class ZernioProvider:
         nothing about the existing schedule is ever left to an
         undocumented default.
 
-        Platform entry preservation (2026-08-23 hardening): EVERY existing
+        Platform entry preservation (2026-08-23 hardening; refined
+        2026-08-23 for platformSpecificData correction): EVERY existing
         platforms[] entry -- whether or not its platform is in `platforms`
-        -- is carried into the PUT body byte-for-byte, unmodified. This
-        call only ever APPENDS a freshly built entry for a platform
-        genuinely absent from the existing post; it never rebuilds,
-        replaces, or drops an entry that is already there. An existing
-        entry's account binding, `platformSpecificData`, `contentHash`,
-        provider-assigned `_id`, `status`, `publishAttempts`, and any
-        other undocumented/provider-internal field it carries all survive
-        untouched -- only genuinely missing platforms and the shared
-        title/content/mediaItems get corrected by this repair.
+        -- is carried into the PUT body. This call only ever APPENDS a
+        freshly built entry for a platform genuinely absent from the
+        existing post; it never rebuilds, replaces, or drops an entry
+        that is already there. An existing entry's account binding,
+        `customMedia`, `scheduledFor`, `contentHash`, provider-assigned
+        `_id`, `status`, `publishAttempts`, and any other undocumented/
+        provider-internal field survive completely untouched.
+
+        The ONE exception is `platformSpecificData`: when the caller
+        supplies `platform_specific_data={platform: {...}}` for a
+        platform that ALREADY has an existing entry, this call performs
+        a shallow dict MERGE of the new keys into that entry's existing
+        `platformSpecificData` (new values win on key collision;
+        existing keys the caller doesn't mention are preserved) --
+        because the original "byte-for-byte, never touch an existing
+        entry" design made it structurally impossible to ever correct a
+        wrong/blank YouTube categoryId, firstComment, etc. on a post that
+        already has a youtube platforms[] entry, which is exactly what a
+        live-metadata repair needs to do. `platform_specific_data` for a
+        platform genuinely absent from the post is still applied only
+        to the freshly-appended entry, as before.
+
+        `root_fields` (e.g. tags/hashtags): merged into the request body
+        the same way `title`/`content` are -- corrects the shared,
+        non-platform-specific metadata for the whole post.
         """
         if not title or not title.strip():
             raise ValueError("repair_existing_post() requires a non-empty title")
@@ -1240,31 +1320,61 @@ class ZernioProvider:
             del credential
             return results
 
-        # Preserve every existing entry byte-for-byte -- never filter one
-        # out to rebuild it, even when its platform is also in `platforms`.
-        # Only a platform with NO existing entry at all gets a freshly
-        # built one appended.
+        # Preserve every existing entry -- never filter one out to
+        # rebuild it, even when its platform is also in `platforms`. Only
+        # a platform with NO existing entry at all gets a freshly built
+        # one appended. The ONE field-level exception is
+        # platformSpecificData, merge-corrected just below when the
+        # caller supplies platform_specific_data for that platform's own
+        # entry -- see this function's own docstring.
         #
-        # 2026-08-23 fix (live PUT 400 diagnosed): GET's platforms[].
-        # accountId is an EXPANDED object ({_id, platform, profileId,
-        # displayName, ...}) but PUT rejects that shape for the same
-        # field ("Invalid input: expected string, received object",
-        # param="platforms.0.accountId") -- confirmed via a direct
-        # diagnostic PUT against the real API, 2026-08-23. accountId is
-        # normalized to its plain id string on every existing entry
-        # before sending; every OTHER field on that entry (customMedia,
-        # scheduledFor, platformSpecificData, contentHash, provider _id,
-        # status, publishAttempts, and any undocumented field) is still
-        # carried through completely untouched.
-        existing_platform_entries = [
-            _normalize_platform_entry_account_id(e) for e in (existing_post.get("platforms") or [])
+        # 2026-08-23 fix (live PUT 400 diagnosed, whitelist added same
+        # day): GET's platforms[].accountId is an EXPANDED object ({_id,
+        # platform, profileId, displayName, ...}) but PUT rejects that
+        # shape for the same field ("Invalid input: expected string,
+        # received object", param="platforms.0.accountId") -- confirmed
+        # via a direct diagnostic PUT against the real API. That is
+        # direct evidence Zernio's update endpoint performs STRICT
+        # schema validation, not silent tolerance of extra/wrong-shaped
+        # fields -- so every existing entry is now reduced to
+        # _PLATFORM_ENTRY_PUT_WHITELIST's documented-editable field set
+        # (platform/accountId/customMedia/scheduledFor/
+        # platformSpecificData) via _whitelist_platform_entry_for_put()
+        # BEFORE anything else touches it. Response-only/provider-
+        # internal fields (contentHash, provider-assigned _id, status,
+        # publishAttempts, and any other undocumented key) are dropped,
+        # never blindly echoed back on the strength of "the whole-entry
+        # echo worked once we fixed accountId's shape alone."
+        existing_platform_entries_raw = [
+            _whitelist_platform_entry_for_put(e) for e in (existing_post.get("platforms") or [])
         ]
-        existing_platform_names = {e.get("platform") for e in existing_platform_entries}
+        existing_platform_names = {e.get("platform") for e in existing_platform_entries_raw}
         missing_platforms = [p for p in platforms if p not in existing_platform_names]
+
+        # Merge-correct platformSpecificData on entries that already
+        # exist -- the one exception to "preserve byte-for-byte", see
+        # this function's own docstring. A shallow dict update: caller-
+        # supplied keys win on collision, existing keys the caller
+        # doesn't mention (e.g. a value some other repair already set)
+        # are preserved rather than dropped.
+        existing_platform_entries = []
+        for entry in existing_platform_entries_raw:
+            p = entry.get("platform")
+            new_data = (platform_specific_data or {}).get(p)
+            if new_data:
+                entry = dict(entry)
+                merged_psd = dict(entry.get("platformSpecificData") or {})
+                merged_psd.update(new_data)
+                entry["platformSpecificData"] = merged_psd
+            existing_platform_entries.append(entry)
+
         merged_platform_entries = existing_platform_entries + [
             self._build_platform_entry(
                 p, accounts[p], [], None,
-                platform_specific_data=(platform_settings or {}).get(p) if p != "tiktok" else None,
+                platform_specific_data=(
+                    (platform_specific_data or {}).get(p)
+                    or ((platform_settings or {}).get(p) if p != "tiktok" else None)
+                ),
             )
             for p in missing_platforms
         ]
@@ -1278,6 +1388,8 @@ class ZernioProvider:
             "mediaItems": [_serialize_media_item(m) for m in media],
             "platforms": merged_platform_entries,
         }
+        if root_fields:
+            body.update(root_fields)
         if existing_post.get("scheduledFor"):
             body["scheduledFor"] = existing_post["scheduledFor"]
         if existing_post.get("timezone"):

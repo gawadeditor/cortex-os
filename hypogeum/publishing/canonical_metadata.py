@@ -34,6 +34,10 @@ Public API:
         class_entry, final_duration_seconds, episode_dir, episode_id) -> List[str]
     build_zernio_platform_specific_data(metadata, platform) -> Optional[dict]
     build_zernio_root_fields(metadata) -> dict
+    extract_hashtag_tokens(text) -> set -- the ONE shared hashtag-token
+        validator, real complete-token matching (never substring), also
+        used by hypogeum.agents.canonical_metadata_agent's generation-time
+        validation
 """
 
 from __future__ import annotations
@@ -108,10 +112,18 @@ def resolve_canonical_platform_metadata(
     return None
 
 
-def _extract_hashtag_tokens(text: str) -> set:
-    """Real tokenization -- '#Erd' must never match '#Erdstall'. Case-
-    insensitive (hashtag matching is not case-sensitive on any of these
-    platforms)."""
+def extract_hashtag_tokens(text: str) -> set:
+    """
+    Real tokenization -- '#Erd' must never match '#Erdstall', and
+    '#Test' must never match '#TestTagExtra'. Case-insensitive (hashtag
+    matching is not case-sensitive on any of these platforms). This is
+    the ONE shared hashtag-token validator (2026-08-23) -- used here by
+    validate_canonical_platform_metadata() (readiness) AND by
+    hypogeum.agents.canonical_metadata_agent's generation-time
+    validation, which used to do a broken substring check
+    ('h.lower() in description.lower()') that let '#Test' pass against
+    a description containing only '#TestTagExtra'.
+    """
     return {m.group(0).lower() for m in _HASHTAG_TOKEN_RE.finditer(text or "")}
 
 
@@ -278,7 +290,7 @@ def validate_canonical_platform_metadata(
             failures.append(f"claim_source_map references source_id(s) not in the Research Package: {bad_refs}")
 
     # -- visible hashtags: real token match, never substring
-    desc_tokens = _extract_hashtag_tokens(metadata.description)
+    desc_tokens = extract_hashtag_tokens(metadata.description)
     if not metadata.visible_hashtags:
         failures.append("visible_hashtags is empty")
     else:

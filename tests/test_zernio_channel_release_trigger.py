@@ -168,6 +168,7 @@ class FakeMediaTransport:
 class FakePublishTransport:
     def __init__(self):
         self.post_calls = []
+        self.put_calls = []
         self._counter = 0
 
     def post(self, *, url, headers, json_body, timeout):
@@ -180,6 +181,14 @@ class FakePublishTransport:
                 "_id": f"post_{self._counter}",
                 "platforms": [{"platform": platform, "platformPostId": f"native_{self._counter}", "status": "published"}],
             }},
+        )
+
+    def put(self, *, url, headers, json_body, timeout):
+        self._counter += 1
+        self.put_calls.append(json_body)
+        return ZernioTransportResponse(
+            status_code=200,
+            json_body={"message": "updated", "post": {"_id": "existing_post", "platforms": []}},
         )
 
 
@@ -511,6 +520,67 @@ class TestCanonicalMetadataAutoGeneration:
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
         assert publish_transport.post_calls == []
+
+    def test_missing_categoryid_blocks_the_real_pipeline_end_to_end_zero_transport_calls(self, db_path, assets_root, monkeypatch):
+        """
+        Real end-to-end proof (2026-08-23, replaces the earlier unit-level
+        spy-on-an-unrelated-function proof): process_channel_ready_bundles
+        -> readiness -> the real canonical-metadata backfill -> the real
+        publishing runtime -> a REAL fake Zernio transport object (not a
+        monkeypatch on an unrelated module-level function). A single
+        enabled YouTube target (main_episode) with NO categoryId
+        configured in the Channel Package must block the entire pipeline:
+        the model is never called (canonical generation's own
+        policy-completeness pre-check fails closed atomically), the fake
+        transport's post() and put() are never called, and no
+        publication_intent for this episode is ever marked 'succeeded'.
+        """
+        def _must_not_be_called(*args, **kwargs):
+            raise AssertionError("hypogeum.openrouter.call_claude must never be reached when categoryId is missing")
+        monkeypatch.setattr("hypogeum.openrouter.call_claude", _must_not_be_called)
+
+        episode_id = "ep_missing_category"
+        ep_dir = self._seed_with_real_research_and_script(db_path, assets_root, episode_id)
+        # Overwrite the policy set by _seed_with_real_research_and_script
+        # (which includes categoryId) with one that omits it entirely --
+        # youtube.main_episode enabled, but no categoryId declared.
+        from hypogeum.channel_config import update_channel_operations_profile
+        update_channel_operations_profile(
+            CHANNEL_ID, db_path=db_path,
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True}}},
+        )
+
+        media_transport = FakeMediaTransport()
+        publish_transport = FakePublishTransport()  # a REAL fake transport object, not a monkeypatch
+
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root, enable_production_output_gate=False,
+            media_staging_provider=ZernioMediaStagingProvider(presign_transport=media_transport, upload_transport=media_transport),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+            # canonical_metadata_llm_call deliberately omitted -- the real
+            # default call_claude path is what must never be reached.
+        )
+
+        assert results == [] or all(r.result.status != "published" for r in results)
+        assert publish_transport.post_calls == [], "zero Zernio POST calls"
+        assert publish_transport.put_calls == [], "zero Zernio PUT calls"
+
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT status FROM publication_intents WHERE episode_id=?", (episode_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        assert not any(r[0] == "succeeded" for r in rows), (
+            f"no publication_intent for {episode_id!r} may be marked succeeded: {[r[0] for r in rows]}"
+        )
+
+        # And no canonical_platform_metadata was ever persisted either --
+        # the atomic pre-check fails BEFORE generation, not after a
+        # partial/invalid generation.
+        pkg = json.loads((ep_dir / f"final_render_package_{episode_id}.json").read_text())
+        assert not (pkg.get("metadata_source") or {}).get("canonical_platform_metadata")
 
 
 class TestIdempotencyAcrossRepeatedPolling:

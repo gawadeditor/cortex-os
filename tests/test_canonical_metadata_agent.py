@@ -247,6 +247,43 @@ class TestBoundedAutomaticRegeneration:
         assert "visible_hashtags is empty" in calls[1]
         assert "150 chars" in calls[1]
 
+    def test_hashtag_substring_match_is_rejected_not_accepted_then_recovers(self, tmp_path):
+        # Real bug: the old check was 'h.lower() in description.lower()',
+        # a substring match -- '#Test' would incorrectly pass against a
+        # description that only contains '#TestTagExtra'. Proves the real
+        # token-boundary validator (hypogeum.publishing.canonical_metadata.
+        # extract_hashtag_tokens(), the ONE shared validator with the
+        # readiness-side check) rejects this, AND that the retry loop
+        # recovers automatically once attempt 2 declares a real token.
+        episode_dir = tmp_path
+        final_render_package = _seed_short_grounding(episode_dir)
+        calls = []
+
+        def fake_llm_call(system_prompt, input_package, **kwargs):
+            calls.append(system_prompt)
+            if len(calls) == 1:
+                return {"platforms": {"youtube": {
+                    "title": "T", "cta": "c",
+                    "description": "A real grounded description mentioning #TestTagExtra only.",
+                    "visible_hashtags": ["#Test"],
+                }}}
+            return {"platforms": {"youtube": {
+                "title": "T", "cta": "c",
+                "description": "A real grounded description mentioning #Test directly.",
+                "visible_hashtags": ["#Test"],
+            }}}
+
+        entries = generate_canonical_platform_metadata_for_deliverable(
+            EPISODE_ID, episode_dir, "short_001", "shorts", ["youtube"], final_render_package,
+            config=Config(), channel_id="hypogeum", platform_deliverable_policy=_HYPOGEUM_POLICY,
+            llm_call=fake_llm_call,
+        )
+        assert len(calls) == 2
+        assert "#Test" in calls[1]  # the exact rejected hashtag reaches the retry prompt
+        assert "complete hashtag tokens" in calls[1]
+        assert entries[0]["visible_hashtags"] == ["#Test"]
+        assert entries[0]["description"] == "A real grounded description mentioning #Test directly."
+
 
 class TestPolicyCompletenessPreCheck:
     """
@@ -289,26 +326,33 @@ class TestPolicyCompletenessPreCheck:
         )
         assert entries[0]["category_id"] == "27"
 
-    def test_one_incomplete_platform_does_not_block_a_complete_sibling_platform(self, tmp_path):
-        # instagram has no required_policy_fields at all -- it must still
-        # generate even though youtube's categoryId is missing.
+    def test_one_incomplete_platform_fails_the_whole_deliverable_atomically(self, tmp_path):
+        # Fixed 2026-08-23: the OLD behavior silently dropped youtube
+        # (missing categoryId) and generated instagram anyway -- that
+        # violates the publishing invariant "every enabled target
+        # (deliverable_id, platform) pair must be ready before any
+        # platform for that deliverable is submitted". An incomplete
+        # sibling must fail the ENTIRE deliverable's generation, not just
+        # exclude itself while a complete platform proceeds.
         episode_dir = tmp_path
         final_render_package = _seed_short_grounding(episode_dir)
         policy = {
             "youtube": {"shorts": {"enabled": True}},  # missing categoryId
             "instagram": {"shorts": {"enabled": True}},
         }
+        calls = []
 
-        def fake_llm_call(system_prompt, input_package, **kw):
-            assert input_package["platforms"] == ["instagram"]  # youtube was already dropped
+        def fake_llm_call(*a, **kw):
+            calls.append(1)
             return {"platforms": {"instagram": {
                 "description": "A real grounded description for instagram. #Mystery",
                 "visible_hashtags": ["#Mystery"], "cta": "c",
             }}}
 
-        entries = generate_canonical_platform_metadata_for_deliverable(
-            EPISODE_ID, episode_dir, "short_001", "shorts", ["youtube", "instagram"], final_render_package,
-            config=Config(), channel_id="hypogeum", platform_deliverable_policy=policy,
-            llm_call=fake_llm_call,
-        )
-        assert [e["platform"] for e in entries] == ["instagram"]
+        with pytest.raises(CanonicalMetadataGenerationError, match="youtube.*categoryId|categoryId.*youtube"):
+            generate_canonical_platform_metadata_for_deliverable(
+                EPISODE_ID, episode_dir, "short_001", "shorts", ["youtube", "instagram"], final_render_package,
+                config=Config(), channel_id="hypogeum", platform_deliverable_policy=policy,
+                llm_call=fake_llm_call,
+            )
+        assert calls == []  # zero model calls -- not even for the policy-complete instagram

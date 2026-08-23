@@ -2124,6 +2124,30 @@ def count_bounded_run_claims(conn: sqlite3.Connection, bounded_run_id: str) -> i
     return row[0]
 
 
+def bounded_run_already_claimed_episode(
+    conn: sqlite3.Connection, bounded_run_id: str, episode_id: str,
+) -> bool:
+    """
+    True iff bounded_run_claims already has a row for this exact
+    (bounded_run_id, episode_id) pair -- i.e. this bounded run already
+    owns episode_id from an earlier claim.
+
+    2026-08-23 (same-episode bounded recovery): the generic invariant is
+    that max_episode_claims limits DISTINCT episodes, not claim attempts
+    -- a worker resuming this bounded run's own already-claimed episode
+    (e.g. via a fresh run_queue row created by the auto-retry mechanism
+    for the SAME episode_id) must never be treated as claiming a second
+    episode. bounded_run_claims' own UNIQUE(bounded_run_id, episode_id)
+    constraint is the structural source of truth this reads from --
+    never a separately-maintained counter that could drift.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM bounded_run_claims WHERE bounded_run_id = ? AND episode_id = ? LIMIT 1",
+        (bounded_run_id, episode_id),
+    ).fetchone()
+    return row is not None
+
+
 def record_bounded_run_claim(
     conn: sqlite3.Connection,
     bounded_run_id: str,

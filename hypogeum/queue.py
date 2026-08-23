@@ -77,6 +77,7 @@ import hypogeum.pipeline as _pipeline_module  # patched by tests via monkeypatch
 from hypogeum.db import (
     BoundedRunError,
     abort_queue_item,
+    bounded_run_already_claimed_episode,
     cancel_queue_item,
     claim_next_queue_item,
     complete_queue_item,
@@ -302,15 +303,35 @@ def claim_next_bounded(
     transaction commits or rolls back — the read-count-then-insert sequence
     is fully serialized across callers rather than racing optimistically.
 
+    Same-episode continuation (2026-08-23): max_episode_claims counts
+    DISTINCT episodes, not claim attempts. When the item claim_next_
+    queue_item() actually picks up this call carries an episode_id this
+    bounded_run_id has ALREADY recorded in bounded_run_claims (e.g. a
+    fresh auto-retry run_queue row for the SAME episode after an earlier
+    attempt failed mid-pipeline), this is a continuation — it never
+    consumes another distinct-episode slot and is permitted even once the
+    bounded run's own status is already 'exhausted'. bounded_run_claims'
+    UNIQUE(bounded_run_id, episode_id) constraint is the structural
+    source of truth for "already claimed" (see
+    hypogeum.db.bounded_run_already_claimed_episode()) — a continuation
+    claim inserts no new ledger row (one already exists for that pair)
+    and never re-triggers or alters the exhausted transition. A claim for
+    a genuinely NEW distinct episode_id is unaffected by any of this: it
+    still requires status=='active' and still fails closed once
+    max_episode_claims distinct episodes have been recorded — an
+    exhausted bounded run remains fully incapable of claiming a
+    DIFFERENT episode.
+
     Raises hypogeum.db.BoundedRunError (fail closed — no run_queue claim,
     episode_id assignment, ledger row, or exhausted transition is ever left
     committed) when: bounded_run_id is missing; the bounded run is unknown;
-    its status is not 'active'; its max_episode_claims is invalid; it has
-    already reached max_episode_claims; the write-lock transaction cannot be
-    acquired; or (defensive — should be unreachable given
-    synthesize_episode_id=True always fills a NULL value) the claimed row
-    somehow still has no episode_id. Never silently falls back to unbounded
-    claiming.
+    its status is neither 'active' nor 'exhausted'; a NEW distinct episode
+    is being claimed while status is not 'active', or would exceed
+    max_episode_claims; its max_episode_claims is invalid; the write-lock
+    transaction cannot be acquired; or (defensive — should be unreachable
+    given synthesize_episode_id=True always fills a NULL value) the claimed
+    row somehow still has no episode_id. Never silently falls back to
+    unbounded claiming.
 
     Returns:
         Dict of the claimed run_queue row (same shape as claim_next()),
@@ -337,10 +358,12 @@ def claim_next_bounded(
             run = get_bounded_run(conn, bounded_run_id)
             if run is None:
                 raise BoundedRunError(f"unknown bounded_run_id: {bounded_run_id!r}")
-            if run["status"] != "active":
+            if run["status"] not in ("active", "exhausted"):
                 raise BoundedRunError(
-                    f"bounded_run_id {bounded_run_id!r} is not active "
-                    f"(status={run['status']!r})"
+                    f"bounded_run_id {bounded_run_id!r} is not claimable "
+                    f"(status={run['status']!r}) — only 'active' (for a new "
+                    f"episode) or 'exhausted' (for a continuation of an "
+                    f"already-claimed episode) are valid"
                 )
             max_claims = run["max_episode_claims"]
             if not isinstance(max_claims, int) or max_claims <= 0:
@@ -350,11 +373,6 @@ def claim_next_bounded(
                 )
 
             claimed_count = count_bounded_run_claims(conn, bounded_run_id)
-            if claimed_count >= max_claims:
-                raise BoundedRunError(
-                    f"bounded_run_id {bounded_run_id!r} has already reached "
-                    f"max_episode_claims={max_claims}"
-                )
 
             claimed = claim_next_queue_item(conn, worker_id, now, synthesize_episode_id=True)
             if claimed is None:
@@ -372,16 +390,38 @@ def claim_next_bounded(
                     f"could be determined"
                 )
 
-            record_bounded_run_claim(
-                conn,
-                bounded_run_id=bounded_run_id,
-                queue_id=claimed["queue_id"],
-                episode_id=episode_id,
-                claimed_at=now,
-            )
+            is_continuation = bounded_run_already_claimed_episode(conn, bounded_run_id, episode_id)
 
-            if claimed_count + 1 >= max_claims:
-                mark_bounded_run_exhausted(conn, bounded_run_id, now)
+            if is_continuation:
+                # Already owns this exact episode_id -- no new ledger row
+                # (the UNIQUE constraint would reject one anyway), no
+                # change to claimed_count/status/completed_at. The claim
+                # itself (above) is the only effect.
+                pass
+            else:
+                if run["status"] != "active":
+                    raise BoundedRunError(
+                        f"bounded_run_id {bounded_run_id!r} is not active "
+                        f"(status={run['status']!r}) — cannot claim a NEW "
+                        f"episode_id={episode_id!r}; a continuation of an "
+                        f"already-claimed episode remains permitted "
+                        f"regardless of status"
+                    )
+                if claimed_count >= max_claims:
+                    raise BoundedRunError(
+                        f"bounded_run_id {bounded_run_id!r} has already "
+                        f"reached max_episode_claims={max_claims} distinct "
+                        f"episodes"
+                    )
+                record_bounded_run_claim(
+                    conn,
+                    bounded_run_id=bounded_run_id,
+                    queue_id=claimed["queue_id"],
+                    episode_id=episode_id,
+                    claimed_at=now,
+                )
+                if claimed_count + 1 >= max_claims:
+                    mark_bounded_run_exhausted(conn, bounded_run_id, now)
 
             conn.commit()
             return claimed

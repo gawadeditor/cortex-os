@@ -270,7 +270,16 @@ class TestClaimNextBounded:
         run_row = _bounded_run_row(db_path, "br_fail")
         assert run_row["status"] == "active"
 
-    def test_release_after_committed_claim_does_not_restore_allowance(self, db_path):
+    def test_release_after_committed_claim_permits_same_episode_continuation_only(self, db_path):
+        """
+        2026-08-23 (same-episode bounded recovery): max_episode_claims
+        limits DISTINCT episodes, not attempts. A release-then-reclaim of
+        the exact same (queue_id, episode_id) this bounded run already
+        owns is a continuation -- permitted even once 'exhausted', and
+        never inserts a second bounded_run_claims row (the ledger's own
+        UNIQUE(bounded_run_id, episode_id) constraint would reject one).
+        A genuinely DIFFERENT episode remains correctly blocked.
+        """
         provision_bounded_run("br_release", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
         _enqueue_with_episode(db_path, "ep_1")
 
@@ -280,11 +289,33 @@ class TestClaimNextBounded:
         row = _run_queue_row(db_path, claimed["queue_id"])
         assert row["status"] == "queued"  # released back
         assert _claim_count(db_path, "br_release") == 1  # ledger untouched
+        run_row = _bounded_run_row(db_path, "br_release")
+        assert run_row["status"] == "exhausted"  # already exhausted from the first claim
 
+        # Continuation of the SAME episode: permitted, no new ledger row,
+        # exhausted status unchanged.
+        reclaimed = claim_next_bounded(worker_id="w1", bounded_run_id="br_release", db_path=db_path)
+        assert reclaimed["queue_id"] == claimed["queue_id"]
+        assert reclaimed["episode_id"] == "ep_1"
+        assert _claim_count(db_path, "br_release") == 1
+        assert _bounded_run_row(db_path, "br_release")["status"] == "exhausted"
+
+        # A genuinely NEW, different episode remains blocked.
+        _enqueue_with_episode(db_path, "ep_2")
         with pytest.raises(BoundedRunError):
             claim_next_bounded(worker_id="w1", bounded_run_id="br_release", db_path=db_path)
 
-    def test_downstream_processing_failure_does_not_restore_allowance(self, db_path):
+    def test_downstream_processing_failure_then_auto_retry_row_permits_continuation(self, db_path):
+        """
+        2026-08-23: mirrors the real production shape -- a downstream
+        pipeline failure leaves the original queue_id terminally 'failed'
+        (never re-claimable itself), and hypogeum.queue._maybe_schedule_
+        retry() enqueues a FRESH queue row for the SAME episode_id (an
+        'auto_retry' item). Claiming that fresh row must be recognized as
+        a continuation of the same episode -- never a second distinct-
+        episode claim, and permitted even though the bounded run is
+        already 'exhausted' from the first claim.
+        """
         provision_bounded_run("br_downstream", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
         _enqueue_with_episode(db_path, "ep_1")
 
@@ -294,9 +325,21 @@ class TestClaimNextBounded:
         row = _run_queue_row(db_path, claimed["queue_id"])
         assert row["status"] == "failed"
         assert _claim_count(db_path, "br_downstream") == 1
+        assert _bounded_run_row(db_path, "br_downstream")["status"] == "exhausted"
 
-        with pytest.raises(BoundedRunError):
-            claim_next_bounded(worker_id="w1", bounded_run_id="br_downstream", db_path=db_path)
+        # Original queue_id is terminal -- nothing to claim until a fresh
+        # retry row exists for the same episode_id.
+        assert claim_next_bounded(worker_id="w1", bounded_run_id="br_downstream", db_path=db_path) is None
+
+        retry_queue_id = enqueue(
+            db_path=db_path, channel_id="hypogeum", episode_id="ep_1",
+            priority=0, source="auto_retry", recovery_from_run_id=None, retry_count=1,
+        )
+        reclaimed = claim_next_bounded(worker_id="w1", bounded_run_id="br_downstream", db_path=db_path)
+        assert reclaimed["queue_id"] == retry_queue_id
+        assert reclaimed["episode_id"] == "ep_1"
+        assert _claim_count(db_path, "br_downstream") == 1  # still one distinct episode
+        assert _bounded_run_row(db_path, "br_downstream")["status"] == "exhausted"
 
     def test_worker_crash_restart_does_not_restore_allowance(self, db_path):
         provision_bounded_run("br_crash", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
@@ -1066,3 +1109,139 @@ class TestNormalAutonomousWorkerWiring:
 
         assert pr.status == "empty"
         assert called["claim_next"] is False
+
+
+# ===========================================================================
+# Same-episode bounded recovery (2026-08-23) — _run_gated_cli() row reuse
+# and _validate_bounded_run_ready(episode_id=) continuation awareness.
+# Real-world shape: a manual --gated-episode-id --bounded-run-id resume of
+# an episode whose ONLY prior claim under this bounded run already failed
+# mid-pipeline (VPD, TD, etc.) and whose auto-retry mechanism already
+# enqueued a fresh run_queue row for the SAME episode_id.
+# ===========================================================================
+
+class TestGatedCliSameEpisodeReuse:
+    def test_reuses_existing_queued_row_instead_of_enqueueing_a_new_one(self, db_path, monkeypatch):
+        import run_worker
+
+        existing_queue_id = _enqueue_with_episode(db_path, "ep_reuse", channel_id="hypogeum")
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("enqueue() must not be called when a queued row already exists")
+        monkeypatch.setattr("hypogeum.queue.enqueue", _fail_if_called)
+
+        captured_queue_ids = []
+
+        def _spy_poll(**kwargs):
+            from hypogeum.queue import PollResult
+            row = _run_queue_row(db_path, existing_queue_id)
+            captured_queue_ids.append(row["status"])
+            return PollResult()
+        monkeypatch.setattr("hypogeum.queue.poll", _spy_poll)
+
+        rc = run_worker._run_gated_cli(
+            channel_id="hypogeum", episode_id="ep_reuse", topic="A topic",
+            db_path=db_path,
+        )
+
+        # poll() ran (no AssertionError from enqueue) and the pre-existing
+        # row is exactly what was there -- still 'queued' since our fake
+        # poll() never claimed it, proving no NEW row was substituted in.
+        assert captured_queue_ids == ["queued"]
+        row = _run_queue_row(db_path, existing_queue_id)
+        assert row is not None
+
+    def test_enqueues_a_fresh_row_when_none_exists(self, db_path, monkeypatch):
+        """Preserves prior behavior exactly for a genuinely new manual
+        invocation -- no pre-existing queued row for this episode."""
+        import run_worker
+
+        called = {"enqueue": False}
+        real_enqueue = enqueue
+
+        def _spy_enqueue(**kwargs):
+            called["enqueue"] = True
+            assert kwargs["episode_id"] == "ep_fresh"
+            return real_enqueue(**kwargs)
+        monkeypatch.setattr("hypogeum.queue.enqueue", _spy_enqueue)
+
+        def _spy_poll(**kwargs):
+            from hypogeum.queue import PollResult
+            return PollResult()
+        monkeypatch.setattr("hypogeum.queue.poll", _spy_poll)
+
+        run_worker._run_gated_cli(
+            channel_id="hypogeum", episode_id="ep_fresh", topic="A topic",
+            db_path=db_path,
+        )
+
+        assert called["enqueue"] is True
+
+    def test_ignores_a_queued_row_belonging_to_a_different_episode(self, db_path, monkeypatch):
+        import run_worker
+
+        _enqueue_with_episode(db_path, "ep_other", channel_id="hypogeum")
+
+        called = {"enqueue": False}
+        real_enqueue = enqueue
+
+        def _spy_enqueue(**kwargs):
+            called["enqueue"] = True
+            return real_enqueue(**kwargs)
+        monkeypatch.setattr("hypogeum.queue.enqueue", _spy_enqueue)
+
+        from hypogeum.queue import PollResult
+        monkeypatch.setattr("hypogeum.queue.poll", lambda **k: PollResult())
+
+        run_worker._run_gated_cli(
+            channel_id="hypogeum", episode_id="ep_target", topic="A topic",
+            db_path=db_path,
+        )
+
+        assert called["enqueue"] is True  # a NEW row was created for ep_target, ep_other untouched
+
+    def test_full_flow_claim_fail_auto_retry_gated_resume_never_consumes_second_claim(self, db_path):
+        """
+        End-to-end proof, at the exact shape of the ep_69df5bb0 recovery:
+        1. provision bounded_run_id, max_episode_claims=1
+        2. _run_gated_cli claims+the pipeline fails (queue_fail simulated)
+        3. the failure's own auto-retry mechanism enqueues a fresh row for
+           the SAME episode_id
+        4. a SECOND _run_gated_cli call (same bounded_run_id, same
+           episode_id) must resume via the retry row, consuming NO new
+           claim, and _validate_bounded_run_ready() must recognize this
+           as ready despite the bounded run already being 'exhausted'.
+        """
+        import run_worker
+
+        provision_bounded_run("br_e2e", max_episode_claims=1, publishing_allowed=False, db_path=db_path)
+        _enqueue_with_episode(db_path, "ep_e2e", channel_id="hypogeum", priority=-100)
+
+        claimed = claim_next_bounded(worker_id="w1", bounded_run_id="br_e2e", db_path=db_path)
+        assert claimed is not None
+        assert claimed["episode_id"] is not None
+        episode_id = claimed["episode_id"]
+        queue_fail(claimed["queue_id"], "w1", error_message="visual_package_director failed", db_path=db_path)
+        assert _bounded_run_row(db_path, "br_e2e")["status"] == "exhausted"
+
+        # The real auto-retry mechanism's own enqueue() call shape.
+        retry_queue_id = enqueue(
+            db_path=db_path, channel_id="hypogeum", episode_id=episode_id,
+            priority=-100, source="auto_retry", retry_count=1,
+        )
+
+        # Pre-flight check, exactly like _run_gated_cli()'s own call, must
+        # now recognize this as a valid continuation despite 'exhausted'.
+        reason = run_worker._validate_bounded_run_ready("br_e2e", db_path, episode_id=episode_id)
+        assert reason is None
+
+        # A DIFFERENT episode_id must still be correctly refused.
+        reason_other = run_worker._validate_bounded_run_ready("br_e2e", db_path, episode_id="ep_completely_different")
+        assert reason_other is not None
+        assert "not active" in reason_other
+
+        reclaimed = claim_next_bounded(worker_id="w2", bounded_run_id="br_e2e", db_path=db_path)
+        assert reclaimed["queue_id"] == retry_queue_id
+        assert reclaimed["episode_id"] == episode_id
+        assert _claim_count(db_path, "br_e2e") == 1  # still exactly one distinct episode
+        assert _bounded_run_row(db_path, "br_e2e")["status"] == "exhausted"

@@ -1181,35 +1181,63 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _validate_bounded_run_ready(bounded_run_id: str, db_path: Path) -> str | None:
+def _validate_bounded_run_ready(
+    bounded_run_id: str, db_path: Path, episode_id: str | None = None,
+) -> str | None:
     """
     Read-only pre-flight check for an already-provisioned bounded run.
 
-    Returns None when the bounded run exists and is 'active'; otherwise a
-    human-readable reason ("unknown bounded_run_id", "not active
-    (status=...)"). Used by every bounded CLI entry point (--gated-episode-id
-    + --bounded-run-id, and the plain autonomous daemon loop) to fail closed
-    *before* starting any claiming, rather than a daemon loop silently
-    reporting "empty" every iteration with no diagnostic. The real,
-    authoritative enforcement remains inside
+    Returns None when the bounded run is ready to claim; otherwise a
+    human-readable reason. Used by every bounded CLI entry point
+    (--gated-episode-id + --bounded-run-id, and the plain autonomous daemon
+    loop) to fail closed *before* starting any claiming, rather than a
+    daemon loop silently reporting "empty" every iteration with no
+    diagnostic. The real, authoritative enforcement remains inside
     hypogeum.queue.claim_next_bounded() regardless of this check — this
     function never provisions, claims, or mutates anything.
+
+    episode_id (2026-08-23, same-episode bounded recovery): optional.
+    None (default — every generic daemon-loop call site, which cannot
+    know in advance which episode_id claim_next_queue_item() will
+    actually pick) preserves the original, conservative contract exactly
+    — status must be 'active'. When the caller already knows the specific
+    target episode_id (--gated-episode-id's own call site, which always
+    does), an 'exhausted' bounded run is ALSO accepted here, but only if
+    hypogeum.db.bounded_run_already_claimed_episode() confirms this
+    bounded run already owns that exact episode_id — i.e. only for a
+    genuine continuation, never a general "exhausted is fine" relaxation.
+    This mirrors claim_next_bounded()'s own real enforcement so a caller
+    that already knows its target gets an accurate, fast pre-flight
+    answer instead of always deferring to the claim transaction itself.
     """
-    from hypogeum.db import get_bounded_run, get_connection
+    from hypogeum.db import bounded_run_already_claimed_episode, get_bounded_run, get_connection
 
     conn = get_connection(db_path)
     try:
         bounded_run = get_bounded_run(conn, bounded_run_id)
+        if bounded_run is None:
+            return (
+                f"unknown bounded_run_id: {bounded_run_id!r} — provision it first "
+                f"with --provision-bounded-run"
+            )
+        if bounded_run["status"] == "active":
+            return None
+        if (
+            bounded_run["status"] == "exhausted"
+            and episode_id is not None
+            and bounded_run_already_claimed_episode(conn, bounded_run_id, episode_id)
+        ):
+            return None
     finally:
         conn.close()
-    if bounded_run is None:
-        return (
-            f"unknown bounded_run_id: {bounded_run_id!r} — provision it first "
-            f"with --provision-bounded-run"
+    return (
+        f"bounded_run_id {bounded_run_id!r} is not active (status={bounded_run['status']!r})"
+        + (
+            f" and has not already claimed episode_id={episode_id!r} — a continuation of "
+            f"an already-claimed episode would still be permitted"
+            if episode_id is not None else ""
         )
-    if bounded_run["status"] != "active":
-        return f"bounded_run_id {bounded_run_id!r} is not active (status={bounded_run['status']!r})"
-    return None
+    )
 
 
 def _run_gated_cli(
@@ -1226,12 +1254,24 @@ def _run_gated_cli(
     bounded_run_id: Optional. None (default) preserves prior behavior
         exactly — unbounded claim_next(). When given, must already be
         provisioned via --provision-bounded-run (checked here via
-        _validate_bounded_run_ready() for a fast, clear CLI error; the real
+        _validate_bounded_run_ready() for a fast, clear CLI error, now
+        passing episode_id so a same-episode continuation of an already-
+        'exhausted' bounded run is correctly recognized as ready; the real
         enforcement is inside hypogeum.queue.claim_next_bounded()
         regardless) — this function never provisions one itself.
+
+    Existing-queued-row reuse (2026-08-23, same-episode bounded recovery):
+        before enqueueing anything, checks for an ALREADY-queued run_queue
+        row for this exact (channel_id, episode_id) — e.g. the row an
+        earlier failure's auto-retry mechanism created for the SAME
+        episode_id. When one exists, it is reused as-is (no new row, no
+        new topic claim) and this call proceeds straight to poll(); a
+        brand-new row is enqueued only when no queued row for this
+        episode already exists, exactly matching prior behavior for a
+        genuinely fresh manual invocation.
     """
     from hypogeum.config import Config
-    from hypogeum.db import initialize_schema
+    from hypogeum.db import get_connection, initialize_schema
     from hypogeum.queue import enqueue, poll
     from hypogeum.worker_integration import build_gated_pipeline_executor
 
@@ -1243,15 +1283,32 @@ def _run_gated_cli(
         return 1
 
     if bounded_run_id is not None:
-        reason = _validate_bounded_run_ready(bounded_run_id, db_path)
+        reason = _validate_bounded_run_ready(bounded_run_id, db_path, episode_id=episode_id)
         if reason is not None:
             print(reason, file=sys.stderr)
             return 1
 
-    queue_id = enqueue(
-        db_path=db_path, channel_id=channel_id, episode_id=episode_id,
-        priority=-100, source="manual",
-    )
+    conn = get_connection(db_path)
+    try:
+        existing_row = conn.execute(
+            "SELECT queue_id FROM run_queue WHERE channel_id = ? AND episode_id = ? "
+            "AND status = 'queued' ORDER BY queued_at DESC LIMIT 1",
+            (channel_id, episode_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if existing_row is not None:
+        queue_id = existing_row["queue_id"]
+        log.info(
+            "gated_cli_reusing_existing_queue_row channel=%s episode_id=%s queue_id=%s",
+            channel_id, episode_id, queue_id,
+        )
+    else:
+        queue_id = enqueue(
+            db_path=db_path, channel_id=channel_id, episode_id=episode_id,
+            priority=-100, source="manual",
+        )
     topic_resolver = (lambda _claimed_row: topic) if topic else None
     executor = build_gated_pipeline_executor(db_path=db_path, bounded_run_id=bounded_run_id)
 

@@ -567,6 +567,160 @@ class TestBundleCycleScheduling:
         assert len({d.scheduled_for for d in result.schedule_plan.entries.values()}) == 4
 
 
+class TestPerPlatformScheduleOverrides:
+    """
+    2026-08-23: platform_overrides -- optional {platform: {day_of_week,
+    time_of_day, timezone}} on a deliverable entry (bundle-cycle member,
+    bundle-cycle anchor, or flat deliverable_schedule_policy entry) --
+    lets individual platforms within one aggregated post carry genuinely
+    independent publication timestamps, while bundle cohesion (release
+    ORDER between deliverables, governed by anchor_relation) is entirely
+    unaffected: an override is always resolved relative to the SAME
+    reference its own deliverable's base scheduled_for used.
+    """
+
+    BUNDLE_CYCLE_WITH_OVERRIDES = {
+        "cycle1": {
+            "anchor_deliverable_id": "main_episode",
+            "required_deliverable_ids": ["main_episode", "short_001"],
+            "deliverables": {
+                "main_episode": {
+                    "day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC",
+                    "platform_overrides": {
+                        "youtube": {"day_of_week": "sunday", "time_of_day": "16:00", "timezone": "UTC"},
+                    },
+                },
+                "short_001": {
+                    "day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC",
+                    "anchor_relation": "after",
+                    "platform_overrides": {
+                        "tiktok": {"day_of_week": "monday", "time_of_day": "20:00", "timezone": "UTC"},
+                        "instagram": {"day_of_week": "tuesday", "time_of_day": "09:00", "timezone": "UTC"},
+                    },
+                },
+            },
+        },
+    }
+
+    def test_overridden_platform_gets_its_own_independent_timestamp(self, db_path):
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", self.BUNDLE_CYCLE_WITH_OVERRIDES)
+        now = datetime(2026, 8, 20, 0, 0, tzinfo=timezone.utc)  # Thursday
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "short_001"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is False, result.blocked_reason
+        entries = result.schedule_plan.entries
+
+        assert entries["main_episode"].scheduled_for == datetime(2026, 8, 23, 14, 0, tzinfo=timezone.utc)
+        assert entries["main_episode"].platform_scheduled_for_by_platform == {
+            "youtube": datetime(2026, 8, 23, 16, 0, tzinfo=timezone.utc),
+        }
+
+        assert entries["short_001"].scheduled_for == datetime(2026, 8, 24, 18, 0, tzinfo=timezone.utc)
+        assert entries["short_001"].platform_scheduled_for_by_platform == {
+            "tiktok": datetime(2026, 8, 24, 20, 0, tzinfo=timezone.utc),
+            "instagram": datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc),
+        }
+
+    def test_non_overridden_platform_falls_back_to_the_shared_base_slot(self, db_path):
+        """facebook/youtube on short_001 were never given their own
+        override -- they must use the deliverable's own scheduled_for,
+        never a fabricated independent time."""
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", self.BUNDLE_CYCLE_WITH_OVERRIDES)
+        now = datetime(2026, 8, 20, 0, 0, tzinfo=timezone.utc)
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "short_001"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        short_sched = result.schedule_plan.entries["short_001"]
+        assert "youtube" not in short_sched.platform_scheduled_for_by_platform
+        assert "facebook" not in short_sched.platform_scheduled_for_by_platform
+        # publish_episode_package()'s own resolution (platform_scheduled_for_by_platform.get(p, ...))
+        # falls back to scheduled_for for these -- verified directly here.
+        assert short_sched.scheduled_for == datetime(2026, 8, 24, 18, 0, tzinfo=timezone.utc)
+
+    def test_no_platform_overrides_declared_is_a_complete_noop(self, db_path):
+        """A deliverable with no platform_overrides key at all (the
+        existing HYPOGEUM_BUNDLE_CYCLE_POLICY fixture) must resolve
+        byte-identically to before this mechanism existed."""
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", HYPOGEUM_BUNDLE_CYCLE_POLICY)
+        now = datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode", "short_001", "short_002", "short_003"],
+            db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is False
+        for sched in result.schedule_plan.entries.values():
+            assert sched.platform_scheduled_for_by_platform == {}
+
+    def test_invalid_platform_override_fails_closed_bundle_cycle_layer(self, db_path):
+        broken_policy = {
+            "cycle1": {
+                "anchor_deliverable_id": "main_episode",
+                "required_deliverable_ids": ["main_episode"],
+                "deliverables": {
+                    "main_episode": {
+                        "day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC",
+                        "platform_overrides": {"tiktok": {"day_of_week": "not_a_real_day", "time_of_day": "20:00"}},
+                    },
+                },
+            },
+        }
+        _make_channel_with_bundle_cycle(db_path, "hypogeum", broken_policy)
+        result = compile_schedule_plan_from_channel_package(
+            "hypogeum", ["main_episode"], db_path=db_path,
+            now=datetime(2026, 8, 20, tzinfo=timezone.utc), require_explicit_policy=True,
+        )
+        assert result.blocked is True
+        assert "platform_overrides" in result.blocked_reason
+        assert result.schedule_plan is None
+
+    def test_invalid_platform_override_fails_closed_flat_layer(self, db_path):
+        create_brand_profile(name="ch2 Brand", db_path=db_path)
+        create_channel_profile(channel_id="ch2", name="ch2", db_path=db_path)
+        create_channel_operations_profile(
+            channel_id="ch2", channel_name="ch2", timezone="UTC",
+            deliverable_schedule_policy={
+                "main_episode": {
+                    "day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC",
+                    "platform_overrides": {"tiktok": {"day_of_week": "sunday"}},  # missing time_of_day
+                },
+            },
+            db_path=db_path,
+        )
+        result = compile_schedule_plan_from_channel_package(
+            "ch2", ["main_episode"], db_path=db_path,
+            now=datetime(2026, 8, 20, tzinfo=timezone.utc), require_explicit_policy=True,
+        )
+        assert result.blocked is True
+        assert "platform_overrides" in result.blocked_reason
+
+    def test_flat_layer_platform_override_resolves(self, db_path):
+        create_brand_profile(name="ch3 Brand", db_path=db_path)
+        create_channel_profile(channel_id="ch3", name="ch3", db_path=db_path)
+        create_channel_operations_profile(
+            channel_id="ch3", channel_name="ch3", timezone="UTC",
+            deliverable_schedule_policy={
+                "main_episode": {
+                    "day_of_week": "sunday", "time_of_day": "14:00", "timezone": "UTC",
+                    "platform_overrides": {
+                        "youtube": {"day_of_week": "sunday", "time_of_day": "16:00", "timezone": "UTC"},
+                    },
+                },
+            },
+            db_path=db_path,
+        )
+        now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        result = compile_schedule_plan_from_channel_package(
+            "ch3", ["main_episode"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is False
+        sched = result.schedule_plan.entries["main_episode"]
+        assert sched.scheduled_for == datetime(2026, 8, 23, 14, 0, tzinfo=timezone.utc)
+        assert sched.platform_scheduled_for_by_platform == {
+            "youtube": datetime(2026, 8, 23, 16, 0, tzinfo=timezone.utc),
+        }
+
+
 class TestFailsClosed:
     def test_no_channel_operations_profile_blocks(self, db_path):
         result = compile_schedule_plan_from_channel_package(

@@ -326,6 +326,60 @@ def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
     return result
 
 
+def _refresh_scheduling_evidence_for_all_channels(db_path: Path) -> dict:
+    """
+    2026-08-23 (autonomous weekly runtime, Phase 3 requirement #1/#8):
+    "the daemon must refresh scheduling evidence automatically before
+    compiling future schedules" and "when evidence becomes sufficient,
+    the periodic analytics sync must allow later cycles to move
+    automatically to analytics mode". Runs immediately after the periodic
+    analytics sync (Step 4, same iteration) so freshly-synced
+    platform_analytics rows feed straight into the next schedule
+    compilation without a separate manual trigger -- see
+    hypogeum.publishing.evidence_based_scheduling.
+    refresh_analytics_scheduling_policy()'s own docstring for exactly
+    what it writes and why a periodic (not per-publish) refresh is
+    correct here.
+
+    No Hypogeum-specific branch: every channel returned by
+    list_channel_profiles(status="active") is treated identically, and is
+    skipped entirely (silently, not an error) when it has no
+    analytics_scheduling_policy configured at all -- see that function's
+    own "never raises for missing configuration" contract. An UNEXPECTED
+    exception for one channel is caught and logged HERE, per channel, so
+    one channel's failure can never stop another channel's refresh or
+    crash the worker loop -- the same isolation pattern
+    _process_channel_publishing()/_check_and_refill_queue() already use.
+    """
+    from hypogeum.channel_config import list_channel_profiles
+    from hypogeum.publishing.evidence_based_scheduling import refresh_analytics_scheduling_policy
+
+    result: dict = {"channels_checked": 0, "channels_updated": []}
+
+    try:
+        channels = list_channel_profiles(status="active", db_path=db_path)
+    except Exception as exc:
+        log.error("scheduling_evidence_channel_list_error error=%s", exc)
+        return result
+
+    for ch in channels:
+        channel_id = ch.channel_id
+        result["channels_checked"] += 1
+        try:
+            refresh_result = refresh_analytics_scheduling_policy(channel_id, db_path=db_path)
+        except Exception as exc:
+            log.error("scheduling_evidence_refresh_error channel=%s error=%s", channel_id, exc, exc_info=True)
+            continue
+        if refresh_result.deliverables_updated:
+            result["channels_updated"].append(channel_id)
+            log.info(
+                "scheduling_evidence_refreshed channel=%s deliverables_updated=%s",
+                channel_id, refresh_result.deliverables_updated,
+            )
+
+    return result
+
+
 def _check_and_refill_queue(
     db_path: Path,
     threshold: int,
@@ -788,10 +842,15 @@ def run_iteration(
 
     # Step 4: background analytics sync — every _ANALYTICS_SYNC_EVERY_N iterations
     analytics_synced = False
+    scheduling_evidence_result: dict = {}
     if not dry_run and iteration % _ANALYTICS_SYNC_EVERY_N == 0:
         log.info("analytics_sync_triggered iteration=%d", iteration)
         _sync_analytics_background(db_path=db_path, config=config)
         analytics_synced = True
+        try:
+            scheduling_evidence_result = _refresh_scheduling_evidence_for_all_channels(db_path=db_path)
+        except Exception as exc:
+            log.error("scheduling_evidence_refresh_sweep_error error=%s", exc, exc_info=True)
 
     poll_status = proc.status if proc else (
         "paused" if (queue_paused and not bypass_pause_for_bounded_run)
@@ -806,6 +865,7 @@ def run_iteration(
         "discovery":              discovery_result,
         "publishing":             publishing_result,
         "analytics_synced":       analytics_synced,
+        "scheduling_evidence":    scheduling_evidence_result,
         "queue_paused":           queue_paused,
         "factory_cleared":        clearance.cleared,
         "clearance_reason":       clearance.reason,

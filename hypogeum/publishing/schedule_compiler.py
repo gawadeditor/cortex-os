@@ -130,6 +130,58 @@ def _resolve_bundle_cycle_for_deliverables(
     return cycle_id, cycle_def
 
 
+def _resolve_platform_overrides(
+    entry: dict, *, reference_slot: datetime, default_tz: str, cycle_id: str, deliverable_id: str,
+) -> dict:
+    """
+    2026-08-23 (per-platform bundle-cycle scheduling): resolve a
+    deliverable entry's OPTIONAL platform_overrides -- {platform:
+    {day_of_week, time_of_day, timezone}} -- into {platform: datetime},
+    each computed via the exact same pure compute_next_publish_slot()
+    every other slot in this module uses, relative to reference_slot (the
+    SAME reference point the deliverable's own base scheduled_for was
+    resolved from -- reference_slot for the anchor itself, or the
+    already-resolved candidate for a member). This is what "preserves
+    bundle cohesion" means concretely: a platform override still lands
+    within the same release-cycle window as its own deliverable's base
+    slot, never recomputed from wall-clock effective_now independently
+    (which could otherwise drift a platform's own time into a completely
+    different week than the rest of its deliverable).
+
+    Absent platform_overrides (the default -- no key, or an empty dict)
+    returns {} -- every platform then falls back to the deliverable's own
+    single scheduled_for, exactly as before this mechanism existed. This
+    is what "must not be collapsed into one generic timestamp UNLESS
+    policy explicitly requires identical timing" means: identical timing
+    is exactly what you get by simply never declaring platform_overrides
+    for a deliverable whose platforms should all share one time.
+
+    Raises _BundleCycleBlocked for a platform_overrides entry that fails
+    to resolve to a real slot -- a configured-but-broken override is a
+    real configuration error, never silently dropped back to the
+    deliverable's own base slot.
+    """
+    from hypogeum.scheduler import compute_next_publish_slot  # noqa: PLC0415
+
+    platform_overrides_decl = entry.get("platform_overrides") or {}
+    resolved: dict = {}
+    for platform, override_entry in platform_overrides_decl.items():
+        override_tz = (override_entry or {}).get("timezone") or default_tz
+        override_schedule = {
+            "day_of_week": (override_entry or {}).get("day_of_week"),
+            "time_of_day": (override_entry or {}).get("time_of_day"),
+        }
+        slot = compute_next_publish_slot(override_schedule, override_tz, reference_slot)
+        if slot is None:
+            raise _BundleCycleBlocked(
+                f"bundle_cycle_id={cycle_id!r} deliverable_id={deliverable_id!r} "
+                f"platform_overrides[{platform!r}] is invalid or incomplete "
+                f"(entry={override_entry!r}) — refusing to invent a release time"
+            )
+        resolved[platform] = slot
+    return resolved
+
+
 def _compile_bundle_cycle(
     cycle_id: str,
     cycle_def: dict,
@@ -193,7 +245,14 @@ def _compile_bundle_cycle(
             f"is invalid or incomplete (entry={anchor_entry!r}) — refusing to invent a release time"
         )
 
-    entries: dict = {anchor_id: DeliverableSchedule(scheduled_for=anchor_slot, timezone_name=anchor_tz, publish_now=publish_now)}
+    anchor_platform_overrides = _resolve_platform_overrides(
+        anchor_entry, reference_slot=effective_now, default_tz=anchor_tz,
+        cycle_id=cycle_id, deliverable_id=anchor_id,
+    )
+    entries: dict = {anchor_id: DeliverableSchedule(
+        scheduled_for=anchor_slot, timezone_name=anchor_tz, publish_now=publish_now,
+        platform_scheduled_for_by_platform=anchor_platform_overrides,
+    )}
 
     for deliverable_id in deliverable_ids:
         if deliverable_id == anchor_id:
@@ -210,7 +269,8 @@ def _compile_bundle_cycle(
             # construction when given anchor_slot as its own reference, so
             # this is what structurally guarantees "after its anchor,
             # within the same cycle" without re-deriving cadence.
-            candidate = compute_next_publish_slot(member_schedule, member_tz, anchor_slot)
+            member_reference = anchor_slot
+            candidate = compute_next_publish_slot(member_schedule, member_tz, member_reference)
             if candidate is None:
                 raise _BundleCycleBlocked(
                     f"bundle_cycle_id={cycle_id!r} member deliverable_id={deliverable_id!r} schedule "
@@ -224,14 +284,14 @@ def _compile_bundle_cycle(
             # cycle's teaser slot and would otherwise skip straight to
             # NEXT cycle's teaser, landing it after, not before, this
             # cycle's anchor).
-            reference = anchor_slot - _RECURRENCE_PERIOD
-            candidate = compute_next_publish_slot(member_schedule, member_tz, reference)
+            member_reference = anchor_slot - _RECURRENCE_PERIOD
+            candidate = compute_next_publish_slot(member_schedule, member_tz, member_reference)
             if candidate is None:
                 raise _BundleCycleBlocked(
                     f"bundle_cycle_id={cycle_id!r} member deliverable_id={deliverable_id!r} schedule "
                     f"entry is invalid or incomplete (entry={member_entry!r})"
                 )
-            if not (reference <= candidate < anchor_slot):
+            if not (member_reference <= candidate < anchor_slot):
                 raise _BundleCycleBlocked(
                     f"bundle_cycle_id={cycle_id!r} member deliverable_id={deliverable_id!r} is declared "
                     f"anchor_relation='before' but resolved to {candidate.isoformat()}, which is not "
@@ -244,7 +304,14 @@ def _compile_bundle_cycle(
                 f"unknown anchor_relation={relation!r} (must be 'after' or 'before')"
             )
 
-        entries[deliverable_id] = DeliverableSchedule(scheduled_for=candidate, timezone_name=member_tz, publish_now=publish_now)
+        member_platform_overrides = _resolve_platform_overrides(
+            member_entry, reference_slot=member_reference, default_tz=member_tz,
+            cycle_id=cycle_id, deliverable_id=deliverable_id,
+        )
+        entries[deliverable_id] = DeliverableSchedule(
+            scheduled_for=candidate, timezone_name=member_tz, publish_now=publish_now,
+            platform_scheduled_for_by_platform=member_platform_overrides,
+        )
 
     # Optional declared ORDERING/SEQUENCE (required_deliverable_ids, read
     # as an ordered list when present): every consecutive pair of non-
@@ -390,8 +457,19 @@ def compile_schedule_plan_from_channel_package(
                         f"(entry={policy_entry!r}) — refusing to invent a release time"
                     ),
                 )
+            try:
+                platform_overrides = _resolve_platform_overrides(
+                    policy_entry, reference_slot=effective_now, default_tz=entry_tz,
+                    cycle_id="deliverable_schedule_policy", deliverable_id=deliverable_id,
+                )
+            except _BundleCycleBlocked as exc:
+                return ScheduleCompilationResult(
+                    channel_id=channel_id, schedule_plan=None, blocked=True,
+                    blocked_reason=f"channel_id={channel_id!r} {exc.reason}",
+                )
             entries[deliverable_id] = DeliverableSchedule(
                 scheduled_for=slot_dt, timezone_name=entry_tz, publish_now=publish_now,
+                platform_scheduled_for_by_platform=platform_overrides,
             )
             continue
 

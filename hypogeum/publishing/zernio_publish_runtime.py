@@ -92,12 +92,29 @@ class ChannelScopeMismatchError(ZernioPublishRuntimeError):
 @dataclass(frozen=True)
 class DeliverableSchedule:
     """One deliverable's resolved publish timing — passed straight through
-    to ZernioProvider.publish()'s own scheduling kwargs, unmodified."""
+    to ZernioProvider.publish()/publish_multi_platform()'s own scheduling
+    kwargs, unmodified.
+
+    platform_scheduled_for_by_platform (2026-08-23): optional {platform:
+    datetime} — when a platform is present here, its OWN value governs
+    that platform's `platforms[].scheduledFor` entry in a multi-platform
+    post, independently of every other platform in the same post and of
+    this deliverable's own top-level scheduled_for/platform_scheduled_for.
+    A platform absent from this dict falls back to platform_scheduled_for
+    (if set) then scheduled_for, exactly as before this field existed —
+    empty dict (default) is a complete no-op, byte-identical to prior
+    behavior. This is what lets bundle cohesion (every deliverable's own
+    base scheduled_for, preserved for release-order purposes) coexist
+    with genuinely independent per-platform timestamps within one
+    aggregated post, rather than collapsing every platform in a Short's
+    post onto one generic timestamp.
+    """
     scheduled_for: Optional[datetime] = None
     platform_scheduled_for: Optional[datetime] = None
     timezone_name: Optional[str] = None
     publish_now: bool = False
     is_draft: bool = False
+    platform_scheduled_for_by_platform: Dict[str, datetime] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -452,6 +469,7 @@ def publish_episode_package(
                     content=deliverable.description,
                     scheduled_for=sched.scheduled_for,
                     platform_scheduled_for=sched.platform_scheduled_for,
+                    platform_scheduled_for_by_platform=sched.platform_scheduled_for_by_platform,
                     timezone_name=sched.timezone_name,
                     publish_now=sched.publish_now,
                     is_draft=sched.is_draft,
@@ -496,7 +514,10 @@ def publish_episode_package(
                     title=deliverable.title,
                     content=deliverable.description,
                     scheduled_for=sched.scheduled_for,
-                    platform_scheduled_for=sched.platform_scheduled_for,
+                    platform_scheduled_for=(
+                        sched.platform_scheduled_for_by_platform.get(platform)
+                        or sched.platform_scheduled_for
+                    ),
                     timezone_name=sched.timezone_name,
                     publish_now=sched.publish_now,
                     is_draft=sched.is_draft,

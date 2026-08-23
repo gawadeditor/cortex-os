@@ -368,14 +368,24 @@ def _validate_timezone_name(timezone_name: Optional[str]) -> None:
 def _validate_schedule(
     *, scheduled_for: Optional[datetime], platform_scheduled_for: Optional[datetime],
     publish_now: bool, is_draft: bool,
+    platform_scheduled_for_by_platform: Optional[Dict[str, datetime]] = None,
 ) -> None:
     """
     Fail closed on internally-contradictory or malformed scheduling input.
     This adapter accepts a RESOLVED schedule; it never computes or corrects
     one (Cortex's own editorial calendar is out of scope here).
+
+    platform_scheduled_for_by_platform (2026-08-23): every value in this
+    dict is validated with the exact same rules as scheduled_for/
+    platform_scheduled_for (timezone-aware, future unless publish_now,
+    never combined with is_draft) -- an independent per-platform override
+    is just as real a scheduling commitment as the single override was.
     """
     now = datetime.now(_dt_timezone.utc)
-    for label, value in (("scheduled_for", scheduled_for), ("platform_scheduled_for", platform_scheduled_for)):
+    named_values = [("scheduled_for", scheduled_for), ("platform_scheduled_for", platform_scheduled_for)]
+    for platform, value in (platform_scheduled_for_by_platform or {}).items():
+        named_values.append((f"platform_scheduled_for_by_platform[{platform!r}]", value))
+    for label, value in named_values:
         if value is None:
             continue
         if not isinstance(value, datetime):
@@ -395,9 +405,13 @@ def _validate_schedule(
             raise ZernioScheduleValidationError(
                 f"publish_now=True is contradictory with a future {label} -- choose one"
             )
-    if is_draft and (publish_now or scheduled_for is not None or platform_scheduled_for is not None):
+    if is_draft and (
+        publish_now or scheduled_for is not None or platform_scheduled_for is not None
+        or bool(platform_scheduled_for_by_platform)
+    ):
         raise ZernioScheduleValidationError(
-            "is_draft=True is contradictory with publish_now/scheduled_for/platform_scheduled_for"
+            "is_draft=True is contradictory with publish_now/scheduled_for/"
+            "platform_scheduled_for/platform_scheduled_for_by_platform"
         )
 
 
@@ -923,6 +937,9 @@ class ZernioProvider:
         platform_media = list(kwargs.get("platform_media") or [])
         scheduled_for = kwargs.get("scheduled_for")
         platform_scheduled_for = kwargs.get("platform_scheduled_for")
+        platform_scheduled_for_by_platform: Dict[str, datetime] = dict(
+            kwargs.get("platform_scheduled_for_by_platform") or {}
+        )
         timezone_name = kwargs.get("timezone_name")
         publish_now = bool(kwargs.get("publish_now", False))
         is_draft = bool(kwargs.get("is_draft", False))
@@ -944,6 +961,7 @@ class ZernioProvider:
         _validate_schedule(
             scheduled_for=scheduled_for, platform_scheduled_for=platform_scheduled_for,
             publish_now=publish_now, is_draft=is_draft,
+            platform_scheduled_for_by_platform=platform_scheduled_for_by_platform,
         )
 
         # Resolve every platform's approved binding/account BEFORE any
@@ -1039,7 +1057,10 @@ class ZernioProvider:
                     results[p] = self._ambiguous_result(p, deliverable_type, g)
                 return results
             merged_platform_entries = list(existing_post["platforms"]) + [
-                self._build_platform_entry(p, accounts[p], platform_media, platform_scheduled_for)
+                self._build_platform_entry(
+                    p, accounts[p], platform_media,
+                    platform_scheduled_for_by_platform.get(p, platform_scheduled_for),
+                )
                 for p in to_submit
             ]
             try:
@@ -1056,7 +1077,10 @@ class ZernioProvider:
                 return results
         else:
             platform_entries = [
-                self._build_platform_entry(p, accounts[p], platform_media, platform_scheduled_for)
+                self._build_platform_entry(
+                    p, accounts[p], platform_media,
+                    platform_scheduled_for_by_platform.get(p, platform_scheduled_for),
+                )
                 for p in to_submit
             ]
             body = _build_multi_platform_publish_body(

@@ -53,14 +53,41 @@ All 3 Shorts, confirmed via a second fresh GET (not the PUT response):
 - instagram/facebook/tiktok `platformSpecificData` completely untouched.
 - root `tags`/`hashtags` now populated from the canonical package.
 
-## main_episode — reported, not mutated
+## main_episode — attempted, rejected by a genuine provider constraint
 
 Fresh GET confirmed `title`/`content` (303 chars) already correct
 (matches the earlier repair), `categoryId`/`containsSyntheticMedia`
-absent, `tags`/`hashtags` empty — the same gap as the Shorts, but left
-untouched in this phase per explicit scope ("do not delete or recreate
-the main post during this step"). A future phase can apply the same
-`repair_existing_post()` pattern used above once authorized.
+absent, `tags`/`hashtags` empty — the same gap as the Shorts.
+
+An authorized repair attempt (same `repair_existing_post()` path used
+for the Shorts above, title/content/chapters/sources populated from the
+regenerated canonical package, media/thumbnail/visibility/schedule
+explicitly preserved) was submitted and **rejected by Zernio itself**:
+HTTP 400, `"Published posts can only have their recycling config
+updated"`. This is a real, newly-discovered, live-confirmed provider
+constraint: once a post's `status` is `published` (as this one is,
+unlike the Shorts which are still `scheduled`), Zernio's `PUT /v1/posts/
+{postId}` rejects any change to title/content/media/platformSpecificData
+— only a "recycling config" (an unrelated repost/recycle-content
+feature) may be updated on an already-published post.
+
+A second fresh GET immediately after the rejected PUT confirmed **zero
+mutation**: title, content, tags, hashtags, `platformSpecificData`, and
+`mediaItems` are byte-for-byte identical to the pre-attempt GET. No
+partial write occurred. The local `publication_intent`/attempt ledger
+was left untouched (`status: "ambiguous"`, "PUT response did not confirm
+the shared post's content/media correction").
+
+This is a genuine, structural blocker requiring an operator decision,
+not a code defect: main_episode's live post cannot receive the new
+canonical metadata (`categoryId`/`containsSyntheticMedia`/tags/hashtags/
+the fuller title-description-chapters) through Zernio's update API while
+it remains published. Options for a future, separately-authorized phase:
+confirm whether Zernio exposes any other endpoint for a published post's
+metadata; or accept the already-live video's original (shorter, but
+real and correct) title/description as final. Not decided or acted on
+here — per explicit instruction, the main post was not deleted or
+recreated in this step.
 
 ## Remaining known blocker (separate, unrelated to this repair)
 

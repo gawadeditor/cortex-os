@@ -510,6 +510,7 @@ def generate_canonical_platform_metadata_for_deliverable(
     if not target_platforms:
         raise CanonicalMetadataGenerationError("target_platforms is empty -- nothing to generate")
 
+    from hypogeum.publishing.canonical_metadata import is_required_policy_field_present
     from hypogeum.publishing.zernio_platform_contracts import get_platform_contract
 
     # Policy-completeness pre-check -- BEFORE any grounding resolution or
@@ -519,13 +520,15 @@ def generate_canonical_platform_metadata_for_deliverable(
     # drops the incomplete platform and proceeds for the rest (that would
     # let one enabled platform release ahead of a sibling that shares the
     # same deliverable, violating "every enabled target platform ready
-    # before any platform submits").
+    # before any platform submits"). Presence uses the ONE shared
+    # validator (is_required_policy_field_present) -- a required boolean
+    # field legitimately set to False is present, not missing.
     policy_incomplete: Dict[str, List[str]] = {}
     for platform in target_platforms:
         contract = get_platform_contract(platform)
         required_fields = getattr(contract, "required_policy_fields", ()) or ()
         class_entry = ((platform_deliverable_policy or {}).get(platform) or {}).get(deliverable_class, {})
-        missing_fields = [f for f in required_fields if not class_entry.get(f)]
+        missing_fields = [f for f in required_fields if not is_required_policy_field_present(class_entry, f)]
         if missing_fields:
             policy_incomplete[platform] = missing_fields
 

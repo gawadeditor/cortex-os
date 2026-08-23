@@ -38,6 +38,11 @@ Public API:
         validator, real complete-token matching (never substring), also
         used by hypogeum.agents.canonical_metadata_agent's generation-time
         validation
+    is_required_policy_field_present(class_entry, field) -> bool -- the
+        ONE shared required-policy-field presence validator (boolean
+        False and numeric 0 are present; None/whitespace-only/empty are
+        missing), also used by hypogeum.agents.canonical_metadata_agent's
+        pre-generation policy-completeness check
 """
 
 from __future__ import annotations
@@ -125,6 +130,49 @@ def extract_hashtag_tokens(text: str) -> set:
     a description containing only '#TestTagExtra'.
     """
     return {m.group(0).lower() for m in _HASHTAG_TOKEN_RE.finditer(text or "")}
+
+
+def is_required_policy_field_present(class_entry: Optional[dict], field: str) -> bool:
+    """
+    The ONE shared required-policy-field presence validator (2026-08-23)
+    -- used everywhere a PlatformContract.required_policy_fields entry is
+    checked against the channel's own platform_deliverable_policy class
+    entry: here (validate_canonical_platform_metadata()'s
+    required_fields loop) and in
+    hypogeum.agents.canonical_metadata_agent's pre-generation
+    policy-completeness check.
+
+    A prior version of this check ('not class_entry.get(field)') treated
+    boolean False and numeric 0 as missing, which is wrong -- a required
+    boolean field (e.g. TikTok's allow_comment) may legitimately be
+    False, and that is a present, valid, deliberate value, not an
+    absence. A separate, looser prior version ('field not in
+    class_entry') treated an explicit None, an all-whitespace string, or
+    an empty list/dict as present, which is also wrong -- those carry no
+    real content.
+
+    Semantics:
+      - key absent from class_entry                 -> missing (False)
+      - value is None                                -> missing (False)
+      - value is a string containing only whitespace -> missing (False)
+      - value is an empty list or dict                -> missing (False)
+      - value is a bool (True or False)              -> present (True)
+      - value is a number, including 0                -> present (True)
+      - anything else non-empty                       -> present (True)
+    """
+    entry = class_entry or {}
+    if field not in entry:
+        return False
+    value = entry[field]
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (list, dict, set, tuple)):
+        return len(value) > 0
+    return True
 
 
 def _load_json(path: Path) -> dict:
@@ -334,7 +382,7 @@ def validate_canonical_platform_metadata(
     # values, catching a divergence between the two.
     required_fields = getattr(contract, "required_policy_fields", ()) or ()
     for f in required_fields:
-        if f not in (class_entry or {}):
+        if not is_required_policy_field_present(class_entry, f):
             failures.append(f"channel policy is missing required platform field {f!r} for platform={platform!r}")
 
     # -- thumbnail reference: only required for a main_episode. A Short

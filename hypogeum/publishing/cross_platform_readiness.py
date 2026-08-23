@@ -364,8 +364,10 @@ def check_cross_platform_readiness(
                             evidence["privacy_value"] = privacy_value
 
                     if contract.required_policy_fields:
+                        from hypogeum.publishing.canonical_metadata import is_required_policy_field_present  # noqa: PLC0415
                         missing_policy_fields = [
-                            f for f in contract.required_policy_fields if f not in (class_entry or {})
+                            f for f in contract.required_policy_fields
+                            if not is_required_policy_field_present(class_entry, f)
                         ]
                         if missing_policy_fields:
                             failures.append(

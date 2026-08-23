@@ -27,6 +27,7 @@ from hypogeum.agents.canonical_metadata_agent import (
 )
 from hypogeum.config import Config
 from hypogeum.openrouter import CallResult
+from hypogeum.publishing.canonical_metadata import is_required_policy_field_present
 
 EPISODE_ID = "ep_test"
 
@@ -312,6 +313,57 @@ class TestPolicyCompletenessPreCheck:
             )
         assert calls == []  # the model was never called
 
+    def test_blank_categoryid_fails_and_skips_generation(self, tmp_path):
+        # An explicit but blank/whitespace-only value is not a real
+        # configured category any more than a missing key is.
+        episode_dir = tmp_path
+        final_render_package = _seed_short_grounding(episode_dir)
+        policy_blank_category = {"youtube": {"shorts": {"enabled": True, "categoryId": "   "}}}
+        calls = []
+
+        def fake_llm_call(*a, **kw):
+            calls.append(1)
+            return _VALID_YOUTUBE_RESPONSE
+
+        with pytest.raises(CanonicalMetadataGenerationError, match="categoryId"):
+            generate_canonical_platform_metadata_for_deliverable(
+                EPISODE_ID, episode_dir, "short_001", "shorts", ["youtube"], final_render_package,
+                config=Config(), channel_id="hypogeum", platform_deliverable_policy=policy_blank_category,
+                llm_call=fake_llm_call,
+            )
+        assert calls == []
+
+    def test_required_boolean_field_explicitly_false_is_present_not_missing(self, tmp_path):
+        # Real bug this fixes: TikTok's required_policy_fields
+        # (allow_comment/allow_duet/allow_stitch/content_preview_confirmed/
+        # express_consent_given) are all booleans -- an operator setting
+        # allow_duet=False (a deliberate, valid opt-out) was previously
+        # treated as "missing" by 'not class_entry.get(field)', wrongly
+        # blocking TikTok generation entirely. Every one of these fields
+        # explicitly False here must NOT block generation.
+        episode_dir = tmp_path
+        final_render_package = _seed_short_grounding(episode_dir)
+        policy = {
+            "tiktok": {"shorts": {
+                "enabled": True,
+                "content_preview_confirmed": True, "express_consent_given": True,
+                "allow_comment": True, "allow_duet": False, "allow_stitch": False,
+            }},
+        }
+
+        def fake_llm_call(system_prompt, input_package, **kw):
+            return {"platforms": {"tiktok": {
+                "description": "A real grounded description for tiktok. #Mystery",
+                "visible_hashtags": ["#Mystery"], "cta": "c",
+            }}}
+
+        entries = generate_canonical_platform_metadata_for_deliverable(
+            EPISODE_ID, episode_dir, "short_001", "shorts", ["tiktok"], final_render_package,
+            config=Config(), channel_id="hypogeum", platform_deliverable_policy=policy,
+            llm_call=fake_llm_call,
+        )
+        assert entries[0]["platform"] == "tiktok"
+
     def test_present_required_policy_field_generates_normally(self, tmp_path):
         episode_dir = tmp_path
         final_render_package = _seed_short_grounding(episode_dir)
@@ -356,3 +408,50 @@ class TestPolicyCompletenessPreCheck:
                 llm_call=fake_llm_call,
             )
         assert calls == []  # zero model calls -- not even for the policy-complete instagram
+
+
+class TestRequiredPolicyFieldPresenceValidator:
+    """
+    Direct unit coverage for hypogeum.publishing.canonical_metadata.
+    is_required_policy_field_present() -- the ONE shared validator used
+    by both the pre-generation check above and the readiness-side checks
+    in hypogeum.publishing.canonical_metadata.validate_canonical_platform_metadata()
+    and hypogeum.publishing.cross_platform_readiness.check_cross_platform_readiness().
+
+    Two real, opposite-direction bugs this replaces:
+      - 'not class_entry.get(field)' treated boolean False and numeric 0
+        as missing (too strict -- rejected a legitimate False).
+      - 'field not in class_entry' treated an explicit None, an
+        all-whitespace string, or an empty list/dict as present (too
+        permissive -- accepted real absence of content).
+    """
+
+    def test_missing_key_is_missing(self):
+        assert is_required_policy_field_present({}, "categoryId") is False
+
+    def test_none_value_is_missing(self):
+        assert is_required_policy_field_present({"categoryId": None}, "categoryId") is False
+
+    def test_whitespace_only_string_is_missing(self):
+        assert is_required_policy_field_present({"categoryId": "   "}, "categoryId") is False
+
+    def test_empty_list_is_missing(self):
+        assert is_required_policy_field_present({"allow_list": []}, "allow_list") is False
+
+    def test_empty_dict_is_missing(self):
+        assert is_required_policy_field_present({"settings": {}}, "settings") is False
+
+    def test_boolean_false_is_present(self):
+        assert is_required_policy_field_present({"ai_disclosure": False}, "ai_disclosure") is True
+
+    def test_boolean_true_is_present(self):
+        assert is_required_policy_field_present({"ai_disclosure": True}, "ai_disclosure") is True
+
+    def test_numeric_zero_is_present(self):
+        assert is_required_policy_field_present({"retry_count": 0}, "retry_count") is True
+
+    def test_real_non_empty_string_is_present(self):
+        assert is_required_policy_field_present({"categoryId": "27"}, "categoryId") is True
+
+    def test_none_class_entry_is_missing(self):
+        assert is_required_policy_field_present(None, "categoryId") is False

@@ -1,0 +1,105 @@
+{
+  "episode_id": "ep_f3619022",
+  "operation": "tiktok_complete_2026-08-23",
+  "tiktok_channel_package_policy": {
+    "enabled": true,
+    "privacy": "PUBLIC_TO_EVERYONE",
+    "content_preview_confirmed": true,
+    "express_consent_given": true,
+    "allow_comment": true,
+    "allow_duet": true,
+    "allow_stitch": true
+  },
+  "tiktok_account_id": "6a83540477555aae01af46ca",
+  "post_ids": {
+    "short_001": "6a89752c7a56b107295b2b2c",
+    "short_002": "6a897539c2f26fb88c8c21c9",
+    "short_003": "6a897546c2f26fb88c8c2a16"
+  },
+  "put_count": 3,
+  "post_calls_issued": 0,
+  "post_mutation_verification_get": {
+    "short_001": {
+      "post_id": "6a89752c7a56b107295b2b2c",
+      "platforms": [
+        "youtube",
+        "instagram",
+        "facebook",
+        "tiktok"
+      ],
+      "tiktok_platform_specific_data": {
+        "tiktokSettings": {
+          "privacy_level": "PUBLIC_TO_EVERYONE",
+          "content_preview_confirmed": true,
+          "express_consent_given": true,
+          "allow_comment": true,
+          "allow_duet": true,
+          "allow_stitch": true
+        },
+        "__platformUserIdSnapshot": "-000CwwE9oAXc4f1jRM55YLi2RSniionWADU",
+        "__usernameSnapshot": "thehypogeum1"
+      },
+      "title": "Europe's Erdstall Tunnels Hide a Passage No One Can Explain",
+      "content_length": 1090,
+      "media_url": "https://media.zernio.com/media/1787435290979_q2kgxekj_short_0_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435312901_48tqtbg8_short_001.recomposed_v1.jpg",
+      "scheduledFor": "2026-08-24T18:00:00.000Z",
+      "timezone": "UTC"
+    },
+    "short_002": {
+      "post_id": "6a897539c2f26fb88c8c21c9",
+      "platforms": [
+        "youtube",
+        "instagram",
+        "facebook",
+        "tiktok"
+      ],
+      "tiktok_platform_specific_data": {
+        "tiktokSettings": {
+          "privacy_level": "PUBLIC_TO_EVERYONE",
+          "content_preview_confirmed": true,
+          "express_consent_given": true,
+          "allow_comment": true,
+          "allow_duet": true,
+          "allow_stitch": true
+        },
+        "__platformUserIdSnapshot": "-000CwwE9oAXc4f1jRM55YLi2RSniionWADU",
+        "__usernameSnapshot": "thehypogeum1"
+      },
+      "title": "The Erdstall Tunnel Cut Into a 6,000-Year-Old Stone Age Tomb",
+      "content_length": 1012,
+      "media_url": "https://media.zernio.com/media/1787435297969_0dad42p0_short_1_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435314790_pubcjvz1_short_002.recomposed_v1.jpg",
+      "scheduledFor": "2026-08-26T18:00:00.000Z",
+      "timezone": "UTC"
+    },
+    "short_003": {
+      "post_id": "6a897546c2f26fb88c8c2a16",
+      "platforms": [
+        "youtube",
+        "instagram",
+        "facebook",
+        "tiktok"
+      ],
+      "tiktok_platform_specific_data": {
+        "tiktokSettings": {
+          "privacy_level": "PUBLIC_TO_EVERYONE",
+          "content_preview_confirmed": true,
+          "express_consent_given": true,
+          "allow_comment": true,
+          "allow_duet": true,
+          "allow_stitch": true
+        },
+        "__platformUserIdSnapshot": "-000CwwE9oAXc4f1jRM55YLi2RSniionWADU",
+        "__usernameSnapshot": "thehypogeum1"
+      },
+      "title": "Medieval Europe Recorded Everything, Except the Erdstall Tunnels",
+      "content_length": 1154,
+      "media_url": "https://media.zernio.com/media/1787435304922_2lhd4zlw_short_2_ep_f3619022.repaired_v1.mp4",
+      "media_thumbnail": "https://media.zernio.com/media/1787435317204_hjyeytp4_short_003.recomposed_v1.jpg",
+      "scheduledFor": "2026-08-28T18:00:00.000Z",
+      "timezone": "UTC"
+    }
+  },
+  "generated_at": "2026-08-23T07:46:40.403100+00:00"
+}

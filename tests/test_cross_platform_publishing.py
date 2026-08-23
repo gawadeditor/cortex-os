@@ -45,7 +45,11 @@ SHORT_DELIVERABLE_IDS = ["short_sh_0", "short_sh_1", "short_sh_2"]
 
 HYPOGEUM_MATRIX = {
     "youtube": {"main_episode": {"enabled": True}, "shorts": {"enabled": True}},
-    "tiktok": {"main_episode": {"enabled": False}, "shorts": {"enabled": True, "privacy": "PUBLIC_TO_EVERYONE"}},
+    "tiktok": {"main_episode": {"enabled": False}, "shorts": {
+        "enabled": True, "privacy": "PUBLIC_TO_EVERYONE",
+        "content_preview_confirmed": True, "express_consent_given": True,
+        "allow_comment": True, "allow_duet": True, "allow_stitch": True,
+    }},
     "instagram": {"main_episode": {"enabled": False}, "shorts": {"enabled": True}},
     "facebook": {"main_episode": {"enabled": False}, "shorts": {"enabled": True}},
 }
@@ -532,6 +536,161 @@ class TestCrossPlatformReadinessBlocking:
         assert tiktok_short.status == "fail"
         assert "privacy_level" in tiktok_short.reason
 
+    def test_missing_required_policy_fields_block_independently_of_privacy(self, db_path, assets_root):
+        policy = json.loads(json.dumps(HYPOGEUM_MATRIX))
+        for f in ("content_preview_confirmed", "express_consent_given", "allow_comment", "allow_duet", "allow_stitch"):
+            policy["tiktok"]["shorts"].pop(f, None)
+        _setup_channel(db_path, platform_deliverable_policy=policy)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        tiktok_short = next(c for c in result.for_platform("tiktok") if c.deliverable_id == "short_sh_0")
+        assert tiktok_short.status == "fail"
+        assert "content_preview_confirmed" in tiktok_short.reason
+        assert "allow_comment" in tiktok_short.reason
+
+    def test_all_required_tiktok_policy_fields_pass_when_fully_configured(self, db_path, assets_root):
+        _setup_channel(db_path)  # HYPOGEUM_MATRIX already includes all 5 fields
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        for short_id in ("short_sh_0", "short_sh_1", "short_sh_2"):
+            tiktok_short = next(c for c in result.for_platform("tiktok") if c.deliverable_id == short_id)
+            assert tiktok_short.status == "pass", tiktok_short.reason
+            assert tiktok_short.evidence["required_policy_fields"] == {
+                "content_preview_confirmed": True, "express_consent_given": True,
+                "allow_comment": True, "allow_duet": True, "allow_stitch": True,
+            }
+
+
+class TestCrossPlatformReadinessResolvesRepairedVideoAssetId:
+    """
+    2026-08-23: check_cross_platform_readiness() previously always derived
+    a Short's video path from the generation-time index filename
+    (short_{i}_{episode_id}.mp4), silently ignoring shorts_renders[i].
+    video_asset_id even when it pointed at an immutably-versioned repaired
+    render sitting right next to the original -- the exact real defect
+    that made ep_f3619022's repaired Shorts invisible to this check.
+    """
+
+    def test_readiness_reads_the_video_asset_id_file_not_the_index_file(self, db_path, assets_root, monkeypatch):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        # Promote an immutable "repaired" copy alongside the untouched
+        # original, and point shorts_renders[0].video_asset_id at it --
+        # exactly the real live-repair pattern.
+        repaired_path = ep_dir / f"short_0_{EPISODE_ID}.repaired_v1.mp4"
+        repaired_path.write_bytes(b"repaired short 0" * 500)
+        pkg_path = ep_dir / f"final_render_package_{EPISODE_ID}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["shorts_renders"][0]["video_asset_id"] = f"episodes/{EPISODE_ID}/short_0_{EPISODE_ID}.repaired_v1"
+        pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+
+        # Original (unrepaired) file measures out-of-range (95s); the
+        # repaired file measures in-range (55s) -- readiness must probe
+        # the REPAIRED path, proving it resolved video_asset_id and not
+        # the stale index-derived filename.
+        original_path = ep_dir / f"short_0_{EPISODE_ID}.mp4"
+
+        def _path_aware_duration(path):
+            if str(path) == str(repaired_path):
+                return 55.0
+            if str(path) == str(original_path):
+                return 95.0
+            return 30.0
+
+        monkeypatch.setattr(
+            "hypogeum.publishing.cross_platform_readiness._probe_duration_seconds",
+            _path_aware_duration,
+        )
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        fb_short0 = next(c for c in result.for_platform("facebook") if c.deliverable_id == "short_sh_0")
+        assert fb_short0.status == "pass", fb_short0.reason
+        assert fb_short0.evidence["duration_seconds"] == 55.0
+
+    def test_shorts_without_video_asset_id_fall_back_to_index_convention(self, db_path, assets_root, monkeypatch):
+        """Backward compatibility: an unrepaired historical package (no
+        video_asset_id set on any short) behaves exactly as before."""
+        monkeypatch.setattr(
+            "hypogeum.publishing.cross_platform_readiness._probe_duration_seconds",
+            lambda path: 30.0,
+        )
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        for short_id in ("short_sh_0", "short_sh_1", "short_sh_2"):
+            fb_short = next(c for c in result.for_platform("facebook") if c.deliverable_id == short_id)
+            assert fb_short.status == "pass", fb_short.reason
+
+    def test_repaired_titles_captions_and_platform_contracts_all_resolve_for_three_shorts(self, db_path, assets_root, monkeypatch):
+        """
+        End-to-end proof (both fixes together, all three Shorts): the
+        exact real ep_f3619022 pattern -- shorts_renders[].short_id
+        already canonical ('short_001' style, never re-prefixed),
+        video_asset_id pointing at an immutable repaired file, real
+        in-range duration, real resolvable captions/titles -- all three
+        Shorts reach a clean pass on every real platform contract.
+        """
+        monkeypatch.setattr(
+            "hypogeum.publishing.cross_platform_readiness._probe_duration_seconds",
+            lambda path: 55.0,
+        )
+        _setup_channel(db_path)
+        ep_dir = assets_root / "episodes" / EPISODE_ID
+        ep_dir.mkdir(parents=True)
+        conn = get_connection(db_path)
+        try:
+            insert_episode(conn, episode_id=EPISODE_ID, created_at=_now_iso(), topic="A Real Topic", status="complete")
+            insert_episode_topic(conn, topic_id=f"topic_{EPISODE_ID}", channel_id=CHANNEL_ID, topic_text="A topic",
+                                  created_at=_now_iso(), updated_at=_now_iso(), episode_id=EPISODE_ID)
+            conn.commit()
+        finally:
+            conn.close()
+
+        short_ids = ["short_001", "short_002", "short_003"]
+        pkg = {
+            "metadata_source": {
+                "episode_title": "A Real Episode Title", "description": "A real description.",
+                "shorts_titles": [{"short_id": sid, "title": f"Real Title {sid}"} for sid in short_ids],
+                "shorts_captions": [{"short_id": sid, "caption": f"Real caption for {sid}.", "source": "test", "version": "v1"} for sid in short_ids],
+            },
+            "shorts_renders": [
+                {"short_id": sid, "video_asset_id": f"episodes/{EPISODE_ID}/{sid}.repaired_v1"}
+                for sid in short_ids
+            ],
+        }
+        (ep_dir / f"final_render_package_{EPISODE_ID}.json").write_text(json.dumps(pkg), encoding="utf-8")
+        (ep_dir / f"main_{EPISODE_ID}.mp4").write_bytes(b"main" * 500)
+        for sid in short_ids:
+            (ep_dir / f"{sid}.repaired_v1.mp4").write_bytes(f"{sid} repaired".encode() * 500)
+        from PIL import Image
+        thumbs_dir = ep_dir / "thumbnails"
+        thumbs_dir.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1280, 720), color=(60, 60, 60)).save(thumbs_dir / "candidate_1.jpg", "JPEG")
+        (ep_dir / f"thumbnail_package_{EPISODE_ID}.json").write_text(json.dumps({
+            "thumbnail_package_id": f"tp_{EPISODE_ID}", "episode_id": EPISODE_ID,
+            "main_thumbnail": {"asset_id": f"episodes/{EPISODE_ID}/thumbnails/candidate_1"},
+            "candidates": [{"candidate_id": "c1", "rank": 1, "selected": True, "status": "generated",
+                             "asset_id": f"episodes/{EPISODE_ID}/thumbnails/candidate_1"}],
+            "thumbnail_qa_report": {"overall_status": "pass", "checks": [], "failures": []},
+            "thumbnail_identity_report": {"verdict": "APPROVED", "violations": []},
+        }), encoding="utf-8")
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        for sid in short_ids:
+            assert sid in {c.deliverable_id for c in result.checks}, f"{sid} never double-prefixed"
+            for platform in ("youtube", "tiktok", "instagram", "facebook"):
+                check = next(c for c in result.for_platform(platform) if c.deliverable_id == sid)
+                assert check.status == "pass", f"{sid}/{platform}: {check.reason}"
+
     def test_existing_succeeded_intent_blocks_resubmission(self, db_path, assets_root):
         _setup_channel(db_path)
         _seed_episode(db_path, assets_root)
@@ -655,6 +814,9 @@ class TestCaptionsAndPlatformSettingsReachTheRealRequest:
             # submission.
             assert call["tiktokSettings"]["content_preview_confirmed"] is True
             assert call["tiktokSettings"]["express_consent_given"] is True
+            assert call["tiktokSettings"]["allow_comment"] is True
+            assert call["tiktokSettings"]["allow_duet"] is True
+            assert call["tiktokSettings"]["allow_stitch"] is True
 
     def test_tiktok_settings_never_attached_to_instagram_or_facebook_platform_entries(self, db_path, assets_root):
         """

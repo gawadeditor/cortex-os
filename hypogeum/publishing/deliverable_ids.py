@@ -53,9 +53,21 @@ def resolve_short_deliverable_id(short_entry: Optional[dict], index: int) -> str
     generic "clean up a broken/placeholder short_id" rule, applicable to
     any channel's episode with the same defect — nothing here is
     Hypogeum-specific.
+
+    Idempotent (2026-08-23 fix): a raw_short_id already in canonical
+    deliverable_id form (starts with 'short_' — e.g. a package whose
+    short_id was corrected to match metadata_source.shorts_titles[].
+    short_id's OWN convention directly, as the ep_f3619022 live-repair
+    phase did) is returned AS-IS, never re-prefixed into
+    'short_short_...'. A bare, non-prefixed raw_short_id (the original,
+    generation-time convention, e.g. 'sh_000') still gets 'short_'
+    prepended exactly as before — every unrepaired historical package's
+    behavior is unchanged.
     """
     raw_short_id = (short_entry or {}).get("short_id") or ""
     if raw_short_id and "_placeholder" not in raw_short_id:
+        if raw_short_id.startswith("short_"):
+            return raw_short_id
         return f"short_{raw_short_id}"
     return f"short_{index + 1:03d}"
 

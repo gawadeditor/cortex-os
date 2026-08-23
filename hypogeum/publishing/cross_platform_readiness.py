@@ -50,7 +50,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from hypogeum.artifact_compatibility import _probe_duration_seconds
-from hypogeum.publishing.deliverable_ids import classify_deliverable_class, resolve_required_deliverable_ids
+from hypogeum.publishing.deliverable_ids import (
+    classify_deliverable_class,
+    resolve_required_deliverable_ids,
+    resolve_short_deliverable_id,
+)
 from hypogeum.publishing.provider_repository import resolve_active_binding
 from hypogeum.publishing.readiness import (
     CaptionResolutionError,
@@ -105,10 +109,32 @@ def _load_render_package(episode_dir: Path, episode_id: str) -> dict:
         return {}
 
 
-def _deliverable_file_path(episode_dir: Path, episode_id: str, deliverable_id: str, deliverable_ids_in_order: List[str]) -> Path:
+def _deliverable_file_path(
+    episode_dir: Path, episode_id: str, deliverable_id: str, deliverable_ids_in_order: List[str],
+    final_render_package: Optional[dict] = None,
+) -> Path:
+    """
+    2026-08-23 fix: resolve a Short's video from its own canonical
+    video_asset_id (final_render_package['shorts_renders'][i].
+    video_asset_id) when present -- the same assets_root-relative,
+    extension-less convention hypogeum.agents.production_output_gate's
+    own equivalent fix already uses for caption_asset_id/video_asset_id.
+    Previously this function only ever derived the generation-time index
+    filename, so a repaired render promoted under its own immutable
+    versioned asset id (the original short_{index}_{episode_id}.mp4
+    preserved untouched alongside it) was invisible here. Falls back to
+    the index convention when video_asset_id is empty/absent or
+    final_render_package is not supplied — every unrepaired historical
+    package's behavior is unchanged.
+    """
     if deliverable_id == "main_episode":
         return episode_dir / f"main_{episode_id}.mp4"
     index = deliverable_ids_in_order.index(deliverable_id) - 1  # -1 for main_episode offset
+    shorts_renders = (final_render_package or {}).get("shorts_renders") or []
+    if 0 <= index < len(shorts_renders):
+        video_asset_id = shorts_renders[index].get("video_asset_id") or ""
+        if video_asset_id:
+            return episode_dir.parent.parent / f"{video_asset_id}.mp4"
     return episode_dir / f"short_{index}_{episode_id}.mp4"
 
 
@@ -190,7 +216,9 @@ def check_cross_platform_readiness(
 
     for deliverable_id in deliverable_ids:
         deliverable_class = classify_deliverable_class(deliverable_id)
-        file_path = _deliverable_file_path(episode_dir, episode_id, deliverable_id, deliverable_ids)
+        file_path = _deliverable_file_path(
+            episode_dir, episode_id, deliverable_id, deliverable_ids, final_render_package,
+        )
 
         for platform, platform_policy in policy.items():
             class_entry = (platform_policy or {}).get(deliverable_class, {})
@@ -288,6 +316,21 @@ def check_cross_platform_readiness(
                             )
                         else:
                             evidence["privacy_value"] = privacy_value
+
+                    if contract.required_policy_fields:
+                        missing_policy_fields = [
+                            f for f in contract.required_policy_fields if f not in (class_entry or {})
+                        ]
+                        if missing_policy_fields:
+                            failures.append(
+                                f"platform {platform!r} requires policy field(s) {missing_policy_fields} to be "
+                                f"set but platform_deliverable_policy has no value configured for them on "
+                                f"({platform!r}, {deliverable_class!r})"
+                            )
+                        else:
+                            evidence["required_policy_fields"] = {
+                                f: class_entry[f] for f in contract.required_policy_fields
+                            }
 
             existing_status = _existing_intent_status(db_path, channel_id, episode_id, deliverable_id, platform)
             if existing_status in ("succeeded", "open"):

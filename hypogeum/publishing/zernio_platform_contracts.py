@@ -54,11 +54,33 @@ class PlatformContract:
     scheduling_supported: bool
     thumbnail_supported: bool
     thumbnail_field: Optional[str]
-    # Platform-specific settings object this contract requires to be
-    # present (with these exact sub-keys, all True/set) before an
-    # autonomous submission is safe — e.g. TikTok's mandatory consent
-    # flags. Keys not listed here are optional per the documentation.
+    # Platform-specific settings this contract requires to be present,
+    # with a value FIXED at this (provider) level regardless of any
+    # channel's own policy -- e.g. a field with only one valid value for
+    # every caller. Keys not listed here are optional per the
+    # documentation. Rarely used now that policy-driven fields below
+    # exist -- prefer required_policy_fields for anything that is a real
+    # per-channel choice (even a "must be true" legal consent flag is a
+    # channel/operator decision, not a provider constant).
     required_settings: dict = field(default_factory=dict)
+    # Documented settings-object field names this contract knows about
+    # that a Channel Package's platform_deliverable_policy MAY supply a
+    # value for (beyond the single privacy_field/privacy_allowed_values
+    # pair, which keeps its own dedicated enum-validated handling). When
+    # present in policy_entry, passed through verbatim into the built
+    # settings object under the SAME key name -- this module only
+    # records that the key is a real, documented field for this
+    # platform; it never invents or defaults a value itself. Never
+    # channel-specific: this is provider (Zernio/TikTok/etc) knowledge,
+    # not a Hypogeum editorial choice -- the ACTUAL values live in the
+    # Channel Package's own platform_deliverable_policy, never here.
+    policy_passthrough_fields: Tuple[str, ...] = ()
+    # Subset of policy_passthrough_fields that MUST be present in
+    # policy_entry (in addition to privacy_field, when privacy_required)
+    # before this platform is considered ready for autonomous submission
+    # -- readiness fails closed, per (deliverable, platform), when any
+    # of these is absent from the channel's own configured policy.
+    required_policy_fields: Tuple[str, ...] = ()
     settings_body_key: Optional[str] = None  # e.g. "tiktokSettings", root-level
     known_gaps: Tuple[str, ...] = ()
 
@@ -80,10 +102,26 @@ ZERNIO_PLATFORM_CONTRACTS: dict = {
         scheduling_supported=True,
         thumbnail_supported=True,
         thumbnail_field="tiktokSettings.video_cover_image_url",
-        required_settings={
-            "content_preview_confirmed": True,
-            "express_consent_given": True,
-        },
+        # 2026-08-23: content_preview_confirmed/express_consent_given were
+        # previously hardcoded True here regardless of any channel's own
+        # policy -- moved to policy_passthrough_fields/required_policy_fields
+        # below. Even a "must be true" legal consent flag is a real
+        # per-channel operator decision (whose consent, for which content),
+        # never a provider constant Factory Core should assert on a
+        # channel's behalf.
+        required_settings={},
+        # Verified live via docs.zernio.com/platforms/tiktok (2026-08-23):
+        # allow_comment/allow_duet/allow_stitch (boolean; duet/stitch
+        # "required for videos") plus the two legal consent flags are all
+        # real, documented tiktokSettings fields.
+        policy_passthrough_fields=(
+            "content_preview_confirmed", "express_consent_given",
+            "allow_comment", "allow_duet", "allow_stitch",
+        ),
+        required_policy_fields=(
+            "content_preview_confirmed", "express_consent_given",
+            "allow_comment", "allow_duet", "allow_stitch",
+        ),
         settings_body_key="tiktokSettings",
         known_gaps=(
             "exact allowed privacy_level values are account/creator-specific — "
@@ -91,6 +129,11 @@ ZERNIO_PLATFORM_CONTRACTS: dict = {
             "docs state this must be fetched from a creator-info endpoint, which "
             "this contract does not yet call",
             "timezone behavior for scheduledFor not documented for TikTok specifically",
+            "commercialContentType (branded/commercial-content declaration) is "
+            "documented but deliberately never set by this contract or any "
+            "policy value below -- only set explicitly, per-episode, when "
+            "content genuinely qualifies as branded content; omission is the "
+            "correct default, never invented.",
         ),
     ),
     "instagram": PlatformContract(
@@ -165,11 +208,23 @@ def build_platform_settings(platform: str, policy_entry: dict) -> Optional[dict]
     silently diverge.
 
     Returns None when this platform has no settings object to build
-    (Instagram/Facebook today — no required_settings, no privacy field).
-    Never invents a policy VALUE that isn't in policy_entry; only adds
-    the contract's own documented required_settings (fixed operational
-    flags with no per-episode data source, e.g. TikTok's consent
-    acknowledgements) when this platform is genuinely being targeted.
+    (Instagram/Facebook today — no required_settings, no privacy field,
+    no policy_passthrough_fields).
+
+    Never invents a policy VALUE that isn't in policy_entry:
+    - contract.required_settings supplies only fixed, provider-constant
+      values with no per-channel choice at all (rare -- prefer
+      required_policy_fields for anything that is a real operator
+      decision, even a "must be true" consent flag).
+    - contract.privacy_field's value comes only from policy_entry["privacy"].
+    - Every other name in contract.policy_passthrough_fields (which
+      includes required_policy_fields -- required ones are also
+      passthrough) is copied verbatim from policy_entry ONLY when the
+      channel's own policy actually set it; a genuinely required field
+      the channel never configured is simply absent here, never defaulted
+      -- readiness (check_cross_platform_readiness) is what fails that
+      combination closed, not this function inventing a value to paper
+      over it.
     """
     contract = get_platform_contract(platform)
     if contract is None or not contract.verified:
@@ -183,5 +238,8 @@ def build_platform_settings(platform: str, policy_entry: dict) -> Optional[dict]
         # object itself.
         leaf = contract.privacy_field.split(".")[-1]
         settings[leaf] = policy_entry["privacy"]
+    for field_name in contract.policy_passthrough_fields:
+        if field_name in policy_entry:
+            settings[field_name] = policy_entry[field_name]
 
     return settings or None

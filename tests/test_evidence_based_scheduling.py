@@ -49,9 +49,9 @@ def _make_channel(db_path, channel_id="ch1", **profile_kwargs):
     )
 
 
-def _seed_evidence(db_path, *, channel_id, platform, deliverable_id, n=6, weekday=1, hour=15, avg_view_pct=0.85):
+def _seed_evidence(db_path, *, channel_id, platform, deliverable_id, n=6, weekday=1, hour=15, avg_view_pct=0.85, id_offset=0):
     conn = get_connection(db_path)
-    for i in range(n):
+    for i in range(id_offset, id_offset + n):
         pub_at = _NOW - timedelta(days=7 * i)
         while pub_at.weekday() != weekday:
             pub_at -= timedelta(days=1)
@@ -291,3 +291,43 @@ class TestEveryPlatformIndependent:
         profile = get_channel_operations_profile("ch1", db_path=db_path)
         overrides = profile.deliverable_schedule_policy["short_001"]["platform_overrides"]
         assert set(overrides.keys()) == {"youtube"}
+
+
+class TestFallbackToAnalyticsTransition:
+    """
+    2026-08-23 (Phase 4 requirement): 'when evidence becomes sufficient,
+    the periodic analytics sync must allow later cycles to move
+    automatically to analytics mode'. Proves the actual TRANSITION across
+    two sequential refresh calls -- not just two independent static
+    snapshots -- for the SAME deliverable/platform: first refresh (thin
+    evidence) leaves the platform on the base fallback slot; more
+    evidence accumulates; second refresh (same call, no code change, no
+    manual step) promotes it to analytics mode automatically.
+    """
+
+    def test_second_refresh_promotes_once_evidence_accumulates(self, tmp_path):
+        db_path = tmp_path / "t.db"
+        initialize_schema(db_path)
+        _make_channel(
+            db_path,
+            deliverable_schedule_policy={"main_episode": {"day_of_week": "thursday", "time_of_day": "18:00", "timezone": "UTC"}},
+            analytics_scheduling_policy={"main_episode": {"youtube": {"enabled": True, "min_sample_size": 5, "min_confidence": 0.5}}},
+        )
+
+        # First refresh: only 2 real samples -- below min_sample_size=5.
+        _seed_evidence(db_path, channel_id="ch1", platform="youtube", deliverable_id="main_episode", n=2, weekday=1, hour=15)
+        r1 = refresh_analytics_scheduling_policy("ch1", db_path=db_path, now=_NOW, assets_root=tmp_path)
+        assert r1.deliverables_updated == []
+        profile = get_channel_operations_profile("ch1", db_path=db_path)
+        assert "platform_overrides" not in profile.deliverable_schedule_policy["main_episode"]
+
+        # Evidence accumulates: 3 more samples land (total 5, meets threshold).
+        _seed_evidence(db_path, channel_id="ch1", platform="youtube", deliverable_id="main_episode", n=3, weekday=1, hour=15, id_offset=2)
+
+        # Second refresh, same call, no manual intervention -- promotes automatically.
+        r2 = refresh_analytics_scheduling_policy("ch1", db_path=db_path, now=_NOW, assets_root=tmp_path)
+        assert r2.deliverables_updated == ["main_episode"]
+        profile = get_channel_operations_profile("ch1", db_path=db_path)
+        override = profile.deliverable_schedule_policy["main_episode"]["platform_overrides"]["youtube"]
+        assert override["selection_mode"] == "analytics"
+        assert override["sample_count"] >= 5

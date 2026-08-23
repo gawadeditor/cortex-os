@@ -150,6 +150,130 @@ def _wc_get(key: str, default: str, db_path: Path) -> str:
         return default
 
 
+def is_worker_heartbeat_stale(db_path: Path, max_age_seconds: float = 300.0) -> bool:
+    """
+    True when worker_control.worker_heartbeat_at (see run_worker()'s own
+    heartbeat write, Step-loop, 2026-08-23) is older than max_age_seconds,
+    OR has never been recorded at all -- the "no evidence of liveness" case
+    is treated as stale, never as "not stale because we can't tell", so a
+    caller that never checks for None separately still fails safe.
+
+    Never raises for a malformed/missing worker_control row -- returns
+    True (stale) for anything it cannot parse, matching the same fail-
+    closed-on-ambiguity discipline the rest of this module already uses
+    for the singleton lock and per-channel operator_enabled gate.
+
+    Pure read -- makes no database write, never touches the singleton
+    lock or heartbeat itself.
+    """
+    raw = _wc_get("worker_heartbeat_at", "", db_path)
+    if not raw:
+        return True
+    try:
+        heartbeat_at = datetime.fromisoformat(raw)
+        if heartbeat_at.tzinfo is None:
+            heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return True
+    try:
+        age_seconds = (_now_utc() - heartbeat_at).total_seconds()
+    except TypeError:
+        return True
+    return age_seconds > max_age_seconds
+
+
+_worker_singleton_lock_registered = False
+
+
+def _acquire_worker_singleton_lock() -> str | None:
+    """
+    Refuse to start a second, concurrent, mutation-capable process against
+    the same DB. Returns None on success (lock acquired, this process's
+    own PID now written to _WORKER_PID_FILE, atexit cleanup registered);
+    a human-readable conflict reason otherwise (nothing written).
+
+    2026-08-23, corrected same day: originally scoped to the long-running
+    daemon only (an --once/--gated-episode-id/bounded one-shot was
+    exempted, on the theory that such invocations were "designed to run
+    alongside a daemon for a single supervised operation"). That was
+    wrong -- a gated or one-shot invocation still claims from run_queue,
+    still runs the real pipeline, still stages/publishes; it is exactly
+    as mutation-capable as the daemon loop and must be covered by the
+    SAME singleton lock. Every real run_worker.py entry point (the
+    daemon's own run_worker(), and _run_gated_cli()) now calls this one
+    shared function -- there is no second, narrower lock. The only things
+    exempt from ever calling this at all are genuinely read-only
+    diagnostic tools that never claim/write anything (e.g.
+    scripts/schedule_projection_hypogeum.py), which simply never call it
+    in the first place -- there is no in-process bypass flag.
+
+    _WORKER_PID_FILE is the same fixed, hardcoded, cross-module-shared
+    path run_dashboard.py and hypogeum/observability.py both
+    independently read to detect "is a worker running" -- this function
+    never changes its location, only adds the missing check-before-write
+    it never had.
+
+    Liveness check: os.kill(pid, 0) — raises ProcessLookupError for a
+    dead PID (stale lock file from a crash — safely overwritten,
+    logged), PermissionError for a live PID owned by another user (still
+    a real conflict — refused), or succeeds silently for a live PID
+    owned by this same user (a real conflict — refused).
+    """
+    global _worker_singleton_lock_registered
+
+    try:
+        if _WORKER_PID_FILE.exists():
+            existing_pid_str = _WORKER_PID_FILE.read_text().strip()
+            if existing_pid_str:
+                existing_pid = int(existing_pid_str)
+                try:
+                    _os.kill(existing_pid, 0)
+                except ProcessLookupError:
+                    log.warning(
+                        "worker_pid_file_stale existing_pid=%d — no such process, overwriting",
+                        existing_pid,
+                    )
+                except PermissionError:
+                    return (
+                        f"existing_pid={existing_pid} is alive (owned by another user) — "
+                        f"refusing to start a second mutation-capable process against the same DB"
+                    )
+                else:
+                    return (
+                        f"existing_pid={existing_pid} is alive — refusing to start a second "
+                        f"mutation-capable process against the same DB"
+                    )
+    except (ValueError, OSError) as exc:
+        log.warning("worker_pid_file_check_error error=%s — proceeding", exc)
+
+    try:
+        _WORKER_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _WORKER_PID_FILE.write_text(str(_os.getpid()))
+    except Exception as exc:
+        log.warning("worker_pid_file_write_failed error=%s", exc)
+        return None  # best-effort -- a write failure alone never blocks the caller
+
+    if not _worker_singleton_lock_registered:
+        import atexit as _atexit
+        _atexit.register(_release_worker_singleton_lock)
+        _worker_singleton_lock_registered = True
+
+    return None
+
+
+def _release_worker_singleton_lock() -> None:
+    """Removes _WORKER_PID_FILE only if it still names THIS process's own
+    PID (never another process's, e.g. one that acquired the lock after
+    this process's own stale registration somehow survived). Safe to call
+    multiple times (idempotent) and safe to call when the lock was never
+    acquired (no-op)."""
+    try:
+        if _WORKER_PID_FILE.exists() and _WORKER_PID_FILE.read_text().strip() == str(_os.getpid()):
+            _WORKER_PID_FILE.unlink()
+    except Exception:
+        pass
+
+
 def _sync_analytics_background(db_path: Path, config) -> None:
     """
     Background analytics sync — runs automatically, non-blocking, best-effort.
@@ -287,14 +411,30 @@ def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
         # _check_and_refill_queue()'s own (see that call site's comment
         # for the full rationale); an operator-disabled channel's already-
         # complete deliverables are never auto-published either.
+        #
+        # 2026-08-23 (autonomy safety semantics correction): fails CLOSED
+        # on a missing/unreadable profile -- a channel with no
+        # ChannelOperationsProfile at all, or one this read couldn't
+        # parse, must never be treated as autonomously enabled for a
+        # mutating/paid action (publishing spends real provider calls and
+        # makes real external posts). This mirrors hypogeum.worker_
+        # integration.load_operations_profile_or_fail()'s own contract
+        # for production execution -- staging/publishing get the same
+        # fail-closed guarantee here, at the autonomous sweep's own entry
+        # point, rather than relying solely on _resolve_bundle_definitions_
+        # for_channel()'s downstream empty-list fallback to accidentally
+        # produce the same result.
         from hypogeum.channel_config import get_channel_operations_profile
         try:
             ops_profile = get_channel_operations_profile(channel_id, db_path=db_path)
         except RuntimeError as exc:
             log.error("publishing_operator_enabled_check_error channel=%s error=%s", channel_id, exc)
             ops_profile = None
-        if ops_profile is not None and not ops_profile.operator_enabled:
-            log.info("publishing_operator_disabled channel=%s — skipping", channel_id)
+        if ops_profile is None or not ops_profile.operator_enabled:
+            log.info(
+                "publishing_operator_disabled_or_no_profile channel=%s has_profile=%s — skipping",
+                channel_id, ops_profile is not None,
+            )
             continue
 
         bundle_definitions = _resolve_bundle_definitions_for_channel(channel_id, db_path=db_path)
@@ -471,19 +611,31 @@ def _check_and_refill_queue(
         # disabled never even triggers a fresh (paid) discovery cycle or
         # auto-approves a new topic in the first place, rather than
         # discovering/queuing work that would only be refused later at
-        # claim time. A channel with no ChannelOperationsProfile at all
-        # (operator_enabled defaults meaningless without one) is treated
-        # as enabled -- unchanged, fail-open-on-absence behavior, matching
-        # every other optional-profile gate in this same loop (buffer
-        # gate, bundle definitions).
+        # claim time.
+        #
+        # 2026-08-23 (autonomy safety semantics correction): a channel
+        # with no ChannelOperationsProfile at all (or one this read
+        # couldn't parse) now fails CLOSED here -- discovery is a real,
+        # paid action (topic_discovery.run_discovery_cycle() makes real
+        # LLM/Perplexity calls) and approve_candidate() (this loop's own
+        # auto-approve path below) has no ChannelOperationsProfile gate
+        # of its own at all, so this is the ONLY gate standing between
+        # an unconfigured channel and autonomous spend/topic-approval.
+        # Previously fail-open-on-absence, matching the buffer/bundle-
+        # definitions gates' own (correct, for THOSE non-mutating checks)
+        # behavior -- but "no restriction configured" is the wrong
+        # default for an action that spends money and mutates state.
         from hypogeum.channel_config import get_channel_operations_profile
         try:
             ops_profile = get_channel_operations_profile(channel_id, db_path=db_path)
         except RuntimeError as exc:
             log.error("discovery_operator_enabled_check_error channel=%s error=%s", channel_id, exc)
             ops_profile = None
-        if ops_profile is not None and not ops_profile.operator_enabled:
-            log.info("discovery_operator_disabled channel=%s — skipping refill", channel_id)
+        if ops_profile is None or not ops_profile.operator_enabled:
+            log.info(
+                "discovery_operator_disabled_or_no_profile channel=%s has_profile=%s — skipping refill",
+                channel_id, ops_profile is not None,
+            )
             continue
 
         # ── Deliverable/bundle buffer gate (Step 0 discovery-refill gate
@@ -953,70 +1105,14 @@ def run_worker(
     except Exception as exc:
         log.warning("startup_preflight_error error=%s", exc)
 
-    # Singleton enforcement (2026-08-23): refuse to start a second
-    # concurrent worker against the same DB. The PID file already existed
-    # (see below) but was write-only -- nothing ever checked it before
-    # writing, so two `run_worker.py` processes could run concurrently
-    # with nothing stopping it. A PID file whose recorded process is no
-    # longer alive is stale (the prior worker crashed or was killed
-    # without a clean atexit) and is safely overwritten -- os.kill(pid, 0)
-    # is the standard liveness probe (raises ProcessLookupError for a dead
-    # PID, PermissionError for a live PID owned by another user — both
-    # distinguishable from "no such process"). This check is bypassed
-    # entirely for --once/gated/bounded one-shot invocations, which are
-    # designed to run alongside (or instead of) a long-running daemon
-    # for a single supervised operation and were never the process this
-    # lock is protecting against.
-    if not once:
-        try:
-            if _WORKER_PID_FILE.exists():
-                existing_pid_str = _WORKER_PID_FILE.read_text().strip()
-                if existing_pid_str:
-                    existing_pid = int(existing_pid_str)
-                    try:
-                        _os.kill(existing_pid, 0)
-                    except ProcessLookupError:
-                        log.warning(
-                            "worker_pid_file_stale existing_pid=%d — no such process, overwriting",
-                            existing_pid,
-                        )
-                    except PermissionError:
-                        log.error(
-                            "worker_singleton_conflict existing_pid=%d is alive (owned by another "
-                            "user) — refusing to start a second worker",
-                            existing_pid,
-                        )
-                        return 1
-                    else:
-                        log.error(
-                            "worker_singleton_conflict existing_pid=%d is alive — refusing to "
-                            "start a second worker against the same DB",
-                            existing_pid,
-                        )
-                        return 1
-        except (ValueError, OSError) as exc:
-            log.warning("worker_pid_file_check_error error=%s — proceeding", exc)
-
-    # Write PID file so the dashboard can detect this worker regardless of whether
-    # it was started via the dashboard UI or directly from the CLI. Without this,
-    # _get_worker_pid() returns None for CLI workers, causing the dashboard's
-    # orphan reconciliation to falsely mark active runs as orphaned.
-    try:
-        _WORKER_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _WORKER_PID_FILE.write_text(str(_os.getpid()))
-    except Exception as exc:
-        log.warning("worker_pid_file_write_failed error=%s", exc)
-
-    # Remove PID file when this process exits for any reason (normal or signal).
-    import atexit as _atexit
-    _pid_str = str(_os.getpid())
-    def _remove_pid_file():
-        try:
-            if _WORKER_PID_FILE.exists() and _WORKER_PID_FILE.read_text().strip() == _pid_str:
-                _WORKER_PID_FILE.unlink()
-        except Exception:
-            pass
-    _atexit.register(_remove_pid_file)
+    # Singleton enforcement (2026-08-23, corrected same day — see
+    # _acquire_worker_singleton_lock()'s own docstring): every mutation-
+    # capable invocation of this process acquires the SAME shared lock,
+    # daemon or one-shot alike. No `once`/gated exemption.
+    conflict_reason = _acquire_worker_singleton_lock()
+    if conflict_reason is not None:
+        log.error("worker_singleton_conflict %s", conflict_reason)
+        return 1
 
     # Register this worker in the control table so the dashboard can show status.
     # Do NOT reset stop_requested here — the dashboard may have set it before
@@ -1081,9 +1177,9 @@ def run_worker(
         # normally on something slow". Writing wall-clock "now" every
         # iteration, unconditionally, before any step that could hang or
         # raise, lets any external monitor (dashboard, launchd health
-        # check) detect a stalled worker by comparing this timestamp's
-        # age against the configured --interval, without needing to
-        # reason about worker_status's own value at all.
+        # check) detect a stalled worker via is_worker_heartbeat_stale()
+        # below, without needing to reason about worker_status's own
+        # value at all.
         _wc_set("worker_heartbeat_at", _now_utc().isoformat(), db_path)
         _wc_set("worker_status", "claiming", db_path)
         try:
@@ -1129,16 +1225,15 @@ def run_worker(
         stop_reason if not _shutdown_requested else "signal",
     )
     # Explicit cleanup on the normal graceful-exit path (2026-08-23) --
-    # the atexit handler registered above is a safety net for a crash or
-    # an unhandled signal that skips past this point, but it only fires
-    # at real PROCESS exit. A caller that invokes run_worker() directly
-    # and keeps running afterward (e.g. many sequential calls within one
-    # long-lived test process) would otherwise leave a stale-but-still-
-    # matching PID file on disk indefinitely, since atexit never fires
-    # between such calls -- exactly what the new singleton check above
-    # now depends on being accurate. Same guard as _remove_pid_file(): only
-    # removes the file if it still names THIS process's own PID.
-    _remove_pid_file()
+    # the atexit handler _acquire_worker_singleton_lock() registered is a
+    # safety net for a crash or an unhandled signal that skips past this
+    # point, but it only fires at real PROCESS exit. A caller that invokes
+    # run_worker() directly and keeps running afterward (e.g. many
+    # sequential calls within one long-lived test process) would
+    # otherwise leave a stale-but-still-matching PID file on disk
+    # indefinitely, since atexit never fires between such calls -- exactly
+    # what the singleton check depends on being accurate.
+    _release_worker_singleton_lock()
     return 0
 
 
@@ -1348,40 +1443,56 @@ def _run_gated_cli(
             print(reason, file=sys.stderr)
             return 1
 
-    conn = get_connection(db_path)
+    # Singleton enforcement (2026-08-23): a gated/one-shot invocation is
+    # exactly as mutation-capable as the daemon loop (claims from
+    # run_queue, runs the real pipeline, may stage/publish) and shares
+    # the SAME lock -- see _acquire_worker_singleton_lock()'s own
+    # docstring for why the prior "one-shot invocations are exempt"
+    # design was wrong. Acquired here, after the cheap validity checks
+    # above but before any run_queue mutation (existing-row lookup below
+    # is read-only; enqueue()/poll() are not).
+    conflict_reason = _acquire_worker_singleton_lock()
+    if conflict_reason is not None:
+        print(f"worker_singleton_conflict: {conflict_reason}", file=sys.stderr)
+        return 1
+
     try:
-        existing_row = conn.execute(
-            "SELECT queue_id FROM run_queue WHERE channel_id = ? AND episode_id = ? "
-            "AND status = 'queued' ORDER BY queued_at DESC LIMIT 1",
-            (channel_id, episode_id),
-        ).fetchone()
+        conn = get_connection(db_path)
+        try:
+            existing_row = conn.execute(
+                "SELECT queue_id FROM run_queue WHERE channel_id = ? AND episode_id = ? "
+                "AND status = 'queued' ORDER BY queued_at DESC LIMIT 1",
+                (channel_id, episode_id),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if existing_row is not None:
+            queue_id = existing_row["queue_id"]
+            log.info(
+                "gated_cli_reusing_existing_queue_row channel=%s episode_id=%s queue_id=%s",
+                channel_id, episode_id, queue_id,
+            )
+        else:
+            queue_id = enqueue(
+                db_path=db_path, channel_id=channel_id, episode_id=episode_id,
+                priority=-100, source="manual",
+            )
+        topic_resolver = (lambda _claimed_row: topic) if topic else None
+        executor = build_gated_pipeline_executor(db_path=db_path, bounded_run_id=bounded_run_id)
+
+        result = poll(
+            worker_id=str(uuid.uuid4()), db_path=db_path, dry_run=False,
+            max_iterations=1, config=config, topic_resolver=topic_resolver,
+            pipeline_executor=executor, bounded_run_id=bounded_run_id,
+        )
+        proc = next((r for r in result.results if r.status != "empty"), None)
+        output = proc.__dict__ if proc is not None else {"status": "empty", "queue_id": queue_id}
+        print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+
+        return 0 if proc is not None and proc.status == "completed" else 1
     finally:
-        conn.close()
-
-    if existing_row is not None:
-        queue_id = existing_row["queue_id"]
-        log.info(
-            "gated_cli_reusing_existing_queue_row channel=%s episode_id=%s queue_id=%s",
-            channel_id, episode_id, queue_id,
-        )
-    else:
-        queue_id = enqueue(
-            db_path=db_path, channel_id=channel_id, episode_id=episode_id,
-            priority=-100, source="manual",
-        )
-    topic_resolver = (lambda _claimed_row: topic) if topic else None
-    executor = build_gated_pipeline_executor(db_path=db_path, bounded_run_id=bounded_run_id)
-
-    result = poll(
-        worker_id=str(uuid.uuid4()), db_path=db_path, dry_run=False,
-        max_iterations=1, config=config, topic_resolver=topic_resolver,
-        pipeline_executor=executor, bounded_run_id=bounded_run_id,
-    )
-    proc = next((r for r in result.results if r.status != "empty"), None)
-    output = proc.__dict__ if proc is not None else {"status": "empty", "queue_id": queue_id}
-    print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
-
-    return 0 if proc is not None and proc.status == "completed" else 1
+        _release_worker_singleton_lock()
 
 
 def _run_provision_bounded_cli(

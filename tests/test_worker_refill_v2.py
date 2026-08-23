@@ -72,6 +72,20 @@ def _init_db(tmp_path: Path) -> Path:
         conn.commit()
     finally:
         conn.close()
+
+    # 2026-08-23: _check_and_refill_queue()'s per-channel operator_enabled
+    # gate now fails CLOSED on a missing ChannelOperationsProfile
+    # (autonomy-safety correction -- discovery is a paid, mutating
+    # action). A real row here (this file uses a real DB, unlike
+    # test_autonomous_discovery_loop.py's globally-mocked connection)
+    # keeps every existing test in this file exercising the v1/v2 refill
+    # logic they actually target, rather than being blocked earlier by
+    # the (now correct) missing-profile gate.
+    from hypogeum.channel_config import create_channel_operations_profile
+    create_channel_operations_profile(
+        channel_id=CHANNEL_ID, channel_name="Refill Test Channel", timezone="UTC",
+        operator_enabled=True, db_path=db,
+    )
     return db
 
 

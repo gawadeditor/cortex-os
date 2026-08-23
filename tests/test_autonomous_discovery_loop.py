@@ -526,7 +526,22 @@ class TestQueueRefillTrigger:
         def _fake_get_conn(db_path=None):
             return _NoClose(real_conn)
 
+        # 2026-08-23: _check_and_refill_queue()'s per-channel operator_enabled
+        # gate now fails CLOSED on a missing/unreadable ChannelOperationsProfile
+        # (autonomy-safety correction -- discovery is a paid, mutating action).
+        # This helper's channels are SimpleNamespace stand-ins with no real
+        # channel_operations_profiles row, so every channel_id must resolve
+        # to an explicitly-enabled fake profile here to keep exercising the
+        # threshold/multi-channel/auto-approve logic these tests actually
+        # target, rather than being blocked earlier by the (now correct)
+        # missing-profile gate.
+        fake_profile = SimpleNamespace(operator_enabled=True, deliverable_bundle_definitions=[])
+
+        def _fake_get_ops_profile(channel_id, db_path=None):
+            return fake_profile
+
         with patch("hypogeum.channel_config.list_channel_profiles", side_effect=_fake_list_channels), \
+             patch("hypogeum.channel_config.get_channel_operations_profile", side_effect=_fake_get_ops_profile), \
              patch("hypogeum.topic_discovery.run_discovery_cycle", side_effect=_fake_discovery), \
              patch("hypogeum.topic_discovery.approve_candidate", side_effect=_fake_approve), \
              patch("hypogeum.db.get_connection", side_effect=_fake_get_conn):
@@ -619,7 +634,17 @@ class TestMultiChannelRefill:
         def _fake_get_conn(db_path=None):
             return _NoClose(real_conn)
 
+        # 2026-08-23: see TestQueueRefillTrigger._run_refill()'s own comment
+        # -- the per-channel operator_enabled gate now fails closed on a
+        # missing profile, so every fake channel here needs an explicitly-
+        # enabled one.
+        fake_profile = SimpleNamespace(operator_enabled=True, deliverable_bundle_definitions=[])
+
+        def _fake_get_ops_profile(channel_id, db_path=None):
+            return fake_profile
+
         with patch("hypogeum.channel_config.list_channel_profiles", return_value=channels), \
+             patch("hypogeum.channel_config.get_channel_operations_profile", side_effect=_fake_get_ops_profile), \
              patch("hypogeum.topic_discovery.run_discovery_cycle", side_effect=_fake_discovery), \
              patch("hypogeum.topic_discovery.approve_candidate", side_effect=_fake_approve), \
              patch("hypogeum.db.get_connection", side_effect=_fake_get_conn):
@@ -701,7 +726,14 @@ class TestAutoApprove:
         def _fake_get_conn(db_path=None):
             return _NoClose(real_conn)
 
+        # 2026-08-23: see TestQueueRefillTrigger._run_refill()'s own comment.
+        fake_profile = SimpleNamespace(operator_enabled=True, deliverable_bundle_definitions=[])
+
+        def _fake_get_ops_profile(channel_id, db_path=None):
+            return fake_profile
+
         with patch("hypogeum.channel_config.list_channel_profiles", return_value=[self._fake_channel()]), \
+             patch("hypogeum.channel_config.get_channel_operations_profile", side_effect=_fake_get_ops_profile), \
              patch("hypogeum.topic_discovery.run_discovery_cycle", side_effect=_fake_discovery), \
              patch("hypogeum.topic_discovery.approve_candidate", side_effect=_fake_approve), \
              patch("hypogeum.db.get_connection", side_effect=_fake_get_conn):

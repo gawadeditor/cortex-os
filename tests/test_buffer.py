@@ -448,7 +448,8 @@ class TestPartialPublicationBundleSemantics:
 
 def _make_channel_profile(db_path, channel_id):
     from hypogeum.channel_config import (
-        create_brand_profile, create_channel_profile, create_model_profile, create_publishing_profile,
+        create_brand_profile, create_channel_profile, create_channel_operations_profile,
+        create_model_profile, create_publishing_profile,
     )
     brand = create_brand_profile(name=f"{channel_id} Brand", db_path=db_path)
     model = create_model_profile(name=f"{channel_id} Model", db_path=db_path)
@@ -457,6 +458,17 @@ def _make_channel_profile(db_path, channel_id):
         channel_id=channel_id, name=channel_id,
         brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
         publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+    )
+    # 2026-08-23: _check_and_refill_queue()'s per-channel operator_enabled
+    # gate now fails CLOSED on a missing ChannelOperationsProfile (a real
+    # autonomy-safety correction -- discovery is a paid, mutating action)
+    # -- every test channel in this file needs an explicitly-enabled one
+    # to keep exercising the buffer-isolation logic these tests actually
+    # target, rather than being blocked earlier by the (now correct)
+    # missing-profile gate.
+    create_channel_operations_profile(
+        channel_id=channel_id, channel_name=channel_id, timezone="UTC",
+        operator_enabled=True, db_path=db_path,
     )
 
 

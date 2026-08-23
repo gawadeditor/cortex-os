@@ -43,6 +43,7 @@ from hypogeum.agents.visual_package_director import (
     _estimate_a2_tokens_per_scene,
     _flatten_beats_for_a2,
     _merge_a1_a2,
+    _renumber_short_scene_ids,
     run_visual_package_director,
 )
 from hypogeum.config import Config
@@ -1134,6 +1135,135 @@ class TestA3Validation:
 
         assert (tmp_path / "vpd_a1_meta_ep_pres.json").exists(), "A1 checkpoint must survive"
         assert (tmp_path / "vpd_a2_scenes_batch_0_ep_pres.json").exists(), "A2 checkpoint must survive"
+
+
+class TestRenumberShortSceneIds:
+    """
+    2026-08-23: regression coverage for the cross-batch scene_id collision
+    first observed live on ep_69df5bb0 -- a short's beats spanning more than
+    one Stage A2 batch (batch size ~7) caused every batch touching that
+    short to independently restart its scene_id suffix at s01, since each
+    A2 call has no visibility into what an earlier batch already assigned
+    the same short_id. scene_index (the true global position) was always
+    correct; only the human-facing scene_id string collided.
+    """
+
+    def test_reproduces_and_fixes_the_live_ep_69df5bb0_collision(self):
+        """Exact shape of the real failure: short_001's 6 beats split across
+        two batches (4 then 2), each batch numbering its own slice s01.."""
+        scenes = [
+            _make_scene("sh_short_001_s01", 31, "short", "short_001"),
+            _make_scene("sh_short_001_s02", 32, "short", "short_001"),
+            _make_scene("sh_short_001_s03", 33, "short", "short_001"),
+            _make_scene("sh_short_001_s04", 34, "short", "short_001"),
+            # batch boundary -- next A2 call restarts short_001 at s01
+            _make_scene("sh_short_001_s01", 35, "short", "short_001"),
+            _make_scene("sh_short_001_s02", 36, "short", "short_001"),
+        ]
+
+        _renumber_short_scene_ids(scenes)
+
+        assert [s["scene_id"] for s in scenes] == [
+            "sh_short_001_s01", "sh_short_001_s02", "sh_short_001_s03",
+            "sh_short_001_s04", "sh_short_001_s05", "sh_short_001_s06",
+        ]
+        # scene_index (the always-correct global position) is untouched
+        assert [s["scene_index"] for s in scenes] == [31, 32, 33, 34, 35, 36]
+
+        from hypogeum.scene_identity import enforce_global_scene_identity
+        enforce_global_scene_identity(scenes)  # must not raise
+
+    def test_multiple_shorts_each_get_independent_sequences(self):
+        scenes = [
+            _make_scene("sh_short_001_s01", 0, "short", "short_001"),
+            _make_scene("sh_short_002_s01", 1, "short", "short_002"),
+            _make_scene("sh_short_001_s01", 2, "short", "short_001"),  # collision
+            _make_scene("sh_short_002_s01", 3, "short", "short_002"),  # collision
+        ]
+
+        _renumber_short_scene_ids(scenes)
+
+        assert [s["scene_id"] for s in scenes] == [
+            "sh_short_001_s01", "sh_short_002_s01",
+            "sh_short_001_s02", "sh_short_002_s02",
+        ]
+
+    def test_main_episode_scenes_are_never_touched(self):
+        main_scenes = [_make_scene("s01", 0), _make_scene("s02", 1)]
+        original_ids = [s["scene_id"] for s in main_scenes]
+
+        _renumber_short_scene_ids(main_scenes)
+
+        assert [s["scene_id"] for s in main_scenes] == original_ids
+
+    def test_mixed_main_and_short_scenes_short_ids_fixed_main_untouched(self):
+        scenes = [
+            _make_scene("s01", 0),
+            _make_scene("sh_short_001_s01", 1, "short", "short_001"),
+            _make_scene("sh_short_001_s01", 2, "short", "short_001"),  # collision
+            _make_scene("s02", 3),
+        ]
+
+        _renumber_short_scene_ids(scenes)
+
+        assert [s["scene_id"] for s in scenes] == [
+            "s01", "sh_short_001_s01", "sh_short_001_s02", "s02",
+        ]
+
+    def test_end_to_end_two_colliding_a2_batches_do_not_raise(self, tmp_path):
+        """Full run_visual_package_director path: two A2 batch calls both
+        return sh_short_001_s01/s02 (mirroring the live collision exactly).
+        Stage A3's identity check must pass because the collision is
+        corrected before it runs."""
+        config = make_config()
+        meta   = _make_meta_package("ep_collide")
+        sp     = _make_script_package("ep_collide", n_main_beats=0, shorts=[
+            {
+                "short_id": "short_001",
+                "visual_directions": "",
+                "narration_beats": [
+                    {"beat_id": f"sb_{i:03d}", "beat_type": "narration",
+                     "text": f"Short beat {i} text about ancient history."}
+                    for i in range(4)
+                ],
+            }
+        ])
+
+        batch_calls = {"n": 0}
+
+        def mock_run_agent(**kwargs):
+            schema = kwargs.get("output_schema")
+            if schema == "vpd_skeleton_meta":
+                return meta
+            if schema == "vpd_skeleton_scene_batch":
+                batch_calls["n"] += 1
+                if batch_calls["n"] == 1:
+                    return {"scenes": [
+                        _make_scene("sh_short_001_s01", 0, "short", "short_001"),
+                        _make_scene("sh_short_001_s02", 1, "short", "short_001"),
+                    ]}
+                return {"scenes": [
+                    _make_scene("sh_short_001_s01", 2, "short", "short_001"),
+                    _make_scene("sh_short_001_s02", 3, "short", "short_001"),
+                ]}
+            return _make_prompts_batch([])
+
+        with patch("hypogeum.agents.visual_package_director.run_agent", side_effect=mock_run_agent), \
+             patch("hypogeum.agents.visual_package_director._compute_a2_batches",
+                   return_value=[["beat_a", "beat_b"], ["beat_c", "beat_d"]]), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/r", "https://cdn/r.jpg")), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result(episode_id="ep_collide")):
+            run_visual_package_director(sp, config, "ep_collide", tmp_path)
+
+        skeleton = json.loads((tmp_path / "visual_package_skeleton_ep_collide.json").read_text())
+        scene_ids = [s["scene_id"] for s in skeleton["scenes"]]
+        assert scene_ids == [
+            "sh_short_001_s01", "sh_short_001_s02",
+            "sh_short_001_s03", "sh_short_001_s04",
+        ]
+        assert len(scene_ids) == len(set(scene_ids))
 
 
 # ---------------------------------------------------------------------------

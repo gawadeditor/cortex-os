@@ -630,6 +630,7 @@ def run_visual_package_director(
             )
 
         # ── Stage A3: merge A1 + A2 batches → validate → write skeleton ──
+        _renumber_short_scene_ids(all_scenes)
         visual_package = _merge_a1_a2(meta_package, all_scenes, episode_id)
         try:
             validate("visual_package", visual_package)
@@ -1412,6 +1413,40 @@ def _compute_a2_batches(beats: list, n_entities: int) -> list:
 # ---------------------------------------------------------------------------
 # Stage A3 helper — merge A1 metadata + A2 scene batches
 # ---------------------------------------------------------------------------
+
+def _renumber_short_scene_ids(all_scenes: list) -> None:
+    """
+    Deterministically reassign the s{NN} suffix of every short scene's
+    scene_id, sequentially per short_id, in all_scenes list order.
+
+    Root cause (2026-08-23, first observed on ep_69df5bb0): each Stage A2
+    batch call plans its own scene_id suffix for a short's beats with no
+    visibility into what an earlier batch already assigned that same
+    short_id -- start_scene_index gives the LLM a correct *global*
+    position (reflected faithfully in scene_index, which is never wrong),
+    but nothing tells it the correct *per-short* continuation point. Any
+    short whose beats span more than one A2 batch (batch size ~7)
+    therefore restarts at s01 in every batch it touches, deterministically
+    colliding with the earlier batch's s01, s02, ... every time -- not an
+    LLM sampling fluke, so blindly retrying the same cached A2 batch
+    checkpoints reproduces the identical collision forever.
+
+    Called once, after all Stage A2 batches are merged into all_scenes and
+    before enforce_global_scene_identity() runs, so every downstream
+    consumer only ever sees the corrected, already-unique scene_id.
+    Main-episode scenes (short_id is None) are untouched -- their s{N}
+    form already comes from the correct global running index and has
+    never collided. scene_index itself is never touched here; it was
+    already globally correct.
+    """
+    counters: dict = {}
+    for s in all_scenes:
+        short_id = s.get("short_id")
+        if not short_id:
+            continue
+        counters[short_id] = counters.get(short_id, 0) + 1
+        s["scene_id"] = f"sh_{short_id}_s{counters[short_id]:02d}"
+
 
 def _merge_a1_a2(meta_package: dict, all_scenes: list, episode_id: str) -> dict:
     """

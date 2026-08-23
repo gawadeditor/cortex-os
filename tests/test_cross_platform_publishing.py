@@ -764,6 +764,47 @@ class TestCanonicalMetadataReadinessReproducesEpF3619022Incident:
         assert yt_main.status == "fail"
         assert "does not match the channel-approved categoryId" in yt_main.reason
 
+    def test_missing_ai_disclosure_fails_closed_for_a_short_not_just_main_episode(self, db_path, assets_root):
+        # Fixed 2026-08-23 (operator channel-policy decision, categoryId=27
+        # + ai_disclosure=true for youtube.main_episode AND youtube.shorts):
+        # ai_disclosure is a per-video containsSyntheticMedia disclosure
+        # obligation, not a main-episode-only concept -- removing it from a
+        # Short's canonical entry must block that Short's readiness exactly
+        # like removing it from main_episode does.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "short_sh_0", "youtube", ai_disclosure=None)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_short = next(c for c in result.for_platform("youtube") if c.deliverable_id == "short_sh_0")
+        assert yt_short.status == "fail"
+        assert "ai_disclosure is absent" in yt_short.reason
+
+    def test_categoryid_enforcement_is_intentionally_conditional_on_channel_policy_declaring_one(self, db_path, assets_root):
+        # Documents a real, deliberate architectural asymmetry between
+        # categoryId and ai_disclosure, so it is never mistaken for a bug:
+        # categoryId is a channel EDITORIAL PREFERENCE (a channel may
+        # legitimately have none), so Factory Core only validates a MATCH
+        # once the channel has declared one approved value (line
+        # "if approved_category:" in validate_canonical_platform_metadata)
+        # -- removing categoryId from the Channel Package reverts to "no
+        # opinion enforced", not a failure. ai_disclosure is a disclosure
+        # OBLIGATION, never optional once the platform is youtube, so it
+        # is unconditionally required regardless of what the policy says
+        # (see test_missing_ai_disclosure_fails_closed_for_a_short_not_
+        # just_main_episode above, and resolve to True/False, never
+        # omitted, at the canonical-entry level).
+        policy = json.loads(json.dumps(HYPOGEUM_MATRIX))
+        del policy["youtube"]["main_episode"]["categoryId"]
+        _setup_channel(db_path, platform_deliverable_policy=policy)
+        ep_dir = _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert "categoryId" not in yt_main.reason
+
     def test_category_matching_a_different_channel_approved_value_passes(self, db_path, assets_root):
         # Proves item 1's own point directly: "22" is accepted when the
         # CHANNEL policy approves it -- Factory Core has no opinion of

@@ -8,6 +8,13 @@
       "workflow_id": "hypogeum_main_production",
       "workflow_version": "1.0.0",
       "sha256": "1ad2f646d875afa056a581683c3a4d2a095db17b18d0c0eb206a6a9fe4de2776"
+    },
+    {
+      "path": "platform_distribution_policy_v1.json",
+      "role": "platform_distribution_policy",
+      "policy_id": "hypogeum_platform_distribution_policy_v1",
+      "policy_version": "1.2.0",
+      "sha256": "efc0b368107fb850da06274674879b8fd9717f7ba0305e39529c1f4534ee9d91"
     }
   ]
 }

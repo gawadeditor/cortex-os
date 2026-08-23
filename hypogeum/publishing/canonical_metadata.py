@@ -336,12 +336,19 @@ def validate_canonical_platform_metadata(
     if deliverable_class == "main_episode" and not metadata.thumbnail_ref:
         failures.append("thumbnail_ref is absent")
 
+    # -- AI/synthetic-media disclosure: required for every YouTube
+    # deliverable class (main_episode AND shorts), not main_episode-only
+    # -- containsSyntheticMedia is a per-video disclosure obligation, the
+    # same as categoryId above. Other platforms are not gated on this yet
+    # (see build_zernio_platform_specific_data()'s own docstring: only
+    # YouTube's containsSyntheticMedia mapping is verified/wired).
+    if platform == "youtube" and metadata.ai_disclosure is None:
+        failures.append("ai_disclosure is absent (must be explicitly True or False, never omitted)")
+
     # -- chapters: only required for a main_episode with a documented
     # title_field (i.e. YouTube today) -- "where applicable" per the
     # canonical contract's own field list.
     if deliverable_class == "main_episode" and platform == "youtube":
-        if metadata.ai_disclosure is None:
-            failures.append("ai_disclosure is absent (must be explicitly True or False, never omitted)")
         if len(metadata.chapters) < 3:
             failures.append(f"chapters has {len(metadata.chapters)} entries -- a main episode requires at least 3")
         else:

@@ -20,7 +20,9 @@ Coverage:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -30,11 +32,14 @@ import pytest
 
 from hypogeum.channel_config import (
     ChannelOperationsProfile,
+    ChannelPackagePolicyDriftError,
     create_channel_operations_profile,
     create_channel_profile,
     create_publishing_profile,
     get_channel_operations_profile,
     get_publishing_profile,
+    load_platform_distribution_policy,
+    sync_platform_distribution_policy_to_runtime,
     update_channel_operations_profile,
 )
 from hypogeum.db import get_connection, initialize_schema
@@ -546,3 +551,161 @@ class TestPublishingProfileUnaffected:
 
         after = get_publishing_profile(pub.publishing_profile_id, db_path=db_path)
         assert after == before
+
+
+# ===========================================================================
+# TestPlatformDistributionPolicySync — the versioned Channel Package file
+# is authoritative for platform_deliverable_policy, never the database.
+# Fixed 2026-08-23, see docs/operations/audits/
+# ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md item 8: the runtime
+# database had drifted ahead of platform_distribution_policy_v1.json
+# (TikTok consent fields were added directly via
+# update_channel_operations_profile(), bypassing the versioned file
+# entirely). All fixtures here use an isolated tmp_path packages_root --
+# never channel_packages/hypogeum/ and never .hypogeum-assets/hypogeum.db.
+# ===========================================================================
+
+
+
+def _write_policy_package(packages_root: Path, channel_id: str, policy_doc: dict):
+    pkg_dir = packages_root / channel_id
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = pkg_dir / "platform_distribution_policy_v1.json"
+    artifact_bytes = json.dumps(policy_doc, sort_keys=True).encode()
+    artifact_path.write_bytes(artifact_bytes)
+
+    manifest = {
+        "channel_id": channel_id,
+        "package_version": "1.0.0",
+        "artifacts": [{
+            "path": "platform_distribution_policy_v1.json",
+            "role": "platform_distribution_policy",
+            "policy_id": f"{channel_id}_platform_distribution_policy_v1",
+            "policy_version": policy_doc.get("policy_version", "1.0.0"),
+            "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+        }],
+    }
+    (pkg_dir / "channel_package_manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+    return artifact_path, artifact_bytes
+
+
+_MINIMAL_POLICY_DOC = {
+    "channel_id": "hypogeum",
+    "policy_version": "1.0.0",
+    "platform_deliverable_policy": {
+        "youtube": {
+            "main_episode": {"enabled": True, "categoryId": "27", "ai_disclosure": True},
+            "shorts": {"enabled": True, "categoryId": "27", "ai_disclosure": True},
+        },
+    },
+}
+
+
+class TestPlatformDistributionPolicySync:
+
+    def test_load_reads_live_file_and_verifies_checksum(self, tmp_path):
+        _write_policy_package(tmp_path, "hypogeum", _MINIMAL_POLICY_DOC)
+        doc = load_platform_distribution_policy("hypogeum", packages_root=tmp_path)
+        assert doc["platform_deliverable_policy"]["youtube"]["main_episode"]["categoryId"] == "27"
+
+    def test_editing_artifact_without_bumping_manifest_checksum_fails_closed(self, tmp_path):
+        artifact_path, _ = _write_policy_package(tmp_path, "hypogeum", _MINIMAL_POLICY_DOC)
+        # Simulate drift: the file on disk changes, but the manifest's
+        # registered sha256 is never updated to match.
+        edited = dict(_MINIMAL_POLICY_DOC)
+        edited["platform_deliverable_policy"] = dict(edited["platform_deliverable_policy"])
+        edited["platform_deliverable_policy"]["youtube"] = {
+            "main_episode": {"enabled": True, "categoryId": "99"},
+        }
+        artifact_path.write_bytes(json.dumps(edited, sort_keys=True).encode())
+
+        with pytest.raises(ChannelPackagePolicyDriftError, match="no longer matches"):
+            load_platform_distribution_policy("hypogeum", packages_root=tmp_path)
+
+    def test_missing_manifest_entry_fails_closed(self, tmp_path):
+        pkg_dir = tmp_path / "hypogeum"
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "channel_package_manifest.json").write_text(
+            json.dumps({"channel_id": "hypogeum", "package_version": "1.0.0", "artifacts": []})
+        )
+        with pytest.raises(ChannelPackagePolicyDriftError, match="no 'platform_distribution_policy' artifact"):
+            load_platform_distribution_policy("hypogeum", packages_root=tmp_path)
+
+    def test_missing_artifact_file_fails_closed(self, tmp_path):
+        pkg_dir = tmp_path / "hypogeum"
+        pkg_dir.mkdir(parents=True)
+        manifest = {
+            "channel_id": "hypogeum", "package_version": "1.0.0",
+            "artifacts": [{
+                "path": "platform_distribution_policy_v1.json",
+                "role": "platform_distribution_policy",
+                "sha256": "0" * 64,
+            }],
+        }
+        (pkg_dir / "channel_package_manifest.json").write_text(json.dumps(manifest))
+        with pytest.raises(ChannelPackagePolicyDriftError, match="unreadable"):
+            load_platform_distribution_policy("hypogeum", packages_root=tmp_path)
+
+    def test_malformed_json_fails_closed(self, tmp_path):
+        pkg_dir = tmp_path / "hypogeum"
+        pkg_dir.mkdir(parents=True)
+        artifact_path = pkg_dir / "platform_distribution_policy_v1.json"
+        artifact_bytes = b"{not valid json"
+        artifact_path.write_bytes(artifact_bytes)
+        manifest = {
+            "channel_id": "hypogeum", "package_version": "1.0.0",
+            "artifacts": [{
+                "path": "platform_distribution_policy_v1.json",
+                "role": "platform_distribution_policy",
+                "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+            }],
+        }
+        (pkg_dir / "channel_package_manifest.json").write_text(json.dumps(manifest))
+        with pytest.raises(ChannelPackagePolicyDriftError, match="not valid JSON"):
+            load_platform_distribution_policy("hypogeum", packages_root=tmp_path)
+
+    def test_sync_compiles_the_verified_file_into_the_runtime_profile(
+        self, tmp_path, db_path, canonical_channel,
+    ):
+        create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+        _write_policy_package(tmp_path, "hypogeum", _MINIMAL_POLICY_DOC)
+
+        profile = sync_platform_distribution_policy_to_runtime(
+            "hypogeum", packages_root=tmp_path, db_path=db_path,
+        )
+        assert profile.platform_deliverable_policy["youtube"]["main_episode"]["categoryId"] == "27"
+        assert profile.platform_deliverable_policy["youtube"]["shorts"]["ai_disclosure"] is True
+
+        # Re-read from the database directly -- proves it actually
+        # persisted, not just returned in-memory.
+        reread = get_channel_operations_profile("hypogeum", db_path=db_path)
+        assert reread.platform_deliverable_policy["youtube"]["main_episode"]["categoryId"] == "27"
+
+    def test_sync_never_writes_to_the_database_when_the_file_fails_verification(
+        self, tmp_path, db_path, canonical_channel,
+    ):
+        create_channel_operations_profile(db_path=db_path, **_valid_kwargs())
+        before = get_channel_operations_profile("hypogeum", db_path=db_path)
+        # No package written at tmp_path at all -- manifest missing entirely.
+
+        with pytest.raises(ChannelPackagePolicyDriftError):
+            sync_platform_distribution_policy_to_runtime(
+                "hypogeum", packages_root=tmp_path, db_path=db_path,
+            )
+
+        after = get_channel_operations_profile("hypogeum", db_path=db_path)
+        assert after.platform_deliverable_policy == before.platform_deliverable_policy
+
+    def test_real_hypogeum_channel_package_file_verifies_against_its_own_manifest(self):
+        # The real, checked-in channel_packages/hypogeum/ directory --
+        # proves the actual production artifact this repo ships passes
+        # its own checksum verification, not just a synthetic fixture.
+        doc = load_platform_distribution_policy("hypogeum")
+        policy = doc["platform_deliverable_policy"]
+        assert policy["youtube"]["main_episode"]["categoryId"] == "27"
+        assert policy["youtube"]["main_episode"]["ai_disclosure"] is True
+        assert policy["youtube"]["shorts"]["categoryId"] == "27"
+        assert policy["youtube"]["shorts"]["ai_disclosure"] is True
+        # The database drift this fix closed: TikTok's consent fields
+        # must still be present in the versioned file, not lost.
+        assert policy["tiktok"]["shorts"]["content_preview_confirmed"] is True

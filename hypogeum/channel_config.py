@@ -1688,6 +1688,128 @@ def update_channel_operations_profile(
     return True
 
 
+class ChannelPackagePolicyDriftError(RuntimeError):
+    """
+    A versioned Channel Package policy artifact (e.g.
+    platform_distribution_policy_v1.json) could not be located, read,
+    parsed, or its live sha256 no longer matches what
+    channel_package_manifest.json has registered for it. Always fails
+    closed -- never silently syncs an unverified or stale file into the
+    runtime channel_operations_profiles row.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def load_platform_distribution_policy(
+    channel_id: str, *, packages_root: Optional[Path] = None,
+) -> dict:
+    """
+    Reads channel_packages/{channel_id}/platform_distribution_policy_v1.json
+    fresh from disk (never cached) and verifies its sha256 against the
+    'platform_distribution_policy' artifact entry registered in that
+    channel's own channel_package_manifest.json -- fixed 2026-08-23, see
+    docs/operations/audits/ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md
+    item 8: the versioned file is the authoritative source for
+    platform_deliverable_policy, never the runtime database, mirroring
+    the exact drift-detection discipline hypogeum.workflow_executor
+    already applies to workflow_definition artifacts.
+
+    Raises ChannelPackagePolicyDriftError (never returns a partial or
+    stale result) if the manifest, the artifact file, or the checksum
+    match fails in any way.
+    """
+    from hypogeum.workflow_executor import (  # noqa: PLC0415 -- avoid a module-load-order cycle
+        channel_package_dir,
+        load_channel_package_manifest,
+    )
+
+    try:
+        manifest = load_channel_package_manifest(channel_id, packages_root=packages_root)
+    except Exception as exc:
+        raise ChannelPackagePolicyDriftError(
+            f"channel_package_manifest.json unreadable for channel_id={channel_id!r}: {exc}"
+        ) from exc
+
+    entry = next(
+        (a for a in manifest.get("artifacts", []) if a.get("role") == "platform_distribution_policy"),
+        None,
+    )
+    if entry is None:
+        raise ChannelPackagePolicyDriftError(
+            f"no 'platform_distribution_policy' artifact entry registered in "
+            f"channel_package_manifest.json for channel_id={channel_id!r}"
+        )
+
+    artifact_path = channel_package_dir(channel_id, packages_root=packages_root) / entry["path"]
+    try:
+        raw = artifact_path.read_bytes()
+    except OSError as exc:
+        raise ChannelPackagePolicyDriftError(
+            f"platform_distribution_policy artifact unreadable at {artifact_path}: {exc}"
+        ) from exc
+
+    live_checksum = hashlib.sha256(raw).hexdigest()
+    expected_checksum = entry.get("sha256")
+    if live_checksum != expected_checksum:
+        raise ChannelPackagePolicyDriftError(
+            f"live platform_distribution_policy checksum {live_checksum!r} for "
+            f"channel_id={channel_id!r} no longer matches the checksum "
+            f"{expected_checksum!r} registered in channel_package_manifest.json -- "
+            f"the file changed without the manifest being updated to match"
+        )
+
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ChannelPackagePolicyDriftError(
+            f"platform_distribution_policy artifact at {artifact_path} is not valid JSON: {exc}"
+        ) from exc
+
+    if "platform_deliverable_policy" not in doc:
+        raise ChannelPackagePolicyDriftError(
+            f"platform_distribution_policy artifact at {artifact_path} has no "
+            f"'platform_deliverable_policy' key"
+        )
+
+    return doc
+
+
+def sync_platform_distribution_policy_to_runtime(
+    channel_id: str, *, packages_root: Optional[Path] = None, db_path: Optional[Path] = None,
+) -> ChannelOperationsProfile:
+    """
+    The sole sanctioned path from the versioned, checksum-verified
+    platform_distribution_policy Channel Package artifact into the
+    runtime channel_operations_profiles row. A direct
+    update_channel_operations_profile(platform_deliverable_policy=...)
+    call that bypasses this function -- and therefore bypasses the
+    versioned file -- must not be used to change this policy; doing so
+    is exactly how the runtime database drifted ahead of
+    platform_distribution_policy_v1.json in the first place (TikTok's
+    consent fields were added directly to the database on 2026-08-23,
+    never reflected back into the versioned file until this fix folded
+    them in).
+
+    Fails closed via load_platform_distribution_policy() before ever
+    touching the database -- a missing/unreadable/checksum-mismatched
+    artifact never partially syncs.
+    """
+    policy_doc = load_platform_distribution_policy(channel_id, packages_root=packages_root)
+    update_channel_operations_profile(
+        channel_id, platform_deliverable_policy=policy_doc["platform_deliverable_policy"], db_path=db_path,
+    )
+    profile = get_channel_operations_profile(channel_id, db_path=db_path)
+    if profile is None:
+        raise RuntimeError(
+            f"sync_platform_distribution_policy_to_runtime: no ChannelOperationsProfile "
+            f"found after sync for channel_id={channel_id!r}"
+        )
+    return profile
+
+
 # ===========================================================================
 # Channel bootstrap workflow
 # ===========================================================================

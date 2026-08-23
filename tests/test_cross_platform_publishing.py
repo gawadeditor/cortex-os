@@ -13,8 +13,10 @@ call. No live cross-platform POST occurs anywhere in this file.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
+import subprocess
 
 import pytest
 
@@ -44,7 +46,7 @@ BUNDLE = DeliverableBundleDefinition(channel_id=CHANNEL_ID, bundle_id="main_epis
 SHORT_DELIVERABLE_IDS = ["short_sh_0", "short_sh_1", "short_sh_2"]
 
 HYPOGEUM_MATRIX = {
-    "youtube": {"main_episode": {"enabled": True}, "shorts": {"enabled": True}},
+    "youtube": {"main_episode": {"enabled": True, "categoryId": "27"}, "shorts": {"enabled": True, "categoryId": "27"}},
     "tiktok": {"main_episode": {"enabled": False}, "shorts": {
         "enabled": True, "privacy": "PUBLIC_TO_EVERYONE",
         "content_preview_confirmed": True, "express_consent_given": True,
@@ -120,6 +122,88 @@ def _setup_channel(db_path, *, platform_deliverable_policy=None, deliverable_sch
     )
 
 
+def _canonical_platform_metadata_entry(
+    deliverable_id, platform, *, description="A real description. #TestTag",
+    title="A Real Title", with_chapters=False, real_source_urls=("https://example.com/source",),
+    research_package_sha256="0" * 64,
+):
+    """
+    A real-shaped hypogeum.publishing.canonical_metadata.CanonicalPlatformMetadata
+    dict (fixed 2026-08-23, replacing the incident-only, YouTube/main-only
+    youtube_metadata_package field -- see docs/operations/audits/
+    ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md) satisfying every
+    validate_canonical_platform_metadata() check: real, non-placeholder
+    title/description/CTA, freshness fingerprint matching a real on-disk
+    artifact, sources tracing to the fixture's own research_package,
+    claim-to-source provenance, hashtag TOKENS present in the visible
+    description, backend tags kept separate from hashtags, and (for a
+    main_episode YouTube entry) >=3 chapters starting at 0.0s.
+    """
+    entry = {
+        "deliverable_id": deliverable_id, "platform": platform,
+        "title": title, "description": description,
+        "visible_hashtags": ["#TestTag"], "backend_tags": ["test tag one", "test tag two"],
+        "sources": [{"title": "Example Source", "url": u} for u in real_source_urls],
+        "claim_source_map": {"clm_001": {"sources": ["src_001"]}},
+        "cta": "Subscribe for more real, well-sourced content.",
+        "language": "en", "metadata_version": "v1",
+        "source_artifact_ids": [f"research_package_{EPISODE_ID}.json"],
+        "input_fingerprint": {f"research_package_{EPISODE_ID}.json": research_package_sha256},
+        "generated_at": _now_iso(), "approved_at": _now_iso(),
+        "first_comment": "A real first comment.",
+        "thumbnail_ref": f"episodes/{EPISODE_ID}/thumbnails/candidate_1",
+        "ai_disclosure": True,
+    }
+    if platform == "youtube":
+        entry["category_id"] = "27"  # channel-approved value, matches _setup_channel's own policy below
+    if with_chapters:
+        entry["chapters"] = [
+            {"start_seconds": 0.0, "title": "Intro"},
+            {"start_seconds": 12.0, "title": "Middle"},
+            {"start_seconds": 24.0, "title": "End"},
+        ]
+    return entry
+
+
+def _default_canonical_platform_metadata(n_shorts=3, *, research_package_sha256="0" * 64):
+    """
+    Complete canonical_platform_metadata covering every (deliverable_id,
+    platform) pair HYPOGEUM_MATRIX enables: main_episode -> youtube only;
+    each short -> all four platforms. Matches this fixture module's own
+    real topology, never a hypothetical one.
+    """
+    entries = [_canonical_platform_metadata_entry(
+        "main_episode", "youtube", with_chapters=True, research_package_sha256=research_package_sha256,
+        title="A Real Episode Title", description="A real description. #TestTag",
+    )]
+    for i in range(n_shorts):
+        short_id = f"short_sh_{i}"
+        for platform in ALL_PLATFORMS:
+            entries.append(_canonical_platform_metadata_entry(
+                short_id, platform, research_package_sha256=research_package_sha256,
+                title=f"A Real Short Title {i}",
+                description=f"A real, script-grounded caption for short {i}. #TestTag",
+            ))
+    return entries
+
+
+def _write_real_short_video(path, *, duration_seconds=5):
+    """
+    A real, ffprobe-measurable, moving-content video -- required since
+    cross_platform_readiness's chapter-validation gate refuses to trust
+    narration-duration summation alone and instead ffprobes the actual
+    deliverable file. A placeholder byte blob measures as 0s duration
+    and correctly fails that gate.
+    """
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=24:duration={duration_seconds}",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+        ],
+        check=True, capture_output=True,
+    )
+
+
 def _seed_episode(db_path, assets_root, episode_id=EPISODE_ID, *, n_shorts=3, with_captions=True, channel_id=CHANNEL_ID):
     conn = get_connection(db_path)
     try:
@@ -134,6 +218,18 @@ def _seed_episode(db_path, assets_root, episode_id=EPISODE_ID, *, n_shorts=3, wi
 
     ep_dir = assets_root / "episodes" / episode_id
     ep_dir.mkdir(parents=True)
+
+    # A real-shaped research package -- canonical_platform_metadata's own
+    # source/provenance checks trace against this file, never a fabricated
+    # standalone list (see hypogeum.publishing.canonical_metadata).
+    research_pkg = {
+        "source_registry": [{"source_id": "src_001", "url": "https://example.com/source", "inferred_type": "test"}],
+        "claims": [{"claim_id": "clm_001", "text": "A real claim.", "sources": ["src_001"]}],
+    }
+    research_pkg_path = ep_dir / f"research_package_{episode_id}.json"
+    research_pkg_path.write_text(json.dumps(research_pkg), encoding="utf-8")
+    research_package_sha256 = hashlib.sha256(research_pkg_path.read_bytes()).hexdigest()
+
     shorts_titles = [{"short_id": f"short_sh_{i}", "title": f"A Real Short Title {i}"} for i in range(n_shorts)]
     shorts_captions = (
         [{"short_id": f"short_sh_{i}", "caption": f"A real, script-grounded caption for short {i}.", "source": "test_fixture", "version": "v1"} for i in range(n_shorts)]
@@ -141,13 +237,16 @@ def _seed_episode(db_path, assets_root, episode_id=EPISODE_ID, *, n_shorts=3, wi
     )
     pkg = {
         "metadata_source": {
-            "episode_title": "A Real Episode Title", "description": "A real description.",
+            "episode_title": "A Real Episode Title", "description": "A real description. #TestTag",
             "shorts_titles": shorts_titles, "shorts_captions": shorts_captions,
+            "canonical_platform_metadata": _default_canonical_platform_metadata(
+                n_shorts, research_package_sha256=research_package_sha256,
+            ),
         },
         "shorts_renders": [{"short_id": f"sh_{i}"} for i in range(n_shorts)],
     }
     (ep_dir / f"final_render_package_{episode_id}.json").write_text(json.dumps(pkg), encoding="utf-8")
-    (ep_dir / f"main_{episode_id}.mp4").write_bytes(b"main bytes" * 500)
+    _write_real_short_video(ep_dir / f"main_{episode_id}.mp4")
     for i in range(n_shorts):
         (ep_dir / f"short_{i}_{episode_id}.mp4").write_bytes(f"short {i}".encode() * 500)
 
@@ -565,6 +664,379 @@ class TestCrossPlatformReadinessBlocking:
             }
 
 
+class TestCanonicalMetadataReadinessReproducesEpF3619022Incident:
+    """
+    Fixed 2026-08-23, see docs/operations/audits/
+    ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md. Deterministic
+    regression coverage reproducing the exact live-observed defect
+    pattern (a Zernio post with populated generic title/content but
+    blank platform-specific fields, sourced from a description that was
+    silently accepted from the raw research logline) against the
+    GENERIC, per-(deliverable_id, platform) canonical_platform_metadata
+    contract -- covering main_episode AND Shorts, never exempting either.
+    Each test isolates ONE missing/wrong field.
+    """
+
+    def _replace_entry(self, ep_dir, deliverable_id, platform, **overrides):
+        pkg = json.loads((ep_dir / f"final_render_package_{EPISODE_ID}.json").read_text())
+        entries = pkg["metadata_source"]["canonical_platform_metadata"]
+        for i, e in enumerate(entries):
+            if e["deliverable_id"] == deliverable_id and e["platform"] == platform:
+                new_entry = dict(e)
+                new_entry.update(overrides)
+                entries[i] = new_entry
+                break
+        else:
+            raise AssertionError(f"no existing entry for ({deliverable_id}, {platform}) to replace")
+        (ep_dir / f"final_render_package_{EPISODE_ID}.json").write_text(json.dumps(pkg), encoding="utf-8")
+
+    def _remove_entry(self, ep_dir, deliverable_id, platform):
+        pkg = json.loads((ep_dir / f"final_render_package_{EPISODE_ID}.json").read_text())
+        entries = pkg["metadata_source"]["canonical_platform_metadata"]
+        pkg["metadata_source"]["canonical_platform_metadata"] = [
+            e for e in entries if not (e["deliverable_id"] == deliverable_id and e["platform"] == platform)
+        ]
+        (ep_dir / f"final_render_package_{EPISODE_ID}.json").write_text(json.dumps(pkg), encoding="utf-8")
+
+    def test_missing_canonical_metadata_entry_fails_closed(self, db_path, assets_root):
+        # Reproduces the live ep_f3619022 state: no canonical entry for
+        # (main_episode, youtube) at all -- only the generic title/
+        # content fields, which is what let Zernio's post ship with
+        # every dedicated field blank.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._remove_entry(ep_dir, "main_episode", "youtube")
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "no canonical_platform_metadata entry found" in yt_main.reason
+
+    def test_description_verbatim_equal_to_research_logline_fails_closed(self, db_path, assets_root):
+        # The actual ep_f3619022 root cause reproduced against the new
+        # contract: a canonical entry whose description IS the raw
+        # research logline verbatim.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        (ep_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
+            json.dumps({"logline": "A raw research logline, never real publication copy."}), encoding="utf-8",
+        )
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            description="A raw research logline, never real publication copy.",
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "verbatim identical to a raw research" in yt_main.reason
+
+    def test_blank_backend_tags_pass_but_blank_hashtags_fail(self, db_path, assets_root):
+        # backend_tags has no "must be non-empty" requirement in the
+        # generic contract (unlike the incident-only draft) -- only
+        # visible_hashtags is required. This test proves that
+        # distinction is real, not accidental.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "main_episode", "youtube", visible_hashtags=[])
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "visible_hashtags is empty" in yt_main.reason
+
+    def test_category_not_matching_channel_policy_fails_closed(self, db_path, assets_root):
+        # Factory Core validates against the CHANNEL's own approved
+        # categoryId (from platform_deliverable_policy) -- never a
+        # hardcoded Hypogeum editorial value. "22" is not globally
+        # invalid; it is invalid HERE only because it does not match
+        # this channel's own configured "27".
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "main_episode", "youtube", category_id="22")
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "does not match the channel-approved categoryId" in yt_main.reason
+
+    def test_category_matching_a_different_channel_approved_value_passes(self, db_path, assets_root):
+        # Proves item 1's own point directly: "22" is accepted when the
+        # CHANNEL policy approves it -- Factory Core has no opinion of
+        # its own on which category is correct.
+        policy = json.loads(json.dumps(HYPOGEUM_MATRIX))
+        policy["youtube"]["main_episode"]["categoryId"] = "22"
+        _setup_channel(db_path, platform_deliverable_policy=policy)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "main_episode", "youtube", category_id="22")
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "pass", yt_main.reason
+
+    def test_fewer_than_three_chapters_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            chapters=[{"start_seconds": 0.0, "title": "Intro"}, {"start_seconds": 12.0, "title": "End"}],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "requires at least 3" in yt_main.reason
+
+    def test_chapters_not_starting_at_zero_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            chapters=[
+                {"start_seconds": 1.0, "title": "Intro"},
+                {"start_seconds": 13.0, "title": "Mid"},
+                {"start_seconds": 25.0, "title": "End"},
+            ],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "first chapter must start at 0.0s" in yt_main.reason
+
+    def test_chapter_shorter_than_ten_seconds_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            chapters=[
+                {"start_seconds": 0.0, "title": "Intro"},
+                {"start_seconds": 5.0, "title": "TooSoon"},
+                {"start_seconds": 20.0, "title": "End"},
+            ],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "must be at least 10 seconds" in yt_main.reason
+
+    def test_non_increasing_chapter_timestamps_fail_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            chapters=[
+                {"start_seconds": 0.0, "title": "Intro"},
+                {"start_seconds": 0.0, "title": "Also Intro"},
+                {"start_seconds": 20.0, "title": "End"},
+            ],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "strictly increasing" in yt_main.reason
+
+    def test_chapter_timestamp_beyond_final_duration_fails_closed(self, db_path, assets_root, monkeypatch):
+        # Real cross-check against the ACTUAL encoded file -- never trust
+        # narration-duration summation alone.
+        monkeypatch.setattr(
+            "hypogeum.publishing.cross_platform_readiness._probe_duration_seconds",
+            lambda path: 30.0,
+        )
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            chapters=[
+                {"start_seconds": 0.0, "title": "Intro"},
+                {"start_seconds": 12.0, "title": "Mid"},
+                {"start_seconds": 9999.0, "title": "Impossible"},
+            ],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "is not below the actual final encoded duration" in yt_main.reason
+
+    def test_missing_sources_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "main_episode", "youtube", sources=[])
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "sources is empty" in yt_main.reason
+
+    def test_source_url_not_in_research_package_fails_closed(self, db_path, assets_root):
+        # A non-empty sources list is NOT verification -- each URL must
+        # trace to the episode's own real Research Package.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            sources=[{"title": "Fabricated", "url": "https://not-in-research-package.example.com/fake"}],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "do not trace to this episode's own Research Package" in yt_main.reason
+
+    def test_malformed_source_url_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "main_episode", "youtube", sources=[{"title": "Bad", "url": "not-a-url"}])
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "not well-formed http(s) URLs" in yt_main.reason
+
+    def test_empty_claim_source_map_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "main_episode", "youtube", claim_source_map={})
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "claim_source_map is empty" in yt_main.reason
+
+    def test_claim_source_map_references_unknown_source_id_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            claim_source_map={"clm_001": {"sources": ["src_does_not_exist"]}},
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "references source_id(s) not in the Research Package" in yt_main.reason
+
+    def test_hashtag_substring_match_is_rejected_real_token_required(self, db_path, assets_root):
+        # A hashtag substring match is not valid token validation --
+        # "#Test" must NOT be satisfied by description text containing
+        # "#TestTagExtra" (a different, longer token).
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            description="A real description. #TestTagExtra", visible_hashtags=["#TestTag"],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "not valid token validation" in yt_main.reason
+
+    def test_backend_tags_overlapping_visible_hashtags_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            backend_tags=["testtag"], visible_hashtags=["#TestTag"],
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "must remain separate concepts" in yt_main.reason
+
+    def test_stale_input_fingerprint_fails_closed(self, db_path, assets_root):
+        # Metadata generated against a research_package.json that has
+        # since changed on disk -- freshness must fail closed rather
+        # than trust a stale approval.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(
+            ep_dir, "main_episode", "youtube",
+            input_fingerprint={f"research_package_{EPISODE_ID}.json": "0" * 64},
+        )
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "stale relative to current source inputs" in yt_main.reason
+
+    def test_missing_approved_at_timestamp_fails_closed(self, db_path, assets_root):
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._replace_entry(ep_dir, "main_episode", "youtube", approved_at=None)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "fail"
+        assert "approved_at timestamp is absent" in yt_main.reason
+
+    def test_fully_populated_package_passes(self, db_path, assets_root):
+        # Positive control -- proves the gate is genuinely satisfiable,
+        # not just permanently fail-closed.
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "pass", yt_main.reason
+
+    def test_gate_now_applies_to_shorts_too(self, db_path, assets_root):
+        # Fixed 2026-08-23: an earlier draft of this contract exempted
+        # Shorts entirely. The operator explicitly required this NOT be
+        # the case -- every Short/platform pair needs its own approved
+        # canonical metadata. This is the regression guard against ever
+        # silently re-exempting them.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        self._remove_entry(ep_dir, "short_sh_0", "youtube")
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_short = next(c for c in result.for_platform("youtube") if c.deliverable_id == "short_sh_0")
+        assert yt_short.status == "fail"
+        assert "no canonical_platform_metadata entry found" in yt_short.reason
+
+    def test_each_short_requires_its_own_distinct_canonical_metadata(self, db_path, assets_root):
+        # Silent reuse of one generic caption across all 4 platforms for
+        # a Short must not pass unless the Channel Package explicitly
+        # approves identical content -- proven here by each Short's
+        # fixture entry being genuinely distinct per platform and all
+        # passing independently.
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        for short_id in ("short_sh_0", "short_sh_1", "short_sh_2"):
+            for platform in ALL_PLATFORMS:
+                c = next(x for x in result.for_platform(platform) if x.deliverable_id == short_id)
+                assert c.status == "pass", f"{short_id}/{platform}: {c.reason}"
+
+
 class TestCrossPlatformReadinessResolvesRepairedVideoAssetId:
     """
     2026-08-23: check_cross_platform_readiness() previously always derived
@@ -655,11 +1127,32 @@ class TestCrossPlatformReadinessResolvesRepairedVideoAssetId:
             conn.close()
 
         short_ids = ["short_001", "short_002", "short_003"]
+        research_pkg = {
+            "source_registry": [{"source_id": "src_001", "url": "https://example.com/source", "inferred_type": "test"}],
+            "claims": [{"claim_id": "clm_001", "text": "A real claim.", "sources": ["src_001"]}],
+        }
+        research_pkg_path = ep_dir / f"research_package_{EPISODE_ID}.json"
+        research_pkg_path.write_text(json.dumps(research_pkg), encoding="utf-8")
+        research_package_sha256 = hashlib.sha256(research_pkg_path.read_bytes()).hexdigest()
+
+        canonical_platform_metadata = [
+            _canonical_platform_metadata_entry(
+                "main_episode", "youtube", with_chapters=True, research_package_sha256=research_package_sha256,
+            ),
+        ]
+        for sid in short_ids:
+            for platform in ("youtube", "tiktok", "instagram", "facebook"):
+                canonical_platform_metadata.append(_canonical_platform_metadata_entry(
+                    sid, platform, description=f"Real caption for {sid}. #TestTag",
+                    research_package_sha256=research_package_sha256,
+                ))
+
         pkg = {
             "metadata_source": {
-                "episode_title": "A Real Episode Title", "description": "A real description.",
+                "episode_title": "A Real Episode Title", "description": "A real description. #TestTag",
                 "shorts_titles": [{"short_id": sid, "title": f"Real Title {sid}"} for sid in short_ids],
                 "shorts_captions": [{"short_id": sid, "caption": f"Real caption for {sid}.", "source": "test", "version": "v1"} for sid in short_ids],
+                "canonical_platform_metadata": canonical_platform_metadata,
             },
             "shorts_renders": [
                 {"short_id": sid, "video_asset_id": f"episodes/{EPISODE_ID}/{sid}.repaired_v1"}
@@ -770,6 +1263,13 @@ class TestVerifiedContractsCoverRequiredPlatforms:
 
 class TestCaptionsAndPlatformSettingsReachTheRealRequest:
     def test_canonical_caption_reaches_real_content_field(self, db_path, assets_root):
+        # Fixed 2026-08-23 (item 3): _seed_episode() now populates a real
+        # canonical_platform_metadata entry for every Short/platform
+        # pair (see _pick_root_title_description()), which takes
+        # priority over the older metadata_source.shorts_captions
+        # resolution -- the fixture's canonical descriptions mirror the
+        # same real per-short caption text so this assertion still
+        # verifies the same real content actually reaches Zernio.
         _setup_channel(db_path)
         _seed_episode(db_path, assets_root)
         _bind_all_platforms(db_path)

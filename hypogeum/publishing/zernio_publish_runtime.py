@@ -215,6 +215,20 @@ class DeliverableFile:
     # populated best-effort by the package builder, never a second,
     # independent enforcement point.
     thumbnail_local_path: Optional[Path] = None
+    # Real production wiring for hypogeum.publishing.canonical_metadata
+    # (2026-08-23, see docs/operations/audits/
+    # ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md item 5): per-
+    # platform platforms[].platformSpecificData dicts (keyed by
+    # platform, e.g. {"youtube": {"categoryId": "27", ...}}), built by
+    # build_publish_package_from_episode_dir() from each platform's own
+    # resolved CanonicalPlatformMetadata via
+    # canonical_metadata.build_zernio_platform_specific_data(). Empty
+    # dict (default) when no canonical metadata was resolved for any
+    # platform -- never invented here.
+    platform_specific_data: Dict[str, dict] = field(default_factory=dict)
+    # Root-level, non-platform-specific Zernio request fields (tags/
+    # hashtags -- see canonical_metadata.build_zernio_root_fields()).
+    root_fields: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -474,6 +488,8 @@ def publish_episode_package(
                     publish_now=sched.publish_now,
                     is_draft=sched.is_draft,
                     platform_settings=platform_settings,
+                    platform_specific_data=deliverable.platform_specific_data,
+                    root_fields=deliverable.root_fields,
                 )
             except Exception as exc:
                 outcomes.append(DeliverablePublishOutcome(

@@ -157,6 +157,34 @@ def _existing_intent_status(db_path, channel_id: str, episode_id: str, deliverab
         conn.close()
 
 
+def _check_canonical_platform_metadata(
+    *, final_render_package: dict, deliverable_id: str, platform: str,
+    deliverable_class: str, class_entry: dict, final_duration_seconds: Optional[float],
+    episode_dir: Path, episode_id: str, contract,
+) -> List[str]:
+    """
+    Thin wrapper delegating to hypogeum.publishing.canonical_metadata --
+    the generic, permanent, per-(deliverable_id, platform) contract that
+    replaced this module's incident-only 2026-08-23 YouTube-only check.
+    Applies to EVERY (deliverable_id, platform) pair the channel enables,
+    Shorts included -- never exempted. See canonical_metadata.py's own
+    docstring for the full field/validation contract, and
+    docs/operations/audits/ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md
+    for why the earlier main-episode-only design was insufficient.
+    """
+    from hypogeum.publishing.canonical_metadata import (
+        resolve_canonical_platform_metadata,
+        validate_canonical_platform_metadata,
+    )
+
+    metadata = resolve_canonical_platform_metadata(final_render_package, deliverable_id, platform)
+    return validate_canonical_platform_metadata(
+        metadata, deliverable_class=deliverable_class, platform=platform,
+        class_entry=class_entry, final_duration_seconds=final_duration_seconds,
+        episode_dir=episode_dir, episode_id=episode_id, contract=contract,
+    )
+
+
 def check_cross_platform_readiness(
     episode_id: str,
     *,
@@ -209,9 +237,10 @@ def check_cross_platform_readiness(
     deliverable_ids = resolve_required_deliverable_ids(episode_id, assets_root)
 
     try:
-        resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
+        resolved_metadata = resolve_canonical_metadata(episode_id, episode_dir, db_path, metadata_override, final_render_package)
         metadata_error: Optional[MetadataResolutionError] = None
     except MetadataResolutionError as exc:
+        resolved_metadata = None
         metadata_error = exc
 
     for deliverable_id in deliverable_ids:
@@ -259,8 +288,12 @@ def check_cross_platform_readiness(
                 if "video/mp4" not in _ZERNIO_SUPPORTED_CONTENT_TYPES:
                     failures.append("video/mp4 is not in Zernio's documented supported content types")
 
+            # contract is resolved for EVERY platform now (YouTube has its
+            # own verified ZERNIO_PLATFORM_CONTRACTS entry, added
+            # 2026-08-23) -- needed below by the generic canonical-
+            # metadata check regardless of platform.
+            contract = get_platform_contract(platform)
             if platform != "youtube":
-                contract = get_platform_contract(platform)
                 if contract is None or not contract.verified:
                     failures.append(f"no verified Zernio platform contract for platform={platform!r} — fail closed")
                 else:
@@ -331,6 +364,17 @@ def check_cross_platform_readiness(
                             evidence["required_policy_fields"] = {
                                 f: class_entry[f] for f in contract.required_policy_fields
                             }
+
+            # Generic canonical-metadata contract, applied to EVERY
+            # enabled (deliverable_id, platform) pair -- Shorts included,
+            # never exempted (see canonical_metadata.py's own docstring).
+            final_duration = _probe_duration_seconds(file_path) if file_path.exists() else None
+            failures.extend(_check_canonical_platform_metadata(
+                final_render_package=final_render_package, deliverable_id=deliverable_id,
+                platform=platform, deliverable_class=deliverable_class, class_entry=class_entry,
+                final_duration_seconds=final_duration if (final_duration or 0) > 0 else None,
+                episode_dir=episode_dir, episode_id=episode_id, contract=contract,
+            ))
 
             existing_status = _existing_intent_status(db_path, channel_id, episode_id, deliverable_id, platform)
             if existing_status in ("succeeded", "open"):

@@ -324,16 +324,18 @@ class TestMetadataBlocking:
         assert meta.status == "fail"
         assert "shorts_titles" in meta.reason
 
-    def test_description_resolves_from_topic_brief_logline_reproduces_real_ep_f3619022_shape(self, episode_dir, db_path):
-        """The exact real ep_f3619022 shape: metadata_source.description and
-        metadata_source.logline are both empty (confirmed via the sealed
-        publishing_record and final_render_package on disk), but
-        topic_brief.logline holds the Executive Producer's real,
-        already-generated logline. This is the same completed-package
-        text that every other real production episode copies verbatim into
-        metadata_source.description/.logline -- reusing it here is not
-        inventing copy, it is resolving the canonical value from where it
-        already lives."""
+    def test_topic_brief_logline_never_substitutes_reproduces_real_ep_f3619022_shape(self, episode_dir, db_path):
+        """Fixed 2026-08-23 (the exact real ep_f3619022 root cause -- see
+        docs/operations/audits/ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md
+        item 2): metadata_source.description and metadata_source.logline
+        are both empty, and topic_brief.logline holds only the raw
+        research logline. This resolver now DELIBERATELY refuses to
+        accept topic_brief.logline as a description candidate at all --
+        internal research text may never become public-facing copy by
+        fallback. A_METADATA must fail closed for this reason directly,
+        not silently "resolve cleanly" and only fail for an unrelated
+        cause (shorts_titles, as an earlier version of this test
+        asserted)."""
         _attribute_to_channel(db_path)
         _write_render_package(
             episode_dir,
@@ -357,22 +359,18 @@ class TestMetadataBlocking:
 
         result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
-        # description itself resolves cleanly from topic_brief.logline...
-        assert "no canonical description found" not in meta.reason
-        assert "conflicting CANONICAL description" not in meta.reason
-        # ...but shorts_titles is a genuine, unresolved content gap in this
-        # real episode -- no artifact anywhere contains a real Shorts title
-        # (every episode in production history that ever populated
-        # shorts_titles used the short_id itself as a placeholder), so
-        # A_METADATA still fails closed, reported exactly for that reason,
-        # never fabricated.
         assert meta.status == "fail"
-        assert "shorts_titles" in meta.reason
+        assert "no canonical description found" in meta.reason
+        assert "topic_brief.logline is never accepted" in meta.reason
+        # The raw logline text must never appear anywhere in the reported
+        # evidence as if it had been accepted as a real candidate.
+        assert "Thousands of hand-carved" not in json.dumps(meta.evidence)
 
     def test_missing_description_blocks_when_no_candidate_source_exists(self, episode_dir, db_path):
-        """Absence of ALL three description sources (metadata_source.
-        description, metadata_source.logline, topic_brief.logline) must
-        report the exact absence, never fabricate a value."""
+        """Absence of both real description sources (metadata_source.
+        description, metadata_source.logline -- topic_brief.logline is
+        never a candidate, fixed 2026-08-23) must report the exact
+        absence, never fabricate a value."""
         _attribute_to_channel(db_path)
         _write_render_package(episode_dir, metadata_source={"episode_title": "T", "logline": "", "description": "", "shorts_titles": []})
         _write_main_render(episode_dir)
@@ -383,11 +381,10 @@ class TestMetadataBlocking:
         assert meta.evidence["description_candidates"] == {}
 
     def test_conflicting_description_candidates_still_blocks(self, episode_dir, db_path):
+        # The two remaining real candidate sources (topic_brief.logline is
+        # never a candidate, fixed 2026-08-23) disagreeing must still block.
         _attribute_to_channel(db_path)
-        _write_render_package(episode_dir, metadata_source={"episode_title": "T", "logline": "", "description": "Description A", "shorts_titles": []})
-        (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
-            json.dumps({"episode_title": "T", "logline": "Description B"}), encoding="utf-8",
-        )
+        _write_render_package(episode_dir, metadata_source={"episode_title": "T", "logline": "Description B", "description": "Description A", "shorts_titles": []})
         _write_main_render(episode_dir)
         result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path)
         meta = next(c for c in result.checks if c.capability == "A_METADATA")
@@ -543,17 +540,17 @@ class TestResolveCanonicalMetadata:
     """
 
     def test_resolves_the_same_values_check_publish_readiness_validated(self, episode_dir, db_path):
+        # topic_brief.logline is never a description candidate (fixed
+        # 2026-08-23) -- the real description must come from
+        # metadata_source.description/.logline directly.
         _attribute_to_channel(db_path)
         _write_render_package(
             episode_dir,
             metadata_source={
-                "episode_title": "T", "logline": "", "description": "",
+                "episode_title": "T", "logline": "", "description": "A real description.",
                 "shorts_titles": [{"short_id": "short_001", "title": "Real Short Title"}],
             },
             shorts_renders=[{"short_id": "001"}],
-        )
-        (episode_dir / f"topic_brief_{EPISODE_ID}.json").write_text(
-            json.dumps({"episode_title": "T", "logline": "A real description."}), encoding="utf-8",
         )
         _write_main_render(episode_dir)
         _write_short_render(episode_dir, 0)
@@ -563,7 +560,7 @@ class TestResolveCanonicalMetadata:
         assert meta_check.status == "pass", meta_check.reason
 
         resolved = resolve_canonical_metadata(EPISODE_ID, episode_dir, db_path, None, {
-            "metadata_source": {"episode_title": "T", "logline": "", "description": "", "shorts_titles": [{"short_id": "short_001", "title": "Real Short Title"}]},
+            "metadata_source": {"episode_title": "T", "logline": "", "description": "A real description.", "shorts_titles": [{"short_id": "short_001", "title": "Real Short Title"}]},
             "shorts_renders": [{"short_id": "001"}],
         })
         assert resolved.title == "T"

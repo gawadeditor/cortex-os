@@ -41,8 +41,10 @@ evidence, never silent):
                              provenance evidence, never a blocking
                              candidate), description (canonical sources only:
                              metadata_source.description / metadata_source.
-                             logline / topic_brief.logline, conflict-checked
-                             the same way), shorts_titles. None of these are
+                             logline -- topic_brief.logline is DELIBERATELY
+                             never accepted, fixed 2026-08-23, see
+                             resolve_canonical_metadata()'s own docstring --
+                             conflict-checked the same way), shorts_titles. None of these are
                              ever invented — a genuinely missing field (e.g.
                              no episode in production history has ever had a
                              real, non-placeholder shorts_titles entry) fails
@@ -321,15 +323,26 @@ def resolve_canonical_metadata(
         }
 
     # -- description: resolved from canonical completed-release-package
-    # sources only (metadata_source.description, metadata_source.logline,
-    # topic_brief.logline), conflict-checked against EACH OTHER exactly like
-    # title above, unless an operator override is explicitly supplied.
-    # metadata_source.logline and topic_brief.logline are real, existing,
-    # already-generated package fields (the Executive Producer's logline is
-    # copied into metadata_source.description/.logline by every real
-    # production episode observed to date) — never a fabricated value. This
-    # check never invents or regenerates copy; it only reuses what an
-    # earlier agent already produced.
+    # sources only (metadata_source.description, metadata_source.logline),
+    # conflict-checked against EACH OTHER exactly like title above, unless
+    # an operator override is explicitly supplied.
+    #
+    # topic_brief.logline is DELIBERATELY excluded (fixed 2026-08-23, see
+    # docs/operations/audits/ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md
+    # item 2 -- the exact live ep_f3619022 root cause). It is real,
+    # non-fabricated research/pre-writing text, but it is internal
+    # research copy, never real viewer-facing publication copy, and must
+    # never silently substitute for one. A caller with only
+    # topic_brief.logline available must now get a real
+    # MetadataResolutionError, not a quiet, technically-non-empty
+    # "success" that ships a raw research logline as the public
+    # description. metadata_source.logline is still accepted -- it is
+    # the Executive Producer's logline explicitly COPIED into the
+    # metadata_source namespace by an earlier agent (a real production
+    # step, not a resolver-level fallback to a different artifact
+    # entirely) -- see hypogeum.publishing.canonical_metadata's own
+    # (stronger, per-platform) description checks for the permanent,
+    # forward-looking replacement of this whole resolver.
     if metadata_override is not None and metadata_override.description:
         description = metadata_override.description
         description_evidence = {"resolved_by": "metadata_override"}
@@ -341,20 +354,17 @@ def resolve_canonical_metadata(
         ms_logline = (metadata_source.get("logline") or "").strip()
         if ms_logline:
             description_candidates["metadata_source.logline"] = ms_logline
-        topic_brief = _load_json(episode_dir / f"topic_brief_{episode_id}.json")
-        tb_logline = (topic_brief.get("logline") or "").strip()
-        if tb_logline:
-            description_candidates["topic_brief.logline"] = tb_logline
 
         distinct_description_values = sorted(set(description_candidates.values()))
         if not distinct_description_values:
             raise MetadataResolutionError(
                 reason=(
-                    "no canonical description found in metadata_source.description, "
-                    "metadata_source.logline, or topic_brief.logline"
+                    "no canonical description found in metadata_source.description or "
+                    "metadata_source.logline (topic_brief.logline is never accepted -- "
+                    "internal research text may never become public-facing copy by fallback)"
                 ),
                 evidence={"title": title, **title_evidence, "description_candidates": description_candidates},
-                remediation="Populate metadata_source.description (or topic_brief.logline), or supply a MetadataOverride(description=...).",
+                remediation="Populate metadata_source.description, or supply a MetadataOverride(description=...).",
             )
         if len(distinct_description_values) > 1:
             raise MetadataResolutionError(

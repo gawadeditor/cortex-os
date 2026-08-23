@@ -1796,11 +1796,19 @@ def sync_platform_distribution_policy_to_runtime(
     Fails closed via load_platform_distribution_policy() before ever
     touching the database -- a missing/unreadable/checksum-mismatched
     artifact never partially syncs.
+
+    default_privacy_state (2026-08-24): when the file declares this key,
+    it is synced too -- the channel's own scheduled-release visibility
+    (e.g. "public" for a normal release), never a Factory-Core-hardcoded
+    value. Omitted from the file: left untouched at whatever the runtime
+    row already has, exactly like any other field this function does not
+    mention.
     """
     policy_doc = load_platform_distribution_policy(channel_id, packages_root=packages_root)
-    update_channel_operations_profile(
-        channel_id, platform_deliverable_policy=policy_doc["platform_deliverable_policy"], db_path=db_path,
-    )
+    sync_fields = {"platform_deliverable_policy": policy_doc["platform_deliverable_policy"]}
+    if "default_privacy_state" in policy_doc:
+        sync_fields["default_privacy_state"] = policy_doc["default_privacy_state"]
+    update_channel_operations_profile(channel_id, db_path=db_path, **sync_fields)
     profile = get_channel_operations_profile(channel_id, db_path=db_path)
     if profile is None:
         raise RuntimeError(

@@ -13,8 +13,8 @@
       "path": "platform_distribution_policy_v1.json",
       "role": "platform_distribution_policy",
       "policy_id": "hypogeum_platform_distribution_policy_v1",
-      "policy_version": "1.2.0",
-      "sha256": "efc0b368107fb850da06274674879b8fd9717f7ba0305e39529c1f4534ee9d91"
+      "policy_version": "1.3.0",
+      "sha256": "d091057cf85d2eca3ab9479a1be1e4da53225ac8a7f8653e778cd33410fa71f7"
     }
   ]
 }

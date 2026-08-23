@@ -266,6 +266,8 @@ class Config:
     MUAPI_TIMEOUT_SECONDS: int                # default: 180 (Veo3 Premium took 128.5s in benchmark)
     MUAPI_POLL_INTERVAL_SECONDS: int          # default: 5
     MUAPI_MAX_POLL_ATTEMPTS: int              # default: 24
+    MUAPI_QUOTA_RETRY_MAX_ATTEMPTS: int       # default: 3 (real HTTP 402 -- bounded retry, allows operator-managed Auto Reload to complete)
+    MUAPI_QUOTA_RETRY_DELAY_SECONDS: float    # default: 60.0 (seconds between real HTTP 402 retries)
     MUAPI_WEBHOOK_URL: Optional[str]
     MUAPI_CREDIT_WARNING_THRESHOLD: Optional[float]  # USD; default: None (off)
 
@@ -483,6 +485,8 @@ class Config:
         self.MUAPI_TIMEOUT_SECONDS = _get_int("MUAPI_TIMEOUT_SECONDS", default=180)
         self.MUAPI_POLL_INTERVAL_SECONDS = _get_int("MUAPI_POLL_INTERVAL_SECONDS", default=5)
         self.MUAPI_MAX_POLL_ATTEMPTS = _get_int("MUAPI_MAX_POLL_ATTEMPTS", default=24)
+        self.MUAPI_QUOTA_RETRY_MAX_ATTEMPTS = _get_int("MUAPI_QUOTA_RETRY_MAX_ATTEMPTS", default=3)
+        self.MUAPI_QUOTA_RETRY_DELAY_SECONDS = _get_float("MUAPI_QUOTA_RETRY_DELAY_SECONDS", default=60.0)
         self.MUAPI_WEBHOOK_URL = _get_optional("MUAPI_WEBHOOK_URL")
         self.MUAPI_CREDIT_WARNING_THRESHOLD = _get_float("MUAPI_CREDIT_WARNING_THRESHOLD")
 
@@ -925,6 +929,8 @@ class Config:
             f"  MUAPI_TIMEOUT_SECONDS       = {self.MUAPI_TIMEOUT_SECONDS}\n"
             f"  MUAPI_POLL_INTERVAL_SECONDS = {self.MUAPI_POLL_INTERVAL_SECONDS}\n"
             f"  MUAPI_MAX_POLL_ATTEMPTS     = {self.MUAPI_MAX_POLL_ATTEMPTS}\n"
+            f"  MUAPI_QUOTA_RETRY_MAX_ATTEMPTS = {self.MUAPI_QUOTA_RETRY_MAX_ATTEMPTS}\n"
+            f"  MUAPI_QUOTA_RETRY_DELAY_SECONDS = {self.MUAPI_QUOTA_RETRY_DELAY_SECONDS}\n"
             f"  # ElevenLabs\n"
             f"  ELEVENLABS_API_KEY          = {_status(self.ELEVENLABS_API_KEY)}\n"
             f"  ELEVENLABS_VOICE_ID         = {_status(self.ELEVENLABS_VOICE_ID)}\n"

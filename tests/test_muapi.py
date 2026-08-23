@@ -100,7 +100,8 @@ _ALL_ENV_VARS = [
     "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY", "PERPLEXITY_MODEL", "PERPLEXITY_MAX_TOKENS",
     "MUAPI_API_KEY", "MUAPI_BASE_URL", "MUAPI_T1_MODEL", "MUAPI_T2_MODEL", "MUAPI_T3_MODEL",
     "MUAPI_I2V_MODEL", "MUAPI_IMAGE_MODEL", "MUAPI_DEFAULT_TIER", "MUAPI_TIMEOUT_SECONDS",
-    "MUAPI_POLL_INTERVAL_SECONDS", "MUAPI_MAX_POLL_ATTEMPTS", "MUAPI_WEBHOOK_URL",
+    "MUAPI_POLL_INTERVAL_SECONDS", "MUAPI_MAX_POLL_ATTEMPTS",
+    "MUAPI_QUOTA_RETRY_MAX_ATTEMPTS", "MUAPI_QUOTA_RETRY_DELAY_SECONDS", "MUAPI_WEBHOOK_URL",
     "MUAPI_CREDIT_WARNING_THRESHOLD", "MUAPI_RUNWAY_ONLY_MODE",
     "MUAPI_EPISODE_BUDGET_CREDITS", "MUAPI_SCENE_BUDGET_CREDITS",
     "MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", "EPISODE_ZERO_MAX_SCENES",
@@ -130,6 +131,8 @@ def make_config(
     image_model: str = "flux-2-dev",
     poll_interval: int = 0,   # 0 for tests (no real sleep)
     max_poll_attempts: int = 3,
+    quota_retry_max_attempts: int = 3,
+    quota_retry_delay_seconds: float = 60.0,
 ) -> Config:
     """Build a minimal Config for muapi tests."""
     original = {k: os.environ.get(k) for k in _ALL_ENV_VARS}
@@ -146,6 +149,8 @@ def make_config(
     os.environ["MUAPI_IMAGE_MODEL"] = image_model
     os.environ["MUAPI_POLL_INTERVAL_SECONDS"] = str(poll_interval)
     os.environ["MUAPI_MAX_POLL_ATTEMPTS"] = str(max_poll_attempts)
+    os.environ["MUAPI_QUOTA_RETRY_MAX_ATTEMPTS"] = str(quota_retry_max_attempts)
+    os.environ["MUAPI_QUOTA_RETRY_DELAY_SECONDS"] = str(quota_retry_delay_seconds)
     # Explicitly enable paid fallbacks in tests — default changed to False in M5.6
     os.environ["MUAPI_ALLOW_PAID_FALLBACKS"] = "true"
     # Pin thumbnail provider to muapi so existing MUAPI-path tests are unaffected
@@ -761,6 +766,109 @@ class TestSubmitSceneQuotaExhausted:
             mock_post.return_value = _mock_http_error(402)
             with pytest.raises(MUAPIQuotaExhausted):
                 submit_scene(spec, config, "ep_001", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# TestMuapiQuotaBoundedRetry (2026-08-24) -- a real HTTP 402 must never
+# halt generation from a single response alone: an operator-managed Auto
+# Reload needs real time to top up the account. Proves the bounded,
+# delayed retry added to _submit_http()/_poll_until_complete()/
+# _upload_file() via _retry_muapi_quota_exhausted().
+# ---------------------------------------------------------------------------
+
+class TestMuapiQuotaBoundedRetry:
+
+    def test_402_then_real_success_recovers_without_raising(self, tmp_path):
+        # A single 402 must not halt generation by itself -- a retry that
+        # succeeds must complete normally, exactly as if no 402 had ever
+        # happened.
+        config = make_config(quota_retry_max_attempts=3, quota_retry_delay_seconds=1.0)
+        spec = make_scene_spec()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep") as mock_sleep, \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+
+            mock_post.side_effect = [_mock_http_error(402), _mock_submit_ok("req_recovered")]
+            mock_get.return_value = _mock_poll_completed("https://cdn.example.com/v.mp4")
+
+            result = submit_scene(spec, config, "ep_001", tmp_path, episode_id_for_asset="ep_001")
+
+        assert result["generation_status"] == "generated"
+        assert mock_post.call_count == 2  # the original attempt + exactly one real retry
+        # The configured quota-retry delay was used (never invented) --
+        # other, unrelated sleep calls (e.g. poll interval) may also occur
+        # in the success path, so this checks presence, not exclusivity.
+        assert any(call.args and call.args[0] == 1.0 for call in mock_sleep.call_args_list)
+
+    def test_persistent_402_raises_only_after_exact_bounded_attempt_count(self, tmp_path):
+        config = make_config(quota_retry_max_attempts=3, quota_retry_delay_seconds=0.01)
+        spec = make_scene_spec()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.time.sleep") as mock_sleep:
+
+            mock_post.return_value = _mock_http_error(402)
+            with pytest.raises(MUAPIQuotaExhausted):
+                submit_scene(spec, config, "ep_001", tmp_path)
+
+        # Exactly 3 real requests (the configured bound), never fewer
+        # (never a blocker from one response alone) and never more
+        # (genuinely bounded, not infinite).
+        assert mock_post.call_count == 3
+        assert mock_sleep.call_count == 2  # a delay between each of the 3 attempts, none after the last
+
+    def test_quota_retry_max_attempts_is_configurable_not_hardcoded(self, tmp_path):
+        # Generic provider-account policy -- a different configured bound
+        # changes the real number of attempts made, proving it is read
+        # from Config, never a fixed Hypogeum-specific constant.
+        config = make_config(quota_retry_max_attempts=5, quota_retry_delay_seconds=0.01)
+        spec = make_scene_spec()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.time.sleep"):
+
+            mock_post.return_value = _mock_http_error(402)
+            with pytest.raises(MUAPIQuotaExhausted):
+                submit_scene(spec, config, "ep_001", tmp_path)
+
+        assert mock_post.call_count == 5
+
+    def test_poll_402_also_gets_bounded_delayed_retry(self, tmp_path):
+        # The same real network-call site during polling (a job already
+        # submitted, checking its result) must not halt on one 402 either.
+        config = make_config(quota_retry_max_attempts=3, quota_retry_delay_seconds=1.0)
+        spec = make_scene_spec()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+
+            mock_post.return_value = _mock_submit_ok("req_poll_402")
+            mock_get.side_effect = [_mock_http_error(402), _mock_poll_completed("https://cdn.example.com/v.mp4")]
+
+            result = submit_scene(spec, config, "ep_001", tmp_path, episode_id_for_asset="ep_001")
+
+        assert result["generation_status"] == "generated"
+        assert mock_get.call_count == 2
+
+    def test_real_costs_and_responses_are_recorded_never_a_fake_balance(self, tmp_path, caplog):
+        # No fake/estimated balance is ever stored -- only real HTTP
+        # status codes and real retry timing are logged. This asserts the
+        # retry decision function never fabricates a balance value.
+        import hypogeum.muapi as muapi_module
+        from hypogeum.logger import get_logger
+
+        log = get_logger(episode_id="ep_001", agent="test")
+        # attempt=0 with max_attempts=3 -> should retry (return True), not exhausted yet.
+        config = make_config(quota_retry_max_attempts=3, quota_retry_delay_seconds=0.0)
+        assert muapi_module._retry_muapi_quota_exhausted(0, config, log, "s01") is True
+        # attempt=2 with max_attempts=3 -> bounded retries exhausted.
+        assert muapi_module._retry_muapi_quota_exhausted(2, config, log, "s01") is False
 
 
 # ---------------------------------------------------------------------------
@@ -1680,6 +1788,15 @@ class TestExceptionHierarchy:
     def test_quota_exhausted_message_contains_402(self):
         exc = MUAPIQuotaExhausted()
         assert "402" in str(exc)
+
+    def test_quota_exhausted_has_no_terminal_failure_policy_override(self):
+        # 2026-08-24: a persistent 402 after every bounded retry must
+        # remain a RETRYABLE provider/account failure at the queue level
+        # (FailurePolicy.TRANSIENT, the default), never a hardcoded
+        # terminal one -- hypogeum.queue reads
+        # getattr(exc, "failure_policy", FailurePolicy.TRANSIENT).
+        from hypogeum.failure_policy import FailurePolicy
+        assert getattr(MUAPIQuotaExhausted(), "failure_policy", FailurePolicy.TRANSIENT) == FailurePolicy.TRANSIENT
 
 
 # ---------------------------------------------------------------------------

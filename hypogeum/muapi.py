@@ -150,7 +150,14 @@ _JOB_STATUS_TERMINAL    = frozenset({_JOB_STATUS_COMPLETED, _JOB_STATUS_FAILED, 
 _JOB_STATUS_IN_PROGRESS = frozenset({"queued", "pending", "processing"})
 
 # HTTP status code classification (per spec §7)
-# 401, 402 → halt ALL generation (raise exception)
+# 401 → halt ALL generation (raise exception) -- an invalid/missing API key
+#       needs operator intervention, no retry can fix it.
+# 402 → bounded, delayed retry first (2026-08-24: an operator-managed Auto
+#       Reload on the provider account needs real time to top up; a real
+#       balance snapshot alone must never halt generation -- only a
+#       persistent 402 across every bounded retry does, and even then as a
+#       retryable provider/account failure, never a hardcoded terminal one).
+#       See _retry_muapi_quota_exhausted() below.
 # 400, 403, 422 → hard fail this attempt only (try fallback)
 # 429, 500, 503 → retry once within this attempt
 _HALT_FAILURE_CODES: frozenset[int] = frozenset({401, 402})
@@ -319,16 +326,77 @@ class MUAPIAuthFailure(MUAPIError):
 
 class MUAPIQuotaExhausted(MUAPIError):
     """
-    HTTP 402 — Account quota exhausted or billing issue.
+    HTTP 402 — Account quota exhausted or billing issue, raised only after
+    _retry_muapi_quota_exhausted() has already retried the SAME real
+    request config.MUAPI_QUOTA_RETRY_MAX_ATTEMPTS times with a real
+    config.MUAPI_QUOTA_RETRY_DELAY_SECONDS delay between attempts (2026-08-24
+    -- an operator-managed Auto Reload needs real time to top up the
+    account; a single low-balance snapshot must never halt generation by
+    itself).
 
-    This halts ALL MUAPI generation. Requires out-of-band resolution.
-    Callers must issue a PDR: severity BLOCKING, type provider_quota_exhausted.
+    Deliberately has no failure_policy override -- defaults to
+    FailurePolicy.TRANSIENT (see hypogeum.failure_policy), so a persistent
+    402 after every bounded retry is still a retryable provider/account
+    failure at the queue level, never a hardcoded terminal one. Callers
+    that need an out-of-band signal should still issue a PDR (severity
+    BLOCKING, type provider_quota_exhausted) for operator visibility --
+    that is about notification, not about permanently killing the episode.
     """
     def __init__(self) -> None:
         super().__init__(
-            "MUAPI quota exhausted (HTTP 402). "
-            "Account billing issue requires resolution. All scene generation halted."
+            "MUAPI quota exhausted (HTTP 402) after every bounded retry. "
+            "Account billing issue requires resolution. All scene generation halted for now."
         )
+
+
+def _retry_muapi_quota_exhausted(
+    attempt: int, config: "Config", log, scene_id: str,
+) -> bool:
+    """
+    Generic, provider-account-level retry policy for a REAL HTTP 402
+    response -- never Hypogeum-specific, never stored as channel identity
+    (see Config.MUAPI_QUOTA_RETRY_MAX_ATTEMPTS/MUAPI_QUOTA_RETRY_DELAY_SECONDS,
+    runtime/provider-account configuration a future dashboard can edit).
+
+    A real HTTP 402 is not necessarily a permanent failure: an
+    operator-managed Auto Reload on the MUAPI account can top up the
+    balance, but needs real time to process the payment. This function
+    never estimates or invents a balance -- it only decides whether the
+    caller should wait and re-issue the SAME real request, so the actual,
+    current provider state is rechecked every time, never a cached or
+    assumed value.
+
+    Args:
+        attempt: 0-indexed count of 402 responses already seen for this
+                 one real request (the caller re-issues the request and
+                 calls this again for each new 402).
+        config:  Loaded Config -- MUAPI_QUOTA_RETRY_MAX_ATTEMPTS/
+                 MUAPI_QUOTA_RETRY_DELAY_SECONDS.
+        log:     Structured logger -- every retry decision is recorded,
+                 never silent.
+        scene_id: For log correlation only.
+
+    Returns:
+        True  — caller should sleep MUAPI_QUOTA_RETRY_DELAY_SECONDS and
+                retry the SAME real request.
+        False — bounded retries exhausted; caller should raise
+                MUAPIQuotaExhausted().
+    """
+    max_attempts = max(1, getattr(config, "MUAPI_QUOTA_RETRY_MAX_ATTEMPTS", 3))
+    delay_seconds = getattr(config, "MUAPI_QUOTA_RETRY_DELAY_SECONDS", 60.0)
+    if attempt + 1 >= max_attempts:
+        log.error(
+            "muapi_quota_exhausted", scene_id=scene_id, http_status=402,
+            attempts_made=attempt + 1, max_attempts=max_attempts,
+        )
+        return False
+    log.warn(
+        "muapi_quota_exhausted_retry", scene_id=scene_id, http_status=402,
+        attempt=attempt + 1, max_attempts=max_attempts,
+        retry_delay_seconds=delay_seconds,
+    )
+    time.sleep(delay_seconds)
+    return True
 
 
 class MUAPIUnavailable(MUAPIError):
@@ -3174,13 +3242,26 @@ def _submit_http(
                 continue
             return None, "connection_error"
 
-        # Halt failures — raise immediately (propagates through all callers)
+        # Halt failures — 401 raises immediately (no retry can fix a bad
+        # API key). 402 gets a bounded, delayed retry first -- a real
+        # provider account balance snapshot alone must never halt
+        # generation; see _retry_muapi_quota_exhausted()'s own docstring.
         if resp.status_code == 401:
             log.error("muapi_auth_failure", scene_id=scene_id, http_status=401)
             raise MUAPIAuthFailure()
         if resp.status_code == 402:
-            log.error("muapi_quota_exhausted", scene_id=scene_id, http_status=402)
-            raise MUAPIQuotaExhausted()
+            quota_attempt = 0
+            while resp.status_code == 402 and _retry_muapi_quota_exhausted(quota_attempt, config, log, scene_id):
+                quota_attempt += 1
+                resp = requests.post(endpoint, headers=_get_headers(config), json=payload, timeout=30)
+            if resp.status_code == 402:
+                raise MUAPIQuotaExhausted()
+            if resp.status_code == 401:
+                log.error("muapi_auth_failure", scene_id=scene_id, http_status=401)
+                raise MUAPIAuthFailure()
+            # else: a retry succeeded with a real, different status --
+            # falls through to the normal handling below, exactly as if
+            # this had been the response from the start.
 
         # Soft retry conditions
         if resp.status_code in _SOFT_RETRY_CODES:
@@ -3283,7 +3364,16 @@ def _poll_until_complete(
         if resp.status_code == 401:
             raise MUAPIAuthFailure()
         if resp.status_code == 402:
-            raise MUAPIQuotaExhausted()
+            quota_attempt = 0
+            while resp.status_code == 402 and _retry_muapi_quota_exhausted(quota_attempt, config, log, scene_id):
+                quota_attempt += 1
+                resp = requests.get(poll_url, headers=_get_headers(config), timeout=30)
+            if resp.status_code == 402:
+                raise MUAPIQuotaExhausted()
+            if resp.status_code == 401:
+                raise MUAPIAuthFailure()
+            # else: a retry succeeded with a real, different status --
+            # falls through to the normal polling handling below.
 
         # M5.6 — HTTP 400 early abort: persistent 400s indicate a bad job state
         if resp.status_code == 400:
@@ -3470,23 +3560,38 @@ def _upload_file(
     """
     upload_url = f"{config.MUAPI_BASE_URL}/{_UPLOAD_PATH}"
 
-    try:
+    def _do_upload():
         with local_path.open("rb") as fh:
             # Do NOT pass Content-Type here — requests sets it automatically to
             # multipart/form-data with boundary when `files` is present.
-            resp = requests.post(
+            return requests.post(
                 upload_url,
                 headers={"x-api-key": config.MUAPI_API_KEY},
                 files={"file": (local_path.name, fh, "image/jpeg")},
                 timeout=60,
             )
+
+    try:
+        resp = _do_upload()
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
         raise MUAPIError(f"File upload failed: {exc}") from exc
 
     if resp.status_code == 401:
         raise MUAPIAuthFailure()
     if resp.status_code == 402:
-        raise MUAPIQuotaExhausted()
+        quota_attempt = 0
+        while resp.status_code == 402 and _retry_muapi_quota_exhausted(quota_attempt, config, log, local_path.name):
+            quota_attempt += 1
+            try:
+                resp = _do_upload()
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                raise MUAPIError(f"File upload failed: {exc}") from exc
+        if resp.status_code == 402:
+            raise MUAPIQuotaExhausted()
+        if resp.status_code == 401:
+            raise MUAPIAuthFailure()
+        # else: a retry succeeded with a real, different status -- falls
+        # through to the normal handling below.
     if resp.status_code not in (200, 201):
         raise MUAPIError(
             f"File upload returned HTTP {resp.status_code} for {local_path.name}"

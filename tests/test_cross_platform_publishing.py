@@ -779,6 +779,32 @@ class TestCanonicalMetadataReadinessReproducesEpF3619022Incident:
         yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
         assert yt_main.status == "pass", yt_main.reason
 
+    def test_broken_legacy_metadata_resolver_never_blocks_a_pair_with_a_real_canonical_entry(self, db_path, assets_root):
+        # Real bug found live running this exact check against ep_f3619022:
+        # the OLDER, pre-canonical-metadata resolve_canonical_metadata()
+        # (metadata_source.description/.logline only, no per-platform
+        # awareness) was still being consulted UNCONDITIONALLY for every
+        # (deliverable, platform) pair, even once that pair had a real,
+        # valid canonical_platform_metadata entry -- so an episode whose
+        # legacy fields were simply never populated (true for any episode
+        # generated entirely through the new canonical pipeline) could
+        # never pass readiness no matter how complete its canonical
+        # package was. Fixed: the legacy resolver is now only a blocker
+        # when NO canonical entry exists for that exact pair.
+        _setup_channel(db_path)
+        ep_dir = _seed_episode(db_path, assets_root)
+        pkg_path = ep_dir / f"final_render_package_{EPISODE_ID}.json"
+        pkg = json.loads(pkg_path.read_text())
+        pkg["metadata_source"]["description"] = ""
+        pkg["metadata_source"]["logline"] = ""
+        pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+        _bind_all_platforms(db_path)
+
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        yt_main = next(c for c in result.for_platform("youtube") if c.deliverable_id == "main_episode")
+        assert yt_main.status == "pass", yt_main.reason
+        assert "canonical metadata unresolved" not in yt_main.reason
+
     def test_fewer_than_three_chapters_fails_closed(self, db_path, assets_root):
         _setup_channel(db_path)
         ep_dir = _seed_episode(db_path, assets_root)

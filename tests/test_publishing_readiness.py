@@ -685,3 +685,40 @@ class TestMandatoryMainEpisodeThumbnail:
         assert thumb.status == "pass"
         assert thumb.evidence["width"] == 1280
         assert thumb.evidence["height"] == 720
+
+    def test_versioned_dotted_asset_id_resolves_to_the_correct_file(self, episode_dir, db_path):
+        """
+        Reproduces a real bug found live against ep_f3619022: a repaired
+        thumbnail's asset_id ('main_episode.repaired_v1', matching this
+        repo's own '.repaired_vN'/'.recomposed_vN' versioned-asset
+        convention) contains a dot in its filename stem.
+        Path.with_suffix('.jpg') on such a stem misreads '.repaired_v1' as
+        an existing extension and REPLACES it, silently resolving to a
+        nonexistent 'main_episode.jpg' instead of the real file. The fix
+        appends the suffix instead of replacing one.
+        """
+        from PIL import Image
+
+        _make_fully_ready(episode_dir, db_path, n_shorts=0, platforms=(), channel_id=CHANNEL_ID)
+        thumbs_dir = episode_dir / "thumbnails"
+        thumbs_dir.mkdir(exist_ok=True)
+        Image.new("RGB", (1280, 720), color=(60, 60, 60)).save(
+            thumbs_dir / "main_episode.repaired_v1.jpg", "JPEG"
+        )
+        asset_id = f"episodes/{EPISODE_ID}/thumbnails/main_episode.repaired_v1"
+        pkg = {
+            "thumbnail_package_id": f"tp_{EPISODE_ID}", "episode_id": EPISODE_ID,
+            "main_thumbnail": {"asset_id": asset_id},
+            "candidates": [{
+                "candidate_id": "tsc_test_1", "rank": 1, "selected": True,
+                "status": "generated", "asset_id": asset_id,
+            }],
+            "thumbnail_qa_report": {"overall_status": "pass", "checks": [], "failures": []},
+            "thumbnail_identity_report": {"verdict": "APPROVED", "violations": []},
+        }
+        (episode_dir / f"thumbnail_package_{EPISODE_ID}.json").write_text(json.dumps(pkg), encoding="utf-8")
+
+        result = check_publish_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=episode_dir.parent.parent, db_path=db_path, platforms=("youtube",))
+        thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
+        assert thumb.status == "pass", thumb.reason
+        assert thumb.evidence["width"] == 1280

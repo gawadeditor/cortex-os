@@ -136,6 +136,9 @@ def _load_json_if_exists(path: Path) -> dict:
         return {}
 
 
+_LLM_JSON_RETRY_ATTEMPTS = 3
+
+
 def _default_llm_call(
     system_prompt: str, input_package: dict, *, config: Config,
     episode_id: str, channel_id: Optional[str],
@@ -146,17 +149,40 @@ def _default_llm_call(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(input_package, ensure_ascii=False)},
     ]
-    result = call_claude(
-        model_slug=getattr(config, "CANONICAL_METADATA_MODEL_SLUG", "anthropic/claude-sonnet-4.6"),
-        messages=messages, max_tokens=4096, config=config,
-        episode_id=episode_id, agent=_AGENT_NAME, channel_id=channel_id,
-    )
-    raw = result.content.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.lower().startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw)
+    last_error: Optional[json.JSONDecodeError] = None
+    for attempt in range(_LLM_JSON_RETRY_ATTEMPTS):
+        call_messages = list(messages)
+        if attempt > 0:
+            # A prior attempt returned text that failed to parse as JSON --
+            # most commonly an unescaped literal quote character inside a
+            # string value (e.g. the model quoting source material with "
+            # instead of an escaped \"). Retrying with an explicit reminder
+            # resolves this in practice; this never changes what content is
+            # requested, only how strictly it must be JSON-escaped.
+            call_messages.append({
+                "role": "user",
+                "content": (
+                    "Your previous response was not valid JSON "
+                    f"({last_error}). Return ONLY the JSON object again, "
+                    "with every literal double-quote character inside a "
+                    "string value properly escaped as \\\"."
+                ),
+            })
+        result = call_claude(
+            model_slug=getattr(config, "CANONICAL_METADATA_MODEL_SLUG", "anthropic/claude-sonnet-4.6"),
+            messages=call_messages, max_tokens=4096, config=config,
+            episode_id=episode_id, agent=_AGENT_NAME, channel_id=channel_id,
+        )
+        raw = result.content.strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    raise last_error
 
 
 def _resolve_grounding_text(

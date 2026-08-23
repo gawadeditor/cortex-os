@@ -692,7 +692,11 @@ def resolve_canonical_main_thumbnail(episode_id: str, episode_dir: Path) -> Reso
     candidate_stem = assets_root / main_asset_id
     resolved_path = None
     for suffix in (".jpg", ".jpeg", ".png", ".webp"):
-        candidate_path = candidate_stem.with_suffix(suffix)
+        # candidate_stem.name may itself contain a dot (e.g. a versioned
+        # asset_id like 'main_episode.recomposed_v1') -- Path.with_suffix()
+        # would misread that as an existing extension and replace it,
+        # silently resolving to the wrong file. Append instead.
+        candidate_path = candidate_stem.with_name(candidate_stem.name + suffix)
         if candidate_path.exists():
             resolved_path = candidate_path
             break

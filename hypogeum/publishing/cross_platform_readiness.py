@@ -264,8 +264,21 @@ def check_cross_platform_readiness(
             failures: List[str] = []
             evidence: dict = {}
 
+            # The legacy resolve_canonical_metadata() error is only a real
+            # blocker when this (deliverable_id, platform) pair has no real
+            # canonical_platform_metadata entry to fall back on -- once a
+            # validated entry exists, _check_canonical_platform_metadata()
+            # below is the sole authoritative content-readiness gate for
+            # this pair (2026-08-23, see docs/operations/audits/
+            # ZERNIO_CANONICAL_METADATA_CONTRACT_2026-08-23.md item 4).
+            # metadata_override/resolve_canonical_metadata() remain real,
+            # still-used elsewhere (readiness.py, zernio_release_flow.py,
+            # the root title/content fallback in
+            # zernio_channel_release_trigger.py) -- not removed here.
             if metadata_error is not None:
-                failures.append(f"canonical metadata unresolved: {metadata_error.reason}")
+                from hypogeum.publishing.canonical_metadata import resolve_canonical_platform_metadata  # noqa: PLC0415
+                if resolve_canonical_platform_metadata(final_render_package, deliverable_id, platform) is None:
+                    failures.append(f"canonical metadata unresolved: {metadata_error.reason}")
 
             binding = resolve_active_binding(
                 db_path, channel_id=channel_id, capability="publishing",

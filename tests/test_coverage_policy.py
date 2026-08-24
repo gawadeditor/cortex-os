@@ -25,6 +25,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -944,6 +945,89 @@ class TestAssemblyCoverageGateTwoBeat:
         assert req_scene_ids == ["sc_002"]
         assert acr["requests"][0]["needed_additional_seconds"] > 0
         assert "additional_coverage_required" in package["assembly_qa_report"]["human_review_reasons"]
+
+    def test_coverage_repair_assets_persisted_to_checkpoint_even_when_deficit_unfillable(self, tmp_path):
+        """
+        Regression test for the ep_af078f34 production defect (2026-08-24):
+        fill_coverage_deficits() mutates visual_package["asset_manifest"]
+        ["assets"] in memory for every real, paid, qualified clip it
+        generates -- including sc_002__extra1 and sc_002__extra2 here, both
+        real paid work -- but assembly never persisted this mutation back
+        to visual_package_{episode_id}.json on disk. A resumed run reading
+        that stale checkpoint would have no durable record these clips
+        exist, at risk of the resumed fill_coverage_deficits() call's own
+        existing_extra_ids/represented_shot_ids bookkeeping treating them
+        as never attempted.
+
+        Reproduces the exact empty-render-package scenario (unfillable
+        deficit, additional_coverage_required, no render) with non-empty,
+        valid assembly inputs -- identical fixture to the sibling test
+        above -- and proves the checkpoint file on disk now contains both
+        extra clips' manifest entries after assembly halts.
+        """
+        episode_id = "ep_cov_checkpoint"
+        visual = _two_beat_visual_package(episode_id)
+        narration = _two_beat_narration_package(episode_id, beat2_duration=30.0)
+        thumbnails = _make_thumbnail_package(episode_id=episode_id)
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk_no_probe(visual, assets_root)
+        _setup_narration_on_disk(narration, assets_root)
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            dest = output_dir / "video" / f"sc_{scene_spec['scene_id']}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"FAKEEXTRA")
+            return {"generation_status": "generated"}
+
+        cfg = _make_config()
+        cfg.COVERAGE_CHECK_ENABLED = True
+        cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = 2
+
+        episode_dir = tmp_path / episode_id
+        checkpoint_path = episode_dir / f"visual_package_{episode_id}.json"
+        assert not checkpoint_path.exists()  # no stale file to accidentally pass against
+
+        with patch("hypogeum.agents.music_agent.generate_music_track",
+                   return_value=_make_music_track_result(tmp_path=tmp_path)), \
+             patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset", side_effect=_mock_qualify_always_pass), \
+             patch("hypogeum.agents.assembly_agent.render_episode") as mock_render, \
+             patch("subprocess.run", side_effect=_fake_duration_probe({"extra": 6.5})):
+            package = run_assembly_agent(
+                visual_package=visual,
+                narration_package=narration,
+                thumbnail_package=thumbnails,
+                config=cfg,
+                episode_id=episode_id,
+                output_dir=episode_dir,
+            )
+
+        # Same halt-before-render outcome as the sibling test above --
+        # the fix must never weaken this: an unfillable deficit still
+        # halts assembly and still reports additional_coverage_required.
+        mock_render.assert_not_called()
+        assert package["package_integrity"]["production_ready"] is False
+        assert "additional_coverage_required" in package
+
+        # The defect: assembly must not silently lose the record of the
+        # two real, paid clips it just generated. The checkpoint file must
+        # now exist and contain both __extra1 and __extra2 manifest entries.
+        assert checkpoint_path.exists(), (
+            "visual_package checkpoint was never re-persisted after "
+            "coverage repair generated real paid clips -- they exist on "
+            "disk and cost money but a resumed run would have no record "
+            "of them"
+        )
+        persisted = json.loads(checkpoint_path.read_text())
+        persisted_scene_ids = {
+            a.get("scene_id") for a in persisted["asset_manifest"]["assets"]
+        }
+        assert "sc_002__extra1" in persisted_scene_ids
+        assert "sc_002__extra2" in persisted_scene_ids
+
+        # In-memory and on-disk manifests must agree (same record, no drift).
+        assert persisted["asset_manifest"]["assets"] == visual["asset_manifest"]["assets"]
 
 
 # ---------------------------------------------------------------------------

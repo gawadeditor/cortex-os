@@ -135,6 +135,47 @@ class ShortIdentityLinkageError(AssemblyAgentError):
     """
 
 
+def _persist_visual_package_checkpoint(
+    visual_package: dict,
+    episode_id: str,
+    episode_dir: Path,
+    log,
+) -> None:
+    """
+    Re-persist the Visual Package checkpoint after a clip-repair pass
+    appends new asset_manifest entries to the in-memory visual_package dict.
+
+    hypogeum.agents.clip_repair_agent (both run_clip_repair()'s Strategy B
+    and fill_coverage_deficits()) mutates visual_package["asset_manifest"]
+    ["assets"] directly on the dict Assembly passed in, but neither
+    function has its own disk-write access -- Assembly is the only caller
+    that knows a mutation happened, so it is the only place that can close
+    this gap. Without this write, a clip-repair asset is real (paid,
+    qualified, on disk, in the cost ledger) but the checkpoint file any
+    future resume reads (hypogeum/pipeline.py's checkpoint loader, or a
+    fresh fill_coverage_deficits() call's own existing_extra_ids /
+    represented_shot_ids resume bookkeeping) has no record of it -- the
+    only thing standing between that and a duplicate paid call is
+    submit_scene()'s own opportunistic path-exists reuse, which is a
+    correct independent safety net but should never be the sole source of
+    truth for what has already been generated.
+
+    Generic and channel-agnostic: writes the exact same file, at the exact
+    same path and in the exact same JSON convention, that every other
+    checkpoint write in this codebase already produces
+    (f"visual_package_{episode_id}.json"), keyed only by episode_id.
+    """
+    path = episode_dir / f"visual_package_{episode_id}.json"
+    content = json.dumps(visual_package, ensure_ascii=False, indent=2)
+    path.write_text(content, encoding="utf-8")
+    log.info(
+        "assembly_visual_package_checkpoint_updated",
+        episode_id=episode_id,
+        path=str(path),
+        asset_count=len(visual_package.get("asset_manifest", {}).get("assets", [])),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -377,6 +418,14 @@ def run_assembly_agent(
             episode_id=episode_id,
             log=log,
         )
+        # run_clip_repair() may have appended new asset_manifest entries to
+        # visual_package in memory (Strategy B) — persist immediately so
+        # this paid work is never lost from the checkpoint, regardless of
+        # what happens later in this run.
+        _persist_visual_package_checkpoint(
+            visual_package=visual_package, episode_id=episode_id,
+            episode_dir=episode_dir, log=log,
+        )
         # Recompute availability — repaired clips should now exist on disk
         present_clips = []
         missing_clips = []
@@ -542,6 +591,18 @@ def run_assembly_agent(
                 log=log,
             )
             _attach_extra_clips(extra_clips_by_scene)
+
+            # fill_coverage_deficits() appends new asset_manifest entries to
+            # visual_package in memory for every clip it successfully
+            # generated and qualified — persist now, before the coverage
+            # recheck below decides whether assembly can proceed, so this
+            # paid work is durably recorded on the checkpoint even if
+            # coverage still comes up short and this run halts here.
+            if extra_clips_by_scene:
+                _persist_visual_package_checkpoint(
+                    visual_package=visual_package, episode_id=episode_id,
+                    episode_dir=episode_dir, log=log,
+                )
 
             coverage_result = check_timeline_coverage(_all_beat_entries())
 

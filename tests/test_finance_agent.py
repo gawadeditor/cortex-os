@@ -1212,377 +1212,225 @@ class TestMusicCostTracking:
 
 
 # ---------------------------------------------------------------------------
-# TestPostVPDAuthorization — post-VPD finance gate from scene routing
+# TestPostVPDAuthorization — post-VPD finance gate, authorized exclusively
+# against a compiled hypogeum.production_plan.ProductionPlan's own
+# normal/maximum totals. The rough scene-routing-only estimate
+# (_resolve_scene_model_estimate / _estimate_muapi_from_vpd_plan) and the
+# production_plan=None legacy fallback were REMOVED in the 2026-08-24
+# factory-level correction -- this gate cannot run at all without a
+# compiled plan (TypeError for a missing argument), and no longer
+# re-derives narration/music/OpenRouter costs of its own (they are already
+# inside the plan's own totals).
 # ---------------------------------------------------------------------------
 
 class TestPostVPDAuthorization:
     """
-    Tests for run_post_vpd_authorization() and its helpers.
-
-    Verifies that:
-    - MUAPI cost is estimated from actual scene routing, not section count
-    - Tier 1/2/3 model costs are summed correctly per MODEL_CREDIT_COSTS
-    - I2V model is predicted for scenes with final-locked primary entities
-    - BLOCKED verdict fires when scene-routing total exceeds ceiling
-    - AUTHORIZED verdict fires when scene-routing total is within ceiling
-    - Post-VPD record validates against finance_record schema
+    Tests for run_post_vpd_authorization() against a real compiled
+    Production Plan.
     """
 
-    # ----------------------------------------------------------------
-    # Test fixtures
-    # ----------------------------------------------------------------
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _HYPOGEUM_PACKAGES_ROOT = _REPO_ROOT / "channel_packages"
 
-    def _make_config(
-        self,
-        ceiling: float = 50.0,
-        t1_model: str = "veo3-text-to-video",
-        t2_model: str = "veo3-fast-text-to-video",
-        t3_model: str = "runway-text-to-video",
-        i2v_model: str = "runway-image-to-video",
-        default_tier: int = 2,
-        runway_only: bool = False,
-        cheap_mode: bool = False,
-    ) -> MagicMock:
+    def _make_config(self, ceiling: float = 50.0) -> MagicMock:
         cfg = MagicMock()
         cfg.FINANCE_BUDGET_CEILING_USD = ceiling
         cfg.FINANCE_WARNING_THRESHOLD_PCT = 0.80
-        cfg.MUAPI_T1_MODEL = t1_model
-        cfg.MUAPI_T2_MODEL = t2_model
-        cfg.MUAPI_T3_MODEL = t3_model
-        cfg.MUAPI_I2V_MODEL = i2v_model
-        cfg.MUAPI_DEFAULT_TIER = default_tier
-        cfg.MUAPI_RUNWAY_ONLY_MODE = runway_only
-        cfg.MUAPI_CHEAP_MODE = cheap_mode
+        cfg.MUAPI_T1_MODEL = "veo3-text-to-video"
+        cfg.MUAPI_T2_MODEL = "veo3.1-lite-text-to-video"
+        cfg.MUAPI_T3_MODEL = "veo3.1-lite-text-to-video"
+        cfg.MUAPI_I2V_MODEL = "veo3-image-to-video"
+        cfg.MUAPI_DEFAULT_TIER = 2
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 1
+        cfg.THUMBNAIL_IMAGE_MODEL = "gpt-image-2-text-to-image"
+        cfg.THUMBNAIL_SHORT_CANDIDATE_CAP = 3
+        cfg.ELEVENLABS_MUSIC_DEFAULT_DURATION = 120
         return cfg
 
-    def _make_scene(self, scene_id: str, tier: int, entity_id: str | None = None) -> dict:
-        """Make a minimal scene dict with tier routing and optional primary entity."""
-        scene = {
-            "scene_id": scene_id,
-            "scene_index": 0,
-            "source_type": "main_episode",
-            "short_id": None,
+    def _make_scene(self, scene_id: str, beat_id: str, tier: int = 2, short_id=None,
+                     aspect_ratio: str = "16:9") -> dict:
+        return {
+            "scene_id": scene_id, "narration_reference": beat_id, "short_id": short_id,
+            "scene_index": 0, "source_type": "short" if short_id else "main_episode",
             "section_reference": "sec_001",
-            "narration_reference": "b_001",
             "production_spec": {
-                "aspect_ratio": "16:9",
+                "aspect_ratio": aspect_ratio,
                 "duration_seconds": 8.0,
-                "provider_routing": {
-                    "primary_provider": "muapi",
-                    "primary_tier": tier,
-                    "primary_prompt": "test prompt",
-                    "fallback_tier": 3,
-                    "fallback_prompt": "fallback prompt",
-                    "routing_rationale": "test",
-                },
+                "provider_routing": {"primary_tier": tier, "primary_prompt": f"prompt for {scene_id}"},
                 "reference_image_url": None,
             },
             "entity_appearances": [],
         }
-        if entity_id:
-            scene["entity_appearances"] = [
-                {"entity_id": entity_id, "role": "primary"}
-            ]
-        return scene
 
-    def _make_vpd_plan(self, scenes: list, final_entity_ids: list | None = None) -> dict:
-        """Make a minimal visual_package plan with given scenes and locked entities."""
-        locked_entities = []
-        for eid in (final_entity_ids or []):
-            locked_entities.append({
-                "entity_id": eid,
-                "lock_state": "final",
-                "entity_name": f"Entity {eid}",
-            })
-        return {
+    def _make_plan_and_vpd(self, *, scene_count: int, tier: int = 2, ceiling: float = 50.0):
+        from hypogeum.production_plan import compile_production_plan
+
+        script_package = {
+            "sections": [{"section_id": "s1", "narration_beats": [
+                {"beat_id": f"b_{i:03d}", "text": "x"} for i in range(scene_count)
+            ]}],
+            "shorts_scripts": [
+                {"short_id": sid, "narration_beats": [{"beat_id": f"b_{sid}", "text": "x"}]}
+                for sid in ("short_001", "short_002", "short_003")
+            ],
+        }
+        narration_segments = [
+            {"beat_reference": f"b_{i:03d}", "duration_seconds": 8.0, "character_cost": 50}
+            for i in range(scene_count)
+        ]
+        for sid in ("short_001", "short_002", "short_003"):
+            narration_segments.append({"beat_reference": f"b_{sid}", "duration_seconds": 8.0, "character_cost": 30})
+        narration_package = {"narration_segments": narration_segments}
+
+        scenes = [self._make_scene(f"s{i:02d}", f"b_{i:03d}", tier=tier) for i in range(scene_count)]
+        for sid in ("short_001", "short_002", "short_003"):
+            scenes.append(self._make_scene(f"sh_{sid}", f"b_{sid}", tier=tier, short_id=sid, aspect_ratio="9:16"))
+        visual_package = {
             "package_metadata": {"visual_package_id": "vp_test"},
             "episode_metadata": {"episode_id": "ep_test"},
-            "visual_continuity_record": {"locked_entities": locked_entities},
+            "visual_continuity_record": {"locked_entities": []},
             "scenes": scenes,
             "asset_manifest": {"assets": []},
             "provider_routing_manifest": {"scenes_by_provider": {"muapi": len(scenes)}},
             "thumbnail_handoff_brief": {},
             "package_integrity": {},
         }
-
-    # ----------------------------------------------------------------
-    # _resolve_scene_model_estimate tests
-    # ----------------------------------------------------------------
-
-    def test_tier1_resolves_to_t1_model(self):
-        from hypogeum.agents.finance_agent import _resolve_scene_model_estimate
-        scene = self._make_scene("s01", tier=1)
-        cfg = self._make_config()
-        model = _resolve_scene_model_estimate(scene, set(), cfg)
-        assert model == "veo3-text-to-video"
-
-    def test_tier2_resolves_to_t2_model(self):
-        from hypogeum.agents.finance_agent import _resolve_scene_model_estimate
-        scene = self._make_scene("s01", tier=2)
-        cfg = self._make_config()
-        model = _resolve_scene_model_estimate(scene, set(), cfg)
-        assert model == "veo3-fast-text-to-video"
-
-    def test_tier3_resolves_to_t3_model(self):
-        from hypogeum.agents.finance_agent import _resolve_scene_model_estimate
-        scene = self._make_scene("s01", tier=3)
-        cfg = self._make_config()
-        model = _resolve_scene_model_estimate(scene, set(), cfg)
-        assert model == "runway-text-to-video"
-
-    def test_scene_with_final_locked_primary_entity_resolves_to_i2v(self):
-        """Scene with final-locked primary entity → I2V model (reference image will be generated)."""
-        from hypogeum.agents.finance_agent import _resolve_scene_model_estimate
-        scene = self._make_scene("s01", tier=2, entity_id="entity_xyz")
-        cfg = self._make_config()
-        model = _resolve_scene_model_estimate(scene, {"entity_xyz"}, cfg)
-        assert model == "runway-image-to-video"
-
-    def test_scene_with_non_locked_entity_uses_tier_model(self):
-        """Scene with entity that is NOT final-locked → T2V model (no ref image)."""
-        from hypogeum.agents.finance_agent import _resolve_scene_model_estimate
-        scene = self._make_scene("s01", tier=2, entity_id="entity_xyz")
-        cfg = self._make_config()
-        # entity_xyz is NOT in final_entity_ids
-        model = _resolve_scene_model_estimate(scene, set(), cfg)
-        assert model == "veo3-fast-text-to-video"
-
-    def test_runway_only_mode_forces_tier2(self):
-        """MUAPI_RUNWAY_ONLY_MODE=True forces tier 2 model regardless of scene routing."""
-        from hypogeum.agents.finance_agent import _resolve_scene_model_estimate
-        scene = self._make_scene("s01", tier=1)  # Tier 1 scene
-        cfg = self._make_config(runway_only=True)
-        model = _resolve_scene_model_estimate(scene, set(), cfg)
-        assert model == "veo3-fast-text-to-video"
-
-    def test_cheap_mode_forces_tier3(self):
-        """MUAPI_CHEAP_MODE=True forces tier 3 model and disables I2V."""
-        from hypogeum.agents.finance_agent import _resolve_scene_model_estimate
-        # Tier 1 scene with final-locked entity — cheap mode overrides both
-        scene = self._make_scene("s01", tier=1, entity_id="ent_a")
-        cfg = self._make_config(cheap_mode=True)
-        model = _resolve_scene_model_estimate(scene, {"ent_a"}, cfg)
-        assert model == "runway-text-to-video"  # T3 model, not I2V
-
-    # ----------------------------------------------------------------
-    # _estimate_muapi_from_vpd_plan tests
-    # ----------------------------------------------------------------
-
-    def test_26_scene_antikythera_plan_estimates_correctly(self):
-        """
-        Reproduce ep_val_01 routing: 7×Tier1 + 17×Tier2 + 2×Tier3 with no locked entities.
-        Expected: 7×$2.50 + 17×$0.60 + 2×$0.15 = $17.50 + $10.20 + $0.30 = $28.00
-        """
-        from hypogeum.agents.finance_agent import _estimate_muapi_from_vpd_plan
-        scenes = (
-            [self._make_scene(f"s{i:02d}", tier=1) for i in range(7)]
-            + [self._make_scene(f"s{i:02d}", tier=2) for i in range(7, 24)]
-            + [self._make_scene(f"s{i:02d}", tier=3) for i in range(24, 26)]
+        cfg = self._make_config(ceiling=ceiling)
+        plan = compile_production_plan(
+            script_package=script_package, narration_package=narration_package,
+            visual_package=visual_package, channel_id="hypogeum", episode_id="ep_test",
+            config=cfg, packages_root=self._HYPOGEUM_PACKAGES_ROOT,
         )
-        vpd_plan = self._make_vpd_plan(scenes, final_entity_ids=[])
-        cfg = self._make_config()
-        total, breakdown = _estimate_muapi_from_vpd_plan(vpd_plan, cfg)
-        assert abs(total - 28.00) < 0.001, f"Expected $28.00, got ${total}"
-        assert breakdown.get("veo3-text-to-video") == 7
-        assert breakdown.get("veo3-fast-text-to-video") == 17
-        assert breakdown.get("runway-text-to-video") == 2
-
-    def test_tier1_cost_is_2_50(self):
-        """Single Tier 1 scene = $2.50 (veo3-text-to-video)."""
-        from hypogeum.agents.finance_agent import _estimate_muapi_from_vpd_plan
-        vpd_plan = self._make_vpd_plan([self._make_scene("s01", tier=1)])
-        cfg = self._make_config()
-        total, _ = _estimate_muapi_from_vpd_plan(vpd_plan, cfg)
-        assert abs(total - 2.5) < 0.001
-
-    def test_tier2_cost_is_0_60(self):
-        """Single Tier 2 scene = $0.60 (veo3-fast-text-to-video)."""
-        from hypogeum.agents.finance_agent import _estimate_muapi_from_vpd_plan
-        vpd_plan = self._make_vpd_plan([self._make_scene("s01", tier=2)])
-        cfg = self._make_config()
-        total, _ = _estimate_muapi_from_vpd_plan(vpd_plan, cfg)
-        assert abs(total - 0.60) < 0.001
-
-    def test_tier3_cost_is_0_15(self):
-        """Single Tier 3 scene = $0.15 (runway-text-to-video)."""
-        from hypogeum.agents.finance_agent import _estimate_muapi_from_vpd_plan
-        vpd_plan = self._make_vpd_plan([self._make_scene("s01", tier=3)])
-        cfg = self._make_config()
-        total, _ = _estimate_muapi_from_vpd_plan(vpd_plan, cfg)
-        assert abs(total - 0.15) < 0.001
-
-    def test_i2v_scene_cost_is_runway_rate(self):
-        """Scene with final-locked entity uses runway-image-to-video = $0.15."""
-        from hypogeum.agents.finance_agent import _estimate_muapi_from_vpd_plan
-        scene = self._make_scene("s01", tier=2, entity_id="ent_a")
-        vpd_plan = self._make_vpd_plan([scene], final_entity_ids=["ent_a"])
-        cfg = self._make_config()
-        total, breakdown = _estimate_muapi_from_vpd_plan(vpd_plan, cfg)
-        assert abs(total - 0.15) < 0.001
-        assert breakdown.get("runway-image-to-video") == 1
+        return visual_package, plan, cfg
 
     # ----------------------------------------------------------------
-    # run_post_vpd_authorization gate tests
+    # No compiled plan → cannot call this gate at all.
     # ----------------------------------------------------------------
 
-    def test_authorized_when_plan_is_under_ceiling(self):
-        """26-scene plan under $50 ceiling → AUTHORIZED."""
+    def test_missing_production_plan_is_a_type_error(self):
+        """There is no None-tolerant legacy fallback any more -- omitting
+        production_plan is a missing required argument, not an optional
+        rough-estimate path."""
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
-        scenes = [self._make_scene(f"s{i:02d}", tier=2) for i in range(5)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=50.0)
+        vpd_plan, _plan, cfg = self._make_plan_and_vpd(scene_count=2)
         with tempfile.TemporaryDirectory() as tmpdir:
-            record = run_post_vpd_authorization(vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir))
+            with pytest.raises(TypeError):
+                run_post_vpd_authorization(vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir))
+
+    # ----------------------------------------------------------------
+    # Plan-driven gate tests
+    # ----------------------------------------------------------------
+
+    def test_authorized_when_plan_maximum_is_under_ceiling(self):
+        from hypogeum.agents.finance_agent import run_post_vpd_authorization
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record = run_post_vpd_authorization(
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
+            )
         assert record["verdict"] == "AUTHORIZED"
         assert record["authorized"] is True
         assert record["phase"] == "post_vpd_authorization"
 
-    def test_blocked_when_plan_exceeds_ceiling(self):
-        """26-scene Antikythera plan ($28+ MUAPI) exceeds $15 ceiling → BLOCKED."""
+    def test_blocked_when_plan_maximum_exceeds_ceiling(self):
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
-        scenes = (
-            [self._make_scene(f"s{i:02d}", tier=1) for i in range(7)]
-            + [self._make_scene(f"s{i:02d}", tier=2) for i in range(7, 24)]
-            + [self._make_scene(f"s{i:02d}", tier=3) for i in range(24, 26)]
-        )
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=15.0)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            record = run_post_vpd_authorization(vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir))
-        assert record["verdict"] == "BLOCKED"
-        assert record["authorized"] is False
-        # MUAPI alone exceeds ceiling
-        assert record["cost_breakdown"]["estimated_muapi_usd"] > 15.0
-
-    def test_section_count_not_used_as_authoritative_muapi_estimate(self):
-        """
-        Post-VPD estimate must use scene routing, not section_count × clips_per_section.
-        A 3-section script with 26 scenes should NOT produce section-count-based MUAPI estimate.
-        """
-        from hypogeum.agents.finance_agent import (
-            _MUAPI_CLIPS_PER_SECTION,
-            _MUAPI_COST_PER_CLIP,
-            run_post_vpd_authorization,
-        )
-        script_pkg = make_script_package(section_count=3)
-        section_based_estimate = 3 * _MUAPI_CLIPS_PER_SECTION * _MUAPI_COST_PER_CLIP
-
-        scenes = [self._make_scene(f"s{i:02d}", tier=1) for i in range(10)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=50.0)
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=10, tier=1, ceiling=1.0)
         with tempfile.TemporaryDirectory() as tmpdir:
             record = run_post_vpd_authorization(
-                vpd_plan, "ep_test", cfg, script_package=script_pkg, output_dir=Path(tmpdir)
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
-        actual_muapi = record["cost_breakdown"]["estimated_muapi_usd"]
-        # 10 Tier-1 scenes × $2.50 = $25.00 — not 3 × 3 × $0.15 = $1.35
-        assert abs(actual_muapi - 25.0) < 0.001, (
-            f"Post-VPD gate used scene routing correctly (${actual_muapi:.4f}), "
-            f"not section-count estimate (${section_based_estimate:.4f})"
-        )
-        assert abs(actual_muapi - section_based_estimate) > 1.0, (
-            "Post-VPD estimate must differ from section-count estimate for this plan"
-        )
+        assert record["verdict"] == "BLOCKED"
+        assert record["authorized"] is False
+        assert record["cost_breakdown"]["maximum_bounded_cost_usd"] > 1.0
 
-    def test_finance_blocks_before_muapi_on_26_scene_plan_over_ceiling(self):
-        """
-        FinancePostVPDBlockedError is raised before MUAPI generation when
-        post-VPD gate returns BLOCKED.
-        """
+    def test_estimated_spend_equals_plan_maximum_bounded_cost(self):
+        from hypogeum.agents.finance_agent import run_post_vpd_authorization
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record = run_post_vpd_authorization(
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
+            )
+        assert record["estimated_spend_usd"] == pytest.approx(plan.maximum_bounded_cost_usd, abs=0.001)
+
+    def test_finance_totals_equal_sum_of_all_authoritative_line_items(self):
+        """Finance must not append narration/music/OpenRouter costs of its
+        own -- the recorded cost_breakdown fields must equal the plan's
+        own already-summed categories exactly."""
+        from hypogeum.agents.finance_agent import run_post_vpd_authorization
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record = run_post_vpd_authorization(
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
+            )
+        cb = record["cost_breakdown"]
+        assert cb["estimated_narration_usd"] == round(plan.narration_cost_usd, 4)
+        assert cb["estimated_music_usd"] == round(plan.music_cost_usd, 4)
+        assert cb["estimated_openrouter_usd"] == round(plan.planning_call_estimate_usd, 4)
+        assert cb["maximum_bounded_cost_usd"] == round(plan.maximum_bounded_cost_usd, 4)
+
+    def test_finance_blocks_before_muapi_on_over_ceiling_plan(self):
         from hypogeum.agents.finance_agent import (
             FinancePostVPDBlockedError,
             run_post_vpd_authorization,
         )
-        scenes = [self._make_scene(f"s{i:02d}", tier=1) for i in range(7)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=5.0)  # 7 × $2.50 = $17.50 >> $5
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=10, tier=1, ceiling=1.0)
         with tempfile.TemporaryDirectory() as tmpdir:
-            record = run_post_vpd_authorization(vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir))
+            record = run_post_vpd_authorization(
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
+            )
         assert record["verdict"] == "BLOCKED"
-        # Caller raises FinancePostVPDBlockedError
         with pytest.raises(FinancePostVPDBlockedError) as exc_info:
             raise FinancePostVPDBlockedError(episode_id="ep_test", record=record)
         assert exc_info.value.episode_id == "ep_test"
         assert exc_info.value.record["verdict"] == "BLOCKED"
 
     def test_post_vpd_record_validates_against_schema(self):
-        """Post-VPD authorization record passes finance_record schema validation."""
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
-        from hypogeum.schemas import validate
-        scenes = [self._make_scene("s01", tier=2)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=50.0)
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=1, ceiling=50.0)
         with tempfile.TemporaryDirectory() as tmpdir:
-            record = run_post_vpd_authorization(vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir))
-        # Must not raise
-        validate("finance_record", record)
+            record = run_post_vpd_authorization(
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
+            )
+        validate("finance_record", record)  # must not raise
 
     def test_post_vpd_record_written_to_correct_filename(self):
-        """Output file is finance_post_vpd_authorization_{episode_id}.json."""
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
-        scenes = [self._make_scene("s01", tier=2)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config()
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=1, ceiling=50.0)
         with tempfile.TemporaryDirectory() as tmpdir:
-            run_post_vpd_authorization(vpd_plan, "ep_abc", cfg, output_dir=Path(tmpdir))
+            run_post_vpd_authorization(
+                vpd_plan, "ep_abc", cfg, production_plan=plan, output_dir=Path(tmpdir),
+            )
             output_file = Path(tmpdir) / "finance_post_vpd_authorization_ep_abc.json"
             assert output_file.exists()
             data = json.loads(output_file.read_text())
             assert data["episode_id"] == "ep_abc"
             assert data["phase"] == "post_vpd_authorization"
 
-    def test_warning_when_plan_is_above_warning_threshold(self):
-        """Plan above 80% of ceiling triggers WARNING verdict."""
-        from hypogeum.agents.finance_agent import run_post_vpd_authorization
-        # 4 Tier-2 scenes × $0.60 = $2.40; ceiling=$3.00, 80% = $2.40
-        scenes = [self._make_scene(f"s{i:02d}", tier=2) for i in range(4)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=3.0)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            record = run_post_vpd_authorization(vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir))
-        # $2.40 MUAPI + $0.05 OpenRouter = $2.45 > 80% of $3.00 ($2.40)
-        assert record["verdict"] in ("WARNING", "AUTHORIZED")
-        assert record["authorized"] is True
-
     def test_no_ceiling_always_authorized(self, tmp_path):
-        """FINANCE_BUDGET_CEILING_USD=0 (no ceiling) → always AUTHORIZED."""
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         from hypogeum.db import initialize_schema
-        # Isolated, empty DB — see test_ceiling_recorded for why this must
-        # never fall back to the real production DB's factory ceiling.
         db_path = tmp_path / "test.db"
         initialize_schema(db_path)
-        scenes = [self._make_scene(f"s{i:02d}", tier=1) for i in range(50)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=0.0)
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=10, tier=1, ceiling=0.0)
         with tempfile.TemporaryDirectory() as tmpdir:
             record = run_post_vpd_authorization(
-                vpd_plan, "ep_test", cfg, output_dir=Path(tmpdir), db_path=db_path,
+                vpd_plan, "ep_test", cfg, production_plan=plan,
+                output_dir=Path(tmpdir), db_path=db_path,
             )
         assert record["verdict"] == "AUTHORIZED"
 
-    def test_narration_cost_included_when_script_package_provided(self):
-        """Narration cost from script_package is included in total when provided."""
+    def test_warning_when_plan_maximum_is_above_warning_threshold(self):
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
-        script_pkg = make_script_package(section_count=6, chars_per_beat=1000)
-        scenes = [self._make_scene("s01", tier=3)]  # cheap scene
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=50.0)
+        # First compile once (ceiling irrelevant to the plan's own totals)
+        # to learn the plan's real maximum, then set a ceiling just above
+        # it so the maximum crosses the 80% warning threshold but stays
+        # within the ceiling.
+        _, probe_plan, _ = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
+        ceiling = probe_plan.maximum_bounded_cost_usd / 0.85
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=ceiling)
         with tempfile.TemporaryDirectory() as tmpdir:
             record = run_post_vpd_authorization(
-                vpd_plan, "ep_test", cfg, script_package=script_pkg, output_dir=Path(tmpdir)
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
-        narration_cost = record["cost_breakdown"]["estimated_narration_usd"]
-        assert narration_cost > 0.0, "Narration cost must be non-zero when script_package provided"
-
-    def test_no_script_package_narration_is_zero(self):
-        """Without script_package (resume path), narration cost is $0.00."""
-        from hypogeum.agents.finance_agent import run_post_vpd_authorization
-        scenes = [self._make_scene("s01", tier=2)]
-        vpd_plan = self._make_vpd_plan(scenes)
-        cfg = self._make_config(ceiling=50.0)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            record = run_post_vpd_authorization(
-                vpd_plan, "ep_test", cfg, script_package=None, output_dir=Path(tmpdir)
-            )
-        assert record["cost_breakdown"]["estimated_narration_usd"] == 0.0
+        assert record["verdict"] in ("WARNING", "AUTHORIZED")
+        assert record["authorized"] is True

@@ -257,6 +257,12 @@ class Config:
                                                # see docs/validation/thumbnail_image_generation_validation/
                                                # GPT_IMAGE_2_ROUTING_AUDIT.md)
     THUMBNAIL_IMAGE_MODEL: str               # default: gpt-image-2-text-to-image (MUAPI path only)
+    THUMBNAIL_SHORT_CANDIDATE_CAP: int        # default: 3 — Factory Core conservative maximum-bound
+                                               # cap for Shorts' thumbnail candidate count (schema has
+                                               # no upper bound; real count is decided by Thumbnail
+                                               # Director's own Phase-1 planning, which has not run yet
+                                               # when hypogeum.production_plan compiles — see that
+                                               # module's own docstring)
     THUMBNAIL_IMAGE_RESOLUTION: str          # default: 2K (GPT Image 2 only)
     THUMBNAIL_IMAGE_QUALITY: str             # default: high (GPT Image 2 only)
     THUMBNAIL_FALLBACK_PROVIDER: str         # default: openrouter (fallback #1 when primary fails)
@@ -269,8 +275,6 @@ class Config:
     MUAPI_QUOTA_RETRY_MAX_ATTEMPTS: int       # default: 3 (real HTTP 402 -- bounded retry, allows operator-managed Auto Reload to complete)
     MUAPI_QUOTA_RETRY_DELAY_SECONDS: float    # default: 60.0 (seconds between real HTTP 402 retries)
     CINEMATIC_DIRECTOR_MAX_RETRIES: int       # default: 2 (bounded transient-retry allowance for automatic batched cinematic planning; exhausted retries fail closed -- never a duration-blind fallback plan)
-    COVERAGE_CONSERVATIVE_DURATION_FACTOR: float  # default: 0.95 (planned-mode coverage validation safety margin below the provider's requested clip duration -- see hypogeum.production_plan)
-    ENHANCEMENT_UNIT_PRICE_USD: float         # default: 0.09 (per-asset source-enhancement cost estimate used by hypogeum.production_plan's pre-spend Finance authorization)
     MUAPI_WEBHOOK_URL: Optional[str]
     MUAPI_CREDIT_WARNING_THRESHOLD: Optional[float]  # USD; default: None (off)
 
@@ -472,6 +476,7 @@ class Config:
         # GPT_IMAGE_2_ROUTING_AUDIT.md): MUAPI gpt-image-2-text-to-image is the primary
         # thumbnail provider/model. openrouter and openai are genuine-failure fallbacks only.
         self.THUMBNAIL_IMAGE_PROVIDER = _get_optional("THUMBNAIL_IMAGE_PROVIDER", default="muapi")
+        self.THUMBNAIL_SHORT_CANDIDATE_CAP = _get_int("THUMBNAIL_SHORT_CANDIDATE_CAP", default=3)
         self.THUMBNAIL_IMAGE_MODEL = _get_optional(
             "THUMBNAIL_IMAGE_MODEL", default="gpt-image-2-text-to-image"
         )
@@ -491,8 +496,6 @@ class Config:
         self.MUAPI_QUOTA_RETRY_MAX_ATTEMPTS = _get_int("MUAPI_QUOTA_RETRY_MAX_ATTEMPTS", default=3)
         self.MUAPI_QUOTA_RETRY_DELAY_SECONDS = _get_float("MUAPI_QUOTA_RETRY_DELAY_SECONDS", default=60.0)
         self.CINEMATIC_DIRECTOR_MAX_RETRIES = _get_int("CINEMATIC_DIRECTOR_MAX_RETRIES", default=2)
-        self.COVERAGE_CONSERVATIVE_DURATION_FACTOR = _get_float("COVERAGE_CONSERVATIVE_DURATION_FACTOR", default=0.95)
-        self.ENHANCEMENT_UNIT_PRICE_USD = _get_float("ENHANCEMENT_UNIT_PRICE_USD", default=0.09)
         self.MUAPI_WEBHOOK_URL = _get_optional("MUAPI_WEBHOOK_URL")
         self.MUAPI_CREDIT_WARNING_THRESHOLD = _get_float("MUAPI_CREDIT_WARNING_THRESHOLD")
 

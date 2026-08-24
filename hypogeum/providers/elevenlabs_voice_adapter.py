@@ -149,7 +149,7 @@ class ElevenlabsVoiceAdapter:
         from hypogeum.config import Config
         from hypogeum.logger import get_logger
         from hypogeum.elevenlabs import (
-            _BASE_URL, _TTS_USD_PER_CHAR, _auth_headers, _chars_to_words, _output_format_extension,
+            _BASE_URL, TTS_USD_PER_CHAR, _auth_headers, _chars_to_words, _output_format_extension,
             _parse_char_alignment, _post_json_with_retry,
         )
         from hypogeum.elevenlabs import ElevenLabsError
@@ -216,7 +216,7 @@ class ElevenlabsVoiceAdapter:
         # Character-based cost, mirroring the legacy path's own formula
         # exactly (hypogeum.elevenlabs.generate_narration_segment()) --
         # never exceeds the authorized ceiling.
-        computed_cost = Decimal(str(round(char_count * _TTS_USD_PER_CHAR, 6)))
+        computed_cost = Decimal(str(round(char_count * TTS_USD_PER_CHAR, 6)))
         charged_amount = min(computed_cost, capability.max_cost_per_call)
 
         return AdapterResult(

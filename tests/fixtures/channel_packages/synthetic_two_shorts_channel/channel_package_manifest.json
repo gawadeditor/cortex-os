@@ -1,0 +1,13 @@
+{
+  "channel_id": "synthetic_two_shorts_channel",
+  "package_version": "1.0.0",
+  "artifacts": [
+    {
+      "path": "deliverable_contract_v1.json",
+      "role": "deliverable_contract",
+      "contract_id": "synthetic_two_shorts_channel_deliverable_contract_v1",
+      "contract_version": "1.0.0",
+      "sha256": "e4795f29ea823f43c47e7c3b223edaba37621cdb2703ce2fee34d39f51471f0f"
+    }
+  ]
+}

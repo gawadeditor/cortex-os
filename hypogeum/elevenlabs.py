@@ -104,9 +104,9 @@ _DEFAULT_MODEL_ID = "eleven_multilingual_v2"
 
 # Cost estimates (USD) — used for cost recording only; not billing.
 # eleven_multilingual_v2 at creator tier: ~$0.30 per 1,000 characters.
-_TTS_USD_PER_CHAR   = 3e-4
+TTS_USD_PER_CHAR   = 3e-4
 # music_v1: approximate per-second cost for generated music.
-_MUSIC_USD_PER_SEC  = 0.02
+MUSIC_USD_PER_SEC  = 0.02
 
 # Default output format
 _DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"
@@ -683,7 +683,7 @@ def _generate_narration_via_gate(
     expected_output_identity = f"episodes/{episode_id}/narration/{beat_id}"
     dest_path = output_dir / "narration" / f"{beat_id}{_output_format_extension(output_format)}"
     char_count = len(text)
-    max_cost = Decimal(str(round(char_count * _TTS_USD_PER_CHAR, 6)))
+    max_cost = Decimal(str(round(char_count * TTS_USD_PER_CHAR, 6)))
     authorization_id = f"{episode_id}:narr_{beat_id}"
 
     try:
@@ -762,7 +762,7 @@ def _generate_narration_via_gate(
     duration_seconds = word_timings[-1].end_seconds if word_timings else 0.0
     _finance.record_cost(
         provider=_VOICE_PROVIDER, model=model_id, call_type="narration",
-        cost_usd=float(result.adapter_result.charged_amount) if result.adapter_result and result.adapter_result.charged_amount else round(char_count * _TTS_USD_PER_CHAR, 6),
+        cost_usd=float(result.adapter_result.charged_amount) if result.adapter_result and result.adapter_result.charged_amount else round(char_count * TTS_USD_PER_CHAR, 6),
         tokens_or_credits=float(char_count), asset_id=expected_output_identity,
     )
 
@@ -959,7 +959,7 @@ def generate_narration_segment(
         provider="elevenlabs",
         model=config.ELEVENLABS_MODEL_ID or _DEFAULT_MODEL_ID,
         call_type="narration",
-        cost_usd=round(char_count * _TTS_USD_PER_CHAR, 6),
+        cost_usd=round(char_count * TTS_USD_PER_CHAR, 6),
         tokens_or_credits=float(char_count),
         asset_id=asset_id,
     )
@@ -1467,7 +1467,7 @@ def _generate_music_via_gate(
     operation_payload_content = operation_payload_bytes.decode("utf-8")
     operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
 
-    max_cost = Decimal(str(round(actual_duration_seconds * _MUSIC_USD_PER_SEC, 6)))
+    max_cost = Decimal(str(round(actual_duration_seconds * MUSIC_USD_PER_SEC, 6)))
     authorization_id = f"{episode_id}:music:{category_slug}:{track_id}"
 
     try:
@@ -1557,7 +1557,7 @@ def _generate_music_via_gate(
 
     _finance.record_cost(
         provider=_VOICE_PROVIDER, model=model_id, call_type="music",
-        cost_usd=float(result.adapter_result.charged_amount) if result.adapter_result.charged_amount else round(evidence["duration_seconds"] * _MUSIC_USD_PER_SEC, 6),
+        cost_usd=float(result.adapter_result.charged_amount) if result.adapter_result.charged_amount else round(evidence["duration_seconds"] * MUSIC_USD_PER_SEC, 6),
         tokens_or_credits=evidence["duration_seconds"], asset_id=expected_output_identity,
     )
 
@@ -1799,7 +1799,7 @@ def generate_music_track(
         provider="elevenlabs",
         model=model_id,
         call_type="music",
-        cost_usd=round(actual_duration_seconds * _MUSIC_USD_PER_SEC, 6),
+        cost_usd=round(actual_duration_seconds * MUSIC_USD_PER_SEC, 6),
         tokens_or_credits=actual_duration_seconds,
         asset_id=asset_id,
     )

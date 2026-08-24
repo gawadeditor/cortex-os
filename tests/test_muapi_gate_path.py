@@ -74,6 +74,59 @@ def _isolated_channel_identity(monkeypatch):
     )
 
 
+def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s01b01",
+                            model, prompt="Ancient Greek ruins at dawn, wide establishing shot.") -> None:
+    """
+    hypogeum.muapi._submit_scene_via_gate() now checks the real scene
+    submission against a persisted hypogeum.production_plan.ProductionPlan
+    before compiling an envelope at all (2026-08-24 correction) -- these
+    gate-path integration tests exercise the grant/envelope/submission_gate
+    machinery itself, not plan compilation (that has its own coverage in
+    test_production_plan.py), so this persists a minimal, directly
+    constructed plan declaring exactly the one asset each test submits.
+    """
+    from hypogeum.muapi import _compute_asset_id
+    from hypogeum.production_plan import (
+        PLAN_SCHEMA_VERSION,
+        ROLE_REQUIRED,
+        PlannedAsset,
+        ProductionPlan,
+        persist_production_plan,
+        prompt_fingerprint,
+    )
+    from hypogeum.video_prompt_writer import assemble_video_scene_prompt
+
+    # The declared fingerprint must match the FULLY ASSEMBLED prompt
+    # submit_scene() actually submits (it always runs the raw
+    # production_spec.primary_prompt through assemble_video_scene_prompt()
+    # before calling _submit_scene_via_gate() -- see that function's own
+    # plan-conformance check).
+    assembled_prompt = assemble_video_scene_prompt(prompt)
+    asset = PlannedAsset(
+        deliverable_id="main_episode", beat_id="b_001", shot_id="b_001__primary",
+        asset_id=_compute_asset_id(episode_id, scene_id, None), scene_id=scene_id, short_id=None,
+        role=ROLE_REQUIRED, prompt=assembled_prompt, prompt_fingerprint=prompt_fingerprint(assembled_prompt),
+        shot_signature="", aspect_ratio="16:9", requested_duration_seconds=8.0,
+        conservative_usable_duration_seconds=8.0, provider="muapi", model=model,
+        unit_price_usd=0.39, enhancement_price_usd=0.05, max_chargeable_attempts=2,
+    )
+    plan = ProductionPlan(
+        schema_version=PLAN_SCHEMA_VERSION, channel_id="test_channel", episode_id=episode_id,
+        deliverable_contract_id="test", deliverable_ids=["main_episode"], assets=[asset],
+        thumbnail_main_candidate_count=3, thumbnail_short_candidate_cap=3,
+        thumbnail_attempts_per_candidate=2, thumbnail_unit_price_usd=0.09,
+        thumbnail_cost_normal_usd=0.27, thumbnail_cost_maximum_usd=0.27,
+        narration_char_count=0, narration_price_per_char_usd=0.0003,
+        narration_cost_usd=0.0, narration_is_realized=False,
+        music_section_count=0, music_seconds_per_section=120.0,
+        music_price_per_second_usd=0.02, music_cost_usd=0.0,
+        planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.05,
+        normal_expected_cost_usd=0.71, maximum_bounded_cost_usd=0.90,
+        content_hash="a" * 64, compiled_at="2026-08-24T00:00:00+00:00",
+    )
+    persist_production_plan(plan, Path(output_dir))
+
+
 def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decimal("10.00")):
     bindings = [astore.GrantBinding(
         provider="muapi", model=model, provider_operation="video.text_to_video",
@@ -176,6 +229,7 @@ class TestGrantDerivedGatePath:
         # will) -- point the production db_path at this test's isolated
         # file for the duration of this test only.
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
 
         with patch("hypogeum.muapi.requests.post") as mock_post, \
              patch("hypogeum.muapi.requests.get") as mock_get, \
@@ -205,6 +259,7 @@ class TestGrantDerivedGatePath:
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
 
         with patch("hypogeum.muapi.requests.post") as mock_post, \
              patch("hypogeum.muapi.requests.get") as mock_get, \
@@ -261,6 +316,7 @@ class TestGrantDerivedGatePath:
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
 
         import hypogeum.video_prompt_writer as video_prompt_writer
         expected_prompt = video_prompt_writer.assemble_video_scene_prompt(
@@ -300,6 +356,7 @@ class TestGrantDerivedGatePath:
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL, max_calls=5, max_total_spend=Decimal("10.00"))
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
 
         with patch("hypogeum.muapi.requests.post") as mock_post, \
              patch("hypogeum.muapi.requests.get") as mock_get, \

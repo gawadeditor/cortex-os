@@ -52,7 +52,7 @@ _UPSCALE_ENVELOPE_SCHEMA_VERSION = "1.0"
 # docstring) -- a flat ceiling above the observed range, mirroring how
 # every other domain estimates a pre-call max_cost_per_call ceiling
 # before the real, provider-reported cost is known.
-_UPSCALE_CEILING_USD = Decimal("0.10")
+UPSCALE_CEILING_USD = Decimal("0.10")
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _ASSETS_ROOT = _PROJECT_ROOT / ".hypogeum-assets"
@@ -382,7 +382,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
                 },
                 provider=PROVIDER_NAME, model=MODEL_NAME, provider_operation=_UPSCALE_PROVIDER_OPERATION,
                 deterministic_output_path=str(dest_path), expected_output_identity=expected_output_identity,
-                authorization_id=authorization_id, authorization_version=1, max_cost_per_call=_UPSCALE_CEILING_USD,
+                authorization_id=authorization_id, authorization_version=1, max_cost_per_call=UPSCALE_CEILING_USD,
                 run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
                 retry_authorized=False, fallback_authorized=False, idempotency_key=authorization_id,
                 created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
@@ -418,8 +418,8 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
                 structured_spec_checksum=structured_spec_checksum, compiler_version="1",
             )
             scopes = [
-                bs.ScopeRequest(bs.BudgetScopeKind.CALL, scene_id, _UPSCALE_CEILING_USD, "USD"),
-                bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or _UPSCALE_CEILING_USD, "USD"),
+                bs.ScopeRequest(bs.BudgetScopeKind.CALL, scene_id, UPSCALE_CEILING_USD, "USD"),
+                bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or UPSCALE_CEILING_USD, "USD"),
             ]
             result = submission_gate.submit(
                 envelope, live_sources=live_sources, authorization=authorization, lease_conn=conn,

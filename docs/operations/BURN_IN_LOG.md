@@ -1,0 +1,167 @@
+- `2026-08-07T20:10:27.188863+00:00` WORKER STATUS: idle -> claiming (active_queue_id=)
+- `2026-08-07T20:10:57.465046+00:00` WORKER STATUS: claiming -> idle (active_queue_id=)
+- `2026-08-07T20:40:58.476858+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-07T21:10:59.600756+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-07T21:41:00.589121+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-07T22:11:01.402056+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-07T22:41:02.046164+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-07T23:11:03.025153+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-07T23:41:04.199013+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T00:11:05.553556+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T00:41:06.796372+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T01:11:08.072987+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T01:41:09.310965+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T02:11:10.640037+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T02:35:11.671350+00:00` WORKER STATUS: idle -> claiming (active_queue_id=)
+- `2026-08-08T02:35:41.696049+00:00` WORKER STATUS: claiming -> idle (active_queue_id=)
+- `2026-08-08T03:05:43.075645+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T03:35:44.366596+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T04:05:45.627197+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T04:35:46.841466+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T05:05:48.162520+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T05:35:49.462272+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T06:05:50.717814+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T06:35:51.895864+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T07:05:52.924545+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T07:35:53.769469+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T08:05:54.584488+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T08:35:55.450355+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T09:05:56.430862+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T09:35:57.088737+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T10:05:57.631071+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T10:35:58.310282+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T11:05:59.248182+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T11:36:00.206916+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T12:06:01.137111+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T12:27:01.706404+00:00` WORKER STATUS: idle -> claiming (active_queue_id=)
+- `2026-08-08T12:27:31.722202+00:00` WORKER STATUS: claiming -> idle (active_queue_id=)
+- `2026-08-08T12:57:32.547874+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T13:27:33.358888+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T13:57:34.326896+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-08T14:26:20.631824+00:00
+- `2026-08-08T14:27:35.297052+00:00` **SCHEDULER FIRED** — schedule `f11b158d-040f-418b-af01-fe01096669c3` (status=active) last_run_at 2026-08-07T14:26:20.631824+00:00 -> 2026-08-08T14:27:11.812484+00:00; next_run_at now 2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T14:27:35.297052+00:00` scheduled_runs: new row `80923bf9-567d-41d4-b60b-5c55a48e21ae` channel=None status=cancelled scheduled_for=2026-08-08T14:27:11.812484+00:00
+- `2026-08-08T17:53:21.610654+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T18:23:22.635867+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T18:53:23.598122+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T19:23:24.657347+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T19:53:25.493287+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T20:23:26.552566+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T20:53:27.536239+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-08T23:31:20.768544+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T05:06:06.988242+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T07:30:39.472991+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T08:00:40.443652+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T08:30:41.559292+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T08:39:41.939866+00:00` WORKER STATUS: idle -> claiming (active_queue_id=)
+- `2026-08-09T08:40:11.964545+00:00` WORKER STATUS: claiming -> idle (active_queue_id=)
+- `2026-08-09T09:10:13.128626+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T09:40:14.208198+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T10:10:15.682884+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T10:40:16.926766+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T11:10:18.235242+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T11:40:19.386477+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T12:10:20.650048+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T12:40:21.880075+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T13:10:22.855432+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T13:40:24.235102+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T14:10:25.444006+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-09T14:27:11.812484+00:00
+- `2026-08-09T14:27:26.100914+00:00` **SCHEDULER FIRED** — schedule `f11b158d-040f-418b-af01-fe01096669c3` (status=active) last_run_at 2026-08-08T14:27:11.812484+00:00 -> 2026-08-09T14:27:20.843999+00:00; next_run_at now 2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T14:27:26.100914+00:00` scheduled_runs: new row `cda1f466-6896-4408-a452-94c00f9058c3` channel=None status=cancelled scheduled_for=2026-08-09T14:27:20.843999+00:00
+- `2026-08-09T14:57:27.330797+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T15:27:28.649981+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T15:40:29.192309+00:00` WORKER STATUS: idle -> claiming (active_queue_id=)
+- `2026-08-09T15:40:59.214871+00:00` WORKER STATUS: claiming -> idle (active_queue_id=)
+- `2026-08-09T16:11:00.431477+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T16:41:01.630125+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T17:11:02.731970+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T17:41:03.864571+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T18:11:05.102778+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T18:41:06.329441+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T19:11:07.546095+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T19:41:08.441072+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T20:11:09.512172+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T20:41:26.832863+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T21:11:27.804120+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T21:41:28.640876+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T22:11:29.810937+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T22:41:30.972338+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T23:11:32.261293+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-09T23:41:33.522227+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T00:11:34.593031+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T00:41:35.637293+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T01:11:36.744625+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T01:41:37.793255+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T02:11:38.994489+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T02:41:40.248788+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T03:11:41.380433+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T03:41:42.681026+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T04:11:43.829732+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T04:41:44.991925+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T05:11:46.075601+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T05:41:47.091233+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T06:11:48.213608+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T06:41:49.047707+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T07:11:50.053650+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T07:41:51.186478+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T08:11:52.287426+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T08:41:53.160953+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T09:11:53.977224+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T09:41:54.800360+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T10:11:55.533551+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T10:41:56.420134+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T11:11:57.501562+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T11:41:58.548745+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T12:11:59.521372+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T12:42:00.333476+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T13:12:18.516863+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T13:42:19.393918+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T14:12:20.319803+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-10T14:27:20.843999+00:00
+- `2026-08-10T14:28:20.796759+00:00` **SCHEDULER FIRED** — schedule `f11b158d-040f-418b-af01-fe01096669c3` (status=active) last_run_at 2026-08-09T14:27:20.843999+00:00 -> 2026-08-10T14:28:20.424406+00:00; next_run_at now 2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T14:28:20.796759+00:00` scheduled_runs: new row `df98b71a-2f2e-489c-959c-b39bb042a888` channel=None status=cancelled scheduled_for=2026-08-10T14:28:20.424406+00:00
+- `2026-08-10T14:58:21.632053+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T15:28:22.417027+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T15:58:23.708321+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T16:28:24.944381+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T16:58:26.192163+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T17:28:27.224442+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T17:58:28.369410+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T18:28:29.291430+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T18:58:30.257736+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T19:28:31.038989+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T20:40:35.379971+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T21:10:36.355073+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T21:26:06.888958+00:00` WORKER STATUS: idle -> claiming (active_queue_id=)
+- `2026-08-10T21:26:36.901808+00:00` WORKER STATUS: claiming -> idle (active_queue_id=)
+- `2026-08-10T21:56:37.975157+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-10T22:58:00.572166+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T06:29:40.229306+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T07:11:12.062579+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T07:41:12.981169+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T08:11:16.291776+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T08:41:16.997181+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T09:11:17.814329+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T09:41:18.606642+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T10:11:19.483677+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T10:41:20.401734+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T11:11:21.442059+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T11:41:22.363802+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T12:11:23.931617+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T12:41:24.947295+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T13:11:25.771007+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T13:41:26.732740+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T14:11:27.772688+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-11T14:28:20.424406+00:00
+- `2026-08-11T14:28:58.480029+00:00` **SCHEDULER FIRED** — schedule `f11b158d-040f-418b-af01-fe01096669c3` (status=active) last_run_at 2026-08-10T14:28:20.424406+00:00 -> 2026-08-11T14:28:36.355291+00:00; next_run_at now 2026-08-12T14:28:36.355291+00:00
+- `2026-08-11T14:28:58.480029+00:00` scheduled_runs: new row `236859b9-881b-4635-b293-7a089c8fd0d1` channel=None status=cancelled scheduled_for=2026-08-11T14:28:36.355291+00:00
+- `2026-08-11T14:58:59.288218+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-11T15:29:00.439168+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-11T15:59:01.500944+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-11T16:29:02.755532+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-11T16:59:03.869298+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-11T17:29:05.082356+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-11T18:01:18.006979+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-12T03:35:55.853318+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-12T06:34:03.921392+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-12T07:38:13.878719+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-12T08:08:14.798881+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-12T08:38:15.544408+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00
+- `2026-08-12T09:08:16.672430+00:00` heartbeat: worker=idle, queue_depth=71, next_schedule_fires=2026-08-12T14:28:36.355291+00:00

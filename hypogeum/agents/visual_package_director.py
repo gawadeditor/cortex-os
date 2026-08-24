@@ -1184,10 +1184,15 @@ def run_visual_package_director(
         persist_production_plan,
         validate_plan_coverage,
     )
+    # channel_id is never substituted with a real-looking placeholder here:
+    # "unknown" has no real Channel Package on disk, so a caller that omits
+    # channel_id fails closed inside compile_production_plan() ->
+    # load_deliverable_contract() with a clear ChannelPackagePolicyDriftError
+    # rather than silently proceeding with an inferred or invented shape.
     production_plan = compile_production_plan(
         script_package=script_package,
         narration_package=narration_package or {},
-        cinematic_coverage_plan=coverage_plan,
+        visual_package=visual_package,
         channel_id=channel_id or "unknown",
         episode_id=episode_id,
         config=config,
@@ -1209,34 +1214,39 @@ def run_visual_package_director(
     )
 
     # ------------------------------------------------------------------
-    # Post-VPD finance gate — authoritative budget check from scene routing
-    # Runs after Phase 1 planning (routing data now known) and before MUAPI spend.
+    # Post-VPD finance gate — authoritative budget check from the compiled
+    # Production Plan's own maximum bounded cost. Always runs, regardless
+    # of whether a ceiling is configured (config.FINANCE_BUDGET_CEILING_USD
+    # <= 0 is handled inside run_post_vpd_authorization() itself, which
+    # still records a finance_record and returns AUTHORIZED) -- a caller
+    # must never be able to reach MUAPI spend without at least attempting
+    # Finance authorization, per the no-legacy-paid-bypass requirement
+    # this correction enforces end to end.
     # ------------------------------------------------------------------
-    if config.FINANCE_BUDGET_CEILING_USD > 0:
-        from hypogeum.agents.finance_agent import (
-            FinancePostVPDBlockedError,
-            run_post_vpd_authorization,
-        )
-        post_vpd_finance = run_post_vpd_authorization(
-            visual_package=visual_package,
-            episode_id=episode_id,
-            config=config,
-            script_package=script_package,
-            output_dir=_resolve_output_dir,
-        )
-        log.info(
-            "vpd_post_vpd_finance_gate",
-            verdict=post_vpd_finance.get("verdict"),
-            estimated_spend_usd=post_vpd_finance.get("estimated_spend_usd"),
-            scene_count=post_vpd_finance.get("cost_breakdown", {}).get("scene_count"),
-        )
-        if post_vpd_finance.get("verdict") == "BLOCKED":
-            # Check for an operator-granted single-use approval before blocking.
-            _approved = _check_finance_approval(episode_id, post_vpd_finance, log)
-            if not _approved:
-                raise FinancePostVPDBlockedError(
-                    episode_id=episode_id, record=post_vpd_finance
-                )
+    from hypogeum.agents.finance_agent import (
+        FinancePostVPDBlockedError,
+        run_post_vpd_authorization,
+    )
+    post_vpd_finance = run_post_vpd_authorization(
+        visual_package=visual_package,
+        episode_id=episode_id,
+        config=config,
+        production_plan=production_plan,
+        output_dir=_resolve_output_dir,
+    )
+    log.info(
+        "vpd_post_vpd_finance_gate",
+        verdict=post_vpd_finance.get("verdict"),
+        estimated_spend_usd=post_vpd_finance.get("estimated_spend_usd"),
+        scene_count=post_vpd_finance.get("cost_breakdown", {}).get("scene_count"),
+    )
+    if post_vpd_finance.get("verdict") == "BLOCKED":
+        # Check for an operator-granted single-use approval before blocking.
+        _approved = _check_finance_approval(episode_id, post_vpd_finance, log)
+        if not _approved:
+            raise FinancePostVPDBlockedError(
+                episode_id=episode_id, record=post_vpd_finance
+            )
 
     # ------------------------------------------------------------------
     # Phase 2 — MUAPI execution
@@ -1256,7 +1266,7 @@ def run_visual_package_director(
 
     visual_package = _execute_muapi_phase(
         visual_package, config, episode_id, _resolve_output_dir, log,
-        budget_guard=budget_guard,
+        budget_guard=budget_guard, channel_id=channel_id,
     )
 
     log.info(
@@ -1823,6 +1833,7 @@ def run_visual_package_director_from_plan(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Resume VPD from an existing validated plan — skip Phase 1 (Claude planning),
@@ -1871,29 +1882,39 @@ def run_visual_package_director_from_plan(
         from hypogeum.agents.brand_guardian_agent import run_bga_pass1
         run_bga_pass1(visual_package, episode_id, config, _resolve_output_dir)
 
-    # Post-VPD finance gate on resume path (script_package not available; MUAPI only)
-    if config.FINANCE_BUDGET_CEILING_USD > 0:
-        from hypogeum.agents.finance_agent import (
-            FinancePostVPDBlockedError,
-            run_post_vpd_authorization,
+    # Post-VPD finance gate on resume path — reconciles the ALREADY
+    # compiled, persisted Production Plan from this episode's Phase 1 run
+    # (this function never compiles a fresh plan; a resume path has no
+    # script_package to compile one from). A legacy/checkpoint episode
+    # from before this correction, or any resume whose plan file is
+    # missing for any other reason, fails closed with
+    # ProductionPlanMissingError rather than silently reaching MUAPI
+    # ungoverned by any plan.
+    from hypogeum.agents.finance_agent import (
+        FinancePostVPDBlockedError,
+        run_post_vpd_authorization,
+    )
+    from hypogeum.production_plan import ProductionPlanMissingError, load_production_plan
+    resumed_plan = load_production_plan(episode_id, _resolve_output_dir)
+    if resumed_plan is None:
+        raise ProductionPlanMissingError(episode_id=episode_id)
+    post_vpd_finance = run_post_vpd_authorization(
+        visual_package=visual_package,
+        episode_id=episode_id,
+        config=config,
+        production_plan=resumed_plan,
+        output_dir=_resolve_output_dir,
+    )
+    log.info(
+        "vpd_post_vpd_finance_gate",
+        verdict=post_vpd_finance.get("verdict"),
+        estimated_spend_usd=post_vpd_finance.get("estimated_spend_usd"),
+        scene_count=post_vpd_finance.get("cost_breakdown", {}).get("scene_count"),
+    )
+    if post_vpd_finance.get("verdict") == "BLOCKED":
+        raise FinancePostVPDBlockedError(
+            episode_id=episode_id, record=post_vpd_finance
         )
-        post_vpd_finance = run_post_vpd_authorization(
-            visual_package=visual_package,
-            episode_id=episode_id,
-            config=config,
-            script_package=None,
-            output_dir=_resolve_output_dir,
-        )
-        log.info(
-            "vpd_post_vpd_finance_gate",
-            verdict=post_vpd_finance.get("verdict"),
-            estimated_spend_usd=post_vpd_finance.get("estimated_spend_usd"),
-            scene_count=post_vpd_finance.get("cost_breakdown", {}).get("scene_count"),
-        )
-        if post_vpd_finance.get("verdict") == "BLOCKED":
-            raise FinancePostVPDBlockedError(
-                episode_id=episode_id, record=post_vpd_finance
-            )
 
     # M5.6 — Create budget guard for this run
     budget_guard = MUAPIBudgetGuard(
@@ -1906,7 +1927,7 @@ def run_visual_package_director_from_plan(
     log.info("vpd_muapi_phase_started", scenes_total=scenes_planned)
     visual_package = _execute_muapi_phase(
         visual_package, config, episode_id, _resolve_output_dir, log,
-        budget_guard=budget_guard,
+        budget_guard=budget_guard, channel_id=channel_id,
     )
     log.info(
         "vpd_muapi_phase_completed",
@@ -1932,6 +1953,7 @@ def _execute_muapi_phase(
     output_dir: Path,
     log,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute MUAPI generation for all reference images and scenes.
@@ -1942,6 +1964,20 @@ def _execute_muapi_phase(
     M5.6 guardrails applied here:
       - EPISODE_ZERO_MAX_SCENES cap: truncates scene list before generation begins
       - budget_guard: passed to each scene generation call
+
+    channel_id: forwarded to generate_all_scene_videos() -> generate_scene_video()
+      -> muapi.submit_scene()'s own channel_id parameter. Every prior caller of
+      this function omitted channel_id entirely, which meant every real
+      production video-generation call reached submit_scene() with
+      channel_id=None -- the exact condition under which submit_scene() falls
+      through to its legacy, ungated _attempt_generation() path with no
+      RunAuthorizationGrant, no GenerationExecutionEnvelope, and no
+      submission_gate.submit() check at all (see submit_scene()'s own
+      docstring/branch: "channel_id is not None" is what commits a caller to
+      the enforced gate path; omitting it was previously indistinguishable
+      from "not yet migrated"). This was a real, live gap, not a hypothetical
+      one -- fixed 2026-08-24 as part of the Channel-Package-driven Production
+      Plan / Finance correction.
     """
     vcr = visual_package.get("visual_continuity_record", {})
     locked_entities = vcr.get("locked_entities", [])
@@ -1963,7 +1999,7 @@ def _execute_muapi_phase(
     generate_all_scene_videos(
         visual_package, scenes_sorted, entity_hosted_urls,
         config, episode_id, output_dir, log,
-        budget_guard=budget_guard,
+        budget_guard=budget_guard, channel_id=channel_id,
     )
 
     # Step 3: Re-build provider_routing_manifest summary from actuals

@@ -52,6 +52,29 @@ from hypogeum.schemas import SchemaError
 
 
 @pytest.fixture(autouse=True)
+def _stub_deliverable_contract(monkeypatch):
+    """
+    This file tests VPD Stage A orchestration (checkpointing, batching),
+    not Channel Package deliverable shape validation (covered in
+    test_production_plan.py) -- stub compile_production_plan()'s
+    Channel-Package lookup so this file's call sites (none of which pass
+    channel_id, and none of which ship a matching channel_packages/
+    fixture) don't need a real Channel Package.
+    """
+    import hypogeum.production_plan as pp
+
+    def _permissive_contract(channel_id, *, packages_root=None):
+        return {"allow_standalone_shorts": True, "deliverables": [
+            {"deliverable_id": "main_episode", "kind": "main_episode",
+             "aspect_ratio": "16:9", "required": True, "derived_from": None},
+        ]}
+
+    monkeypatch.setattr(pp, "load_deliverable_contract", _permissive_contract)
+    monkeypatch.setattr(pp, "validate_deliverable_shape", lambda *a, **k: None)
+    monkeypatch.setenv("MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", "1")
+
+
+@pytest.fixture(autouse=True)
 def _no_real_cinematic_director_calls():
     """Cinematic Director (2026-08-06) makes its own run_agent call inside
     hypogeum.agents.cinematic_director — a separate import binding from

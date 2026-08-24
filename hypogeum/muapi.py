@@ -701,7 +701,55 @@ def _submit_scene_via_gate(
         channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
     )
 
-    plan_checksum = hashlib.sha256(_canonical_json_bytes({"scene_id": scene_id, "prompt": prompt, "tier": tier})).hexdigest()
+    dest_path = scene_file_path(output_dir, scene_id, short_id)
+    expected_output_identity = _compute_asset_id(episode_id, scene_id, short_id)
+
+    # ------------------------------------------------------------------
+    # Plan-conformance check (2026-08-24 correction) -- the common paid
+    # network boundary rejects an undeclared asset, a changed prompt, or a
+    # changed model BEFORE any envelope is compiled or any network call is
+    # made. Not a second, parallel authorization registry: this is a
+    # lookup against the SAME persisted hypogeum.production_plan.
+    # ProductionPlan the Finance gate already authorized, at the ONE real
+    # submission boundary every video-generation caller (VPD's own Phase 2
+    # executor, clip_repair_agent's missing-clip and coverage-fill repair,
+    # any future caller) already passes through once channel_id is
+    # supplied. This is what makes Assembly's own repair calls incapable
+    # of inventing an asset the plan never declared, without moving those
+    # call sites out of assembly_agent.py.
+    # ------------------------------------------------------------------
+    from hypogeum.production_plan import load_production_plan, prompt_fingerprint  # noqa: PLC0415
+
+    production_plan = load_production_plan(episode_id, output_dir)
+    if production_plan is None:
+        return None, (
+            f"no_production_plan: no compiled Production Plan found for "
+            f"episode {episode_id!r} -- refusing to submit an asset with no "
+            f"authorized plan to check it against"
+        )
+    declared_asset = production_plan.asset_by_id(expected_output_identity)
+    if declared_asset is None:
+        return None, (
+            f"undeclared_asset: {expected_output_identity!r} was never declared "
+            f"in the authorized Production Plan (content_hash="
+            f"{production_plan.content_hash[:12]})"
+        )
+    real_prompt_fingerprint = prompt_fingerprint(prompt)
+    if real_prompt_fingerprint != declared_asset.prompt_fingerprint:
+        return None, (
+            f"prompt_mismatch: real prompt fingerprint for {expected_output_identity!r} "
+            f"does not match the plan's declared fingerprint for this asset identity"
+        )
+    if model != declared_asset.model:
+        return None, (
+            f"model_mismatch: {model!r} does not match the plan's declared "
+            f"model {declared_asset.model!r} for {expected_output_identity!r}"
+        )
+
+    # plan_checksum ties this envelope's dependency_checksums back to the
+    # REAL compiled, Finance-authorized Production Plan -- never an ad-hoc
+    # per-call hash independent of anything Finance actually reviewed.
+    plan_checksum = production_plan.content_hash
     structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({
         "aspect_ratio": aspect_ratio, "requested_duration": requested_duration,
         "reference_image_url": reference_image_url,
@@ -715,8 +763,6 @@ def _submit_scene_via_gate(
     operation_payload_content = operation_payload_bytes.decode("utf-8")
     operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
 
-    dest_path = scene_file_path(output_dir, scene_id, short_id)
-    expected_output_identity = _compute_asset_id(episode_id, scene_id, short_id)
     max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, _DEFAULT_UNKNOWN_MODEL_COST)))
     authorization_id = f"{episode_id}:{scene_id}:{'fallback' if is_fallback else 'primary'}"
     idempotency_key = authorization_id

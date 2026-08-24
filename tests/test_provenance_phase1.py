@@ -650,31 +650,31 @@ class TestMUAPICostRecording:
 
 class TestElevenLabsCostRecording:
     def test_tts_rate_constant_is_reasonable(self):
-        """_TTS_USD_PER_CHAR is $0.30/1000 chars — sanity check."""
-        from hypogeum.elevenlabs import _TTS_USD_PER_CHAR
-        assert _TTS_USD_PER_CHAR == pytest.approx(3e-4)
+        """TTS_USD_PER_CHAR is $0.30/1000 chars — sanity check."""
+        from hypogeum.elevenlabs import TTS_USD_PER_CHAR
+        assert TTS_USD_PER_CHAR == pytest.approx(3e-4)
 
     def test_music_rate_constant_is_reasonable(self):
-        from hypogeum.elevenlabs import _MUSIC_USD_PER_SEC
-        assert _MUSIC_USD_PER_SEC == pytest.approx(0.02)
+        from hypogeum.elevenlabs import MUSIC_USD_PER_SEC
+        assert MUSIC_USD_PER_SEC == pytest.approx(0.02)
 
     def test_elevenlabs_tts_cost_formula(self):
         """1000-char beat costs $0.30."""
-        from hypogeum.elevenlabs import _TTS_USD_PER_CHAR
-        cost = round(1000 * _TTS_USD_PER_CHAR, 6)
+        from hypogeum.elevenlabs import TTS_USD_PER_CHAR
+        cost = round(1000 * TTS_USD_PER_CHAR, 6)
         assert cost == pytest.approx(0.30)
 
     def test_elevenlabs_tts_record_cost_called(self, db):
         """finance.record_cost is reachable with elevenlabs provider from active run."""
         db_path, run_id, episode_id = db
         set_run_context(run_id, episode_id, db_path)
-        from hypogeum.elevenlabs import _TTS_USD_PER_CHAR
+        from hypogeum.elevenlabs import TTS_USD_PER_CHAR
         try:
             record_cost(
                 provider="elevenlabs",
                 model="eleven_multilingual_v2",
                 call_type="narration",
-                cost_usd=round(500 * _TTS_USD_PER_CHAR, 6),
+                cost_usd=round(500 * TTS_USD_PER_CHAR, 6),
                 tokens_or_credits=500.0,
                 asset_id="episodes/ep_p1/narration/beat_01",
             )
@@ -695,14 +695,14 @@ class TestElevenLabsCostRecording:
     def test_elevenlabs_music_record_cost_called(self, db):
         db_path, run_id, episode_id = db
         set_run_context(run_id, episode_id, db_path)
-        from hypogeum.elevenlabs import _MUSIC_USD_PER_SEC
+        from hypogeum.elevenlabs import MUSIC_USD_PER_SEC
         duration = 120.0
         try:
             record_cost(
                 provider="elevenlabs",
                 model="music_v1",
                 call_type="music",
-                cost_usd=round(duration * _MUSIC_USD_PER_SEC, 6),
+                cost_usd=round(duration * MUSIC_USD_PER_SEC, 6),
                 tokens_or_credits=duration,
                 asset_id="episodes/ep_p1/music/intro",
             )

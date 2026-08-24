@@ -51,6 +51,36 @@ from hypogeum.agents.visual_package_director import (
 from hypogeum.schemas import SchemaError, validate
 
 
+@pytest.fixture(autouse=True)
+def _stub_deliverable_contract(monkeypatch):
+    """
+    This file tests VPD Phase 1/2 orchestration (reference images, scene
+    generation status, ordering, resume) -- not Channel Package deliverable
+    shape validation, which has its own dedicated coverage in
+    tests/test_production_plan.py. Stub compile_production_plan()'s
+    Channel-Package lookup so this file's ~35 pre-existing call sites (none
+    of which pass channel_id, and none of which ship a matching
+    channel_packages/ fixture) don't all need editing to satisfy a contract
+    check unrelated to what they're testing.
+    """
+    import hypogeum.production_plan as pp
+
+    def _permissive_contract(channel_id, *, packages_root=None):
+        return {"allow_standalone_shorts": True, "deliverables": [
+            {"deliverable_id": "main_episode", "kind": "main_episode",
+             "aspect_ratio": "16:9", "required": True, "derived_from": None},
+        ]}
+
+    monkeypatch.setattr(pp, "load_deliverable_contract", _permissive_contract)
+    monkeypatch.setattr(pp, "validate_deliverable_shape", lambda *a, **k: None)
+    # MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE defaults to 0 ("unlimited" in
+    # MUAPIBudgetGuard's own semantics), which compile_production_plan()
+    # now correctly refuses to plan a MAXIMUM bounded cost against (see
+    # resolve_max_chargeable_attempts()) -- give this file's real Config()
+    # instances a finite bound so plan compilation succeeds.
+    monkeypatch.setenv("MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", "1")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1169,12 +1199,42 @@ class TestVPDHandoffBriefWritten:
 # TestFromPlan
 # ---------------------------------------------------------------------------
 
+def _persist_minimal_plan(output_dir, episode_id="ep_001") -> None:
+    """
+    A resume caller (run_visual_package_director_from_plan) now REQUIRES a
+    compiled Production Plan on disk before Finance authorization can run
+    (see hypogeum.production_plan.ProductionPlanMissingError) -- these
+    tests exercise Phase 2 resume orchestration, not plan compilation
+    itself (that has its own coverage in test_production_plan.py), so this
+    writes a minimal, directly-constructed, already-valid plan rather than
+    re-deriving one from a full script_package/visual_package.
+    """
+    from hypogeum.production_plan import PLAN_SCHEMA_VERSION, ProductionPlan, persist_production_plan
+
+    plan = ProductionPlan(
+        schema_version=PLAN_SCHEMA_VERSION, channel_id="hypogeum", episode_id=episode_id,
+        deliverable_contract_id="test", deliverable_ids=["main_episode"], assets=[],
+        thumbnail_main_candidate_count=3, thumbnail_short_candidate_cap=3,
+        thumbnail_attempts_per_candidate=2, thumbnail_unit_price_usd=0.09,
+        thumbnail_cost_normal_usd=0.27, thumbnail_cost_maximum_usd=0.27,
+        narration_char_count=0, narration_price_per_char_usd=0.0003,
+        narration_cost_usd=0.0, narration_is_realized=False,
+        music_section_count=0, music_seconds_per_section=120.0,
+        music_price_per_second_usd=0.02, music_cost_usd=0.0,
+        planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.0,
+        normal_expected_cost_usd=0.32, maximum_bounded_cost_usd=0.32,
+        content_hash="test", compiled_at="2026-08-24T00:00:00+00:00",
+    )
+    persist_production_plan(plan, Path(output_dir))
+
+
 class TestFromPlan:
     """run_visual_package_director_from_plan skips Phase 1, runs Phase 2 only."""
 
     def test_run_agent_not_called(self, tmp_path):
         cfg = make_config()
         plan = _make_visual_package()
+        _persist_minimal_plan(tmp_path)
         with patch("hypogeum.agents.visual_package_director.run_agent") as mock_ra, \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
@@ -1186,6 +1246,7 @@ class TestFromPlan:
     def test_muapi_phase_executes(self, tmp_path):
         cfg = make_config()
         plan = _make_visual_package()
+        _persist_minimal_plan(tmp_path)
         with patch("hypogeum.agents.visual_package_director.run_agent"), \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
@@ -1197,6 +1258,7 @@ class TestFromPlan:
     def test_quota_exhausted_propagates(self, tmp_path):
         cfg = make_config()
         plan = _make_visual_package()
+        _persist_minimal_plan(tmp_path)
         with patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    side_effect=MUAPIQuotaExhausted()):
             with pytest.raises(MUAPIQuotaExhausted):
@@ -1205,6 +1267,7 @@ class TestFromPlan:
     def test_returns_visual_package_dict(self, tmp_path):
         cfg = make_config()
         plan = _make_visual_package()
+        _persist_minimal_plan(tmp_path)
         with patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
@@ -1212,6 +1275,16 @@ class TestFromPlan:
             result = run_visual_package_director_from_plan(plan, cfg, "ep_001", tmp_path)
         assert isinstance(result, dict)
         assert "scenes" in result
+
+    def test_missing_plan_fails_closed(self, tmp_path):
+        """A legacy/checkpoint episode with no compiled plan on disk must
+        fail closed with a clear migration error, never silently proceed
+        to MUAPI generation ungoverned by any plan."""
+        from hypogeum.production_plan import ProductionPlanMissingError
+        cfg = make_config()
+        plan = _make_visual_package()
+        with pytest.raises(ProductionPlanMissingError):
+            run_visual_package_director_from_plan(plan, cfg, "ep_001", tmp_path)
 
 
 # ---------------------------------------------------------------------------

@@ -417,6 +417,7 @@ def run_assembly_agent(
             config=config,
             episode_id=episode_id,
             log=log,
+            channel_id=channel_id,
         )
         # run_clip_repair() may have appended new asset_manifest entries to
         # visual_package in memory (Strategy B) — persist immediately so
@@ -589,6 +590,7 @@ def run_assembly_agent(
                 config=config,
                 episode_id=episode_id,
                 log=log,
+                channel_id=channel_id,
             )
             _attach_extra_clips(extra_clips_by_scene)
 

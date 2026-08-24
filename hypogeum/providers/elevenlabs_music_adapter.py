@@ -151,7 +151,7 @@ class ElevenlabsMusicAdapter:
         from hypogeum.config import Config
         from hypogeum.logger import get_logger
         from hypogeum.elevenlabs import (
-            _BASE_URL, _MUSIC_ANCIENT_CIV_MIN_BYTES, _MUSIC_ENDPOINT, _MUSIC_USD_PER_SEC,
+            _BASE_URL, _MUSIC_ANCIENT_CIV_MIN_BYTES, _MUSIC_ENDPOINT, MUSIC_USD_PER_SEC,
             _auth_headers, _post_music_with_retry,
         )
 
@@ -197,7 +197,7 @@ class ElevenlabsMusicAdapter:
         # Duration-based cost, mirroring the legacy path's own formula
         # exactly (hypogeum.elevenlabs.generate_music_track()) -- never
         # exceeds the authorized ceiling.
-        computed_cost = Decimal(str(round(duration_seconds * _MUSIC_USD_PER_SEC, 6)))
+        computed_cost = Decimal(str(round(duration_seconds * MUSIC_USD_PER_SEC, 6)))
         charged_amount = min(computed_cost, capability.max_cost_per_call)
 
         return AdapterResult(

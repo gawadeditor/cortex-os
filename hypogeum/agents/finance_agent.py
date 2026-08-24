@@ -48,6 +48,7 @@ from typing import Optional
 
 from hypogeum.config import Config
 from hypogeum.policy_cascade import get_effective_budget_ceiling
+from hypogeum.production_plan import ROLE_CONTINGENCY, ROLE_REQUIRED, ProductionPlan
 from hypogeum.schemas import validate
 
 # ---------------------------------------------------------------------------
@@ -70,9 +71,6 @@ _MUAPI_IMAGE_DEFAULT_COST: float = 0.01   # fallback for unknown image models
 # Music source that incurs no provider cost
 _MUSIC_FREE_SOURCE: str = "channel_library"
 _ELEVENLABS_MUSIC_COST_PER_TRACK: float = 0.20   # USD per generated music track
-
-# Conservative fallback for model cost when model slug is not in MODEL_CREDIT_COSTS
-_MUAPI_UNKNOWN_MODEL_COST: float = 2.5
 
 # Bumped whenever the cost constants above or the estimation formula in
 # run_budget_authorization() change in a way that would alter its output for
@@ -208,106 +206,6 @@ class FinancePostVPDBlockedError(Exception):
             f"estimated ${record.get('estimated_spend_usd', '?')} USD "
             f"exceeds ${record.get('budget_ceiling_usd', '?')} USD ceiling"
         )
-
-
-def _resolve_scene_model_estimate(
-    scene: dict,
-    final_entity_ids: set,
-    config,
-) -> str:
-    """
-    Predict the MUAPI model for a scene from its Phase 1 VPD plan.
-
-    Mirrors submit_scene() / _tier_to_model() logic but predicts
-    reference_image_url presence from entity lock state — reference images
-    are not yet generated at Phase 1 planning time.
-
-    A scene will use the I2V model when its primary entity is a final-locked
-    entity (because a reference image will be generated for it in Phase 2).
-
-    Args:
-        scene:            Scene dict from visual_package.scenes[].
-        final_entity_ids: Set of entity_id strings with lock_state == "final".
-        config:           Loaded Config instance.
-
-    Returns:
-        MUAPI model slug string.
-    """
-    # Predict I2V: scene has a primary entity that is final-locked.
-    # cheap_mode disables reference image conditioning entirely.
-    will_use_i2v = (
-        not config.MUAPI_CHEAP_MODE
-        and any(
-            a.get("entity_id") in final_entity_ids
-            for a in scene.get("entity_appearances", [])
-            if a.get("role") == "primary"
-        )
-    )
-
-    if will_use_i2v:
-        return config.MUAPI_I2V_MODEL
-
-    # Apply mode overrides (same precedence as submit_scene())
-    if config.MUAPI_CHEAP_MODE:
-        tier = 3
-    elif config.MUAPI_RUNWAY_ONLY_MODE:
-        tier = 2
-    else:
-        prod = scene.get("production_spec", {})
-        routing = prod.get("provider_routing", {})
-        raw_tier = routing.get("primary_tier")
-        tier = int(raw_tier) if raw_tier is not None else config.MUAPI_DEFAULT_TIER
-
-    if tier == 1:
-        return config.MUAPI_T1_MODEL
-    if tier == 3:
-        return config.MUAPI_T3_MODEL
-    return config.MUAPI_T2_MODEL
-
-
-def _estimate_muapi_from_vpd_plan(
-    visual_package: dict,
-    config,
-) -> tuple:
-    """
-    Estimate total MUAPI video generation cost from the Phase 1 VPD plan.
-
-    Iterates all planned scenes, predicts each scene's model from tier routing
-    and entity lock state, then sums costs from MODEL_CREDIT_COSTS.
-
-    Args:
-        visual_package: Phase 1 VPD output (generation_status = "planned").
-        config:         Loaded Config instance.
-
-    Returns:
-        (total_cost_usd: float, model_breakdown: dict[str, int])
-        model_breakdown maps model slug → scene count.
-    """
-    from hypogeum.muapi import MODEL_CREDIT_COSTS
-
-    # Build set of final-locked entity IDs for I2V prediction
-    locked_entities = (
-        visual_package
-        .get("visual_continuity_record", {})
-        .get("locked_entities", [])
-    )
-    final_entity_ids = {
-        e["entity_id"]
-        for e in locked_entities
-        if e.get("lock_state") == "final" and "entity_id" in e
-    }
-
-    scenes = visual_package.get("scenes", [])
-    total_cost = 0.0
-    model_breakdown: dict = {}
-
-    for scene in scenes:
-        model = _resolve_scene_model_estimate(scene, final_entity_ids, config)
-        cost = MODEL_CREDIT_COSTS.get(model, _MUAPI_UNKNOWN_MODEL_COST)
-        total_cost += cost
-        model_breakdown[model] = model_breakdown.get(model, 0) + 1
-
-    return round(total_cost, 4), model_breakdown
 
 
 def _append_to_ledger(record: dict, ledger_path: str) -> bool:
@@ -628,34 +526,62 @@ def run_post_vpd_authorization(
     visual_package: dict,
     episode_id: str,
     config: Config,
-    script_package: Optional[dict] = None,
+    production_plan: "ProductionPlan",
     output_dir: Optional[Path] = None,
     db_path: Optional[Path] = None,
 ) -> dict:
     """
-    Post-VPD authoritative budget gate. Called after Phase 1 (Claude planning)
-    and BGA Pass 1, before Phase 2 (MUAPI execution).
+    Post-VPD authoritative budget gate. Called after Phase 1 (Claude planning),
+    Production Plan compilation + coverage validation, and BGA Pass 1, before
+    Phase 2 (MUAPI execution).
 
-    Computes an accurate MUAPI cost estimate from actual scene routing in the
-    visual_package plan. This replaces the rough section-count-based estimate
-    used by run_budget_authorization() (which runs before VPD has produced
-    scene routing data).
+    production_plan is REQUIRED (2026-08-24 factory-level correction — the
+    fix for the ep_af078f34 root cause's Finance half, and the removal of
+    the None-tolerant legacy paid path per the follow-up architecture
+    correction). There is no fallback estimate any more: this gate
+    authorizes exclusively against the compiled hypogeum.production_plan.
+    ProductionPlan's own cost-complete totals —
+    normal_expected_cost_usd (every billable category, required assets at
+    one attempt each) and maximum_bounded_cost_usd (every billable
+    category, required + declared contingency assets at their full
+    max_chargeable_attempts bound). Both totals already include video
+    generation, source enhancement, thumbnails, narration, music, and
+    planning-call estimates — see hypogeum.production_plan's own module
+    docstring for the authoritative price source of each category. This
+    function does NOT re-derive or append narration/music/OpenRouter costs
+    from script_package: doing so would double-count categories the plan
+    already prices, and would let those categories drift onto invented
+    constants instead of the plan's own authoritative sources.
+
+    A caller with no compiled plan (a legacy checkpoint, an episode from
+    before this correction, or a resume path that has not reconciled its
+    plan) cannot call this function at all — TypeError at the call site
+    for a missing argument. This is deliberate: there is no institutional
+    way to authorize spend without a plan any more. See
+    hypogeum.production_plan.load_production_plan() for how a resume path
+    should recover an existing plan, and
+    hypogeum.agents.visual_package_director.ProductionPlanMissingError for
+    the fail-closed error a resume path raises when no plan can be found.
 
     Finance gate ordering:
         run_budget_authorization()    ← rough pre-VPD gate (script_package only)
         run_visual_package_director() ← Phase 1: Claude planning
+        compile_production_plan() +
+          validate_plan_coverage()    ← compiled, coverage-validated plan
         BGA Pass 1                    ← brand compliance gate
         run_post_vpd_authorization()  ← authoritative gate (this function)
+        muapi._submit_scene_via_gate()← plan-conformance check + grant/envelope gate
         MUAPI Phase 2                 ← video generation spend
 
     Args:
-        visual_package: Phase 1 VPD output with scene routing (generation_status = "planned").
-        episode_id:     Episode identifier.
-        config:         Loaded Config instance.
-        script_package: Script Engine output; used to estimate narration + music cost.
-                        If None (resume path), narration/music estimated as $0.00.
-        output_dir:     Directory for finance_post_vpd_authorization_{episode_id}.json.
-        db_path:        Override DB path for the factory-policy ceiling
+        visual_package:  Phase 1 VPD output with scene routing (generation_status = "planned").
+        episode_id:      Episode identifier.
+        config:          Loaded Config instance.
+        production_plan: hypogeum.production_plan.ProductionPlan — the
+                         immutable, cost-complete compiled plan this gate
+                         authorizes against. Required.
+        output_dir:      Directory for finance_post_vpd_authorization_{episode_id}.json.
+        db_path:         Override DB path for the factory-policy ceiling
                          cascade (see policy_cascade.get_effective_budget_ceiling).
                          None (default) resolves to the production DB, which
                          is correct for real pipeline runs; tests must always
@@ -663,9 +589,9 @@ def run_post_vpd_authorization(
 
     Returns:
         finance_record dict (phase="post_vpd_authorization") with one of:
-            - verdict="AUTHORIZED" — total spend within ceiling
+            - verdict="AUTHORIZED" — maximum bounded spend within ceiling
             - verdict="WARNING"    — above warning threshold but within ceiling
-            - verdict="BLOCKED"    — total spend exceeds ceiling
+            - verdict="BLOCKED"    — maximum bounded spend exceeds ceiling
 
     The caller must raise FinancePostVPDBlockedError when verdict=="BLOCKED".
     No MUAPI generation should start before this gate returns AUTHORIZED or WARNING.
@@ -710,58 +636,58 @@ def run_post_vpd_authorization(
                    "c_vpd_plan_has_scenes", "warn",
                    "VPD plan has no scenes — MUAPI cost estimated as $0.00")
 
-    # ----------------------------------------------------------------
-    # Compute authoritative MUAPI cost from scene routing
-    # ----------------------------------------------------------------
-    estimated_muapi_usd, model_breakdown = _estimate_muapi_from_vpd_plan(
-        visual_package, config
-    )
-
-    routing_detail = ", ".join(
-        f"{model}×{count}" for model, count in sorted(model_breakdown.items())
+    # ------------------------------------------------------------
+    # Plan-driven costing — the plan's own totals ARE the total. No
+    # category is re-derived or appended here: narration, music, and
+    # planning-call costs are already inside normal_expected_cost_usd /
+    # maximum_bounded_cost_usd (see hypogeum.production_plan).
+    # ------------------------------------------------------------
+    normal_expected_usd = production_plan.normal_expected_cost_usd
+    maximum_bounded_usd = production_plan.maximum_bounded_cost_usd
+    contingency_usd = round(maximum_bounded_usd - normal_expected_usd, 4)
+    required_count = sum(1 for a in production_plan.assets if a.role == ROLE_REQUIRED)
+    contingency_count = sum(1 for a in production_plan.assets if a.role == ROLE_CONTINGENCY)
+    bounded_technical_retry_allowance = sum(
+        a.max_chargeable_attempts for a in production_plan.assets
     )
 
     _add_check(checks, failures, warnings,
-               "c_muapi_routing_estimate", "pass",
-               f"MUAPI estimated ${estimated_muapi_usd:.4f} USD from {scene_count} scene(s): "
-               f"{routing_detail or 'none'}")
+               "c_production_plan_costed", "pass",
+               f"Production Plan {production_plan.content_hash[:12]}: "
+               f"{required_count} required + {contingency_count} contingency asset(s), "
+               f"thumbnails ${production_plan.thumbnail_cost_normal_usd:.4f}-"
+               f"${production_plan.thumbnail_cost_maximum_usd:.4f} USD -- "
+               f"normal ${normal_expected_usd:.4f} USD, "
+               f"maximum bounded ${maximum_bounded_usd:.4f} USD")
 
-    # ----------------------------------------------------------------
-    # Narration + music from script_package (if available)
-    # ----------------------------------------------------------------
-    if script_package is not None:
-        narration_chars = _estimate_narration_chars(script_package)
-        section_count = _estimate_section_count(script_package)
-        estimated_narration_usd = (narration_chars / 1000.0) * _ELEVENLABS_COST_PER_1K_CHARS
-        estimated_music_usd = section_count * _MUSIC_COST_PER_SECTION
-    else:
-        narration_chars = 0
-        section_count = 0
-        estimated_narration_usd = 0.0
-        estimated_music_usd = 0.0
-
-    estimated_openrouter_usd = _OPENROUTER_PLANNING_FLAT
-    total_estimated = (
-        estimated_narration_usd
-        + estimated_muapi_usd
-        + estimated_openrouter_usd
-        + estimated_music_usd
-    )
+    total_estimated = maximum_bounded_usd
+    model_breakdown: dict = {}
+    for a in production_plan.assets:
+        model_breakdown[a.model] = model_breakdown.get(a.model, 0) + 1
 
     cost_breakdown = {
         "scene_count": scene_count,
         "model_breakdown": model_breakdown,
-        "estimated_muapi_usd": round(estimated_muapi_usd, 4),
-        "estimated_narration_usd": round(estimated_narration_usd, 4),
-        "estimated_music_usd": round(estimated_music_usd, 4),
-        "estimated_openrouter_usd": estimated_openrouter_usd,
+        "estimated_muapi_usd": round(maximum_bounded_usd, 4),
+        "estimated_narration_usd": round(production_plan.narration_cost_usd, 4),
+        "estimated_music_usd": round(production_plan.music_cost_usd, 4),
+        "estimated_openrouter_usd": round(production_plan.planning_call_estimate_usd, 4),
         "total_estimated_usd": round(total_estimated, 4),
-        "narration_chars": narration_chars,
-        "section_count": section_count,
+        "narration_chars": production_plan.narration_char_count,
+        "production_plan_content_hash": production_plan.content_hash,
+        "required_asset_count": required_count,
+        "contingency_asset_count": contingency_count,
+        "thumbnail_cost_normal_usd": round(production_plan.thumbnail_cost_normal_usd, 4),
+        "thumbnail_cost_maximum_usd": round(production_plan.thumbnail_cost_maximum_usd, 4),
+        "normal_expected_cost_usd": round(normal_expected_usd, 4),
+        "declared_contingency_cost_usd": contingency_usd,
+        "bounded_technical_retry_allowance": bounded_technical_retry_allowance,
+        "maximum_bounded_cost_usd": round(total_estimated, 4),
+        "remaining_budget_usd": round(ceiling - total_estimated, 4) if ceiling > 0 else None,
     }
 
     # ----------------------------------------------------------------
-    # Check 3 — within ceiling
+    # Check 3 — within ceiling (against the plan's own MAXIMUM bounded total)
     # ----------------------------------------------------------------
     if ceiling <= 0.0:
         _add_check(checks, failures, warnings,

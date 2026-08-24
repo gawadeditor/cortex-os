@@ -108,13 +108,29 @@ class TestFinanceGateBlocks:
         cfg.MUAPI_T3_MODEL              = "veo3-fast-text-to-video"
         cfg.MUAPI_I2V_MODEL             = "veo3-image-to-video"
 
+        from hypogeum.production_plan import PLAN_SCHEMA_VERSION, ProductionPlan
+        production_plan = ProductionPlan(
+            schema_version=PLAN_SCHEMA_VERSION, channel_id="hypogeum", episode_id="ep_test_gate",
+            deliverable_contract_id="test", deliverable_ids=["main_episode"], assets=[],
+            thumbnail_main_candidate_count=3, thumbnail_short_candidate_cap=3,
+            thumbnail_attempts_per_candidate=2, thumbnail_unit_price_usd=0.09,
+            thumbnail_cost_normal_usd=0.27, thumbnail_cost_maximum_usd=0.27,
+            narration_char_count=0, narration_price_per_char_usd=0.0003,
+            narration_cost_usd=0.0, narration_is_realized=False,
+            music_section_count=0, music_seconds_per_section=120.0,
+            music_price_per_second_usd=0.02, music_cost_usd=0.0,
+            planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.0,
+            normal_expected_cost_usd=0.32, maximum_bounded_cost_usd=0.32,
+            content_hash="a" * 64, compiled_at="2026-08-24T00:00:00+00:00",
+        )
+
         # Patch policy cascade to return env ceiling only
         with patch("hypogeum.agents.finance_agent.get_effective_budget_ceiling",
                    return_value=5.0), \
              patch("hypogeum.ois.emit_signal"):
             record = run_post_vpd_authorization(
                 visual_package=vp, episode_id="ep_test_gate",
-                config=cfg, script_package=None, output_dir=tmp_path,
+                config=cfg, production_plan=production_plan, output_dir=tmp_path,
             )
 
         # With 0 scenes + narration=$0 the estimate is $0 and ceiling=$5 → AUTHORIZED.

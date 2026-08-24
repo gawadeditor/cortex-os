@@ -67,7 +67,7 @@ from hypogeum.elevenlabs import (
     _RETRY_MAX,
     _QUOTA_KEYWORDS,
     _SRT_MAX_WORDS_PER_LINE,
-    _MUSIC_USD_PER_SEC,
+    MUSIC_USD_PER_SEC,
     _MUSIC_MAX_DURATION_MS,
 )
 
@@ -1070,10 +1070,10 @@ class TestMusicDurationAccuracy:
 
         clamped_seconds = _MUSIC_MAX_DURATION_MS / 1000.0
         kwargs = self.mock_record_cost.call_args[1]
-        assert kwargs["cost_usd"] == round(clamped_seconds * _MUSIC_USD_PER_SEC, 6)
+        assert kwargs["cost_usd"] == round(clamped_seconds * MUSIC_USD_PER_SEC, 6)
         assert kwargs["tokens_or_credits"] == clamped_seconds
         # The bug's exact symptom: cost must NOT reflect the 900s request.
-        assert kwargs["cost_usd"] != round(900.0 * _MUSIC_USD_PER_SEC, 6)
+        assert kwargs["cost_usd"] != round(900.0 * MUSIC_USD_PER_SEC, 6)
 
     def test_library_metadata_reflects_clamped_duration(self, tmp_path):
         self._run(tmp_path, required_duration_seconds=900.0)
@@ -1095,7 +1095,7 @@ class TestMusicDurationAccuracy:
 
         assert result.duration_seconds == 150.0
         kwargs = self.mock_record_cost.call_args[1]
-        assert kwargs["cost_usd"] == round(150.0 * _MUSIC_USD_PER_SEC, 6)
+        assert kwargs["cost_usd"] == round(150.0 * MUSIC_USD_PER_SEC, 6)
 
     def test_duration_clamped_up_to_minimum_floor(self, tmp_path):
         """Symmetric case: a request below the 3s minimum floor is clamped
@@ -1103,7 +1103,7 @@ class TestMusicDurationAccuracy:
         result = self._run(tmp_path, required_duration_seconds=1.0)
         assert result.duration_seconds == 3.0
         kwargs = self.mock_record_cost.call_args[1]
-        assert kwargs["cost_usd"] == round(3.0 * _MUSIC_USD_PER_SEC, 6)
+        assert kwargs["cost_usd"] == round(3.0 * MUSIC_USD_PER_SEC, 6)
 
 
 # ---------------------------------------------------------------------------

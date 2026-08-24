@@ -50,6 +50,27 @@ from hypogeum.agents.brand_guardian_agent import (
 from hypogeum.schemas import validate, SchemaError
 
 
+@pytest.fixture(autouse=True)
+def _stub_deliverable_contract(monkeypatch):
+    """
+    This file tests BGA/VPD wiring (whether run_bga_pass1 is called), not
+    Channel Package deliverable shape validation (covered in
+    test_production_plan.py) -- stub compile_production_plan()'s
+    Channel-Package lookup so its handful of VPD-wiring tests (which pass
+    script_package={} / no channel_id) don't need a real Channel Package.
+    """
+    import hypogeum.production_plan as pp
+
+    def _permissive_contract(channel_id, *, packages_root=None):
+        return {"allow_standalone_shorts": True, "deliverables": [
+            {"deliverable_id": "main_episode", "kind": "main_episode",
+             "aspect_ratio": "16:9", "required": True, "derived_from": None},
+        ]}
+
+    monkeypatch.setattr(pp, "load_deliverable_contract", _permissive_contract)
+    monkeypatch.setattr(pp, "validate_deliverable_shape", lambda *a, **k: None)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -59,7 +80,8 @@ def _make_config(bga_enabled: bool = True):
     cfg = MagicMock()
     cfg.BGA_ENABLED = bga_enabled
     cfg.OPENROUTER_API_KEY = "sk-or-test"
-    cfg.FINANCE_BUDGET_CEILING_USD = 0  # disable post-VPD finance gate in BGA wiring tests
+    cfg.FINANCE_BUDGET_CEILING_USD = 0  # no ceiling; Finance still runs and authorizes unconditionally
+    cfg.FINANCE_WARNING_THRESHOLD_PCT = 0.8
     # Thumbnail provider fields — must be real strings for json.dumps() in thumbnail_director
     cfg.THUMBNAIL_IMAGE_MODEL = "gpt-image-2-text-to-image"
     cfg.THUMBNAIL_FALLBACK_MODEL = "flux-2-dev"
@@ -68,11 +90,15 @@ def _make_config(bga_enabled: bool = True):
     # hypogeum.production_plan.compile_production_plan() reads these directly
     # (getattr with a default does not help against a bare MagicMock, which
     # auto-creates any unset attribute rather than falling through).
-    cfg.COVERAGE_CONSERVATIVE_DURATION_FACTOR = 0.95
-    cfg.ENHANCEMENT_UNIT_PRICE_USD = 0.09
     cfg.COVERAGE_FILL_MAX_SLOT_RETRIES = 1
     cfg.MUAPI_DEFAULT_TIER = 2
+    cfg.MUAPI_T1_MODEL = "veo3-text-to-video"
     cfg.MUAPI_T2_MODEL = "veo3.1-lite-text-to-video"
+    cfg.MUAPI_T3_MODEL = "veo3.1-lite-text-to-video"
+    cfg.MUAPI_I2V_MODEL = "veo3-image-to-video"
+    cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 1
+    cfg.THUMBNAIL_SHORT_CANDIDATE_CAP = 3
+    cfg.ELEVENLABS_MUSIC_DEFAULT_DURATION = 120
     return cfg
 
 
@@ -1053,6 +1079,30 @@ class TestVPDFromPlanWiring:
     normal VPD path.
     """
 
+    @staticmethod
+    def _persist_minimal_plan(output_dir, episode_id="ep_000"):
+        """The resume path now requires a compiled Production Plan on disk
+        before Finance authorization can run (hypogeum.production_plan.
+        ProductionPlanMissingError otherwise) -- these tests exercise BGA
+        wiring, not plan compilation, so this persists a minimal,
+        directly-constructed, already-valid plan."""
+        from hypogeum.production_plan import PLAN_SCHEMA_VERSION, ProductionPlan, persist_production_plan
+        plan = ProductionPlan(
+            schema_version=PLAN_SCHEMA_VERSION, channel_id="hypogeum", episode_id=episode_id,
+            deliverable_contract_id="test", deliverable_ids=["main_episode"], assets=[],
+            thumbnail_main_candidate_count=3, thumbnail_short_candidate_cap=3,
+            thumbnail_attempts_per_candidate=2, thumbnail_unit_price_usd=0.09,
+            thumbnail_cost_normal_usd=0.27, thumbnail_cost_maximum_usd=0.27,
+            narration_char_count=0, narration_price_per_char_usd=0.0003,
+            narration_cost_usd=0.0, narration_is_realized=False,
+            music_section_count=0, music_seconds_per_section=120.0,
+            music_price_per_second_usd=0.02, music_cost_usd=0.0,
+            planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.0,
+            normal_expected_cost_usd=0.32, maximum_bounded_cost_usd=0.32,
+            content_hash="a" * 64, compiled_at="2026-08-24T00:00:00+00:00",
+        )
+        persist_production_plan(plan, Path(output_dir))
+
     def test_bga_called_when_enabled(self, tmp_path):
         from hypogeum.agents.visual_package_director import (
             run_visual_package_director_from_plan,
@@ -1060,6 +1110,7 @@ class TestVPDFromPlanWiring:
 
         vp = _make_visual_package(n_scenes=2)
         cfg = _make_config(bga_enabled=True)
+        self._persist_minimal_plan(tmp_path)
 
         with (
             patch("hypogeum.agents.brand_guardian_agent.run_bga_pass1") as mock_bga,
@@ -1082,6 +1133,7 @@ class TestVPDFromPlanWiring:
 
         vp = _make_visual_package(n_scenes=2)
         cfg = _make_config(bga_enabled=False)
+        self._persist_minimal_plan(tmp_path)
 
         with (
             patch("hypogeum.agents.brand_guardian_agent.run_bga_pass1") as mock_bga,

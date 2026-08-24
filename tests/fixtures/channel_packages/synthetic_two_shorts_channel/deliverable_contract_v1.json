@@ -1,0 +1,28 @@
+{
+  "deliverable_contract_id": "synthetic_two_shorts_channel_deliverable_contract_v1",
+  "contract_version": "1.0.0",
+  "allow_standalone_shorts": false,
+  "deliverables": [
+    {
+      "deliverable_id": "main_episode",
+      "kind": "main_episode",
+      "aspect_ratio": "16:9",
+      "required": true,
+      "derived_from": null
+    },
+    {
+      "deliverable_id": "clip_a",
+      "kind": "derived_short",
+      "aspect_ratio": "9:16",
+      "required": true,
+      "derived_from": "main_episode"
+    },
+    {
+      "deliverable_id": "clip_b",
+      "kind": "derived_short",
+      "aspect_ratio": "9:16",
+      "required": true,
+      "derived_from": "main_episode"
+    }
+  ]
+}

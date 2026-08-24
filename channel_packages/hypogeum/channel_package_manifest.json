@@ -15,6 +15,13 @@
       "policy_id": "hypogeum_platform_distribution_policy_v1",
       "policy_version": "1.3.0",
       "sha256": "d091057cf85d2eca3ab9479a1be1e4da53225ac8a7f8653e778cd33410fa71f7"
+    },
+    {
+      "path": "deliverable_contract_v1.json",
+      "role": "deliverable_contract",
+      "contract_id": "hypogeum_deliverable_contract_v1",
+      "contract_version": "1.0.0",
+      "sha256": "a671f8b3a289141875f3d9faa789548496f47696d7130730063f99103be0d845"
     }
   ]
 }

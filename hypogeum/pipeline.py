@@ -2292,6 +2292,7 @@ def _run_visual_package_director(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
     return run_visual_package_director(
         script_package=script_package,

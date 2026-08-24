@@ -857,32 +857,27 @@ def run_visual_package_director(
     # scene (2026-08-06 directing-rule fix — see hypogeum.agents.
     # cinematic_director module docstring for the full rationale).
     #
-    # beat_texts_by_id is recomputed from the original script_package
-    # (cheap, pure, available regardless of whether Stage A2 resumed from
-    # its own checkpoint this run) via _flatten_beats_full_text_by_id() —
-    # deliberately NOT _flatten_beats_for_a2()/input_package, which carries
-    # Stage A2's 20-word-per-beat prompt-budget compaction. Cinematic
-    # Director's duration estimate needs the real text; see
-    # _flatten_beats_full_text_by_id()'s own docstring.
-    #
-    # measured_durations_by_id comes from narration_package (Audio Agent
-    # now runs before this stage) via _measured_durations_by_beat_id() —
-    # the authoritative per-beat duration Cinematic Director's shot-budget
-    # arithmetic consumes. beat_texts_by_id remains the fallback for any
-    # beat_id absent from narration_package (see run_cinematic_director()).
+    # run_cinematic_director() is now a thin wrapper around the same
+    # batched, deterministic, strict-schema planning implementation the
+    # tools/regenerate_coverage_plan.py CLI uses -- it consumes
+    # script_package/narration_package directly (real beat text and real
+    # measured per-beat durations from Audio Agent, which now runs before
+    # this stage) rather than pre-flattened dicts, and fails closed with
+    # CinematicPlanningFailedError (propagated, uncaught, up through this
+    # pipeline stage and out before Finance authorization) if every
+    # bounded batched-planning attempt fails -- never a duration-blind
+    # single-shot-per-beat fallback.
     # ------------------------------------------------------------------
     from hypogeum.agents.cinematic_director import run_cinematic_director  # noqa: PLC0415
-    _beat_texts_by_id = _flatten_beats_full_text_by_id(script_package)
-    _measured_durations_by_id = _measured_durations_by_beat_id(narration_package or {})
     log.info(
         "vpd_cinematic_director_started",
         episode_id=episode_id,
         scenes=len(visual_package.get("scenes", [])),
     )
     coverage_plan = run_cinematic_director(
+        script_package=script_package,
+        narration_package=narration_package,
         visual_package=visual_package,
-        beat_texts_by_id=_beat_texts_by_id,
-        measured_durations_by_id=_measured_durations_by_id,
         episode_id=episode_id,
         config=config,
         output_dir=_resolve_output_dir,

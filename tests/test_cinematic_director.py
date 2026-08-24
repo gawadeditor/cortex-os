@@ -29,6 +29,7 @@ from hypogeum.agents.cinematic_director import (
     PROGRESSION_PATTERNS,
     SHOT_DIVERSITY_FIELDS,
     SYSTEM_PROMPT,
+    CinematicPlanningFailedError,
     CoveragePlanDiversityError,
     CoverageRegenerationError,
     NarrationCompletenessError,
@@ -182,86 +183,144 @@ class TestEstimateBeatDuration:
 # ---------------------------------------------------------------------------
 
 class TestRunCinematicDirector:
+    """
+    run_cinematic_director() is now a thin, resume-aware wrapper around
+    regenerate_cinematic_coverage_plan() -- the SAME batched, deterministic,
+    strict-schema production implementation tools/regenerate_coverage_plan.py
+    uses. There is exactly one production planning implementation; these
+    tests exercise it through the automatic-pipeline entry point, mocking
+    hypogeum.openrouter.call_claude() (the real network boundary
+    regenerate_cinematic_coverage_plan() calls), never run_agent() (removed
+    from this module entirely -- see cinematic_director.py's own history).
+    """
 
     def test_checkpoint_written_and_schema_valid(self, tmp_path):
         cfg = _make_config()
-        vp = _make_visual_package()
-        plan = {
-            "episode_id": "ep_001",
-            "beat_plans": [_valid_beat_plan("b_001", 8.0, 1)],
-        }
-        with patch("hypogeum.agents.cinematic_director.run_agent", return_value=plan):
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
             result = run_cinematic_director(
-                visual_package=vp, beat_texts_by_id={"b_001": "a short beat"},
-                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+                script_package=sp, narration_package=np, visual_package=vp,
+                episode_id="ep_regen", config=cfg, output_dir=tmp_path,
             )
         validate("cinematic_coverage_plan", result)
-        ckpt = tmp_path / "cinematic_coverage_plan_ep_001.json"
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
         assert ckpt.exists()
         assert json.loads(ckpt.read_text()) == result
 
     def test_resumes_from_existing_checkpoint_without_calling_llm(self, tmp_path):
         cfg = _make_config()
-        vp = _make_visual_package()
-        ckpt = tmp_path / "cinematic_coverage_plan_ep_001.json"
-        existing = {"episode_id": "ep_001", "beat_plans": [_valid_beat_plan("b_001", 8.0, 1)]}
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        existing = _matching_candidate_plan()
         ckpt.write_text(json.dumps(existing))
 
-        with patch("hypogeum.agents.cinematic_director.run_agent") as mock_ra:
+        with patch("hypogeum.openrouter.call_claude") as mock_cc:
             result = run_cinematic_director(
-                visual_package=vp, beat_texts_by_id={"b_001": "text"},
-                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+                script_package=sp, narration_package=np, visual_package=vp,
+                episode_id="ep_regen", config=cfg, output_dir=tmp_path,
             )
-        mock_ra.assert_not_called()
+        mock_cc.assert_not_called()
         assert result == existing
 
-    def test_llm_failure_falls_back_to_minimal_valid_plan(self, tmp_path):
+    def test_llm_failure_raises_instead_of_falling_back_to_minimal_plan(self, tmp_path):
+        """The old duration-blind _minimal_pass_through() single-shot-per-beat
+        fallback is gone entirely -- this is the exact ep_af078f34 root
+        cause (a truncated/failed LLM call silently became a plan
+        mathematically incapable of satisfying coverage, and nothing ever
+        checked). A planning failure must now halt closed, before Finance,
+        before any paid provider call, and no checkpoint may be installed."""
         cfg = _make_config()
-        vp = _make_visual_package()
-        with patch("hypogeum.agents.cinematic_director.run_agent", side_effect=RuntimeError("boom")):
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        with patch("hypogeum.openrouter.call_claude", side_effect=RuntimeError("boom")):
+            with pytest.raises(CinematicPlanningFailedError) as exc_info:
+                run_cinematic_director(
+                    script_package=sp, narration_package=np, visual_package=vp,
+                    episode_id="ep_regen", config=cfg, output_dir=tmp_path,
+                )
+        assert exc_info.value.episode_id == "ep_regen"
+        assert not (tmp_path / "cinematic_coverage_plan_ep_regen.json").exists()
+        # No stray candidate artifact left behind either.
+        assert not (tmp_path / "cinematic_coverage_plan_ep_regen.candidate.json").exists()
+
+    def test_bounded_retries_then_fails_closed(self, tmp_path):
+        """CINEMATIC_DIRECTOR_MAX_RETRIES bounds the number of batched
+        attempts -- exactly max_retries+1 total attempts, never unbounded,
+        never silently degraded."""
+        cfg = _make_config(CINEMATIC_DIRECTOR_MAX_RETRIES=2)
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        with patch("hypogeum.openrouter.call_claude", side_effect=RuntimeError("boom")) as mock_cc:
+            with pytest.raises(CinematicPlanningFailedError) as exc_info:
+                run_cinematic_director(
+                    script_package=sp, narration_package=np, visual_package=vp,
+                    episode_id="ep_regen", config=cfg, output_dir=tmp_path,
+                )
+        assert exc_info.value.attempts == 3
+        # One call_claude invocation per attempt in this 1-batch fixture.
+        assert mock_cc.call_count == 3
+
+    def test_transient_failure_then_success_recovers_within_bound(self, tmp_path):
+        """A transient failure on attempt 1 that succeeds on attempt 2 must
+        install the successful plan -- bounded retry is a real recovery
+        path, not just a slower way to fail."""
+        cfg = _make_config(CINEMATIC_DIRECTOR_MAX_RETRIES=2)
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        good_response = _make_call_result(json.dumps(_matching_structured_response()))
+        with patch("hypogeum.openrouter.call_claude",
+                   side_effect=[RuntimeError("transient"), good_response]) as mock_cc:
             result = run_cinematic_director(
-                visual_package=vp, beat_texts_by_id={"b_001": "a short beat"},
-                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+                script_package=sp, narration_package=np, visual_package=vp,
+                episode_id="ep_regen", config=cfg, output_dir=tmp_path,
             )
         validate("cinematic_coverage_plan", result)
-        assert len(result["beat_plans"]) == 1
-        assert result["beat_plans"][0]["shots"][0]["transition_in"] == "clean_cut"
-        assert result["beat_plans"][0]["shots"][0]["transition_out"] == "clean_cut"
+        assert mock_cc.call_count == 2
+        assert (tmp_path / "cinematic_coverage_plan_ep_regen.json").exists()
 
-    def test_one_beat_plan_per_scene_narration_reference(self, tmp_path):
+    def test_missing_narration_raises_before_any_llm_call_not_retried(self, tmp_path):
+        """Incomplete narration is a structural input problem, not a
+        transient one -- it must never be retried (retrying identical
+        incomplete input cannot help) and must never reach the LLM."""
         cfg = _make_config()
-        vp = _make_visual_package(scenes=[
-            {"scene_id": "s01", "narration_reference": "b_001", "source_type": "main_episode",
-             "visual_spec": {}, "presentation_plan": {}, "narrative_signals": []},
-            {"scene_id": "s02", "narration_reference": "b_002", "source_type": "main_episode",
-             "visual_spec": {}, "presentation_plan": {}, "narrative_signals": []},
-        ])
-        plan = {
-            "episode_id": "ep_001",
-            "beat_plans": [
-                _valid_beat_plan("b_001", 8.0, 1),
-                _valid_beat_plan("b_002", 30.0, 3),
-            ],
-        }
-        captured = {}
+        sp = _make_small_script_package()
+        incomplete_np = {"narration_segments": [
+            {"beat_reference": "b_001", "duration_seconds": 8.0},
+        ]}
+        vp = _make_small_visual_package()
+        with patch("hypogeum.openrouter.call_claude") as mock_cc:
+            with pytest.raises(NarrationCompletenessError):
+                run_cinematic_director(
+                    script_package=sp, narration_package=incomplete_np, visual_package=vp,
+                    episode_id="ep_regen", config=cfg, output_dir=tmp_path,
+                )
+        mock_cc.assert_not_called()
 
-        def _capture(**kwargs):
-            captured.update(kwargs)
-            return plan
-
-        with patch("hypogeum.agents.cinematic_director.run_agent", side_effect=_capture):
-            run_cinematic_director(
-                visual_package=vp,
-                beat_texts_by_id={"b_001": "short", "b_002": " ".join(["word"] * 70)},
-                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+    def test_longer_beat_receives_strictly_more_shots_than_shorter_beat(self, tmp_path):
+        """Duration drives planning end-to-end through the automatic
+        pipeline entry point, not a fixed count -- b_002 (20s, budget 3)
+        must receive strictly more shots than b_001 (8s, budget 1) in the
+        final installed plan."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
+            result = run_cinematic_director(
+                script_package=sp, narration_package=np, visual_package=vp,
+                episode_id="ep_regen", config=cfg, output_dir=tmp_path,
             )
-
-        sent_beats = captured["input_package"]["beats"]
-        assert len(sent_beats) == 2
-        # The longer beat (b_002) must receive a strictly larger shot_budget
-        # than the short one -- proof duration drives planning, not a fixed count.
-        budgets = {b["beat_id"]: b["shot_budget"] for b in sent_beats}
-        assert budgets["b_002"] > budgets["b_001"]
+        by_beat = {bp["beat_id"]: len(bp["shots"]) for bp in result["beat_plans"]}
+        assert by_beat["b_002"] > by_beat["b_001"]
 
     def test_progression_patterns_are_documented_vocabulary(self):
         assert "single_shot" in PROGRESSION_PATTERNS
@@ -407,21 +466,6 @@ class TestValidateCoveragePlanDiversity:
             validate_coverage_plan_diversity(plan, episode_id="ep_001")
         assert exc_info.value.beat_id == "b_002"
 
-    def test_llm_failure_pass_through_plan_always_passes(self):
-        """_minimal_pass_through()'s degraded plan (exactly one shot per
-        beat) can never trigger this validation -- a single shot has no
-        sibling to duplicate."""
-        from hypogeum.agents.cinematic_director import _minimal_pass_through
-
-        beats_for_director = [
-            {"beat_id": "b_001", "narration_duration_seconds": 8.0,
-             "visual_spec": {"subject": "a corridor", "framing": "wide", "lighting": "warm"}},
-            {"beat_id": "b_002", "narration_duration_seconds": 40.0,
-             "visual_spec": {"subject": "a chamber", "framing": "medium", "lighting": "cool"}},
-        ]
-        plan = _minimal_pass_through("ep_fallback", beats_for_director)
-        validate_coverage_plan_diversity(plan, episode_id="ep_fallback")  # must not raise
-
 
 # ---------------------------------------------------------------------------
 # TestShotBudgetIndependentTerms — coverage_minimum, editorial_minimum, and
@@ -468,68 +512,35 @@ class TestShotBudgetIndependentTerms:
 
 
 # ---------------------------------------------------------------------------
-# TestMeasuredDurationPreference — run_cinematic_director() must prefer
-# measured_durations_by_id over the text-based estimate whenever present
+# TestMeasuredDurationIsAuthoritative — run_cinematic_director() now
+# consumes narration_package's real measured durations directly, via
+# validate_narration_completeness(); the old word-count-estimate fallback
+# for a beat missing from measured durations is gone -- a missing beat is
+# now a hard NarrationCompletenessError (proven above in
+# TestRunCinematicDirector.test_missing_narration_raises_before_any_llm_call_not_retried),
+# never a silent approximation.
 # ---------------------------------------------------------------------------
 
-class TestMeasuredDurationPreference:
+class TestMeasuredDurationIsAuthoritative:
 
-    def test_measured_duration_used_when_present(self, tmp_path):
+    def test_real_measured_duration_drives_shot_budget_not_beat_text(self, tmp_path):
+        """b_002's narration_package duration (20.0s) drives its shot count
+        (3), regardless of how short or long its script_package TEXT is --
+        proof the real measured duration is what plans, never text length."""
         cfg = _make_config()
-        vp = _make_visual_package()
-        plan = {"episode_id": "ep_001", "beat_plans": [_valid_beat_plan("b_001", 40.0, 1)]}
-        captured = {}
-
-        def _capture(**kwargs):
-            captured.update(kwargs)
-            return plan
-
-        with patch("hypogeum.agents.cinematic_director.run_agent", side_effect=_capture):
-            run_cinematic_director(
-                visual_package=vp,
-                beat_texts_by_id={"b_001": "one two three"},  # tiny estimate if used
-                episode_id="ep_001", config=cfg, output_dir=tmp_path,
-                measured_durations_by_id={"b_001": 40.0},  # real, much longer
-            )
-
-        sent_beat = captured["input_package"]["beats"][0]
-        assert sent_beat["narration_duration_seconds"] == 40.0
-
-    def test_falls_back_to_estimate_when_beat_missing_from_measured(self, tmp_path):
-        cfg = _make_config()
-        vp = _make_visual_package()
-        plan = {"episode_id": "ep_001", "beat_plans": [_valid_beat_plan("b_001", 8.0, 1)]}
-        captured = {}
-
-        def _capture(**kwargs):
-            captured.update(kwargs)
-            return plan
-
-        with patch("hypogeum.agents.cinematic_director.run_agent", side_effect=_capture):
-            run_cinematic_director(
-                visual_package=vp,
-                beat_texts_by_id={"b_001": " ".join(["word"] * 58)},
-                episode_id="ep_001", config=cfg, output_dir=tmp_path,
-                measured_durations_by_id={},  # b_001 absent -- must fall back
-            )
-
-        sent_beat = captured["input_package"]["beats"][0]
-        assert sent_beat["narration_duration_seconds"] == pytest.approx(24.0, abs=1.5)
-
-    def test_omitting_measured_durations_entirely_preserves_old_estimate_behavior(self, tmp_path):
-        """A caller that doesn't pass measured_durations_by_id at all (e.g.
-        an existing test not concerned with duration accuracy) must keep
-        working exactly as before the parameter was added."""
-        cfg = _make_config()
-        vp = _make_visual_package()
-        plan = {"episode_id": "ep_001", "beat_plans": [_valid_beat_plan("b_001", 8.0, 1)]}
-
-        with patch("hypogeum.agents.cinematic_director.run_agent", return_value=plan):
+        sp = _make_small_script_package()  # b_002's text is just "two"
+        np = _make_small_narration_package()  # but its measured duration is 20.0s
+        vp = _make_small_visual_package()
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
             result = run_cinematic_director(
-                visual_package=vp, beat_texts_by_id={"b_001": "a short beat"},
-                episode_id="ep_001", config=cfg, output_dir=tmp_path,
+                script_package=sp, narration_package=np, visual_package=vp,
+                episode_id="ep_regen", config=cfg, output_dir=tmp_path,
             )
-        validate("cinematic_coverage_plan", result)
+        by_beat = {bp["beat_id"]: bp["narration_duration_seconds"] for bp in result["beat_plans"]}
+        assert by_beat["b_002"] == 20.0
+        shots_by_beat = {bp["beat_id"]: len(bp["shots"]) for bp in result["beat_plans"]}
+        assert shots_by_beat["b_002"] == 3
 
 
 # ---------------------------------------------------------------------------

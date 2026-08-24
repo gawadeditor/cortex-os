@@ -77,14 +77,12 @@ import math
 from pathlib import Path
 from typing import Optional
 
-from hypogeum.agent import run_agent
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 from hypogeum.prompt_loader import compose_system_prompt
 
 _AGENT_NAME = "cinematic_director"
 _CLAUDE_SONNET = "anthropic/claude-sonnet-4.6"
-_MAX_TOKENS = 4_096
 
 # regenerate_cinematic_coverage_plan()'s own output-token ceiling
 # (2026-08-08, raised 16,000 -> 24,000 same day). Fixed, non-streaming,
@@ -380,46 +378,97 @@ def compute_shot_budget(narration_duration_seconds: float, config: Config) -> in
     return min(planned_shots, max_shots)
 
 
+class CinematicPlanningFailedError(Exception):
+    """
+    Raised when the automatic Cinematic Director cannot produce a payable
+    plan after its bounded retry allowance is exhausted.
+
+    This is the fail-closed replacement for the old duration-blind
+    single-shot-per-beat pass-through: a planning failure now halts the
+    episode BEFORE Finance authorization and before any paid provider
+    call, rather than silently substituting a plan that may be
+    mathematically incapable of satisfying the coverage policy (the
+    ep_af078f34 root cause — see docs/operations/audits/ for the forensic
+    trace). Callers must not catch this and continue; it is a real,
+    deliberate halt.
+
+    Attributes:
+        episode_id — the episode that could not be planned.
+        attempts   — how many batched-planning attempts were made.
+        reason     — the last rejection reason from
+                     regenerate_cinematic_coverage_plan().
+    """
+    def __init__(self, episode_id: str, attempts: int, reason: Optional[str]) -> None:
+        self.episode_id = episode_id
+        self.attempts = attempts
+        self.reason = reason
+        super().__init__(
+            f"Episode {episode_id!r}: Cinematic Director could not produce a "
+            f"valid batched coverage plan after {attempts} attempt(s). "
+            f"Last reason: {reason!r}. Halting before Finance authorization — "
+            f"never falling back to a duration-blind single-shot plan."
+        )
+
+
 def run_cinematic_director(
+    script_package: dict,
+    narration_package: Optional[dict],
     visual_package: dict,
-    beat_texts_by_id: dict,
     episode_id: str,
     config: Config,
     output_dir: Optional[Path] = None,
-    *,
-    measured_durations_by_id: Optional[dict] = None,
 ) -> dict:
     """
     Produce a Cinematic Coverage Plan for every beat in the episode.
 
+    This is now a thin, resume-aware wrapper around the SAME batched,
+    deterministic, strict-schema planning implementation the
+    tools/regenerate_coverage_plan.py CLI uses
+    (regenerate_cinematic_coverage_plan()) — there is exactly one
+    production planning implementation, shared by the automatic pipeline
+    and the manual CLI, not two. A single un-batched request-with-fallback
+    (the pre-2026-08-24 behavior) is gone: an episode with enough beats to
+    exceed one batch's token budget is planned across multiple bounded
+    batches instead of being silently degraded to one shot per beat.
+
     Args:
+        script_package:    Validated Script Package (authoritative beat
+                            text/IDs) — see authoritative_beat_texts().
+        narration_package: Validated Narration Package (Audio Agent's
+                            output, real measured per-beat durations) — see
+                            validate_narration_completeness(). Audio Agent
+                            runs before this stage in the pipeline, so this
+                            is normally complete; a genuinely incomplete
+                            narration package raises
+                            NarrationCompletenessError immediately, before
+                            any LLM call or retry — no word-count estimate
+                            fallback any more (that was itself a
+                            duration-blind approximation).
         visual_package:    Visual Package dict (after Stage A4 has injected
-                            presentation_plan into each scene).
-        beat_texts_by_id:  {beat_id: raw narration text}. Used directly only
-                            as a fallback estimate (see
-                            estimate_beat_duration_seconds()) for any
-                            beat_id missing from measured_durations_by_id —
-                            the normal case is that Audio Agent already ran
-                            and every beat has a real measured duration.
+                            presentation_plan into each scene). Read-only
+                            creative context; never mutated here.
         episode_id:         Episode identifier for logging and file naming.
-        config:             Loaded Config instance.
+        config:             Loaded Config instance. Reads
+                            CINEMATIC_DIRECTOR_MAX_RETRIES (generic,
+                            channel-agnostic; default 2) for the bounded
+                            transient-retry allowance below.
         output_dir:         Optional output directory override.
-        measured_durations_by_id: {beat_id: real narration duration in
-                            seconds}, from the validated narration_package
-                            (Audio Agent's output) — the authoritative
-                            temporal planning input, keyword-only and
-                            optional (defaults to {}). Takes precedence over
-                            the text-based estimate whenever present; a
-                            caller that omits it (e.g. an existing test not
-                            concerned with duration accuracy) falls back to
-                            the per-beat word-count estimate exactly as
-                            before.
 
     Returns:
         cinematic_coverage_plan dict (schema-validated, written to disk).
-        On LLM failure, returns a minimal valid single-shot-per-beat plan
-        (transition_in/out=clean_cut, no invented purpose/progression
-        beyond a safe generic default) so the pipeline can continue.
+
+    Raises:
+        NarrationCompletenessError — narration_package is missing real
+            measured durations for one or more authoritative beats.
+            Not retried — retrying identical incomplete input cannot help.
+        ValueError — a single beat's own shot budget exceeds one batch's
+            capacity (a structural planning-input problem). Not retried.
+        CinematicPlanningFailedError — every batched-planning attempt
+            (bounded by CINEMATIC_DIRECTOR_MAX_RETRIES) failed for a
+            transient reason (LLM/network error, malformed output,
+            truncation, arithmetic mismatch). Fails closed before Finance
+            authorization and before any paid provider call — never
+            substitutes a duration-blind single-shot-per-beat plan.
     """
     _resolve_dir: Path = (
         Path(output_dir) if output_dir is not None
@@ -434,130 +483,56 @@ def run_cinematic_director(
         log.info("cinematic_director_resumed", path=str(ckpt_path), episode_id=episode_id)
         return json.loads(ckpt_path.read_text(encoding="utf-8"))
 
-    scenes = visual_package.get("scenes", [])
-    measured_durations_by_id = measured_durations_by_id or {}
-
-    beats_for_director = []
-    for scene in scenes:
-        beat_id = scene.get("narration_reference", "")
-        measured_duration = measured_durations_by_id.get(beat_id)
-        if measured_duration is not None:
-            narration_duration = float(measured_duration)
-        else:
-            beat_text = beat_texts_by_id.get(beat_id, "")
-            narration_duration = estimate_beat_duration_seconds(beat_text, config)
-            log.warn(
-                "cinematic_director_measured_duration_missing",
-                episode_id=episode_id,
-                beat_id=beat_id,
-                fallback="word_count_estimate",
-            )
-        shot_budget = compute_shot_budget(narration_duration, config)
-        beats_for_director.append({
-            "beat_id": beat_id,
-            "scene_id": scene.get("scene_id"),
-            "source_type": scene.get("source_type"),
-            "narration_duration_seconds": round(narration_duration, 3),
-            "shot_budget": shot_budget,
-            "visual_spec": scene.get("visual_spec", {}),
-            "presentation_plan": scene.get("presentation_plan", {}),
-            "narrative_signals": scene.get("narrative_signals", []),
-        })
-
-    director_input = {
-        "task": "plan_cinematic_coverage",
-        "episode_metadata": {
-            "episode_title": visual_package.get("episode_metadata", {}).get("episode_title", ""),
-            "total_beats": len(beats_for_director),
-            "episode_id": episode_id,
-        },
-        "progression_patterns": list(PROGRESSION_PATTERNS),
-        "beats": beats_for_director,
-    }
+    max_retries = max(0, int(getattr(config, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)))
+    max_attempts = max_retries + 1
 
     log.info(
         "cinematic_director_started",
         episode_id=episode_id,
-        beats=len(beats_for_director),
-        total_shot_budget=sum(b["shot_budget"] for b in beats_for_director),
-        max_tokens=_MAX_TOKENS,
+        max_attempts=max_attempts,
     )
 
-    try:
-        result = run_agent(
-            agent_name=_AGENT_NAME,
-            model_slug=_CLAUDE_SONNET,
-            system_prompt=SYSTEM_PROMPT,
-            input_package=director_input,
-            output_schema="cinematic_coverage_plan",
+    last_reason: Optional[str] = None
+    for attempt in range(1, max_attempts + 1):
+        result = regenerate_cinematic_coverage_plan(
+            script_package=script_package,
+            narration_package=narration_package,
+            visual_package=visual_package,
             episode_id=episode_id,
-            max_tokens=_MAX_TOKENS,
             config=config,
-            output_dir=None,
+            output_dir=output_dir,
+            force=True,
         )
-    except Exception as exc:  # noqa: BLE001
-        log.error(
-            "cinematic_director_failed",
+        if result["status"] == "installed":
+            plan = result["plan"]
+            log.info(
+                "cinematic_director_completed",
+                episode_id=episode_id,
+                attempt=attempt,
+                beat_plans=len(plan.get("beat_plans", [])),
+                total_shots=sum(len(bp.get("shots", [])) for bp in plan.get("beat_plans", [])),
+                path=str(ckpt_path),
+            )
+            return plan
+
+        last_reason = result.get("reason")
+        log.warn(
+            "cinematic_director_batch_attempt_failed",
             episode_id=episode_id,
-            error=str(exc),
-            note="Returning minimal single-shot-per-beat pass-through plan",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            reason=last_reason,
         )
-        result = _minimal_pass_through(episode_id, beats_for_director)
 
-    ckpt_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.info(
-        "cinematic_director_completed",
+    log.error(
+        "cinematic_director_planning_exhausted",
         episode_id=episode_id,
-        beat_plans=len(result.get("beat_plans", [])),
-        total_shots=sum(len(bp.get("shots", [])) for bp in result.get("beat_plans", [])),
-        path=str(ckpt_path),
+        attempts=max_attempts,
+        reason=last_reason,
     )
-    return result
-
-
-def _minimal_pass_through(episode_id: str, beats_for_director: list) -> dict:
-    """
-    Minimal valid cinematic_coverage_plan when the LLM call fails: exactly
-    one shot per beat (the same coverage the pre-existing pipeline already
-    provided), so a director-layer outage degrades to today's known-safe
-    behavior rather than blocking the episode.
-    """
-    beat_plans = []
-    for b in beats_for_director:
-        beat_id = b["beat_id"]
-        beat_plans.append({
-            "beat_id": beat_id,
-            "narration_duration_seconds": b["narration_duration_seconds"],
-            "progression_pattern": "single_shot",
-            "shots": [{
-                "shot_id": f"{beat_id}__shot1",
-                "parent_beat_id": beat_id,
-                "shot_order": 1,
-                "shot_purpose": "establish_location",
-                "narrative_function": "primary coverage for this beat",
-                "estimated_usable_duration": 8.0,
-                "subject": b["visual_spec"].get("subject", ""),
-                "action": "",
-                "framing": b["visual_spec"].get("framing", ""),
-                "shot_scale": "medium",
-                "camera_angle": "eye_level",
-                "camera_height": "eye_level",
-                "camera_direction": "frontal",
-                "camera_movement": "slow_push_in",
-                "lens_character": "standard",
-                "composition": "rule_of_thirds_left",
-                "foreground_usage": "none",
-                "background_depth": "shallow",
-                "lighting_direction": b["visual_spec"].get("lighting", ""),
-                "screen_direction": "neutral",
-                "eye_line": "neutral",
-                "motion_energy": "low",
-                "transition_in": "clean_cut",
-                "transition_out": "clean_cut",
-                "diversity_justification": None,
-            }],
-        })
-    return {"episode_id": episode_id, "beat_plans": beat_plans, "notes": ["pass_through_fallback"]}
+    raise CinematicPlanningFailedError(
+        episode_id=episode_id, attempts=max_attempts, reason=last_reason,
+    )
 
 
 # ---------------------------------------------------------------------------

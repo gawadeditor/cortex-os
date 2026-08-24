@@ -103,6 +103,18 @@ def _flag_violation(item_id: str = "sc_002", rule_id: str = "E-C08") -> dict:
     }
 
 
+# run_cinematic_director() now delegates to
+# regenerate_cinematic_coverage_plan() (2026-08-24 refactor) -- this file's
+# fixtures pass an empty script_package ({}), so there are no authoritative
+# beats to plan; stub the whole call rather than exercise real batched
+# planning, which is not what TestVPDWiring/TestTDWiring are testing.
+_EMPTY_INSTALLED_COVERAGE_PLAN = {
+    "status": "installed", "reason": None,
+    "plan": {"episode_id": "ep_001", "beat_plans": []},
+    "active_plan_path": None, "backup_path": None, "candidate_path": None, "totals": None,
+}
+
+
 def _make_visual_package(n_scenes: int = 3) -> dict:
     return {
         "scenes": [
@@ -867,6 +879,8 @@ class TestVPDWiring:
         # satisfy the full visual_package schema (Stage A3 validation).
         with (
             patch("hypogeum.agents.visual_package_director.run_agent", return_value=vp),
+            patch("hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
+                  return_value=_EMPTY_INSTALLED_COVERAGE_PLAN),
             patch("hypogeum.agents.brand_guardian_agent.run_bga_pass1") as mock_bga,
             patch("hypogeum.agents.visual_package_director._execute_muapi_phase", return_value=vp),
             patch("hypogeum.agents.visual_package_director._write_final_package"),
@@ -887,6 +901,8 @@ class TestVPDWiring:
 
         with (
             patch("hypogeum.agents.visual_package_director.run_agent", return_value=vp),
+            patch("hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
+                  return_value=_EMPTY_INSTALLED_COVERAGE_PLAN),
             patch("hypogeum.agents.brand_guardian_agent.run_bga_pass1") as mock_bga,
             patch("hypogeum.agents.visual_package_director._execute_muapi_phase", return_value=vp),
             patch("hypogeum.agents.visual_package_director._write_final_package"),
@@ -909,6 +925,8 @@ class TestVPDWiring:
 
         with (
             patch("hypogeum.agents.visual_package_director.run_agent", return_value=vp),
+            patch("hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
+                  return_value=_EMPTY_INSTALLED_COVERAGE_PLAN),
             patch("hypogeum.agents.visual_package_director.validate"),
             patch(
                 "hypogeum.agents.brand_guardian_agent.run_bga_pass1",

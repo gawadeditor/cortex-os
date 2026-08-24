@@ -45,23 +45,31 @@ def _no_real_cinematic_director_calls():
     visual_package_director's own run_agent — so it needs its own mock to
     keep this file's zero-real-network-call contract intact."""
     with patch(
-        "hypogeum.agents.cinematic_director.run_agent",
+        "hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
         return_value={
-            "episode_id": "ep_001",
-            "beat_plans": [{
-                "beat_id": "b_stub", "narration_duration_seconds": 8.0,
-                "progression_pattern": "single_shot",
-                "shots": [{
-                    "shot_id": "b_stub__shot1", "parent_beat_id": "b_stub", "shot_order": 1,
-                    "shot_purpose": "establish_location", "narrative_function": "stub",
-                    "estimated_usable_duration": 8.0, "subject": "stub", "shot_scale": "medium",
-                    "camera_angle": "eye_level", "camera_height": "eye_level",
-                    "camera_direction": "frontal", "camera_movement": "slow_push_in",
-                    "composition": "rule_of_thirds_left", "background_depth": "shallow",
-                    "screen_direction": "neutral", "motion_energy": "low",
-                    "transition_in": "clean_cut", "transition_out": "clean_cut",
+            "status": "installed",
+            "reason": None,
+            "active_plan_path": None,
+            "backup_path": None,
+            "candidate_path": None,
+            "totals": None,
+            "plan": {
+                "episode_id": "ep_001",
+                "beat_plans": [{
+                    "beat_id": "b_stub", "narration_duration_seconds": 8.0,
+                    "progression_pattern": "single_shot",
+                    "shots": [{
+                        "shot_id": "b_stub__shot1", "parent_beat_id": "b_stub", "shot_order": 1,
+                        "shot_purpose": "establish_location", "narrative_function": "stub",
+                        "estimated_usable_duration": 8.0, "subject": "stub", "shot_scale": "medium",
+                        "camera_angle": "eye_level", "camera_height": "eye_level",
+                        "camera_direction": "frontal", "camera_movement": "slow_push_in",
+                        "composition": "rule_of_thirds_left", "background_depth": "shallow",
+                        "screen_direction": "neutral", "motion_energy": "low",
+                        "transition_in": "clean_cut", "transition_out": "clean_cut",
+                    }],
                 }],
-            }],
+            },
         },
     ):
         yield

@@ -302,40 +302,80 @@ def _vpd_run_agent_dispatcher(meta: dict, scenes: list, capture: dict) -> "calla
     return _dispatch
 
 
-def _cinematic_run_agent_dispatcher(capture: list) -> "callable":
-    """Double for hypogeum.agents.cinematic_director's own run_agent import.
-    Records every call's kwargs (which includes the fully-computed
-    narration_duration_seconds/shot_budget per beat -- the exact values
-    this defect corrupted) and returns one schema-valid, single-shot
-    beat_plan per beat, using the beat's own narration_duration_seconds so
-    the returned plan is internally consistent. A single shot per beat can
-    never trip the (unrelated) shot-diversity gate, which is not what these
-    tests are about."""
+def _make_narration_package(config: Config) -> dict:
+    """Real, distinct per-beat durations -- the ACTUAL authoritative input
+    to shot-budget arithmetic since the 2026-08-24 refactor (Cinematic
+    Director no longer estimates duration from text at all; it consumes
+    narration_package's real measured durations exclusively, via
+    validate_narration_completeness()). Computed with the SAME words/wpm*60
+    formula the old text-estimate fallback used, so these fixtures still
+    exercise the short/long/verylong boundary this file was built around --
+    just sourced as "real" measured data (as Audio Agent would produce),
+    never text length, matching the new architecture."""
+    return {"narration_segments": [
+        {"beat_reference": beat_id, "duration_seconds": round(n / config.CINEMATIC_ESTIMATED_WORDS_PER_MINUTE * 60.0, 3)}
+        for beat_id, n in _BEAT_WORD_COUNTS.items()
+    ]}
+
+
+def _cinematic_regen_dispatcher(capture: list) -> "callable":
+    """Double for hypogeum.agents.cinematic_director's own
+    regenerate_cinematic_coverage_plan() -- the single shared batched
+    planning implementation run_cinematic_director() now delegates to (see
+    that module's own history). Records every call's kwargs (script_package,
+    narration_package -- the exact real measured durations this file's
+    fixtures now carry) and returns one schema-valid, single-shot beat_plan
+    per beat, using each beat's own REAL compute_shot_budget() result (never
+    hardcoded) so the returned plan is internally consistent with what a
+    real batched LLM response would have to satisfy. A single shot per beat
+    can never trip the (unrelated) shot-diversity gate, which is not what
+    these tests are about."""
+    from hypogeum.agents.cinematic_director import compute_shot_budget
 
     def _dispatch(**kwargs):
         capture.append(kwargs)
-        beats = kwargs["input_package"]["beats"]
+        script_package = kwargs["script_package"]
+        narration_package = kwargs["narration_package"]
+        config = kwargs["config"]
+        durations_by_beat = {
+            seg["beat_reference"]: seg["duration_seconds"]
+            for seg in narration_package["narration_segments"]
+        }
+        beat_ids = [
+            b["beat_id"]
+            for sec in script_package.get("sections", [])
+            for b in sec.get("narration_beats", [])
+        ]
         beat_plans = []
-        for b in beats:
-            beat_id = b["beat_id"]
+        for beat_id in beat_ids:
+            duration = durations_by_beat[beat_id]
+            shot_budget = compute_shot_budget(duration, config)
+            shots = [{
+                "shot_id": f"{beat_id}__shot{i}", "parent_beat_id": beat_id, "shot_order": i,
+                "shot_purpose": "establish_location", "narrative_function": f"generic coverage {i}",
+                "estimated_usable_duration": 8.0, "subject": "a generic subject",
+                "shot_scale": "medium", "camera_angle": "eye_level", "camera_height": "eye_level",
+                "camera_direction": "frontal", "camera_movement": "slow_push_in",
+                "composition": "rule_of_thirds_left", "background_depth": "shallow",
+                "screen_direction": "neutral", "motion_energy": "low",
+                "transition_in": "clean_cut", "transition_out": "clean_cut",
+                "diversity_justification": "distinct planned angle" if i > 1 else None,
+            } for i in range(1, shot_budget + 1)]
             beat_plans.append({
                 "beat_id": beat_id,
-                "narration_duration_seconds": b["narration_duration_seconds"],
-                "progression_pattern": "single_shot",
-                "shots": [{
-                    "shot_id": f"{beat_id}__shot1", "parent_beat_id": beat_id, "shot_order": 1,
-                    "shot_purpose": "establish_location", "narrative_function": "generic coverage",
-                    "estimated_usable_duration": 8.0, "subject": "a generic subject",
-                    "shot_scale": "medium", "camera_angle": "eye_level", "camera_height": "eye_level",
-                    "camera_direction": "frontal", "camera_movement": "slow_push_in",
-                    "composition": "rule_of_thirds_left", "background_depth": "shallow",
-                    "screen_direction": "neutral", "motion_energy": "low",
-                    "transition_in": "clean_cut", "transition_out": "clean_cut",
-                }],
+                "narration_duration_seconds": duration,
+                "shot_budget": shot_budget,
+                "progression_pattern": "single_shot" if shot_budget == 1 else "wide_medium_close",
+                "shots": shots,
             })
         return {
-            "episode_id": kwargs["input_package"]["episode_metadata"]["episode_id"],
-            "beat_plans": beat_plans,
+            "status": "installed",
+            "reason": None,
+            "plan": {"episode_id": kwargs["episode_id"], "beat_plans": beat_plans},
+            "active_plan_path": None,
+            "backup_path": None,
+            "candidate_path": None,
+            "totals": None,
         }
 
     return _dispatch
@@ -344,8 +384,9 @@ def _cinematic_run_agent_dispatcher(capture: list) -> "callable":
 def _run_vpd_and_capture(config: Config, episode_id: str, tmp_path) -> tuple[dict, list]:
     """Run the real run_visual_package_director() end to end (no publishing,
     no real network calls) against the generic 3-beat fixture, returning
-    (vpd_run_agent_capture, cinematic_run_agent_capture)."""
+    (vpd_run_agent_capture, cinematic_regen_capture)."""
     script_pkg = _make_script_package(episode_id)
+    narration_pkg = _make_narration_package(config)
     scenes = [
         _make_scene("s01", "b_short", 0),
         _make_scene("s02", "b_long", 1),
@@ -358,21 +399,41 @@ def _run_vpd_and_capture(config: Config, episode_id: str, tmp_path) -> tuple[dic
 
     with patch("hypogeum.agents.visual_package_director.run_agent",
                side_effect=_vpd_run_agent_dispatcher(meta, scenes, vpd_capture)), \
-         patch("hypogeum.agents.cinematic_director.run_agent",
-               side_effect=_cinematic_run_agent_dispatcher(cinematic_capture)), \
+         patch("hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
+               side_effect=_cinematic_regen_dispatcher(cinematic_capture)), \
          patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
          patch("hypogeum.agents.video_generation_agent.submit_scene",
                return_value=_make_submit_result("s01", episode_id)):
-        run_visual_package_director(script_pkg, config, episode_id, tmp_path)
+        run_visual_package_director(
+            script_pkg, config, episode_id, tmp_path, narration_package=narration_pkg,
+        )
 
     return vpd_capture, cinematic_capture
 
 
 def _cinematic_beats_by_id(cinematic_capture: list) -> dict:
-    assert len(cinematic_capture) == 1, "expected exactly one Cinematic Director run_agent call"
-    beats = cinematic_capture[0]["input_package"]["beats"]
-    return {b["beat_id"]: b for b in beats}
+    """Reconstructs the same {beat_id: {"narration_duration_seconds":,
+    "shot_budget":}} view the old run_agent-based capture exposed, from the
+    real script_package/narration_package regenerate_cinematic_coverage_plan()
+    actually received -- proof of what reached the planning boundary,
+    computed with the real compute_shot_budget(), never hardcoded."""
+    from hypogeum.agents.cinematic_director import compute_shot_budget
+
+    assert len(cinematic_capture) == 1, "expected exactly one Cinematic Director planning call"
+    kwargs = cinematic_capture[0]
+    config = kwargs["config"]
+    durations_by_beat = {
+        seg["beat_reference"]: seg["duration_seconds"]
+        for seg in kwargs["narration_package"]["narration_segments"]
+    }
+    return {
+        beat_id: {
+            "narration_duration_seconds": duration,
+            "shot_budget": compute_shot_budget(duration, config),
+        }
+        for beat_id, duration in durations_by_beat.items()
+    }
 
 
 def _stage_a2_beats_by_id(vpd_capture: dict) -> dict:

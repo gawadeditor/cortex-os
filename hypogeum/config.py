@@ -268,6 +268,7 @@ class Config:
     MUAPI_MAX_POLL_ATTEMPTS: int              # default: 24
     MUAPI_QUOTA_RETRY_MAX_ATTEMPTS: int       # default: 3 (real HTTP 402 -- bounded retry, allows operator-managed Auto Reload to complete)
     MUAPI_QUOTA_RETRY_DELAY_SECONDS: float    # default: 60.0 (seconds between real HTTP 402 retries)
+    CINEMATIC_DIRECTOR_MAX_RETRIES: int       # default: 2 (bounded transient-retry allowance for automatic batched cinematic planning; exhausted retries fail closed -- never a duration-blind fallback plan)
     MUAPI_WEBHOOK_URL: Optional[str]
     MUAPI_CREDIT_WARNING_THRESHOLD: Optional[float]  # USD; default: None (off)
 
@@ -487,6 +488,7 @@ class Config:
         self.MUAPI_MAX_POLL_ATTEMPTS = _get_int("MUAPI_MAX_POLL_ATTEMPTS", default=24)
         self.MUAPI_QUOTA_RETRY_MAX_ATTEMPTS = _get_int("MUAPI_QUOTA_RETRY_MAX_ATTEMPTS", default=3)
         self.MUAPI_QUOTA_RETRY_DELAY_SECONDS = _get_float("MUAPI_QUOTA_RETRY_DELAY_SECONDS", default=60.0)
+        self.CINEMATIC_DIRECTOR_MAX_RETRIES = _get_int("CINEMATIC_DIRECTOR_MAX_RETRIES", default=2)
         self.MUAPI_WEBHOOK_URL = _get_optional("MUAPI_WEBHOOK_URL")
         self.MUAPI_CREDIT_WARNING_THRESHOLD = _get_float("MUAPI_CREDIT_WARNING_THRESHOLD")
 

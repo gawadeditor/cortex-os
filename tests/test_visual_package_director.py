@@ -127,14 +127,23 @@ def _make_cinematic_coverage_plan_stub() -> dict:
 @pytest.fixture(autouse=True)
 def _no_real_cinematic_director_calls():
     """This test file's whole contract (see module docstring) is zero real
-    network calls. Cinematic Director (2026-08-06) makes its own run_agent
-    call inside hypogeum.agents.cinematic_director — a module none of these
-    tests otherwise know about or need to exercise — so it is mocked here,
-    once, for every test in this file, rather than requiring each existing
-    test to add its own patch for a stage it isn't testing."""
+    network calls. Cinematic Director (2026-08-06, refactored 2026-08-24 to
+    share regenerate_cinematic_coverage_plan()'s batched implementation —
+    see cinematic_director.py's own history) makes its own network call(s)
+    inside hypogeum.agents.cinematic_director — a module none of these
+    tests otherwise know about or need to exercise — so
+    regenerate_cinematic_coverage_plan() itself (the single seam
+    run_cinematic_director() delegates to) is mocked here, once, for every
+    test in this file, rather than requiring each existing test to add its
+    own patch for a stage it isn't testing."""
+    _stub_plan = _make_cinematic_coverage_plan_stub()
     with patch(
-        "hypogeum.agents.cinematic_director.run_agent",
-        return_value=_make_cinematic_coverage_plan_stub(),
+        "hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
+        return_value={
+            "status": "installed", "reason": None, "plan": _stub_plan,
+            "active_plan_path": None, "backup_path": None, "candidate_path": None,
+            "totals": None,
+        },
     ):
         yield
 
@@ -2743,7 +2752,10 @@ class TestVPDCoveragePlanOrchestration:
 
         with patch("hypogeum.agents.visual_package_director.run_agent",
                    side_effect=_stage_side_effect(plan)) as mock_ra, \
-             patch("hypogeum.agents.cinematic_director.run_agent", return_value=bad_plan), \
+             patch("hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
+                   return_value={"status": "installed", "reason": None, "plan": bad_plan,
+                                 "active_plan_path": None, "backup_path": None,
+                                 "candidate_path": None, "totals": None}), \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
@@ -2774,7 +2786,10 @@ class TestVPDCoveragePlanOrchestration:
 
         with patch("hypogeum.agents.visual_package_director.run_agent",
                    side_effect=_stage_side_effect(plan)), \
-             patch("hypogeum.agents.cinematic_director.run_agent", return_value=good_plan), \
+             patch("hypogeum.agents.cinematic_director.regenerate_cinematic_coverage_plan",
+                   return_value={"status": "installed", "reason": None, "plan": good_plan,
+                                 "active_plan_path": None, "backup_path": None,
+                                 "candidate_path": None, "totals": None}), \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
                    return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",

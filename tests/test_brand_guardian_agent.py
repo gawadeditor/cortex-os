@@ -65,6 +65,14 @@ def _make_config(bga_enabled: bool = True):
     cfg.THUMBNAIL_FALLBACK_MODEL = "flux-2-dev"
     cfg.THUMBNAIL_IMAGE_RESOLUTION = "2K"
     cfg.THUMBNAIL_IMAGE_QUALITY = "high"
+    # hypogeum.production_plan.compile_production_plan() reads these directly
+    # (getattr with a default does not help against a bare MagicMock, which
+    # auto-creates any unset attribute rather than falling through).
+    cfg.COVERAGE_CONSERVATIVE_DURATION_FACTOR = 0.95
+    cfg.ENHANCEMENT_UNIT_PRICE_USD = 0.09
+    cfg.COVERAGE_FILL_MAX_SLOT_RETRIES = 1
+    cfg.MUAPI_DEFAULT_TIER = 2
+    cfg.MUAPI_T2_MODEL = "veo3.1-lite-text-to-video"
     return cfg
 
 

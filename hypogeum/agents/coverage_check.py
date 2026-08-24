@@ -90,6 +90,23 @@ class CoverageCheckResult:
     insufficient_beats: List[BeatCoverage] = field(default_factory=list)
 
 
+def coverage_arithmetic(narration_duration_seconds: float, available_duration_seconds: float) -> Tuple[float, float, bool]:
+    """
+    The canonical coverage formula, in isolation from where
+    available_duration_seconds came from — the ONE thing "planned mode"
+    (hypogeum.production_plan, before generation, from conservative
+    provider-duration guarantees) and "actual mode" (compute_beat_coverage
+    below, after generation, from real probed file durations) must always
+    agree on. Do not reimplement this arithmetic anywhere else; both modes
+    must call this function.
+
+    Returns (max_editorial_duration_seconds, deficit_seconds, sufficient).
+    """
+    max_editorial = available_duration_seconds * MAX_EDITORIAL_SPEED_FACTOR
+    deficit = max(0.0, narration_duration_seconds - max_editorial)
+    return max_editorial, deficit, deficit <= 0.001
+
+
 def _probe_duration_seconds(path: Path) -> float:
     """Real duration of a media file via ffprobe. Returns 0.0 on any failure."""
     try:
@@ -140,8 +157,7 @@ def compute_beat_coverage(entry: TimelineEntry) -> BeatCoverage:
             usable_clips.append((extra_path, _probe_duration_seconds(extra_path)))
 
     available = sum(duration for _, duration in usable_clips)
-    max_editorial = available * MAX_EDITORIAL_SPEED_FACTOR
-    deficit = max(0.0, entry.duration_seconds - max_editorial)
+    max_editorial, deficit, sufficient = coverage_arithmetic(entry.duration_seconds, available)
 
     return BeatCoverage(
         scene_id=entry.scene_id,
@@ -151,7 +167,7 @@ def compute_beat_coverage(entry: TimelineEntry) -> BeatCoverage:
         available_duration_seconds=available,
         max_editorial_duration_seconds=max_editorial,
         deficit_seconds=deficit,
-        sufficient=deficit <= 0.001,
+        sufficient=sufficient,
         usable_clips=usable_clips,
     )
 

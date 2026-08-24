@@ -1277,6 +1277,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -2223,6 +2224,7 @@ def _run_visual_package_director(
     output_dir: Optional[Path],
     *,
     narration_package: Optional[dict] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Visual Package Director (M2.3/M2.4 — implemented).
@@ -2297,6 +2299,7 @@ def _run_visual_package_director(
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
 

@@ -399,6 +399,7 @@ def run_visual_package_director(
     output_dir: Optional[Path] = None,
     *,
     narration_package: Optional[dict] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute the Visual Package Director end-to-end.
@@ -1162,6 +1163,50 @@ def run_visual_package_director(
     if config.BGA_ENABLED:
         from hypogeum.agents.brand_guardian_agent import BGARejectedError, run_bga_pass1
         run_bga_pass1(visual_package, episode_id, config, _resolve_output_dir)
+
+    # ------------------------------------------------------------------
+    # Compiled Production Plan (2026-08-24 factory-level correction) —
+    # the immutable, versioned, coverage-validated artifact that must
+    # exist before Finance authorization and before any paid provider
+    # call. Compiled from the already-batched, already-diverse Cinematic
+    # Coverage Plan (coverage_plan, Commit A) — never a Hypogeum-specific
+    # literal; the deliverable shape is derived from this episode's own
+    # real script_package. Rejects the episode here, before Finance,
+    # before any MUAPI call, if any beat cannot mathematically satisfy
+    # coverage even counting every declared contingency asset — the exact
+    # generic gap that let ep_af078f34 spend $48 before Assembly
+    # discovered, after the fact, that its plan could never have
+    # rendered. See hypogeum.production_plan for the full contract.
+    # ------------------------------------------------------------------
+    from hypogeum.production_plan import (  # noqa: PLC0415
+        ProductionPlanCoverageError,
+        compile_production_plan,
+        persist_production_plan,
+        validate_plan_coverage,
+    )
+    production_plan = compile_production_plan(
+        script_package=script_package,
+        narration_package=narration_package or {},
+        cinematic_coverage_plan=coverage_plan,
+        channel_id=channel_id or "unknown",
+        episode_id=episode_id,
+        config=config,
+    )
+    _plan_coverage = validate_plan_coverage(production_plan, narration_package or {})
+    if not _plan_coverage.sufficient:
+        raise ProductionPlanCoverageError(
+            episode_id=episode_id, failing_beats=_plan_coverage.failing_beats,
+        )
+    persist_production_plan(production_plan, _resolve_output_dir)
+    log.info(
+        "vpd_production_plan_compiled",
+        episode_id=episode_id,
+        deliverable_ids=production_plan.deliverable_ids,
+        asset_count=len(production_plan.assets),
+        normal_expected_cost_usd=production_plan.normal_expected_cost_usd,
+        maximum_bounded_cost_usd=production_plan.maximum_bounded_cost_usd,
+        content_hash=production_plan.content_hash[:12],
+    )
 
     # ------------------------------------------------------------------
     # Post-VPD finance gate — authoritative budget check from scene routing

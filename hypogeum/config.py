@@ -269,6 +269,8 @@ class Config:
     MUAPI_QUOTA_RETRY_MAX_ATTEMPTS: int       # default: 3 (real HTTP 402 -- bounded retry, allows operator-managed Auto Reload to complete)
     MUAPI_QUOTA_RETRY_DELAY_SECONDS: float    # default: 60.0 (seconds between real HTTP 402 retries)
     CINEMATIC_DIRECTOR_MAX_RETRIES: int       # default: 2 (bounded transient-retry allowance for automatic batched cinematic planning; exhausted retries fail closed -- never a duration-blind fallback plan)
+    COVERAGE_CONSERVATIVE_DURATION_FACTOR: float  # default: 0.95 (planned-mode coverage validation safety margin below the provider's requested clip duration -- see hypogeum.production_plan)
+    ENHANCEMENT_UNIT_PRICE_USD: float         # default: 0.09 (per-asset source-enhancement cost estimate used by hypogeum.production_plan's pre-spend Finance authorization)
     MUAPI_WEBHOOK_URL: Optional[str]
     MUAPI_CREDIT_WARNING_THRESHOLD: Optional[float]  # USD; default: None (off)
 
@@ -489,6 +491,8 @@ class Config:
         self.MUAPI_QUOTA_RETRY_MAX_ATTEMPTS = _get_int("MUAPI_QUOTA_RETRY_MAX_ATTEMPTS", default=3)
         self.MUAPI_QUOTA_RETRY_DELAY_SECONDS = _get_float("MUAPI_QUOTA_RETRY_DELAY_SECONDS", default=60.0)
         self.CINEMATIC_DIRECTOR_MAX_RETRIES = _get_int("CINEMATIC_DIRECTOR_MAX_RETRIES", default=2)
+        self.COVERAGE_CONSERVATIVE_DURATION_FACTOR = _get_float("COVERAGE_CONSERVATIVE_DURATION_FACTOR", default=0.95)
+        self.ENHANCEMENT_UNIT_PRICE_USD = _get_float("ENHANCEMENT_UNIT_PRICE_USD", default=0.09)
         self.MUAPI_WEBHOOK_URL = _get_optional("MUAPI_WEBHOOK_URL")
         self.MUAPI_CREDIT_WARNING_THRESHOLD = _get_float("MUAPI_CREDIT_WARNING_THRESHOLD")
 

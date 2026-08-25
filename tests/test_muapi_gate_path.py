@@ -92,6 +92,7 @@ def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s
         PlannedAsset,
         ProductionPlan,
         persist_production_plan,
+        payload_content_hash,
         prompt_fingerprint,
     )
     from hypogeum.video_prompt_writer import assemble_video_scene_prompt
@@ -122,9 +123,17 @@ def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s
         music_price_per_second_usd=0.02, music_cost_usd=0.0,
         planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.05,
         normal_expected_cost_usd=0.71, maximum_bounded_cost_usd=0.90,
-        content_hash="a" * 64, compiled_at="2026-08-24T00:00:00+00:00",
+        content_hash="0" * 64, compiled_at="2026-08-24T00:00:00+00:00",
     )
-    persist_production_plan(plan, Path(output_dir))
+    # Persist a plan whose content_hash is the REAL canonical hash of its
+    # own payload -- load_production_plan() recomputes and verifies it
+    # before the gate will accept the plan, so a placeholder hash is
+    # rejected as an unverifiable plan.
+    payload = plan.to_dict()
+    verified_plan = ProductionPlan.from_dict(
+        {**payload, "content_hash": payload_content_hash(payload)}
+    )
+    persist_production_plan(verified_plan, Path(output_dir))
 
 
 def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decimal("10.00")):

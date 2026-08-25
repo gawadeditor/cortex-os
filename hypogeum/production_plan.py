@@ -174,6 +174,10 @@ Lifecycle:
      the SAME hypogeum.agents.coverage_check.coverage_arithmetic()
      Assembly's actual-mode check uses.
   4. persist_production_plan() — atomic write-once, immutable.
+     load_production_plan() re-verifies the persisted content_hash by
+     RECOMPUTING it from the payload (payload_content_hash()) and
+     rejecting missing/malformed/mismatched hashes
+     (ProductionPlanIntegrityError) before any caller sees the plan.
   5. Finance (hypogeum.agents.finance_agent.run_post_vpd_authorization)
      authorizes the plan's own normal/maximum totals directly — it may
      not append narration/music/OpenRouter costs of its own; they are
@@ -336,6 +340,41 @@ class ProductionPlanImmutabilityError(Exception):
             f"content_hash={existing_hash!r}, which differs from the newly "
             f"compiled plan's content_hash={new_hash!r}. Production Plans are "
             f"immutable -- refusing to overwrite."
+        )
+
+
+class ProductionPlanIntegrityError(Exception):
+    """
+    Raised by load_production_plan() when a persisted Production Plan file
+    fails integrity verification and must never be loaded:
+
+      - the stored content_hash is missing or malformed (not 64 hex chars), or
+      - the canonical content hash RECOMPUTED from the loaded payload does
+        not equal the stored content_hash -- i.e. the file's contents
+        (assets, prompts, fingerprints, models, prices, totals) changed
+        after persistence.
+
+    Fail-closed by design: an unverifiable plan grants no authorization,
+    so it is rejected rather than silently accepted. Recovery requires
+    recompiling and re-persisting a fresh plan for the episode through
+    the normal Phase-1 path (persist_production_plan() refuses to
+    overwrite a differing existing file, so the tampered file must be
+    removed by an operator first).
+
+    This recomputed-hash comparison detects accidental or uncoordinated
+    modification of the persisted file; it does NOT provide cryptographic
+    authenticity -- content_hash is an unkeyed digest, so an actor able
+    to rewrite the payload can recompute it, and malicious-tamper
+    resistance requires the separate signed grant/approval binding
+    ceremony (hypogeum.authorization_authority), not this check.
+    """
+    def __init__(self, episode_id: str, plan_path: Path, reason: str) -> None:
+        self.episode_id = episode_id
+        self.plan_path = plan_path
+        self.reason = reason
+        super().__init__(
+            f"Episode {episode_id!r}: persisted Production Plan at {plan_path} "
+            f"failed integrity verification -- {reason}"
         )
 
 
@@ -691,6 +730,37 @@ def _content_hash(plan_kwargs: dict, assets: list) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def payload_content_hash(payload: dict) -> str:
+    """
+    Recompute the canonical content hash from a SERIALIZED plan payload —
+    the exact dict persist_production_plan() wrote to disk — using the
+    SAME _content_hash() computation compile_production_plan() used at
+    persist time. No serialization semantics are reinterpreted here: the
+    payload's non-asset fields become plan_kwargs verbatim, and hashing
+    proceeds identically from there.
+
+    The "assets" field is required and must be a list of asset objects
+    (mirroring ProductionPlan.from_dict()'s own strictness): a missing,
+    null, mapping, string, or otherwise non-list "assets" value raises
+    KeyError/TypeError so callers treat it as malformed instead of
+    silently canonicalizing it to an empty list. Each list element is
+    reconstructed as a PlannedAsset, raising TypeError/KeyError on any
+    missing or unexpected field.
+
+    Any mutation of the persisted file — an edited asset, prompt,
+    fingerprint, model, price, attempt bound, or cost total — changes
+    the returned value relative to the stored content_hash.
+    """
+    raw_assets = payload["assets"]  # KeyError if absent -- same strictness as from_dict()
+    if not isinstance(raw_assets, list):
+        raise TypeError(
+            f'"assets" must be a list of asset objects, got {type(raw_assets).__name__}'
+        )
+    assets = [PlannedAsset(**a) for a in raw_assets]
+    plan_kwargs = {k: v for k, v in payload.items() if k != "assets"}
+    return _content_hash(plan_kwargs, assets)
+
+
 def _beat_deliverable_map(script_package: dict) -> dict:
     """{beat_id: deliverable_id} derived from the episode's own real
     script_package -- used only after validate_deliverable_shape() has
@@ -1036,11 +1106,71 @@ def persist_production_plan(plan: ProductionPlan, output_dir: Path) -> Path:
 
 
 def load_production_plan(episode_id: str, output_dir: Path) -> Optional[ProductionPlan]:
-    """Load the persisted Production Plan for an episode, or None if none exists yet."""
+    """
+    Load the persisted Production Plan for an episode, or None if none
+    exists yet.
+
+    Integrity-verified (fail-closed): before returning, the canonical
+    content hash is RECOMPUTED from the loaded payload via
+    payload_content_hash() and compared against the file's own stored
+    content_hash. A missing or malformed stored hash, a payload that
+    cannot be reconstructed, or any recomputed/stored mismatch raises
+    ProductionPlanIntegrityError -- an unverifiable plan never reaches
+    the Finance gate or the provider-submission boundary, because a plan
+    whose contents cannot be proven identical to what was authorized
+    authorizes nothing.
+    """
     path = _plan_path(episode_id, Path(output_dir))
     if not path.exists():
         return None
-    return ProductionPlan.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProductionPlanIntegrityError(
+            episode_id=episode_id, plan_path=path,
+            reason=f"persisted plan is not valid UTF-8 text: {exc}",
+        ) from exc
+    except OSError as exc:
+        raise ProductionPlanIntegrityError(
+            episode_id=episode_id, plan_path=path,
+            reason=f"persisted plan is unreadable: {exc}",
+        ) from exc
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ProductionPlanIntegrityError(
+            episode_id=episode_id, plan_path=path,
+            reason=f"persisted plan is not valid JSON: {exc}",
+        ) from exc
+
+    stored_hash = payload.get("content_hash") if isinstance(payload, dict) else None
+    if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", stored_hash):
+        raise ProductionPlanIntegrityError(
+            episode_id=episode_id, plan_path=path,
+            reason=f"stored content_hash is missing or malformed "
+                   f"({stored_hash!r}) -- refusing to load an unverifiable plan",
+        )
+
+    try:
+        recomputed = payload_content_hash(payload)
+    except Exception as exc:  # noqa: BLE001 -- any reconstruction failure means the payload is not verifiable
+        raise ProductionPlanIntegrityError(
+            episode_id=episode_id, plan_path=path,
+            reason=f"payload is malformed and cannot be hash-verified: "
+                   f"{type(exc).__name__}: {exc}",
+        ) from exc
+
+    if recomputed != stored_hash:
+        raise ProductionPlanIntegrityError(
+            episode_id=episode_id, plan_path=path,
+            reason=f"recomputed content_hash {recomputed!r} does not match the "
+                   f"stored content_hash {stored_hash!r} -- the plan file "
+                   f"changed after persistence",
+        )
+
+    return ProductionPlan.from_dict(payload)
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,9 @@ Covers:
                                        compiled_at.
   TestValidatePlanCoverage          — per-beat/per-deliverable coverage.
   TestPersistence                   — atomic, write-once, immutable.
+  TestPersistenceIntegrity          — load re-verifies the persisted
+                                       content_hash by recomputing it;
+                                       tampered/malformed plans rejected.
   TestAssetLookup                   — ProductionPlan.asset_by_id(), the
                                        lookup the provider boundary uses
                                        (no separate registry class).
@@ -34,6 +37,7 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -51,6 +55,7 @@ from hypogeum.production_plan import (
     ChannelPackagePolicyDriftError,
     DeliverableContractViolationError,
     ProductionPlanImmutabilityError,
+    ProductionPlanIntegrityError,
     ProductionPlanPricingError,
     compile_production_plan,
     load_deliverable_contract,
@@ -59,6 +64,7 @@ from hypogeum.production_plan import (
     persist_production_plan,
     production_plan_to_grant_binding_spec,
     prompt_fingerprint,
+    payload_content_hash,
     validate_deliverable_shape,
     validate_plan_coverage,
 )
@@ -621,6 +627,158 @@ class TestPersistence:
 
     def test_load_returns_none_when_absent(self, tmp_path):
         assert load_production_plan("ep_missing", tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# TestPersistenceIntegrity — load_production_plan() re-verifies the
+# persisted content_hash by RECOMPUTING it from the payload; any
+# post-persistence mutation is rejected, never silently loaded.
+# ---------------------------------------------------------------------------
+
+def _plan_payload(tmp_path: Path) -> tuple[Path, dict]:
+    plan = _compile()
+    path = persist_production_plan(plan, tmp_path)
+    return path, json.loads(path.read_text())
+
+
+class TestPersistenceIntegrity:
+
+    def test_recomputed_hash_matches_for_an_untouched_persisted_plan(self, tmp_path):
+        path, payload = _plan_payload(tmp_path)
+        assert payload_content_hash(payload) == payload["content_hash"]
+        loaded = load_production_plan("ep_test", tmp_path)
+        assert loaded is not None
+        assert loaded.content_hash == payload["content_hash"]
+
+    def test_tampered_asset_without_hash_update_is_rejected(self, tmp_path):
+        path, payload = _plan_payload(tmp_path)
+        payload["assets"][0]["model"] = "veo3-text-to-video"
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ProductionPlanIntegrityError):
+            load_production_plan("ep_test", tmp_path)
+
+    def test_tampered_cost_total_without_hash_update_is_rejected(self, tmp_path):
+        path, payload = _plan_payload(tmp_path)
+        payload["maximum_bounded_cost_usd"] = 0.0
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ProductionPlanIntegrityError):
+            load_production_plan("ep_test", tmp_path)
+
+    def test_tampered_asset_with_manually_replaced_wrong_hash_is_rejected(self, tmp_path):
+        path, payload = _plan_payload(tmp_path)
+        payload["assets"][0]["model"] = "veo3-text-to-video"
+        payload["content_hash"] = hashlib.sha256(b"attacker-chosen").hexdigest()
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ProductionPlanIntegrityError) as excinfo:
+            load_production_plan("ep_test", tmp_path)
+        assert "does not match" in excinfo.value.reason
+
+    def test_missing_content_hash_is_rejected(self, tmp_path):
+        path, payload = _plan_payload(tmp_path)
+        del payload["content_hash"]
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ProductionPlanIntegrityError) as excinfo:
+            load_production_plan("ep_test", tmp_path)
+        assert "missing or malformed" in excinfo.value.reason
+
+    def test_malformed_content_hash_is_rejected(self, tmp_path):
+        path, payload = _plan_payload(tmp_path)
+        for bogus in ("not-a-hash", "", 12345, "deadbeef"):
+            payload["content_hash"] = bogus
+            path.write_text(json.dumps(payload))
+            with pytest.raises(ProductionPlanIntegrityError):
+                load_production_plan("ep_test", tmp_path)
+
+    def test_malformed_asset_entry_is_rejected_not_crashed_on(self, tmp_path):
+        path, payload = _plan_payload(tmp_path)
+        payload["assets"][0].pop("asset_id")
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ProductionPlanIntegrityError):
+            load_production_plan("ep_test", tmp_path)
+
+    def test_persist_then_load_is_deterministic_across_repeated_reads(self, tmp_path):
+        plan = _compile()
+        persist_production_plan(plan, tmp_path)
+        first = load_production_plan("ep_test", tmp_path)
+        second = load_production_plan("ep_test", tmp_path)
+        assert first.content_hash == second.content_hash == plan.content_hash
+        assert first.normal_expected_cost_usd == second.normal_expected_cost_usd
+        assert first.maximum_bounded_cost_usd == second.maximum_bounded_cost_usd
+        assert [(a.asset_id, a.model, a.prompt_fingerprint) for a in first.assets] == \
+               [(a.asset_id, a.model, a.prompt_fingerprint) for a in second.assets]
+
+    def test_immutability_behavior_remains_intact_alongside_verification(self, tmp_path):
+        plan_a = _compile()
+        persist_production_plan(plan_a, tmp_path)
+        # A verified, untouched plan still loads...
+        assert load_production_plan("ep_test", tmp_path).content_hash == plan_a.content_hash
+        # ...and a differing re-persist is still refused as before.
+        plan_b = _compile(config=_make_config(MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE=5))
+        with pytest.raises(ProductionPlanImmutabilityError):
+            persist_production_plan(plan_b, tmp_path)
+
+    # -- Review finding #1 closure: "assets" must be present AND a list. --
+    # Baseline: a legitimately zero-asset plan whose stored hash was
+    # computed over [] is verifiable and loads; replacing its assets value
+    # with any non-list shape (or removing the key) must be rejected at
+    # VERIFICATION time -- never silently canonicalized to [] and never
+    # escaping as a raw KeyError/TypeError after verification passed.
+
+    def _persist_zero_asset_plan(self, tmp_path: Path) -> Path:
+        payload = _compile().to_dict()
+        payload["assets"] = []
+        payload = {**payload, "content_hash": payload_content_hash(payload)}
+        path = tmp_path / "production_plan_ep_test.json"
+        path.write_text(json.dumps(payload))
+        return path
+
+    def test_zero_asset_plan_with_list_assets_still_loads(self, tmp_path):
+        self._persist_zero_asset_plan(tmp_path)
+        loaded = load_production_plan("ep_test", tmp_path)
+        assert loaded is not None and loaded.assets == []
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda p: p.pop("assets"), id="missing"),
+            pytest.param(lambda p: p.update(assets=None), id="null"),
+            pytest.param(lambda p: p.update(assets={"not": "a list"}), id="mapping"),
+            pytest.param(lambda p: p.update(assets="assets-as-string"), id="string"),
+        ],
+    )
+    def test_non_list_assets_shape_is_rejected_as_malformed(self, tmp_path, mutate):
+        path = self._persist_zero_asset_plan(tmp_path)
+        payload = json.loads(path.read_text())
+        mutate(payload)
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ProductionPlanIntegrityError) as excinfo:
+            load_production_plan("ep_test", tmp_path)
+        assert "malformed" in excinfo.value.reason
+        assert isinstance(excinfo.value.__cause__, (KeyError, TypeError))
+
+    # -- Review finding #2 closure: byte-level and OS-level read failures. --
+
+    def test_invalid_utf8_bytes_are_rejected_as_unreadable_text(self, tmp_path):
+        persist_production_plan(_compile(), tmp_path)
+        path = tmp_path / "production_plan_ep_test.json"
+        path.write_bytes(b"\x80\x81\x82 this is not valid utf-8")
+        with pytest.raises(ProductionPlanIntegrityError) as excinfo:
+            load_production_plan("ep_test", tmp_path)
+        assert "UTF-8" in excinfo.value.reason
+        assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+
+    def test_oserror_on_read_is_wrapped_without_permission_changes(self, tmp_path):
+        """Narrow controlled OSError: swap the persisted plan file for a
+        directory at the exact same path, so Path.read_text raises
+        IsADirectoryError (an OSError subclass) -- no real filesystem
+        permissions are modified and nothing outside tmp_path is touched."""
+        path = persist_production_plan(_compile(), tmp_path)
+        path.unlink()
+        path.mkdir()
+        with pytest.raises(ProductionPlanIntegrityError) as excinfo:
+            load_production_plan("ep_test", tmp_path)
+        assert "unreadable" in excinfo.value.reason
+        assert isinstance(excinfo.value.__cause__, OSError)
 
 
 # ---------------------------------------------------------------------------

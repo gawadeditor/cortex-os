@@ -1086,7 +1086,12 @@ class TestVPDFromPlanWiring:
         ProductionPlanMissingError otherwise) -- these tests exercise BGA
         wiring, not plan compilation, so this persists a minimal,
         directly-constructed, already-valid plan."""
-        from hypogeum.production_plan import PLAN_SCHEMA_VERSION, ProductionPlan, persist_production_plan
+        from hypogeum.production_plan import (
+            PLAN_SCHEMA_VERSION,
+            ProductionPlan,
+            persist_production_plan,
+            payload_content_hash,
+        )
         plan = ProductionPlan(
             schema_version=PLAN_SCHEMA_VERSION, channel_id="hypogeum", episode_id=episode_id,
             deliverable_contract_id="test", deliverable_ids=["main_episode"], assets=[],
@@ -1099,9 +1104,17 @@ class TestVPDFromPlanWiring:
             music_price_per_second_usd=0.02, music_cost_usd=0.0,
             planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.0,
             normal_expected_cost_usd=0.32, maximum_bounded_cost_usd=0.32,
-            content_hash="a" * 64, compiled_at="2026-08-24T00:00:00+00:00",
+            content_hash="0" * 64, compiled_at="2026-08-24T00:00:00+00:00",
         )
-        persist_production_plan(plan, Path(output_dir))
+        # Persist a plan whose content_hash is the REAL canonical hash of
+        # its own payload -- load_production_plan() recomputes and verifies
+        # it (ProductionPlanIntegrityError otherwise), so a placeholder
+        # hash is rejected as an unverifiable plan.
+        payload = plan.to_dict()
+        verified_plan = ProductionPlan.from_dict(
+            {**payload, "content_hash": payload_content_hash(payload)}
+        )
+        persist_production_plan(verified_plan, Path(output_dir))
 
     def test_bga_called_when_enabled(self, tmp_path):
         from hypogeum.agents.visual_package_director import (

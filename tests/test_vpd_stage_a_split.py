@@ -778,7 +778,10 @@ class TestStageABatchCount:
                 start = batch_idx * batch_size
                 end   = start + batch_size
                 return {"scenes": all_scenes[start:min(end, len(all_scenes))]}
-            return _make_prompts_batch(all_scenes[:10])
+            # Stage B: prompt every scene it actually received (compile-
+            # time Production Plan assembly rejects empty scene prompts).
+            inp = kwargs["input_package"]
+            return _make_prompts_batch(inp.get("scenes", all_scenes))
 
         with patch("hypogeum.agents.visual_package_director.run_agent", side_effect=mock_run_agent), \
              patch("hypogeum.agents.image_generation_agent.generate_reference_image",
@@ -1277,7 +1280,10 @@ class TestRenumberShortSceneIds:
                     _make_scene("sh_short_001_s01", 2, "short", "short_001"),
                     _make_scene("sh_short_001_s02", 3, "short", "short_001"),
                 ]}
-            return _make_prompts_batch([])
+            # Stage B: prompt every scene it actually received (compile-
+            # time Production Plan assembly rejects empty scene prompts).
+            inp = kwargs["input_package"]
+            return _make_prompts_batch(inp.get("scenes", []))
 
         with patch("hypogeum.agents.visual_package_director.run_agent", side_effect=mock_run_agent), \
              patch("hypogeum.agents.visual_package_director._compute_a2_batches",

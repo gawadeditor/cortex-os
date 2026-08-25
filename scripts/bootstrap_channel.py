@@ -22,6 +22,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -140,6 +141,32 @@ def _build_config_dict(config: Config) -> dict:
     }
 
 
+def _weekly_video_budget_from_env():
+    """
+    Phase 3 (2026-08-25): the channel's weekly paid-video ceiling comes
+    from CHANNEL_WEEKLY_VIDEO_BUDGET_USD when set. Unset/invalid -> None:
+    the runtime enforcement point (hypogeum.weekly_budget) fails closed on
+    an unconfigured ceiling, never treats it as unlimited -- so bootstrap
+    never invents spend policy on the operator's behalf.
+    """
+    raw = os.environ.get("CHANNEL_WEEKLY_VIDEO_BUDGET_USD")
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"  WARNING: CHANNEL_WEEKLY_VIDEO_BUDGET_USD={raw!r} is not numeric "
+              f"— bootstrapping WITHOUT a weekly ceiling (paid video will be "
+              f"denied until one is configured).")
+        return None
+    if value <= 0:
+        print(f"  WARNING: CHANNEL_WEEKLY_VIDEO_BUDGET_USD={raw!r} must be > 0 "
+              f"— bootstrapping WITHOUT a weekly ceiling (paid video will be "
+              f"denied until one is configured).")
+        return None
+    return value
+
+
 def _build_operations_profile_dict() -> dict:
     """
     Exact required initial Channel Operations Profile values for Hypogeum.
@@ -181,6 +208,7 @@ def _build_operations_profile_dict() -> dict:
             "blocked_or_disabled_platforms_do_not_halt": True,
         },
         "cost_ceiling_usd_per_episode": None,
+        "weekly_video_budget_usd": _weekly_video_budget_from_env(),
         "default_privacy_state": "private",
     }
 
@@ -205,6 +233,17 @@ def _run_operations_profile_bootstrap() -> bool:
             f"  ChannelOperationsProfile already exists for {CHANNEL_ID!r} "
             f"(operator_enabled={existing.operator_enabled!r}) — skipping insert."
         )
+        if getattr(existing, "weekly_video_budget_usd", None) is None:
+            print(
+                "  WARNING: no weekly_video_budget_usd configured for this channel — "
+                "Phase 3 weekly enforcement DENIES all paid video until a positive "
+                "ceiling is set, e.g.:"
+            )
+            print(
+                "    python3 -c \"import hypogeum.channel_config as c; "
+                f"c.update_channel_operations_profile('{CHANNEL_ID}', "
+                "weekly_video_budget_usd=25.0)\""
+            )
         return True
 
     try:

@@ -319,6 +319,14 @@ class ChannelOperationsProfile:
     updated_at:                   str
     metadata_version:             str = METADATA_VERSION
 
+    # Phase 3 (2026-08-25): per-channel weekly paid-video budget ceiling in
+    # USD. None = not configured -- the weekly enforcement point
+    # (hypogeum.weekly_budget, via hypogeum.muapi's paid video boundary)
+    # fails closed on None exactly as on any other missing or malformed
+    # value; it never treats None as unlimited. Values <= 0 are rejected at
+    # write time by _validate_operations_fields().
+    weekly_video_budget_usd:      Optional[float] = None
+
     # Optional, per-deliverable-type schedule override (ADR — autonomous
     # runtime slice). Empty dict (default) means "no per-deliverable
     # policy configured" -- hypogeum.publishing.schedule_compiler falls
@@ -522,6 +530,7 @@ def _ensure_tables(conn) -> None:
             retry_policy_json              TEXT    NOT NULL DEFAULT '{}',
             failure_halt_policy_json       TEXT    NOT NULL DEFAULT '{}',
             cost_ceiling_usd_per_episode   REAL,
+            weekly_video_budget_usd        REAL,
             default_privacy_state          TEXT    NOT NULL DEFAULT 'private',
             created_at                     TEXT    NOT NULL,
             updated_at                     TEXT    NOT NULL,
@@ -580,6 +589,13 @@ _CHANNEL_OPERATIONS_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # deliverable_schedule_policy/publishing_schedule only).
     ("deliverable_bundle_definitions_json", "TEXT"),
     ("analytics_scheduling_policy_json", "TEXT"),
+    # Phase 3 (2026-08-25): per-channel weekly paid-video budget ceiling in
+    # USD. NULL means "no weekly ceiling configured" -- the enforcement
+    # point (hypogeum.weekly_budget via hypogeum.muapi's paid video
+    # boundary) fails closed on NULL exactly as on any other missing or
+    # malformed value, so a channel is never silently unlimited. Values
+    # <= 0 are rejected at write time by _validate_operations_fields().
+    ("weekly_video_budget_usd", "REAL"),
 ]
 
 
@@ -696,6 +712,9 @@ def _row_to_operations(row) -> ChannelOperationsProfile:
         retry_policy                 = _uj(row["retry_policy_json"], {}),
         failure_halt_policy          = _uj(row["failure_halt_policy_json"], {}),
         cost_ceiling_usd_per_episode = row["cost_ceiling_usd_per_episode"],
+        weekly_video_budget_usd      = (
+            row["weekly_video_budget_usd"] if "weekly_video_budget_usd" in keys else None
+        ),
         default_privacy_state        = row["default_privacy_state"],
         created_at                   = row["created_at"],
         updated_at                   = row["updated_at"],
@@ -1294,6 +1313,7 @@ _OPERATIONS_FIELD_MAP: dict[str, Any] = {
     "retry_policy":                ("retry_policy_json", _j),
     "failure_halt_policy":         ("failure_halt_policy_json", _j),
     "cost_ceiling_usd_per_episode": "cost_ceiling_usd_per_episode",
+    "weekly_video_budget_usd":     "weekly_video_budget_usd",
     "default_privacy_state":       "default_privacy_state",
     "deliverable_schedule_policy": ("deliverable_schedule_policy_json", _j),
     "bundle_cycle_policy":         ("bundle_cycle_policy_json", _j),
@@ -1326,6 +1346,7 @@ def _validate_operations_fields(
     default_privacy_state: str,
     production_cadence: dict,
     publishing_schedule: dict,
+    weekly_video_budget_usd: Optional[float] = None,
 ) -> None:
     """Hard validation for ChannelOperationsProfile — raises ValueError, never warns."""
     _validate_timezone_name(timezone_)
@@ -1359,6 +1380,16 @@ def _validate_operations_fields(
         raise ValueError(
             "cost_ceiling_usd_per_episode must be null (inherit factory/env policy) "
             f"or > 0, got {cost_ceiling_usd_per_episode}"
+        )
+
+    # Phase 3: same hard posture as the episode ceiling — a weekly budget
+    # that is zero or negative can never mean "unlimited"; it is a config
+    # error, rejected at write time. (None = not configured, which the
+    # runtime enforcement point fails closed on.)
+    if weekly_video_budget_usd is not None and weekly_video_budget_usd <= 0:
+        raise ValueError(
+            "weekly_video_budget_usd must be null (weekly enforcement fails "
+            f"closed on unconfigured channels) or > 0, got {weekly_video_budget_usd}"
         )
 
     if default_privacy_state not in _SUPPORTED_PRIVACY_STATES:
@@ -1396,6 +1427,7 @@ def create_channel_operations_profile(
     retry_policy:                 Optional[dict] = None,
     failure_halt_policy:          Optional[dict] = None,
     cost_ceiling_usd_per_episode: Optional[float] = None,
+    weekly_video_budget_usd:      Optional[float] = None,
     default_privacy_state:        str            = "private",
     deliverable_schedule_policy:  Optional[dict] = None,
     bundle_cycle_policy:          Optional[dict] = None,
@@ -1447,6 +1479,7 @@ def create_channel_operations_profile(
         blocked_platform_reasons=blocked_platform_reasons,
         max_concurrent_episodes=max_concurrent_episodes,
         cost_ceiling_usd_per_episode=cost_ceiling_usd_per_episode,
+        weekly_video_budget_usd=weekly_video_budget_usd,
         default_privacy_state=default_privacy_state,
         production_cadence=production_cadence,
         publishing_schedule=publishing_schedule,
@@ -1471,6 +1504,7 @@ def create_channel_operations_profile(
         retry_policy=retry_policy,
         failure_halt_policy=failure_halt_policy,
         cost_ceiling_usd_per_episode=cost_ceiling_usd_per_episode,
+        weekly_video_budget_usd=weekly_video_budget_usd,
         default_privacy_state=default_privacy_state,
         created_at=now,
         updated_at=now,
@@ -1492,19 +1526,19 @@ def create_channel_operations_profile(
                     discovery_enabled, production_enabled, publishing_enabled,
                     analytics_sync_enabled, unattended_operation_enabled,
                     max_concurrent_episodes, retry_policy_json, failure_halt_policy_json,
-                    cost_ceiling_usd_per_episode, default_privacy_state,
+                    cost_ceiling_usd_per_episode, weekly_video_budget_usd, default_privacy_state,
                     created_at, updated_at, metadata_version,
                     deliverable_schedule_policy_json, bundle_cycle_policy_json,
                     platform_deliverable_policy_json,
                     deliverable_bundle_definitions_json, analytics_scheduling_policy_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (channel_id, channel_name, timezone, int(operator_enabled),
                  _j(production_cadence), _j(publishing_schedule),
                  _j(enabled_platforms), _j(blocked_platform_reasons),
                  int(discovery_enabled), int(production_enabled), int(publishing_enabled),
                  int(analytics_sync_enabled), int(unattended_operation_enabled),
                  max_concurrent_episodes, _j(retry_policy), _j(failure_halt_policy),
-                 cost_ceiling_usd_per_episode, default_privacy_state,
+                 cost_ceiling_usd_per_episode, weekly_video_budget_usd, default_privacy_state,
                  now, now, profile.metadata_version,
                  _j(deliverable_schedule_policy), _j(bundle_cycle_policy),
                  _j(platform_deliverable_policy),
@@ -1623,6 +1657,9 @@ def update_channel_operations_profile(
         ),
         cost_ceiling_usd_per_episode=kwargs.get(
             "cost_ceiling_usd_per_episode", current.cost_ceiling_usd_per_episode
+        ),
+        weekly_video_budget_usd=kwargs.get(
+            "weekly_video_budget_usd", current.weekly_video_budget_usd
         ),
         default_privacy_state=kwargs.get(
             "default_privacy_state", current.default_privacy_state

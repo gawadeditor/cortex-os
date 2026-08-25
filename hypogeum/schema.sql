@@ -1731,12 +1731,26 @@ CREATE INDEX IF NOT EXISTS idx_runtime_leases_expires_at
 -- replay (returns the existing row) rather than a duplicate reservation.
 -- Rows are never deleted: 'released' and 'committed' are terminal
 -- statuses that remain as their own audit trail.
+--
+-- Phase 3 (per-channel weekly budget enforcement, 2026-08-25): scope_kind
+-- gains 'channel_weekly', whose scope_ref is "<channel_id>:<ISO week key>"
+-- (e.g. "ch_x:2026-W35"). The five weekly_* columns are NULL for every
+-- other scope kind and carry the immutable, at-reservation-time snapshot
+-- of the window identity a CHANNEL_WEEKLY row was authorized against
+-- (channel attribution, channel timezone snapshot, resolved UTC window
+-- boundaries, ceiling snapshot). They are written inside the same
+-- BEGIN IMMEDIATE insert as the reservation itself -- never patched in
+-- afterward -- so an audit row always proves exactly which window policy
+-- the reservation consumed, and an in-week channel timezone change can be
+-- detected against persisted evidence instead of recomputed history.
+-- Existing databases are widened to this exact shape by the transactional
+-- table rebuild in hypogeum/db.py::_migrate_budget_reservations_scope_check().
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS budget_reservations (
     reservation_id    TEXT NOT NULL PRIMARY KEY,
     scope_kind        TEXT NOT NULL
-                           CHECK(scope_kind IN ('call','run','episode','organization','retry','fallback')),
+                           CHECK(scope_kind IN ('call','run','episode','organization','retry','fallback','channel_weekly')),
     scope_ref         TEXT NOT NULL,
     idempotency_key   TEXT NOT NULL,
     reserved_amount   TEXT NOT NULL,
@@ -1746,11 +1760,20 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
     committed_amount  TEXT,
     created_at        TEXT NOT NULL,
     resolved_at       TEXT,
+    channel_id        TEXT,
+    weekly_timezone_snapshot   TEXT,
+    weekly_window_start_utc    TEXT,
+    weekly_window_end_utc      TEXT,
+    weekly_ceiling_snapshot    TEXT,
     UNIQUE(scope_kind, scope_ref, idempotency_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_scope
     ON budget_reservations(scope_kind, scope_ref, status);
+
+CREATE INDEX IF NOT EXISTS idx_budget_reservations_channel_weekly_active
+    ON budget_reservations(channel_id, status)
+    WHERE scope_kind = 'channel_weekly';
 
 -- ---------------------------------------------------------------------------
 -- circuit_breakers

@@ -468,25 +468,116 @@ def _migrate_publishing_outcomes_status_enum(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_budget_reservations_scope_check(conn: sqlite3.Connection) -> None:
+    """
+    Phase 3 per-channel weekly budget enforcement (2026-08-25): widen
+    budget_reservations.scope_kind's CHECK constraint with 'channel_weekly'
+    and add the five nullable weekly window-evidence columns
+    (channel_id, weekly_timezone_snapshot, weekly_window_end_utc,
+    weekly_window_start_utc, weekly_ceiling_snapshot).
+
+    SQLite cannot ALTER a CHECK constraint directly, so this rebuilds the
+    table (rename -> create -> copy -> drop) inside one explicit
+    transaction, exactly as _migrate_publishing_outcomes_status_enum()
+    does (same empirically-verified crash-atomicity applies). Idempotent:
+    gated on whether 'channel_weekly' already appears in the table's
+    stored CREATE statement (sqlite_master.sql) -- there is no single new
+    column to probe via PRAGMA table_info, since the CHECK value list and
+    the column set change together and schema.sql creates the full new
+    shape directly on a fresh database.
+
+    Every existing row is preserved unchanged; legacy rows' new columns
+    are NULL (they carry no weekly attribution by definition), and only
+    the constraint widens.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='budget_reservations'"
+    ).fetchone()
+    if not row or row[0] is None:
+        return  # no table yet (schema.sql will create the new shape directly)
+    if "channel_weekly" in row[0]:
+        return  # already migrated
+
+    conn.execute("BEGIN")
+    try:
+        conn.execute("ALTER TABLE budget_reservations RENAME TO budget_reservations_v1")
+        conn.execute(
+            """
+            CREATE TABLE budget_reservations (
+                reservation_id    TEXT NOT NULL PRIMARY KEY,
+                scope_kind        TEXT NOT NULL
+                                       CHECK(scope_kind IN ('call','run','episode','organization','retry','fallback','channel_weekly')),
+                scope_ref         TEXT NOT NULL,
+                idempotency_key   TEXT NOT NULL,
+                reserved_amount   TEXT NOT NULL,
+                currency          TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'reserved'
+                                       CHECK(status IN ('reserved','committed','released')),
+                committed_amount  TEXT,
+                created_at        TEXT NOT NULL,
+                resolved_at       TEXT,
+                channel_id        TEXT,
+                weekly_timezone_snapshot   TEXT,
+                weekly_window_start_utc    TEXT,
+                weekly_window_end_utc      TEXT,
+                weekly_ceiling_snapshot    TEXT,
+                UNIQUE(scope_kind, scope_ref, idempotency_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO budget_reservations
+                (reservation_id, scope_kind, scope_ref, idempotency_key,
+                 reserved_amount, currency, status, committed_amount,
+                 created_at, resolved_at)
+            SELECT reservation_id, scope_kind, scope_ref, idempotency_key,
+                   reserved_amount, currency, status, committed_amount,
+                   created_at, resolved_at
+            FROM budget_reservations_v1
+            """
+        )
+        conn.execute("DROP TABLE budget_reservations_v1")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_budget_reservations_scope
+                ON budget_reservations(scope_kind, scope_ref, status)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_budget_reservations_channel_weekly_active
+                ON budget_reservations(channel_id, status)
+                WHERE scope_kind = 'channel_weekly'
+            """
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def initialize_schema(db_path: Optional[Path] = None) -> None:
     """
     Create all tables and indexes defined in schema.sql, then apply v2–v4
-    column migrations and the two publishing_outcomes table-rebuild
+    column migrations and the three constraint-widening table-rebuild
     migrations to existing tables.
 
     Idempotent: safe to call on every pipeline startup.
       - CREATE TABLE IF NOT EXISTS handles new tables and views.
       - _apply_v*_column_migrations() handles new columns on existing tables.
-      - _migrate_publishing_outcomes_deliverable_id() and
-        _migrate_publishing_outcomes_status_enum() are the exceptions to
+      - _migrate_publishing_outcomes_deliverable_id(),
+        _migrate_publishing_outcomes_status_enum(), and
+        _migrate_budget_reservations_scope_check() are the exceptions to
         "existing tables are never modified" below — each widens a
-        constraint (a UNIQUE constraint, then the publishing_status CHECK
-        constraint) via an atomic table rebuild (see each function's
-        docstring). Both run *before* executescript() so a pre-existing
-        old-shape table is already rebuilt by the time schema.sql's
-        CREATE INDEX IF NOT EXISTS statements run (those would otherwise
-        fail against a still-old-shape table, since CREATE TABLE IF NOT
-        EXISTS is a no-op once a table already exists). Every other
+        constraint (a UNIQUE constraint, the publishing_status CHECK
+        constraint, then budget_reservations.scope_kind's CHECK plus its
+        weekly window-evidence columns) via an atomic table rebuild (see
+        each function's docstring). All run *before* executescript() so a
+        pre-existing old-shape table is already rebuilt by the time
+        schema.sql's CREATE INDEX IF NOT EXISTS statements run (those would
+        otherwise fail against a still-old-shape table, since CREATE TABLE
+        IF NOT EXISTS is a no-op once a table already exists). Every other
         existing table and its data is never dropped or modified.
 
     Args:
@@ -498,6 +589,7 @@ def initialize_schema(db_path: Optional[Path] = None) -> None:
     try:
         _migrate_publishing_outcomes_deliverable_id(conn)
         _migrate_publishing_outcomes_status_enum(conn)
+        _migrate_budget_reservations_scope_check(conn)
         conn.executescript(schema_sql)
         conn.commit()
         _apply_v2_column_migrations(conn)
@@ -3238,6 +3330,7 @@ def reserve_budget(
     ceiling: str,
     *,
     created_at: str,
+    evidence: Optional[dict] = None,
 ) -> tuple:
     """
     Atomically reserves reserved_amount against (scope_kind, scope_ref),
@@ -3256,15 +3349,35 @@ def reserve_budget(
     constraint is what guarantees this is safe -- the amount was already
     validated and counted the first time).
 
-    Returns (accepted: bool, row: dict | None). accepted=False means the
-    reservation was denied (would exceed ceiling); row is then the
-    current scope sum's context is not returned -- callers needing the
-    current sum should call sum_reserved_and_committed() directly.
+    Returns (accepted: bool, row: dict | None, inserted_now: bool).
+    accepted=False means the reservation was denied (would exceed ceiling);
+    row is then None and the caller should call sum_reserved_and_committed()
+    for context. inserted_now distinguishes the two success shapes, which is
+    a COMPENSATING-RELEASE OWNERSHIP signal (Phase 3 correction, 2026-08-25):
+    True means THIS call created the row inside this transaction and the
+    caller owns its lifecycle; False means an identical (scope_kind,
+    scope_ref, idempotency_key) reservation already existed and was
+    returned untouched -- the row belongs to whichever earlier attempt
+    created it, so the replaying attempt must NEVER release it (a release
+    here would destroy another in-flight or unknown-held attempt's
+    reservation; committed rows are structurally safe either way because
+    release only flips 'reserved').
 
     Amounts (reserved_amount, currency, ceiling) are compared as plain
     Decimal-shaped strings by the caller (hypogeum.budget_scopes) before
     this function is invoked -- this function only performs the atomic
     sum-and-insert; it does not itself parse Decimal.
+
+    evidence -- optional mapping of weekly window-evidence columns for a
+    CHANNEL_WEEKLY reservation ("channel_id", "weekly_timezone_snapshot",
+    "weekly_window_start_utc", "weekly_window_end_utc",
+    "weekly_ceiling_snapshot"). Written inside the SAME insert (and thus
+    the same BEGIN IMMEDIATE transaction) as the reservation row itself --
+    never patched in afterward -- so an accepted reservation always
+    carries its window attribution and an audit row can never exist
+    without it. Keys absent from the mapping are stored NULL; the
+    parameter is ignored on idempotent replay (the original row's
+    evidence stands).
     """
     from decimal import Decimal  # local import: only this function needs numeric comparison
 
@@ -3279,7 +3392,7 @@ def reserve_budget(
         ).fetchone()
         if existing is not None:
             conn.commit()
-            return True, dict(existing)
+            return True, dict(existing), False
 
         # SQLite has no native Decimal SUM; sum the rows in Python instead
         # of trusting SQL's floating-point SUM() on cast text.
@@ -3294,16 +3407,28 @@ def reserve_budget(
 
         if total + Decimal(reserved_amount) > Decimal(ceiling):
             conn.rollback()
-            return False, None
+            return False, None, False
 
+        _evidence = dict(evidence or {})
         conn.execute(
             """
             INSERT INTO budget_reservations
                 (reservation_id, scope_kind, scope_ref, idempotency_key,
-                 reserved_amount, currency, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?)
+                 reserved_amount, currency, status, created_at,
+                 channel_id, weekly_timezone_snapshot,
+                 weekly_window_start_utc, weekly_window_end_utc,
+                 weekly_ceiling_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?)
             """,
-            (reservation_id, scope_kind, scope_ref, idempotency_key, reserved_amount, currency, created_at),
+            (
+                reservation_id, scope_kind, scope_ref, idempotency_key,
+                reserved_amount, currency, created_at,
+                _evidence.get("channel_id"),
+                _evidence.get("weekly_timezone_snapshot"),
+                _evidence.get("weekly_window_start_utc"),
+                _evidence.get("weekly_window_end_utc"),
+                _evidence.get("weekly_ceiling_snapshot"),
+            ),
         )
         conn.commit()
     except Exception:
@@ -3312,7 +3437,7 @@ def reserve_budget(
     row = conn.execute(
         "SELECT * FROM budget_reservations WHERE reservation_id = ?", (reservation_id,)
     ).fetchone()
-    return True, dict(row)
+    return True, dict(row), True
 
 
 def commit_budget_reservation(

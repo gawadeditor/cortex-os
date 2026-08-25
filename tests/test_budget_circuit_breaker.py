@@ -134,8 +134,8 @@ class TestConcurrentReservationSafety:
         conn_b = db.get_connection(db_path)
         try:
             # Both attempt to reserve against a ceiling that only fits one.
-            accepted_a, _ = db.reserve_budget(conn_a, "res_a", "run", "run_1", "idem_a", "0.39", "USD", "0.39", created_at=AT)
-            accepted_b, _ = db.reserve_budget(conn_b, "res_b", "run", "run_1", "idem_b", "0.39", "USD", "0.39", created_at=AT)
+            accepted_a, _, _created_a = db.reserve_budget(conn_a, "res_a", "run", "run_1", "idem_a", "0.39", "USD", "0.39", created_at=AT)
+            accepted_b, _, _created_b = db.reserve_budget(conn_b, "res_b", "run", "run_1", "idem_b", "0.39", "USD", "0.39", created_at=AT)
             assert accepted_a != accepted_b or (accepted_a and accepted_b and False)
             assert sum([accepted_a, accepted_b]) == 1
         finally:

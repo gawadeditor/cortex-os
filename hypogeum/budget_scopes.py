@@ -55,6 +55,12 @@ class BudgetScopeKind(str, Enum):
     ORGANIZATION = "organization"
     RETRY = "retry"
     FALLBACK = "fallback"
+    # Phase 3 (2026-08-25): per-channel weekly paid-video ceiling. scope_ref
+    # is "<channel_id>:<ISO week key>" (e.g. "ch_x:2026-W35"); the window
+    # itself is ISO Monday 00:00 -> next Monday 00:00 in the channel's own
+    # configured timezone, resolved by hypogeum.weekly_budget and snapshotted
+    # onto the reservation row as immutable window-evidence columns.
+    CHANNEL_WEEKLY = "channel_weekly"
 
 
 class BudgetError(Exception):
@@ -109,12 +115,20 @@ class ScopeRequest:
     ORGANIZATION it is whatever the caller's policy configured for that
     scope_ref (never read from the envelope itself, since a scope's
     remaining balance must never be a value the envelope carries -- see
-    architecture §7.1)."""
+    architecture §7.1).
+
+    evidence -- optional immutable window attribution written onto the
+    reservation row inside the same atomic insert (Phase 3: CHANNEL_WEEKLY
+    carries channel_id / timezone snapshot / UTC window start+end /
+    ceiling snapshot; every other scope kind leaves it None). Never a
+    second write -- an accepted reservation can never exist without its
+    evidence."""
 
     scope_kind: BudgetScopeKind
     scope_ref: str
     ceiling: Decimal
     currency: str
+    evidence: Optional[Mapping] = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +141,13 @@ class BudgetReservation:
     currency: str
     status: str
     committed_amount: Optional[Decimal]
+    # COMPENSATING-RELEASE OWNERSHIP (Phase 3 correction, 2026-08-25):
+    # True only when the call that returned this reservation CREATED the
+    # row inside its own transaction. A replayed row (identical
+    # scope_kind/scope_ref/idempotency_key already existed) carries False
+    # and belongs to whichever earlier attempt created it -- a replaying
+    # attempt must never release it.
+    created_by_this_call: bool = True
 
 
 @dataclass(frozen=True)
@@ -137,9 +158,16 @@ class MultiScopeReservation:
 
     idempotency_key: str
     reservations: Sequence[BudgetReservation]
+    # True iff THIS call inserted every reservation in `reservations`.
+    # False means at least one was an idempotent replay of an earlier
+    # attempt's row (mixed create/replay is possible across scopes).
+    all_created_by_this_call: bool = True
 
     def reservation_ids(self) -> Sequence[str]:
         return tuple(r.reservation_id for r in self.reservations)
+
+    def created_by_this_call(self) -> bool:
+        return self.all_created_by_this_call
 
 
 @dataclass(frozen=True)
@@ -155,7 +183,7 @@ class BreakerEvidence:
     tripped_at: Optional[str]
 
 
-def _row_to_reservation(row: dict) -> BudgetReservation:
+def _row_to_reservation(row: dict, *, created_by_this_call: bool = True) -> BudgetReservation:
     return BudgetReservation(
         reservation_id=row["reservation_id"],
         scope_kind=BudgetScopeKind(row["scope_kind"]),
@@ -165,6 +193,7 @@ def _row_to_reservation(row: dict) -> BudgetReservation:
         currency=row["currency"],
         status=row["status"],
         committed_amount=Decimal(row["committed_amount"]) if row["committed_amount"] is not None else None,
+        created_by_this_call=created_by_this_call,
     )
 
 
@@ -210,23 +239,35 @@ def reserve_all_scopes(
     required scope has no configured ceiling).
     """
     made: list = []
+    created_flags: list = []
     try:
         for scope in scopes:
             if currency != scope.currency:
                 raise BudgetCurrencyMismatchError(scope.scope_kind, currency, scope.currency)
             reservation_id = f"{reservation_id_prefix}:{scope.scope_kind.value}"
-            accepted, row = db.reserve_budget(
+            accepted, row, inserted_now = db.reserve_budget(
                 conn, reservation_id, scope.scope_kind.value, scope.scope_ref, idempotency_key,
                 str(amount), currency, str(scope.ceiling), created_at=at,
+                evidence=scope.evidence,
             )
             if not accepted:
                 raise BudgetCeilingExceededError(scope.scope_kind, scope.scope_ref)
-            made.append(_row_to_reservation(row))
+            made.append(_row_to_reservation(row, created_by_this_call=inserted_now))
+            created_flags.append(inserted_now)
     except BudgetError:
-        for reservation in made:
-            db.release_budget_reservation(conn, reservation.reservation_id, at=at)
+        # Compensating release touches ONLY rows this call created. A
+        # replayed row (inserted_now=False) belongs to an earlier attempt;
+        # releasing it here would destroy another attempt's live or
+        # unknown-held reservation (Phase 3 ownership correction).
+        for reservation, inserted in zip(made, created_flags):
+            if inserted:
+                db.release_budget_reservation(conn, reservation.reservation_id, at=at)
         raise
-    return MultiScopeReservation(idempotency_key=idempotency_key, reservations=tuple(made))
+    return MultiScopeReservation(
+        idempotency_key=idempotency_key,
+        reservations=tuple(made),
+        all_created_by_this_call=all(created_flags) if created_flags else True,
+    )
 
 
 def release_reservation(conn, reservation_id: str, *, at: str) -> bool:

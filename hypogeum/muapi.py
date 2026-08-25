@@ -728,6 +728,7 @@ def _submit_scene_via_gate(
     import hypogeum.channel_config as channel_config
     import hypogeum.db as db
     import hypogeum.submission_gate as submission_gate
+    import hypogeum.weekly_budget as weekly_budget
     import hypogeum.workflow_executor as workflow_executor
     from hypogeum.deterministic_allocation import check_output_collision
     from hypogeum.providers.muapi_video_adapter import (
@@ -828,6 +829,25 @@ def _submit_scene_via_gate(
     # REAL compiled, Finance-authorized Production Plan -- never an ad-hoc
     # per-call hash independent of anything Finance actually reviewed.
     plan_checksum = production_plan.content_hash
+
+    # ------------------------------------------------------------------
+    # Phase 3: channel attribution (2026-08-25) -- the verified persisted
+    # Production Plan declares the channel it was compiled for. A paid
+    # submission whose channel context disagrees with the plan's own
+    # attribution fails closed here, before any envelope, authorization,
+    # reservation, or network activity. Channel identity is never inferred
+    # from episode metadata: both sides of this comparison are explicit,
+    # authoritative values.
+    # ------------------------------------------------------------------
+    if production_plan.channel_id != channel_id:
+        return None, (
+            f"plan_channel_mismatch: verified persisted Production Plan "
+            f"(content_hash={production_plan.content_hash[:12]}) declares "
+            f"channel_id={production_plan.channel_id!r} but this submission "
+            f"context carries channel_id={channel_id!r} -- refusing paid "
+            f"submission without exact channel attribution"
+        )
+
     structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({
         "aspect_ratio": aspect_ratio, "requested_duration": requested_duration,
         "reference_image_url": reference_image_url,
@@ -842,57 +862,221 @@ def _submit_scene_via_gate(
     operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
 
     max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, _DEFAULT_UNKNOWN_MODEL_COST)))
+
+    # ------------------------------------------------------------------
+    # Phase 3: plan-bound price cross-check (2026-08-25) -- the envelope's
+    # per-call cost must be a number the VERIFIED PLAN itself authorizes
+    # for this asset. The tier model registry and the compiled plan are
+    # independent sources; any drift between them (a re-priced model, an
+    # unknown model falling back to the default ceiling while the plan
+    # carries a real price) is a fail-closed denial rather than a silently
+    # different per-call authorization.
+    # ------------------------------------------------------------------
+    plan_unit_price = getattr(declared_asset, "unit_price_usd", None)
+    if plan_unit_price is None:
+        return None, (
+            f"plan_price_missing: declared asset {expected_output_identity!r} in the "
+            f"verified persisted plan carries no unit_price_usd -- refusing to "
+            f"submit against an unpriced asset"
+        )
+    plan_unit_price_dec = Decimal(str(plan_unit_price))
+    if plan_unit_price_dec <= 0:
+        return None, (
+            f"plan_price_invalid: declared asset {expected_output_identity!r} in the "
+            f"verified persisted plan prices at {plan_unit_price_dec} USD -- a "
+            f"non-positive price can never be authorized spend"
+        )
+    if plan_unit_price_dec != max_cost:
+        return None, (
+            f"plan_price_mismatch: verified persisted plan prices asset "
+            f"{expected_output_identity!r} at {plan_unit_price_dec} USD but tier "
+            f"model {model!r} resolves to {max_cost} USD -- refusing to submit "
+            f"an amount the plan did not authorize"
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 3 correction (2026-08-25): the WEEKLY reservation amount is
+    # the verified persisted plan's OWN maximum_bounded_cost_usd -- taken
+    # from the integrity-verified plan object above, never from caller
+    # input or the tier registry -- and it is reserved ONCE per exact
+    # verified episode plan per channel-week. Every scene, Short,
+    # primary/fallback attempt, retry, resume, and repair of that same
+    # verified plan replays the one row; a different episode or a
+    # different verified plan hash necessarily gets its own row. Phase 2
+    # per-asset/model/prompt conformance above still independently
+    # controls each individual provider submission.
+    # ------------------------------------------------------------------
+    raw_plan_max = getattr(production_plan, "maximum_bounded_cost_usd", None)
+    if raw_plan_max is None:
+        return None, (
+            f"plan_maximum_missing: verified persisted Production Plan "
+            f"(content_hash={production_plan.content_hash[:12]}) carries no "
+            f"maximum_bounded_cost_usd -- refusing paid video without an "
+            f"authoritative weekly reservation amount"
+        )
+    try:
+        plan_max = Decimal(str(raw_plan_max))
+    except Exception:  # noqa: BLE001 -- malformed pricing is itself fail-closed
+        return None, (
+            f"plan_maximum_malformed: verified persisted Production Plan "
+            f"maximum_bounded_cost_usd {raw_plan_max!r} is not a valid decimal amount"
+        )
+    if not plan_max.is_finite() or plan_max <= 0:
+        return None, (
+            f"plan_maximum_invalid: verified persisted Production Plan "
+            f"maximum_bounded_cost_usd is {plan_max}; zero/negative/non-finite "
+            f"can never authorize spend"
+        )
+
     authorization_id = f"{episode_id}:{scene_id}:{'fallback' if is_fallback else 'primary'}"
     idempotency_key = authorization_id
 
-    try:
-        envelope = GenerationExecutionEnvelope.create(
-            envelope_schema_version=_VIDEO_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
-            channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
-            execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
-            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=scene_id,
-            structured_spec_checksum=structured_spec_checksum, compiler_identity=_VIDEO_COMPILER_IDENTITY,
-            compiler_version="1", operation_payload_content=operation_payload_content,
-            operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_VIDEO_SCHEMA_VERSION,
-            content_provenance={
-                "compiler": _VIDEO_COMPILER_IDENTITY, "compiler_version": "1",
-                "source_work_item_id": scene_id, "rendered_at": at,
-            },
-            provider=_VIDEO_PROVIDER, model=model, provider_operation=_VIDEO_PROVIDER_OPERATION,
-            deterministic_output_path=str(dest_path), expected_output_identity=expected_output_identity,
-            authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
-            run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
-            retry_authorized=False, fallback_authorized=False, idempotency_key=idempotency_key,
-            created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
-            dependency_checksums={
-                "channel_package": package_identity["checksum"], "plan": plan_checksum,
-                "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_VIDEO_COMPILER_IDENTITY.encode()).hexdigest(),
-            },
-            aspect_ratio=aspect_ratio, duration_seconds=Decimal(str(requested_duration)),
+    # The WEEKLY identity is plan-scoped, never scene-scoped: identical for
+    # every submission of this verified plan in this channel/episode, so
+    # all of them replay the ONE reservation (db.reserve_budget's UNIQUE
+    # (scope_kind, scope_ref, idempotency_key) replay), while any different
+    # episode or plan hash produces a distinct key and row.
+    weekly_plan_key = f"plan-weekly:{channel_id}:{episode_id}:{production_plan.content_hash}"
+
+    # ------------------------------------------------------------------
+    # Phase 3: dry-run zero-network short-circuit (2026-08-25).
+    # MUAPI_DRY_RUN makes no real provider call by construction, so it must
+    # consume zero CHANNEL_WEEKLY budget -- and it must not enter the gate
+    # path at all, because the pre-Phase-3 behavior (reserve CALL/EPISODE,
+    # mint child authorization, then poll a fake dry-run job id until
+    # timeout -> unknown_acceptance) would leave reservations held and a
+    # ledger reservation trail behind a submission that could never have
+    # been charged. This mirrors the legacy path exactly: same placeholder
+    # clip, same generation_status="generated" contract downstream
+    # Assembly/QA validate (see _generate_dry_run_placeholder_clip()), but
+    # reached BEFORE any envelope compile, authorization, lease, receipt,
+    # or budget reservation -- structurally incapable of touching either
+    # the network or the weekly ledger.
+    # ------------------------------------------------------------------
+    if config.MUAPI_DRY_RUN:
+        _generate_dry_run_placeholder_clip(dest_path, aspect_ratio, requested_duration, log)
+        log.info(
+            "muapi_gate_dry_run_complete",
+            scene_id=scene_id,
+            channel_id=channel_id,
+            model=model,
         )
-        authorization = authority.issue_child_authorization(
-            envelope, grant.grant_id, grant.grant_version, at=at,
-            # Phase 2 plan-bound authorization: independently re-verified by
-            # the authority (grant hash == this verified persisted plan hash
-            # == envelope dependency_checksums.plan) BEFORE any ledger
-            # reservation. Not a tautology: this value comes from the
-            # integrity-verified load_production_plan() read above, and the
-            # grant's own registered hash must equal it exactly.
-            expected_production_plan_content_hash=production_plan.content_hash,
-        )
-    except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
-        log.warn("muapi_gate_authorization_failed", scene_id=scene_id, reason=str(exc))
-        return None, f"gate_authorization_failed: {exc}"
+        return {
+            "scene_id": scene_id,
+            "asset_id": expected_output_identity,
+            "generation_status": "generated",
+            "provider": "muapi",
+            "tier_used": tier,
+            "model_used": model,
+            "prompt_used": prompt,
+            "fallback_used": is_fallback,
+            "failure_reason": None,
+            "request_id": f"{_DRY_RUN_REQUEST_ID_PREFIX}{scene_id}",
+        }, None
 
     conn = db.get_connection()
+    weekly: Optional[weekly_budget.WeeklyReservationOutcome] = None
+
+    def _release_weekly_reservation(release_conn, *, at_ts: str) -> bool:
+        """Compensating release for a pre-provider failure of the attempt
+        that CREATED this attempt's plan-level weekly reservation. Gated on
+        `created`: a replayed row belongs to whichever earlier attempt
+        created it (it may be another in-flight attempt's live reservation,
+        an unknown-acceptance hold, or committed spend) and is never
+        released here. Releasing an already-released/committed row would be
+        a harmless no-op anyway, but the ownership gate comes first."""
+        if weekly is None:
+            return False
+        # Ownership is enforced inside the release helper itself: a
+        # replayed outcome (created=False) is refused there.
+        return weekly_budget.release_channel_weekly_reservation(
+            release_conn, weekly, at=at_ts,
+        )
+
     try:
+        # --------------------------------------------------------------
+        # Phase 3: atomic weekly check-and-reserve (2026-08-25) --
+        # BEFORE child authorization and any grant-ledger side effect.
+        # ONE plan-scoped reservation per verified episode plan per
+        # channel-week (amount = verified maximum_bounded_cost_usd), under
+        # one BEGIN IMMEDIATE with immutable window evidence; every
+        # failure mode here is a clean, zero-network denial. Later
+        # submissions of the same verified plan replay this row
+        # (created=False) and can never double-reserve or release it.
+        # --------------------------------------------------------------
+        try:
+            weekly = weekly_budget.ensure_channel_weekly_reservation(
+                conn,
+                channel_id=channel_id,
+                amount=plan_max,
+                currency="USD",
+                idempotency_key=weekly_plan_key,
+                now_utc=datetime.now(timezone.utc),
+            )
+        except weekly_budget.WeeklyBudgetError as exc:
+            log.warn(
+                "muapi_weekly_budget_denied", scene_id=scene_id,
+                channel_id=channel_id, episode_id=episode_id, reason=str(exc),
+            )
+            return None, f"weekly_budget_denied: {exc}"
+        except bs.BudgetError as exc:
+            log.warn(
+                "muapi_weekly_budget_exhausted", scene_id=scene_id,
+                channel_id=channel_id, episode_id=episode_id, reason=str(exc),
+            )
+            return None, f"weekly_budget_exhausted: {exc}"
+
+        try:
+            envelope = GenerationExecutionEnvelope.create(
+                envelope_schema_version=_VIDEO_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
+                channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
+                execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
+                plan_version="live", plan_checksum=plan_checksum, planned_shot_id=scene_id,
+                structured_spec_checksum=structured_spec_checksum, compiler_identity=_VIDEO_COMPILER_IDENTITY,
+                compiler_version="1", operation_payload_content=operation_payload_content,
+                operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_VIDEO_SCHEMA_VERSION,
+                content_provenance={
+                    "compiler": _VIDEO_COMPILER_IDENTITY, "compiler_version": "1",
+                    "source_work_item_id": scene_id, "rendered_at": at,
+                },
+                provider=_VIDEO_PROVIDER, model=model, provider_operation=_VIDEO_PROVIDER_OPERATION,
+                deterministic_output_path=str(dest_path), expected_output_identity=expected_output_identity,
+                authorization_id=authorization_id, authorization_version=1, max_cost_per_call=max_cost,
+                run_level_budget_ref=episode_id, episode_level_budget_ref=episode_id, currency="USD",
+                retry_authorized=False, fallback_authorized=False, idempotency_key=idempotency_key,
+                created_at=at, expiration_policy={"on_expiry": "invalidated_source_changed", "expires_at": None},
+                dependency_checksums={
+                    "channel_package": package_identity["checksum"], "plan": plan_checksum,
+                    "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_VIDEO_COMPILER_IDENTITY.encode()).hexdigest(),
+                },
+                aspect_ratio=aspect_ratio, duration_seconds=Decimal(str(requested_duration)),
+            )
+            authorization = authority.issue_child_authorization(
+                envelope, grant.grant_id, grant.grant_version, at=at,
+                # Phase 2 plan-bound authorization: independently re-verified by
+                # the authority (grant hash == this verified persisted plan hash
+                # == envelope dependency_checksums.plan) BEFORE any ledger
+                # reservation. Not a tautology: this value comes from the
+                # integrity-verified load_production_plan() read above, and the
+                # grant's own registered hash must equal it exactly.
+                expected_production_plan_content_hash=production_plan.content_hash,
+            )
+        except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
+            _release_weekly_reservation(conn, at_ts=datetime.now(timezone.utc).isoformat())
+            log.warn("muapi_gate_authorization_failed", scene_id=scene_id, reason=str(exc))
+            return None, f"gate_authorization_failed: {exc}"
+
         # Durable envelope storage (Part 1) -- required before submit()
         # will accept this envelope at all (Step 1.6:
         # _check_stored_envelope_durable_integrity()). Every real
         # submission through this path persists its own envelope in the
         # same call it compiles it, so there is never a staleness
         # window between compilation and durable storage.
-        authorization_store.persist_execution_envelope(conn, envelope)
+        try:
+            authorization_store.persist_execution_envelope(conn, envelope)
+        except Exception:
+            _release_weekly_reservation(conn, at_ts=datetime.now(timezone.utc).isoformat())
+            raise
 
         adapter_registry.register_adapter(
             _VIDEO_PROVIDER, model, _VIDEO_PROVIDER_OPERATION, "1.0", MuapiVideoAdapter,
@@ -902,6 +1086,7 @@ def _submit_scene_via_gate(
         lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
         lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
         if lease is None:
+            _release_weekly_reservation(conn, at_ts=datetime.now(timezone.utc).isoformat())
             return None, "gate_lease_unavailable"
 
         receipt_store = WriteAheadReceiptStore(output_dir)
@@ -909,6 +1094,14 @@ def _submit_scene_via_gate(
             channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
             structured_spec_checksum=structured_spec_checksum, compiler_version="1",
         )
+        # Phase 3 correction: the WEEKLY reservation is deliberately NOT in
+        # the gate's scope list. Its lifecycle is plan-scoped and owned by
+        # THIS caller (created-vs-replayed is known only here): the gate's
+        # per-scene CALL/EPISODE scopes keep their own commit/release/hold
+        # accounting, while the weekly row is committed on first provider
+        # acceptance for the plan, held through unknown/rejected outcomes,
+        # and released only by its creating attempt on a pre-provider
+        # failure (see the compensating-release sites above/below).
         scopes = [
             bs.ScopeRequest(bs.BudgetScopeKind.CALL, scene_id, max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
@@ -943,11 +1136,44 @@ def _submit_scene_via_gate(
                 submitted_at=at if adapter_outcome == "accepted" else None,
                 provider_job_id=(result.adapter_result.provider_job_id if result.adapter_result is not None else None),
             )
+            # Phase 3 correction: first provider ACCEPTANCE for this verified
+            # plan transitions the plan-level weekly reservation from
+            # 'reserved' to 'committed'. The full plan maximum stays counted
+            # either way (the weekly sum counts reserved and committed rows
+            # at their reserved amount -- never the unverified lower actual
+            # charge); committing is the lifecycle/audit transition.
+            # Idempotent: sibling scenes' acceptances replay as
+            # "already_committed_same". Unknown/rejected outcomes keep the
+            # full reservation held (conservative policy).
+            if adapter_outcome == "accepted":
+                bs.commit_reservation(
+                    conn,
+                    weekly.reservation_id,
+                    authorized_ceiling=plan_max,
+                    charged_amount=plan_max,
+                    at=at,
+                )
             conn.commit()
     finally:
         conn.close()
 
     if not result.approved:
+        # Phase 3 compensating release — OWNERSHIP-GATED: only the attempt
+        # that CREATED this attempt's plan-level weekly reservation may
+        # release it, and only for a failure BEFORE the provider boundary
+        # (adapter_invoked=False). A replaying attempt (created=False)
+        # returns without touching the row: it may be another in-flight
+        # attempt's live reservation, an unknown-acceptance hold, or
+        # committed spend. Once the provider boundary was entered
+        # (adapter_invoked=True) the hold persists by conservative policy —
+        # unknown acceptance keeps it held; a provider rejection also keeps
+        # it held (only pre-provider failures release).
+        if not result.adapter_invoked:
+            release_conn = db.get_connection()
+            try:
+                _release_weekly_reservation(release_conn, at_ts=datetime.now(timezone.utc).isoformat())
+            finally:
+                release_conn.close()
         return None, f"gate_denied[{result.denied_at_check}]: {result.reason}"
 
     return {

@@ -330,6 +330,13 @@ def _submit_canary(args: argparse.Namespace, preflight: dict) -> dict:
         episode_id_for_asset=args.episode_id,
         agent="muapi_canary_submit",
         budget_guard=guard,
+        # Phase 3 correction (2026-08-25): the canary is a live paid-video
+        # path and MUST enter the same enforced boundary as production --
+        # verified persisted plan, grant/plan/finance three-way agreement,
+        # atomic CHANNEL_WEEKLY reservation, child authorization, submission
+        # gate. There is no ungated paid fallback: without an authoritative
+        # channel context the submission is denied before any network call.
+        channel_id=args.channel_id,
     )
     return result
 
@@ -371,6 +378,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+
+    # Phase 3 correction (2026-08-25): fail closed on a missing/blank
+    # channel_id BEFORE preflight and before any provider/network call.
+    # The canary is a paid path; without an authoritative channel context
+    # it must not run at all (no ungated fallback exists).
+    if not (args.channel_id or "").strip():
+        print(json.dumps({
+            "preflight_status": "FAIL",
+            "failed_check": "channel_context",
+            "reason": (
+                "--channel-id is required: paid canary submission without an "
+                "authoritative channel context is not permitted"
+            ),
+            "provider_calls_made": 0,
+        }, indent=2))
+        return 1
 
     try:
         preflight = run_preflight(args)

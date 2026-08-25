@@ -1087,7 +1087,9 @@ class TestNotificationDeliveriesMigration:
         """
         import inspect
         from hypogeum import db as _db
-        src = inspect.getsource(_db.initialize_schema)
+        # Follow __wrapped__ so the Phase 3 conftest production-DB guard
+        # (which wraps this function per-test) stays transparent here.
+        src = inspect.getsource(inspect.unwrap(_db.initialize_schema))
         assert "executescript" in src, "initialize_schema must use executescript"
         assert "CREATE TABLE IF NOT EXISTS" in open(
             __file__.replace("test_notifications.py", "")

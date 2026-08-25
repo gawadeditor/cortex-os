@@ -1,28 +1,41 @@
 """
-scripts/recover_scenes.py — Targeted scene recovery for ep_000_lite
+scripts/recover_scenes.py — Targeted scene recovery (authorized channels
+only)
 
 Runs VPD Phase 2 (MUAPI generation only) for a specific set of scenes.
 Resume safety in submit_scene() skips scenes whose clip files already exist.
 Does NOT run Assembly, Publishing, or any other pipeline stage.
 
+Phase 3 (2026-08-25): this tool is a live paid-video path and now requires
+an authoritative --channel-id. With channel_id supplied, every paid
+submission routes through the same enforced boundary as normal production:
+verified persisted Production Plan -> grant/plan/finance-record three-way
+agreement -> atomic CHANNEL_WEEKLY budget check-and-reserve ->
+child authorization -> submission gate -> provider adapter. There is NO
+ungated fallback: a missing/unknown channel, an unbound grant, or an
+exhausted weekly budget fails closed before any network call.
+
 Usage:
     # Path A — Runway retry (same prompts, T2):
-    python3 scripts/recover_scenes.py --episode-id ep_000_lite --scenes s02 s04
+    python3 scripts/recover_scenes.py --channel-id hypogeum \
+        --episode-id ep_000_lite --scenes s02 s04
 
     # Path B — veo3-fast fallback (T3, if Runway fails again):
-    python3 scripts/recover_scenes.py --episode-id ep_000_lite --scenes s02 s04 --force-tier 3
+    python3 scripts/recover_scenes.py --channel-id hypogeum \
+        --episode-id ep_000_lite --scenes s02 s04 --force-tier 3
 
 Options:
+    --channel-id   Authoritative channel identifier (REQUIRED; the grant,
+                   weekly budget, and channel package are resolved against it)
     --episode-id   Episode identifier (required)
     --scenes       Scene IDs to target (space-separated; others skipped via resume safety)
     --force-tier   Override primary_tier for targeted scenes (2=runway, 3=veo3-fast)
     --budget       Episode budget ceiling in credits (default: 2.00)
     --dry-run      Dry-run only (set MUAPI_DRY_RUN=true via env to use this)
 
-Budget guard is per-process. Prior run spend is not counted.
-Expected costs:
-    T2 (Runway):    2 scenes × $0.15 = $0.30
-    T3 (veo3-fast): 2 scenes × ~$0.60 = ~$1.20
+Budget guard is per-process. Prior run spend is not counted by the legacy
+in-process guard; the DB-enforced CHANNEL_WEEKLY scope and grant ledger
+count every enforced submission regardless of process.
 """
 
 from __future__ import annotations
@@ -84,6 +97,10 @@ def _apply_tier_override(visual_package: dict, target_scene_ids: list[str], tier
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Targeted scene recovery for Hypogeum pipeline.")
+    parser.add_argument("--channel-id", required=True, dest="channel_id",
+                        help="Authoritative channel identifier (REQUIRED -- paid recovery "
+                             "submissions are enforced against this channel's grant and "
+                             "weekly budget; no ungated fallback exists)")
     parser.add_argument("--episode-id", required=True, help="Episode identifier, e.g. ep_000_lite")
     parser.add_argument("--scenes", nargs="+", required=True, help="Scene IDs to target, e.g. s02 s04")
     parser.add_argument("--force-tier", type=int, choices=[1, 2, 3], default=None,
@@ -93,6 +110,14 @@ def main() -> int:
     args = parser.parse_args()
 
     _load_env()
+
+    # Fail-closed guard independent of argparse (also covers programmatic
+    # callers): a blank channel_id must never reach a paid boundary.
+    channel_id = (args.channel_id or "").strip()
+    if not channel_id:
+        print("ERROR: --channel-id is required: paid scene recovery without an "
+              "authoritative channel context is not permitted.", file=sys.stderr)
+        return 1
 
     episode_id = args.episode_id
     target_scenes = args.scenes
@@ -105,6 +130,7 @@ def main() -> int:
 
     print(f"\nSCENE RECOVERY — {episode_id}")
     print("=" * 50)
+    print(f"Channel:         {channel_id} (enforced: plan/grant/finance/weekly budget)")
     print(f"Target scenes:   {', '.join(target_scenes)}")
     print(f"Budget ceiling:  ${args.budget:.2f}")
     if args.force_tier:
@@ -143,7 +169,12 @@ def main() -> int:
         _apply_tier_override(visual_package, target_scenes, args.force_tier)
         print()
 
-    # Run VPD Phase 2 only — resume safety handles existing clips
+    # Run VPD Phase 2 only — resume safety handles existing clips.
+    # channel_id is ALWAYS supplied (required above): every paid submission
+    # below goes through the enforced gate path -- verified persisted plan,
+    # grant/plan/finance three-way agreement, atomic CHANNEL_WEEKLY
+    # reservation, child authorization, submission gate. A denial at any
+    # layer surfaces as a per-scene generation failure, never a fallback.
     print("Running VPD Phase 2 (generation only)...")
     print("  Scenes not in target list will be skipped by resume safety if files exist.")
     print()
@@ -153,6 +184,7 @@ def main() -> int:
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
     except Exception as e:
         print(f"ERROR during generation: {type(e).__name__}: {e}", file=sys.stderr)
@@ -191,7 +223,8 @@ def main() -> int:
         print("If Runway returned 400 again for the same scenes:")
         print("  Re-run with --force-tier 3 to route to veo3-fast.")
         print()
-        print(f"  python3 scripts/recover_scenes.py --episode-id {episode_id} \\")
+        print(f"  python3 scripts/recover_scenes.py --channel-id {channel_id} \\")
+        print(f"      --episode-id {episode_id} \\")
         print(f"      --scenes {' '.join(target_scenes)} --force-tier 3 --budget 2.00")
 
     return 0 if all_generated else 1

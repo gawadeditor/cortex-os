@@ -75,7 +75,7 @@ def _isolated_channel_identity(monkeypatch):
 
 
 def _build_matching_plan(*, episode_id="ep_gate_test", scene_id="s01b01",
-                         model, unit_price_usd=0.39,
+                         model, unit_price_usd=0.15,
                          prompt="Ancient Greek ruins at dawn, wide establishing shot."):
     """
     hypogeum.muapi._submit_scene_via_gate() now checks the real scene
@@ -142,7 +142,7 @@ def _matching_plan_hash(**kwargs) -> str:
 
 
 def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s01b01",
-                           model, unit_price_usd=0.39,
+                           model, unit_price_usd=0.15,
                            prompt="Ancient Greek ruins at dawn, wide establishing shot.") -> None:
     from hypogeum.production_plan import persist_production_plan
 
@@ -175,7 +175,8 @@ def _persist_matching_finance_record(output_dir, *, episode_id="ep_gate_test", c
 
 
 def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decimal("10.00"),
-                    production_plan_content_hash=None):
+                    production_plan_content_hash=None,
+                    grant_id="g_gate_test", episode_id="ep_gate_test"):
     # Phase 2: by default the grant is bound to the exact verified plan
     # _persist_matching_plan() persists; a test may bind it to a
     # DIFFERENT hash to prove the mismatch fails closed.
@@ -186,31 +187,55 @@ def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decima
         currency="USD", max_cost_per_call=Decimal("2.50"), max_calls=max_calls, max_total_spend=max_total_spend,
     )]
     checksum = authority.compute_grant_checksum(
-        channel_id="test_channel", episode_id="ep_gate_test", workflow_id="hypogeum_main_production",
+        channel_id="test_channel", episode_id=episode_id, workflow_id="hypogeum_main_production",
         workflow_version="1.0.0", workflow_checksum="a" * 64,
         production_plan_content_hash=production_plan_content_hash, bindings=bindings,
         max_total_spend_all_bindings=max_total_spend, currency="USD", expires_at="2099-01-01T00:00:00Z",
     )
     artifact = sign_approval_artifact(
         dict(
-            approval_id="appr1", approval_version=1, approval_type="grant", subject_checksum=checksum,
-            channel_id="test_channel", scope_id="ep_gate_test", workflow_id="hypogeum_main_production",
+            approval_id=f"appr_{grant_id}_{episode_id}", approval_version=1, approval_type="grant",
+            subject_checksum=checksum,
+            channel_id="test_channel", scope_id=episode_id, workflow_id="hypogeum_main_production",
             workflow_version="1.0.0", workflow_checksum="a" * 64, channel_package_version="1.0",
             channel_package_checksum="b" * 64,
             allowed_bindings=(GrantBindingApproval("muapi", model, "video.text_to_video"),),
             currency="USD", max_cost_per_call=Decimal("2.50"), max_total_spend=max_total_spend,
             max_calls=max_calls, retry_authorized=False, fallback_authorized=False,
-            issued_at=AT, expires_at="2099-01-01T00:00:00Z", approver_identity="operator_x", nonce="nonce_gate_1",
+            issued_at=AT, expires_at="2099-01-01T00:00:00Z", approver_identity="operator_x",
+            nonce=f"nonce_gate_{grant_id}_{episode_id}",
         ),
         private_key=priv,
     )
     return authority.register_run_grant(
-        grant_id="g_gate_test", grant_version=1, channel_id="test_channel", episode_id="ep_gate_test",
+        grant_id=grant_id, grant_version=1, channel_id="test_channel", episode_id=episode_id,
         workflow_id="hypogeum_main_production", workflow_version="1.0.0", workflow_checksum="a" * 64,
         production_plan_content_hash=production_plan_content_hash,
         bindings=bindings, max_total_spend_all_bindings=max_total_spend, currency="USD",
         expires_at="2099-01-01T00:00:00Z", approval_artifact=artifact, db_path=db_path,
     )
+
+
+def _configure_channel_weekly(db_path, *, channel_id="test_channel", timezone_name="UTC",
+                              weekly_video_budget_usd=25.0):
+    """Phase 3: give the channel an operations profile with a weekly paid-video
+    ceiling so submissions reach the enforced boundary instead of being denied
+    for missing configuration. Idempotent."""
+    if channel_config.get_channel_profile(channel_id, db_path=db_path) is None:
+        channel_config.create_channel_profile(
+            channel_id=channel_id, name="Test Channel", db_path=db_path,
+        )
+    existing = channel_config.get_channel_operations_profile(channel_id, db_path=db_path)
+    if existing is None:
+        channel_config.create_channel_operations_profile(
+            channel_id=channel_id, channel_name="Test Channel", timezone=timezone_name,
+            weekly_video_budget_usd=weekly_video_budget_usd, db_path=db_path,
+        )
+    else:
+        channel_config.update_channel_operations_profile(
+            channel_id, timezone=timezone_name,
+            weekly_video_budget_usd=weekly_video_budget_usd, db_path=db_path,
+        )
 
 
 class TestOmittedChannelIdLeavesLegacyPathUnaffected:
@@ -243,7 +268,11 @@ class TestChannelIdSuppliedWithNoGrantIsEnforcedNotBypassed:
     behavior change the cutover requires; it applies to any
     (channel_id, episode_id), never anything hypogeum-specific."""
 
-    def test_channel_id_supplied_but_no_grant_fails_closed_with_zero_provider_calls(self, tmp_path):
+    def test_channel_id_supplied_but_no_grant_fails_closed_with_zero_provider_calls(self, tmp_path, monkeypatch):
+        import hypogeum.db as db
+        db_path = tmp_path / "isolated.db"
+        db.initialize_schema(db_path)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
         config = make_config()
         spec = make_scene_spec(scene_id="s01b01")
         with patch("hypogeum.muapi.requests.post") as mock_post, \
@@ -255,10 +284,14 @@ class TestChannelIdSuppliedWithNoGrantIsEnforcedNotBypassed:
         assert result["asset_id"] is None
         assert "no_active_authorization_grant" in result["failure_reason"]
 
-    def test_denial_reason_names_the_channel_id(self, tmp_path):
+    def test_denial_reason_names_the_channel_id(self, tmp_path, monkeypatch):
         """The failure_reason must name the exact channel_id that
         triggered enforcement -- generic across any channel, never a
         hardcoded 'hypogeum' string."""
+        import hypogeum.db as db
+        db_path = tmp_path / "isolated.db"
+        db.initialize_schema(db_path)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
         config = make_config()
         spec = make_scene_spec(scene_id="s01b01")
         with patch("hypogeum.muapi.requests.post"), patch("hypogeum.muapi.requests.get"):
@@ -277,6 +310,7 @@ class TestGrantDerivedGatePath:
         db.initialize_schema(db_path)
         grant = _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
         assert grant.status == "active"
+        _configure_channel_weekly(db_path)
 
         # _submit_scene_via_gate() resolves everything against the
         # PRODUCTION db_path internally (get_connection()/authority
@@ -314,6 +348,7 @@ class TestGrantDerivedGatePath:
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _configure_channel_weekly(db_path)
         _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
 
         with patch("hypogeum.muapi.requests.post") as mock_post, \
@@ -346,6 +381,7 @@ class TestGrantDerivedGatePath:
         import hypogeum.db as db
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL, max_calls=0, max_total_spend=Decimal("0.00"))
+        _configure_channel_weekly(db_path)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
 
         with patch("hypogeum.muapi.requests.post") as mock_post, \
@@ -371,6 +407,7 @@ class TestGrantDerivedGatePath:
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _configure_channel_weekly(db_path)
         _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
 
         import hypogeum.video_prompt_writer as video_prompt_writer
@@ -410,6 +447,7 @@ class TestGrantDerivedGatePath:
         import hypogeum.db as db
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL, max_calls=5, max_total_spend=Decimal("10.00"))
+        _configure_channel_weekly(db_path)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
         _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
 
@@ -453,6 +491,7 @@ class TestGrantDerivedGatePath:
         import hypogeum.db as db
         db.initialize_schema(db_path)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _configure_channel_weekly(db_path)
 
         with patch("hypogeum.muapi.requests.post") as mock_post, \
              patch("hypogeum.muapi.requests.get") as mock_get:
@@ -483,6 +522,7 @@ class TestPhase2PlanBoundAuthorization:
             priv, db_path, model=config.MUAPI_T2_MODEL,
             production_plan_content_hash=grant_hash,
         )
+        _configure_channel_weekly(db_path)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
         return priv, config, grant
 

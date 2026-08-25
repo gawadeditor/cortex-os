@@ -370,3 +370,71 @@ def _isolate_pipeline_workflow_verification():
             yield
 
 
+
+
+@pytest.fixture(autouse=True)
+def _forbid_production_schema_mutation():
+    """
+    Phase 3 production-DB isolation guard (2026-08-25).
+
+    Hard-fails any test that drives hypogeum.db.initialize_schema() against
+    the resolved PRODUCTION database path (.hypogeum-assets/hypogeum.db).
+    initialize_schema is the one entry point that mutates schema (CREATE
+    tables, ALTER columns, transactional constraint-widening table
+    rebuilds) — a single stray call from test/dev code silently migrates
+    the live factory database, which is exactly how the Phase 3
+    budget_reservations widening reached the production file during
+    development (see docs for the 2026-08-25 incident: all 142 pre-existing
+    reservation rows preserved, zero channel_weekly rows, migration itself
+    data-preserving — but never again by accident).
+
+    Mechanics: hypogeum.db.initialize_schema is replaced by an identity-
+    checking wrapper BEFORE each test, and the same wrapper object is swept
+    into every already-imported hypogeum.* module that holds a direct
+    `from hypogeum.db import initialize_schema` reference (module-level
+    imports bind early and would otherwise bypass an attribute patch on
+    hypogeum.db alone). Lazy function-level imports resolve at call time
+    and pick up the patched attribute automatically. Path comparison uses
+    resolved-path identity (Path.resolve()), never string equality.
+
+    Legitimate tmp_path databases are unaffected: only the resolved
+    production path raises.
+    """
+    from pathlib import Path as _Path
+
+    import functools as _functools
+
+    import hypogeum.db as _db_mod
+    import sys as _sys
+
+    _production_path = _Path(_db_mod._DEFAULT_DB_PATH).resolve()
+    _original = _db_mod.initialize_schema
+
+    @_functools.wraps(_original)  # __wrapped__ chain: inspect.getsource/unwrap see through the guard
+    def _guarded_initialize_schema(db_path=None):
+        target = _Path(db_path) if db_path is not None else _Path(_db_mod._DEFAULT_DB_PATH)
+        if target.resolve() == _production_path:
+            raise AssertionError(
+                "TEST ISOLATION VIOLATION: initialize_schema() was invoked "
+                f"against the production database ({_production_path}). Tests "
+                "must pass an explicit tmp_path database. If you reached this "
+                "from production code called without db_path=, fix the call "
+                "site or patch its path — never point tests at the live DB."
+            )
+        return _original(db_path)
+
+    import contextlib as _contextlib
+
+    with _patch.object(_db_mod, "initialize_schema", _guarded_initialize_schema):
+        with _contextlib.ExitStack() as _stack:
+            for _name, _mod in list(_sys.modules.items()):
+                if not _name.startswith("hypogeum"):
+                    continue
+                try:
+                    if getattr(_mod, "initialize_schema", None) is _original:
+                        _stack.enter_context(
+                            _patch.object(_mod, "initialize_schema", _guarded_initialize_schema)
+                        )
+                except Exception:
+                    continue
+            yield

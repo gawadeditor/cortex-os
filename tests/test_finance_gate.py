@@ -98,7 +98,7 @@ class TestFinanceGateBlocks:
         vp = {"scenes": [], "episode_metadata": {}, "visual_continuity_record": {"locked_entities": []}}
 
         cfg = MagicMock()
-        cfg.FINANCE_BUDGET_CEILING_USD   = 5.0    # very low ceiling
+        cfg.FINANCE_BUDGET_CEILING_USD   = 0.05   # below the plan's maximum bounded cost
         cfg.FINANCE_WARNING_THRESHOLD_PCT = 0.80
         cfg.MUAPI_DRY_RUN               = False
         cfg.MUAPI_CHEAP_MODE            = False
@@ -108,7 +108,12 @@ class TestFinanceGateBlocks:
         cfg.MUAPI_T3_MODEL              = "veo3-fast-text-to-video"
         cfg.MUAPI_I2V_MODEL             = "veo3-image-to-video"
 
-        from hypogeum.production_plan import PLAN_SCHEMA_VERSION, ProductionPlan
+        from hypogeum.production_plan import (
+            PLAN_SCHEMA_VERSION,
+            ProductionPlan,
+            payload_content_hash,
+            persist_production_plan,
+        )
         production_plan = ProductionPlan(
             schema_version=PLAN_SCHEMA_VERSION, channel_id="hypogeum", episode_id="ep_test_gate",
             deliverable_contract_id="test", deliverable_ids=["main_episode"], assets=[],
@@ -121,28 +126,45 @@ class TestFinanceGateBlocks:
             music_price_per_second_usd=0.02, music_cost_usd=0.0,
             planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.0,
             normal_expected_cost_usd=0.32, maximum_bounded_cost_usd=0.32,
-            content_hash="a" * 64, compiled_at="2026-08-24T00:00:00+00:00",
+            content_hash="0" * 64, compiled_at="2026-08-24T00:00:00+00:00",
         )
+        # Real canonical content hash — never a manually invented placeholder.
+        payload = production_plan.to_dict()
+        production_plan = ProductionPlan.from_dict(
+            {**payload, "content_hash": payload_content_hash(payload)}
+        )
+        # Phase 2 plan-bound authorization: run_post_vpd_authorization()
+        # verifies its passed plan against the episode's VERIFIED PERSISTED
+        # Production Plan — persist the exact canonical plan this test
+        # authorizes against first.
+        persist_production_plan(production_plan, tmp_path)
 
-        # Patch policy cascade to return env ceiling only
+        # Patch policy cascade to a ceiling BELOW the persisted plan's own
+        # maximum bounded cost ($0.32) so the gate genuinely returns BLOCKED.
         with patch("hypogeum.agents.finance_agent.get_effective_budget_ceiling",
-                   return_value=5.0), \
+                   return_value=0.05), \
              patch("hypogeum.ois.emit_signal"):
             record = run_post_vpd_authorization(
                 visual_package=vp, episode_id="ep_test_gate",
                 config=cfg, production_plan=production_plan, output_dir=tmp_path,
             )
 
-        # With 0 scenes + narration=$0 the estimate is $0 and ceiling=$5 → AUTHORIZED.
-        # For a BLOCKED test we need estimate > ceiling; patch the total estimate instead.
-        blocked_record = {**record, "verdict": "BLOCKED",
-                          "estimated_spend_usd": 35.0, "budget_ceiling_usd": 5.0}
+        # The finance ceiling produced BLOCKED against the persisted plan.
+        assert record["verdict"] == "BLOCKED"
+        assert record["authorized"] is False
+        assert record["estimated_spend_usd"] > record["budget_ceiling_usd"]
 
-        # Now call _check_finance_approval (no approval exists) → returns False → gate blocks
+        # Caller contract (visual_package_director): no valid approval exists
+        # → _check_finance_approval returns False → the caller raises
+        # FinancePostVPDBlockedError instead of proceeding to MUAPI spend.
         from hypogeum.agents.visual_package_director import _check_finance_approval
         log = MagicMock()
-        result = _check_finance_approval("ep_no_approval", blocked_record, log)
+        result = _check_finance_approval("ep_test_gate", record, log)
         assert result is False
+
+        with pytest.raises(FinancePostVPDBlockedError) as exc_info:
+            raise FinancePostVPDBlockedError(episode_id="ep_test_gate", record=record)
+        assert exc_info.value.record["verdict"] == "BLOCKED"
 
     def test_finance_gate_error_message_includes_amounts(self, tmp_path):
         """FinancePostVPDBlockedError message contains estimated and ceiling amounts."""

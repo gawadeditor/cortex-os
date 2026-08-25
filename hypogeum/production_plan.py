@@ -1184,13 +1184,18 @@ def load_production_plan(episode_id: str, output_dir: Path) -> Optional[Producti
 # from what was actually compiled and authorized.
 # ---------------------------------------------------------------------------
 
-def production_plan_to_grant_binding_spec(plan: ProductionPlan) -> list:
+def production_plan_to_grant_binding_spec(plan: ProductionPlan) -> dict:
     """
-    One grant "bindings" entry (see scripts/approve_run_grant.py's own
-    grant spec JSON shape) per distinct (provider, model) pair this plan
-    declares, with max_calls/max_total_spend set to this plan's own
-    MAXIMUM bounded numbers for that model — never a value invented
-    independently of the compiled plan.
+    Grant-spec fragment for scripts/approve_run_grant.py: {"bindings":
+    [...], "production_plan_content_hash": ...}. One grant "bindings"
+    entry per distinct (provider, model) pair this plan declares, with
+    max_calls/max_total_spend set to this plan's own MAXIMUM bounded
+    numbers for that model -- never a value invented independently of
+    the compiled plan. production_plan_content_hash is the plan's own
+    content_hash: the offline approval ceremony requires it in the
+    grant spec, signs it into the grant checksum, and every paid video
+    submission re-verifies it against the verified persisted plan
+    before any network call.
     """
     by_model: dict = {}
     for a in plan.assets:
@@ -1210,4 +1215,7 @@ def production_plan_to_grant_binding_spec(plan: ProductionPlan) -> list:
         }
         for (provider, model), v in sorted(by_model.items())
     ]
-    return bindings
+    return {
+        "bindings": bindings,
+        "production_plan_content_hash": plan.content_hash,
+    }

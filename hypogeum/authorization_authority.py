@@ -25,6 +25,7 @@ or authorization is touched.
 from __future__ import annotations
 
 import base64
+import re
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -52,6 +53,7 @@ __all__ = [
     "EnvelopeExceedsGrantLimitsError",
     "GrantCapacityExhaustedError",
     "GrantScopeMismatchError",
+    "GrantPlanHashMismatchError",
     "compute_grant_checksum",
     "register_run_grant",
     "resolve_active_grant",
@@ -133,6 +135,17 @@ class GrantScopeMismatchError(AuthorizationAuthorityError):
     operation/currency/cost binding happens to match."""
 
 
+class GrantPlanHashMismatchError(AuthorizationAuthorityError):
+    """A plan-hash binding mismatch on a plan-bound child authorization:
+    the grant carries no production_plan_content_hash, its hash differs
+    from the caller-supplied verified Production Plan hash, or the
+    envelope's dependency_checksums.plan differs from that verified
+    hash. Raised by issue_child_authorization() ONLY when the caller
+    opts in via expected_production_plan_content_hash (today: the paid
+    MUAPI video boundary) -- before any ledger reservation or state
+    transition. Domains that do not opt in are unaffected."""
+
+
 def _load_trusted_public_key() -> Ed25519PublicKey:
     """The ONE place the trust anchor is resolved. Not a function
     parameter anywhere on this module's public API -- a caller cannot
@@ -183,6 +196,7 @@ def register_run_grant(
     workflow_id: str,
     workflow_version: str,
     workflow_checksum: str,
+    production_plan_content_hash: str,
     bindings: Sequence[store.GrantBinding],
     max_total_spend_all_bindings: Optional[Decimal],
     currency: str,
@@ -198,10 +212,27 @@ def register_run_grant(
     exposes signing to anything but the offline scripts), so calling
     this function with a self-constructed or tampered artifact always
     fails before any grant row is written.
+
+    production_plan_content_hash is REQUIRED (Phase 2 plan-bound
+    authorization): the 64-hex-char content_hash of the exact verified
+    persisted Production Plan this grant authorizes. It is part of the
+    signed grant checksum -- the offline approver's signature therefore
+    covers the plan identity -- and every child authorization minted
+    from this grant must carry a matching envelope plan checksum. There
+    is no unbound-grant registration path any more.
     """
+    if not isinstance(production_plan_content_hash, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", production_plan_content_hash
+    ):
+        raise AuthorizationAuthorityError(
+            f"production_plan_content_hash must be a 64-hex-char Production Plan "
+            f"content_hash, got {production_plan_content_hash!r} -- refusing to "
+            "register an unbound grant"
+        )
     grant_checksum = compute_grant_checksum(
         channel_id=channel_id, episode_id=episode_id, workflow_id=workflow_id,
         workflow_version=workflow_version, workflow_checksum=workflow_checksum,
+        production_plan_content_hash=production_plan_content_hash,
         bindings=bindings, max_total_spend_all_bindings=max_total_spend_all_bindings, currency=currency,
         expires_at=expires_at,
     )
@@ -219,7 +250,8 @@ def register_run_grant(
             grant = store.insert_grant(
                 conn, grant_id=grant_id, grant_version=grant_version, grant_checksum=grant_checksum,
                 channel_id=channel_id, episode_id=episode_id, workflow_id=workflow_id,
-                workflow_version=workflow_version, workflow_checksum=workflow_checksum, bindings=bindings,
+                workflow_version=workflow_version, workflow_checksum=workflow_checksum,
+                production_plan_content_hash=production_plan_content_hash, bindings=bindings,
                 max_total_spend_all_bindings=max_total_spend_all_bindings, currency=currency,
                 expires_at=expires_at, approval_id=approval_artifact.approval_id,
                 approval_version=approval_artifact.approval_version,
@@ -235,8 +267,20 @@ def register_run_grant(
 
 def compute_grant_checksum(
     *, channel_id, episode_id, workflow_id, workflow_version, workflow_checksum,
+    production_plan_content_hash: Optional[str],
     bindings: Sequence[store.GrantBinding], max_total_spend_all_bindings, currency, expires_at,
 ) -> str:
+    """production_plan_content_hash participates in the checksum payload
+    ONLY when non-None -- historical-compatibility contract: grants
+    registered before Phase 2 plan binding existed have stored
+    grant_checksums / artifact subject_checksums computed over payloads
+    WITHOUT this key. Omitting the key for None makes the recomputed
+    expected checksum for such a legacy row byte-identical to its
+    original, so resolve_active_grant() keeps resolving it exactly as it
+    did before the plan-binding change (no global invalidation, no
+    forced re-registration). Registration (register_run_grant) always
+    supplies a validated non-None hash, so every NEW grant's signature
+    covers its exact Production Plan identity."""
     from hypogeum.approval_artifact import compute_approval_subject_checksum
     payload = {
         "channel_id": channel_id, "episode_id": episode_id, "workflow_id": workflow_id,
@@ -245,6 +289,8 @@ def compute_grant_checksum(
         "max_total_spend_all_bindings": None if max_total_spend_all_bindings is None else str(max_total_spend_all_bindings),
         "currency": currency, "expires_at": expires_at,
     }
+    if production_plan_content_hash is not None:
+        payload["production_plan_content_hash"] = production_plan_content_hash
     return compute_approval_subject_checksum(payload)
 
 
@@ -280,6 +326,7 @@ def resolve_active_grant(
         expected_checksum = compute_grant_checksum(
             channel_id=grant.channel_id, episode_id=grant.episode_id, workflow_id=grant.workflow_id,
             workflow_version=grant.workflow_version, workflow_checksum=grant.workflow_checksum,
+            production_plan_content_hash=getattr(grant, "production_plan_content_hash", None),
             bindings=grant.bindings, max_total_spend_all_bindings=grant.max_total_spend_all_bindings,
             currency=grant.currency, expires_at=grant.expires_at,
         )
@@ -406,6 +453,49 @@ def _validate_envelope_grant_scope(
     )
 
 
+def _validate_expected_plan_hash(
+    grant: "store.RunAuthorizationGrant", envelope: GenerationExecutionEnvelope,
+    expected_production_plan_content_hash: str,
+) -> None:
+    """Phase 2 plan-bound authorization for callers that DECLARE a
+    verified Production Plan identity (today: the paid MUAPI video
+    boundary, which passes the exact hash of the integrity-verified
+    persisted plan it just loaded). Enforces three-way equality BEFORE
+    any ledger reservation or state transition:
+
+        grant.production_plan_content_hash ==
+        expected_production_plan_content_hash ==
+        envelope.dependency_checksums.plan
+
+    A legacy NULL-hash grant fails here (denied for plan-bound
+    consumption) while remaining fully usable for domains that do not
+    opt in -- this function runs ONLY when the caller supplies an
+    expected hash. No mutation, no fallback: pass silently or raise
+    GrantPlanHashMismatchError."""
+    grant_plan_hash = getattr(grant, "production_plan_content_hash", None)
+    if not grant_plan_hash:
+        raise GrantPlanHashMismatchError(
+            f"grant {grant.grant_id!r}@{grant.grant_version} carries no "
+            "production_plan_content_hash -- grants registered before plan binding "
+            "are denied for plan-bound authorization; re-register the grant against "
+            "the verified persisted plan"
+        )
+    if grant_plan_hash != expected_production_plan_content_hash:
+        raise GrantPlanHashMismatchError(
+            f"grant {grant.grant_id!r}@{grant.grant_version} is bound to content_hash "
+            f"{grant_plan_hash!r} != caller-supplied verified plan hash "
+            f"{expected_production_plan_content_hash!r} -- this grant authorizes a "
+            "different Production Plan"
+        )
+    envelope_plan = envelope.dependency_checksums.plan
+    if envelope_plan != expected_production_plan_content_hash:
+        raise GrantPlanHashMismatchError(
+            f"envelope {envelope.envelope_id!r} plan checksum {envelope_plan!r} != "
+            f"caller-supplied verified plan hash "
+            f"{expected_production_plan_content_hash!r}"
+        )
+
+
 def _validate_envelope_against_grant_binding(
     grant: "store.RunAuthorizationGrant", envelope: GenerationExecutionEnvelope,
 ) -> "store.GrantBinding":
@@ -487,6 +577,7 @@ def _reserve_grant_ledger_capacity(
 def issue_child_authorization(
     envelope: GenerationExecutionEnvelope, grant_id: str, grant_version: int, *,
     at: str, db_path: Optional[Path] = None,
+    expected_production_plan_content_hash: Optional[str] = None,
 ) -> AuthorizationRecord:
     """
     See plan §5.5 for the full algorithm. Uses envelope.idempotency_key
@@ -501,6 +592,17 @@ def issue_child_authorization(
     uses). A grant registered for a different channel, episode, or
     workflow fails closed (GrantScopeMismatchError) even if every
     provider/model/operation/currency/cost binding matches.
+
+    expected_production_plan_content_hash -- Phase 2 plan-bound
+    authorization, OPT-IN per caller. Only a caller that has IN HAND
+    the exact hash of an integrity-verified persisted Production Plan
+    (today: hypogeum.muapi._submit_scene_via_gate(), the paid video
+    boundary) supplies it; when supplied,
+    _validate_expected_plan_hash() requires grant hash == supplied
+    verified hash == envelope dependency_checksums.plan before any
+    ledger activity. When NOT supplied (every other gated domain),
+    pre-Phase-2 behavior is preserved exactly -- including full
+    compatibility with historical NULL-hash grants.
     """
     conn = get_connection(db_path)
     try:
@@ -511,6 +613,18 @@ def issue_child_authorization(
             _validate_envelope_grant_scope(
                 grant, envelope, target_description=f"envelope {envelope.envelope_id!r}",
             )
+            # Phase 2 plan-bound authorization -- OPT-IN, video-only: the
+            # paid MUAPI video caller supplies the verified persisted
+            # Production Plan hash it loaded; the authority independently
+            # re-checks grant == expected and envelope.plan == expected
+            # here. Callers that do not supply an expected hash (every
+            # other gated domain) get exactly their pre-Phase-2 behavior.
+            # Either way this runs pre-ledger, pre-state-transition: a
+            # denial leaves zero consumption rows and an untouched record.
+            if expected_production_plan_content_hash is not None:
+                _validate_expected_plan_hash(
+                    grant, envelope, expected_production_plan_content_hash,
+                )
             binding = _validate_envelope_against_grant_binding(grant, envelope)
             reservation = _reserve_grant_ledger_capacity(conn, grant, grant_version, binding, envelope, at)
 

@@ -78,6 +78,7 @@ M5.6 — Cost guardrail events:
 
 from __future__ import annotations
 
+import json
 import random
 import subprocess
 import time
@@ -655,6 +656,49 @@ def _canonical_json_bytes(payload: dict) -> bytes:
     return _json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
 
 
+def _load_post_vpd_finance_plan_hash(
+    episode_id: str, output_dir: Path,
+) -> "tuple[Optional[str], Optional[str]]":
+    """
+    Phase 2 plan-bound financial authorization: read the bound Production
+    Plan content_hash back from the episode's post-VPD finance record
+    (finance_post_vpd_authorization_{episode_id}.json, written by
+    run_post_vpd_authorization() only after verifying the exact persisted
+    plan). Returns (hash, None) on success or (None, denial_reason) when
+    the record is missing, unreadable, or carries no bound hash -- every
+    such case fails closed at the paid video boundary before any network
+    call. Hash source: top-level 'bound_production_plan_content_hash'
+    (Phase 2 records), falling back to
+    'cost_breakdown.production_plan_content_hash' (records written since
+    the 2026-08-24 plan correction).
+    """
+    path = Path(output_dir) / f"finance_post_vpd_authorization_{episode_id}.json"
+    if not path.exists():
+        return None, (
+            f"finance_record_missing: no post-VPD finance authorization record at "
+            f"{path.name} -- a paid submission requires a Finance-authorized plan "
+            f"(run_post_vpd_authorization writes this record)"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"finance_record_unreadable: {path.name} could not be read: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"finance_record_unreadable: {path.name} is not a JSON object"
+    bound_hash = payload.get("bound_production_plan_content_hash")
+    if not bound_hash:
+        cost_breakdown = payload.get("cost_breakdown")
+        if isinstance(cost_breakdown, dict):
+            bound_hash = cost_breakdown.get("production_plan_content_hash")
+    if not isinstance(bound_hash, str) or not bound_hash:
+        return None, (
+            f"finance_record_unbound: {path.name} carries no "
+            f"production_plan_content_hash -- refusing paid submission against an "
+            f"authorization whose plan identity is unprovable"
+        )
+    return bound_hash, None
+
+
 def _submit_scene_via_gate(
     *, channel_id: str, grant, prompt: str, tier: int, reference_image_url: Optional[str],
     scene_id: str, short_id: Optional[str], aspect_ratio: str, requested_duration: float,
@@ -746,6 +790,40 @@ def _submit_scene_via_gate(
             f"model {declared_asset.model!r} for {expected_output_identity!r}"
         )
 
+    # ------------------------------------------------------------------
+    # Phase 2 plan-bound financial authorization -- three-way agreement
+    # between (1) the grant's registered production_plan_content_hash,
+    # (2) the freshly loaded, integrity-verified persisted Production
+    # Plan, and (3) the post-VPD finance record's bound hash. Every
+    # disagreement fails closed HERE, before any envelope is compiled,
+    # any authorization is minted, and any paid provider call is made.
+    # ------------------------------------------------------------------
+    grant_plan_hash = getattr(grant, "production_plan_content_hash", None)
+    if not grant_plan_hash:
+        return None, (
+            f"grant_plan_unbound: grant {grant.grant_id}@{grant.grant_version} "
+            f"carries no production_plan_content_hash -- grants registered before "
+            f"plan binding fail closed; register a new RunAuthorizationGrant bound "
+            f"to this episode's verified persisted Production Plan"
+        )
+    if grant_plan_hash != production_plan.content_hash:
+        return None, (
+            f"grant_plan_mismatch: grant {grant.grant_id}@{grant.grant_version} is bound "
+            f"to content_hash={grant_plan_hash[:12]} but the verified persisted plan has "
+            f"content_hash={production_plan.content_hash[:12]} -- changing or replacing "
+            f"the plan invalidates authorization; re-register the grant"
+        )
+    finance_plan_hash, finance_denial = _load_post_vpd_finance_plan_hash(episode_id, output_dir)
+    if finance_denial is not None:
+        return None, finance_denial
+    if finance_plan_hash != production_plan.content_hash:
+        return None, (
+            f"finance_record_mismatch: post-VPD finance authorization is bound to "
+            f"content_hash={finance_plan_hash[:12]} but the verified persisted plan has "
+            f"content_hash={production_plan.content_hash[:12]} -- the plan changed after "
+            f"Finance authorized it"
+        )
+
     # plan_checksum ties this envelope's dependency_checksums back to the
     # REAL compiled, Finance-authorized Production Plan -- never an ad-hoc
     # per-call hash independent of anything Finance actually reviewed.
@@ -792,7 +870,16 @@ def _submit_scene_via_gate(
             },
             aspect_ratio=aspect_ratio, duration_seconds=Decimal(str(requested_duration)),
         )
-        authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
+        authorization = authority.issue_child_authorization(
+            envelope, grant.grant_id, grant.grant_version, at=at,
+            # Phase 2 plan-bound authorization: independently re-verified by
+            # the authority (grant hash == this verified persisted plan hash
+            # == envelope dependency_checksums.plan) BEFORE any ledger
+            # reservation. Not a tautology: this value comes from the
+            # integrity-verified load_production_plan() read above, and the
+            # grant's own registered hash must equal it exactly.
+            expected_production_plan_content_hash=production_plan.content_hash,
+        )
     except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
         log.warn("muapi_gate_authorization_failed", scene_id=scene_id, reason=str(exc))
         return None, f"gate_authorization_failed: {exc}"

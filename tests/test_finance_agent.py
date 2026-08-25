@@ -1305,6 +1305,15 @@ class TestPostVPDAuthorization:
         )
         return visual_package, plan, cfg
 
+    def _persist_plan(self, plan, output_dir) -> None:
+        """Phase 2 plan-bound authorization: run_post_vpd_authorization()
+        verifies its passed plan against the episode's VERIFIED PERSISTED
+        Production Plan before authorizing anything -- every test in this
+        class persists the compiled plan to its tmpdir first."""
+        from hypogeum.production_plan import persist_production_plan
+
+        persist_production_plan(plan, Path(output_dir))
+
     # ----------------------------------------------------------------
     # No compiled plan → cannot call this gate at all.
     # ----------------------------------------------------------------
@@ -1327,6 +1336,7 @@ class TestPostVPDAuthorization:
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
@@ -1338,6 +1348,7 @@ class TestPostVPDAuthorization:
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=10, tier=1, ceiling=1.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
@@ -1349,6 +1360,7 @@ class TestPostVPDAuthorization:
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
@@ -1361,6 +1373,7 @@ class TestPostVPDAuthorization:
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
@@ -1377,6 +1390,7 @@ class TestPostVPDAuthorization:
         )
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=10, tier=1, ceiling=1.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
@@ -1390,6 +1404,7 @@ class TestPostVPDAuthorization:
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=1, ceiling=50.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
@@ -1399,6 +1414,12 @@ class TestPostVPDAuthorization:
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=1, ceiling=50.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
+            # The gate verifies against production_plan_{episode_id}.json --
+            # mirror the persisted plan under this test's episode id too.
+            (Path(tmpdir) / "production_plan_ep_abc.json").write_bytes(
+                (Path(tmpdir) / "production_plan_ep_test.json").read_bytes()
+            )
             run_post_vpd_authorization(
                 vpd_plan, "ep_abc", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
@@ -1415,6 +1436,7 @@ class TestPostVPDAuthorization:
         initialize_schema(db_path)
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=10, tier=1, ceiling=0.0)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan,
                 output_dir=Path(tmpdir), db_path=db_path,
@@ -1431,8 +1453,69 @@ class TestPostVPDAuthorization:
         ceiling = probe_plan.maximum_bounded_cost_usd / 0.85
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=ceiling)
         with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
             record = run_post_vpd_authorization(
                 vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
             )
         assert record["verdict"] in ("WARNING", "AUTHORIZED")
         assert record["authorized"] is True
+
+    def test_passed_plan_must_equal_verified_persisted_plan(self):
+        """Phase 2: authorization is calculated only from the exact verified
+        persisted Production Plan. An in-memory plan that diverges from the
+        persisted file (a replaced or recompiled plan) is never authorized."""
+        from hypogeum.agents.finance_agent import (
+            FinancePostVPDPlanMismatchError,
+            run_post_vpd_authorization,
+        )
+        from hypogeum.production_plan import PlannedAsset, ProductionPlan, payload_content_hash
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
+            # A DIFFERENT, internally consistent plan (one asset's prompt changed).
+            tampered_asset = PlannedAsset(**{
+                **plan.assets[0].__dict__, "prompt": "changed prompt",
+                "prompt_fingerprint": "changed",
+            })
+            replaced_dict = {
+                **plan.to_dict(),
+                "assets": [tampered_asset.__dict__] + [a.__dict__ for a in plan.assets[1:]],
+            }
+            payload = {k: v for k, v in replaced_dict.items()}
+            replaced_hash = payload_content_hash(payload)
+            replaced = ProductionPlan.from_dict({**payload, "content_hash": replaced_hash})
+            with pytest.raises(FinancePostVPDPlanMismatchError) as exc_info:
+                run_post_vpd_authorization(
+                    vpd_plan, "ep_test", cfg, production_plan=replaced, output_dir=Path(tmpdir),
+                )
+            assert exc_info.value.passed_content_hash == replaced.content_hash
+            assert exc_info.value.persisted_content_hash == plan.content_hash
+
+    def test_missing_persisted_plan_fails_closed(self):
+        from hypogeum.agents.finance_agent import (
+            FinancePostVPDPlanMismatchError,
+            run_post_vpd_authorization,
+        )
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=2, ceiling=50.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(FinancePostVPDPlanMismatchError):
+                run_post_vpd_authorization(
+                    vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
+                )
+
+    def test_record_carries_top_level_bound_production_plan_hash(self):
+        """The durable bound hash the MUAPI video gate later three-way-
+        checks against the grant and the loaded plan."""
+        import json
+
+        from hypogeum.agents.finance_agent import run_post_vpd_authorization
+        vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=1, ceiling=50.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._persist_plan(plan, tmpdir)
+            run_post_vpd_authorization(
+                vpd_plan, "ep_test", cfg, production_plan=plan, output_dir=Path(tmpdir),
+            )
+            data = json.loads(
+                (Path(tmpdir) / "finance_post_vpd_authorization_ep_test.json").read_text()
+            )
+        assert data["bound_production_plan_content_hash"] == plan.content_hash

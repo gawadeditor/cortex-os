@@ -25,6 +25,7 @@ Grant spec JSON shape:
   "grant_id": "...", "grant_version": 1,
   "channel_id": "...", "episode_id": "...",
   "workflow_id": "...", "workflow_version": "...", "workflow_checksum": "...",
+  "production_plan_content_hash": "<64-hex content_hash of the verified persisted plan>",
   "channel_package_version": "...", "channel_package_checksum": "...",
   "currency": "USD", "max_total_spend_all_bindings": "10.00",
   "expires_at": "2026-12-31T23:59:59Z",
@@ -34,6 +35,21 @@ Grant spec JSON shape:
      "retry_authorized": false, "fallback_authorized": false}
   ]
 }
+
+production_plan_content_hash is REQUIRED (Phase 2 plan-bound
+authorization): the grant is signed over -- and forever bound to --
+that exact verified persisted Production Plan. Derive it (and the
+bindings) mechanically with --from-plan instead of hand-typing:
+
+    python3 scripts/approve_run_grant.py --spec grant_spec.json \
+        --from-plan .hypogeum-assets/episodes/ep_x/production_plan_ep_x.json ...
+
+--from-plan loads the persisted Production Plan JSON, re-verifies its
+content_hash integrity exactly like the runtime does, derives bindings
+via hypogeum.production_plan.production_plan_to_grant_binding_spec(),
+and uses the plan's own content_hash as production_plan_content_hash.
+A spec that also carries bindings/hash conflicting with the plan is
+aborted, never silently reconciled.
 
 Usage:
     python3 scripts/approve_run_grant.py --spec grant_spec.json \\
@@ -46,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -79,9 +96,74 @@ def _build_bindings(spec: dict) -> "list[GrantBinding]":
     ]
 
 
+def _require_plan_hash(spec: dict) -> str:
+    """Fail closed unless the spec carries a well-formed 64-hex-char
+    Production Plan content_hash. An unbound grant can never be minted
+    through this ceremony."""
+    plan_hash = spec.get("production_plan_content_hash")
+    if not isinstance(plan_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_hash):
+        print(
+            "ERROR: spec is missing a valid 'production_plan_content_hash' "
+            "(64 hex chars) -- Phase 2 requires every grant to be bound to one "
+            "exact verified persisted Production Plan. Derive it with --from-plan.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return plan_hash
+
+
+def _apply_from_plan(args: argparse.Namespace, spec: dict) -> None:
+    """--from-plan: derive bindings + hash from the persisted plan file,
+    after verifying its stored content_hash against a fresh recomputation
+    (the same fail-closed integrity check load_production_plan() enforces
+    at runtime). Spec/plan conflicts abort; nothing is silently merged."""
+    from hypogeum.production_plan import (
+        ProductionPlan,
+        payload_content_hash,
+        production_plan_to_grant_binding_spec,
+    )
+
+    payload = json.loads(args.from_plan.read_text())
+    stored_hash = payload.get("content_hash") if isinstance(payload, dict) else None
+    recomputed = payload_content_hash(payload)
+    if stored_hash != recomputed:
+        print(
+            f"ERROR: plan file {args.from_plan} failed integrity verification "
+            f"(stored content_hash {stored_hash!r} != recomputed {recomputed!r}) "
+            "-- refusing to derive a grant from an unverifiable plan.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    fragment = production_plan_to_grant_binding_spec(ProductionPlan.from_dict(payload))
+    plan_hash = fragment["production_plan_content_hash"]
+    spec_hash = spec.get("production_plan_content_hash")
+    if spec_hash is not None and spec_hash != plan_hash:
+        print(
+            f"ERROR: spec production_plan_content_hash {spec_hash!r} != plan file's "
+            f"verified content_hash {plan_hash!r} -- aborting instead of reconciling.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if "bindings" in spec and spec["bindings"] and spec["bindings"] != fragment["bindings"]:
+        print(
+            "ERROR: spec carries bindings that differ from the plan-derived "
+            "bindings -- aborting instead of reconciling.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    spec["bindings"] = fragment["bindings"]
+    spec["production_plan_content_hash"] = plan_hash
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--spec", required=True, type=Path, help="grant specification JSON file")
+    parser.add_argument(
+        "--from-plan", required=False, type=Path, default=None,
+        help="persisted Production Plan JSON file -- derives bindings and "
+             "production_plan_content_hash from the verified plan instead of hand-typing them",
+    )
     parser.add_argument("--private-key", required=True, type=Path, help="Ed25519 private key PEM file (never checked into the repo)")
     parser.add_argument("--approver-identity", required=True, help="human-readable identity of the approving operator")
     parser.add_argument("--nonce", required=True, help="unique nonce for this approval -- reused nonces are rejected")
@@ -92,12 +174,16 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     spec = json.loads(args.spec.read_text())
+    if args.from_plan is not None:
+        _apply_from_plan(args, spec)
+    plan_content_hash = _require_plan_hash(spec)
     bindings = _build_bindings(spec)
     max_total_spend_all_bindings = Decimal(spec["max_total_spend_all_bindings"]) if spec.get("max_total_spend_all_bindings") else None
 
     checksum = compute_grant_checksum(
         channel_id=spec["channel_id"], episode_id=spec["episode_id"], workflow_id=spec["workflow_id"],
         workflow_version=spec["workflow_version"], workflow_checksum=spec["workflow_checksum"],
+        production_plan_content_hash=plan_content_hash,
         bindings=bindings, max_total_spend_all_bindings=max_total_spend_all_bindings, currency=spec["currency"],
         expires_at=spec["expires_at"],
     )
@@ -109,6 +195,7 @@ def main(argv=None) -> int:
     print(f"  channel_id:    {spec['channel_id']}")
     print(f"  episode_id:    {spec['episode_id']}")
     print(f"  workflow:      {spec['workflow_id']}@{spec['workflow_version']} ({spec['workflow_checksum'][:16]}...)")
+    print(f"  plan binding:  {plan_content_hash[:16]}... (verified persisted Production Plan)")
     print(f"  expires_at:    {spec['expires_at']}")
     print(f"  grant_checksum: {checksum}")
     for b in bindings:
@@ -146,7 +233,8 @@ def main(argv=None) -> int:
     grant = register_run_grant(
         grant_id=spec["grant_id"], grant_version=spec["grant_version"], channel_id=spec["channel_id"],
         episode_id=spec["episode_id"], workflow_id=spec["workflow_id"], workflow_version=spec["workflow_version"],
-        workflow_checksum=spec["workflow_checksum"], bindings=bindings,
+        workflow_checksum=spec["workflow_checksum"], production_plan_content_hash=plan_content_hash,
+        bindings=bindings,
         max_total_spend_all_bindings=max_total_spend_all_bindings, currency=spec["currency"],
         expires_at=spec["expires_at"], approval_artifact=artifact, db_path=args.db_path,
     )

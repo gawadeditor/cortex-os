@@ -74,16 +74,18 @@ def _isolated_channel_identity(monkeypatch):
     )
 
 
-def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s01b01",
-                            model, prompt="Ancient Greek ruins at dawn, wide establishing shot.") -> None:
+def _build_matching_plan(*, episode_id="ep_gate_test", scene_id="s01b01",
+                         model, unit_price_usd=0.39,
+                         prompt="Ancient Greek ruins at dawn, wide establishing shot."):
     """
     hypogeum.muapi._submit_scene_via_gate() now checks the real scene
     submission against a persisted hypogeum.production_plan.ProductionPlan
     before compiling an envelope at all (2026-08-24 correction) -- these
     gate-path integration tests exercise the grant/envelope/submission_gate
     machinery itself, not plan compilation (that has its own coverage in
-    test_production_plan.py), so this persists a minimal, directly
-    constructed plan declaring exactly the one asset each test submits.
+    test_production_plan.py), so this builds a minimal, directly
+    constructed plan declaring exactly the one asset each test submits,
+    carrying its REAL canonical content_hash.
     """
     from hypogeum.muapi import _compute_asset_id
     from hypogeum.production_plan import (
@@ -91,7 +93,6 @@ def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s
         ROLE_REQUIRED,
         PlannedAsset,
         ProductionPlan,
-        persist_production_plan,
         payload_content_hash,
         prompt_fingerprint,
     )
@@ -109,7 +110,7 @@ def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s
         role=ROLE_REQUIRED, prompt=assembled_prompt, prompt_fingerprint=prompt_fingerprint(assembled_prompt),
         shot_signature="", aspect_ratio="16:9", requested_duration_seconds=8.0,
         conservative_usable_duration_seconds=8.0, provider="muapi", model=model,
-        unit_price_usd=0.39, enhancement_price_usd=0.05, max_chargeable_attempts=2,
+        unit_price_usd=unit_price_usd, enhancement_price_usd=0.05, max_chargeable_attempts=2,
     )
     plan = ProductionPlan(
         schema_version=PLAN_SCHEMA_VERSION, channel_id="test_channel", episode_id=episode_id,
@@ -125,25 +126,69 @@ def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s
         normal_expected_cost_usd=0.71, maximum_bounded_cost_usd=0.90,
         content_hash="0" * 64, compiled_at="2026-08-24T00:00:00+00:00",
     )
-    # Persist a plan whose content_hash is the REAL canonical hash of its
+    # The content_hash must be the REAL canonical hash of the plan's
     # own payload -- load_production_plan() recomputes and verifies it
     # before the gate will accept the plan, so a placeholder hash is
     # rejected as an unverifiable plan.
     payload = plan.to_dict()
-    verified_plan = ProductionPlan.from_dict(
-        {**payload, "content_hash": payload_content_hash(payload)}
+    return ProductionPlan.from_dict({**payload, "content_hash": payload_content_hash(payload)})
+
+
+def _matching_plan_hash(**kwargs) -> str:
+    """The verified content_hash of the plan _persist_matching_plan()
+    persists -- the exact value a Phase 2 plan-bound grant must carry
+    for submissions against that plan to be authorized."""
+    return _build_matching_plan(**kwargs).content_hash
+
+
+def _persist_matching_plan(output_dir, *, episode_id="ep_gate_test", scene_id="s01b01",
+                           model, unit_price_usd=0.39,
+                           prompt="Ancient Greek ruins at dawn, wide establishing shot.") -> None:
+    from hypogeum.production_plan import persist_production_plan
+
+    verified_plan = _build_matching_plan(
+        episode_id=episode_id, scene_id=scene_id, model=model,
+        unit_price_usd=unit_price_usd, prompt=prompt,
     )
     persist_production_plan(verified_plan, Path(output_dir))
+    # Phase 2 three-way verification: the paid video boundary also requires
+    # the post-VPD finance authorization record Finance writes right before
+    # VPD Phase 2 -- bound to the SAME verified persisted plan hash.
+    _persist_matching_finance_record(output_dir, episode_id=episode_id, content_hash=verified_plan.content_hash)
 
 
-def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decimal("10.00")):
+def _persist_matching_finance_record(output_dir, *, episode_id="ep_gate_test", content_hash) -> None:
+    import json
+
+    record = {
+        "finance_id": "fv_test", "episode_id": episode_id,
+        "phase": "post_vpd_authorization", "recorded_at": AT,
+        "verdict": "AUTHORIZED", "authorized": True, "budget_ceiling_usd": 50.0,
+        "estimated_spend_usd": 0.9,
+        "bound_production_plan_content_hash": content_hash,
+        "checks": [], "failures": [], "warnings": [],
+        "cost_breakdown": {"production_plan_content_hash": content_hash},
+    }
+    (Path(output_dir) / f"finance_post_vpd_authorization_{episode_id}.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+
+
+def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decimal("10.00"),
+                    production_plan_content_hash=None):
+    # Phase 2: by default the grant is bound to the exact verified plan
+    # _persist_matching_plan() persists; a test may bind it to a
+    # DIFFERENT hash to prove the mismatch fails closed.
+    if production_plan_content_hash is None:
+        production_plan_content_hash = _matching_plan_hash(model=model)
     bindings = [astore.GrantBinding(
         provider="muapi", model=model, provider_operation="video.text_to_video",
         currency="USD", max_cost_per_call=Decimal("2.50"), max_calls=max_calls, max_total_spend=max_total_spend,
     )]
     checksum = authority.compute_grant_checksum(
         channel_id="test_channel", episode_id="ep_gate_test", workflow_id="hypogeum_main_production",
-        workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+        workflow_version="1.0.0", workflow_checksum="a" * 64,
+        production_plan_content_hash=production_plan_content_hash, bindings=bindings,
         max_total_spend_all_bindings=max_total_spend, currency="USD", expires_at="2099-01-01T00:00:00Z",
     )
     artifact = sign_approval_artifact(
@@ -162,6 +207,7 @@ def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decima
     return authority.register_run_grant(
         grant_id="g_gate_test", grant_version=1, channel_id="test_channel", episode_id="ep_gate_test",
         workflow_id="hypogeum_main_production", workflow_version="1.0.0", workflow_checksum="a" * 64,
+        production_plan_content_hash=production_plan_content_hash,
         bindings=bindings, max_total_spend_all_bindings=max_total_spend, currency="USD",
         expires_at="2099-01-01T00:00:00Z", approval_artifact=artifact, db_path=db_path,
     )
@@ -419,3 +465,188 @@ class TestGrantDerivedGatePath:
         assert result["generation_status"] == "generation_failed"
         assert "no_active_authorization_grant" in result["failure_reason"]
         assert "some_future_channel_never_seen_before" in result["failure_reason"]
+
+
+class TestPhase2PlanBoundAuthorization:
+    """Phase 2: financial authorization is bound to the exact verified
+    persisted Production Plan. Grant hash, verified persisted plan hash,
+    and finance-record hash must all agree BEFORE any envelope is
+    compiled or any paid provider call is made."""
+
+    def _setup(self, keypair, tmp_path, monkeypatch, *, grant_hash=None):
+        priv, _pub = keypair
+        import hypogeum.db as db
+        db_path = tmp_path / "auth.db"
+        db.initialize_schema(db_path)
+        config = make_config()
+        grant = _register_grant(
+            priv, db_path, model=config.MUAPI_T2_MODEL,
+            production_plan_content_hash=grant_hash,
+        )
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        return priv, config, grant
+
+    def test_happy_path_three_way_agreement_still_generates(self, keypair, tmp_path, monkeypatch):
+        """Grant == persisted plan == finance record (all bound to the same
+        verified content_hash) authorizes the submission exactly as before."""
+        _, config, _grant = self._setup(keypair, tmp_path, monkeypatch)
+        spec = make_scene_spec(scene_id="s01b01")
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+            mock_post.return_value = _mock_submit_ok("req_p2_ok")
+            mock_get.return_value = _mock_poll_completed()
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+        assert result["generation_status"] == "generated", result
+
+    def test_grant_bound_to_different_plan_hash_fails_closed_pre_network(self, keypair, tmp_path, monkeypatch):
+        """A grant registered against a DIFFERENT Production Plan content_hash
+        can never authorize a submission against this episode's persisted
+        plan -- denied before any envelope/authorization/network activity."""
+        _, config, _grant = self._setup(
+            keypair, tmp_path, monkeypatch, grant_hash="e" * 64,
+        )
+        spec = make_scene_spec(scene_id="s01b01")
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "grant_plan_mismatch" in result["failure_reason"]
+        assert "eeeeeeee" in result["failure_reason"]
+
+    def test_replaced_self_consistent_plan_invalidates_authorization(self, keypair, tmp_path, monkeypatch):
+        """Deleting the persisted plan and writing a DIFFERENT but fully
+        self-consistent one (valid recomputed content_hash) must NOT
+        silently inherit the grant -- the grant stays bound to the old
+        hash and the submission fails closed pre-network."""
+        _, config, _grant = self._setup(keypair, tmp_path, monkeypatch)
+        spec = make_scene_spec(scene_id="s01b01")
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+        # Replace with a different, self-consistent plan: same asset_id,
+        # prompt, and model (so the plan-conformance checks pass), but a
+        # different unit price -- a different content_hash, i.e. a
+        # DIFFERENT plan in the eyes of the binding.
+        plan_path = tmp_path / f"production_plan_ep_gate_test.json"
+        plan_path.unlink()
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL, unit_price_usd=0.49)
+        # The replacement's finance record matches the NEW plan; only the
+        # GRANT is now stale -- exactly the hand-replacement attack shape.
+        from hypogeum.production_plan import load_production_plan
+        new_hash = load_production_plan("ep_gate_test", tmp_path).content_hash
+        _persist_matching_finance_record(tmp_path, content_hash=new_hash)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "grant_plan_mismatch" in result["failure_reason"]
+
+    def test_missing_finance_record_fails_closed(self, keypair, tmp_path, monkeypatch):
+        """No post-VPD finance authorization record -> no provable
+        Finance-authorized plan -> paid submission refused pre-network."""
+        _, config, _grant = self._setup(keypair, tmp_path, monkeypatch)
+        spec = make_scene_spec(scene_id="s01b01")
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+        (tmp_path / "finance_post_vpd_authorization_ep_gate_test.json").unlink()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "finance_record_missing" in result["failure_reason"]
+
+    def test_finance_record_bound_to_other_hash_fails_closed(self, keypair, tmp_path, monkeypatch):
+        _, config, _grant = self._setup(keypair, tmp_path, monkeypatch)
+        spec = make_scene_spec(scene_id="s01b01")
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+        _persist_matching_finance_record(tmp_path, content_hash="f" * 64)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "finance_record_mismatch" in result["failure_reason"]
+
+    def test_legacy_null_hash_grant_cannot_resolve_for_paid_submission(self, keypair, tmp_path, monkeypatch):
+        """A pre-Phase-2 grant row whose production_plan_content_hash was
+        nulled out (legacy shape) fails closed at grant resolution --
+        before the gate path is even entered."""
+        _, config, _grant = self._setup(keypair, tmp_path, monkeypatch)
+        spec = make_scene_spec(scene_id="s01b01")
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+        import hypogeum.db as db
+        conn = db.get_connection(tmp_path / "auth.db")
+        try:
+            conn.execute(
+                "UPDATE run_authorization_grants SET production_plan_content_hash = NULL "
+                "WHERE grant_id = ? AND grant_version = 1", ("g_gate_test",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "no_active_authorization_grant" in result["failure_reason"]
+
+    def test_historical_grant_denied_at_video_boundary_not_resolution(self, keypair, tmp_path, monkeypatch):
+        """A TRUE historical grant (checksum computed before the plan-hash
+        key existed; NULL column) still RESOLVES after migration -- and is
+        then denied at the paid video boundary itself (grant_plan_unbound),
+        pre-envelope, pre-network. This proves the video rejection happens
+        at the plan-binding layer, not by breaking legacy resolution."""
+        from test_phase2_plan_bound_authorization import insert_historical_grant
+
+        priv, config, _grant = self._setup_without_registration(keypair, tmp_path, monkeypatch)
+        spec = make_scene_spec(scene_id="s01b01")
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+        insert_historical_grant(
+            priv, tmp_path / "auth.db", grant_id="g_hist_video",
+            channel_id="test_channel", episode_id="ep_gate_test",
+            workflow_id="hypogeum_main_production", workflow_version="1.0.0",
+            workflow_checksum="a" * 64,
+            provider="muapi", model=config.MUAPI_T2_MODEL,
+            provider_operation="video.text_to_video",
+            max_cost_per_call="2.50",
+        )
+
+        # Sanity: the historical grant RESOLVES (compatibility preserved).
+        import hypogeum.authorization_authority as authority
+        resolved = authority.resolve_active_grant("test_channel", "ep_gate_test", at=AT, db_path=tmp_path / "auth.db")
+        assert resolved is not None
+        assert resolved.production_plan_content_hash is None
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+            assert mock_get.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "grant_plan_unbound" in result["failure_reason"]
+
+    def _setup_without_registration(self, keypair, tmp_path, monkeypatch):
+        """Same environment as _setup but WITHOUT registering a grant --
+        for tests that register their own (e.g. historical-shaped)."""
+        priv, _pub = keypair
+        import hypogeum.db as db
+        db_path = tmp_path / "auth.db"
+        db.initialize_schema(db_path)
+        config = make_config()
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        return priv, config, None

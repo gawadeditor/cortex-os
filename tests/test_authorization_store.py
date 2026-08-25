@@ -40,6 +40,7 @@ class TestGrantAtomicRegistration:
         g = store.insert_grant(
             conn, grant_id="g1", grant_version=1, grant_checksum="c" * 64, channel_id="test_channel",
             episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            production_plan_content_hash="c" * 64,
             bindings=_bindings(), max_total_spend_all_bindings=Decimal("1.00"), currency="USD",
             expires_at="2099-01-01T00:00:00Z", approval_id="appr1", approval_version=1,
         )
@@ -53,6 +54,7 @@ class TestGrantAtomicRegistration:
         kwargs = dict(
             grant_id="g1", grant_version=1, grant_checksum="c" * 64, channel_id="test_channel",
             episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            production_plan_content_hash="c" * 64,
             bindings=_bindings(), max_total_spend_all_bindings=Decimal("1.00"), currency="USD",
             expires_at="2099-01-01T00:00:00Z", approval_id="appr1", approval_version=1,
         )
@@ -63,7 +65,7 @@ class TestGrantAtomicRegistration:
     def test_different_checksum_same_key_raises(self, conn):
         base = dict(
             grant_id="g1", grant_version=1, channel_id="test_channel", episode_id="ep_test",
-            workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=_bindings(),
+            workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, production_plan_content_hash="c" * 64, bindings=_bindings(),
             max_total_spend_all_bindings=Decimal("1.00"), currency="USD", expires_at="2099-01-01T00:00:00Z",
             approval_id="appr1", approval_version=1,
         )
@@ -74,7 +76,8 @@ class TestGrantAtomicRegistration:
     def test_find_active_grant_for_scope_returns_most_recent(self, conn):
         base = dict(
             channel_id="test_channel", episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0",
-            workflow_checksum="a" * 64, bindings=_bindings(), max_total_spend_all_bindings=Decimal("1.00"),
+            workflow_checksum="a" * 64, production_plan_content_hash="c" * 64, bindings=_bindings(),
+            max_total_spend_all_bindings=Decimal("1.00"),
             currency="USD", expires_at="2099-01-01T00:00:00Z", approval_id="appr1", approval_version=1,
         )
         store.insert_grant(conn, grant_id="g1", grant_version=1, grant_checksum="c" * 64, **base)
@@ -84,7 +87,8 @@ class TestGrantAtomicRegistration:
     def test_revoke_hides_from_active_lookups(self, conn):
         base = dict(
             channel_id="test_channel", episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0",
-            workflow_checksum="a" * 64, bindings=_bindings(), max_total_spend_all_bindings=Decimal("1.00"),
+            workflow_checksum="a" * 64, production_plan_content_hash="c" * 64, bindings=_bindings(),
+            max_total_spend_all_bindings=Decimal("1.00"),
             currency="USD", expires_at="2099-01-01T00:00:00Z", approval_id="appr1", approval_version=1,
         )
         store.insert_grant(conn, grant_id="g1", grant_version=1, grant_checksum="c" * 64, **base)
@@ -213,6 +217,7 @@ class TestRevalidateGrantReservation:
         store.insert_grant(
             conn, grant_id="g1", grant_version=1, grant_checksum="c" * 64, channel_id="test_channel",
             episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            production_plan_content_hash="c" * 64,
             bindings=_bindings(), max_total_spend_all_bindings=Decimal("1.00"), currency="USD",
             expires_at=expires_at, approval_id="appr1", approval_version=1,
         )

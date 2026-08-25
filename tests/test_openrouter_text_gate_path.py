@@ -91,6 +91,9 @@ def _isolated_channel_identity(monkeypatch):
     )
 
 
+_GRANT_PLAN_HASH = "c" * 64  # grant-bound Production Plan content_hash (Phase 2)
+
+
 def _register_grant(priv, db_path, *, model=SONNET, max_calls=5, max_total_spend=Decimal("10.00")):
     bindings = [astore.GrantBinding(
         provider="openrouter", model=model, provider_operation="text.completion",
@@ -98,7 +101,8 @@ def _register_grant(priv, db_path, *, model=SONNET, max_calls=5, max_total_spend
     )]
     checksum = authority.compute_grant_checksum(
         channel_id="test_channel", episode_id="ep_gate_test", workflow_id="hypogeum_main_production",
-        workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+        workflow_version="1.0.0", workflow_checksum="a" * 64,
+        production_plan_content_hash=_GRANT_PLAN_HASH, bindings=bindings,
         max_total_spend_all_bindings=max_total_spend, currency="USD", expires_at="2099-01-01T00:00:00Z",
     )
     artifact = sign_approval_artifact(
@@ -117,6 +121,7 @@ def _register_grant(priv, db_path, *, model=SONNET, max_calls=5, max_total_spend
     return authority.register_run_grant(
         grant_id="g_text_gate_test", grant_version=1, channel_id="test_channel", episode_id="ep_gate_test",
         workflow_id="hypogeum_main_production", workflow_version="1.0.0", workflow_checksum="a" * 64,
+        production_plan_content_hash=_GRANT_PLAN_HASH,
         bindings=bindings, max_total_spend_all_bindings=max_total_spend, currency="USD",
         expires_at="2099-01-01T00:00:00Z", approval_artifact=artifact, db_path=db_path,
     )
@@ -210,4 +215,44 @@ class TestGrantDerivedGatePath:
             with pytest.raises(FallbackFailed, match="fallback model .* also failed"):
                 call_claude(
                     SONNET, MINIMAL_MESSAGES, 512, cfg, episode_id="ep_gate_test", channel_id="test_channel",
+                )
+class TestLegacyGrantStillRoutesThroughGate:
+    """Phase 2 correction: a PRE-PHASE-2 historical grant (checksum
+    computed before production_plan_content_hash existed; NULL column)
+    still resolves after migration and must keep routing through THIS
+    domain's gate -- never silently falling back to the ungated legacy
+    provider call."""
+
+    def test_legacy_null_hash_grant_routes_through_gate(self, keypair, tmp_path, monkeypatch):
+        from test_phase2_plan_bound_authorization import insert_historical_grant
+
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = make_config()
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        insert_historical_grant(
+            priv, db_path, grant_id="g_legacy_text",
+            channel_id="test_channel", episode_id="ep_gate_test",
+            provider="openrouter", model=SONNET, provider_operation="text.completion",
+            max_cost_per_call="2.50",
+        )
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        import hypogeum.openrouter as domain_module
+
+        class _GateProbe(Exception):
+            pass
+
+        class _LegacyProbe(Exception):
+            pass
+
+        def _gate_probe(*args, **kwargs):
+            raise _GateProbe()
+
+        monkeypatch.setattr(domain_module, "_call_claude_via_gate", _gate_probe)
+        with patch("hypogeum.openrouter.requests.post", side_effect=_LegacyProbe()):
+            with pytest.raises(_GateProbe):
+                call_claude(
+                    SONNET, MINIMAL_MESSAGES, 512, config,
+                    episode_id="ep_gate_test", channel_id="test_channel",
                 )

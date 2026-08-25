@@ -254,9 +254,17 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     already_initialized = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='approval_artifacts'"
     ).fetchone()
-    if already_initialized is not None:
-        return
+    if already_initialized is None:
+        _create_authorization_tables(conn)
+    # Column migrations run on EVERY call -- the PRAGMA read below is
+    # side-effect-free (no implicit commit), so once migrated every
+    # subsequent call within a transaction is still safe. Only the
+    # one-time ALTER itself writes, and every public entry point that
+    # opens a BEGIN IMMEDIATE calls ensure_tables() before the
+    # transaction starts.
+    _migrate_run_authorization_grants_columns(conn)
 
+def _create_authorization_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS approval_artifacts (
@@ -286,6 +294,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             workflow_id                      TEXT NOT NULL,
             workflow_version                  TEXT NOT NULL,
             workflow_checksum                  TEXT NOT NULL,
+            production_plan_content_hash        TEXT,
             bindings_json                        TEXT NOT NULL,
             max_total_spend_all_bindings           TEXT,
             currency                                 TEXT NOT NULL,
@@ -382,6 +391,37 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+
+
+def _migrate_run_authorization_grants_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent column migration for run_authorization_grants --
+    mirrors the PRAGMA-table_info-guard discipline of hypogeum.db's
+    _V2_COLUMN_MIGRATIONS, applied here because this module owns its own
+    DDL (hypogeum.schema.sql never creates these tables).
+
+    Phase 2 plan-bound authorization (2026-08-25): adds
+    production_plan_content_hash -- the verified persisted Production
+    Plan content_hash this grant is bound to. NULL on rows registered
+    before this column existed; such legacy grants remain fully
+    resolvable (compute_grant_checksum omits the key for None, matching
+    their historical checksums) and keep working unchanged for domains
+    that do not opt in -- they are denied ONLY for plan-bound
+    consumption: paid MUAPI video child authorization and the video
+    boundary's own three-way verification.
+    """
+    existing_columns = {
+        # Tolerate both sqlite3.Row connections (hypogeum.db.get_connection)
+        # and plain tuples (raw sqlite3.connect callers).
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute("PRAGMA table_info(run_authorization_grants)").fetchall()
+    }
+    if not existing_columns:
+        return
+    if "production_plan_content_hash" not in existing_columns:
+        conn.execute(
+            "ALTER TABLE run_authorization_grants ADD COLUMN production_plan_content_hash TEXT"
+        )
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +785,8 @@ class RunAuthorizationGrant:
 
     __slots__ = (
         "grant_id", "grant_version", "grant_checksum", "channel_id", "episode_id",
-        "workflow_id", "workflow_version", "workflow_checksum", "bindings",
+        "workflow_id", "workflow_version", "workflow_checksum",
+        "production_plan_content_hash", "bindings",
         "max_total_spend_all_bindings", "currency", "expires_at", "approval_id",
         "approval_version", "status", "registered_at", "revoked_at", "revoked_by", "revoked_reason",
     )
@@ -764,6 +805,7 @@ class RunAuthorizationGrant:
 def insert_grant(
     conn: sqlite3.Connection, *, grant_id: str, grant_version: int, grant_checksum: str,
     channel_id: str, episode_id: str, workflow_id: str, workflow_version: str, workflow_checksum: str,
+    production_plan_content_hash: str,
     bindings: Sequence[GrantBinding], max_total_spend_all_bindings: Optional[Decimal], currency: str,
     expires_at: str, approval_id: str, approval_version: int,
 ) -> RunAuthorizationGrant:
@@ -771,7 +813,18 @@ def insert_grant(
     identical (grant_id, grant_version, grant_checksum); raises
     GrantAlreadyExistsWithDifferentContentError on a checksum mismatch
     for the same key, mirroring workflow_registry.register_workflow()'s
-    exact discipline."""
+    exact discipline.
+
+    production_plan_content_hash is REQUIRED (Phase 2 plan-bound
+    authorization): every registered grant is bound to one exact
+    verified persisted Production Plan content_hash. A NULL/missing
+    value here would create exactly the legacy-row shape that fails
+    closed at every consumption point, so it is rejected at write time."""
+    if not production_plan_content_hash:
+        raise AuthorizationStoreError(
+            "production_plan_content_hash is required -- a grant must be bound to "
+            "one exact verified persisted Production Plan content_hash"
+        )
     ensure_tables(conn)
     registered_at = _now_iso()
     bindings_json = json.dumps([b.to_dict() for b in bindings], sort_keys=True)
@@ -780,13 +833,14 @@ def insert_grant(
             """
             INSERT INTO run_authorization_grants
                 (grant_id, grant_version, grant_checksum, channel_id, episode_id, workflow_id,
-                 workflow_version, workflow_checksum, bindings_json, max_total_spend_all_bindings,
+                 workflow_version, workflow_checksum, production_plan_content_hash,
+                 bindings_json, max_total_spend_all_bindings,
                  currency, expires_at, approval_id, approval_version, status, registered_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
             """,
             (
                 grant_id, grant_version, grant_checksum, channel_id, episode_id, workflow_id,
-                workflow_version, workflow_checksum, bindings_json,
+                workflow_version, workflow_checksum, production_plan_content_hash, bindings_json,
                 _decimal_to_str(max_total_spend_all_bindings), currency, expires_at,
                 approval_id, approval_version, registered_at,
             ),
@@ -819,6 +873,7 @@ def _row_to_grant(row: sqlite3.Row) -> RunAuthorizationGrant:
         grant_id=row["grant_id"], grant_version=row["grant_version"], grant_checksum=row["grant_checksum"],
         channel_id=row["channel_id"], episode_id=row["episode_id"], workflow_id=row["workflow_id"],
         workflow_version=row["workflow_version"], workflow_checksum=row["workflow_checksum"],
+        production_plan_content_hash=row["production_plan_content_hash"],
         bindings=bindings, max_total_spend_all_bindings=_str_to_decimal(row["max_total_spend_all_bindings"]),
         currency=row["currency"], expires_at=row["expires_at"], approval_id=row["approval_id"],
         approval_version=row["approval_version"], status=row["status"], registered_at=row["registered_at"],

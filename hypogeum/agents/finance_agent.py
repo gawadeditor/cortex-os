@@ -48,7 +48,12 @@ from typing import Optional
 
 from hypogeum.config import Config
 from hypogeum.policy_cascade import get_effective_budget_ceiling
-from hypogeum.production_plan import ROLE_CONTINGENCY, ROLE_REQUIRED, ProductionPlan
+from hypogeum.production_plan import (
+    ROLE_CONTINGENCY,
+    ROLE_REQUIRED,
+    ProductionPlan,
+    load_production_plan,
+)
 from hypogeum.schemas import validate
 
 # ---------------------------------------------------------------------------
@@ -205,6 +210,28 @@ class FinancePostVPDBlockedError(Exception):
             f"Post-VPD finance gate BLOCKED for {episode_id}: "
             f"estimated ${record.get('estimated_spend_usd', '?')} USD "
             f"exceeds ${record.get('budget_ceiling_usd', '?')} USD ceiling"
+        )
+
+
+class FinancePostVPDPlanMismatchError(Exception):
+    """
+    Raised by run_post_vpd_authorization() when the production_plan passed
+    in is not byte-for-byte the same compiled artifact as the episode's
+    verified persisted Production Plan (or no persisted plan exists).
+    Phase 2 plan-bound authorization: authorization may only be calculated
+    from the exact verified persisted plan -- an in-memory plan that
+    diverges from what was persisted (a replaced or recompiled plan) is
+    never authorized. Halts the pipeline before any spend.
+    """
+    def __init__(self, episode_id: str, passed_hash: str, persisted_hash: str):
+        self.episode_id = episode_id
+        self.passed_content_hash = passed_hash
+        self.persisted_content_hash = persisted_hash
+        super().__init__(
+            f"Post-VPD finance gate plan mismatch for {episode_id}: passed "
+            f"production_plan content_hash={passed_hash!r} != verified persisted "
+            f"plan content_hash={persisted_hash!r} -- authorization is calculated "
+            f"only from the exact verified persisted Production Plan"
         )
 
 
@@ -600,6 +627,36 @@ def run_post_vpd_authorization(
     failures: list = []
     warnings: list = []
 
+    # ----------------------------------------------------------------
+    # Phase 2 plan-bound authorization -- verify the passed plan IS the
+    # exact verified persisted Production Plan before authorizing
+    # anything against it. load_production_plan() re-hashes the payload
+    # and fails closed (ProductionPlanIntegrityError) on any tampering;
+    # a missing file, or a persisted plan whose verified content_hash
+    # differs from the caller's in-memory object (a replaced or
+    # recompiled plan), raises FinancePostVPDPlanMismatchError. The
+    # verified persisted hash is recorded on the finance_record as the
+    # durable bound hash the MUAPI video gate later three-way-checks
+    # against the grant and the loaded plan.
+    # ----------------------------------------------------------------
+    _base = output_dir or (
+        Path(__file__).resolve().parent.parent.parent
+        / ".hypogeum-assets" / "episodes" / episode_id
+    )
+    _persisted_plan = load_production_plan(episode_id, Path(_base))
+    if _persisted_plan is None:
+        raise FinancePostVPDPlanMismatchError(
+            episode_id=episode_id,
+            passed_hash=production_plan.content_hash,
+            persisted_hash="<no persisted production plan>",
+        )
+    if _persisted_plan.content_hash != production_plan.content_hash:
+        raise FinancePostVPDPlanMismatchError(
+            episode_id=episode_id,
+            passed_hash=production_plan.content_hash,
+            persisted_hash=_persisted_plan.content_hash,
+        )
+
     # P3-05: cascade factory policy ceiling (non-blocking fallback to env value)
     try:
         ceiling = get_effective_budget_ceiling(
@@ -741,6 +798,12 @@ def run_post_vpd_authorization(
         "authorized": authorized,
         "budget_ceiling_usd": ceiling,
         "estimated_spend_usd": round(total_estimated, 4),
+        # Phase 2 plan-bound authorization: the verified persisted
+        # Production Plan this authorization was calculated from. The
+        # MUAPI video gate three-way-checks this hash against the grant's
+        # registered production_plan_content_hash and the freshly loaded,
+        # integrity-verified plan before any paid submission.
+        "bound_production_plan_content_hash": production_plan.content_hash,
         "checks": checks,
         "failures": failures,
         "warnings": warnings,
@@ -750,11 +813,7 @@ def run_post_vpd_authorization(
     validate("finance_record", record)
 
     # Write output file (separate from finance_authorization_{episode_id}.json)
-    base = output_dir or (
-        Path(__file__).resolve().parent.parent.parent
-        / ".hypogeum-assets" / "episodes" / episode_id
-    )
-    _write_output(record, Path(base) / f"finance_post_vpd_authorization_{episode_id}.json")
+    _write_output(record, Path(_base) / f"finance_post_vpd_authorization_{episode_id}.json")
 
     return record
 

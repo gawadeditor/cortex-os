@@ -816,13 +816,14 @@ class TestGrantBindingSpec:
 
     def test_produces_one_binding_per_distinct_model(self):
         plan = _compile()
-        bindings = production_plan_to_grant_binding_spec(plan)
+        fragment = production_plan_to_grant_binding_spec(plan)
+        bindings = fragment["bindings"]
         models = {b["model"] for b in bindings}
         assert models == {a.model for a in plan.assets}
 
     def test_max_total_spend_matches_plan_video_maximum_for_that_model(self):
         plan = _compile(config=_make_config(MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE=2))
-        bindings = production_plan_to_grant_binding_spec(plan)
+        bindings = production_plan_to_grant_binding_spec(plan)["bindings"]
         binding = bindings[0]
         model_assets = [a for a in plan.assets if a.model == binding["model"]]
         expected = sum(a.unit_price_usd * a.max_chargeable_attempts for a in model_assets)
@@ -830,7 +831,17 @@ class TestGrantBindingSpec:
 
     def test_max_calls_matches_sum_of_attempt_bounds(self):
         plan = _compile()
-        bindings = production_plan_to_grant_binding_spec(plan)
+        bindings = production_plan_to_grant_binding_spec(plan)["bindings"]
         binding = bindings[0]
         model_assets = [a for a in plan.assets if a.model == binding["model"]]
         assert binding["max_calls"] == sum(a.max_chargeable_attempts for a in model_assets)
+
+    def test_carries_the_plan_content_hash_for_grant_binding(self):
+        """Phase 2 plan-bound authorization: the emitted grant-spec
+        fragment carries the plan's own content_hash so the offline
+        approval ceremony signs the grant over that exact verified
+        persisted Production Plan."""
+        plan = _compile()
+        fragment = production_plan_to_grant_binding_spec(plan)
+        assert fragment["production_plan_content_hash"] == plan.content_hash
+        assert len(fragment["production_plan_content_hash"]) == 64

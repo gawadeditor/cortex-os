@@ -686,7 +686,8 @@ class TestGrantDerivedAuthorizationBoundary:
         grant_checksum = authority.compute_grant_checksum(
             channel_id=env.channel_id, episode_id=env.episode_level_budget_ref, workflow_id="wf",
             workflow_version=env.workflow_version,
-            workflow_checksum="a" * 64, bindings=bindings, max_total_spend_all_bindings=max_total_spend,
+            workflow_checksum="a" * 64, production_plan_content_hash="c" * 64, bindings=bindings,
+            max_total_spend_all_bindings=max_total_spend,
             currency=env.currency, expires_at="2099-01-01T00:00:00Z",
         )
         artifact = sign_approval_artifact(
@@ -704,7 +705,8 @@ class TestGrantDerivedAuthorizationBoundary:
         )
         grant = authority.register_run_grant(
             grant_id="g1", grant_version=1, channel_id=env.channel_id, episode_id=env.episode_level_budget_ref,
-            workflow_id="wf", workflow_version=env.workflow_version, workflow_checksum="a" * 64, bindings=bindings,
+            workflow_id="wf", workflow_version=env.workflow_version, workflow_checksum="a" * 64,
+            production_plan_content_hash="c" * 64, bindings=bindings,
             max_total_spend_all_bindings=max_total_spend, currency=env.currency, expires_at="2099-01-01T00:00:00Z",
             approval_artifact=artifact, db_path=db_path,
         )

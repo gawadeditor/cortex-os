@@ -56,6 +56,9 @@ def _isolated_channel_identity(monkeypatch):
     )
 
 
+_GRANT_PLAN_HASH = "c" * 64  # grant-bound Production Plan content_hash (Phase 2)
+
+
 def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decimal("10.00")):
     bindings = [astore.GrantBinding(
         provider="muapi", model=model, provider_operation="image.thumbnail",
@@ -63,7 +66,8 @@ def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decima
     )]
     checksum = authority.compute_grant_checksum(
         channel_id="test_channel", episode_id="ep_gate_test", workflow_id="hypogeum_main_production",
-        workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+        workflow_version="1.0.0", workflow_checksum="a" * 64,
+        production_plan_content_hash=_GRANT_PLAN_HASH, bindings=bindings,
         max_total_spend_all_bindings=max_total_spend, currency="USD", expires_at="2099-01-01T00:00:00Z",
     )
     artifact = sign_approval_artifact(
@@ -82,6 +86,7 @@ def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decima
     return authority.register_run_grant(
         grant_id="g_thumb_gate_test", grant_version=1, channel_id="test_channel", episode_id="ep_gate_test",
         workflow_id="hypogeum_main_production", workflow_version="1.0.0", workflow_checksum="a" * 64,
+        production_plan_content_hash=_GRANT_PLAN_HASH,
         bindings=bindings, max_total_spend_all_bindings=max_total_spend, currency="USD",
         expires_at="2099-01-01T00:00:00Z", approval_artifact=artifact, db_path=db_path,
     )
@@ -177,3 +182,45 @@ class TestGrantDerivedGatePath:
                 )
             assert mock_post.called is False
             assert mock_get.called is False
+class TestLegacyGrantStillRoutesThroughGate:
+    """Phase 2 correction: a PRE-PHASE-2 historical grant (checksum
+    computed before production_plan_content_hash existed; NULL column)
+    still resolves after migration and must keep routing through THIS
+    domain's gate -- never silently falling back to the ungated legacy
+    provider call."""
+
+    def test_legacy_null_hash_grant_routes_through_gate(self, keypair, tmp_path, monkeypatch):
+        from test_phase2_plan_bound_authorization import insert_historical_grant
+
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = _thumbnail_config()
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        insert_historical_grant(
+            priv, db_path, grant_id="g_legacy_thumb",
+            channel_id="test_channel", episode_id="ep_gate_test",
+            provider="muapi", model=config.THUMBNAIL_IMAGE_MODEL, provider_operation="image.thumbnail",
+            max_cost_per_call="0.10",
+        )
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        import hypogeum.muapi as domain_module
+
+        class _GateProbe(Exception):
+            pass
+
+        class _LegacyProbe(Exception):
+            pass
+
+        def _gate_probe(*args, **kwargs):
+            raise _GateProbe()
+
+        monkeypatch.setattr(domain_module, "_generate_thumbnail_via_gate", _gate_probe)
+        with patch("hypogeum.muapi.requests.post", side_effect=_LegacyProbe()), \
+             patch("hypogeum.muapi.requests.get", side_effect=_LegacyProbe()), \
+             patch("hypogeum.muapi.time.sleep"):
+            with pytest.raises(_GateProbe):
+                generate_thumbnail(
+                    "main", "an ancient tomb entrance at dusk", "16:9", config,
+                    "ep_gate_test", tmp_path, channel_id="test_channel",
+                )

@@ -24,6 +24,10 @@ from hypogeum.execution_envelope import GenerationExecutionEnvelope
 
 AT = "2026-01-01T00:00:00Z"
 
+# Phase 2 plan-bound authorization: every registered grant carries the
+# content_hash of one exact verified persisted Production Plan.
+_GRANT_PLAN_HASH = "c" * 64
+
 
 @pytest.fixture
 def keypair(monkeypatch):
@@ -48,7 +52,8 @@ def _sign_grant_artifact(priv, *, channel_id="test_channel", episode_id="ep_test
     bindings = bindings or _bindings()
     checksum = authority.compute_grant_checksum(
         channel_id=channel_id, episode_id=episode_id, workflow_id="wf", workflow_version="1.0.0",
-        workflow_checksum="a" * 64, bindings=bindings, max_total_spend_all_bindings=max_total_spend_all_bindings,
+        workflow_checksum="a" * 64, production_plan_content_hash=_GRANT_PLAN_HASH,
+        bindings=bindings, max_total_spend_all_bindings=max_total_spend_all_bindings,
         currency="USD", expires_at=expires_at,
     )
     fields = dict(
@@ -73,7 +78,8 @@ def _register_grant(priv, db_path, *, channel_id="test_channel", episode_id="ep_
     )
     return authority.register_run_grant(
         grant_id=grant_id, grant_version=1, channel_id=channel_id, episode_id=episode_id,
-        workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+        workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+        production_plan_content_hash=_GRANT_PLAN_HASH, bindings=bindings,
         max_total_spend_all_bindings=max_total_spend_all_bindings, currency="USD", expires_at=expires_at,
         approval_artifact=artifact, db_path=db_path,
     )
@@ -125,7 +131,8 @@ class TestRegisterRunGrantRequiresVerifiedApproval:
         with pytest.raises(authority.InvalidApprovalSignatureError):
             authority.register_run_grant(
                 grant_id="g1", grant_version=1, channel_id="test_channel", episode_id="ep_test",
-                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+                production_plan_content_hash=_GRANT_PLAN_HASH, bindings=bindings,
                 max_total_spend_all_bindings=Decimal("1.00"), currency="USD", expires_at="2099-01-01T00:00:00Z",
                 approval_artifact=tampered, db_path=tmp_path / "auth.db",
             )
@@ -136,7 +143,8 @@ class TestRegisterRunGrantRequiresVerifiedApproval:
         with pytest.raises(authority.ApprovalSubjectMismatchError):
             authority.register_run_grant(
                 grant_id="g1", grant_version=1, channel_id="test_channel", episode_id="ep_test",
-                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+                production_plan_content_hash=_GRANT_PLAN_HASH, bindings=bindings,
                 max_total_spend_all_bindings=Decimal("1.00"), currency="USD", expires_at="2099-01-01T00:00:00Z",
                 approval_artifact=artifact, db_path=tmp_path / "auth.db",
             )
@@ -146,14 +154,16 @@ class TestRegisterRunGrantRequiresVerifiedApproval:
         bindings = _bindings()
         checksum = authority.compute_grant_checksum(
             channel_id="test_channel", episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0",
-            workflow_checksum="a" * 64, bindings=bindings, max_total_spend_all_bindings=Decimal("1.00"),
+            workflow_checksum="a" * 64, production_plan_content_hash=_GRANT_PLAN_HASH,
+            bindings=bindings, max_total_spend_all_bindings=Decimal("1.00"),
             currency="USD", expires_at="2099-01-01T00:00:00Z",
         )
         artifact, _c, _b = _sign_grant_artifact(priv, approval_type="authorization_proposal", subject_checksum=checksum)
         with pytest.raises(authority.ApprovalTypeMismatchError):
             authority.register_run_grant(
                 grant_id="g1", grant_version=1, channel_id="test_channel", episode_id="ep_test",
-                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+                production_plan_content_hash=_GRANT_PLAN_HASH, bindings=bindings,
                 max_total_spend_all_bindings=Decimal("1.00"), currency="USD", expires_at="2099-01-01T00:00:00Z",
                 approval_artifact=artifact, db_path=tmp_path / "auth.db",
             )
@@ -171,7 +181,8 @@ class TestRegisterRunGrantRequiresVerifiedApproval:
         with pytest.raises(store.ApprovalReplayError):
             authority.register_run_grant(
                 grant_id="g2", grant_version=1, channel_id="test_channel", episode_id="ep_other",
-                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64, bindings=bindings,
+                workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+                production_plan_content_hash=_GRANT_PLAN_HASH, bindings=bindings,
                 max_total_spend_all_bindings=Decimal("1.00"), currency="USD", expires_at="2099-01-01T00:00:00Z",
                 approval_artifact=replayed, db_path=db_path,
             )
@@ -207,6 +218,7 @@ class TestResolveActiveGrant:
         store.insert_grant(
             conn, grant_id="forged", grant_version=1, grant_checksum="c" * 64, channel_id="test_channel",
             episode_id="ep_test", workflow_id="wf", workflow_version="1.0.0", workflow_checksum="a" * 64,
+            production_plan_content_hash="c" * 64,
             bindings=_bindings(), max_total_spend_all_bindings=Decimal("1.00"), currency="USD",
             expires_at="2099-01-01T00:00:00Z", approval_id="never_signed", approval_version=1,
         )

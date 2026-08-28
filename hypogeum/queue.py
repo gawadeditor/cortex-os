@@ -1328,11 +1328,17 @@ def process_next(
                 worker_id=worker_id,
             )
         else:
+            # Thread the worker's execution DB through so run_pipeline's
+            # run-registry / lease / reservation / signal writes stay bound
+            # to it (the default worker path uses build_gated_pipeline_
+            # executor(), which already passes db_path -- this is the bare
+            # fallback used by tests / direct poll() callers).
             _pipeline_module.run_pipeline(
                 topic_input=topic_text,
                 episode_id=episode_id,
                 config=config,
                 channel_id=channel_id,
+                db_path=db_path,
                 cancel_check=_cancel_check,
             )
 

@@ -104,6 +104,99 @@ _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 # ---------------------------------------------------------------------------
+# Execution-DB binding
+# ---------------------------------------------------------------------------
+# A single long-running execution (one run_pipeline / one autonomous cycle)
+# threads its authoritative db_path explicitly to most calls, but a few
+# deep helpers -- provider PRE_PLAN reservations, finance record_cost,
+# OIS signal emission from run-state transitions -- historically resolved
+# get_connection(None) straight to _DEFAULT_DB_PATH. The 2026-08-28
+# incident showed that a probe passing db_path=<temp> to run_pipeline
+# still wrote run/lease/reservation/signal rows to production through
+# exactly those helpers.
+#
+# bind_execution_db() pins the execution's db_path for the current
+# context (thread + async task). get_connection(None) then resolves to
+# it instead of _DEFAULT_DB_PATH. This is NOT dependency injection --
+# it is the same pattern hypogeum.finance.set_run_context already uses
+# for the run_id, scoped to one execution and always cleared in a
+# finally block. When nothing is bound (a plain CLI call, the live
+# worker) behaviour is unchanged: _DEFAULT_DB_PATH.
+import contextvars as _contextvars
+
+_execution_db_path: "_contextvars.ContextVar[Optional[Path]]" = _contextvars.ContextVar(
+    "hypogeum_execution_db_path", default=None
+)
+
+
+def bind_execution_db(db_path) -> "_contextvars.Token":
+    """Pin the execution DB for the current context. Returns a token to
+    pass to unbind_execution_db(). Prefer the execution_db() context
+    manager."""
+    return _execution_db_path.set(Path(db_path) if db_path is not None else None)
+
+
+def unbind_execution_db(token: "_contextvars.Token") -> None:
+    try:
+        _execution_db_path.reset(token)
+    except (ValueError, LookupError):
+        # token from a different context (e.g. cleared across a thread
+        # boundary) -- best-effort clear.
+        _execution_db_path.set(None)
+
+
+def current_execution_db() -> Optional[Path]:
+    return _execution_db_path.get()
+
+
+def resolve_db_path(db_path=None, *, module_default=None) -> Path:
+    """Single resolution point for every module that keeps its own
+    `_DEFAULT_DB_PATH` fallback:
+
+        explicit db_path  >  execution binding  >  module_default  >  _DEFAULT_DB_PATH
+
+    The execution binding (set by run_pipeline / an autonomous cycle for
+    an explicit db_path) is what fixes the 2026-08-28 incident. Passing
+    the caller module's own `_DEFAULT_DB_PATH` as `module_default` keeps
+    existing tests that `patch("<module>._DEFAULT_DB_PATH", tmp)` working
+    -- that patch still wins whenever no execution is bound."""
+    if db_path is not None:
+        return Path(db_path)
+    bound = _execution_db_path.get()
+    if bound is not None:
+        return Path(bound)
+    if module_default is not None:
+        return Path(module_default)
+    return _DEFAULT_DB_PATH
+
+
+class execution_db:  # noqa: N801 - context-manager, lowercase by convention here
+    """`with db.execution_db(path):` pins `path` for every get_connection(None)
+    inside the block, and fails closed if the binding is lost mid-block."""
+
+    def __init__(self, db_path):
+        self._path = Path(db_path) if db_path is not None else None
+        self._token = None
+
+    def __enter__(self):
+        self._token = bind_execution_db(self._path)
+        return self._path
+
+    def __exit__(self, *exc):
+        # fail closed: if something reset the ContextVar out from under an
+        # active execution, that is a real isolation bug -- surface it.
+        current = _execution_db_path.get()
+        if current != self._path and not exc[0]:
+            unbind_execution_db(self._token)
+            raise RuntimeError(
+                f"execution DB binding was lost mid-execution "
+                f"(expected {self._path}, found {current}) -- refusing to "
+                f"continue with an ambiguous database binding"
+            )
+        unbind_execution_db(self._token)
+        return False
+
+# ---------------------------------------------------------------------------
 # v2 column migrations
 # SQLite does not support ALTER TABLE ADD COLUMN IF NOT EXISTS.
 # _apply_v2_column_migrations() checks PRAGMA table_info() before issuing
@@ -258,6 +351,8 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     Returns:
         Open sqlite3.Connection. Caller is responsible for commit and close.
     """
+    if db_path is None:
+        db_path = _execution_db_path.get()
     path = db_path or _DEFAULT_DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -305,7 +305,11 @@ def _runs_dir(runs_dir: Optional[Path]) -> Path:
 
 
 def _db_path(db_path: Optional[Path]) -> Path:
-    return db_path or _DEFAULT_DB_PATH
+    # An explicit path wins; otherwise the execution binding set by
+    # run_pipeline (hypogeum.db.execution_db); otherwise the default.
+    from hypogeum.db import resolve_db_path  # noqa: PLC0415
+
+    return resolve_db_path(db_path, module_default=_DEFAULT_DB_PATH)
 
 
 def _model_assignments_from_config(config: Config) -> dict:

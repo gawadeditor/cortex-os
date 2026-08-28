@@ -15,12 +15,18 @@ Before any POST_PLAN paid provider call, this module:
   1. compiles the TRUTHFUL COMPLETE Production Plan -- every mandatory
      deliverable, every Short, narration, visual coverage, music,
      thumbnails, metadata, enhancement, plus the workflow's configured
-     retry / fallback / contingency allowance -- and exposes both
-     `expected_total_cost` and `maximum_bounded_total_cost`;
-  2. resolves the six financial concepts distinctly (see EpisodeCostModel);
-  3. compares `maximum_bounded_total_cost` with `remaining_weekly_capacity`.
+     retry / fallback / contingency allowance;
+  2. assembles EpisodeCostModel from NON-OVERLAPPING primitives
+     (`episode_cost_incurred` counted EXACTLY ONCE):
+         weekly_capacity_before_episode = configured_weekly_budget_limit - other_weekly_exposure
+         future_capacity_available      = weekly_capacity_before_episode - episode_cost_incurred
+         maximum_bounded_complete_episode_cost = episode_cost_incurred + maximum_bounded_remaining_cost
+         required_future_reservation    = maximum_bounded_remaining_cost
+  3. canonical fit check:  maximum_bounded_remaining_cost <= future_capacity_available
+     (identical to  maximum_bounded_complete_episode_cost <= weekly_capacity_before_episode;
+      tests assert both forms always agree).
 
-If it fits: reserve `required_reservation_amount` and continue.
+If it fits: reserve `required_future_reservation` and continue.
 If it does not fit: raise ProductionPlanBudgetInfeasibleError with the
 full component-by-component breakdown and the exact deficit -- it NEVER
 raises the limit, hides incurred cost, or omits mandatory work.
@@ -50,6 +56,7 @@ __all__ = [
     "resolve_configured_weekly_limit",
     "compute_episode_cost_model",
     "compile_truthful_production_plan",
+    "build_required_asset_inventory",
     "substitution_permitted",
     "DEFAULT_SUBSTITUTION_LADDER",
 ]
@@ -81,55 +88,208 @@ class ProductionPlanBudgetInfeasibleError(Exception):
         self.cost_model = cost_model
         self.component_breakdown = component_breakdown
         self.substitution_attempted = substitution_attempted
-        self.deficit = cost_model.maximum_bounded_completion_cost - cost_model.remaining_weekly_capacity
+        # deficit is measured on the NON-OVERLAPPING quantities:
+        # maximum_bounded_remaining_cost vs future_capacity_available.
+        self.deficit = (
+            cost_model.maximum_bounded_remaining_cost - cost_model.future_capacity_available
+        )
         super().__init__(
-            f"episode {episode_id}: maximum_bounded_completion_cost "
-            f"{cost_model.maximum_bounded_completion_cost} exceeds remaining_weekly_capacity "
-            f"{cost_model.remaining_weekly_capacity} (configured_weekly_budget_limit "
-            f"{cost_model.configured_weekly_budget_limit}) by {self.deficit}. "
+            f"episode {episode_id}: maximum_bounded_remaining_cost "
+            f"{cost_model.maximum_bounded_remaining_cost} exceeds future_capacity_available "
+            f"{cost_model.future_capacity_available} "
+            f"(configured_weekly_budget_limit {cost_model.configured_weekly_budget_limit}, "
+            f"other_weekly_exposure {cost_model.other_weekly_exposure}, "
+            f"episode_cost_incurred {cost_model.episode_cost_incurred}) by {self.deficit}. "
             f"Components: {component_breakdown}"
         )
 
 
 @dataclass(frozen=True)
 class EpisodeCostModel:
-    """The six financial concepts, kept strictly separate. All Decimal."""
+    """Episode financial state as NON-OVERLAPPING primitives plus derived
+    views. `episode_cost_incurred` is counted EXACTLY ONCE: it is
+    subtracted from weekly capacity (to get `future_capacity_available`)
+    and added to remaining cost (to get the complete-episode totals) --
+    never both in the same comparison. All Decimal.
 
-    # 1. money already spent + recorded in the costs ledger for this episode
-    actual_incurred_cost: Decimal
-    # 2. best realistic estimate to complete every mandatory deliverable
-    expected_completion_cost: Decimal
-    # 3. maximum authorized cost incl. planned retries / fallbacks /
-    #    contingencies / alternates / enhancement / other bounded paid ops
-    maximum_bounded_completion_cost: Decimal
-    # 4. operator-controlled policy value from the authoritative profile
+    Stored primitives (no overlap):
+        configured_weekly_budget_limit  -- operator policy value
+        other_weekly_exposure           -- reserved/committed exposure of
+                                           OTHER work this channel-week
+                                           (this episode's own PRE_PLAN /
+                                           incurred-marker / plan rows are
+                                           excluded)
+        episode_cost_incurred           -- this episode's recorded spend
+        expected_remaining_cost         -- realistic cost to finish (plan)
+        maximum_bounded_remaining_cost  -- max authorized cost to finish
+    """
+
     configured_weekly_budget_limit: Decimal
-    # 5. configured limit minus actual+reserved exposure of OTHER work this week
-    remaining_weekly_capacity: Decimal
-    # 6. amount needed to authorize this complete plan with no hidden future spend
-    required_reservation_amount: Decimal
+    other_weekly_exposure: Decimal
+    episode_cost_incurred: Decimal
+    expected_remaining_cost: Decimal
+    maximum_bounded_remaining_cost: Decimal
 
     currency: str = "USD"
     channel_week_ref: str = ""
-    other_week_exposure: Decimal = Decimal("0")
     budget_policy_ref: str = ""
 
+    # ---- derived (each uses episode_cost_incurred at most once) ----
+    @property
+    def weekly_capacity_before_episode(self) -> Decimal:
+        return self.configured_weekly_budget_limit - self.other_weekly_exposure
+
+    @property
+    def future_capacity_available(self) -> Decimal:
+        return self.weekly_capacity_before_episode - self.episode_cost_incurred
+
+    @property
+    def expected_complete_episode_cost(self) -> Decimal:
+        return self.episode_cost_incurred + self.expected_remaining_cost
+
+    @property
+    def maximum_bounded_complete_episode_cost(self) -> Decimal:
+        return self.episode_cost_incurred + self.maximum_bounded_remaining_cost
+
+    @property
+    def required_future_reservation(self) -> Decimal:
+        return self.maximum_bounded_remaining_cost
+
     def fits(self) -> bool:
-        return self.maximum_bounded_completion_cost <= self.remaining_weekly_capacity
+        """THE canonical comparison. Equivalent to
+        `maximum_bounded_complete_episode_cost <= weekly_capacity_before_episode`
+        (proven equal in tests) -- this form is used everywhere because it
+        makes the single-count of episode_cost_incurred obvious."""
+        return self.maximum_bounded_remaining_cost <= self.future_capacity_available
+
+    def fits_complete_form(self) -> bool:
+        """The algebraically equivalent form -- used only by tests to
+        assert both equations always agree."""
+        return self.maximum_bounded_complete_episode_cost <= self.weekly_capacity_before_episode
+
+    def deficit(self) -> Decimal:
+        """Shortfall on the non-overlapping quantities; 0 when it fits."""
+        gap = self.maximum_bounded_remaining_cost - self.future_capacity_available
+        return gap if gap > 0 else Decimal("0")
+
+    def min_weekly_limit_for(self, remaining_cost: Decimal) -> Decimal:
+        """The smallest configured_weekly_budget_limit that would let a
+        plan whose remaining cost is `remaining_cost` proceed this week,
+        given the current other exposure + incurred spend."""
+        return (self.other_weekly_exposure + self.episode_cost_incurred + remaining_cost)
+
+    # ---- backward-compatible aliases (do not add new callers) ----
+    @property
+    def actual_incurred_cost(self) -> Decimal:
+        return self.episode_cost_incurred
+
+    @property
+    def expected_completion_cost(self) -> Decimal:
+        return self.expected_complete_episode_cost
+
+    @property
+    def maximum_bounded_completion_cost(self) -> Decimal:
+        return self.maximum_bounded_complete_episode_cost
+
+    @property
+    def remaining_weekly_capacity(self) -> Decimal:
+        return self.future_capacity_available
+
+    @property
+    def required_reservation_amount(self) -> Decimal:
+        return self.required_future_reservation
+
+    @property
+    def other_week_exposure(self) -> Decimal:
+        return self.other_weekly_exposure
 
     def as_dict(self) -> dict:
         return {
-            "actual_incurred_cost": str(self.actual_incurred_cost),
-            "expected_completion_cost": str(self.expected_completion_cost),
-            "maximum_bounded_completion_cost": str(self.maximum_bounded_completion_cost),
             "configured_weekly_budget_limit": str(self.configured_weekly_budget_limit),
-            "remaining_weekly_capacity": str(self.remaining_weekly_capacity),
-            "required_reservation_amount": str(self.required_reservation_amount),
-            "other_week_exposure": str(self.other_week_exposure),
+            "other_weekly_exposure": str(self.other_weekly_exposure),
+            "episode_cost_incurred": str(self.episode_cost_incurred),
+            "weekly_capacity_before_episode": str(self.weekly_capacity_before_episode),
+            "future_capacity_available": str(self.future_capacity_available),
+            "expected_remaining_cost": str(self.expected_remaining_cost),
+            "maximum_bounded_remaining_cost": str(self.maximum_bounded_remaining_cost),
+            "expected_complete_episode_cost": str(self.expected_complete_episode_cost),
+            "maximum_bounded_complete_episode_cost": str(self.maximum_bounded_complete_episode_cost),
+            "required_future_reservation": str(self.required_future_reservation),
+            "fits": self.fits(),
+            "deficit": str(self.deficit()),
             "currency": self.currency,
             "channel_week_ref": self.channel_week_ref,
             "budget_policy_ref": self.budget_policy_ref,
         }
+
+
+def build_required_asset_inventory(production_plan, *, script_package: dict, contract: dict) -> dict:
+    """Explicit, itemised inventory of EVERY paid operation the compiled
+    complete plan will reach before `ready_to_publish` -- derived from the
+    deliverable contract + script structure + the plan's own priced
+    assets, NEVER from any budget figure. Used for disclosure and to
+    prove (in tests) that the inventory exists before any budget
+    comparison and that every required deliverable is priced.
+
+    `production_plan` is a compiled hypogeum.production_plan.ProductionPlan
+    (or a compatible object exposing .assets / the *_cost_usd fields)."""
+    from collections import Counter
+
+    assets = list(getattr(production_plan, "assets", []) or [])
+    roles = Counter(getattr(a, "role", "?") for a in assets)
+    models = Counter(getattr(a, "model", "?") for a in assets)
+    required_deliverables = [
+        d["deliverable_id"] for d in contract.get("deliverables", []) if d.get("required")
+    ]
+    required_shorts = [
+        d["deliverable_id"] for d in contract.get("deliverables", [])
+        if d.get("required") and d.get("kind") in ("derived_short", "short")
+    ]
+    priced_deliverables = set(getattr(production_plan, "deliverable_ids", []) or [])
+    missing = [d for d in required_deliverables if d not in priced_deliverables]
+
+    sections = script_package.get("sections", []) or []
+    shorts_scripts = script_package.get("shorts_scripts", []) or []
+    beats = script_package.get("beats", []) or []
+    if not beats:
+        for s in sections:
+            beats += s.get("beats", []) or s.get("narration_beats", []) or []
+
+    def _f(name):
+        return float(getattr(production_plan, name, 0.0) or 0.0)
+
+    return {
+        "required_deliverables": required_deliverables,
+        "required_shorts_count": len(required_shorts),
+        "required_shorts": required_shorts,
+        "priced_deliverables": sorted(priced_deliverables),
+        "missing_required_deliverables": missing,   # non-empty -> plan is INCOMPLETE
+        "narrative_beat_count": len(beats),
+        "script_section_count": len(sections),
+        "shorts_script_count": len(shorts_scripts),
+        "narration_char_count": int(getattr(production_plan, "narration_char_count", 0) or 0),
+        "video_asset_count_total": len(assets),
+        "video_primary_shot_count": roles.get("required", 0),
+        "video_contingency_shot_count": roles.get("contingency", 0),
+        "video_models": dict(models),
+        "max_paid_attempts_per_scene": getattr(production_plan, "max_chargeable_attempts", None)
+            or (getattr(assets[0], "max_chargeable_attempts", None) if assets else None),
+        "source_enhancement_operations_max": len(assets),
+        "music_section_count": int(getattr(production_plan, "music_section_count", 0) or 0),
+        "thumbnail_main_candidate_count": int(getattr(production_plan, "thumbnail_main_candidate_count", 0) or 0),
+        "thumbnail_short_candidate_cap": int(getattr(production_plan, "thumbnail_short_candidate_cap", 0) or 0),
+        "thumbnail_attempts_per_candidate": int(getattr(production_plan, "thumbnail_attempts_per_candidate", 0) or 0),
+        "component_costs_usd": {
+            "narration": _f("narration_cost_usd"),
+            "music": _f("music_cost_usd"),
+            "enhancement_maximum": _f("enhancement_cost_maximum_usd"),
+            "thumbnail_normal": _f("thumbnail_cost_normal_usd"),
+            "thumbnail_maximum": _f("thumbnail_cost_maximum_usd"),
+            "planning_call_estimate": _f("planning_call_estimate_usd"),
+            "post_plan_normal_total": _f("normal_expected_cost_usd"),
+            "post_plan_maximum_total": _f("maximum_bounded_cost_usd"),
+        },
+    }
 
 
 @dataclass
@@ -139,13 +299,16 @@ class TruthfulPlanResult:
     coverage_sufficient: bool
     substitution_applied: list = field(default_factory=list)
     is_alternative_plan: bool = False
+    asset_inventory: dict = field(default_factory=dict)
 
     def accounting_ok(self) -> bool:
         cm = self.cost_model
         return (
             cm.fits()
+            and cm.fits() == cm.fits_complete_form()   # both equations agree
             and self.coverage_sufficient
-            and cm.required_reservation_amount == Decimal(str(self.production_plan.maximum_bounded_cost_usd))
+            and cm.required_future_reservation == Decimal(str(self.production_plan.maximum_bounded_cost_usd))
+            and cm.deficit() == Decimal("0")
         )
 
 
@@ -245,8 +408,6 @@ def compute_episode_cost_model(
     finally:
         conn.close()
 
-    remaining_capacity = limit - other_exposure - incurred
-
     if production_plan is not None:
         post_plan_expected = _q(getattr(production_plan, "normal_expected_cost_usd", 0))
         post_plan_maximum = _q(getattr(production_plan, "maximum_bounded_cost_usd", 0))
@@ -255,15 +416,13 @@ def compute_episode_cost_model(
         post_plan_maximum = Decimal("0")
 
     return EpisodeCostModel(
-        actual_incurred_cost=incurred,
-        expected_completion_cost=incurred + post_plan_expected,
-        maximum_bounded_completion_cost=incurred + post_plan_maximum,
         configured_weekly_budget_limit=limit,
-        remaining_weekly_capacity=remaining_capacity,
-        required_reservation_amount=post_plan_maximum,
+        other_weekly_exposure=other_exposure,
+        episode_cost_incurred=incurred,
+        expected_remaining_cost=post_plan_expected,
+        maximum_bounded_remaining_cost=post_plan_maximum,
         currency="USD",
         channel_week_ref=scope_ref,
-        other_week_exposure=other_exposure,
         budget_policy_ref=policy_ref,
     )
 
@@ -362,6 +521,7 @@ def compile_truthful_production_plan(
     channel_id: str, episode_id: str, config, log=None,
     now: Optional[datetime] = None, db_path: Optional[Path] = None,
     substitution_ladder=DEFAULT_SUBSTITUTION_LADDER,
+    contract: Optional[dict] = None,
 ) -> TruthfulPlanResult:
     """Compile the truthful COMPLETE Production Plan, then evaluate it
     against the operator-configured weekly limit.
@@ -383,14 +543,20 @@ def compile_truthful_production_plan(
         return plan, cov
 
     plan, cov = _compile(visual_package, config)
-    if not cov.sufficient:
+    # The full required-asset inventory is derived from the deliverable
+    # contract + script structure BEFORE any budget comparison.
+    if contract is None:
+        from hypogeum.production_plan import load_deliverable_contract
+        contract = load_deliverable_contract(channel_id)
+    inventory = build_required_asset_inventory(plan, script_package=script_package, contract=contract)
+    if not cov.sufficient or inventory["missing_required_deliverables"]:
         # An incomplete plan is never valid -- it can never be made
         # "affordable" by understating the work. Reject before any budget
         # comparison.
         from hypogeum.production_plan import ProductionPlanCoverageError
-        raise ProductionPlanCoverageError(
-            episode_id=episode_id, failing_beats=getattr(cov, "failing_beats", []),
-        )
+        _failing = list(getattr(cov, "failing_beats", []) or [])
+        _failing += [{"beat_id": d} for d in inventory["missing_required_deliverables"]]
+        raise ProductionPlanCoverageError(episode_id=episode_id, failing_beats=_failing)
     cost_model = compute_episode_cost_model(
         channel_id, episode_id, production_plan=plan, now=now, db_path=db_path,
     )
@@ -406,20 +572,36 @@ def compile_truthful_production_plan(
             "asset_count": len(getattr(p, "assets", []) or []),
             "deliverable_ids": list(getattr(p, "deliverable_ids", []) or []),
             "coverage_sufficient": bool(c.sufficient),
-            "actual_incurred_cost_usd": float(cost_model.actual_incurred_cost),
-            "other_week_exposure_usd": float(cost_model.other_week_exposure),
-            "expected_completion_cost_usd": float(cost_model.expected_completion_cost),
-            "maximum_bounded_completion_cost_usd": float(cost_model.maximum_bounded_completion_cost),
+            "configured_weekly_budget_limit_usd": float(cost_model.configured_weekly_budget_limit),
+            "other_weekly_exposure_usd": float(cost_model.other_weekly_exposure),
+            "episode_cost_incurred_usd": float(cost_model.episode_cost_incurred),
+            "weekly_capacity_before_episode_usd": float(cost_model.weekly_capacity_before_episode),
+            "future_capacity_available_usd": float(cost_model.future_capacity_available),
+            "expected_remaining_cost_usd": float(cost_model.expected_remaining_cost),
+            "maximum_bounded_remaining_cost_usd": float(cost_model.maximum_bounded_remaining_cost),
+            "expected_complete_episode_cost_usd": float(cost_model.expected_complete_episode_cost),
+            "maximum_bounded_complete_episode_cost_usd": float(cost_model.maximum_bounded_complete_episode_cost),
+            "deficit_usd": float(cost_model.deficit()),
+            "min_weekly_limit_for_expected_usd": float(
+                cost_model.min_weekly_limit_for(cost_model.expected_remaining_cost)
+            ),
+            "min_weekly_limit_for_maximum_usd": float(
+                cost_model.min_weekly_limit_for(cost_model.maximum_bounded_remaining_cost)
+            ),
         }
 
     if cost_model.fits() and cov.sufficient:
-        return TruthfulPlanResult(production_plan=plan, cost_model=cost_model, coverage_sufficient=True)
+        return TruthfulPlanResult(
+            production_plan=plan, cost_model=cost_model, coverage_sufficient=True,
+            asset_inventory=inventory,
+        )
 
     permitted = substitution_permitted(channel_id, config, db_path=db_path)
     if not permitted:
         raise ProductionPlanBudgetInfeasibleError(
             episode_id=episode_id, cost_model=cost_model,
-            component_breakdown=_breakdown(plan, cov), substitution_attempted=False,
+            component_breakdown={**_breakdown(plan, cov), "asset_inventory": inventory},
+            substitution_attempted=False,
         )
 
     # ---- one bounded, deterministic, zero-network alternative plan ----
@@ -466,21 +648,29 @@ def compile_truthful_production_plan(
             try:
                 log.info(
                     "budget_alternative_plan", episode_id=episode_id,
-                    original_maximum=str(cost_model.maximum_bounded_completion_cost),
-                    alternative_maximum=str(alt_cost_model.maximum_bounded_completion_cost),
+                    original_maximum_bounded_complete=str(cost_model.maximum_bounded_complete_episode_cost),
+                    alternative_maximum_bounded_complete=str(alt_cost_model.maximum_bounded_complete_episode_cost),
                     configured_limit=str(alt_cost_model.configured_weekly_budget_limit),
                     substitutions=applied,
                 )
             except Exception:  # noqa: BLE001
                 pass
+        alt_inventory = build_required_asset_inventory(
+            alt_plan, script_package=script_package, contract=contract,
+        )
         return TruthfulPlanResult(
             production_plan=alt_plan, cost_model=alt_cost_model, coverage_sufficient=bool(alt_cov.sufficient),
-            substitution_applied=applied, is_alternative_plan=True,
+            substitution_applied=applied, is_alternative_plan=True, asset_inventory=alt_inventory,
         )
 
     raise ProductionPlanBudgetInfeasibleError(
         episode_id=episode_id, cost_model=alt_cost_model,
-        component_breakdown={**_breakdown(alt_plan, alt_cov), "substitutions_attempted": applied},
+        component_breakdown={
+            **_breakdown(alt_plan, alt_cov), "substitutions_attempted": applied,
+            "asset_inventory": build_required_asset_inventory(
+                alt_plan, script_package=script_package, contract=contract,
+            ),
+        },
         substitution_attempted=True,
     )
 

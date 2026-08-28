@@ -508,6 +508,28 @@ def _script_pkg(n_scenes, shorts=2):
     }
 
 
+def _synth_contract(shorts=2):
+    return {
+        "deliverable_contract_id": "synth", "contract_version": "1.0.0",
+        "deliverables": (
+            [{"deliverable_id": "main_episode", "kind": "main_episode", "required": True}]
+            + [{"deliverable_id": f"short{i}", "kind": "derived_short", "required": True,
+                "derived_from": "main_episode"} for i in range(shorts)]
+        ),
+    }
+
+
+def _truthful(**kw):
+    """Wrapper: inject a synthetic deliverable contract matching the test's
+    own script_package, so the budget-arithmetic tests are not coupled to
+    the real Hypogeum contract (which is exercised separately in
+    tests/test_hypogeum_episode_pricing.py)."""
+    if "contract" not in kw:
+        sp = kw.get("script_package", {})
+        kw["contract"] = _synth_contract(len(sp.get("shorts_scripts", []) or []))
+    return budget_policy.compile_truthful_production_plan(**kw)
+
+
 def _install_pricing_model(monkeypatch, *, per_shot_by_tier=None, fixed_overhead=Decimal("4.00")):
     """A deterministic zero-network pricing model in place of the real
     compile_production_plan. `maximum_bounded_cost_usd` is a faithful
@@ -558,30 +580,36 @@ def _install_pricing_model(monkeypatch, *, per_shot_by_tier=None, fixed_overhead
 
 
 class TestScenario11ConfigurableBudget:
-    def test_cost_model_keeps_the_six_concepts_separate(self, env, monkeypatch):
+    def test_cost_model_keeps_the_concepts_separate_and_non_overlapping(self, env, monkeypatch):
         _install_pricing_model(monkeypatch)
-        # incur some PRE_PLAN cost
-        _record_cost(env.db_path, "ep_sep", Decimal("12.00"))
+        _record_cost(env.db_path, "ep_sep", Decimal("12.00"))   # this episode's incurred spend
         vp = _complete_visual_package(8, tier=2)
-        res = budget_policy.compile_truthful_production_plan(
+        res = _truthful(
             script_package=_script_pkg(8), narration_package={}, visual_package=vp,
             channel_id=_CH, episode_id="ep_sep", config=_cfg(), now=NOW, db_path=env.db_path,
         )
         cm = res.cost_model
-        assert cm.actual_incurred_cost == Decimal("12.00")
-        assert cm.expected_completion_cost > cm.actual_incurred_cost
-        assert cm.maximum_bounded_completion_cost > cm.expected_completion_cost
+        max_rem = Decimal(str(res.production_plan.maximum_bounded_cost_usd))
+        exp_rem = Decimal(str(res.production_plan.normal_expected_cost_usd))
+        # non-overlapping primitives
         assert cm.configured_weekly_budget_limit == Decimal("80.00")
-        assert cm.remaining_weekly_capacity == Decimal("80.00") - Decimal("12.00")
-        assert cm.required_reservation_amount == Decimal(str(res.production_plan.maximum_bounded_cost_usd))
-        # concept #7: none is a substitute for another
-        assert len({cm.actual_incurred_cost, cm.expected_completion_cost,
-                    cm.maximum_bounded_completion_cost, cm.configured_weekly_budget_limit}) == 4
+        assert cm.other_weekly_exposure == Decimal("0")
+        assert cm.episode_cost_incurred == Decimal("12.00")
+        assert cm.expected_remaining_cost == exp_rem
+        assert cm.maximum_bounded_remaining_cost == max_rem
+        # derived, each using episode_cost_incurred at most once
+        assert cm.weekly_capacity_before_episode == Decimal("80.00")           # limit - other
+        assert cm.future_capacity_available == Decimal("80.00") - Decimal("12.00")   # - incurred, ONCE
+        assert cm.expected_complete_episode_cost == Decimal("12.00") + exp_rem
+        assert cm.maximum_bounded_complete_episode_cost == Decimal("12.00") + max_rem
+        assert cm.required_future_reservation == max_rem   # NOT incurred + max
+        # the two fit equations are always equal
+        assert cm.fits() == cm.fits_complete_form()
 
     def test_1_complete_plan_below_configured_limit_is_admitted(self, env, monkeypatch):
         _install_pricing_model(monkeypatch)
         vp = _complete_visual_package(8, tier=2, contingency_per_scene=1)
-        res = budget_policy.compile_truthful_production_plan(
+        res = _truthful(
             script_package=_script_pkg(8), narration_package={}, visual_package=vp,
             channel_id=_CH, episode_id="ep_ok", config=_cfg(), now=NOW, db_path=env.db_path,
         )
@@ -597,12 +625,12 @@ class TestScenario11ConfigurableBudget:
                       channel_id=_CH, episode_id="ep_lim", config=_cfg(), now=NOW, db_path=env.db_path)
         # under a generous USD 500 limit it fits
         _set_weekly_limit(env.db_path, 500.00)
-        ok = budget_policy.compile_truthful_production_plan(**kwargs)
+        ok = _truthful(**kwargs)
         assert ok.cost_model.fits()
         # the SAME plan under USD 40 is blocked -- no code change, no reduction
         _set_weekly_limit(env.db_path, 40.00)
         with pytest.raises(budget_policy.ProductionPlanBudgetInfeasibleError) as ei:
-            budget_policy.compile_truthful_production_plan(**kwargs)
+            _truthful(**kwargs)
         exc = ei.value
         assert exc.cost_model.configured_weekly_budget_limit == Decimal("40.00")
         assert exc.deficit > 0
@@ -615,13 +643,18 @@ class TestScenario11ConfigurableBudget:
         kwargs = dict(script_package=_script_pkg(14), narration_package={}, visual_package=vp,
                       channel_id=_CH, episode_id="ep_raise", config=_cfg(), now=NOW, db_path=env.db_path)
         _set_weekly_limit(env.db_path, 40.00)
-        with pytest.raises(budget_policy.ProductionPlanBudgetInfeasibleError):
-            budget_policy.compile_truthful_production_plan(**kwargs)
+        with pytest.raises(budget_policy.ProductionPlanBudgetInfeasibleError) as ei:
+            _truthful(**kwargs)
+        low_inv = ei.value.component_breakdown["asset_inventory"]
         # operator raises the configured policy -> same code, now admitted
         _set_weekly_limit(env.db_path, 500.00)
-        res = budget_policy.compile_truthful_production_plan(**kwargs)
+        res = _truthful(**kwargs)
         assert res.cost_model.fits()
         assert res.is_alternative_plan is False
+        # SAME asset inventory -- the plan did not change, only the limit
+        assert res.asset_inventory["video_asset_count_total"] == low_inv["video_asset_count_total"]
+        assert res.asset_inventory["required_deliverables"] == low_inv["required_deliverables"]
+        assert res.asset_inventory["narrative_beat_count"] == low_inv["narrative_beat_count"]
 
     def test_operating_grant_binds_to_configured_limit_120_works_unchanged(self, env, monkeypatch):
         """Admission works identically at USD 120 as at USD 80 -- the
@@ -645,7 +678,7 @@ class TestScenario11ConfigurableBudget:
         # 12 required beats, but the visual package only covers 6 scenes
         vp_incomplete = _complete_visual_package(6, tier=2, shorts=0)
         with pytest.raises(ProductionPlanCoverageError):
-            _ = budget_policy.compile_truthful_production_plan(
+            _ = _truthful(
                 script_package=_script_pkg(12, shorts=0), narration_package={}, visual_package=vp_incomplete,
                 channel_id=_CH, episode_id="ep_omit", config=_cfg(), now=NOW, db_path=env.db_path,
             )
@@ -663,7 +696,7 @@ class TestScenario11ConfigurableBudget:
         _set_weekly_limit(env.db_path, 30.00)
         vp = _complete_visual_package(10, tier=1, contingency_per_scene=3, shorts=2)
         try:
-            res = budget_policy.compile_truthful_production_plan(
+            res = _truthful(
                 script_package=_script_pkg(10, shorts=2), narration_package={}, visual_package=vp,
                 channel_id=_CH, episode_id="ep_sub", config=_cfg(), now=NOW, db_path=env.db_path,
             )
@@ -692,7 +725,7 @@ class TestScenario11ConfigurableBudget:
         reservation (it cannot be generated under the old lower number)."""
         _install_pricing_model(monkeypatch)
         vp = _complete_visual_package(8, tier=2, contingency_per_scene=1)
-        res = budget_policy.compile_truthful_production_plan(
+        res = _truthful(
             script_package=_script_pkg(8), narration_package={}, visual_package=vp,
             channel_id=_CH, episode_id="ep_bound", config=_cfg(), now=NOW, db_path=env.db_path,
         )
@@ -700,7 +733,7 @@ class TestScenario11ConfigurableBudget:
         assert res.cost_model.required_reservation_amount == planned_max
         # a plan with one MORE shot is strictly more expensive
         vp_more = _complete_visual_package(9, tier=2, contingency_per_scene=1)
-        res_more = budget_policy.compile_truthful_production_plan(
+        res_more = _truthful(
             script_package=_script_pkg(9), narration_package={}, visual_package=vp_more,
             channel_id=_CH, episode_id="ep_bound", config=_cfg(), now=NOW, db_path=env.db_path,
         )
@@ -713,19 +746,20 @@ class TestScenario11ConfigurableBudget:
         _install_pricing_model(monkeypatch)
         _set_weekly_limit(env.db_path, 60.00)
         # v1 fits
-        v1 = budget_policy.compile_truthful_production_plan(
+        v1 = _truthful(
             script_package=_script_pkg(10), narration_package={}, visual_package=_complete_visual_package(10, tier=2, contingency_per_scene=1),
             channel_id=_CH, episode_id="ep_rev", config=_cfg(), now=NOW, db_path=env.db_path,
         )
         assert v1.cost_model.fits()
         # v2 (many premium tier-1 scenes) is far more expensive -> blocked
         with pytest.raises(budget_policy.ProductionPlanBudgetInfeasibleError) as ei:
-            budget_policy.compile_truthful_production_plan(
+            _truthful(
                 script_package=_script_pkg(10), narration_package={}, visual_package=_complete_visual_package(10, tier=1, contingency_per_scene=3),
                 channel_id=_CH, episode_id="ep_rev", config=_cfg(), now=NOW, db_path=env.db_path,
             )
         assert ei.value.deficit > 0
-        assert ei.value.cost_model.maximum_bounded_completion_cost > v1.cost_model.maximum_bounded_completion_cost
+        assert (ei.value.cost_model.maximum_bounded_complete_episode_cost
+                > v1.cost_model.maximum_bounded_complete_episode_cost)
 
     def test_8_incomplete_historical_episode_is_not_a_complete_55_episode(self):
         """Read-only: the real incomplete Hypogeum episode's recorded
@@ -755,6 +789,132 @@ class TestScenario11ConfigurableBudget:
         assert incurred > Decimal("55.00")   # already OVER 55 while still incomplete
         assert grants >= 2                    # piecemeal authorization, not one plan
         # therefore "USD 55 = a complete episode" is false by evidence
+
+
+def _seed_channel_weekly(db_path, *, idem_key, amount, scope_ref, status="reserved", channel_id=_CH):
+    conn = db.get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO budget_reservations (reservation_id, scope_kind, scope_ref, idempotency_key, "
+            "reserved_amount, currency, status, created_at, channel_id) "
+            "VALUES (?, 'channel_weekly', ?, ?, ?, 'USD', ?, ?, ?)",
+            (f"{idem_key}:channel_weekly", scope_ref, idem_key, str(amount), status,
+             NOW.isoformat(), channel_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestAccountingSingleCount:
+    """The corrected accounting: episode_cost_incurred is counted EXACTLY
+    ONCE, and the two fit equations always agree."""
+
+    def _cm(self, env, episode_id, *, plan_max=Decimal("20.00"), now=NOW):
+        plan = SimpleNamespace(
+            normal_expected_cost_usd=float(plan_max / 3),
+            maximum_bounded_cost_usd=float(plan_max),
+        )
+        return budget_policy.compute_episode_cost_model(
+            _CH, episode_id, production_plan=plan, now=now, db_path=env.db_path,
+        )
+
+    def test_zero_incurred_counts_incurred_once(self, env):
+        cm = self._cm(env, "ep_zero", plan_max=Decimal("30.00"))
+        assert cm.episode_cost_incurred == Decimal("0")
+        assert cm.future_capacity_available == Decimal("80.00")       # limit - 0 - 0
+        assert cm.maximum_bounded_complete_episode_cost == Decimal("30.00")
+        assert cm.fits() == cm.fits_complete_form()
+
+    def test_nonzero_incurred_counts_incurred_once(self, env):
+        _record_cost(env.db_path, "ep_nz", Decimal("18.00"))
+        cm = self._cm(env, "ep_nz", plan_max=Decimal("40.00"))
+        # future capacity: 80 - 0 - 18 = 62   (incurred subtracted ONCE)
+        assert cm.future_capacity_available == Decimal("62.00")
+        # complete cost: 18 + 40 = 58   (incurred added ONCE)
+        assert cm.maximum_bounded_complete_episode_cost == Decimal("58.00")
+        # fit: 40 <= 62  == (58 <= 80)
+        assert cm.fits() is True
+        assert cm.fits() == cm.fits_complete_form()
+        # NOT the double-counted 2*18 form
+        assert cm.future_capacity_available != Decimal("80.00") - Decimal("36.00")
+
+    def test_another_episode_reservation_is_other_exposure_not_double_counted(self, env):
+        scope_ref = f"{_CH}:2026-W35"
+        _seed_channel_weekly(env.db_path, idem_key=f"preplan:{_CH}:ep_OTHER",
+                             amount=Decimal("25.00"), scope_ref=scope_ref)
+        _record_cost(env.db_path, "ep_mine", Decimal("10.00"))
+        cm = self._cm(env, "ep_mine", plan_max=Decimal("20.00"))
+        assert cm.other_weekly_exposure == Decimal("25.00")           # the OTHER episode
+        assert cm.episode_cost_incurred == Decimal("10.00")           # mine, counted once
+        assert cm.weekly_capacity_before_episode == Decimal("55.00")  # 80 - 25
+        assert cm.future_capacity_available == Decimal("45.00")       # 55 - 10
+        assert cm.fits() == cm.fits_complete_form()
+
+    def test_own_preplan_and_plan_rows_excluded_from_other_exposure(self, env):
+        scope_ref = f"{_CH}:2026-W35"
+        # this episode's OWN rows -- must NOT count as other exposure
+        _seed_channel_weekly(env.db_path, idem_key=f"preplan:{_CH}:ep_self",
+                             amount=Decimal("30.00"), scope_ref=scope_ref)
+        _seed_channel_weekly(env.db_path, idem_key=f"preplan-incurred:{_CH}:ep_self",
+                             amount=Decimal("10.00"), scope_ref=scope_ref, status="committed")
+        _seed_channel_weekly(env.db_path, idem_key=f"plan-weekly:{_CH}:ep_self:abc123",
+                             amount=Decimal("40.00"), scope_ref=scope_ref)
+        cm = self._cm(env, "ep_self", plan_max=Decimal("20.00"))
+        assert cm.other_weekly_exposure == Decimal("0")   # all three are this episode's own
+
+    def test_replay_after_preplan_to_plan_upgrade_counts_incurred_once(self, env):
+        """After the PRE_PLAN->plan upgrade the ledger holds a committed
+        `preplan-incurred` marker AND the costs rows. The cost model must
+        take incurred from `costs` exactly once and never also add the
+        marker into other_weekly_exposure."""
+        scope_ref = f"{_CH}:2026-W35"
+        _record_cost(env.db_path, "ep_up", Decimal("13.50"), call_type="narration")
+        _record_cost(env.db_path, "ep_up", Decimal("4.20"), call_type="research_director")
+        # post-upgrade ledger state:
+        _seed_channel_weekly(env.db_path, idem_key=f"preplan-incurred:{_CH}:ep_up",
+                             amount=Decimal("17.70"), scope_ref=scope_ref, status="committed")
+        _seed_channel_weekly(env.db_path, idem_key=f"plan-weekly:{_CH}:ep_up:deadbeef",
+                             amount=Decimal("22.00"), scope_ref=scope_ref)
+        cm1 = self._cm(env, "ep_up", plan_max=Decimal("22.00"))
+        cm2 = self._cm(env, "ep_up", plan_max=Decimal("22.00"))   # replay
+        for cm in (cm1, cm2):
+            assert cm.episode_cost_incurred == Decimal("17.70")   # from costs, ONCE
+            assert cm.other_weekly_exposure == Decimal("0")       # marker + plan row are own
+            assert cm.future_capacity_available == Decimal("80.00") - Decimal("17.70")
+            assert cm.fits() == cm.fits_complete_form()
+
+    def test_week_rollover_incurred_still_counted_once(self, env, monkeypatch):
+        """PRE_PLAN spend recorded in week A; the cost model evaluated in
+        week B. Incurred is still this episode's `costs` sum (counted
+        once); week-A holds for OTHER episodes belong to week A's
+        scope_ref and are not in week B's other_weekly_exposure."""
+        _record_cost(env.db_path, "ep_roll", Decimal("9.00"))
+        weekA = f"{_CH}:2026-W35"
+        _seed_channel_weekly(env.db_path, idem_key=f"preplan:{_CH}:ep_weekA_other",
+                             amount=Decimal("40.00"), scope_ref=weekA)
+        later = NOW + timedelta(days=9)   # 2026-W36
+        cm = self._cm(env, "ep_roll", now=later, plan_max=Decimal("20.00"))
+        assert cm.channel_week_ref.endswith("2026-W36")
+        assert cm.other_weekly_exposure == Decimal("0")   # week-A holds not in week B
+        assert cm.episode_cost_incurred == Decimal("9.00")  # costs sum, unchanged, once
+        assert cm.fits() == cm.fits_complete_form()
+
+    def test_both_fit_equations_agree_across_a_grid(self, env):
+        import itertools
+        for other, incurred, plan_max, limit in itertools.product(
+            [Decimal("0"), Decimal("15")], [Decimal("0"), Decimal("12"), Decimal("70")],
+            [Decimal("5"), Decimal("50"), Decimal("120")], [Decimal("40"), Decimal("80"), Decimal("200")],
+        ):
+            cm = budget_policy.EpisodeCostModel(
+                configured_weekly_budget_limit=limit, other_weekly_exposure=other,
+                episode_cost_incurred=incurred, expected_remaining_cost=plan_max / 3,
+                maximum_bounded_remaining_cost=plan_max,
+            )
+            assert cm.fits() == cm.fits_complete_form(), (other, incurred, plan_max, limit)
+            # deficit is measured on non-overlapping quantities
+            if not cm.fits():
+                assert cm.deficit() == (plan_max - cm.future_capacity_available)
 
 
 # ===========================================================================

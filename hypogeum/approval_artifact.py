@@ -49,7 +49,9 @@ __all__ = [
     "compute_approval_subject_checksum",
 ]
 
-APPROVAL_TYPES = frozenset({"grant", "authorization_proposal", "enforcement_cutover"})
+APPROVAL_TYPES = frozenset(
+    {"grant", "channel_operating_grant", "authorization_proposal", "enforcement_cutover"}
+)
 
 
 class ApprovalArtifactError(Exception):

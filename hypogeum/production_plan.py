@@ -805,7 +805,16 @@ def compile_production_plan(
 
     requested_duration = resolve_canonical_clip_duration(config)
     max_chargeable_attempts = resolve_max_chargeable_attempts(config, episode_id=episode_id)
-    enhancement_price = resolve_enhancement_price(episode_id=episode_id)
+    # Source enhancement is a bounded but OPTIONAL provider operation. A
+    # channel budget policy (hypogeum.channel_budget_policy, ADR-016 §5) may
+    # deterministically suppress it for a budget-constrained autonomous
+    # episode when the delivery contract is already met by the source
+    # material -- signalled via config.SOURCE_ENHANCEMENT_ENABLED == False.
+    # Default (attribute absent or truthy): priced exactly as before.
+    if getattr(config, "SOURCE_ENHANCEMENT_ENABLED", True) is False:
+        enhancement_price = 0.0
+    else:
+        enhancement_price = resolve_enhancement_price(episode_id=episode_id)
 
     thumbnail_model = getattr(config, "THUMBNAIL_IMAGE_MODEL", None)
     if not thumbnail_model:

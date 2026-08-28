@@ -56,6 +56,10 @@ __all__ = [
     "GrantPlanHashMismatchError",
     "compute_grant_checksum",
     "register_run_grant",
+    "register_channel_operating_grant",
+    "resolve_active_operating_grant",
+    "OperatingGrantNotYetValidError",
+    "CHANNEL_OPERATING_EPISODE_SENTINEL",
     "resolve_active_grant",
     "issue_child_authorization",
     "issue_authorization_from_explicit_approval",
@@ -269,6 +273,11 @@ def compute_grant_checksum(
     *, channel_id, episode_id, workflow_id, workflow_version, workflow_checksum,
     production_plan_content_hash: Optional[str],
     bindings: Sequence[store.GrantBinding], max_total_spend_all_bindings, currency, expires_at,
+    grant_kind: str = "run",
+    channel_package_version: Optional[str] = None, channel_package_checksum: Optional[str] = None,
+    allowed_provider_domains: Optional[Sequence[str]] = None, cadence_snapshot: Optional[str] = None,
+    weekly_exposure_ceiling_usd=None, valid_from: Optional[str] = None,
+    operating_period_ref: Optional[str] = None,
 ) -> str:
     """production_plan_content_hash participates in the checksum payload
     ONLY when non-None -- historical-compatibility contract: grants
@@ -291,6 +300,24 @@ def compute_grant_checksum(
     }
     if production_plan_content_hash is not None:
         payload["production_plan_content_hash"] = production_plan_content_hash
+    # Channel Operating Grant (ADR-016): the channel-package / cadence /
+    # provider-domain / weekly-ceiling identity is part of the signed
+    # payload ONLY for grant_kind='channel_operating'. Omitting the keys
+    # for the default 'run' kind keeps every historical grant's recomputed
+    # checksum byte-identical to its stored one.
+    if grant_kind == "channel_operating":
+        payload["grant_kind"] = "channel_operating"
+        payload["channel_package_version"] = channel_package_version
+        payload["channel_package_checksum"] = channel_package_checksum
+        payload["allowed_provider_domains"] = (
+            sorted(allowed_provider_domains) if allowed_provider_domains is not None else None
+        )
+        payload["cadence_snapshot"] = cadence_snapshot
+        payload["weekly_exposure_ceiling_usd"] = (
+            None if weekly_exposure_ceiling_usd is None else str(weekly_exposure_ceiling_usd)
+        )
+        payload["valid_from"] = valid_from
+        payload["operating_period_ref"] = operating_period_ref
     return compute_approval_subject_checksum(payload)
 
 
@@ -331,6 +358,171 @@ def resolve_active_grant(
             currency=grant.currency, expires_at=grant.expires_at,
         )
         if artifact.subject_checksum != expected_checksum or grant.grant_checksum != expected_checksum:
+            return None
+        return grant
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Channel Operating Grant -- ADR-016
+#
+# One offline Ed25519 signature authorizes many autonomous episodes for
+# exactly one channel over a bounded operating period. It creates NO
+# budget capacity: the weekly ledger, the PRE_PLAN reservation, the
+# atomic plan upgrade, and the plan-bound reservation remain mandatory
+# and authoritative. The Operating Grant is a channel/workflow/domain/
+# ceiling gate that the runtime resolves (public key only) and from which
+# it mints narrowly scoped per-envelope child authorizations in-process.
+# The runtime holds no signing key and cannot broaden or re-sign it.
+# ---------------------------------------------------------------------------
+
+CHANNEL_OPERATING_EPISODE_SENTINEL = "*"
+
+
+class OperatingGrantNotYetValidError(AuthorizationAuthorityError):
+    """`at` precedes the operating grant's valid_from."""
+
+
+def register_channel_operating_grant(
+    *,
+    grant_id: str,
+    grant_version: int,
+    channel_id: str,
+    workflow_id: str,
+    workflow_version: str,
+    workflow_checksum: str,
+    channel_package_version: str,
+    channel_package_checksum: str,
+    allowed_provider_domains: Sequence[str],
+    cadence_snapshot: str,
+    weekly_exposure_ceiling_usd: Decimal,
+    bindings: Sequence[store.GrantBinding],
+    currency: str,
+    valid_from: str,
+    expires_at: str,
+    operating_period_ref: str,
+    approval_artifact: ApprovalArtifact,
+    db_path: Optional[Path] = None,
+) -> store.RunAuthorizationGrant:
+    """Register a Channel Operating Grant -- ONLY if approval_artifact
+    verifies, was signed with approval_type="channel_operating_grant",
+    and its subject_checksum matches this exact grant payload. Same
+    offline-signing / public-key-verification model as
+    register_run_grant(): no in-process caller can construct a valid
+    artifact.
+
+    weekly_exposure_ceiling_usd is a CEILING, not capacity -- it must
+    equal the approved channel weekly ceiling (Hypogeum: USD 55.00). It
+    is stored and signed but the authoritative weekly gate stays the
+    weekly-budget ledger.
+    """
+    if currency != "USD":
+        raise AuthorizationAuthorityError("Channel Operating Grant currency must be USD")
+    ceiling = Decimal(str(weekly_exposure_ceiling_usd))
+    grant_checksum = compute_grant_checksum(
+        channel_id=channel_id, episode_id=CHANNEL_OPERATING_EPISODE_SENTINEL, workflow_id=workflow_id,
+        workflow_version=workflow_version, workflow_checksum=workflow_checksum,
+        production_plan_content_hash=None,
+        bindings=bindings, max_total_spend_all_bindings=ceiling, currency=currency,
+        expires_at=expires_at,
+        grant_kind="channel_operating",
+        channel_package_version=channel_package_version,
+        channel_package_checksum=channel_package_checksum,
+        allowed_provider_domains=list(allowed_provider_domains),
+        cadence_snapshot=cadence_snapshot,
+        weekly_exposure_ceiling_usd=ceiling,
+        valid_from=valid_from,
+        operating_period_ref=operating_period_ref,
+    )
+    _require_verified(
+        approval_artifact, approval_type="channel_operating_grant", subject_checksum=grant_checksum,
+    )
+
+    conn = get_connection(db_path)
+    try:
+        store.ensure_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            store.persist_approval_artifact(
+                conn, approval_artifact,
+                consumed_by_grant_id=grant_id, consumed_by_grant_version=grant_version,
+            )
+            grant = store.insert_grant(
+                conn, grant_id=grant_id, grant_version=grant_version, grant_checksum=grant_checksum,
+                channel_id=channel_id, episode_id=CHANNEL_OPERATING_EPISODE_SENTINEL, workflow_id=workflow_id,
+                workflow_version=workflow_version, workflow_checksum=workflow_checksum,
+                production_plan_content_hash="", bindings=bindings,
+                max_total_spend_all_bindings=ceiling, currency=currency, expires_at=expires_at,
+                approval_id=approval_artifact.approval_id, approval_version=approval_artifact.approval_version,
+                grant_kind="channel_operating",
+                channel_package_version=channel_package_version,
+                channel_package_checksum=channel_package_checksum,
+                allowed_provider_domains=list(allowed_provider_domains),
+                cadence_snapshot=cadence_snapshot,
+                weekly_exposure_ceiling_usd=ceiling,
+                valid_from=valid_from,
+                operating_period_ref=operating_period_ref,
+            )
+            conn.commit()
+            return grant
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
+
+
+def _recompute_operating_grant_checksum(grant: "store.RunAuthorizationGrant") -> str:
+    return compute_grant_checksum(
+        channel_id=grant.channel_id, episode_id=grant.episode_id, workflow_id=grant.workflow_id,
+        workflow_version=grant.workflow_version, workflow_checksum=grant.workflow_checksum,
+        production_plan_content_hash=None,
+        bindings=grant.bindings, max_total_spend_all_bindings=grant.max_total_spend_all_bindings,
+        currency=grant.currency, expires_at=grant.expires_at,
+        grant_kind="channel_operating",
+        channel_package_version=grant.channel_package_version,
+        channel_package_checksum=grant.channel_package_checksum,
+        allowed_provider_domains=grant.allowed_provider_domains,
+        cadence_snapshot=grant.cadence_snapshot,
+        weekly_exposure_ceiling_usd=grant.weekly_exposure_ceiling_usd,
+        valid_from=grant.valid_from,
+        operating_period_ref=grant.operating_period_ref,
+    )
+
+
+def resolve_active_operating_grant(
+    channel_id: str, *, at: str, db_path: Optional[Path] = None,
+) -> Optional[store.RunAuthorizationGrant]:
+    """Read-only. Returns the one active, in-window, signature-verified
+    Channel Operating Grant for channel_id, or None (never raises) if
+    there is none, it is revoked, expired, not yet valid, or its stored
+    ApprovalArtifact no longer verifies against the configured public
+    key. A grant row inserted by any means other than
+    register_channel_operating_grant()'s verified path fails this check
+    every time it is read."""
+    conn = get_connection(db_path)
+    try:
+        grant = store.find_active_operating_grant_for_channel(conn, channel_id)
+        if grant is None:
+            return None
+        if grant.valid_from and at < grant.valid_from:
+            return None
+        if at >= grant.expires_at:
+            return None
+        artifact = store.get_approval_artifact_for_grant(conn, grant.grant_id, grant.grant_version)
+        if artifact is None:
+            return None
+        try:
+            public_key = _load_trusted_public_key()
+        except TrustAnchorNotConfiguredError:
+            return None
+        if not verify_approval_artifact(artifact, public_key=public_key):
+            return None
+        expected_checksum = _recompute_operating_grant_checksum(grant)
+        if artifact.subject_checksum != expected_checksum or grant.grant_checksum != expected_checksum:
+            return None
+        if artifact.approval_type != "channel_operating_grant":
             return None
         return grant
     finally:
@@ -409,7 +601,18 @@ def _validate_grant_scope_binding(
 
     if not episode_id:
         raise GrantScopeMismatchError(f"{target_description} is missing episode_id -- cannot verify grant scope")
-    if episode_id != grant.episode_id:
+    # A Channel Operating Grant (ADR-016) is channel-scoped, not
+    # episode-scoped: episode_id is the '*' sentinel and authorizes any
+    # episode of this channel. The target must still DECLARE its own
+    # episode identity (checked above) -- the operating grant just does
+    # not pin it. A per-episode 'run' grant still requires exact equality.
+    if getattr(grant, "grant_kind", "run") == "channel_operating":
+        if grant.episode_id != CHANNEL_OPERATING_EPISODE_SENTINEL:
+            raise GrantScopeMismatchError(
+                f"channel_operating grant {grant.grant_id!r}@{grant.grant_version} has a "
+                f"non-sentinel episode_id {grant.episode_id!r}"
+            )
+    elif episode_id != grant.episode_id:
         raise GrantScopeMismatchError(
             f"{target_description}'s episode_id {episode_id!r} does not match grant "
             f"{grant.grant_id!r}@{grant.grant_version}'s episode_id {grant.episode_id!r}"
@@ -622,9 +825,26 @@ def issue_child_authorization(
             # Either way this runs pre-ledger, pre-state-transition: a
             # denial leaves zero consumption rows and an untouched record.
             if expected_production_plan_content_hash is not None:
-                _validate_expected_plan_hash(
-                    grant, envelope, expected_production_plan_content_hash,
-                )
+                if getattr(grant, "grant_kind", "run") == "channel_operating":
+                    # A Channel Operating Grant carries no plan hash (it
+                    # precedes every episode's plan). The plan binding is
+                    # still enforced: the envelope's own
+                    # dependency_checksums.plan MUST equal the caller's
+                    # freshly-loaded canonical Production Plan hash, and
+                    # hypogeum.capability_boundary independently re-checks
+                    # the envelope binding against the canonical plan and
+                    # the plan-bound weekly reservation before any I/O.
+                    envelope_plan = envelope.dependency_checksums.plan
+                    if envelope_plan != expected_production_plan_content_hash:
+                        raise GrantPlanHashMismatchError(
+                            f"envelope {envelope.envelope_id!r} plan checksum {envelope_plan!r} != "
+                            f"caller-supplied verified canonical plan hash "
+                            f"{expected_production_plan_content_hash!r}"
+                        )
+                else:
+                    _validate_expected_plan_hash(
+                        grant, envelope, expected_production_plan_content_hash,
+                    )
             binding = _validate_envelope_against_grant_binding(grant, envelope)
             reservation = _reserve_grant_ledger_capacity(conn, grant, grant_version, binding, envelope, at)
 

@@ -71,6 +71,7 @@ __all__ = [
     "insert_grant",
     "get_grant",
     "find_active_grant_for_scope",
+    "find_active_operating_grant_for_channel",
     "revoke_grant_row",
     "persist_authorization_record",
     "get_authorization_record",
@@ -421,6 +422,30 @@ def _migrate_run_authorization_grants_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE run_authorization_grants ADD COLUMN production_plan_content_hash TEXT"
         )
+        conn.commit()
+    # Channel Operating Grant (ADR-016, 2026-08-28): one offline signature
+    # authorizes many autonomous episodes for one channel over a bounded
+    # operating period. grant_kind distinguishes it from the per-episode
+    # 'run' grant. The extra columns are NULL on every legacy 'run' row and
+    # participate in compute_grant_checksum() ONLY for grant_kind =
+    # 'channel_operating' -- so every historical 'run' grant's stored
+    # checksum stays byte-identical and keeps resolving unchanged.
+    _operating_cols = [
+        ("grant_kind", "TEXT NOT NULL DEFAULT 'run'"),
+        ("channel_package_version", "TEXT"),
+        ("channel_package_checksum", "TEXT"),
+        ("allowed_provider_domains_json", "TEXT"),
+        ("cadence_snapshot", "TEXT"),
+        ("weekly_exposure_ceiling_usd", "TEXT"),
+        ("valid_from", "TEXT"),
+        ("operating_period_ref", "TEXT"),
+    ]
+    _changed = False
+    for _name, _defn in _operating_cols:
+        if _name not in existing_columns:
+            conn.execute(f"ALTER TABLE run_authorization_grants ADD COLUMN {_name} {_defn}")
+            _changed = True
+    if _changed:
         conn.commit()
 
 
@@ -789,11 +814,21 @@ class RunAuthorizationGrant:
         "production_plan_content_hash", "bindings",
         "max_total_spend_all_bindings", "currency", "expires_at", "approval_id",
         "approval_version", "status", "registered_at", "revoked_at", "revoked_by", "revoked_reason",
+        # Channel Operating Grant (ADR-016) -- NULL for every 'run' grant.
+        "grant_kind", "channel_package_version", "channel_package_checksum",
+        "allowed_provider_domains", "cadence_snapshot", "weekly_exposure_ceiling_usd",
+        "valid_from", "operating_period_ref",
     )
 
     def __init__(self, **kwargs):
         for slot in self.__slots__:
             setattr(self, slot, kwargs.get(slot))
+        if self.grant_kind is None:
+            self.grant_kind = "run"
+
+    @property
+    def is_channel_operating(self) -> bool:
+        return self.grant_kind == "channel_operating"
 
     def find_binding(self, provider: str, model: str, provider_operation: str) -> Optional[GrantBinding]:
         for b in self.bindings:
@@ -808,6 +843,11 @@ def insert_grant(
     production_plan_content_hash: str,
     bindings: Sequence[GrantBinding], max_total_spend_all_bindings: Optional[Decimal], currency: str,
     expires_at: str, approval_id: str, approval_version: int,
+    grant_kind: str = "run",
+    channel_package_version: Optional[str] = None, channel_package_checksum: Optional[str] = None,
+    allowed_provider_domains: Optional[Sequence[str]] = None, cadence_snapshot: Optional[str] = None,
+    weekly_exposure_ceiling_usd: Optional[Decimal] = None, valid_from: Optional[str] = None,
+    operating_period_ref: Optional[str] = None,
 ) -> RunAuthorizationGrant:
     """Atomic content-addressed registration -- idempotent replay on
     identical (grant_id, grant_version, grant_checksum); raises
@@ -815,19 +855,33 @@ def insert_grant(
     for the same key, mirroring workflow_registry.register_workflow()'s
     exact discipline.
 
-    production_plan_content_hash is REQUIRED (Phase 2 plan-bound
-    authorization): every registered grant is bound to one exact
-    verified persisted Production Plan content_hash. A NULL/missing
-    value here would create exactly the legacy-row shape that fails
-    closed at every consumption point, so it is rejected at write time."""
-    if not production_plan_content_hash:
+    grant_kind == 'run' (default): production_plan_content_hash is
+    REQUIRED (Phase 2 plan-bound authorization) -- every per-episode run
+    grant is bound to one exact verified persisted Production Plan
+    content_hash; a NULL value here is rejected at write time.
+
+    grant_kind == 'channel_operating' (ADR-016): NO production plan hash
+    (a Channel Operating Grant precedes every episode's plan). episode_id
+    is the sentinel '*'. The channel-package / cadence / provider-domain /
+    weekly-ceiling columns are stored and participate in the grant
+    checksum."""
+    if grant_kind not in ("run", "channel_operating"):
+        raise AuthorizationStoreError(f"unknown grant_kind {grant_kind!r}")
+    if grant_kind == "run" and not production_plan_content_hash:
         raise AuthorizationStoreError(
-            "production_plan_content_hash is required -- a grant must be bound to "
+            "production_plan_content_hash is required -- a run grant must be bound to "
             "one exact verified persisted Production Plan content_hash"
+        )
+    if grant_kind == "channel_operating" and production_plan_content_hash:
+        raise AuthorizationStoreError(
+            "a channel_operating grant must NOT carry a production_plan_content_hash"
         )
     ensure_tables(conn)
     registered_at = _now_iso()
     bindings_json = json.dumps([b.to_dict() for b in bindings], sort_keys=True)
+    _domains_json = (
+        json.dumps(sorted(allowed_provider_domains)) if allowed_provider_domains is not None else None
+    )
     try:
         conn.execute(
             """
@@ -835,14 +889,21 @@ def insert_grant(
                 (grant_id, grant_version, grant_checksum, channel_id, episode_id, workflow_id,
                  workflow_version, workflow_checksum, production_plan_content_hash,
                  bindings_json, max_total_spend_all_bindings,
-                 currency, expires_at, approval_id, approval_version, status, registered_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                 currency, expires_at, approval_id, approval_version, status, registered_at,
+                 grant_kind, channel_package_version, channel_package_checksum,
+                 allowed_provider_domains_json, cadence_snapshot, weekly_exposure_ceiling_usd,
+                 valid_from, operating_period_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 grant_id, grant_version, grant_checksum, channel_id, episode_id, workflow_id,
-                workflow_version, workflow_checksum, production_plan_content_hash, bindings_json,
+                workflow_version, workflow_checksum, production_plan_content_hash or None, bindings_json,
                 _decimal_to_str(max_total_spend_all_bindings), currency, expires_at,
                 approval_id, approval_version, registered_at,
+                grant_kind, channel_package_version, channel_package_checksum,
+                _domains_json, cadence_snapshot, _decimal_to_str(weekly_exposure_ceiling_usd),
+                valid_from, operating_period_ref,
             ),
         )
         conn.commit()
@@ -867,8 +928,16 @@ def insert_grant(
     return _row_to_grant(row)
 
 
+def _row_key(row: sqlite3.Row, key: str):
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 def _row_to_grant(row: sqlite3.Row) -> RunAuthorizationGrant:
     bindings = [GrantBinding.from_dict(b) for b in json.loads(row["bindings_json"])]
+    _domains_raw = _row_key(row, "allowed_provider_domains_json")
     return RunAuthorizationGrant(
         grant_id=row["grant_id"], grant_version=row["grant_version"], grant_checksum=row["grant_checksum"],
         channel_id=row["channel_id"], episode_id=row["episode_id"], workflow_id=row["workflow_id"],
@@ -878,7 +947,35 @@ def _row_to_grant(row: sqlite3.Row) -> RunAuthorizationGrant:
         currency=row["currency"], expires_at=row["expires_at"], approval_id=row["approval_id"],
         approval_version=row["approval_version"], status=row["status"], registered_at=row["registered_at"],
         revoked_at=row["revoked_at"], revoked_by=row["revoked_by"], revoked_reason=row["revoked_reason"],
+        grant_kind=_row_key(row, "grant_kind") or "run",
+        channel_package_version=_row_key(row, "channel_package_version"),
+        channel_package_checksum=_row_key(row, "channel_package_checksum"),
+        allowed_provider_domains=(json.loads(_domains_raw) if _domains_raw else None),
+        cadence_snapshot=_row_key(row, "cadence_snapshot"),
+        weekly_exposure_ceiling_usd=_str_to_decimal(_row_key(row, "weekly_exposure_ceiling_usd")),
+        valid_from=_row_key(row, "valid_from"),
+        operating_period_ref=_row_key(row, "operating_period_ref"),
     )
+
+
+def find_active_operating_grant_for_channel(
+    conn: sqlite3.Connection, channel_id: str,
+) -> Optional[RunAuthorizationGrant]:
+    """Most recently registered active-status Channel Operating Grant
+    (grant_kind='channel_operating') for channel_id. Does NOT check
+    expiry / valid_from / re-verify the stored approval artifact --
+    hypogeum.authorization_authority.resolve_active_operating_grant()
+    does all of that before the result is treated as usable."""
+    ensure_tables(conn)
+    row = conn.execute(
+        """
+        SELECT * FROM run_authorization_grants
+        WHERE channel_id = ? AND grant_kind = 'channel_operating' AND status = 'active'
+        ORDER BY registered_at DESC LIMIT 1
+        """,
+        (channel_id,),
+    ).fetchone()
+    return _row_to_grant(row) if row else None
 
 
 def find_active_grant_for_scope(
@@ -894,6 +991,7 @@ def find_active_grant_for_scope(
         """
         SELECT * FROM run_authorization_grants
         WHERE channel_id = ? AND episode_id = ? AND status = 'active'
+          AND (grant_kind IS NULL OR grant_kind = 'run')
         ORDER BY registered_at DESC LIMIT 1
         """,
         (channel_id, episode_id),

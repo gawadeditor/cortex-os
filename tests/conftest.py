@@ -373,12 +373,14 @@ def _isolate_plan_weekly_reservation():
     import hypogeum.db as _db_mod
     import hypogeum.plan_reservation as _pr_mod
     import hypogeum.preplan_reservation as _pp_mod
+    import hypogeum.runtime_admission as _adm_mod
 
     _production_db_path = _Path(_db_mod._DEFAULT_DB_PATH).resolve()
     _real_ensure = _pr_mod.ensure_verified_plan_weekly_reservation
     _real_release = _pr_mod.release_superseded_plan_reservation
     _real_preplan_ensure = _pp_mod.ensure_preproduction_reservation
     _real_preplan_upgrade = _pp_mod.atomic_upgrade_to_plan_reservation
+    _real_admit = _adm_mod.admit_channel_execution
 
     def _assert_not_production(fn_name: str, db_path) -> None:
         if isinstance(_db_mod.get_connection, _MM):
@@ -413,11 +415,16 @@ def _isolate_plan_weekly_reservation():
         _assert_not_production("atomic_upgrade_to_plan_reservation", db_path)
         return _real_preplan_upgrade(db_path=db_path, **kwargs)
 
+    def _guarded_admit(*args, db_path=None, **kwargs):
+        _assert_not_production("admit_channel_execution", db_path)
+        return _real_admit(*args, db_path=db_path, **kwargs)
+
     with _patch("hypogeum.plan_reservation.ensure_verified_plan_weekly_reservation", new=_guarded_ensure):
         with _patch("hypogeum.plan_reservation.release_superseded_plan_reservation", new=_guarded_release):
             with _patch("hypogeum.preplan_reservation.ensure_preproduction_reservation", new=_guarded_preplan_ensure):
                 with _patch("hypogeum.preplan_reservation.atomic_upgrade_to_plan_reservation", new=_guarded_preplan_upgrade):
-                    yield
+                    with _patch("hypogeum.runtime_admission.admit_channel_execution", new=_guarded_admit):
+                        yield
 
 
 @pytest.fixture(autouse=True)

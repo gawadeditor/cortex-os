@@ -1190,19 +1190,56 @@ def run_visual_package_director(
     # channel_id fails closed inside compile_production_plan() ->
     # load_deliverable_contract() with a clear ChannelPackagePolicyDriftError
     # rather than silently proceeding with an inferred or invented shape.
-    production_plan = compile_production_plan(
-        script_package=script_package,
-        narration_package=narration_package or {},
-        visual_package=visual_package,
-        channel_id=channel_id or "unknown",
-        episode_id=episode_id,
-        config=config,
-    )
-    _plan_coverage = validate_plan_coverage(production_plan, narration_package or {})
-    if not _plan_coverage.sufficient:
-        raise ProductionPlanCoverageError(
-            episode_id=episode_id, failing_beats=_plan_coverage.failing_beats,
+    # ADR-016 §5: an autonomously ADMITTED episode compiles its plan
+    # THROUGH the bounded, Decimal-safe channel budget policy -- it computes
+    # the remaining USD 55.00 weekly allowance, and if the first candidate
+    # plan does not fit, applies one deterministic zero-network reduction
+    # ladder and recompiles once. A non-admitted (manual / legacy) run
+    # keeps the direct compile path unchanged.
+    _admitted_for_budget = False
+    if channel_id:
+        try:
+            from hypogeum.runtime_admission import get_admission_binding  # noqa: PLC0415
+            _admitted_for_budget = get_admission_binding(channel_id, episode_id) is not None
+        except Exception:  # noqa: BLE001
+            _admitted_for_budget = False
+
+    if _admitted_for_budget:
+        from hypogeum.channel_budget_policy import compile_plan_within_allowance  # noqa: PLC0415
+        _budget_result = compile_plan_within_allowance(
+            script_package=script_package, narration_package=narration_package or {},
+            visual_package=visual_package, channel_id=channel_id, episode_id=episode_id,
+            config=config, log=log,
         )
+        production_plan = _budget_result.production_plan
+        _plan_coverage = validate_plan_coverage(production_plan, narration_package or {})
+        if not _plan_coverage.sufficient:
+            raise ProductionPlanCoverageError(
+                episode_id=episode_id, failing_beats=_plan_coverage.failing_beats,
+            )
+        log.info(
+            "vpd_budget_aware_plan",
+            episode_id=episode_id,
+            remaining_allowance_usd=str(_budget_result.remaining_allowance),
+            incurred_preplan_usd=str(_budget_result.incurred_preplan_usd),
+            plan_maximum_usd=production_plan.maximum_bounded_cost_usd,
+            recompiled=_budget_result.recompiled,
+            reductions=_budget_result.reductions_applied,
+        )
+    else:
+        production_plan = compile_production_plan(
+            script_package=script_package,
+            narration_package=narration_package or {},
+            visual_package=visual_package,
+            channel_id=channel_id or "unknown",
+            episode_id=episode_id,
+            config=config,
+        )
+        _plan_coverage = validate_plan_coverage(production_plan, narration_package or {})
+        if not _plan_coverage.sufficient:
+            raise ProductionPlanCoverageError(
+                episode_id=episode_id, failing_beats=_plan_coverage.failing_beats,
+            )
     persist_production_plan(production_plan, _resolve_output_dir)
     log.info(
         "vpd_production_plan_compiled",
@@ -1229,6 +1266,19 @@ def run_visual_package_director(
         atomic_upgrade_to_plan_reservation(
             channel_id=channel_id, episode_id=episode_id, config=config, log=log,
         )
+        # ADR-016: record the PRE_PLAN -> plan-bound transition on the
+        # admission row so a restart after this point resumes POST_PLAN
+        # rather than re-running PRE_PLAN.
+        if _admitted_for_budget:
+            try:
+                from hypogeum.runtime_admission import (  # noqa: PLC0415
+                    get_admission_binding, mark_admission_plan_upgraded,
+                )
+                _adm = get_admission_binding(channel_id, episode_id)
+                if _adm is not None and _adm.status == "admitted":
+                    mark_admission_plan_upgraded(_adm.admission_id)
+            except Exception:  # noqa: BLE001 -- admission bookkeeping is non-fatal
+                pass
 
     # ------------------------------------------------------------------
     # Post-VPD finance gate — authoritative budget check from the compiled

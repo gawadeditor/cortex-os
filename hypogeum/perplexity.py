@@ -616,7 +616,27 @@ def query_perplexity(
     if channel_id is not None:
         import hypogeum.authorization_authority as _authority
         _eid = episode_id or "unknown_episode"
-        grant = _authority.resolve_active_grant(channel_id, _eid, at=datetime.now(timezone.utc).isoformat())
+        _now_iso = datetime.now(timezone.utc).isoformat()
+        # ADR-016: an admitted autonomous execution has no paid legacy path.
+        _admission = None
+        if episode_id:
+            try:
+                from hypogeum.runtime_admission import get_admission_binding  # noqa: PLC0415
+                _admission = get_admission_binding(channel_id, episode_id)
+            except Exception:  # noqa: BLE001
+                _admission = None
+        if _admission is not None:
+            grant = _authority.resolve_active_operating_grant(channel_id, at=_now_iso)
+            if grant is None:
+                raise PerplexityHardFailure(
+                    "admitted_autonomous_execution_without_active_operating_grant -- "
+                    "fail closed, no paid legacy path", 0,
+                )
+            return _query_perplexity_via_gate(
+                channel_id=channel_id, grant=grant, query=query, config=config, max_tokens=max_tokens,
+                phase_id=phase_id, query_index=query_index, log=log, episode_id=_eid,
+            )
+        grant = _authority.resolve_active_grant(channel_id, _eid, at=_now_iso)
         if grant is not None:
             return _query_perplexity_via_gate(
                 channel_id=channel_id, grant=grant, query=query, config=config, max_tokens=max_tokens,

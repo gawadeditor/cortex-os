@@ -72,7 +72,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cryptography.hazmat.primitives.serialization import load_pem_private_key  # noqa: E402
 
 from hypogeum.approval_artifact import GrantBindingApproval, sign_approval_artifact  # noqa: E402
-from hypogeum.authorization_authority import compute_grant_checksum, register_run_grant  # noqa: E402
+from hypogeum.authorization_authority import (  # noqa: E402
+    compute_grant_checksum,
+    register_channel_operating_grant,
+    register_run_grant,
+)
 from hypogeum.authorization_store import GrantBinding  # noqa: E402
 
 
@@ -156,8 +160,110 @@ def _apply_from_plan(args: argparse.Namespace, spec: dict) -> None:
     spec["production_plan_content_hash"] = plan_hash
 
 
+def _register_channel_operating(args, spec: dict) -> int:
+    """ADR-016: sign + register ONE Channel Operating Grant.
+
+    One offline signature authorizes many autonomous episodes for exactly
+    one channel over a bounded operating period. It carries NO production
+    plan hash and NO episode_id -- episode_id is the '*' sentinel. It
+    creates no budget capacity: the weekly ledger, the PRE_PLAN
+    reservation, and the plan-bound reservation stay authoritative.
+
+    Spec JSON shape:
+    {
+      "grant_id": "...", "grant_version": 1,
+      "channel_id": "hypogeum",
+      "workflow_id": "hypogeum_main_production", "workflow_version": "1.0.0",
+      "workflow_checksum": "<64 hex>",
+      "channel_package_version": "1.0", "channel_package_checksum": "<64 hex>",
+      "allowed_provider_domains": ["openrouter_text", "perplexity_research", "elevenlabs_voice", "muapi_video"],
+      "cadence_snapshot": "videos_per_week:1",
+      "weekly_exposure_ceiling_usd": "55.00",
+      "currency": "USD",
+      "valid_from": "2026-08-01T00:00:00Z",
+      "expires_at": "2026-12-01T00:00:00Z",
+      "operating_period_ref": "hypogeum:2026-W35..W48",
+      "bindings": [ { "provider": "...", "model": "...", "provider_operation": "...",
+                     "max_cost_per_call": "0.50", "max_calls": 2000, "max_total_spend": "55.00" } ]
+    }
+    """
+    from decimal import Decimal as _D
+
+    bindings = _build_bindings(spec)
+    ceiling = _D(str(spec["weekly_exposure_ceiling_usd"]))
+    domains = list(spec["allowed_provider_domains"])
+    checksum = compute_grant_checksum(
+        channel_id=spec["channel_id"], episode_id="*", workflow_id=spec["workflow_id"],
+        workflow_version=spec["workflow_version"], workflow_checksum=spec["workflow_checksum"],
+        production_plan_content_hash=None, bindings=bindings,
+        max_total_spend_all_bindings=ceiling, currency=spec["currency"], expires_at=spec["expires_at"],
+        grant_kind="channel_operating", channel_package_version=spec["channel_package_version"],
+        channel_package_checksum=spec["channel_package_checksum"], allowed_provider_domains=domains,
+        cadence_snapshot=spec["cadence_snapshot"], weekly_exposure_ceiling_usd=ceiling,
+        valid_from=spec["valid_from"], operating_period_ref=spec["operating_period_ref"],
+    )
+    print("=" * 72)
+    print("CHANNEL OPERATING GRANT -- ABOUT TO SIGN (ADR-016)")
+    print("=" * 72)
+    print(f"  grant_id:        {spec['grant_id']}@{spec['grant_version']}")
+    print(f"  channel_id:      {spec['channel_id']}  (episode_id = '*', many episodes)")
+    print(f"  workflow:        {spec['workflow_id']}@{spec['workflow_version']}")
+    print(f"  channel package: {spec['channel_package_version']} ({spec['channel_package_checksum'][:16]}...)")
+    print(f"  domains:         {', '.join(sorted(domains))}")
+    print(f"  cadence:         {spec['cadence_snapshot']}")
+    print(f"  weekly ceiling:  USD {ceiling}   (a CEILING, not capacity)")
+    print(f"  valid:           {spec['valid_from']}  ->  {spec['expires_at']}")
+    print(f"  grant_checksum:  {checksum}")
+    print("=" * 72)
+    if not args.yes:
+        confirm = input("Sign and register this Channel Operating Grant? Type 'yes': ")
+        if confirm.strip().lower() != "yes":
+            print("Aborted -- not signed, not registered.", file=sys.stderr)
+            return 1
+
+    private_key = _load_private_key(args.private_key)
+    artifact = sign_approval_artifact(
+        dict(
+            approval_id=args.approval_id or f"{spec['grant_id']}:approval",
+            approval_version=1, approval_type="channel_operating_grant", subject_checksum=checksum,
+            channel_id=spec["channel_id"], scope_id="*", workflow_id=spec["workflow_id"],
+            workflow_version=spec["workflow_version"], workflow_checksum=spec["workflow_checksum"],
+            channel_package_version=spec["channel_package_version"],
+            channel_package_checksum=spec["channel_package_checksum"],
+            allowed_bindings=tuple(GrantBindingApproval(b.provider, b.model, b.provider_operation) for b in bindings),
+            currency=spec["currency"],
+            max_cost_per_call=max((b.max_cost_per_call for b in bindings), default=_D("0")),
+            max_total_spend=ceiling, max_calls=sum(b.max_calls for b in bindings),
+            retry_authorized=any(b.retry_authorized for b in bindings),
+            fallback_authorized=any(b.fallback_authorized for b in bindings),
+            issued_at=args.issued_at, expires_at=spec["expires_at"],
+            approver_identity=args.approver_identity, nonce=args.nonce,
+        ),
+        private_key=private_key,
+    )
+    grant = register_channel_operating_grant(
+        grant_id=spec["grant_id"], grant_version=spec["grant_version"], channel_id=spec["channel_id"],
+        workflow_id=spec["workflow_id"], workflow_version=spec["workflow_version"],
+        workflow_checksum=spec["workflow_checksum"],
+        channel_package_version=spec["channel_package_version"],
+        channel_package_checksum=spec["channel_package_checksum"],
+        allowed_provider_domains=domains, cadence_snapshot=spec["cadence_snapshot"],
+        weekly_exposure_ceiling_usd=ceiling, bindings=bindings, currency=spec["currency"],
+        valid_from=spec["valid_from"], expires_at=spec["expires_at"],
+        operating_period_ref=spec["operating_period_ref"], approval_artifact=artifact,
+        db_path=args.db_path,
+    )
+    print(f"Channel Operating Grant registered: {grant.grant_id}@{grant.grant_version}, status={grant.status}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--kind", choices=["run", "channel-operating"], default="run",
+        help="'run' (default): per-episode plan-bound grant. 'channel-operating' "
+             "(ADR-016): one signature, many autonomous episodes for one channel.",
+    )
     parser.add_argument("--spec", required=True, type=Path, help="grant specification JSON file")
     parser.add_argument(
         "--from-plan", required=False, type=Path, default=None,
@@ -174,6 +280,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     spec = json.loads(args.spec.read_text())
+    if args.kind == "channel-operating":
+        return _register_channel_operating(args, spec)
     if args.from_plan is not None:
         _apply_from_plan(args, spec)
     plan_content_hash = _require_plan_hash(spec)

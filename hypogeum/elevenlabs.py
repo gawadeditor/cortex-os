@@ -610,6 +610,35 @@ def _words_to_srt_blocks(
 
 _HYPOGEUM_WORKFLOW_ID = "hypogeum_main_production"
 _HYPOGEUM_WORKFLOW_VERSION = "1.0.0"
+
+
+def _resolve_gate_grant(channel_id: str, episode_id: str):
+    """Returns the grant object to drive the ElevenLabs gate path, or
+    None to fall through to the legacy path. ADR-016: an execution
+    ADMITTED under a Channel Operating Grant (persisted state, never a
+    caller flag) has NO paid legacy path -- if its operating grant no
+    longer resolves, raise ElevenLabsError before any network I/O."""
+    import hypogeum.authorization_authority as _authority
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    admission = None
+    if channel_id and episode_id:
+        try:
+            from hypogeum.runtime_admission import get_admission_binding  # noqa: PLC0415
+            admission = get_admission_binding(channel_id, episode_id)
+        except Exception:  # noqa: BLE001 -- admission table absent => not admitted
+            admission = None
+    if admission is not None:
+        grant = _authority.resolve_active_operating_grant(channel_id, at=now_iso)
+        if grant is None:
+            raise ElevenLabsError(
+                "admitted_autonomous_execution_without_active_operating_grant -- "
+                "fail closed, no paid legacy path"
+            )
+        return grant
+    return _authority.resolve_active_grant(channel_id, episode_id, at=now_iso)
+
+
 _VOICE_PROVIDER = "elevenlabs"
 _VOICE_PROVIDER_OPERATION = "voice.narration_segment"
 _VOICE_COMPILER_IDENTITY = "hypogeum.elevenlabs.generate_narration_segment"
@@ -869,8 +898,7 @@ def generate_narration_segment(
     # channel_id is supplied AND a real, verified grant already
     # resolves for (channel_id, episode_id).
     if channel_id is not None:
-        import hypogeum.authorization_authority as _authority
-        grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+        grant = _resolve_gate_grant(channel_id, episode_id)
         if grant is not None:
             return _generate_narration_via_gate(
                 channel_id=channel_id, grant=grant, beat_id=beat_id, text=text, episode_id=episode_id,
@@ -1705,8 +1733,7 @@ def generate_music_track(
     # MISS, when channel_id is supplied AND a real, verified grant already
     # resolves for (channel_id, episode_id).
     if channel_id is not None:
-        import hypogeum.authorization_authority as _authority
-        grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+        grant = _resolve_gate_grant(channel_id, episode_id)
         if grant is not None:
             return _generate_music_via_gate(
                 channel_id=channel_id, grant=grant, category=category,

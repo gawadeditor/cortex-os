@@ -857,7 +857,34 @@ def call_claude(
     if channel_id is not None:
         import hypogeum.authorization_authority as _authority
         _eid = episode_id or "unknown_episode"
-        grant = _authority.resolve_active_grant(channel_id, _eid, at=datetime.now(timezone.utc).isoformat())
+        _now_iso = datetime.now(timezone.utc).isoformat()
+        # ADR-016: an execution ADMITTED under a Channel Operating Grant
+        # (persisted state -- hypogeum.runtime_admission, never a caller
+        # flag) MUST route every paid PRE_PLAN call through the submission
+        # gate. There is NO paid legacy-network fallback for it: if the
+        # operating grant no longer resolves, fail closed here, before any
+        # network I/O.
+        _admission = None
+        if episode_id:
+            try:
+                from hypogeum.runtime_admission import get_admission_binding  # noqa: PLC0415
+                _admission = get_admission_binding(channel_id, episode_id)
+            except Exception:  # noqa: BLE001 -- admission table absent => not admitted
+                _admission = None
+        if _admission is not None:
+            grant = _authority.resolve_active_operating_grant(channel_id, at=_now_iso)
+            if grant is None:
+                raise HardFailure(
+                    "admitted_autonomous_execution_without_active_operating_grant -- "
+                    "fail closed, no paid legacy path"
+                )
+            return _call_claude_via_gate(
+                channel_id=channel_id, grant=grant, model_slug=model_slug, messages=messages,
+                max_tokens=max_tokens, config=config, episode_id=_eid, agent=agent,
+                response_format=response_format, provider=provider,
+                allow_model_fallback=allow_model_fallback, max_attempts=max_attempts,
+            )
+        grant = _authority.resolve_active_grant(channel_id, _eid, at=_now_iso)
         if grant is not None:
             return _call_claude_via_gate(
                 channel_id=channel_id, grant=grant, model_slug=model_slug, messages=messages,

@@ -881,6 +881,8 @@ class TestCanonicalOperationPayloadCompilation:
             call_count["n"] += 1
             return None, "no_real_http_in_test"  # short-circuits _invoke_real before poll/download
 
+        from tests._capability_boundary_stub import install_passthrough
+        install_passthrough(monkeypatch)
         monkeypatch.setattr(muapi_module, "_submit_http", _fake_submit_http)
 
         capability_fields = dict(

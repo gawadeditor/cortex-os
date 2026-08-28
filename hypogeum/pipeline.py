@@ -1230,6 +1230,7 @@ def run_pipeline(
             episode_id=episode_id,
             output_dir=output_dir,
             skip_shorts=_skip_shorts,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -1309,6 +1310,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -1339,6 +1341,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -2293,6 +2296,8 @@ def _run_visual_package_director(
             episode_id=episode_id,
             output_dir=output_dir,
             channel_id=channel_id,
+            script_package=script_package,
+            narration_package=narration_package or {},
         )
     return run_visual_package_director(
         script_package=script_package,
@@ -2309,6 +2314,7 @@ def _run_source_enhancement(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Source Enhancement (2026-08-02). Provider-agnostic stage between Source
@@ -2325,6 +2331,7 @@ def _run_source_enhancement(
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
 
@@ -2333,6 +2340,7 @@ def _run_thumbnail_director(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Thumbnail Director (M2.5 — implemented).
@@ -2374,6 +2382,7 @@ def _run_thumbnail_director(
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
 
@@ -2383,6 +2392,7 @@ def _run_audio_agent(
     episode_id: str,
     output_dir: Optional[Path],
     skip_shorts: bool = False,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Audio Agent (M3.2–M3.6 — implemented).
@@ -2412,6 +2422,7 @@ def _run_audio_agent(
         episode_id=episode_id,
         output_dir=output_dir,
         skip_shorts=skip_shorts,
+        channel_id=channel_id,
     )
 
 

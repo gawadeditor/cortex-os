@@ -107,6 +107,7 @@ class EnhancementProvider(ABC):
         scene_id: str,
         log,
         channel_id: Optional[str] = None,
+        output_dir: Optional[Path] = None,
     ) -> EnhancementResult:
         """
         Enhance source_path to at least target_width x target_height and
@@ -123,6 +124,11 @@ class EnhancementProvider(ABC):
         must still honor this method's own no-raise contract below --
         it surfaces as EnhancementResult(success=False, failure_reason=...),
         never an exception.
+
+        output_dir (2026-08-26 plan-boundary rule): optional episode
+        output directory, forwarded so the concrete provider can locate
+        the verified persisted Production Plan for the plan-level weekly
+        reservation it must establish before any paid call.
 
         The provider only produces a CANDIDATE file at dest_path — it does
         not decide whether that candidate is acceptable. hypogeum/source_

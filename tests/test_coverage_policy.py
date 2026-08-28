@@ -341,13 +341,14 @@ class TestComputeBeatCoverage:
 # TestFillCoverageDeficits — clip_repair_agent.fill_coverage_deficits()
 # ---------------------------------------------------------------------------
 
-def _mock_qualify_always_pass(asset, clip_path, source_type, config, episode_id, log):
+def _mock_qualify_always_pass(asset, clip_path, source_type, config, episode_id, log, **kwargs):
     """Standin for hypogeum.source_enhancement.qualify_asset() in tests that
     exercise fill_coverage_deficits()'s deficit-planning/stop-early/retry
     logic rather than the asset-qualification boundary itself (see
     tests/test_source_enhancement.py::TestQualifyAsset for that) — the fake
     clip bytes these tests write are not real, ffprobe-readable video, so
-    without this stub every clip would be rejected as corrupt."""
+    without this stub every clip would be rejected as corrupt. **kwargs
+    absorbs the channel_id/output_dir plan-boundary kwargs (2026-08-26)."""
     asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
     return True
 
@@ -736,9 +737,10 @@ class TestFillCoverageDeficits:
             generated_paths.append(str(dest))
             return {"generation_status": "generated"}
 
-        def _mock_qualify_first_fails(asset, clip_path, source_type, config, episode_id, log):
+        def _mock_qualify_first_fails(asset, clip_path, source_type, config, episode_id, log, **kwargs):
             # extra1 never qualifies (simulates corrupt/failed enhancement);
-            # extra2 qualifies cleanly.
+            # extra2 qualifies cleanly. **kwargs absorbs the channel_id/
+            # output_dir plan-boundary kwargs (2026-08-26).
             if "extra1" in asset["scene_id"]:
                 asset["source_enhancement"] = {
                     "validation_result": "failed", "failure_reason": "still_below_target",

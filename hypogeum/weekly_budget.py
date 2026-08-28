@@ -65,6 +65,7 @@ __all__ = [
     "WeeklyCeilingNonPositiveError",
     "WeeklyCorruptWindowStateError",
     "WeeklyTimezoneConflictError",
+    "WeeklyReleasedReplayError",
     "WeeklyWindow",
     "WeeklyReservationOutcome",
     "compute_weekly_window",
@@ -125,6 +126,15 @@ class WeeklyTimezoneConflictError(WeeklyBudgetError):
     authorization stays rejected until the existing window closes, so a
     timezone change can never reset spend measurement or mint fresh
     headroom inside an active charged/reserved window."""
+
+
+class WeeklyReleasedReplayError(WeeklyBudgetError):
+    """A reserve request resolved to a budget_reservations row that is
+    already RELEASED. A released reservation is terminal -- it no longer
+    consumes headroom, so returning it as an idempotent replay would let a
+    new paid action proceed unbudgeted. The flow must fail closed and the
+    ledger be reconciled; a genuinely fresh verified plan produces a
+    distinct reservation key and its own row."""
 
 
 # ---------------------------------------------------------------------------
@@ -463,9 +473,29 @@ def ensure_channel_weekly_reservation(
         at=now_utc.isoformat(),
         reservation_id_prefix=idempotency_key,
     )
+    reservation_id = multi.reservation_ids()[0]
+
+    # Released rows are terminal. bs.reserve_all_scopes()/db.reserve_budget()
+    # return ANY pre-existing row (including a released one) as an accepted
+    # idempotent replay -- but a released reservation no longer consumes
+    # headroom, so proceeding would authorize new spend against nothing.
+    # Fail closed and require reconciliation. A genuinely new verified plan
+    # has a distinct idempotency_key and never lands here.
+    status_row = conn.execute(
+        "SELECT status FROM budget_reservations WHERE reservation_id = ?",
+        (reservation_id,),
+    ).fetchone()
+    if status_row is not None and status_row["status"] == "released":
+        raise WeeklyReleasedReplayError(
+            f"weekly reservation {reservation_id!r} for channel {channel_id!r} "
+            f"(idempotency_key={idempotency_key!r}) is RELEASED -- a released "
+            f"reservation cannot be replayed to authorize spend; reconcile the "
+            f"ledger before this plan may proceed"
+        )
+
     return WeeklyReservationOutcome(
         request=request,
-        reservation_id=multi.reservation_ids()[0],
+        reservation_id=reservation_id,
         idempotency_key=idempotency_key,
         created=multi.created_by_this_call(),
     )

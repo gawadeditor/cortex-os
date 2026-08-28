@@ -98,7 +98,18 @@ def main() -> None:
                         "--force. Ignored (has no effect) without --force.")
     p.add_argument("--assets-root", default=None,
                    help="Override .hypogeum-assets root (default: repo's own)")
+    p.add_argument("--channel-id", default=None,
+                   help="Authoritative channel id. REQUIRED with --force "
+                        "(2026-08-26 plan-boundary rule): OpenRouter planning "
+                        "spend is plan-scoped paid work -- the verified "
+                        "persisted Production Plan's weekly reservation is "
+                        "established/replayed before any LLM call, and a "
+                        "denial fails closed. Never needed without --force.")
     args = p.parse_args()
+
+    if args.force and not args.channel_id:
+        p.error("--channel-id is REQUIRED with --force: OpenRouter planning "
+                "spend is gated by the verified plan's weekly reservation")
 
     episode_id = args.episode_id
     assets_root = Path(args.assets_root) if args.assets_root else _ROOT / ".hypogeum-assets"
@@ -123,6 +134,7 @@ def main() -> None:
             force=args.force,
             fixture_verification=fixture_verification,
             probe_first_batch=args.probe_first_batch,
+            channel_id=args.channel_id,
         )
     except NarrationCompletenessError as exc:
         print(f"NARRATION COMPLETENESS GATE FAILED — no LLM call made.\n{exc}", file=sys.stderr)

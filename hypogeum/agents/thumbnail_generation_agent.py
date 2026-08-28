@@ -98,6 +98,7 @@ def generate_thumbnails(
     output_dir: Path,
     log,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute Phase 2 MUAPI thumbnail generation for all deliverables.
@@ -116,6 +117,11 @@ def generate_thumbnails(
         output_dir:      Episode output directory.
         log:             Caller-provided logger.
         budget_guard:    Optional budget guardrail.
+        channel_id:      Optional authoritative channel id. When supplied, the
+                         verified persisted Production Plan's weekly
+                         reservation is established/replayed BEFORE any image
+                         generation (2026-08-26 plan-boundary rule); a denial
+                         raises before any provider call.
 
     Returns:
         dict with keys:
@@ -126,8 +132,40 @@ def generate_thumbnails(
 
     Raises:
         MUAPIAuthFailure / MUAPIQuotaExhausted / MUAPIBudgetExhausted — halt immediately.
+        hypogeum.plan_reservation.PlanReservationError and weekly-budget
+        denials — plan-level reservation refused (before any spend).
     """
     log.info("td_muapi_phase_started")
+
+    # Plan-level weekly reservation boundary (2026-08-26, hardened
+    # 2026-08-27): once a persisted Production Plan file exists for this
+    # episode, Phase-2 image generation is post-plan paid work governed by
+    # the plan's one CHANNEL_WEEKLY reservation. channel_id is then
+    # MANDATORY -- a missing/mismatched one fails closed here, before the
+    # first image call. The ONE demonstrable zero-network exemption is a
+    # MUAPI dry-run whose PRIMARY thumbnail provider is muapi (the dry-run
+    # placeholder short-circuits before any fallback provider is tried);
+    # a MUAPI dry-run with a non-MUAPI primary can still reach the network,
+    # so it is NOT exempt.
+    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+    _thumb_zero_network = (
+        getattr(config, "MUAPI_DRY_RUN", False)
+        and getattr(config, "THUMBNAIL_IMAGE_PROVIDER", None) == "muapi"
+    )
+    if (
+        not _thumb_zero_network
+        and classify_plan_lifecycle(episode_id, output_dir) is not PlanLifecycle.PRE_PLAN
+    ):
+        from hypogeum.plan_reservation import (
+            ensure_verified_plan_weekly_reservation,
+        )
+        ensure_verified_plan_weekly_reservation(
+            channel_id=channel_id,
+            episode_id=episode_id,
+            config=config,
+            log=log,
+            output_dir=output_dir,
+        )
 
     ranked_candidates = generation_plan["main_episode"]["ranked_candidates"]
     sorted_main = sorted(ranked_candidates, key=lambda c: c.get("rank", 999))

@@ -693,7 +693,7 @@ class TestFillCoverageDeficits:
             dest.write_bytes(b"GENERATED")
             return {"generation_status": "generated"}
 
-        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log, **kwargs):
             # This test exercises scene_spec translation, not the asset
             # qualification boundary itself (see TestQualifyAssetIntegration
             # for that) — simulate an already-compliant clip.
@@ -754,7 +754,7 @@ class TestFillCoverageDeficits:
             dest.write_bytes(b"GENERATED")
             return {"generation_status": "generated"}
 
-        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log, **kwargs):
             asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
             return True
 
@@ -927,7 +927,7 @@ class TestCoverageFillShotDiversity:
             dest.write_bytes(f"CLIP-{scene_spec['scene_id']}".encode())
             return {"generation_status": "generated"}
 
-        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log, **kwargs):
             asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
             return True
 
@@ -1149,7 +1149,7 @@ class TestCoverageFillShotDiversity:
             dest.write_bytes(b"CLIP")
             return {"generation_status": "generated"}
 
-        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log, **kwargs):
             asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
             return True
 
@@ -1240,7 +1240,7 @@ class TestCoverageFillPlanAwareResume:
             dest.write_bytes(f"CLIP-{scene_spec['scene_id']}".encode())
             return {"generation_status": "generated"}
 
-        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log):
+        def _mock_qualify(asset, clip_path, source_type, config, episode_id, log, **kwargs):
             asset["source_enhancement"] = {"validation_result": "skipped_native_resolution"}
             return True
 
@@ -2176,7 +2176,8 @@ class _FakeUpscaleProvider:
         self.calls = []
 
     def enhance(self, source_path, dest_path, target_width, target_height,
-                target_resolution_label, config, episode_id, scene_id, log):
+                target_resolution_label, config, episode_id, scene_id, log,
+                channel_id=None, output_dir=None):
         from hypogeum.providers.enhancement import EnhancementResult
         self.calls.append(scene_id)
         if self.fail:
@@ -2225,7 +2226,8 @@ class _BillingFailUpscaleProvider(_FakeUpscaleProvider):
         super().__init__(**kwargs)
 
     def enhance(self, source_path, dest_path, target_width, target_height,
-                target_resolution_label, config, episode_id, scene_id, log):
+                target_resolution_label, config, episode_id, scene_id, log,
+                channel_id=None, output_dir=None):
         from hypogeum.providers.enhancement import EnhancementResult
         self.calls.append(scene_id)
         return EnhancementResult(

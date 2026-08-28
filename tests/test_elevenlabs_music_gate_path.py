@@ -128,12 +128,25 @@ def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decima
 
 class TestNoGrantLeavesLegacyPathUnaffected:
 
-    def test_channel_id_supplied_but_no_grant_uses_legacy_path(self, tmp_path):
+    def test_channel_id_supplied_but_no_grant_uses_legacy_path(self, tmp_path, monkeypatch):
         """Even with channel_id explicitly supplied, if no grant
         resolves (the real 'hypogeum' case, always, until Enforcement
         Cutover) the call falls straight through to the unchanged
         legacy /v1/music call -- proven here via the same HTTP mock
-        tests/test_elevenlabs.py already uses for the legacy path."""
+        tests/test_elevenlabs.py already uses for the legacy path. The
+        plan-level weekly reservation (2026-08-26 boundary rule) is
+        established first against this test's own isolated DB and
+        persisted plan."""
+        import hypogeum.db as db
+        from test_muapi_upscale_gate_path import _persist_boundary_plan
+
+        db_path = tmp_path / "legacy.db"
+        episode_dir = _persist_boundary_plan(
+            db_path, tmp_path, channel_id="nobody_has_a_grant_for_this_channel",
+            monkeypatch=monkeypatch,
+        )
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
         config = _make_config()
         with patch("hypogeum.elevenlabs.requests.post") as mock_post, \
              patch("hypogeum.elevenlabs._finance.record_cost"):

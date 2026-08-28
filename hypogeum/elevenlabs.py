@@ -686,6 +686,17 @@ def _generate_narration_via_gate(
     max_cost = Decimal(str(round(char_count * TTS_USD_PER_CHAR, 6)))
     authorization_id = f"{episode_id}:narr_{beat_id}"
 
+    # Explicit protected POST_PLAN binding: the exact canonical Production
+    # Plan content_hash this paid invocation belongs to (empty when
+    # pre-plan -- the first narration is pre-plan). capability_boundary
+    # re-verifies it equals the freshly-loaded canonical plan.
+    from hypogeum.production_plan import canonical_episode_dir as _canon_dir  # noqa: PLC0415
+    from hypogeum.production_plan import load_production_plan as _load_canon_plan  # noqa: PLC0415
+    _bound_plan = _load_canon_plan(episode_id, _canon_dir(episode_id))
+    _plan_audit_metadata = (
+        {"production_plan_content_hash": _bound_plan.content_hash} if _bound_plan is not None else {}
+    )
+
     try:
         envelope = GenerationExecutionEnvelope.create(
             envelope_schema_version=_VOICE_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
@@ -709,6 +720,7 @@ def _generate_narration_via_gate(
                 "channel_package": package_identity["checksum"], "plan": plan_checksum,
                 "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_VOICE_COMPILER_IDENTITY.encode()).hexdigest(),
             },
+            audit_metadata=_plan_audit_metadata,
         )
         authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
     except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
@@ -840,6 +852,27 @@ def generate_narration_segment(
                 channel_id=channel_id, grant=grant, beat_id=beat_id, text=text, episode_id=episode_id,
                 output_dir=output_dir, config=config, log=log, previous_request_ids=previous_request_ids,
             )
+
+    # Plan-level weekly reservation boundary (2026-08-26, hardened
+    # 2026-08-27): Audio Agent runs BEFORE VPD in the frozen stage order,
+    # so on a FRESH run there is no plan file yet -- this is a genuine
+    # pre-plan stage and there is nothing to bind to (skipped). On any
+    # POST-plan regeneration the plan file exists: this ElevenLabs TTS call
+    # is then post-plan paid work, channel_id is MANDATORY (missing/
+    # mismatched fails closed), and there is NO dry-run exemption (no
+    # ElevenLabs dry-run flag exists).
+    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+    if classify_plan_lifecycle(episode_id, output_dir) is not PlanLifecycle.PRE_PLAN:
+        from hypogeum.plan_reservation import (
+            ensure_verified_plan_weekly_reservation,
+        )
+        ensure_verified_plan_weekly_reservation(
+            channel_id=channel_id,
+            episode_id=episode_id,
+            config=config,
+            log=log,
+            output_dir=output_dir,
+        )
 
     voice_id      = config.ELEVENLABS_VOICE_ID
     model_id      = config.ELEVENLABS_MODEL_ID or _DEFAULT_MODEL_ID
@@ -1470,6 +1503,14 @@ def _generate_music_via_gate(
     max_cost = Decimal(str(round(actual_duration_seconds * MUSIC_USD_PER_SEC, 6)))
     authorization_id = f"{episode_id}:music:{category_slug}:{track_id}"
 
+    # Explicit protected POST_PLAN binding (see _generate_narration_via_gate).
+    from hypogeum.production_plan import canonical_episode_dir as _canon_dir  # noqa: PLC0415
+    from hypogeum.production_plan import load_production_plan as _load_canon_plan  # noqa: PLC0415
+    _bound_plan = _load_canon_plan(episode_id, _canon_dir(episode_id))
+    _plan_audit_metadata = (
+        {"production_plan_content_hash": _bound_plan.content_hash} if _bound_plan is not None else {}
+    )
+
     try:
         envelope = GenerationExecutionEnvelope.create(
             envelope_schema_version=_MUSIC_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
@@ -1493,6 +1534,7 @@ def _generate_music_via_gate(
                 "channel_package": package_identity["checksum"], "plan": plan_checksum,
                 "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_MUSIC_COMPILER_IDENTITY.encode()).hexdigest(),
             },
+            audit_metadata=_plan_audit_metadata,
         )
         authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
     except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
@@ -1650,6 +1692,27 @@ def generate_music_track(
                 required_duration_seconds=required_duration_seconds, episode_id=episode_id,
                 assets_root=assets_root, config=config, log=log, tone_arc=tone_arc,
             )
+
+    # Plan-level weekly reservation boundary (2026-08-26, hardened
+    # 2026-08-27): music generation (Assembly Agent, via Music Agent) runs
+    # AFTER VPD compiles the plan, so on any real run the plan file exists
+    # and this ElevenLabs /v1/music call is post-plan paid work: channel_id
+    # is MANDATORY (missing/mismatched fails closed) and there is NO
+    # dry-run exemption (no ElevenLabs dry-run flag). Only reached on a
+    # cache MISS.
+    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+    _music_episode_dir = assets_root / "episodes" / episode_id
+    if classify_plan_lifecycle(episode_id, _music_episode_dir) is not PlanLifecycle.PRE_PLAN:
+        from hypogeum.plan_reservation import (
+            ensure_verified_plan_weekly_reservation,
+        )
+        ensure_verified_plan_weekly_reservation(
+            channel_id=channel_id,
+            episode_id=episode_id,
+            config=config,
+            log=log,
+            output_dir=_music_episode_dir,
+        )
 
     # ------------------------------------------------------------------
     # Cache miss — generate via ElevenLabs Music POST /v1/music

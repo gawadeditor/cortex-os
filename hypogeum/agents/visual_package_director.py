@@ -882,6 +882,7 @@ def run_visual_package_director(
         episode_id=episode_id,
         config=config,
         output_dir=_resolve_output_dir,
+        channel_id=channel_id,
     )
 
     # Planning-stage diversity gate (2026-08-07 refactor): reject the
@@ -1834,6 +1835,9 @@ def run_visual_package_director_from_plan(
     episode_id: str,
     output_dir: Optional[Path] = None,
     channel_id: Optional[str] = None,
+    *,
+    script_package: Optional[dict] = None,
+    narration_package: Optional[dict] = None,
 ) -> dict:
     """
     Resume VPD from an existing validated plan — skip Phase 1 (Claude planning),
@@ -1843,11 +1847,26 @@ def run_visual_package_director_from_plan(
     but failed during Phase 2 (e.g., MUAPIQuotaExhausted). Caller loads the
     existing visual_package JSON and passes it here to avoid re-billing Claude.
 
+    Coverage-plan revalidation (2026-08-26): when script_package and
+    narration_package are supplied, the episode's persisted Cinematic
+    Coverage Plan is revalidated against the duration-aware shot budget
+    (run_cinematic_director()'s own resume guard) and re-attached to every
+    scene BEFORE any paid work, so long beats always have enough distinct
+    planned shots and the Production Plan prices every contingency slot.
+    If that changes the declared asset set, the verified persisted
+    Production Plan is recompiled from the same real inputs and repersisted
+    (superseding content hash) before the post-VPD finance gate reads it —
+    a resume whose plan no longer describes its required assets must never
+    authorize spend against the stale plan.
+
     Args:
         visual_package: Validated visual_package dict loaded from disk.
         config:         Loaded Config instance.
         episode_id:     Episode identifier for log correlation and file naming.
         output_dir:     Optional output directory override.
+        script_package: Optional Script Package dict (enables coverage-plan
+                        revalidation + Production Plan recompilation).
+        narration_package: Optional Narration Package dict (same).
 
     Returns:
         The final Visual Package dict with actual generation results.
@@ -1876,6 +1895,106 @@ def run_visual_package_director_from_plan(
         else Path(__file__).resolve().parent.parent.parent
         / ".hypogeum-assets" / "episodes" / episode_id
     )
+
+    # ------------------------------------------------------------------
+    # Coverage-plan revalidation (2026-08-26) — before any paid work.
+    # run_cinematic_director() itself decides whether the persisted plan
+    # is budget-compliant; an underprovisioned (legacy) plan triggers its
+    # own regeneration path. Either way the per-beat plans are re-attached
+    # to every scene so clip_repair's shot-diversity fill and Production
+    # Plan compilation see the same shot set. When the declared asset set
+    # changes as a result, the verified persisted Production Plan is
+    # recompiled from the real inputs and repersisted BEFORE the finance
+    # gate below authorizes anything against it.
+    # ------------------------------------------------------------------
+    if script_package is not None and narration_package:
+        from hypogeum.agents.cinematic_director import run_cinematic_director  # noqa: PLC0415
+
+        # OWNERSHIP TOKEN for a possible supersede-release below (2026-08-27):
+        # run_cinematic_director establishes the plan-scoped weekly
+        # reservation itself (its regeneration Step 0) whenever this episode
+        # is post-plan. We collect THAT call's WeeklyReservationOutcome via
+        # the sink -- never a second reservation call here, and NO
+        # MUAPI-specific dry-run condition: the OpenRouter regeneration is
+        # real spend under MUAPI_DRY_RUN, so it reserves either way, and we
+        # simply capture whatever it produced. If cinematic_director resumed
+        # verbatim (no regeneration => no reservation), the sink stays empty
+        # and a later supersede retains the old reservation conservatively.
+        _weekly_sink: list = []
+
+        coverage_plan = run_cinematic_director(
+            script_package=script_package,
+            narration_package=narration_package,
+            visual_package=visual_package,
+            episode_id=episode_id,
+            config=config,
+            output_dir=_resolve_output_dir,
+            _weekly_reservation_sink=_weekly_sink,
+            channel_id=channel_id,
+        )
+        _coverage_plan_by_beat = {
+            bp["beat_id"]: bp for bp in coverage_plan.get("beat_plans", [])
+        }
+        for scene in visual_package.get("scenes", []):
+            beat_id = scene.get("narration_reference")
+            if beat_id in _coverage_plan_by_beat:
+                scene["cinematic_coverage_plan"] = _coverage_plan_by_beat[beat_id]
+        log.info(
+            "vpd_resume_coverage_plan_reattached",
+            episode_id=episode_id,
+            beat_plans=len(_coverage_plan_by_beat),
+            total_shots=sum(len(bp.get("shots", [])) for bp in _coverage_plan_by_beat.values()),
+        )
+        from hypogeum.production_plan import (  # noqa: PLC0415
+            compile_production_plan,
+            load_production_plan,
+            persist_production_plan,
+        )
+        persisted_plan = load_production_plan(episode_id, _resolve_output_dir)
+        if persisted_plan is not None and channel_id is not None:
+            recompiled = compile_production_plan(
+                script_package=script_package,
+                narration_package=narration_package,
+                visual_package=visual_package,
+                channel_id=channel_id,
+                episode_id=episode_id,
+                config=config,
+            )
+            if recompiled.content_hash != persisted_plan.content_hash:
+                persist_production_plan(recompiled, _resolve_output_dir, supersede=True)
+                log.info(
+                    "production_plan_recompiled_on_resume",
+                    episode_id=episode_id,
+                    old_content_hash=persisted_plan.content_hash[:12],
+                    new_content_hash=recompiled.content_hash[:12],
+                    old_maximum_bounded_cost_usd=persisted_plan.maximum_bounded_cost_usd,
+                    new_maximum_bounded_cost_usd=recompiled.maximum_bounded_cost_usd,
+                    reason="cinematic_coverage_plan_asset_set_changed",
+                )
+                if channel_id:
+                    # One active plan reservation per channel-week: release
+                    # the superseded plan's STILL-RESERVED row ONLY if THIS
+                    # execution proved (via the reservation outcome
+                    # run_cinematic_director's Step 0 produced -- collected in
+                    # _weekly_sink) that it created that exact reservation.
+                    # Otherwise it is retained conservatively -- the
+                    # replacement's reservation then fails closed against the
+                    # ceiling and the ledger requires reconciliation, rather
+                    # than releasing a row another execution may own.
+                    # Committed / unknown-acceptance rows are never touched.
+                    from hypogeum.plan_reservation import (
+                        release_superseded_plan_reservation,
+                    )
+                    _superseded_owner_token = (
+                        _weekly_sink[0] if _weekly_sink else None
+                    )
+                    release_superseded_plan_reservation(
+                        outcome=_superseded_owner_token,
+                        superseded_content_hash=persisted_plan.content_hash,
+                        channel_id=channel_id,
+                        episode_id=episode_id,
+                        log=log,
+                    )
 
     # BGA Pass 1 — brand compliance gate on resume path (before MUAPI spend)
     if config.BGA_ENABLED:

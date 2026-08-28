@@ -51,6 +51,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import hypogeum.capability_boundary as capability_boundary
 from hypogeum.providers.fake_provider_adapter import (
     AdapterInvocationCapability,
     AdapterResult,
@@ -125,27 +126,20 @@ class ElevenlabsMusicAdapter:
         if not isinstance(capability, AdapterInvocationCapability):
             raise InvalidCapabilityError(f"expected AdapterInvocationCapability, got {type(capability)!r}")
 
-        recomputed = compute_capability_checksum(capability)
-        if recomputed != capability.capability_checksum:
-            raise InvalidCapabilityError(
-                f"capability {capability.capability_id!r} checksum mismatch: "
-                f"stored {capability.capability_checksum!r} != recomputed {recomputed!r}"
-            )
-        if capability.capability_id in self._consumed_capability_ids:
-            raise CapabilityAlreadyConsumedError(capability.capability_id)
-        if capability.operation_payload_schema_version != SCHEMA_VERSION:
-            raise InvalidCapabilityError(
-                f"ElevenlabsMusicAdapter only accepts {SCHEMA_VERSION!r} payloads, "
-                f"got {capability.operation_payload_schema_version!r}"
-            )
+        ctx = capability_boundary.verify_and_consume_capability(
+            capability, expected_schema_version=SCHEMA_VERSION,
+            consumed_cache=self._consumed_capability_ids,
+        )
 
         self.invocation_count += 1
-        self._consumed_capability_ids.add(capability.capability_id)
         self.received_capabilities.append(capability)
 
-        return self._invoke_real(capability)
+        return self._invoke_real(ctx)
 
-    def _invoke_real(self, capability: AdapterInvocationCapability) -> AdapterResult:
+    def _invoke_real(self, ctx: "capability_boundary.VerifiedInvocationContext") -> AdapterResult:
+        ctx.assert_live()
+        ctx.claim_io_entry()  # durable atomic provider-I/O entry gate
+        capability = ctx.capability
         import hashlib
 
         from hypogeum.config import Config

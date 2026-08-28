@@ -728,6 +728,7 @@ def fill_coverage_deficits(
                     }
                     qualify_asset(
                         extra_asset, extra_path, beat.source_type, config, episode_id, log,
+                        channel_id=channel_id, output_dir=output_dir,
                     )
                     se = extra_asset.get("source_enhancement") or {}
                     qualified = se.get("validation_result") in (
@@ -1356,7 +1357,10 @@ def fill_confirmed_missing_shots(
             )
             break
 
-        qualify_asset(manifest_entry, clip_path, source_type, config, episode_id, log)
+        qualify_asset(
+            manifest_entry, clip_path, source_type, config, episode_id, log,
+            channel_id=channel_id, output_dir=output_dir,
+        )
         se = manifest_entry.get("source_enhancement") or {}
         if se.get("applied"):
             total_upscale_cost_usd += se.get("cost_usd") or 0.0

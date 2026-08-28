@@ -417,6 +417,9 @@ def run_cinematic_director(
     episode_id: str,
     config: Config,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
+    *,
+    _weekly_reservation_sink: Optional[list] = None,
 ) -> dict:
     """
     Produce a Cinematic Coverage Plan for every beat in the episode.
@@ -480,8 +483,49 @@ def run_cinematic_director(
     ckpt_path = _resolve_dir / f"cinematic_coverage_plan_{episode_id}.json"
 
     if ckpt_path.exists():
-        log.info("cinematic_director_resumed", path=str(ckpt_path), episode_id=episode_id)
-        return json.loads(ckpt_path.read_text(encoding="utf-8"))
+        # Budget-validated resume (2026-08-26): a persisted plan is only
+        # reused verbatim when every beat carries at least
+        # compute_shot_budget(measured_narration_duration) shots — the same
+        # deterministic budget the batched planner itself enforces. A
+        # checkpoint written by an older, duration-blind implementation
+        # (e.g. one-shot-per-beat) would otherwise be silently resumed,
+        # starving Assembly's coverage fill of distinct planned shots
+        # (coverage_fill_shot_plan_exhausted on every long beat) — exactly
+        # the failure this module's own docstring forbids. Under-budget
+        # plans fall through to regeneration below; narration that cannot
+        # be validated keeps the legacy verbatim-resume behavior (a resume
+        # caller without measurable durations could not regenerate either).
+        try:
+            _measured = validate_narration_completeness(
+                script_package, narration_package
+            )
+        except Exception:  # noqa: BLE001 — legacy tolerance, see above
+            log.info(
+                "cinematic_director_resume_budget_unverifiable",
+                episode_id=episode_id,
+                path=str(ckpt_path),
+            )
+            return json.loads(ckpt_path.read_text(encoding="utf-8"))
+        _cached = json.loads(ckpt_path.read_text(encoding="utf-8"))
+        _plans_by_beat = {
+            bp.get("beat_id", ""): bp for bp in _cached.get("beat_plans", [])
+        }
+        _underprovisioned = [
+            beat_id for beat_id, dur in _measured.items()
+            if len(_plans_by_beat.get(beat_id, {}).get("shots", []))
+            < compute_shot_budget(dur, config)
+        ]
+        if not _underprovisioned:
+            log.info("cinematic_director_resumed", path=str(ckpt_path), episode_id=episode_id)
+            return _cached
+        log.warn(
+            "cinematic_resume_plan_underprovisioned",
+            episode_id=episode_id,
+            path=str(ckpt_path),
+            underprovisioned_beats=len(_underprovisioned),
+            sample_beats=sorted(_underprovisioned)[:10],
+            action="regenerating_with_current_duration_aware_planner",
+        )
 
     max_retries = max(0, int(getattr(config, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)))
     max_attempts = max_retries + 1
@@ -502,6 +546,8 @@ def run_cinematic_director(
             config=config,
             output_dir=output_dir,
             force=True,
+            channel_id=channel_id,
+            _weekly_reservation_sink=_weekly_reservation_sink,
         )
         if result["status"] == "installed":
             plan = result["plan"]
@@ -1289,6 +1335,71 @@ def _no_duplicate_keys_object_pairs_hook(pairs: list) -> dict:
     return result
 
 
+def _unwrap_beat_plans_wrapper(structured: object, batch_beat_ids: list) -> dict:
+    """
+    Defense-in-depth normalization (2026-08-26): the strict batch schema
+    demands TOP-LEVEL beat_id keys whose values are compact
+    {pattern, shots{slot -> letter-coded fields}}, but a model that followed
+    this module's own legacy system-prompt envelope instead may return the
+    old {"episode_id": ..., "beat_plans": [{beat_id, shots: [verbose]}, ...]}
+    wrapper. Convert that EXACT shape into the keyed compact form using the
+    same authoritative _COMPACT_ENUM_VOCAB tables every other path decodes
+    through — a pure re-encode, never a guess: any field value outside the
+    canonical vocabulary aborts normalization and the payload fails the
+    unchanged strict validation, exactly as before.
+    """
+    if not (
+        isinstance(structured, dict)
+        and isinstance(structured.get("beat_plans"), list)
+        and set(batch_beat_ids).isdisjoint(structured.keys())
+    ):
+        return structured
+
+    def _letter(field: str, value) -> str:
+        vocab = _COMPACT_ENUM_VOCAB[field]
+        idx = vocab.index(value)  # ValueError on unknown word → abort
+        return chr(65 + idx)
+
+    normalized: dict = {}
+    for entry in structured["beat_plans"]:
+        if not isinstance(entry, dict):
+            return structured
+        beat_id = entry.get("beat_id")
+        raw_shots = entry.get("shots")
+        if beat_id not in batch_beat_ids or not isinstance(raw_shots, list):
+            return structured
+        try:
+            pattern = _letter("progression_pattern",
+                              entry.get("pattern") or entry.get("progression_pattern"))
+        except (ValueError, TypeError):
+            return structured
+        slot_map: dict = {}
+        for order, shot in enumerate(raw_shots, start=1):
+            if not isinstance(shot, dict):
+                return structured
+            try:
+                codes = [_letter(f, shot.get(f)) for f in _COMPACT_CODE_FIELDS]
+            except (ValueError, TypeError):
+                return structured
+            key = str(shot.get("shot_slot") or f"s{order:02d}")
+            slot_map[key] = {
+                "code1": "".join(codes[:5]),
+                "code2": "".join(codes[5:]),
+                "func": shot.get("narrative_function", ""),
+                "subj": shot.get("subject", ""),
+                "act": shot.get("action", ""),
+                "fram": shot.get("framing", ""),
+                "light": shot.get("lighting_direction", ""),
+                "lens": _letter("lens_character", shot.get("lens_character", "standard")),
+                **({"dup": shot["diversity_justification"]}
+                   if shot.get("diversity_justification") else {}),
+            }
+        normalized[beat_id] = {"pattern": pattern, "shots": slot_map}
+    if set(normalized.keys()) == set(batch_beat_ids):
+        return normalized
+    return structured
+
+
 def _structured_payload_to_compact(
     structured: dict,
     authoritative_order: list,
@@ -1513,7 +1624,10 @@ def _batch_content_note(batch_index: int, batch_count: int) -> str:
         + f" This is batch {batch_index} of {batch_count} of a larger sequential "
         "Cinematic Coverage Plan regeneration -- respond with structured content for "
         "ONLY the beats present in this request's schema. Beats outside this batch are "
-        "being planned in separate requests and must not be referenced or repeated here."
+        "being planned in separate requests and must not be referenced or repeated here. "
+        "CRITICAL: every single-letter code MUST be taken from THAT property's own "
+        "legend exactly -- never reuse another property's letters and never exceed its "
+        "range (for example 'pur' allows A-F only; 'mov' has its own separate legend)."
     )
 
 
@@ -1632,6 +1746,9 @@ def _execute_single_batch(
         structured = json.loads(
             raw_content, object_pairs_hook=_no_duplicate_keys_object_pairs_hook,
         )
+        structured = _unwrap_beat_plans_wrapper(
+            structured, batch_beat_ids,
+        )
         batch_compact = _structured_payload_to_compact(
             structured, batch_beat_ids, batch_budget,
         )
@@ -1667,10 +1784,22 @@ def regenerate_cinematic_coverage_plan(
     force: bool = False,
     fixture_verification: Optional[dict] = None,
     probe_first_batch: bool = False,
+    channel_id: Optional[str] = None,
+    _weekly_reservation_sink: Optional[list] = None,
 ) -> dict:
     """
     Isolated, explicit, planning-only regeneration of one episode's
     Cinematic Coverage Plan checkpoint.
+
+    channel_id (2026-08-26 plan-boundary rule): optional; the CLI requires
+    it with --force. When a verified persisted Production Plan exists for
+    this episode (resume/regeneration case), its plan-level weekly
+    reservation is established/replayed BEFORE the probe or first batch LLM
+    call and a denial fails closed before any provider call. On an
+    episode's FIRST-ever planning there is no plan to bind to yet — that
+    skip is structural, not a bypass (the produced plan becomes every later
+    boundary's binding target). A missing channel_id is still a typed
+    refusal whenever any network path is reached.
 
     Consumes script_package (authoritative beat text/IDs) and
     narration_package (measured per-beat durations), both validated via
@@ -1836,6 +1965,31 @@ def regenerate_cinematic_coverage_plan(
             "this entrypoint never generates a plan implicitly; pass force=True to regenerate"
         )
 
+    # Step 0 — plan-level weekly reservation boundary (2026-08-26, hardened
+    # 2026-08-27): every network path below (probe or full batch sequence)
+    # is paid OpenRouter work. On an episode's FIRST-ever planning there is
+    # no Production Plan file yet -- this is a genuine pre-plan stage, so
+    # there is nothing to bind to (skipped); the plan this run produces
+    # becomes the binding target for every later boundary. When a
+    # Production Plan file DOES exist (the resume/regeneration case) this
+    # OpenRouter regeneration is post-plan paid work: channel_id is
+    # MANDATORY (missing/mismatched fails closed) and there is NO dry-run
+    # exemption for an OpenRouter call.
+    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle  # noqa: PLC0415
+    if classify_plan_lifecycle(episode_id, _resolve_dir) is not PlanLifecycle.PRE_PLAN:
+        from hypogeum.plan_reservation import (
+            ensure_verified_plan_weekly_reservation,
+        )
+        _weekly_outcome = ensure_verified_plan_weekly_reservation(
+            channel_id=channel_id,
+            episode_id=episode_id,
+            config=config,
+            log=log,
+            output_dir=_resolve_dir,
+        )
+        if _weekly_reservation_sink is not None:
+            _weekly_reservation_sink.append(_weekly_outcome)
+
     # Step 1 — validate inputs BEFORE the LLM call (and before any backup).
     measured_durations = validate_narration_completeness(script_package, narration_package)
     authoritative = list(measured_durations.keys())
@@ -1952,21 +2106,38 @@ def regenerate_cinematic_coverage_plan(
     # before generation began: "The compiled grammar is too large"). Each
     # batch runs through _execute_single_batch() -- the same shared helper
     # the probe above uses for batch 1 alone -- one independent
-    # one-request-maximum call per batch; a failure at any batch discards
-    # every batch already collected in memory and rejects the whole
-    # attempt -- nothing is written to disk and no batch result is treated
-    # as resumable state until every batch has succeeded and the full
-    # merged candidate has passed every validator below. A later invocation
-    # always starts again from batch 1.
+    # one-request-maximum call per batch.
+    #
+    # Bounded per-batch retry (2026-08-26): a malformed single-batch
+    # response (e.g. one out-of-vocabulary enum letter from a provider that
+    # did not enforce strict mode) previously discarded every already-
+    # collected batch and rejected the whole attempt. Each batch now gets
+    # up to CINEMATIC_DIRECTOR_MAX_RETRIES retries of ITSELF before the
+    # attempt rejects; successful batches are never re-rolled, so a retry
+    # can never change an already-valid beat's plan.
     all_expanded_beat_plans: list = []
+    max_batch_retries = max(0, int(getattr(config, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)))
     for batch_index, batch_beat_ids in enumerate(batches, start=1):
-        outcome = _execute_single_batch(
-            batch_index, len(batches), batch_beat_ids, expected_shot_budget_by_beat_id,
-            measured_durations, scenes_by_beat_id, visual_package, episode_id,
-            config, provider_clip_duration,
-        )
-        if outcome["status"] == "batch_failed":
-            return _rejected(outcome["reason"])
+        outcome = None
+        for attempt in range(1 + max_batch_retries):
+            outcome = _execute_single_batch(
+                batch_index, len(batches), batch_beat_ids, expected_shot_budget_by_beat_id,
+                measured_durations, scenes_by_beat_id, visual_package, episode_id,
+                config, provider_clip_duration,
+            )
+            if outcome["status"] == "batch_succeeded":
+                break
+            log.warn(
+                "coverage_regen_batch_retry",
+                episode_id=episode_id,
+                batch_index=batch_index,
+                batch_count=len(batches),
+                attempt=attempt + 1,
+                max_attempts=1 + max_batch_retries,
+                reason=outcome.get("reason"),
+            )
+        if outcome is None or outcome["status"] != "batch_succeeded":
+            return _rejected(outcome["reason"] if outcome else "batch_failed: no outcome")
 
         # In-memory accumulation only -- no disk write, no partial-batch
         # artifact, until every batch above has succeeded.

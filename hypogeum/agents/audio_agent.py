@@ -98,6 +98,7 @@ def run_audio_agent(
     output_dir: Optional[Path] = None,
     *,
     skip_shorts: bool = False,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute the Audio Agent end-to-end.
@@ -189,6 +190,7 @@ def run_audio_agent(
         config=config,
         episode_id=episode_id,
         output_dir=_resolve_output_dir,
+        channel_id=channel_id,
     )
 
     # Unpack VGO result for local use

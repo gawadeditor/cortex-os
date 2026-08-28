@@ -202,6 +202,8 @@ class TestMuapiVideoAdapterCallsAcknowledgementBeforePolling:
             assert request_id == "real_request_id_789"
             raise RuntimeError("simulated: never called for real in this test's assertions below")
 
+        from tests._capability_boundary_stub import install_passthrough
+        install_passthrough(monkeypatch)
         monkeypatch.setattr(muapi_module, "_submit_http", _fake_submit_http)
         monkeypatch.setattr(muapi_module, "_poll_until_complete", _fake_poll_until_complete)
 

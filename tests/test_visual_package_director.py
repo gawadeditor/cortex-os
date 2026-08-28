@@ -2897,3 +2897,154 @@ class TestVPDCoveragePlanOrchestration:
         assert f"SHOT-SPECIFIC DIRECTION FOR {shots[1]['shot_id']}" in shots[1]["primary_prompt"]
         assert "AUTHORITATIVE" in shots[0]["primary_prompt"]
         assert "AUTHORITATIVE" in shots[1]["primary_prompt"]
+
+
+# ---------------------------------------------------------------------------
+# TestResumeRecompilesPlanAfterCoverageChange — 2026-08-26: from_plan
+# revalidates the persisted Cinematic Coverage Plan against the
+# duration-aware shot budget, re-attaches per-scene plans, and RECOMPILES +
+# repersists the Production Plan when the declared asset set changes — all
+# BEFORE the post-VPD finance gate reads it. Fixtures only; zero network.
+# ---------------------------------------------------------------------------
+
+class TestResumeRecompilesPlanAfterCoverageChange:
+
+    @staticmethod
+    def _script_package():
+        return {
+            "sections": [{"section_id": "s_001", "title": "T",
+                          "narration_beats": [{"beat_id": "b_001", "text": "one"}]}],
+            "shorts_scripts": [
+                {"short_id": short_id,
+                 "narration_beats": [{"beat_id": beat_id, "text": "x"}]}
+                for short_id, beat_id in (
+                    ("short_001", "b_s01"), ("short_002", "b_s02"), ("short_003", "b_s03"))
+            ],
+        }
+
+    @staticmethod
+    def _narration_package(main_seconds):
+        return {"narration_segments": [
+            {"beat_reference": "b_001", "duration_seconds": main_seconds},
+            {"beat_reference": "b_s01", "duration_seconds": 8.0},
+            {"beat_reference": "b_s02", "duration_seconds": 8.0},
+            {"beat_reference": "b_s03", "duration_seconds": 8.0},
+        ]}
+
+    @staticmethod
+    def _scene(scene_id, beat_id, source_type="main_episode", short_id=None, n_shots=1):
+        shots = [{
+            "shot_id": f"{beat_id}__shot{i}", "parent_beat_id": beat_id,
+            "shot_order": i, "shot_purpose": "establish_location",
+            "estimated_usable_duration": 8.0, "subject": "x",
+            "camera_movement": "slow_push_in", "shot_scale": "medium",
+            "diversity_justification": None if i == 1 else "deliberate match-cut",
+        } for i in range(1, n_shots + 1)]
+        return {
+            "scene_id": scene_id, "narration_reference": beat_id,
+            "source_type": source_type, **({"short_id": short_id} if short_id else {}),
+            "visual_spec": {}, "presentation_plan": {}, "narrative_signals": [],
+            "production_spec": {"provider_routing": {"primary_tier": 2,
+                                                      "primary_prompt": "p"},
+                                 "aspect_ratio": "16:9" if source_type == "main_episode" else "9:16"},
+            "cinematic_coverage_plan": {"beat_id": beat_id, "shots": shots},
+        }
+
+    def _visual_package(self, main_shots=1):
+        return {"episode_metadata": {"episode_title": "R"},
+                "asset_manifest": {"assets": []},
+                "scenes": [
+            self._scene("s01", "b_001", "main_episode", None, main_shots),
+            self._scene("sh_short_001_s01", "b_s01", "short", "short_001"),
+            self._scene("sh_short_002_s01", "b_s02", "short", "short_002"),
+            self._scene("sh_short_003_s01", "b_s03", "short", "short_003"),
+        ]}
+
+    def test_recompiles_and_supersedes_when_shot_set_changes(self, tmp_path, monkeypatch):
+        import hypogeum.production_plan as pp
+
+        cfg = make_config()
+        sp = self._script_package()
+        # 20.0s main beat -> compute_shot_budget = ceil(20/(8*1.15)) = 3 shots.
+        np = self._narration_package(main_seconds=20.0)
+
+        old_vp = self._visual_package(main_shots=1)
+        (tmp_path / f"visual_package_ep_001.json").write_text(json.dumps(old_vp))
+
+        from hypogeum.production_plan import (
+            compile_production_plan, load_production_plan, persist_production_plan,
+        )
+        old_plan = compile_production_plan(
+            script_package=sp, narration_package=np, visual_package=old_vp,
+            channel_id="hypogeum", episode_id="ep_001", config=cfg,
+        )
+        persist_production_plan(old_plan, tmp_path)
+
+        # Budget-compliant NEW checkpoint: main beat now carries 3 planned shots.
+        new_ccp = {"episode_id": "ep_001", "beat_plans": [
+            {"beat_id": "b_001", "narration_duration_seconds": 20.0,
+             "progression_pattern": "wide_medium_close",
+             "shots": [
+                 {"shot_id": "b_001__shot1", "parent_beat_id": "b_001", "shot_order": i,
+                  "shot_purpose": p, "estimated_usable_duration": 8.0, "subject": "x",
+                  "camera_movement": m, "shot_scale": s,
+                  "primary_prompt": f"coverage shot {i} for b_001",
+                  **({} if i == 1 else {"diversity_justification": "deliberate match-cut"})}
+                 for i, (p, m, s) in enumerate(
+                     [("establish_location", "slow_push_in", "wide_establishing"),
+                      ("character_emotion", "controlled_pull_back", "medium_close_up"),
+                      ("object_detail", "lateral_dolly_right", "close_up")], start=1)
+             ]},
+            {"beat_id": "b_s01", "narration_duration_seconds": 8.0,
+             "progression_pattern": "single_shot",
+             "shots": [{"shot_id": "b_s01__shot1", "parent_beat_id": "b_s01",
+                        "shot_order": 1, "shot_purpose": "establish_location",
+                        "estimated_usable_duration": 8.0, "subject": "x",
+                        "camera_movement": "slow_push_in", "shot_scale": "medium"}]},
+            {"beat_id": "b_s02", "narration_duration_seconds": 8.0,
+             "progression_pattern": "single_shot",
+             "shots": [{"shot_id": "b_s02__shot1", "parent_beat_id": "b_s02",
+                        "shot_order": 1, "shot_purpose": "establish_location",
+                        "estimated_usable_duration": 8.0, "subject": "x",
+                        "camera_movement": "slow_push_in", "shot_scale": "medium"}]},
+            {"beat_id": "b_s03", "narration_duration_seconds": 8.0,
+             "progression_pattern": "single_shot",
+             "shots": [{"shot_id": "b_s03__shot1", "parent_beat_id": "b_s03",
+                        "shot_order": 1, "shot_purpose": "establish_location",
+                        "estimated_usable_duration": 8.0, "subject": "x",
+                        "camera_movement": "slow_push_in", "shot_scale": "medium"}]},
+        ]}
+        (tmp_path / "cinematic_coverage_plan_ep_001.json").write_text(json.dumps(new_ccp))
+
+        superseded_hashes = []
+        monkeypatch.setattr(
+            "hypogeum.plan_reservation.release_superseded_plan_reservation",
+            lambda **kw: superseded_hashes.append(kw["superseded_content_hash"]) or True,
+        )
+
+        plan = json.loads((tmp_path / "visual_package_ep_001.json").read_text())
+        with patch("hypogeum.agents.visual_package_director.run_agent"), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result()), \
+             patch("hypogeum.agents.finance_agent.run_post_vpd_authorization",
+                   return_value={"verdict": "AUTHORIZED", "estimated_spend_usd": 0.0,
+                                  "cost_breakdown": {"scene_count": 4}}), \
+             patch("hypogeum.agents.visual_package_director.MUAPIBudgetGuard"), \
+             patch("hypogeum.agents.visual_package_director.build_thumbnail_handoff_brief"):
+            result = run_visual_package_director_from_plan(
+                plan, cfg, "ep_001", tmp_path, channel_id="hypogeum",
+                script_package=sp, narration_package=np,
+            )
+
+        # Scenes now carry the budget-compliant multi-shot plan.
+        main_scene = next(s for s in result["scenes"] if s["scene_id"] == "s01")
+        assert len(main_scene["cinematic_coverage_plan"]["shots"]) == 3
+
+        # The persisted plan is a NEW verified hash (contingency slots added)
+        # and the superseded hash was released exactly once.
+        recompiled = load_production_plan("ep_001", tmp_path)
+        assert recompiled.content_hash != old_plan.content_hash
+        assert recompiled.maximum_bounded_cost_usd > old_plan.maximum_bounded_cost_usd
+        assert superseded_hashes == [old_plan.content_hash]

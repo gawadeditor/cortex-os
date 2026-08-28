@@ -183,6 +183,24 @@ def _patch_load_dotenv_globally():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_capability_boundary_receipts_root(monkeypatch, tmp_path):
+    """hypogeum.capability_boundary resolves the AUTHORITATIVE provider-
+    receipt trail SOLELY from its own _DEFAULT_ASSETS_ROOT constant (never
+    caller input -- see blocker 2). Redirect it to this test's tmp_path,
+    exactly like the hypogeum.db._DEFAULT_DB_PATH convention, so gate-path
+    tests whose own receipt store writes under tmp_path resolve to the
+    same {tmp_path}/episodes/{execution_id}/receipts location. Tests that
+    never touch the capability boundary are unaffected. Individual tests
+    that need a different root still override this with their own
+    monkeypatch."""
+    try:
+        import hypogeum.capability_boundary as _cb
+    except Exception:  # noqa: BLE001 -- capability boundary optional for a given test
+        return
+    monkeypatch.setattr(_cb, "_DEFAULT_ASSETS_ROOT", tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_guardrail_env_vars():
     """
     Save and restore production guardrail env vars around every test.
@@ -320,6 +338,72 @@ def _isolate_ois_emit_signal():
 
     with _patch("hypogeum.ois.emit_signal", new=_guarded):
         with _patch("hypogeum.signals.emit_signal", new=_guarded):
+            yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_plan_weekly_reservation():
+    """
+    FAIL FAST if a test drives hypogeum.plan_reservation's boundary helpers
+    against the real production database.
+
+    ensure_verified_plan_weekly_reservation() /
+    release_superseded_plan_reservation() open hypogeum.db.get_connection()
+    with db_path=None, resolving to .hypogeum-assets/hypogeum.db. Production
+    code paths (the pipeline, the resume-recompile path in
+    visual_package_director) call them without a db_path -- correct in
+    production. A TEST that reaches one of those paths without redirecting
+    the DB would create real channel_weekly reservation rows in production
+    (observed 2026-08-28: a resume-recompile test leaked one such row).
+
+    This guard does NOT silently no-op -- that would convert a missing test
+    fixture into apparent authorization success and mask exactly the defect
+    class that caused the leak. Instead: if the effective db_path resolves
+    to the production DB AND hypogeum.db.get_connection has not been patched
+    (no test-level redirect), raise AssertionError immediately.
+
+    A test that exercises reservation behaviour MUST redirect first -- e.g.
+    `monkeypatch.setattr(hypogeum.db, "_DEFAULT_DB_PATH", tmp_path / "x.db")`
+    plus `db.initialize_schema(...)`, or patch hypogeum.db.get_connection,
+    or pass an explicit non-production db_path. Those all pass straight
+    through to the real implementation.
+    """
+    from pathlib import Path as _Path
+    from unittest.mock import MagicMock as _MM
+    import hypogeum.db as _db_mod
+    import hypogeum.plan_reservation as _pr_mod
+
+    _production_db_path = _Path(_db_mod._DEFAULT_DB_PATH).resolve()
+    _real_ensure = _pr_mod.ensure_verified_plan_weekly_reservation
+    _real_release = _pr_mod.release_superseded_plan_reservation
+
+    def _assert_not_production(fn_name: str, db_path) -> None:
+        if isinstance(_db_mod.get_connection, _MM):
+            return
+        effective = (
+            _Path(db_path).resolve() if db_path is not None
+            else _Path(_db_mod._DEFAULT_DB_PATH).resolve()
+        )
+        if effective == _production_db_path:
+            raise AssertionError(
+                f"TEST ISOLATION VIOLATION: {fn_name}() was reached against "
+                f"the PRODUCTION database ({_production_db_path}). Redirect "
+                f"the DB first -- monkeypatch hypogeum.db._DEFAULT_DB_PATH to "
+                f"a tmp file (and initialize_schema it), patch "
+                f"hypogeum.db.get_connection, or pass an explicit db_path. "
+                f"This guard never fakes a successful authorization."
+            )
+
+    def _guarded_ensure(*, db_path=None, **kwargs):
+        _assert_not_production("ensure_verified_plan_weekly_reservation", db_path)
+        return _real_ensure(db_path=db_path, **kwargs)
+
+    def _guarded_release(*, db_path=None, **kwargs):
+        _assert_not_production("release_superseded_plan_reservation", db_path)
+        return _real_release(db_path=db_path, **kwargs)
+
+    with _patch("hypogeum.plan_reservation.ensure_verified_plan_weekly_reservation", new=_guarded_ensure):
+        with _patch("hypogeum.plan_reservation.release_superseded_plan_reservation", new=_guarded_release):
             yield
 
 

@@ -936,7 +936,11 @@ def _submit_scene_via_gate(
     # all of them replay the ONE reservation (db.reserve_budget's UNIQUE
     # (scope_kind, scope_ref, idempotency_key) replay), while any different
     # episode or plan hash produces a distinct key and row.
-    weekly_plan_key = f"plan-weekly:{channel_id}:{episode_id}:{production_plan.content_hash}"
+    from hypogeum.plan_reservation import plan_weekly_idempotency_key  # noqa: PLC0415
+
+    weekly_plan_key = plan_weekly_idempotency_key(
+        channel_id, episode_id, production_plan.content_hash
+    )
 
     # ------------------------------------------------------------------
     # Phase 3: dry-run zero-network short-circuit (2026-08-25).
@@ -1049,6 +1053,7 @@ def _submit_scene_via_gate(
                     "channel_package": package_identity["checksum"], "plan": plan_checksum,
                     "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_VIDEO_COMPILER_IDENTITY.encode()).hexdigest(),
                 },
+                audit_metadata={"production_plan_content_hash": production_plan.content_hash},
                 aspect_ratio=aspect_ratio, duration_seconds=Decimal(str(requested_duration)),
             )
             authorization = authority.issue_child_authorization(
@@ -1397,6 +1402,35 @@ def submit_scene(
             "fallback_used": False, "failure_reason": f"gate_path: {failure_reason}",
         }
 
+    # Legacy two-attempt path (channel_id is None). Fail closed if this is
+    # POST-plan paid work without an authoritative channel identity
+    # (2026-08-27): once a Production Plan file exists for the episode, a
+    # real MUAPI video call requires channel identity + the plan-level
+    # weekly reservation (reached via the gate branch above when channel_id
+    # is supplied). The ONLY exception is MUAPI_DRY_RUN -- the legacy path
+    # then just writes a zero-network placeholder. Pre-plan / no-plan
+    # callers (tests, tools, shadow observation) are unaffected.
+    if not config.MUAPI_DRY_RUN:
+        from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+        if classify_plan_lifecycle(eid, output_dir) is not PlanLifecycle.PRE_PLAN:
+            log.warn(
+                "muapi_legacy_video_path_blocked_post_plan_no_channel",
+                scene_id=scene_id, episode_id=eid,
+            )
+            return {
+                "scene_id": scene_id, "asset_id": None,
+                "generation_status": "generation_failed",
+                "provider": "muapi", "tier_used": None, "model_used": None,
+                "prompt_used": None, "fallback_used": False,
+                "failure_reason": (
+                    "no_authoritative_channel_identity_post_plan: a persisted "
+                    "Production Plan exists for this episode but submit_scene() "
+                    "was reached without channel_id -- refusing real paid video "
+                    "outside plan-scoped weekly enforcement (supply channel_id, "
+                    "or set MUAPI_DRY_RUN for offline runs)"
+                ),
+            }
+
     # Attempt 1 — primary prompt
     manifest, failure_reason_1 = _attempt_generation(
         prompt=primary_prompt,
@@ -1561,6 +1595,17 @@ def _generate_reference_image_via_gate(
     max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, 0.015)))
     authorization_id = f"{episode_id}:ref_{entity_id}"
 
+    # Explicit protected POST_PLAN binding: the exact canonical Production
+    # Plan content_hash this paid invocation belongs to (empty when
+    # pre-plan). hypogeum.capability_boundary re-verifies it equals the
+    # freshly-loaded canonical plan before provider I/O.
+    from hypogeum.production_plan import canonical_episode_dir as _canon_dir  # noqa: PLC0415
+    from hypogeum.production_plan import load_production_plan as _load_canon_plan  # noqa: PLC0415
+    _bound_plan = _load_canon_plan(episode_id, _canon_dir(episode_id))
+    _plan_audit_metadata = (
+        {"production_plan_content_hash": _bound_plan.content_hash} if _bound_plan is not None else {}
+    )
+
     try:
         envelope = GenerationExecutionEnvelope.create(
             envelope_schema_version=_VIDEO_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
@@ -1584,6 +1629,7 @@ def _generate_reference_image_via_gate(
                 "channel_package": package_identity["checksum"], "plan": plan_checksum,
                 "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_IMAGE_COMPILER_IDENTITY.encode()).hexdigest(),
             },
+            audit_metadata=_plan_audit_metadata,
             aspect_ratio=aspect_ratio,
         )
         authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
@@ -3232,6 +3278,14 @@ def _generate_thumbnail_via_gate(
     max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, 0.015)))
     authorization_id = f"{episode_id}:thumb_{deliverable_id}"
 
+    # Explicit protected POST_PLAN binding (see _generate_reference_image_via_gate).
+    from hypogeum.production_plan import canonical_episode_dir as _canon_dir  # noqa: PLC0415
+    from hypogeum.production_plan import load_production_plan as _load_canon_plan  # noqa: PLC0415
+    _bound_plan = _load_canon_plan(episode_id, _canon_dir(episode_id))
+    _plan_audit_metadata = (
+        {"production_plan_content_hash": _bound_plan.content_hash} if _bound_plan is not None else {}
+    )
+
     try:
         envelope = GenerationExecutionEnvelope.create(
             envelope_schema_version=_VIDEO_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
@@ -3255,6 +3309,7 @@ def _generate_thumbnail_via_gate(
                 "channel_package": package_identity["checksum"], "plan": plan_checksum,
                 "structured_spec": structured_spec_checksum, "compiler": hashlib.sha256(_THUMBNAIL_COMPILER_IDENTITY.encode()).hexdigest(),
             },
+            audit_metadata=_plan_audit_metadata,
             aspect_ratio=aspect_ratio,
         )
         authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)

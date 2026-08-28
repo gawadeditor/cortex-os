@@ -113,6 +113,7 @@ def run_thumbnail_director(
     output_dir: Optional[Path] = None,
     *,
     budget_guard: Optional[MUAPIBudgetGuard] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute the Thumbnail Director end-to-end.
@@ -294,6 +295,27 @@ def run_thumbnail_director(
         )
 
     # ------------------------------------------------------------------
+    # Plan-level weekly reservation boundary (2026-08-26, hardened
+    # 2026-08-27): Thumbnail Director's Phase 1 is a paid Claude planning
+    # call that runs AFTER the verified persisted Production Plan exists.
+    # Once the plan file exists this is post-plan paid work: channel_id is
+    # MANDATORY (missing/mismatched fails closed). There is NO dry-run
+    # exemption -- MUAPI_DRY_RUN does not make a Claude call zero-network.
+    # ------------------------------------------------------------------
+    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+    if classify_plan_lifecycle(episode_id, _resolve_output_dir) is not PlanLifecycle.PRE_PLAN:
+        from hypogeum.plan_reservation import (
+            ensure_verified_plan_weekly_reservation,
+        )
+        ensure_verified_plan_weekly_reservation(
+            channel_id=channel_id,
+            episode_id=episode_id,
+            config=config,
+            log=log,
+            output_dir=_resolve_output_dir,
+        )
+
+    # ------------------------------------------------------------------
     # BGA Pass 2 — brand compliance gate (before image generation spend)
     # ------------------------------------------------------------------
     if config.BGA_ENABLED:
@@ -320,6 +342,7 @@ def run_thumbnail_director(
         output_dir=_resolve_output_dir,
         log=log,
         budget_guard=budget_guard,
+        channel_id=channel_id,
     )
     main_asset_id   = gen_result["main_asset_id"]
     main_ok         = gen_result["main_ok"]

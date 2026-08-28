@@ -729,6 +729,7 @@ def run_assembly_agent(
             assets_root=assets_root,
             section_durations=section_durations,
             section_categories=section_categories,
+            channel_id=channel_id,
         )
 
     music_tracks, music_log, sections_without_music = _music_package_to_tracks(
@@ -990,6 +991,24 @@ def run_assembly_agent(
             {**_shorts_scripts[i], "short_id": short_ids[i]}
             for i in range(len(short_ids))
         ]
+        # Plan-level weekly reservation boundary (2026-08-26, hardened
+        # 2026-08-27): shorts-title generation is paid post-plan OpenRouter
+        # text work. Once the plan file exists, channel_id is MANDATORY
+        # (missing/mismatched fails closed) -- there is no dry-run exemption
+        # for an OpenRouter call. Placed OUTSIDE the try/except below so a
+        # reservation denial can never be swallowed as degraded metadata.
+        from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+        if classify_plan_lifecycle(episode_id, episode_dir) is not PlanLifecycle.PRE_PLAN:
+            from hypogeum.plan_reservation import (
+                ensure_verified_plan_weekly_reservation,
+            )
+            ensure_verified_plan_weekly_reservation(
+                channel_id=channel_id,
+                episode_id=episode_id,
+                config=config,
+                log=log,
+                output_dir=episode_dir,
+            )
         try:
             shorts_titles = generate_shorts_titles(
                 _requested_shorts_scripts, config=config, episode_id=episode_id,

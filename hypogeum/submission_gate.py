@@ -840,13 +840,25 @@ def submit(
     _increment_counter_breaker(lease_conn, "provider_calls", "max_provider_calls", breaker_limits, at=at, attempt_id=attempt_id)
 
     # ---- Step 10: instantiate the resolved adapter and invoke it exactly once ----
-    capability = _mint_capability(envelope, attempt_id, lease_owner_id, lease_fencing_token, reservation_ids, at, capability_expires_at or at)
+    # Capability TTL: a capability authorizes ONE imminent provider call.
+    # expires_at is stamped strictly later than issued_at (default
+    # hypogeum.capability_boundary.CAPABILITY_TTL_SECONDS) unless the
+    # caller supplied an explicit capability_expires_at. Every real
+    # adapter re-verifies this window against an injected clock, plus the
+    # full authoritative issuance, via hypogeum.capability_boundary.
+    from hypogeum.capability_boundary import default_expiry_for  # noqa: PLC0415
+    capability = _mint_capability(
+        envelope, attempt_id, lease_owner_id, lease_fencing_token, reservation_ids, at,
+        capability_expires_at or default_expiry_for(at),
+    )
     try:
         adapter_instance = adapter_registry.get_or_create_adapter_instance(adapter_class)
         on_provider_acknowledged = _make_provider_acknowledgement_recorder(
             receipt_store, envelope, execution_id, attempt_id, at, lease_conn, lease_owner_id, lease_fencing_token,
         )
-        adapter_result = adapter_instance.invoke(capability, mode=adapter_mode, on_provider_acknowledged=on_provider_acknowledged)
+        adapter_result = adapter_instance.invoke(
+            capability, mode=adapter_mode, on_provider_acknowledged=on_provider_acknowledged,
+        )
         outcome = adapter_result.outcome
     except Exception as exc:  # noqa: BLE001 -- a crash *during* invocation is exactly "possible acceptance, no ack"
         adapter_result = None
@@ -978,8 +990,9 @@ def _make_provider_acknowledgement_recorder(
     adapter_instance.invoke() -- the ONE thing an adapter is given to
     durably record a real provider job/request ID the moment it has
     one, strictly before any subsequent poll/wait. Appends a
-    PROVIDER_ACKNOWLEDGED receipt event synchronously (event_seq=2,
-    the fixed position immediately after SUBMISSION_ATTEMPT_STARTED --
+    PROVIDER_ACKNOWLEDGED receipt event synchronously at the current
+    tail of the trail (immediately after SUBMISSION_ATTEMPT_STARTED and
+    hypogeum.capability_boundary's own durable consumption-claim event --
     this event, when it happens at all, always happens at exactly this
     point in the sequence). Lease-protected exactly like the boundary-
     entry event it directly follows."""
@@ -989,7 +1002,8 @@ def _make_provider_acknowledgement_recorder(
                 envelope_id=envelope.envelope_id, envelope_version=envelope.envelope_version,
                 authorization_id=envelope.authorization_id, authorization_version=envelope.authorization_version,
                 attempt_id=attempt_id, idempotency_key=envelope.idempotency_key,
-                event_type=EventType.PROVIDER_ACKNOWLEDGED, event_seq=2, at=at,
+                event_type=EventType.PROVIDER_ACKNOWLEDGED,
+                event_seq=len(receipt_store.read_events(execution_id, envelope.idempotency_key)), at=at,
                 provider=envelope.provider, model=envelope.model, provider_operation=envelope.provider_operation,
                 provider_bound_content_sha256=envelope.operation_payload_sha256,
                 max_cost_per_call=envelope.max_cost_per_call, currency=envelope.currency,

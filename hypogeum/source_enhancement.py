@@ -408,6 +408,7 @@ def run_source_enhancement(
     config,
     episode_id: str,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Source Enhancement pipeline stage. Mutates and returns visual_package
@@ -430,10 +431,29 @@ def run_source_enhancement(
     # in production: applying a single global landscape (1920x1080)
     # requirement to portrait Shorts caused MUAPI's AI Video Upscaler's
     # correct 1080x1920 output to be rejected as non-compliant.
+    #
+    # Coverage-fill identity tolerance (2026-08-26 fix): clip_repair_agent
+    # persists extra clips as manifest entries whose scene_id carries an
+    # "__extra<N>" suffix ("sh_short_001_s01__extra1") that has no base
+    # scene row of its own. The bare-scene_id lookup missed every such
+    # entry, so portrait Short extras were re-evaluated against the
+    # landscape requirement and their correct 1080x1920 enhancement output
+    # was rejected after real paid calls. The lookup now strips the suffix
+    # back to the owning base scene.
+    import re as _re
+
     scene_source_type = {
         s.get("scene_id"): s.get("source_type")
         for s in visual_package.get("scenes", [])
     }
+
+    def _resolve_scene_source_type(sid: Optional[str]):
+        if sid is None:
+            return None
+        if sid in scene_source_type:
+            return scene_source_type[sid]
+        base = _re.sub(r"__extra\d+$", "", sid)
+        return scene_source_type.get(base)
 
     assets = visual_package.get("asset_manifest", {}).get("assets", [])
     changed = False
@@ -445,8 +465,11 @@ def run_source_enhancement(
         if clip_path is None or not clip_path.exists():
             continue  # nothing to evaluate — Source Generation/coverage's concern, not this stage's
 
-        source_type = scene_source_type.get(scene_id)
-        if qualify_asset(asset, clip_path, source_type, config, episode_id, log):
+        source_type = _resolve_scene_source_type(scene_id)
+        if qualify_asset(
+            asset, clip_path, source_type, config, episode_id, log,
+            channel_id=channel_id, output_dir=episode_dir,
+        ):
             changed = True
 
     if changed:
@@ -462,6 +485,8 @@ def qualify_asset(
     config,
     episode_id: str,
     log,
+    channel_id: Optional[str] = None,
+    output_dir: Optional[Path] = None,
 ) -> bool:
     """
     The one canonical asset-qualification boundary (2026-08-05). Every
@@ -630,6 +655,8 @@ def qualify_asset(
         episode_id=episode_id,
         scene_id=scene_id,
         log=log,
+        channel_id=channel_id,
+        output_dir=output_dir,
     )
 
     if not result.success:

@@ -146,7 +146,8 @@ class FakeEnhancementProvider(EnhancementProvider):
         self.calls = []
 
     def enhance(self, source_path, dest_path, target_width, target_height,
-                target_resolution_label, config, episode_id, scene_id, log):
+                target_resolution_label, config, episode_id, scene_id, log,
+                channel_id=None, output_dir=None):
         self.calls.append(scene_id)
         if self.fail:
             return EnhancementResult(
@@ -243,6 +244,48 @@ class TestEnhancementSkipped:
         assert se["original_resolution"] == "1920x1080"
         assert se["cost_usd"] is None
         assert provider.calls == []  # never invoked -- zero cost
+
+    def test_short_extra_clip_identity_resolves_parent_source_type(self, tmp_path):
+        """2026-08-26 fix: a coverage-fill extra's scene_id carries an
+        '__extra<N>' suffix with no base scene row of its own. The
+        scene→source_type lookup must strip the suffix back to the owning
+        scene so a portrait Short extra is judged against the PORTRAIT
+        requirement — not the landscape default that made MUAPI's correct
+        1080x1920 output get rejected after real paid calls."""
+        episode_id = "ep_enh_extra_identity"
+        ep_dir = tmp_path
+        # A portrait Short extra clip already at its (portrait) required
+        # resolution: 1080x1920 >= 1080x1920.
+        clip_path = ep_dir / "video" / "sh_short_001" / "sc_sh_short_001_s01__extra1.mp4"
+        _make_clip(clip_path, 1080, 1920)
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_extra", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_extra")
+        vp = {
+            "scenes": [
+                {"scene_id": "sh_short_001_s01", "source_type": "short"},
+            ],
+            "asset_manifest": {
+                "assets": [{
+                    "scene_id": "sh_short_001_s01__extra1",
+                    "asset_id": f"episodes/{episode_id}/video/sh_short_001/sc_sh_short_001_s01__extra1",
+                    "generation_status": "generated",
+                    "model": "veo3.1-lite-text-to-video",
+                    "tier_used": 2,
+                }]
+            },
+        }
+
+        result_vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        asset = result_vp["asset_manifest"]["assets"][0]
+        se = asset["source_enhancement"]
+        # Native-compliant under the SHORT (portrait) requirement: skipped,
+        # provider never invoked — no paid enhancement attempt, no archive.
+        assert se["validation_result"] == "skipped_native_resolution"
+        assert se["required"] is False
+        assert provider.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -693,70 +736,48 @@ class TestCompatibilityFunction:
 # ---------------------------------------------------------------------------
 
 class TestMuapiVideoUpscalerProvider:
-    def test_full_success_flow(self, tmp_path):
+    def test_pre_plan_real_upscale_fails_closed_before_network(self, tmp_path, monkeypatch):
+        """2026-08-28 hardening: a real MUAPI upscale with no compiled
+        Production Plan at the canonical episode dir (PRE_PLAN) fails
+        closed before any reservation or network call. The raw HTTP
+        sequence is no longer a provider method -- it lives only in
+        hypogeum.providers.muapi_upscale_adapter and is reachable only
+        through a gate-minted, persisted-state-verified capability."""
+        import requests as _requests
         from hypogeum.providers.muapi_video_upscaler import MuapiVideoUpscalerProvider
 
+        monkeypatch.setattr(
+            "hypogeum.production_plan.canonical_episode_dir", lambda ep: tmp_path / "episodes" / ep,
+        )
         source = tmp_path / "source.mp4"
         _make_clip(source, 1280, 720)
-        dest = tmp_path / "dest.mp4"
         config = _make_config(
             MUAPI_API_KEY="test-key", MUAPI_BASE_URL="https://api.muapi.ai/api/v1",
             MUAPI_TIMEOUT_SECONDS=30, MUAPI_MAX_POLL_ATTEMPTS=5, MUAPI_POLL_INTERVAL_SECONDS=0,
             MUAPI_DRY_RUN=False,
         )
-
-        upload_resp = MagicMock(status_code=200)
-        upload_resp.json.return_value = {"url": "https://cdn.muapi.ai/outputs/uploaded.mp4"}
-        submit_resp = MagicMock(status_code=200)
-        submit_resp.json.return_value = {"request_id": "req-123", "status": "processing", "cost": {"amount_usd": 0.08}}
-        poll_resp = MagicMock(status_code=200)
-        poll_resp.json.return_value = {"status": "completed", "outputs": ["https://cdn.muapi.ai/outputs/result.mp4"]}
-        download_resp = MagicMock(status_code=200, content=source.read_bytes())
-
-        with patch("hypogeum.providers.muapi_video_upscaler.requests.post",
-                   side_effect=[upload_resp, submit_resp]), \
-             patch("hypogeum.providers.muapi_video_upscaler.requests.get",
-                   side_effect=[poll_resp, download_resp]), \
-             patch("hypogeum.finance.record_cost"):
+        with patch.object(_requests, "post", side_effect=AssertionError("network reached pre-plan")), \
+             patch.object(_requests, "get", side_effect=AssertionError("network reached pre-plan")):
             provider = MuapiVideoUpscalerProvider()
             result = provider.enhance(
-                source_path=source, dest_path=dest,
+                source_path=source, dest_path=tmp_path / "dest.mp4",
                 target_width=1920, target_height=1080, target_resolution_label="1080p",
                 config=config, episode_id="ep_x", scene_id="s01", log=MagicMock(),
-            )
-
-        assert result.success is True
-        assert result.output_path == dest
-        assert result.cost_usd == 0.08
-        assert dest.exists()
-        assert provider.name == "muapi"
-        assert provider.model == "ai-video-upscaler"
-
-    def test_submit_http_error_reports_failure(self, tmp_path):
-        from hypogeum.providers.muapi_video_upscaler import MuapiVideoUpscalerProvider
-
-        source = tmp_path / "source.mp4"
-        _make_clip(source, 1280, 720)
-        dest = tmp_path / "dest.mp4"
-        config = _make_config(MUAPI_API_KEY="test-key", MUAPI_BASE_URL="https://api.muapi.ai/api/v1",
-                               MUAPI_TIMEOUT_SECONDS=30, MUAPI_DRY_RUN=False)
-
-        upload_resp = MagicMock(status_code=200)
-        upload_resp.json.return_value = {"url": "https://cdn.muapi.ai/outputs/uploaded.mp4"}
-        submit_resp = MagicMock(status_code=500, text="internal error")
-
-        with patch("hypogeum.providers.muapi_video_upscaler.requests.post",
-                   side_effect=[upload_resp, submit_resp]):
-            provider = MuapiVideoUpscalerProvider()
-            result = provider.enhance(
-                source_path=source, dest_path=dest,
-                target_width=1920, target_height=1080, target_resolution_label="1080p",
-                config=config, episode_id="ep_x", scene_id="s01", log=MagicMock(),
+                channel_id="test_channel",
             )
 
         assert result.success is False
-        assert "submit_http_500" in result.failure_reason
-        assert not dest.exists()
+        assert "pre_plan_unauthorized" in result.failure_reason
+        assert provider.name == "muapi"
+        assert provider.model == "ai-video-upscaler"
+
+    def test_no_provider_method_reaches_raw_http(self, tmp_path):
+        """The provider exposes no method that reaches the MUAPI network
+        boundary -- the removed _execute_upscale_http() is gone for good."""
+        from hypogeum.providers.muapi_video_upscaler import MuapiVideoUpscalerProvider
+
+        provider = MuapiVideoUpscalerProvider()
+        assert not hasattr(provider, "_execute_upscale_http")
 
     def test_dry_run_produces_placeholder_at_target_resolution(self, tmp_path):
         from hypogeum.providers.muapi_video_upscaler import MuapiVideoUpscalerProvider

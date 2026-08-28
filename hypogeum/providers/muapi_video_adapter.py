@@ -37,6 +37,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+import hypogeum.capability_boundary as capability_boundary
 from hypogeum.providers.fake_provider_adapter import (
     AdapterInvocationCapability,
     AdapterResult,
@@ -128,30 +129,23 @@ class MuapiVideoAdapter:
         if not isinstance(capability, AdapterInvocationCapability):
             raise InvalidCapabilityError(f"expected AdapterInvocationCapability, got {type(capability)!r}")
 
-        recomputed = compute_capability_checksum(capability)
-        if recomputed != capability.capability_checksum:
-            raise InvalidCapabilityError(
-                f"capability {capability.capability_id!r} checksum mismatch: "
-                f"stored {capability.capability_checksum!r} != recomputed {recomputed!r}"
-            )
-        if capability.capability_id in self._consumed_capability_ids:
-            raise CapabilityAlreadyConsumedError(capability.capability_id)
-        if capability.operation_payload_schema_version != SCHEMA_VERSION:
-            raise InvalidCapabilityError(
-                f"MuapiVideoAdapter only accepts {SCHEMA_VERSION!r} payloads, "
-                f"got {capability.operation_payload_schema_version!r}"
-            )
+        ctx = capability_boundary.verify_and_consume_capability(
+            capability, expected_schema_version=SCHEMA_VERSION,
+            consumed_cache=self._consumed_capability_ids,
+        )
 
         self.invocation_count += 1
-        self._consumed_capability_ids.add(capability.capability_id)
         self.received_capabilities.append(capability)
 
-        return self._invoke_real(capability, on_provider_acknowledged=on_provider_acknowledged)
+        return self._invoke_real(ctx, on_provider_acknowledged=on_provider_acknowledged)
 
     def _invoke_real(
-        self, capability: AdapterInvocationCapability,
+        self, ctx: "capability_boundary.VerifiedInvocationContext",
         on_provider_acknowledged: "Callable[..., None] | None" = None,
     ) -> AdapterResult:
+        ctx.assert_live()
+        ctx.claim_io_entry()  # durable atomic provider-I/O entry gate
+        capability = ctx.capability
         # Local import: keeps this adapter module free of a hard,
         # module-load-time dependency on hypogeum.muapi's own (much
         # larger) import surface, and avoids any import-cycle risk

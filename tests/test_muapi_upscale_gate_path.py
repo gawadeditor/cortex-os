@@ -54,6 +54,91 @@ def _make_clip(path: Path, width: int, height: int, duration: float = 1.0) -> No
     )
 
 
+def _persist_boundary_plan(db_path, tmp_path, *, channel_id="test_channel",
+                           episode_id="ep_gate_test", ceiling=25.0,
+                           monkeypatch=None):
+    """2026-08-26 plan-boundary rule: every paid enhancement with a
+    channel_id first reserves the verified persisted Production Plan's
+    weekly maximum. Tests exercising enhance(channel_id=...) therefore need
+    a real channel profile (with a weekly ceiling) plus an integrity-
+    verifiable persisted plan in the episode dir they hand to enhance().
+    Returns the episode dir to pass as enhance(output_dir=...).
+
+    monkeypatch (2026-08-27): when supplied, classify_plan_lifecycle()'s
+    canonical episode dir is pointed at this tmp episode dir so the tmp
+    plan is seen as canonical (not a misdirected path)."""
+    from dataclasses import asdict
+    import hypogeum.db as db
+    from hypogeum.production_plan import (
+        PLAN_SCHEMA_VERSION, ROLE_REQUIRED, PlannedAsset,
+        ProductionPlan, payload_content_hash, persist_production_plan,
+        prompt_fingerprint,
+    )
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(
+            "hypogeum.production_plan.canonical_episode_dir",
+            lambda ep, _root=tmp_path: _root / "episodes" / ep,
+        )
+
+    db.initialize_schema(db_path)
+    if channel_config.get_channel_profile(channel_id, db_path=db_path) is None:
+        channel_config.create_channel_profile(
+            channel_id=channel_id, name="Gate Path Channel", db_path=db_path,
+        )
+    if channel_config.get_channel_operations_profile(channel_id, db_path=db_path) is None:
+        channel_config.create_channel_operations_profile(
+            channel_id=channel_id, channel_name="Gate Path Channel",
+            timezone="UTC", weekly_video_budget_usd=float(ceiling),
+            db_path=db_path,
+        )
+
+    episode_dir = tmp_path / "episodes" / episode_id
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    prompt = "cinematic shot"
+    asset = PlannedAsset(
+        deliverable_id="main_episode", beat_id="b_001", shot_id="b_001__primary",
+        asset_id=f"asset_{episode_id}_s01", scene_id="s01", short_id=None,
+        role=ROLE_REQUIRED, prompt=prompt, prompt_fingerprint=prompt_fingerprint(prompt),
+        shot_signature="", aspect_ratio="16:9", requested_duration_seconds=8.0,
+        conservative_usable_duration_seconds=8.0, provider="muapi",
+        model="veo3.1-lite-text-to-video", unit_price_usd=0.15,
+        enhancement_price_usd=0.05, max_chargeable_attempts=1,
+    )
+    kwargs = dict(
+        schema_version=PLAN_SCHEMA_VERSION,
+        channel_id=channel_id,
+        episode_id=episode_id,
+        deliverable_contract_id="contract_v1",
+        deliverable_ids=["main_episode"],
+        thumbnail_main_candidate_count=3,
+        thumbnail_short_candidate_cap=3,
+        thumbnail_attempts_per_candidate=1,
+        thumbnail_unit_price_usd=0.09,
+        thumbnail_cost_normal_usd=0.36,
+        thumbnail_cost_maximum_usd=1.08,
+        narration_char_count=0,
+        narration_price_per_char_usd=0.0,
+        narration_cost_usd=0.0,
+        narration_is_realized=False,
+        music_section_count=0,
+        music_seconds_per_section=120.0,
+        music_price_per_second_usd=0.0,
+        music_cost_usd=0.0,
+        planning_call_estimate_usd=0.05,
+        enhancement_cost_maximum_usd=0.05,
+        normal_expected_cost_usd=10.00,
+        maximum_bounded_cost_usd=10.00,
+    )
+    payload = {**kwargs, "assets": [asdict(asset)]}
+    plan = ProductionPlan(
+        assets=[asset], content_hash=payload_content_hash(payload),
+        compiled_at="2026-08-26T00:00:00+00:00", **kwargs,
+    )
+    persist_production_plan(plan, episode_dir)
+    return episode_dir
+
+
 @pytest.fixture(autouse=True)
 def _reset_adapter_cache():
     adapter_registry.reset_adapter_instance_cache()
@@ -135,41 +220,66 @@ def _register_grant(priv, db_path, *, max_calls=5, max_total_spend=Decimal("10.0
     )
 
 
-class TestNoGrantLeavesLegacyPathUnaffected:
+class TestNoGrantFailsClosed:
 
-    def test_channel_id_supplied_but_no_grant_uses_legacy_path(self, tmp_path):
-        """Even with channel_id explicitly supplied, if no grant
-        resolves (the real 'hypogeum' case, always, until Enforcement
-        Cutover) the call falls straight through to the unchanged
-        legacy upload/submit/poll/download sequence -- proven here via
-        the same HTTP mocks tests/test_source_enhancement.py already
-        uses for the legacy path."""
+    def test_channel_id_supplied_but_no_grant_fails_closed_zero_network(self, tmp_path, monkeypatch):
+        """2026-08-28 hardening: the post-plan no-grant direct-HTTP legacy
+        path was REMOVED. A plan-level weekly reservation is financial
+        capacity, never provider-execution authorization. With a channel_id
+        supplied but no active grant, enhance() fails closed with zero
+        network calls -- returned as a failed EnhancementResult, never
+        raised (EnhancementProvider.enhance()'s no-raise contract)."""
+        import hypogeum.db as db
+        import requests as _requests
+        db_path = tmp_path / "legacy.db"
+        episode_dir = _persist_boundary_plan(
+            db_path, tmp_path, channel_id="nobody_has_a_grant_for_this_channel",
+            monkeypatch=monkeypatch,
+        )
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
         config = make_config()
         source = tmp_path / "source.mp4"
         _make_clip(source, 1280, 720)
         dest = tmp_path / "dest.mp4"
 
-        upload_resp = MagicMock(status_code=200)
-        upload_resp.json.return_value = {"url": "https://cdn.muapi.ai/outputs/uploaded.mp4"}
-        submit_resp = MagicMock(status_code=200)
-        submit_resp.json.return_value = {"request_id": "req-legacy", "status": "processing", "cost": {"amount_usd": 0.08}}
-        poll_resp = MagicMock(status_code=200)
-        poll_resp.json.return_value = {"status": "completed", "outputs": ["https://cdn.muapi.ai/outputs/result.mp4"]}
-        download_resp = MagicMock(status_code=200, content=source.read_bytes())
-
-        with patch("hypogeum.providers.muapi_video_upscaler.requests.post", side_effect=[upload_resp, submit_resp]), \
-             patch("hypogeum.providers.muapi_video_upscaler.requests.get", side_effect=[poll_resp, download_resp]), \
-             patch("hypogeum.finance.record_cost"):
+        with patch.object(_requests, "post", side_effect=AssertionError("network reached with no grant")), \
+             patch.object(_requests, "get", side_effect=AssertionError("network reached with no grant")):
             provider = MuapiVideoUpscalerProvider()
             result = provider.enhance(
                 source_path=source, dest_path=dest, target_width=1920, target_height=1080,
                 target_resolution_label="1080p", config=config, episode_id="ep_gate_test", scene_id="s01",
                 log=MagicMock(), channel_id="nobody_has_a_grant_for_this_channel",
+                output_dir=episode_dir,
             )
 
         assert isinstance(result, EnhancementResult)
-        assert result.success is True
-        assert result.request_id == "req-legacy"
+        assert result.success is False
+        assert "no_active_grant" in result.failure_reason
+
+    def test_pre_plan_real_upscale_fails_closed(self, tmp_path, monkeypatch):
+        """No compiled Production Plan at the canonical episode dir ->
+        PRE_PLAN -> fail closed before any reservation or network. There
+        is no authorized pre-plan real-network upscale path."""
+        import hypogeum.db as db
+        import requests as _requests
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", tmp_path / "empty.db")
+        monkeypatch.setattr(
+            "hypogeum.production_plan.canonical_episode_dir",
+            lambda ep: tmp_path / "episodes" / ep,
+        )
+        config = make_config()
+        source = tmp_path / "source.mp4"
+        _make_clip(source, 1280, 720)
+        with patch.object(_requests, "post", side_effect=AssertionError("network reached pre-plan")), \
+             patch.object(_requests, "get", side_effect=AssertionError("network reached pre-plan")):
+            result = MuapiVideoUpscalerProvider().enhance(
+                source_path=source, dest_path=tmp_path / "dest.mp4", target_width=1920, target_height=1080,
+                target_resolution_label="1080p", config=config, episode_id="ep_no_plan", scene_id="s01",
+                log=MagicMock(), channel_id="test_channel",
+            )
+        assert result.success is False
+        assert "pre_plan_unauthorized" in result.failure_reason
 
 
 class TestGrantDerivedGatePath:
@@ -186,6 +296,10 @@ class TestGrantDerivedGatePath:
         grant = _register_grant(priv, db_path)
         assert grant.status == "active"
 
+        # Plan-level weekly reservation (2026-08-26 boundary rule): the
+        # reservation precedes the gate path too.
+        episode_dir = _persist_boundary_plan(db_path, tmp_path, monkeypatch=monkeypatch)
+
         # _enhance_via_gate() resolves everything against the
         # PRODUCTION db_path internally (get_connection()/authority
         # calls with no db_path override, exactly as production code
@@ -201,14 +315,15 @@ class TestGrantDerivedGatePath:
         poll_resp.json.return_value = {"status": "completed", "outputs": ["https://cdn.muapi.ai/outputs/result.mp4"]}
         download_resp = MagicMock(status_code=200, content=source.read_bytes())
 
-        with patch("hypogeum.providers.muapi_video_upscaler.requests.post", side_effect=[upload_resp, submit_resp]), \
-             patch("hypogeum.providers.muapi_video_upscaler.requests.get", side_effect=[poll_resp, download_resp]), \
+        import requests as _requests
+        with patch.object(_requests, "post", side_effect=[upload_resp, submit_resp]), \
+             patch.object(_requests, "get", side_effect=[poll_resp, download_resp]), \
              patch("hypogeum.finance.record_cost"):
             provider = MuapiVideoUpscalerProvider()
             result = provider.enhance(
                 source_path=source, dest_path=dest, target_width=1920, target_height=1080,
                 target_resolution_label="1080p", config=config, episode_id="ep_gate_test", scene_id="s01",
-                log=MagicMock(), channel_id="test_channel",
+                log=MagicMock(), channel_id="test_channel", output_dir=episode_dir,
             )
 
         assert result.success is True, result.failure_reason
@@ -224,17 +339,19 @@ class TestGrantDerivedGatePath:
         _make_clip(source, 1280, 720)
         dest = tmp_path / "dest.mp4"
         import hypogeum.db as db
+        import requests as _requests
         db.initialize_schema(db_path)
         _register_grant(priv, db_path, max_calls=0, max_total_spend=Decimal("0.00"))
+        episode_dir = _persist_boundary_plan(db_path, tmp_path, monkeypatch=monkeypatch)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
 
-        with patch("hypogeum.providers.muapi_video_upscaler.requests.post") as mock_post, \
-             patch("hypogeum.providers.muapi_video_upscaler.requests.get") as mock_get:
+        with patch.object(_requests, "post") as mock_post, \
+             patch.object(_requests, "get") as mock_get:
             provider = MuapiVideoUpscalerProvider()
             result = provider.enhance(
                 source_path=source, dest_path=dest, target_width=1920, target_height=1080,
                 target_resolution_label="1080p", config=config, episode_id="ep_gate_test", scene_id="s01",
-                log=MagicMock(), channel_id="test_channel",
+                log=MagicMock(), channel_id="test_channel", output_dir=episode_dir,
             )
             assert mock_post.called is False
             assert mock_get.called is False
@@ -265,6 +382,7 @@ class TestLegacyGrantStillRoutesThroughGate:
             provider=PROVIDER_NAME, model=MODEL_NAME, provider_operation="upscale.video",
             max_cost_per_call="0.10",
         )
+        episode_dir = _persist_boundary_plan(db_path, tmp_path, monkeypatch=monkeypatch)
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
 
         class _GateProbe(Exception):
@@ -279,8 +397,9 @@ class TestLegacyGrantStillRoutesThroughGate:
         monkeypatch.setattr(MuapiVideoUpscalerProvider, "_enhance_via_gate", _gate_probe)
         source = tmp_path / "source_legacy.mp4"
         _make_clip(source, 1280, 720)
-        with patch("hypogeum.providers.muapi_video_upscaler.requests.post", side_effect=_LegacyProbe()), \
-             patch("hypogeum.providers.muapi_video_upscaler.requests.get", side_effect=_LegacyProbe()), \
+        import requests as _requests
+        with patch.object(_requests, "post", side_effect=_LegacyProbe()), \
+             patch.object(_requests, "get", side_effect=_LegacyProbe()), \
              patch("hypogeum.finance.record_cost"):
             with pytest.raises(_GateProbe):
                 MuapiVideoUpscalerProvider().enhance(
@@ -289,4 +408,5 @@ class TestLegacyGrantStillRoutesThroughGate:
                     target_resolution_label="1080p", config=config,
                     episode_id="ep_gate_test", scene_id="s01",
                     log=MagicMock(), channel_id="test_channel",
+                    output_dir=episode_dir,
                 )

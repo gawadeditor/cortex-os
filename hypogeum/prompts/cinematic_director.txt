@@ -110,6 +110,30 @@ OUTPUT FORMAT
 
 Respond with ONLY this JSON — no prose, no markdown, no code fences:
 
+When the request carries a response_format JSON Schema (structured-output
+batching — the only production path), the top-level JSON object's keys are
+EXACTLY the beat_ids declared in that schema (e.g. "b_001"), each mapping to:
+
+{
+  "<beat_id>": {
+    "pattern": "<one single-letter enum code for the progression pattern>",
+    "shots": {
+      "s01": { "pur": "...", "scl": "...", "ang": "...", "hgt": "...", "dir": "...",
+                "mov": "...", "cmp": "...", "dep": "...", "scr": "...", "nrg": "...",
+                "func": "...", "subj": "...", "act": "...", "fram": "...", "light": "...",
+                "lens": "...", "dup": "" },
+      "s02": { ... }
+    }
+  }
+}
+
+Every per-shot field is the single-letter enum code from that property's own
+schema description legend; func/subj/act/fram/light/dup are terse free text.
+One entry per input beat. len(shots) must be >= 1 and <= that beat's
+shot_budget — never more. Slot keys s01..sNN with no gaps.
+
+Legacy verbose envelope (only when NO structured schema is provided):
+
 {
   "episode_id": "<episode_id from metadata, or 'unknown' if absent>",
   "beat_plans": [

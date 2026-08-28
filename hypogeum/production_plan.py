@@ -197,6 +197,7 @@ import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -1053,6 +1054,94 @@ def _plan_path(episode_id: str, output_dir: Path) -> Path:
     return Path(output_dir) / f"production_plan_{episode_id}.json"
 
 
+def canonical_episode_dir(episode_id: str) -> Path:
+    """The canonical on-disk working directory for an episode:
+    <repo>/.hypogeum-assets/episodes/<episode_id>/. This is where
+    persist_production_plan() writes when no explicit output_dir is given,
+    and the fallback location every path-consistency check probes."""
+    return (
+        Path(__file__).resolve().parent.parent
+        / ".hypogeum-assets" / "episodes" / episode_id
+    )
+
+
+class PlanLifecycle(str, Enum):
+    """Authoritative lifecycle/path classification for a paid boundary.
+
+    The CANONICAL episode directory (canonical_episode_dir(), resolved
+    independently of any caller value) is the SOLE authority for whether a
+    verified Production Plan exists and where it lives.
+
+    PRE_PLAN         — no Production Plan file exists at the canonical
+                       episode directory. A boundary running here is
+                       genuinely pre-plan and is outside the plan-level
+                       weekly reservation guarantee (that is the separate
+                       pre-production closure's responsibility).
+    POST_PLAN        — a Production Plan file exists at the canonical
+                       directory AND the caller-supplied output_dir IS the
+                       canonical directory (or output_dir is None). The
+                       boundary MUST establish/replay the plan-level weekly
+                       reservation.
+    INCONSISTENT_PATH — a canonical Production Plan exists but the
+                       caller-supplied output_dir is a DIFFERENT directory
+                       (whatever it contains -- empty, a different plan,
+                       or even a byte-identical same-hash copy), OR a plan
+                       file exists only at a non-canonical supplied dir.
+                       Closure 0 has no authoritative alias / relocation
+                       record system, so a same content_hash alone is NOT
+                       sufficient to accept a non-canonical directory. The
+                       boundary MUST fail closed before any provider I/O.
+    """
+
+    PRE_PLAN = "pre_plan"
+    POST_PLAN = "post_plan"
+    INCONSISTENT_PATH = "inconsistent_path"
+
+
+def classify_plan_lifecycle(
+    episode_id: str, output_dir: Optional[Path] = None
+) -> "PlanLifecycle":
+    """
+    The single authoritative pre-plan / post-plan / misdirected-path
+    classifier for every paid boundary. Resolves the canonical episode
+    directory (canonical_episode_dir()) INDEPENDENTLY of output_dir, so a
+    caller cannot obtain a pre-plan exemption -- or substitute a copied
+    plan file -- by supplying an empty or wrong directory.
+
+    The canonical directory is the ONLY accepted plan location. A
+    non-canonical supplied output_dir is INCONSISTENT_PATH regardless of
+    what it contains (Closure 0 has no alias/relocation authority). Tests
+    that need a tmp directory to BE canonical monkeypatch
+    canonical_episode_dir() -- that legitimately relocates the authority
+    for the test and is unrelated to a production alias.
+
+    See PlanLifecycle for the exact meaning of each result.
+    """
+    canon = canonical_episode_dir(episode_id)
+    canon_has_plan = _plan_path(episode_id, canon).exists()
+
+    supplied_dir = canon if output_dir is None else Path(output_dir)
+    try:
+        same_dir = supplied_dir.resolve() == canon.resolve()
+    except OSError:
+        same_dir = str(supplied_dir) == str(canon)
+
+    if not canon_has_plan:
+        # No canonical plan => genuine pre-plan, UNLESS a plan file exists
+        # only at a non-canonical supplied dir (a plan that is not where it
+        # belongs -- a misdirected path, not an exemption).
+        if not same_dir and _plan_path(episode_id, supplied_dir).exists():
+            return PlanLifecycle.INCONSISTENT_PATH
+        return PlanLifecycle.PRE_PLAN
+
+    # A canonical plan exists. The canonical directory is the only
+    # authoritative location: accept the supplied dir ONLY if it IS the
+    # canonical dir. A same-hash copy elsewhere is still a misdirected path.
+    if same_dir:
+        return PlanLifecycle.POST_PLAN
+    return PlanLifecycle.INCONSISTENT_PATH
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
     """
     Atomic write: write to a sibling temp file on the SAME filesystem,
@@ -1086,7 +1175,12 @@ def _atomic_write_text(path: Path, content: str) -> None:
         pass
 
 
-def persist_production_plan(plan: ProductionPlan, output_dir: Path) -> Path:
+def persist_production_plan(
+    plan: ProductionPlan,
+    output_dir: Path,
+    *,
+    supersede: bool = False,
+) -> Path:
     """
     Write the plan once, keyed by its own deterministic content_hash, via
     atomic temp-file + fsync + os.replace + parent-directory fsync (never
@@ -1094,13 +1188,27 @@ def persist_production_plan(plan: ProductionPlan, output_dir: Path) -> Path:
     to overwrite an already-persisted plan whose content_hash differs.
     Writing the identical plan again (same hash) is a no-op that returns
     the existing path unchanged.
+
+    supersede (2026-08-26): when True and a DIFFERENT verified plan already
+    exists, the old file is preserved verbatim as
+    production_plan_{episode_id}.superseded_{old_hash[:12]}.json — an
+    immutable, inspectable audit artifact — before the replacement is
+    written. This is the ONLY sanctioned replacement path: it exists for
+    the resume-time recompilation whose declared asset set legitimately
+    changed (coverage-plan correction), never for silently rewriting an
+    authorized plan.
     """
     path = _plan_path(plan.episode_id, Path(output_dir))
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if existing.get("content_hash") == plan.content_hash:
             return path
-        raise ProductionPlanImmutabilityError(plan.episode_id, existing.get("content_hash"), plan.content_hash)
+        if not supersede:
+            raise ProductionPlanImmutabilityError(plan.episode_id, existing.get("content_hash"), plan.content_hash)
+        superseded_path = path.with_name(
+            f"{path.stem}.superseded_{str(existing.get('content_hash'))[:12]}.json"
+        )
+        _atomic_write_text(superseded_path, path.read_text(encoding="utf-8"))
     _atomic_write_text(path, json.dumps(plan.to_dict(), indent=2, ensure_ascii=False))
     return path
 

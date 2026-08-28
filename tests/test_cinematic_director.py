@@ -63,6 +63,29 @@ from hypogeum.agents.cinematic_director import (
 from hypogeum.schemas import SchemaError, validate
 
 
+@pytest.fixture(autouse=True)
+def _noop_plan_weekly_reservation(monkeypatch):
+    """2026-08-26 plan-boundary rule: regenerate_cinematic_coverage_plan()
+    now establishes/replays the verified persisted Production Plan's weekly
+    reservation before any LLM call. These tests exercise planning
+    mechanics with tmp dirs and no real channel/plan — the boundary is
+    patched to a recorder no-op here; the gating behavior itself (real
+    helper, real ledger, ordering proof, denial fail-closed) is covered in
+    TestPlanReservationGating below and
+    tests/test_plan_reservation_boundaries.py."""
+    import hypogeum.plan_reservation as pr
+    import hypogeum.plan_reservation as _pr_mod
+    global _REAL_ENSURE_PLAN_WEEKLY
+    _REAL_ENSURE_PLAN_WEEKLY = _pr_mod.ensure_verified_plan_weekly_reservation
+
+    calls = []
+    monkeypatch.setattr(
+        pr, "ensure_verified_plan_weekly_reservation",
+        lambda **kw: calls.append(kw) or None,
+    )
+    yield calls
+
+
 def _make_config(**overrides) -> SimpleNamespace:
     base = dict(
         CINEMATIC_SECONDS_PER_SHOT=10.0,
@@ -227,6 +250,61 @@ class TestRunCinematicDirector:
         mock_cc.assert_not_called()
         assert result == existing
 
+    def test_underprovisioned_checkpoint_regenerates_instead_of_resuming(self, tmp_path):
+        """2026-08-26 resume guard: a persisted plan whose beats carry fewer
+        shots than compute_shot_budget(measured_duration) — the exact legacy
+        one-shot-per-beat state that starved Assembly's coverage fill on
+        ep_af078f34 — is NEVER resumed verbatim. The duration-aware
+        regeneration path must run instead (LLM called), and the installed
+        replacement must be budget-compliant."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = _make_small_narration_package()
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        # Stale: every beat truncated to ONE shot (b_002 needs 3 for 20s).
+        stale = {
+            "episode_id": "ep_regen",
+            "beat_plans": [
+                _valid_beat_plan("b_001", 8.0, 1),
+                _valid_beat_plan("b_002", 20.0, 1),
+                _valid_beat_plan("b_s01", 8.0, 1),
+            ],
+        }
+        ckpt.write_text(json.dumps(stale))
+
+        with patch("hypogeum.openrouter.call_claude",
+                   return_value=_make_call_result(json.dumps(_matching_structured_response()))):
+            result = run_cinematic_director(
+                script_package=sp, narration_package=np, visual_package=vp,
+                episode_id="ep_regen", config=cfg, output_dir=tmp_path,
+            )
+        validate("cinematic_coverage_plan", result)
+        by_beat = {bp["beat_id"]: bp for bp in result["beat_plans"]}
+        assert len(by_beat["b_002"]["shots"]) >= 3  # budget-compliant now
+        # The stale file was superseded on disk.
+        assert json.loads(ckpt.read_text()) == result
+
+    def test_unverifiable_narration_on_resume_keeps_legacy_verbatim_resume(self, tmp_path):
+        """A resume whose narration package cannot be measured keeps the
+        prior verbatim-resume behavior (it could not regenerate either);
+        no LLM call, checkpoint returned as-is."""
+        cfg = _make_config()
+        sp = _make_small_script_package()
+        np = {"narration_segments": []}  # incomplete -> unverifiable
+        vp = _make_small_visual_package()
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        existing = _matching_candidate_plan()
+        ckpt.write_text(json.dumps(existing))
+
+        with patch("hypogeum.openrouter.call_claude") as mock_cc:
+            result = run_cinematic_director(
+                script_package=sp, narration_package=np, visual_package=vp,
+                episode_id="ep_regen", config=cfg, output_dir=tmp_path,
+            )
+        mock_cc.assert_not_called()
+        assert result == existing
+
     def test_llm_failure_raises_instead_of_falling_back_to_minimal_plan(self, tmp_path):
         """The old duration-blind _minimal_pass_through() single-shot-per-beat
         fallback is gone entirely -- this is the exact ep_af078f34 root
@@ -264,8 +342,11 @@ class TestRunCinematicDirector:
                     episode_id="ep_regen", config=cfg, output_dir=tmp_path,
                 )
         assert exc_info.value.attempts == 3
-        # One call_claude invocation per attempt in this 1-batch fixture.
-        assert mock_cc.call_count == 3
+        # One call_claude invocation per batch per attempt; in this 1-batch
+        # fixture the 2026-08-26 bounded PER-BATCH retry multiplies in:
+        # 3 outer attempts x (1 + CINEMATIC_DIRECTOR_MAX_RETRIES=2) inner
+        # batch tries = 9 calls. Still finite, never silently degraded.
+        assert mock_cc.call_count == 3 * (1 + cfg.CINEMATIC_DIRECTOR_MAX_RETRIES)
 
     def test_transient_failure_then_success_recovers_within_bound(self, tmp_path):
         """A transient failure on attempt 1 that succeeds on attempt 2 must
@@ -2104,6 +2185,10 @@ def _count_schema_properties(node, depth_box, depth=0):
     return req, opt, union
 
 
+# request_bytes re-pinned 2026-08-26 (+1142 B): cinematic_director.txt's
+# OUTPUT FORMAT section now documents the structured batch envelope
+# (top-level beat_id keys) that build_structured_coverage_plan_schema()
+# has always demanded -- prompt/schema contract repair, see that module.
 # Exact, pinned expected values for every one of the 25 real ep_f3619022
 # batches under the 6-slot ceiling (reduced 25 -> 12 -> 6, 2026-08-09,
 # after live batches at both 25 and 12 slots were each rejected as "Schema
@@ -2113,99 +2198,99 @@ _PINNED_BATCH_MEASUREMENTS = [
     {"batch_index": 1, "beat_ids": ["b_001", "b_002"],
      "main_beats": ["b_001", "b_002"], "main_slots": 6,
      "short_beats": [], "short_slots": 0, "total_slots": 6,
-     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2749,
+     "schema_bytes": 4110, "request_bytes": 13203, "resp_chars": 2749,
      "max_tokens": 3000, "required_props": 29},
     {"batch_index": 2, "beat_ids": ["b_003", "b_004"],
      "main_beats": ["b_003", "b_004"], "main_slots": 6,
      "short_beats": [], "short_slots": 0, "total_slots": 6,
-     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2626,
+     "schema_bytes": 4110, "request_bytes": 13203, "resp_chars": 2626,
      "max_tokens": 3000, "required_props": 29},
     {"batch_index": 3, "beat_ids": ["b_005", "b_006"],
      "main_beats": ["b_005", "b_006"], "main_slots": 6,
      "short_beats": [], "short_slots": 0, "total_slots": 6,
-     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2685,
+     "schema_bytes": 4110, "request_bytes": 13203, "resp_chars": 2685,
      "max_tokens": 3000, "required_props": 29},
     {"batch_index": 4, "beat_ids": ["b_007", "b_008"],
      "main_beats": ["b_007", "b_008"], "main_slots": 4,
      "short_beats": [], "short_slots": 0, "total_slots": 4,
-     "schema_bytes": 4030, "request_bytes": 11981, "resp_chars": 1760,
+     "schema_bytes": 4030, "request_bytes": 13123, "resp_chars": 1760,
      "max_tokens": 3000, "required_props": 27},
     {"batch_index": 5, "beat_ids": ["b_009", "b_010"],
      "main_beats": ["b_009", "b_010"], "main_slots": 6,
      "short_beats": [], "short_slots": 0, "total_slots": 6,
-     "schema_bytes": 4110, "request_bytes": 12061, "resp_chars": 2681,
+     "schema_bytes": 4110, "request_bytes": 13203, "resp_chars": 2681,
      "max_tokens": 3000, "required_props": 29},
     {"batch_index": 6, "beat_ids": ["b_011"],
      "main_beats": ["b_011"], "main_slots": 5,
      "short_beats": [], "short_slots": 0, "total_slots": 5,
-     "schema_bytes": 3589, "request_bytes": 11494, "resp_chars": 2308,
+     "schema_bytes": 3589, "request_bytes": 12636, "resp_chars": 2308,
      "max_tokens": 3000, "required_props": 25},
     {"batch_index": 7, "beat_ids": ["b_012", "b_013"],
      "main_beats": ["b_012", "b_013"], "main_slots": 5,
      "short_beats": [], "short_slots": 0, "total_slots": 5,
-     "schema_bytes": 4070, "request_bytes": 12021, "resp_chars": 2159,
+     "schema_bytes": 4070, "request_bytes": 13163, "resp_chars": 2159,
      "max_tokens": 3000, "required_props": 28},
     {"batch_index": 8, "beat_ids": ["b_014"],
      "main_beats": ["b_014"], "main_slots": 5,
      "short_beats": [], "short_slots": 0, "total_slots": 5,
-     "schema_bytes": 3589, "request_bytes": 11494, "resp_chars": 2182,
+     "schema_bytes": 3589, "request_bytes": 12636, "resp_chars": 2182,
      "max_tokens": 3000, "required_props": 25},
     {"batch_index": 9, "beat_ids": ["b_015"],
      "main_beats": ["b_015"], "main_slots": 4,
      "short_beats": [], "short_slots": 0, "total_slots": 4,
-     "schema_bytes": 3549, "request_bytes": 11454, "resp_chars": 1782,
+     "schema_bytes": 3549, "request_bytes": 12596, "resp_chars": 1782,
      "max_tokens": 3000, "required_props": 24},
     {"batch_index": 10, "beat_ids": ["b_016", "b_017"],
      "main_beats": ["b_016", "b_017"], "main_slots": 6,
      "short_beats": [], "short_slots": 0, "total_slots": 6,
-     "schema_bytes": 4110, "request_bytes": 12062, "resp_chars": 2747,
+     "schema_bytes": 4110, "request_bytes": 13204, "resp_chars": 2747,
      "max_tokens": 3000, "required_props": 29},
     {"batch_index": 11, "beat_ids": ["b_018", "b_019"],
      "main_beats": ["b_018", "b_019"], "main_slots": 6,
      "short_beats": [], "short_slots": 0, "total_slots": 6,
-     "schema_bytes": 4110, "request_bytes": 12062, "resp_chars": 2621,
+     "schema_bytes": 4110, "request_bytes": 13204, "resp_chars": 2621,
      "max_tokens": 3000, "required_props": 29},
     {"batch_index": 12, "beat_ids": ["b_020", "b_021"],
      "main_beats": ["b_020", "b_021"], "main_slots": 5,
      "short_beats": [], "short_slots": 0, "total_slots": 5,
-     "schema_bytes": 4070, "request_bytes": 12022, "resp_chars": 2166,
+     "schema_bytes": 4070, "request_bytes": 13164, "resp_chars": 2166,
      "max_tokens": 3000, "required_props": 28},
     {"batch_index": 13, "beat_ids": ["b_022"],
      "main_beats": ["b_022"], "main_slots": 4,
      "short_beats": [], "short_slots": 0, "total_slots": 4,
-     "schema_bytes": 3549, "request_bytes": 11455, "resp_chars": 1780,
+     "schema_bytes": 3549, "request_bytes": 12597, "resp_chars": 1780,
      "max_tokens": 3000, "required_props": 24},
     {"batch_index": 14, "beat_ids": ["b_023"],
      "main_beats": ["b_023"], "main_slots": 4,
      "short_beats": [], "short_slots": 0, "total_slots": 4,
-     "schema_bytes": 3549, "request_bytes": 11455, "resp_chars": 1782,
+     "schema_bytes": 3549, "request_bytes": 12597, "resp_chars": 1782,
      "max_tokens": 3000, "required_props": 24},
     {"batch_index": 15, "beat_ids": ["b_024", "b_025"],
      "main_beats": ["b_024", "b_025"], "main_slots": 5,
      "short_beats": [], "short_slots": 0, "total_slots": 5,
-     "schema_bytes": 4070, "request_bytes": 12022, "resp_chars": 2341,
+     "schema_bytes": 4070, "request_bytes": 13164, "resp_chars": 2341,
      "max_tokens": 3000, "required_props": 28},
     {"batch_index": 16, "beat_ids": ["b_026"],
      "main_beats": ["b_026"], "main_slots": 3,
      "short_beats": [], "short_slots": 0, "total_slots": 3,
-     "schema_bytes": 3509, "request_bytes": 11415, "resp_chars": 1247,
+     "schema_bytes": 3509, "request_bytes": 12557, "resp_chars": 1247,
      "max_tokens": 2500, "required_props": 23},
     {"batch_index": 17, "beat_ids": ["b_027"],
      "main_beats": ["b_027"], "main_slots": 5,
      "short_beats": [], "short_slots": 0, "total_slots": 5,
-     "schema_bytes": 3589, "request_bytes": 11495, "resp_chars": 2248,
+     "schema_bytes": 3589, "request_bytes": 12637, "resp_chars": 2248,
      "max_tokens": 3000, "required_props": 25},
     {"batch_index": 18, "beat_ids": ["b_028"],
      "main_beats": ["b_028"], "main_slots": 4,
      "short_beats": [], "short_slots": 0, "total_slots": 4,
-     "schema_bytes": 3549, "request_bytes": 11455, "resp_chars": 1791,
+     "schema_bytes": 3549, "request_bytes": 12597, "resp_chars": 1791,
      "max_tokens": 3000, "required_props": 24},
     {
         # The final main beat -- b_029 alone, 6 slots.
         "batch_index": 19, "beat_ids": ["b_029"],
         "main_beats": ["b_029"], "main_slots": 6,
         "short_beats": [], "short_slots": 0, "total_slots": 6,
-        "schema_bytes": 3629, "request_bytes": 11535, "resp_chars": 2572,
+        "schema_bytes": 3629, "request_bytes": 12677, "resp_chars": 2572,
         "max_tokens": 3000, "required_props": 26,
     },
     {
@@ -2215,38 +2300,38 @@ _PINNED_BATCH_MEASUREMENTS = [
         "main_beats": [], "main_slots": 0,
         "short_beats": ["b_030", "b_031", "b_032"], "short_slots": 6,
         "total_slots": 6,
-        "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2794,
+        "schema_bytes": 4591, "request_bytes": 13731, "resp_chars": 2794,
         "max_tokens": 3500, "required_props": 32,
     },
     {"batch_index": 21, "beat_ids": ["b_033", "b_034", "b_035"],
      "main_beats": [], "main_slots": 0,
      "short_beats": ["b_033", "b_034", "b_035"], "short_slots": 6,
      "total_slots": 6,
-     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2657,
+     "schema_bytes": 4591, "request_bytes": 13731, "resp_chars": 2657,
      "max_tokens": 3500, "required_props": 32},
     {"batch_index": 22, "beat_ids": ["b_036", "b_037", "b_038"],
      "main_beats": [], "main_slots": 0,
      "short_beats": ["b_036", "b_037", "b_038"], "short_slots": 6,
      "total_slots": 6,
-     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2730,
+     "schema_bytes": 4591, "request_bytes": 13731, "resp_chars": 2730,
      "max_tokens": 3500, "required_props": 32},
     {"batch_index": 23, "beat_ids": ["b_039", "b_040", "b_041"],
      "main_beats": [], "main_slots": 0,
      "short_beats": ["b_039", "b_040", "b_041"], "short_slots": 5,
      "total_slots": 5,
-     "schema_bytes": 4551, "request_bytes": 12549, "resp_chars": 2197,
+     "schema_bytes": 4551, "request_bytes": 13691, "resp_chars": 2197,
      "max_tokens": 3000, "required_props": 31},
     {"batch_index": 24, "beat_ids": ["b_042", "b_043", "b_044"],
      "main_beats": [], "main_slots": 0,
      "short_beats": ["b_042", "b_043", "b_044"], "short_slots": 6,
      "total_slots": 6,
-     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2666,
+     "schema_bytes": 4591, "request_bytes": 13731, "resp_chars": 2666,
      "max_tokens": 3500, "required_props": 32},
     {"batch_index": 25, "beat_ids": ["b_045", "b_046", "b_047"],
      "main_beats": [], "main_slots": 0,
      "short_beats": ["b_045", "b_046", "b_047"], "short_slots": 6,
      "total_slots": 6,
-     "schema_bytes": 4591, "request_bytes": 12589, "resp_chars": 2769,
+     "schema_bytes": 4591, "request_bytes": 13731, "resp_chars": 2769,
      "max_tokens": 3500, "required_props": 32},
 ]
 
@@ -2522,15 +2607,17 @@ class TestBatchedRegeneration:
 
         batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
         # Only ONE response supplied for the successful batch 1; batch 2
-        # raises. If the code tried to submit a batch 3, side_effect would
-        # raise StopIteration and fail this test loudly.
+        # raises. 2026-08-26 bounded per-batch retry: the failing batch 2 is
+        # retried up to CINEMATIC_DIRECTOR_MAX_RETRIES times (each raising),
+        # then the attempt rejects — a batch 3 is never submitted.
+        retries = 1 + getattr(cfg, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)
         with patch("hypogeum.openrouter.call_claude",
-                   side_effect=[batch1_response, RuntimeError("batch 2 provider down")]) as mock_cc:
+                   side_effect=[batch1_response] + [RuntimeError("batch 2 provider down")] * retries) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 2  # batch 1 succeeded, batch 2 attempted and failed, no batch 3
+        assert mock_cc.call_count == 1 + retries  # batch 1 succeeded, batch 2 attempted+retried, no batch 3
         assert result["status"] == "rejected"
         assert "llm_call_failed" in result["reason"]
         assert "batch 2/12" in result["reason"]
@@ -2567,14 +2654,18 @@ class TestBatchedRegeneration:
         ckpt.write_text(json.dumps(original))
 
         batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
+        # 2026-08-26 bounded per-batch retry: the permanently-malformed
+        # batch 2 is retried up to CINEMATIC_DIRECTOR_MAX_RETRIES times
+        # (identical response each time) before the attempt rejects.
         batch2_malformed = _make_call_result("{not valid json")
+        retries = 1 + getattr(cfg, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)
         with patch("hypogeum.openrouter.call_claude",
-                   side_effect=[batch1_response, batch2_malformed]) as mock_cc:
+                   side_effect=[batch1_response] + [batch2_malformed] * retries) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 2
+        assert mock_cc.call_count == 1 + retries
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
         assert "batch 2/12" in result["reason"]
@@ -2592,13 +2683,14 @@ class TestBatchedRegeneration:
         batch1_response = _make_call_result(json.dumps(_structured_response_for_batch(_BATCH_TEST_GROUPS[0])))
         raw_with_duplicate_key = '{"b_005": {}, "b_005": {}}'
         batch2_duplicate = _make_call_result(raw_with_duplicate_key)
+        retries = 1 + getattr(cfg, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)
         with patch("hypogeum.openrouter.call_claude",
-                   side_effect=[batch1_response, batch2_duplicate]) as mock_cc:
+                   side_effect=[batch1_response] + [batch2_duplicate] * retries) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 2
+        assert mock_cc.call_count == 1 + retries
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
@@ -2616,13 +2708,14 @@ class TestBatchedRegeneration:
         bad_batch2 = _structured_response_for_batch(_BATCH_TEST_GROUPS[1])
         bad_batch2[_BATCH_TEST_GROUPS[1][0]]["shots"]["s01"]["dep"] = "Z"
         batch2_invalid = _make_call_result(json.dumps(bad_batch2))
+        retries = 1 + getattr(cfg, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)
         with patch("hypogeum.openrouter.call_claude",
-                   side_effect=[batch1_response, batch2_invalid]) as mock_cc:
+                   side_effect=[batch1_response] + [batch2_invalid] * retries) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 2
+        assert mock_cc.call_count == 1 + retries
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
         assert json.loads(ckpt.read_text()) == original
@@ -2639,13 +2732,18 @@ class TestBatchedRegeneration:
         # batch 1 response is missing its last beat entirely.
         incomplete_batch1 = _structured_response_for_batch(_BATCH_TEST_GROUPS[0])
         del incomplete_batch1[_BATCH_TEST_GROUPS[0][-1]]
+        retries = 1 + getattr(cfg, "CINEMATIC_DIRECTOR_MAX_RETRIES", 2)
         with patch("hypogeum.openrouter.call_claude",
-                   side_effect=[_make_call_result(json.dumps(incomplete_batch1))]) as mock_cc:
+                   side_effect=[_make_call_result(json.dumps(incomplete_batch1))] * retries) as mock_cc:
             result = regenerate_cinematic_coverage_plan(
                 sp, np, vp, "ep_batch", cfg, output_dir=tmp_path, force=True,
             )
 
-        assert mock_cc.call_count == 1  # rejected at batch 1, batch 2/12 never submitted
+        # 2026-08-26 bounded per-batch retry: the permanently-malformed
+        # batch is retried up to CINEMATIC_DIRECTOR_MAX_RETRIES times (all
+        # responses identical here), then the attempt rejects — batch 2/12
+        # is never submitted. The active plan is preserved untouched.
+        assert mock_cc.call_count == retries
         assert result["status"] == "rejected"
         assert "malformed_output" in result["reason"]
         assert "batch 1/12" in result["reason"]
@@ -3195,3 +3293,163 @@ class TestCompactWireFormat:
         short_shots = sum(len(bp["shots"]) for bp in expanded["beat_plans"][29:])
         assert main_shots == 95
         assert short_shots == 35
+
+
+# ---------------------------------------------------------------------------
+# TestPlanReservationGating — 2026-08-26 plan-boundary rule for OpenRouter
+# planning spend: regenerate_cinematic_coverage_plan() must establish/replay
+# the verified persisted Production Plan's ONE plan-scoped CHANNEL_WEEKLY
+# reservation BEFORE its first call_claude, and a reservation denial must be
+# unreachable-past (zero LLM calls). Real helper, real tmp ledger — zero
+# network (call_claude mocked; the mock itself is the network boundary
+# probe that records ledger state at invocation time).
+# ---------------------------------------------------------------------------
+
+class TestPlanReservationGating:
+
+    @pytest.fixture(autouse=True)
+    def _use_real_boundary(self, monkeypatch, tmp_path):
+        """Undo this file's autouse no-op so the REAL reservation boundary
+        (tmp DB via db._DEFAULT_DB_PATH) governs exactly these tests, and
+        point classify_plan_lifecycle()'s canonical episode dir at the tmp
+        tree so a plan persisted under tmp_path/episodes/<ep>/ is seen as
+        canonical (2026-08-27)."""
+        import hypogeum.plan_reservation as pr
+        monkeypatch.setattr(pr, "ensure_verified_plan_weekly_reservation",
+                            _REAL_ENSURE_PLAN_WEEKLY)
+        monkeypatch.setattr(
+            "hypogeum.production_plan.canonical_episode_dir",
+            lambda ep, _root=tmp_path: _root / "episodes" / ep,
+        )
+
+    def _configure_channel(self, db_path, channel_id="ch_gate", ceiling="25.00"):
+        import hypogeum.channel_config as channel_config
+
+        if channel_config.get_channel_profile(channel_id, db_path=db_path) is None:
+            channel_config.create_channel_profile(
+                channel_id=channel_id, name="Gate Channel", db_path=db_path,
+            )
+        if channel_config.get_channel_operations_profile(channel_id, db_path=db_path) is None:
+            channel_config.create_channel_operations_profile(
+                channel_id=channel_id, channel_name="Gate Channel",
+                timezone="UTC", weekly_video_budget_usd=float(ceiling),
+                db_path=db_path,
+            )
+
+    def _persist_verified_plan(self, episode_dir, episode_id="ep_regen",
+                               channel_id="ch_gate", maximum=10.00):
+        from dataclasses import asdict
+        from hypogeum.production_plan import (
+            PLAN_SCHEMA_VERSION, ROLE_REQUIRED, PlannedAsset,
+            ProductionPlan, payload_content_hash, persist_production_plan,
+            prompt_fingerprint,
+        )
+        prompt = "cinematic shot"
+        asset = PlannedAsset(
+            deliverable_id="main_episode", beat_id="b_001", shot_id="b_001__primary",
+            asset_id=f"asset_{episode_id}", scene_id="s01", short_id=None,
+            role=ROLE_REQUIRED, prompt=prompt,
+            prompt_fingerprint=prompt_fingerprint(prompt), shot_signature="",
+            aspect_ratio="16:9", requested_duration_seconds=8.0,
+            conservative_usable_duration_seconds=8.0, provider="muapi",
+            model="veo3.1-lite-text-to-video", unit_price_usd=0.15,
+            enhancement_price_usd=0.05, max_chargeable_attempts=1,
+        )
+        kwargs = dict(
+            schema_version=PLAN_SCHEMA_VERSION, channel_id=channel_id,
+            episode_id=episode_id, deliverable_contract_id="contract_v1",
+            deliverable_ids=["main_episode"],
+            thumbnail_main_candidate_count=3, thumbnail_short_candidate_cap=3,
+            thumbnail_attempts_per_candidate=1, thumbnail_unit_price_usd=0.09,
+            thumbnail_cost_normal_usd=0.36, thumbnail_cost_maximum_usd=1.08,
+            narration_char_count=0, narration_price_per_char_usd=0.0,
+            narration_cost_usd=0.0, narration_is_realized=False,
+            music_section_count=0, music_seconds_per_section=120.0,
+            music_price_per_second_usd=0.0, music_cost_usd=0.0,
+            planning_call_estimate_usd=0.05, enhancement_cost_maximum_usd=0.05,
+            normal_expected_cost_usd=float(maximum),
+            maximum_bounded_cost_usd=float(maximum),
+        )
+        payload = {**kwargs, "assets": [asdict(asset)]}
+        plan = ProductionPlan(
+            assets=[asset], content_hash=payload_content_hash(payload),
+            compiled_at="2026-08-26T00:00:00+00:00", **kwargs,
+        )
+        persist_production_plan(plan, episode_dir)
+        return plan.content_hash
+
+    def test_reservation_created_before_first_llm_call(self, tmp_path, monkeypatch):
+        import hypogeum.db as db
+        import hypogeum.plan_reservation as pr
+
+        db_path = tmp_path / "gate.db"
+        db.initialize_schema(db_path)
+        self._configure_channel(db_path)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
+        episode_dir = tmp_path / "episodes" / "ep_regen"
+        episode_dir.mkdir(parents=True)
+        self._persist_verified_plan(episode_dir)
+
+        # The stale checkpoint forces the regeneration path (resume guard).
+        ckpt = tmp_path / "cinematic_coverage_plan_ep_regen.json"
+        ckpt.write_text(json.dumps({
+            "episode_id": "ep_regen",
+            "beat_plans": [_valid_beat_plan("b_001", 8.0, 1)],
+        }))
+
+        ledger_state_at_llm_call = []
+
+        real_get_connection = db.get_connection
+
+        def _spy_call_claude(**kwargs):
+            conn = real_get_connection(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT COUNT(*) FROM budget_reservations WHERE scope_kind='channel_weekly'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            ledger_state_at_llm_call.append(rows)
+            raise RuntimeError("stop-before-network")  # never need a response
+
+        with patch("hypogeum.openrouter.call_claude", side_effect=_spy_call_claude):
+            result = regenerate_cinematic_coverage_plan(
+                script_package=_make_small_script_package(),
+                narration_package=_make_small_narration_package(),
+                visual_package=_make_small_visual_package(),
+                episode_id="ep_regen", config=_make_config(),
+                output_dir=episode_dir, force=True, channel_id="ch_gate",
+            )
+        assert result["status"] == "rejected"
+
+        # At EVERY LLM call (including each retry), the plan-scoped weekly
+        # reservation row already existed — created before the first call
+        # and replayed thereafter.
+        assert ledger_state_at_llm_call, "LLM boundary was never reached"
+        assert all(n == 1 for n in ledger_state_at_llm_call)
+
+    def test_reservation_denial_blocks_planning_zero_llm_calls(self, tmp_path, monkeypatch):
+        import hypogeum.db as db
+        import hypogeum.plan_reservation as pr
+        from hypogeum.budget_scopes import BudgetError
+
+        db_path = tmp_path / "gate2.db"
+        db.initialize_schema(db_path)
+        self._configure_channel(db_path, ceiling="1.00")  # < plan max 10.00
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
+        episode_dir = tmp_path / "episodes" / "ep_regen"
+        episode_dir.mkdir(parents=True)
+        self._persist_verified_plan(episode_dir)
+
+        with patch("hypogeum.openrouter.call_claude") as mock_cc:
+            with pytest.raises(BudgetError):
+                regenerate_cinematic_coverage_plan(
+                    script_package=_make_small_script_package(),
+                    narration_package=_make_small_narration_package(),
+                    visual_package=_make_small_visual_package(),
+                    episode_id="ep_regen", config=_make_config(),
+                    output_dir=episode_dir, force=True, channel_id="ch_gate",
+                )
+        mock_cc.assert_not_called()

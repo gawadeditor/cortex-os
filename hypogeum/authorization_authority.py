@@ -733,6 +733,69 @@ def _validate_envelope_against_grant_binding(
     return binding
 
 
+def _verify_operating_grant_row_integrity(
+    conn: sqlite3.Connection, grant: "store.RunAuthorizationGrant",
+) -> None:
+    """For grant_kind='channel_operating' ONLY: recompute the grant
+    checksum from the row's current field values and require it to equal
+    BOTH the stored grant_checksum AND the signed ApprovalArtifact's
+    subject_checksum. A hand-tampered row (widened domains, edited
+    bindings, changed ceiling) whose ORIGINAL artifact still
+    signature-verifies is rejected here (GrantUnverifiableError), before
+    any ledger reservation or state transition. No-op for run grants."""
+    if getattr(grant, "grant_kind", "run") != "channel_operating":
+        return
+    expected = _recompute_operating_grant_checksum(grant)
+    artifact = store.get_approval_artifact_for_grant(conn, grant.grant_id, grant.grant_version)
+    if artifact is None or artifact.approval_type != "channel_operating_grant":
+        raise GrantUnverifiableError(
+            f"channel_operating grant {grant.grant_id!r}@{grant.grant_version} has no "
+            f"channel_operating_grant approval artifact"
+        )
+    if grant.grant_checksum != expected or artifact.subject_checksum != expected:
+        raise GrantUnverifiableError(
+            f"channel_operating grant {grant.grant_id!r}@{grant.grant_version} row does not "
+            f"match its signed checksum -- the grant was altered after signing"
+        )
+
+
+def _validate_operating_grant_domain(
+    grant: "store.RunAuthorizationGrant", envelope: GenerationExecutionEnvelope,
+) -> str:
+    """ADR-016 provider-domain enforcement. For a Channel Operating Grant
+    ONLY: the canonical domain for this call's exact
+    (envelope.provider, envelope.provider_operation) MUST appear in the
+    grant's SIGNED `allowed_provider_domains`. A binding that matches the
+    provider/model/operation tuple is NOT sufficient on its own -- the
+    operator signed a domain list and it is enforced here, before any
+    ledger reservation, capability issuance, or network I/O. Fails closed
+    (GrantScopeMismatchError) on: an operation with no canonical domain,
+    a grant with no signed domain list, or a domain absent from that
+    list. Run grants (grant_kind='run') are unaffected -- they carry no
+    domain list and this check is skipped for them."""
+    from hypogeum.provider_domains import UnknownProviderOperationError, resolve_provider_domain
+
+    if getattr(grant, "grant_kind", "run") != "channel_operating":
+        return ""
+    signed = getattr(grant, "allowed_provider_domains", None)
+    if not signed:
+        raise GrantScopeMismatchError(
+            f"channel_operating grant {grant.grant_id!r}@{grant.grant_version} has no "
+            f"signed allowed_provider_domains -- refusing to authorize any paid call"
+        )
+    try:
+        domain = resolve_provider_domain(envelope.provider, envelope.provider_operation)
+    except UnknownProviderOperationError as exc:
+        raise GrantScopeMismatchError(str(exc)) from exc
+    if domain not in set(signed):
+        raise GrantScopeMismatchError(
+            f"call ({envelope.provider!r}, {envelope.provider_operation!r}) -> canonical "
+            f"domain {domain!r} is NOT in grant {grant.grant_id!r}@{grant.grant_version}'s "
+            f"signed allowed_provider_domains {sorted(signed)!r}"
+        )
+    return domain
+
+
 def _reserve_grant_ledger_capacity(
     conn: sqlite3.Connection, grant: "store.RunAuthorizationGrant", grant_version: int,
     binding: "store.GrantBinding", envelope: GenerationExecutionEnvelope, at: str,
@@ -850,6 +913,16 @@ def issue_child_authorization(
                         grant, envelope, expected_production_plan_content_hash,
                     )
             binding = _validate_envelope_against_grant_binding(grant, envelope)
+            # ADR-016: for a Channel Operating Grant, independently
+            # re-verify the grant row's integrity (a hand-tampered
+            # allowed_provider_domains / bindings / ceiling row whose
+            # ORIGINAL artifact still signature-verifies must still fail
+            # here) and enforce the SIGNED provider-domain list (a
+            # matching binding is not enough). Both run pre-ledger,
+            # pre-state-transition -- a denial leaves zero consumption
+            # rows. No-ops for grant_kind='run'.
+            _verify_operating_grant_row_integrity(conn, grant)
+            _operating_domain = _validate_operating_grant_domain(grant, envelope)
             reservation = _reserve_grant_ledger_capacity(conn, grant, grant_version, binding, envelope, at)
 
             # AuthorizationRecord.authorization_id must be exactly
@@ -1137,6 +1210,7 @@ def activate_authorization_proposal(
             # from the proposal's own scope alone.
             for aid, env in envelopes.items():
                 _validate_envelope_grant_scope(grant, env, target_description=f"envelope {env.envelope_id!r} ({aid!r})")
+                _validate_operating_grant_domain(grant, env)   # ADR-016: no-op for run grants
             bindings = {
                 aid: _validate_envelope_against_grant_binding(grant, env) for aid, env in envelopes.items()
             }

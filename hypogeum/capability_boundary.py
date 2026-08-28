@@ -435,6 +435,33 @@ def verify_and_consume_capability(
         if not (grant_derived or explicit_approval):
             raise _fail("child authorization carries no signed-grant or explicit-approval derivation evidence")
 
+        # ---- 3b) ADR-016 provider-domain re-check (defense in depth) ----
+        # If the parent grant is a Channel Operating Grant, independently
+        # re-verify -- against the freshly loaded signed grant -- that this
+        # call's canonical provider domain is in allowed_provider_domains.
+        # issue_child_authorization() already enforced this before minting
+        # the AuthorizationRecord; this is a second, pre-I/O check.
+        _pg_id = authorized_evidence.get("parent_grant_id")
+        _pg_ver = authorized_evidence.get("parent_grant_version")
+        if _pg_id is not None and _pg_ver is not None:
+            _pg = authorization_store.get_grant(conn, _pg_id, int(_pg_ver))
+            if _pg is not None and getattr(_pg, "grant_kind", "run") == "channel_operating":
+                from hypogeum.provider_domains import (  # noqa: PLC0415
+                    UnknownProviderOperationError, resolve_provider_domain,
+                )
+                _signed = set(getattr(_pg, "allowed_provider_domains", None) or [])
+                if not _signed:
+                    raise _fail("operating grant has no signed allowed_provider_domains")
+                try:
+                    _dom = resolve_provider_domain(env.provider, env.provider_operation)
+                except UnknownProviderOperationError as _exc:
+                    raise _fail(str(_exc)) from _exc
+                if _dom not in _signed:
+                    raise _fail(
+                        f"call ({env.provider!r}, {env.provider_operation!r}) -> domain {_dom!r} "
+                        f"not in signed allowed_provider_domains {sorted(_signed)!r}"
+                    )
+
         # ---- 4) durable write-ahead receipt trail (AUTHORITATIVE LOCATION) ----
         # The receipt trail is resolved SOLELY from this module's own
         # _DEFAULT_ASSETS_ROOT (a fixed deployment constant, redirected in

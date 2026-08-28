@@ -63,6 +63,7 @@ def run_executive_producer(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> tuple[dict, dict]:
     """
     Execute the Executive Producer agent end-to-end.
@@ -101,6 +102,7 @@ def run_executive_producer(
         max_tokens=_MAX_TOKENS,
         config=config,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
     decision = scorecard.get("decision")
@@ -131,6 +133,7 @@ def run_executive_producer(
         max_tokens=_MAX_TOKENS,
         config=config,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
     return scorecard, brief

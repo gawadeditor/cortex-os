@@ -830,6 +830,23 @@ def call_claude(
     global _use_anthropic_for_run
     log = get_logger(episode_id=episode_id, agent=agent)
 
+    # Pre-production (PRE_PLAN) reservation boundary (2026-08-28): episode
+    # scoring, research synthesis, narrative/structure, and script
+    # generation/critique/revision all run BEFORE the first authoritative
+    # Production Plan exists. Before this paid OpenRouter call reaches the
+    # network, establish/replay the ONE pre-production CHANNEL_WEEKLY hold
+    # against the accepted weekly ledger. No-op once a canonical plan
+    # exists (that is POST_PLAN work -- hypogeum.plan_reservation governs).
+    # Fail closed on any weekly denial -> zero network.
+    if channel_id and episode_id:
+        from hypogeum.preplan_reservation import ensure_preproduction_reservation  # noqa: PLC0415
+        try:
+            ensure_preproduction_reservation(
+                channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fail closed, no retry, no network
+            raise HardFailure(f"pre_plan_reservation_denied: {exc}") from exc
+
     # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
     # muapi.submit_scene()'s own branch exactly. Only reached when
     # channel_id is supplied AND a real, verified grant already

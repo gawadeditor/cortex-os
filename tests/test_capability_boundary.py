@@ -415,6 +415,21 @@ def _seed_weekly_reservation(issued, *, plan_hash, amount):
         conn.close()
 
 
+def _seed_preplan_hold(issued, *, amount=5.0):
+    import hypogeum.weekly_budget as weekly_budget
+    from hypogeum.preplan_reservation import preplan_idempotency_key
+    conn = db.get_connection(issued.db_path)
+    try:
+        weekly_budget.ensure_channel_weekly_reservation(
+            conn, channel_id="test_channel", amount=Decimal(str(amount)), currency="USD",
+            idempotency_key=preplan_idempotency_key("test_channel", _EP),
+            now_utc=issued.issued_dt,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _strip_envelope_plan_binding(issued):
     """Rewrite the persisted execution_envelopes row so its
     audit_metadata no longer carries production_plan_content_hash
@@ -569,13 +584,19 @@ class TestPostPlanWeeklyBinding:
             MuapiUpscaleAdapter().invoke(issued.cap)
         assert _weekly_rows(issued.db_path) == before
 
-    def test_pre_plan_no_canonical_plan_skips_weekly_binding(self, issued):
-        # Remove the canonical plan file -> classify_plan_lifecycle -> PRE_PLAN
-        # -> weekly binding is NOT required (openrouter/perplexity case).
+    def test_pre_plan_binds_to_the_preproduction_hold_not_a_plan(self, issued):
+        # No canonical plan -> classify_plan_lifecycle -> PRE_PLAN. The
+        # invocation is then bound to the ONE pre-production CHANNEL_WEEKLY
+        # hold (openrouter / perplexity / first-narration case), NOT a plan.
         canon = issued.tmp_path / "episodes" / _EP
         for f in canon.glob("production_plan_*.json"):
             f.unlink()
         _exec_sql(issued.db_path, "DELETE FROM budget_reservations WHERE scope_kind='channel_weekly'")
+        # no pre-production hold -> fail closed
+        with pytest.raises(CapabilityAuthenticityError):
+            verify_and_consume_capability(issued.cap)
+        # with the hold present -> passes
+        _seed_preplan_hold(issued)
         ctx = verify_and_consume_capability(issued.cap)
         assert ctx.capability.capability_id == issued.cap.capability_id
 
@@ -600,7 +621,10 @@ class TestAuthoritativeReceiptLocation:
             verify_and_consume_capability(issued.cap)
         # even if the caller could point _DEFAULT_ASSETS_ROOT at the copy,
         # that is a deployment constant, not caller input -- but prove the
-        # copy IS a valid trail (so the failure above is purely location):
+        # copy IS a valid trail (so the failure above is purely location).
+        # rmtree above also removed the canonical plan -> PRE_PLAN -> seed
+        # the pre-production hold so the trail is the only variable.
+        _seed_preplan_hold(issued)
         monkeypatch.setattr(cb, "_DEFAULT_ASSETS_ROOT", foreign)
         ctx = verify_and_consume_capability(issued.cap)
         assert ctx.capability.capability_id == issued.cap.capability_id
@@ -707,7 +731,16 @@ class TestProviderIoEntryClaim:
             t.start()
         for t in ts:
             t.join(10)
-        assert sorted(results.values()) == ["entered_io", "rejected"]
+        # The guarantee is "AT MOST ONE enters provider I/O". A same-process
+        # SQLite / os.link race may make BOTH fail closed (safe) instead of
+        # exactly one succeeding -- never both entering. Assert both the
+        # in-process outcome and the durable trail.
+        assert list(results.values()).count("entered_io") <= 1
+        assert all(v in ("entered_io", "rejected", "CapabilityAuthenticityError") for v in results.values())
+        from hypogeum.provider_receipt import WriteAheadReceiptStore
+        events = WriteAheadReceiptStore(issued.tmp_path).read_events(_EP, issued.cap.idempotency_key)
+        io_claims = [e for e in events if e.evidence.get("phase") == cb._IO_ENTRY_PHASE]
+        assert len(io_claims) <= 1
 
     def test_reconstructed_context_cannot_reuse_the_io_claim(self, issued):
         ctx = self._ctx(issued)

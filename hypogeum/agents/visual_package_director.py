@@ -1215,6 +1215,22 @@ def run_visual_package_director(
     )
 
     # ------------------------------------------------------------------
+    # Atomic PRE_PLAN -> plan-bound weekly-reservation upgrade (2026-08-28).
+    # The Production Plan is now compiled + integrity-verified. Transition
+    # the accepted e20bdcf weekly ledger from the pre-production hold to
+    # the plan-bound CHANNEL_WEEKLY hold in ONE transaction BEFORE any
+    # POST_PLAN paid boundary runs. Insufficient current-week capacity
+    # fails closed here, before any POST_PLAN provider I/O. A run with no
+    # channel_id (legacy) has no weekly ledger and no pre-production hold
+    # to upgrade -- skipped.
+    # ------------------------------------------------------------------
+    if channel_id:
+        from hypogeum.preplan_reservation import atomic_upgrade_to_plan_reservation  # noqa: PLC0415
+        atomic_upgrade_to_plan_reservation(
+            channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+        )
+
+    # ------------------------------------------------------------------
     # Post-VPD finance gate — authoritative budget check from the compiled
     # Production Plan's own maximum bounded cost. Always runs, regardless
     # of whether a ceiling is configured (config.FINANCE_BUDGET_CEILING_USD

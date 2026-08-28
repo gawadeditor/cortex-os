@@ -167,7 +167,7 @@ def run_research_director(
     # -----------------------------------------------------------------------
     log.info("rd_health_check_started", topic=topic)
     health = check_perplexity_health(
-        config, episode_id=episode_id, agent=_AGENT_NAME
+        config, episode_id=episode_id, agent=_AGENT_NAME, channel_id=channel_id
     )
     log.info("rd_health_check_completed", status=health)
 
@@ -351,6 +351,7 @@ def run_research_director(
         max_tokens=_RD_MAX_TOKENS,
         config=config,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
     log.info(

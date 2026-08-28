@@ -126,6 +126,25 @@ def _register_grant(priv, db_path, *, model, max_calls=5, max_total_spend=Decima
     )
 
 
+
+@pytest.fixture(autouse=True)
+def _weekly_binding_iso(monkeypatch, tmp_path):
+    """Gate-flow suite: stub capability_boundary's POST_PLAN plan +
+    weekly-reservation binding (covered by test_capability_boundary.py /
+    test_plan_reservation_*.py / test_preplan_reservation.py) and isolate
+    the ledger DB so these tests need no weekly environment."""
+    from decimal import Decimal as _D
+    import hypogeum.db as _db
+    import hypogeum.capability_boundary as _cb
+    import hypogeum.policy_cascade as _pc
+    import hypogeum.weekly_budget as _wb
+    _iso = tmp_path / "_ledger_iso.db"
+    _db.initialize_schema(_iso)
+    monkeypatch.setattr(_db, "_DEFAULT_DB_PATH", _iso)
+    monkeypatch.setattr(_cb, "_verify_post_plan_weekly_binding", lambda *a, **k: None)
+    monkeypatch.setattr(_pc, "get_effective_budget_ceiling", lambda *a, **k: 55.0)
+    monkeypatch.setattr(_wb, "resolve_channel_weekly_policy", lambda conn, cid: ("UTC", _D("55.00")))
+
 class TestNoGrantLeavesLegacyPathUnaffected:
 
     def test_channel_id_supplied_but_no_grant_uses_legacy_path(self, tmp_path, monkeypatch):

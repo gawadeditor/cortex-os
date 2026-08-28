@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from hypogeum.providers.fake_provider_adapter import (
     AdapterInvocationCapability,
@@ -598,7 +598,12 @@ def _verify_post_plan_weekly_binding(conn, *, env, capability, now, fail):
 
     lifecycle = classify_plan_lifecycle(env.execution_id, None)
     if lifecycle is PlanLifecycle.PRE_PLAN:
-        return  # outside Closure 0 -- the next bounded pre-production closure
+        # PRE_PLAN paid work (episode scoring / research / narrative /
+        # script / first narration) is bound to the ONE pre-production
+        # CHANNEL_WEEKLY hold, not to a plan. Verify that binding
+        # (defense in depth for the grant-derived gate paths).
+        _verify_pre_plan_reservation_binding(conn, env=env, capability=capability, now=now, fail=fail)
+        return
 
     plan = load_production_plan(env.execution_id, canonical_episode_dir(env.execution_id))
     if plan is None:
@@ -623,7 +628,12 @@ def _verify_post_plan_weekly_binding(conn, *, env, capability, now, fail):
     # Plan B is now canonical and a valid Plan B reservation exists.
     _md = dict(getattr(env, "audit_metadata", None) or {})
     _dep = getattr(env, "dependency_checksums", None)
-    _dep_plan = getattr(_dep, "plan", None) if _dep is not None else None
+    if _dep is None:
+        _dep_plan = None
+    elif isinstance(_dep, Mapping):
+        _dep_plan = _dep.get("plan")
+    else:
+        _dep_plan = getattr(_dep, "plan", None)
     bound_plan_hash = _md.get("production_plan_content_hash") or _dep_plan
     if not bound_plan_hash:
         raise fail(
@@ -687,3 +697,59 @@ def _verify_post_plan_weekly_binding(conn, *, env, capability, now, fail):
         raise fail(
             f"weekly reservation amount {reserved_amount} != verified plan maximum_bounded_cost_usd {plan_max}"
         )
+
+
+def _verify_pre_plan_reservation_binding(conn, *, env, capability, now, fail):
+    """MANDATORY for a paid PRE_PLAN capability invocation reached through
+    the (grant-derived) gate. The invocation must be bound to the ONE
+    pre-production CHANNEL_WEEKLY hold for (channel, episode) whose window
+    contains 'now': it must exist, be for this channel, this currency, and
+    be in a state the weekly-budget design authorises ('reserved'). A
+    released, foreign-channel, wrong-currency, or missing hold fails
+    closed. This function only READS the ledger.
+    """
+    import hypogeum.weekly_budget as weekly_budget
+    from hypogeum.preplan_reservation import preplan_idempotency_key
+
+    if not (env.channel_id and str(env.channel_id).strip()):
+        raise fail("PRE_PLAN paid invocation with no channel_id")
+
+    try:
+        tz_name, _ceiling = weekly_budget.resolve_channel_weekly_policy(conn, env.channel_id)
+    except weekly_budget.WeeklyBudgetError as exc:
+        raise fail(f"cannot resolve the channel's weekly policy: {exc}") from exc
+
+    idem = preplan_idempotency_key(env.channel_id, env.execution_id)
+    rows = conn.execute(
+        "SELECT * FROM budget_reservations "
+        "WHERE scope_kind = 'channel_weekly' AND idempotency_key = ?",
+        (idem,),
+    ).fetchall()
+    if not rows:
+        raise fail(
+            f"no pre-production CHANNEL_WEEKLY hold (idempotency_key={idem!r}) -- paid PRE_PLAN "
+            f"work is not bound to the weekly ledger"
+        )
+    now_iso = now.isoformat()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(budget_reservations)")}
+    live = None
+    for r in rows:
+        start = r["weekly_window_start_utc"] or ""
+        end = r["weekly_window_end_utc"] or ""
+        if start <= now_iso < end:
+            live = r
+            break
+    if live is None:
+        raise fail(
+            "the pre-production hold's window does not contain now -- a stale/rolled-over hold "
+            "cannot authorise a current paid PRE_PLAN call"
+        )
+    if live["status"] != "reserved":
+        raise fail(
+            f"pre-production hold status is {live['status']!r} -- only 'reserved' authorises "
+            f"paid PRE_PLAN work (released holds are terminal)"
+        )
+    if "channel_id" in cols and live["channel_id"] not in (None, env.channel_id):
+        raise fail(f"pre-production hold channel_id {live['channel_id']!r} != envelope {env.channel_id!r}")
+    if str(live["currency"] or "") not in ("", capability.currency, env.currency):
+        raise fail(f"pre-production hold currency {live['currency']!r} != {capability.currency!r}")

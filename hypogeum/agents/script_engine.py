@@ -98,6 +98,7 @@ def run_script_engine(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute the Script Engine agent end-to-end.
@@ -146,6 +147,7 @@ def run_script_engine(
         max_tokens=_SE_MAX_TOKENS,
         config=config,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
     # Humanize beat text fields (deterministic — no schema changes)

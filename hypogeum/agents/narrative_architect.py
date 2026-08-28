@@ -73,6 +73,7 @@ def run_narrative_architect(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Execute the Narrative Architect agent end-to-end.
@@ -118,6 +119,7 @@ def run_narrative_architect(
         max_tokens=_NA_MAX_TOKENS,
         config=config,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
     archetype      = narrative_package.get("episode_structure", {}).get("archetype", "unknown")

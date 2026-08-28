@@ -836,14 +836,38 @@ def generate_narration_segment(
     """
     log = get_logger(episode_id=episode_id, agent=agent or "elevenlabs")
 
+    # Weekly reservation boundary -- established BEFORE the gate branch so
+    # BOTH the grant-derived gate path and the legacy path carry it.
+    #  * POST_PLAN regeneration: the plan-bound CHANNEL_WEEKLY hold
+    #    (channel_id MANDATORY; no dry-run exemption).
+    #  * PRE_PLAN first narration (Audio Agent runs before VPD): the ONE
+    #    pre-production CHANNEL_WEEKLY hold.
+    # Either way, fail closed on any weekly denial -> zero network.
+    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+    if classify_plan_lifecycle(episode_id, output_dir) is not PlanLifecycle.PRE_PLAN:
+        # POST_PLAN regeneration -- channel_id MANDATORY (channel_id=None
+        # fails closed inside ensure_verified_plan_weekly_reservation).
+        from hypogeum.plan_reservation import ensure_verified_plan_weekly_reservation
+        ensure_verified_plan_weekly_reservation(
+            channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+            output_dir=output_dir,
+        )
+    elif channel_id:
+        # PRE_PLAN first narration: the ONE pre-production CHANNEL_WEEKLY
+        # hold. A channel-less pre-plan call has nothing to bind to.
+        from hypogeum.preplan_reservation import ensure_preproduction_reservation
+        try:
+            ensure_preproduction_reservation(
+                channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+                output_dir=output_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fail closed, zero network
+            raise ElevenLabsError(f"pre_plan_reservation_denied: {exc}") from exc
+
     # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
     # muapi.submit_scene()'s own branch exactly. Only reached when
     # channel_id is supplied AND a real, verified grant already
-    # resolves for (channel_id, episode_id). Every existing caller
-    # (none of which pass channel_id today) is completely unaffected.
-    # Even a caller that DOES pass channel_id falls straight through
-    # to the legacy path below whenever no real grant exists (true for
-    # "hypogeum" today and throughout Commits F0-L).
+    # resolves for (channel_id, episode_id).
     if channel_id is not None:
         import hypogeum.authorization_authority as _authority
         grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
@@ -852,27 +876,6 @@ def generate_narration_segment(
                 channel_id=channel_id, grant=grant, beat_id=beat_id, text=text, episode_id=episode_id,
                 output_dir=output_dir, config=config, log=log, previous_request_ids=previous_request_ids,
             )
-
-    # Plan-level weekly reservation boundary (2026-08-26, hardened
-    # 2026-08-27): Audio Agent runs BEFORE VPD in the frozen stage order,
-    # so on a FRESH run there is no plan file yet -- this is a genuine
-    # pre-plan stage and there is nothing to bind to (skipped). On any
-    # POST-plan regeneration the plan file exists: this ElevenLabs TTS call
-    # is then post-plan paid work, channel_id is MANDATORY (missing/
-    # mismatched fails closed), and there is NO dry-run exemption (no
-    # ElevenLabs dry-run flag exists).
-    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
-    if classify_plan_lifecycle(episode_id, output_dir) is not PlanLifecycle.PRE_PLAN:
-        from hypogeum.plan_reservation import (
-            ensure_verified_plan_weekly_reservation,
-        )
-        ensure_verified_plan_weekly_reservation(
-            channel_id=channel_id,
-            episode_id=episode_id,
-            config=config,
-            log=log,
-            output_dir=output_dir,
-        )
 
     voice_id      = config.ELEVENLABS_VOICE_ID
     model_id      = config.ELEVENLABS_MODEL_ID or _DEFAULT_MODEL_ID
@@ -1674,15 +1677,33 @@ def generate_music_track(
     if hit is not None:
         return hit
 
-    # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
-    # elevenlabs._generate_narration_via_gate()'s own branch exactly.
-    # Only reached on a cache MISS, when channel_id is supplied AND a
-    # real, verified grant already resolves for (channel_id,
-    # episode_id). Every existing caller (none of which pass
-    # channel_id today) is completely unaffected. Even a caller that
-    # DOES pass channel_id falls straight through to the legacy path
-    # below whenever no real grant exists (true for "hypogeum" today
-    # and throughout Commits F0-L).
+    # Weekly reservation boundary -- established BEFORE the gate branch so
+    # BOTH the grant-derived gate path and the legacy path carry it. Music
+    # runs AFTER VPD on any real run, so this is normally the plan-bound
+    # CHANNEL_WEEKLY hold; the PRE_PLAN branch exists only for direct
+    # test/tool calls before a plan is compiled. channel_id MANDATORY when
+    # supplied; no dry-run exemption; fail closed -> zero network.
+    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
+    _music_episode_dir = assets_root / "episodes" / episode_id
+    if classify_plan_lifecycle(episode_id, _music_episode_dir) is not PlanLifecycle.PRE_PLAN:
+        from hypogeum.plan_reservation import ensure_verified_plan_weekly_reservation
+        ensure_verified_plan_weekly_reservation(
+            channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+            output_dir=_music_episode_dir,
+        )
+    elif channel_id:
+        from hypogeum.preplan_reservation import ensure_preproduction_reservation
+        try:
+            ensure_preproduction_reservation(
+                channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+                output_dir=_music_episode_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fail closed, zero network
+            raise ElevenLabsError(f"pre_plan_reservation_denied: {exc}") from exc
+
+    # Grant-derived gate path (Correction 3/5.5). Only reached on a cache
+    # MISS, when channel_id is supplied AND a real, verified grant already
+    # resolves for (channel_id, episode_id).
     if channel_id is not None:
         import hypogeum.authorization_authority as _authority
         grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
@@ -1692,27 +1713,6 @@ def generate_music_track(
                 required_duration_seconds=required_duration_seconds, episode_id=episode_id,
                 assets_root=assets_root, config=config, log=log, tone_arc=tone_arc,
             )
-
-    # Plan-level weekly reservation boundary (2026-08-26, hardened
-    # 2026-08-27): music generation (Assembly Agent, via Music Agent) runs
-    # AFTER VPD compiles the plan, so on any real run the plan file exists
-    # and this ElevenLabs /v1/music call is post-plan paid work: channel_id
-    # is MANDATORY (missing/mismatched fails closed) and there is NO
-    # dry-run exemption (no ElevenLabs dry-run flag). Only reached on a
-    # cache MISS.
-    from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
-    _music_episode_dir = assets_root / "episodes" / episode_id
-    if classify_plan_lifecycle(episode_id, _music_episode_dir) is not PlanLifecycle.PRE_PLAN:
-        from hypogeum.plan_reservation import (
-            ensure_verified_plan_weekly_reservation,
-        )
-        ensure_verified_plan_weekly_reservation(
-            channel_id=channel_id,
-            episode_id=episode_id,
-            config=config,
-            log=log,
-            output_dir=_music_episode_dir,
-        )
 
     # ------------------------------------------------------------------
     # Cache miss — generate via ElevenLabs Music POST /v1/music

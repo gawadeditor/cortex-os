@@ -205,6 +205,22 @@ def ensure_verified_plan_weekly_reservation(
         )
 
     conn = get_connection(db_path)
+
+    # PRE_PLAN -> plan-bound upgrade must have run before any POST_PLAN
+    # paid boundary (invariant: no POST_PLAN call is authorized until the
+    # plan-bound reservation is durably established). If a still-'reserved'
+    # pre-production hold exists (e.g. a crash between plan persist and the
+    # VPD upgrade, then a resume through the from-plan path), self-heal by
+    # running the idempotent atomic upgrade here -- which also fails closed
+    # on insufficient current-week capacity, before any provider I/O.
+    from hypogeum.preplan_reservation import (  # noqa: PLC0415
+        atomic_upgrade_to_plan_reservation, has_unupgraded_preplan_hold,
+    )
+    if has_unupgraded_preplan_hold(conn, channel_id, episode_id):
+        return atomic_upgrade_to_plan_reservation(
+            channel_id=channel_id, episode_id=episode_id, config=config, log=log, db_path=db_path,
+        )
+
     outcome = weekly_budget.ensure_channel_weekly_reservation(
         conn,
         channel_id=channel_id,

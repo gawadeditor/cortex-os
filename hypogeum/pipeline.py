@@ -980,6 +980,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -1026,6 +1027,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -1066,6 +1068,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -1095,6 +1098,7 @@ def run_pipeline(
             config=config,
             episode_id=episode_id,
             output_dir=output_dir,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -2048,6 +2052,7 @@ def _run_executive_producer(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    channel_id: Optional[str] = None,
 ) -> tuple[dict, dict]:
     """
     Executive Producer (M1.2 — implemented).
@@ -2073,6 +2078,7 @@ def _run_executive_producer(
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
 
@@ -2081,6 +2087,7 @@ def _run_research_director(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    channel_id: Optional[str] = None,
 ) -> tuple[dict, Optional[dict]]:
     """
     Research Director (M1.3 — implemented).
@@ -2105,6 +2112,7 @@ def _run_research_director(
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
 
@@ -2113,6 +2121,7 @@ def _run_narrative_architect(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Narrative Architect (M1.4 — implemented).
@@ -2136,6 +2145,7 @@ def _run_narrative_architect(
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
 
@@ -2144,6 +2154,7 @@ def _run_script_engine(
     config: Config,
     episode_id: str,
     output_dir: Optional[Path],
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Script Engine (M1.5 — implemented).
@@ -2169,6 +2180,7 @@ def _run_script_engine(
         config=config,
         episode_id=episode_id,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
 

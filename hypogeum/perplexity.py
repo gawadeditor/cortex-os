@@ -200,6 +200,7 @@ def check_perplexity_health(
     config: Config,
     episode_id: Optional[str] = None,
     agent: Optional[str] = None,
+    channel_id: Optional[str] = None,
 ) -> str:
     """
     Verify Perplexity reachability and authentication before a research run.
@@ -223,6 +224,21 @@ def check_perplexity_health(
     """
     log = get_logger(episode_id=episode_id, agent=agent or "perplexity_health")
     log.info("perplexity_health_check_started", model=config.PERPLEXITY_MODEL)
+
+    # The health probe is a real (minimal) paid Perplexity completion --
+    # a PRE_PLAN reachable provider call. Establish/replay the ONE
+    # pre-production CHANNEL_WEEKLY hold first; fail closed -> "unavailable"
+    # (a hard stop for the caller), zero network.
+    if channel_id and episode_id:
+        from hypogeum.preplan_reservation import ensure_preproduction_reservation  # noqa: PLC0415
+        try:
+            ensure_preproduction_reservation(
+                channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fail closed, zero network
+            log.error("perplexity_health_check_result", status="unavailable",
+                      reason="pre_plan_reservation_denied", error=str(exc))
+            return "unavailable"
 
     headers = _build_headers(config)
     body = {
@@ -575,6 +591,20 @@ def query_perplexity(
     """
     log = get_logger(episode_id=episode_id, agent=agent or "perplexity")
     max_tokens = max_tokens_override or config.PERPLEXITY_MAX_TOKENS or 2048
+
+    # Pre-production (PRE_PLAN) reservation boundary (2026-08-28): research
+    # runs before the first authoritative Production Plan. Establish/replay
+    # the ONE pre-production CHANNEL_WEEKLY hold before this paid Perplexity
+    # call reaches the network; no-op once a canonical plan exists; fail
+    # closed on any weekly denial -> zero network.
+    if channel_id and episode_id:
+        from hypogeum.preplan_reservation import ensure_preproduction_reservation  # noqa: PLC0415
+        try:
+            ensure_preproduction_reservation(
+                channel_id=channel_id, episode_id=episode_id, config=config, log=log,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fail closed, no retry, no network
+            raise PerplexityHardFailure(f"pre_plan_reservation_denied: {exc}", 0) from exc
 
     # Grant-derived gate path (Correction 3/5.5) -- mirrors hypogeum.
     # muapi.submit_scene()'s own branch exactly. Only reached when

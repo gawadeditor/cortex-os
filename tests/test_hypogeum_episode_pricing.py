@@ -355,8 +355,17 @@ class TestCoverageRequiredClassification:
         cm = bp.compute_episode_cost_model(
             "hypogeum", "fit135", production_plan=plan, narration_package=a["narration_package"], db_path=d,
         )
-        PRE_PLAN_MAX = Decimal("10.00")
-        complete_max = cm.maximum_bounded_remaining_cost + PRE_PLAN_MAX
-        # POST_PLAN maximum alone is ~$122; + PRE_PLAN ~$10 => ~$132 <= $135
-        assert cm.maximum_bounded_remaining_cost < Decimal("125")
-        assert complete_max <= Decimal("135.00"), f"complete_max={complete_max}"
+        # Keep the classification explicit and distinct:
+        #   POST_PLAN required future reservation  = maximum_bounded_remaining_cost (~USD 122.195)
+        #   PRE_PLAN maximum bounded exposure      ~ USD 9.40 (documented estimate,
+        #                                           tools/price_complete_hypogeum_episode.py)
+        #   COMPLETE maximum bounded episode cost  = the two summed (~USD 131.595)
+        # The COMPLETE maximum is NOT 122.195, and the true headroom under
+        # USD 135 is ~USD 3.405, NOT ~USD 12.81.
+        PRE_PLAN_MAX = Decimal("9.40")
+        post_plan_required_future_reservation = cm.maximum_bounded_remaining_cost
+        complete_max = post_plan_required_future_reservation + PRE_PLAN_MAX
+        assert post_plan_required_future_reservation == Decimal("122.195")
+        assert complete_max == Decimal("131.595"), f"complete_max={complete_max}"
+        assert complete_max <= Decimal("135.00")
+        assert Decimal("135.00") - complete_max == Decimal("3.405")

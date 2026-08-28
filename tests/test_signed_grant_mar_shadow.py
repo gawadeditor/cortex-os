@@ -1,19 +1,37 @@
 """
-tests/test_signed_grant_mar_shadow.py — a durable regression proving a
-SIGNED Channel Operating Grant (ADR-016) flows through the REAL Minimum
-Autonomous Runtime machinery: runtime admission -> operating-grant
-resolution + row-integrity + ceiling==configured-limit -> domain-enforced
-child authorization -> truthful complete-plan compilation from the real
-Hypogeum deliverable contract -> atomic PRE_PLAN->plan reservation upgrade
--> ready_to_publish, with a hard network sentinel.
+tests/test_signed_grant_mar_shadow.py
 
-The grant here is signed with a TEST Ed25519 key (conftest / this file
-monkeypatch `_load_trusted_public_key`), in a temp DB, isolated from
-production. The full 10-agent FFmpeg render pipeline is represented by a
-pipeline_runner that exercises the real PRE_PLAN gate path + the real
-truthful-plan compiler + the real reservation upgrade -- not a lambda
-that returns success. End-to-end render-pipeline shadow remains a
-separate follow-up.
+SCOPE (read before citing this file as evidence):
+
+  This is a TEST-KEY INTEGRATION SHADOW of signed-grant admission, domain
+  enforcement, truthful planning, and reservation upgrade. It is NOT:
+    - a real signed production-grant shadow (the grant here is signed with
+      an ephemeral TEST Ed25519 key, in a temp DB);
+    - a complete real default-pipeline shadow (the pipeline is a custom
+      injected `pipeline_runner`, NOT `hypogeum.autonomous_runtime.
+      _default_pipeline_runner` / `hypogeum.pipeline.run_pipeline`);
+    - a full fake-provider end-to-end render (no agent, no FFmpeg, no
+      provider adapter is exercised by the planning test);
+    - proof that every production pipeline stage reached `ready_to_publish`
+      (the custom runner returns that status directly).
+
+  What it DOES exercise, with a hard network sentinel and an injected
+  deterministic clock:
+    - the real `run_autonomous_cycle` admission path;
+    - real operating-grant resolution + row-integrity + ceiling ==
+      configured-limit;
+    - the real `issue_child_authorization` path, with ADR-016 provider
+      -domain enforcement (canonical domain present in the signed grant
+      AND exact provider/model/operation binding);
+    - the real truthful complete-plan compiler on the real Hypogeum
+      deliverable contract (ep_f3619022);
+    - the real atomic PRE_PLAN -> plan reservation upgrade.
+
+  The real signed-production-grant / real-default-pipeline / fake-provider
+  end-to-end shadow is a documented integration gap: the repository has no
+  harness that runs `hypogeum.pipeline.run_pipeline` through all ten
+  agents with deterministic fake provider adapters. See DECISION_LOG.md
+  ADR-016 amendment (2026-08-29).
 """
 from __future__ import annotations
 
@@ -173,8 +191,19 @@ def _real_artifacts():
     return out
 
 
-class TestSignedGrantThroughRealMAR:
-    def test_signed_operating_grant_drives_admission_and_truthful_plan(self, env, monkeypatch):
+# PRE_PLAN cost bounds are NOT produced by the plan cost model (which sees
+# episode_cost_incurred == 0 at compile time). They are the documented
+# estimates from tools/price_complete_hypogeum_episode.py and bound the
+# spend that happens BEFORE the first authoritative plan exists.
+_PRE_PLAN_EXPECTED_USD = Decimal("4.73")
+_PRE_PLAN_MAXIMUM_USD = Decimal("9.40")
+
+
+class TestSignedGrantIntegrationShadow:
+    """Test-key integration shadow -- see the module docstring for the
+    precise (narrow) evidence boundary this class establishes."""
+
+    def test_signed_grant_admission_domain_enforcement_and_truthful_plan(self, env, monkeypatch):
         grant = _sign_operating_grant(env.priv, env.db_path)
         assert grant.grant_kind == "channel_operating"
         _seed_topic(env.db_path)
@@ -193,7 +222,13 @@ class TestSignedGrantThroughRealMAR:
                              MUAPI_T3_MODEL="veo3.1-lite-text-to-video")
 
         def _pipeline_runner(*, channel_id, episode_id, config, db_path, admission):
-            # (a) the admission is bound to the SIGNED grant, ceiling == configured
+            # CUSTOM injected runner -- this is NOT the real default pipeline.
+            # It manually exercises the child-auth + truthful-plan + reservation
+            # -upgrade paths so those integrations are covered; it does not run
+            # any agent, provider adapter, or FFmpeg, and it returns
+            # ready_to_publish directly. See the module docstring.
+
+            # (a) the admission is bound to the test-key SIGNED grant, ceiling == configured
             assert admission.operating_grant_id == grant.grant_id
             assert admission.configured_weekly_limit_usd == "135.00"
 
@@ -313,30 +348,59 @@ class TestSignedGrantThroughRealMAR:
 
         res = seen["plan"]
         cm = res.cost_model
-        # truthful accounting under the SIGNED $135 ceiling
         assert cm.configured_weekly_budget_limit == Decimal("135.00")
-        assert cm.maximum_bounded_complete_episode_cost <= Decimal("135.00")
-        assert cm.required_future_reservation == cm.maximum_bounded_remaining_cost
-        assert cm.fits()
+        assert res.is_alternative_plan is False
+
+        # ---- explicit cost classification -- keep these four DISTINCT ----
+        #
+        # The plan cost model sees episode_cost_incurred == 0 at compile
+        # time, so its own *_complete_episode_cost fields are POST_PLAN-only.
+        # PRE_PLAN exposure is a SEPARATE bound and must be added to get the
+        # true complete-episode figures.
+
+        # (1) PRE_PLAN exposure (before the first authoritative plan exists)
+        pre_plan_expected = _PRE_PLAN_EXPECTED_USD                     # ~USD 4.73
+        pre_plan_maximum = _PRE_PLAN_MAXIMUM_USD                       # ~USD 9.40
+
+        # (2) POST_PLAN required future reservation (what actually gets reserved)
+        post_plan_expected_remaining = cm.expected_remaining_cost      # USD 105.355
+        post_plan_required_future_reservation = cm.maximum_bounded_remaining_cost  # USD 122.195
+        assert post_plan_expected_remaining == Decimal("105.355")
+        assert post_plan_required_future_reservation == Decimal("122.195")
+        assert cm.required_future_reservation == post_plan_required_future_reservation
+        # the cost model's own "complete" fields == POST_PLAN here (incurred == 0)
+        assert cm.maximum_bounded_complete_episode_cost == post_plan_required_future_reservation
+        assert cm.maximum_bounded_complete_episode_cost != Decimal("131.595")  # NOT the complete figure
+
+        # (3) COMPLETE expected episode cost = PRE_PLAN + POST_PLAN
+        complete_expected = pre_plan_expected + post_plan_expected_remaining
+        assert complete_expected == Decimal("110.085")
+
+        # (4) COMPLETE maximum bounded episode cost = PRE_PLAN max + POST_PLAN max
+        complete_maximum_bounded = pre_plan_maximum + post_plan_required_future_reservation
+        assert complete_maximum_bounded == Decimal("131.595")
+        assert complete_maximum_bounded <= Decimal("135.00")
+        assert Decimal("135.00") - complete_maximum_bounded == Decimal("3.405")  # true headroom (NOT 12.81)
+        assert cm.fits()  # POST_PLAN reservation fits the future capacity
+
         # 130 coverage-required / 23 true contingency (the corrected classification)
         _rc, req_shots, cont_shots = bp.coverage_required_video_cost(
             res.production_plan, arts["narration_package"],
         )
-        assert req_shots >= 120 and cont_shots > 0
+        assert req_shots == 130 and cont_shots == 23
         # all four required deliverables represented
         assert set(res.production_plan.deliverable_ids) >= {"main_episode", "short_001", "short_002", "short_003"}
-        assert res.is_alternative_plan is False
 
-        # weekly exposure never exceeds $135
+        # (5) final weekly exposure recorded in the ledger never exceeds the ceiling
         conn = db.get_connection(env.db_path)
         try:
-            rows = conn.execute(
+            weekly_reserved = conn.execute(
                 "SELECT COALESCE(SUM(CAST(reserved_amount AS REAL)),0) FROM budget_reservations "
                 "WHERE scope_kind='channel_weekly' AND status IN ('reserved','committed')"
             ).fetchone()[0]
         finally:
             conn.close()
-        assert Decimal(str(rows)) <= Decimal("135.00")
+        assert Decimal(str(weekly_reserved)) <= Decimal("135.00")
 
     def test_replay_resumes_same_execution_no_duplicates(self, env):
         _sign_operating_grant(env.priv, env.db_path)
@@ -369,16 +433,17 @@ class TestSignedGrantThroughRealMAR:
         assert a == 1 and q == 1 and g == 1
         assert cw <= 1                               # one PRE_PLAN hold
 
-    def test_crash_after_provider_io_claim_does_not_resubmit(self, env, tmp_path):
-        """§6 -- within the signed-grant shadow, a paid provider operation
-        that has crossed the durable provider-I/O entry claim (receipt
-        write-ahead trail on disk) is NOT silently retried after a
-        simulated process crash + restart: a genuinely fresh adapter
-        instance (invocation_count back to 0) plus a fresh receipt store
-        must still refuse the second submission, leaving the real fake
-        invocation count at exactly one."""
-        _sign_operating_grant(env.priv, env.db_path)
-
+    def test_generic_submission_gate_restart_idempotency(self, env, tmp_path):
+        """GENERIC submission-gate restart idempotency (NOT signed-grant
+        specific): a paid operation that has crossed the durable
+        provider-I/O entry claim is not silently retried after a simulated
+        process crash + restart. The authorization envelope here comes from
+        the generic GateHarness, NOT from an admitted execution's signed
+        Operating Grant -- this exercises the durable-claim contract that
+        the signed-grant path also relies on, at the gate level only.
+        (End-to-end binding through admission + child auth + capability +
+        persisted execution context is covered by the integration-gap
+        follow-up, not here.)"""
         from tests.test_submission_gate import GateHarness, _make_env
 
         h1 = GateHarness(tmp_path / "gate")

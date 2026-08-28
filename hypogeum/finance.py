@@ -116,7 +116,12 @@ def _new_cost_id() -> str:
 def _resolve_db_path(db_path: Optional[Path]) -> Path:
     if db_path is not None:
         return db_path
-    return _active_run.get("db_path") or _DEFAULT_DB_PATH
+    ctx = _active_run.get("db_path")
+    if ctx is not None:
+        return ctx
+    from hypogeum.db import resolve_db_path as _r  # noqa: PLC0415
+
+    return _r(None, module_default=_DEFAULT_DB_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +218,7 @@ def write_episode_rollup(
         cost_by_call_type, call_count, metadata_version.
         Returns empty rollup dict on any error.
     """
-    resolved_db = db_path or _DEFAULT_DB_PATH
+    resolved_db = _resolve_db_path(db_path)
     resolved_dir = finance_dir or _DEFAULT_FINANCE_DIR
 
     try:

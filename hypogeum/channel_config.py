@@ -425,7 +425,9 @@ class ChannelOperationsProfile:
 # ---------------------------------------------------------------------------
 
 def _resolve_db_path(db_path: Optional[Path]) -> Path:
-    return Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
+    from hypogeum.db import resolve_db_path as _r  # noqa: PLC0415
+
+    return _r(db_path, module_default=_DEFAULT_DB_PATH)
 
 
 def _now_iso() -> str:

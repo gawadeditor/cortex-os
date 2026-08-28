@@ -587,13 +587,17 @@ class TestV1Unchanged:
         assert result["ok"] is True
         assert result["candidate_count"] == 7
 
-    def test_engine_default_remains_v1(self):
+    def test_engine_default_remains_v1(self, tmp_path):
         """Without DISCOVERY_ENGINE=v2, the director is never called."""
         v2_called = []
 
         def fake_director(*a, **kw):
             v2_called.append(True)
             return {}
+
+        import hypogeum.db as _db
+        _dbp = tmp_path / "disc.db"
+        _db.initialize_schema(_dbp)
 
         old = os.environ.pop("DISCOVERY_ENGINE", None)
         try:
@@ -603,7 +607,7 @@ class TestV1Unchanged:
                            return_value={"ok": True, "cycle_id": "c", "channel_id": "ch",
                                          "candidate_count": 7, "selected_candidate_id": None,
                                          "candidates": []}):
-                    run_discovery_cycle("ch_test")
+                    run_discovery_cycle("ch_test", db_path=_dbp)
         finally:
             if old:
                 os.environ["DISCOVERY_ENGINE"] = old

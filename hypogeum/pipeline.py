@@ -754,6 +754,37 @@ class PipelineResult:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _bind_execution_db(fn):
+    """Decorator: when run_pipeline is called with an explicit db_path,
+    PIN it for the whole run via hypogeum.db.execution_db so the deep
+    helpers that resolve get_connection(None) -- provider PRE_PLAN
+    reservations, finance record_cost, OIS signals from run-state
+    transitions -- write to THIS execution's database, not the process
+    default. See the 2026-08-28 isolation incident (a probe passing
+    db_path=<temp> still wrote run / lease / reservation / signal rows to
+    production). db_path=None is byte-identical passthrough: every call
+    falls through to hypogeum.db._DEFAULT_DB_PATH (the live worker relies
+    on that; tests patch the constant). The decorator keeps run_pipeline
+    a single FunctionDef so its real stage-order call sites stay visible
+    to tooling."""
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        db_path = kwargs.get("db_path")
+        if db_path is None and len(args) >= 7:
+            db_path = args[6]
+        if db_path is None:
+            return fn(*args, **kwargs)
+        import hypogeum.db as _db
+
+        with _db.execution_db(db_path):
+            return fn(*args, **kwargs)
+
+    return _wrapped
+
+
+@_bind_execution_db
 def run_pipeline(
     topic_input: str,
     episode_id: str,
@@ -935,8 +966,8 @@ def run_pipeline(
     _current_stage_id: Optional[str] = None
     _current_stage_t0: str = ""
     try:
-        run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id, workflow_binding=_workflow_binding)
-        set_run_context(run_id=run_id, episode_id=episode_id)
+        run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id, workflow_binding=_workflow_binding, db_path=db_path)
+        set_run_context(run_id=run_id, episode_id=episode_id, db_path=db_path)
         log.info("pipeline_run_registered", run_id=run_id, channel_id=channel_id)
 
         # -----------------------------------------------------------------------
@@ -1740,8 +1771,8 @@ def run_pipeline(
         # -----------------------------------------------------------------------
         # 16. Seal result
         # -----------------------------------------------------------------------
-        complete_run(run_id=run_id, episode_id=episode_id)
-        write_episode_rollup(run_id=run_id, episode_id=episode_id)
+        complete_run(run_id=run_id, episode_id=episode_id, db_path=db_path)
+        write_episode_rollup(run_id=run_id, episode_id=episode_id, db_path=db_path)
         clear_run_context()
         try:
             from hypogeum.run_registry import release_run_lease
@@ -1881,7 +1912,7 @@ def run_pipeline(
     except Exception as _exc:
         if run_id is not None:
             try:
-                fail_run(run_id, episode_id, error_message=str(_exc)[:4096])
+                fail_run(run_id, episode_id, error_message=str(_exc)[:4096], db_path=db_path)
             except Exception:
                 pass
         if _current_stage_id is not None:

@@ -134,6 +134,14 @@ def pytest_configure(config):
         if not os.environ.get(k):
             os.environ[k] = ""
 
+    # Process-level production-database tripwire (2026-08-29). Armed here,
+    # before any test module import or fixture, so nothing in the session
+    # can open / symlink-resolve to / shell out against the production DB
+    # or its assets root -- regardless of whether db_path was threaded.
+    from tests import _prod_tripwire
+
+    _prod_tripwire.arm()
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _block_guardrail_leakage():

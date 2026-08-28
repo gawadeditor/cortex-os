@@ -58,9 +58,13 @@ _REAL_PROD = {
     "ELEVENLABS_MUSIC_DEFAULT_DURATION": 120,
 }
 
-# Observed PRE_PLAN (text/research/planning) cost, from the costs ledger.
-PRE_PLAN_EXPECTED_USD = Decimal("4.73")   # preplan_core ~$1.7 + VPD phase-1 ~$3.0 + $0.05
-PRE_PLAN_MAXIMUM_USD = Decimal("9.40")    # RETRY_MAX=1 on all PRE_PLAN calls
+# Legacy observed PRE_PLAN estimate from the costs ledger. NON-AUTHORITATIVE
+# historical context only -- superseded by hypogeum.preplan_cost_model
+# (it omitted ElevenLabs narration, which runs pre-plan, and understated
+# VPD Phase-1's batched Claude planning). Never use these to prove a
+# fully-bounded episode fits the budget.
+_LEGACY_PRE_PLAN_EXPECTED_USD = Decimal("4.73")
+_LEGACY_PRE_PLAN_MAXIMUM_USD = Decimal("9.40")
 
 
 class _Shim:
@@ -117,12 +121,17 @@ def _price(cfg, sp, nar, vp, label):
           f"-- cache credited only when verified before reservation")
     print(f"  thumbnail        : expected ${th_exp:.2f}   max ${th_max:.2f}")
     print(f"  planning estimate: ${plan_est:.2f}")
-    print(f"  >>> POST_PLAN expected   ${exp}")
-    print(f"  >>> POST_PLAN maximum    ${mx}")
-    print(f"  >>> COMPLETE expected    ${PRE_PLAN_EXPECTED_USD + exp}   (PRE_PLAN ${PRE_PLAN_EXPECTED_USD} + POST_PLAN)")
-    print(f"  >>> COMPLETE maximum     ${PRE_PLAN_MAXIMUM_USD + mx}   (PRE_PLAN ${PRE_PLAN_MAXIMUM_USD} + POST_PLAN)")
+    # realized narration is already in `mx`/`exp` above AND is PRE_PLAN
+    # spend -- net it out here so COMPLETE = PRE_PLAN + POST_PLAN has no
+    # double count.
+    post_exp_net = exp - narr
+    post_mx_net = mx - narr
+    print(f"  >>> POST_PLAN expected (net of realized narration)  ${post_exp_net}")
+    print(f"  >>> POST_PLAN maximum  (net of realized narration)  ${post_mx_net}")
+    print(f"      [legacy figures, non-authoritative: COMPLETE exp ~${_LEGACY_PRE_PLAN_EXPECTED_USD + exp}, "
+          f"COMPLETE max ~${_LEGACY_PRE_PLAN_MAXIMUM_USD + mx}]")
     print(f"  coverage sufficient: {cov.sufficient}")
-    return plan
+    return plan, post_exp_net, post_mx_net
 
 
 def main(argv=None) -> int:
@@ -146,13 +155,55 @@ def main(argv=None) -> int:
     print(f"  required deliverables: {[d['deliverable_id'] for d in req_deliv]}")
     print(f"  allow_standalone_shorts: {contract['allow_standalone_shorts']}")
 
-    base = _price(_cfg(), sp, nar, vp, "== BASELINE (real config, full quality) ==")
+    base, post_exp_net, post_mx_net = _price(_cfg(), sp, nar, vp, "== BASELINE (real config, full quality) ==")
     inv = build_required_asset_inventory(base, script_package=sp, contract=contract)
     print("\n-- required-asset inventory (derived from contract + script, NOT from budget) --")
     for k, v in inv.items():
         if k == "component_costs_usd":
             continue
         print(f"   {k}: {v}")
+
+    # ---- AUTHORITATIVE PRE_PLAN + complete-episode arithmetic ----
+    import json as _json
+    from hypogeum.authorization_store import GrantBinding
+    from hypogeum.preplan_cost_model import compute_preplan_cost_model
+    wf = _json.loads(
+        (_ROOT / "channel_packages" / "hypogeum" / "workflow" / "hypogeum_main_production.json").read_text()
+    )
+    bindings = [
+        GrantBinding(provider=p, model=m, provider_operation=o, currency="USD",
+                     max_cost_per_call=Decimal(c), max_calls=1000, max_total_spend=Decimal(t))
+        for (p, m, o, c, t) in [
+            ("openrouter", "anthropic/claude-sonnet-4.6", "text.completion", "0.60", "25.00"),
+            ("openrouter", "anthropic/claude-opus-4.6", "text.completion", "1.50", "15.00"),
+            ("perplexity", "sonar-pro", "research.query", "0.10", "5.00"),
+            ("elevenlabs", "eleven_multilingual_v2", "voice.narration_segment", "0.05", "12.00"),
+        ]
+    ]
+    pm = compute_preplan_cost_model(bindings=bindings, workflow_definition=wf,
+                                    script_package=sp, narration_package=nar)
+    limit = Decimal("135.00")
+    complete_exp = pm.preplan_expected_cost + post_exp_net
+    complete_max = pm.preplan_policy_capped_maximum_cost + post_mx_net
+    print("\n== AUTHORITATIVE PRE_PLAN + COMPLETE (hypogeum.preplan_cost_model) ==")
+    print(f"  coverage_complete: {pm.coverage_complete}   unbounded: {list(pm.unbounded_components)}")
+    print(f"  PRE_PLAN expected (conservative, policy per-call ceiling)  : ${pm.preplan_expected_cost}")
+    print(f"  PRE_PLAN maximum bounded (raw structural worst case)       : ${pm.preplan_maximum_bounded_cost}")
+    print(f"  PRE_PLAN maximum bounded (policy-capped -- ledger stops here): ${pm.preplan_policy_capped_maximum_cost}")
+    for a in pm.binding_allocation:
+        print(f"     {a['binding_key']:52} struct=${a['preplan_maximum_cost']:>10} "
+              f"capped=${a['preplan_policy_capped_cost']:>10} ceiling=${a['binding_max_total_spend']} "
+              f"over_ceiling={a['preplan_exceeds_binding_ceiling']}")
+    print(f"  POST_PLAN expected (net of realized narration)             : ${post_exp_net}")
+    print(f"  POST_PLAN maximum  (net of realized narration)             : ${post_mx_net}")
+    print(f"  >>> COMPLETE expected episode cost                         : ${complete_exp}")
+    print(f"  >>> COMPLETE maximum bounded episode cost                  : ${complete_max}")
+    if complete_max <= limit:
+        print(f"  >>> FEASIBLE under USD {limit}: headroom ${limit - complete_max}")
+    else:
+        print(f"  >>> NOT FEASIBLE under USD {limit}: DEFICIT ${complete_max - limit}")
+    if complete_exp <= limit:
+        print(f"      (expected case fits: headroom ${limit - complete_exp})")
 
     # coverage-safe variants
     vp_t2 = copy.deepcopy(vp)

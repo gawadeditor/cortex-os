@@ -191,12 +191,11 @@ def _real_artifacts():
     return out
 
 
-# PRE_PLAN cost bounds are NOT produced by the plan cost model (which sees
-# episode_cost_incurred == 0 at compile time). They are the documented
-# estimates from tools/price_complete_hypogeum_episode.py and bound the
-# spend that happens BEFORE the first authoritative plan exists.
-_PRE_PLAN_EXPECTED_USD = Decimal("4.73")
-_PRE_PLAN_MAXIMUM_USD = Decimal("9.40")
+# PRE_PLAN cost bounds are derived authoritatively by
+# hypogeum.preplan_cost_model.compute_preplan_cost_model from the workflow
+# definition + signed grant bindings + structural limits -- NOT hardcoded.
+# The legacy ~USD 4.73 / ~USD 9.40 estimates are non-authoritative
+# historical context only; see tests/test_preplan_cost_model.py.
 
 
 class TestSignedGrantIntegrationShadow:
@@ -351,37 +350,62 @@ class TestSignedGrantIntegrationShadow:
         assert cm.configured_weekly_budget_limit == Decimal("135.00")
         assert res.is_alternative_plan is False
 
-        # ---- explicit cost classification -- keep these four DISTINCT ----
+        # ---- authoritative cost classification (no hardcoded PRE_PLAN) ----
         #
-        # The plan cost model sees episode_cost_incurred == 0 at compile
-        # time, so its own *_complete_episode_cost fields are POST_PLAN-only.
-        # PRE_PLAN exposure is a SEPARATE bound and must be added to get the
-        # true complete-episode figures.
+        # PRE_PLAN bounds come from hypogeum.preplan_cost_model; the complete
+        # arithmetic from hypogeum.channel_budget_policy.
+        # compute_complete_episode_cost, which nets realized narration out of
+        # the POST_PLAN remaining so nothing is double counted.
+        from hypogeum.preplan_cost_model import compute_preplan_cost_model
+        from hypogeum.authorization_store import GrantBinding as _GB
 
-        # (1) PRE_PLAN exposure (before the first authoritative plan exists)
-        pre_plan_expected = _PRE_PLAN_EXPECTED_USD                     # ~USD 4.73
-        pre_plan_maximum = _PRE_PLAN_MAXIMUM_USD                       # ~USD 9.40
+        _wf = json.loads(
+            (__import__("pathlib").Path(__file__).resolve().parent.parent
+             / "channel_packages" / "hypogeum" / "workflow"
+             / "hypogeum_main_production.json").read_text()
+        )
+        pm = compute_preplan_cost_model(
+            bindings=[_GB(provider=p, model=m, provider_operation=o, currency="USD",
+                          max_cost_per_call=c, max_calls=1000, max_total_spend=t)
+                      for (p, m, o, c, t) in [
+                          ("openrouter", "anthropic/claude-sonnet-4.6", "text.completion", Decimal("0.60"), Decimal("25.00")),
+                          ("openrouter", "anthropic/claude-opus-4.6", "text.completion", Decimal("1.50"), Decimal("15.00")),
+                          ("perplexity", "sonar-pro", "research.query", Decimal("0.10"), Decimal("5.00")),
+                          ("elevenlabs", "eleven_multilingual_v2", "voice.narration_segment", Decimal("0.05"), Decimal("12.00")),
+                      ]],
+            workflow_definition=_wf,
+            script_package=arts["script_package"], narration_package=arts["narration_package"],
+        )
+        assert pm.coverage_complete is True
+        cec = bp.compute_complete_episode_cost(
+            _CH, r2.episode_id, preplan_model=pm, production_plan=res.production_plan,
+            narration_package=arts["narration_package"], db_path=env.db_path,
+        )
 
-        # (2) POST_PLAN required future reservation (what actually gets reserved)
-        post_plan_expected_remaining = cm.expected_remaining_cost      # USD 105.355
-        post_plan_required_future_reservation = cm.maximum_bounded_remaining_cost  # USD 122.195
-        assert post_plan_expected_remaining == Decimal("105.355")
-        assert post_plan_required_future_reservation == Decimal("122.195")
-        assert cm.required_future_reservation == post_plan_required_future_reservation
-        # the cost model's own "complete" fields == POST_PLAN here (incurred == 0)
-        assert cm.maximum_bounded_complete_episode_cost == post_plan_required_future_reservation
-        assert cm.maximum_bounded_complete_episode_cost != Decimal("131.595")  # NOT the complete figure
-
-        # (3) COMPLETE expected episode cost = PRE_PLAN + POST_PLAN
-        complete_expected = pre_plan_expected + post_plan_expected_remaining
-        assert complete_expected == Decimal("110.085")
-
-        # (4) COMPLETE maximum bounded episode cost = PRE_PLAN max + POST_PLAN max
-        complete_maximum_bounded = pre_plan_maximum + post_plan_required_future_reservation
-        assert complete_maximum_bounded == Decimal("131.595")
-        assert complete_maximum_bounded <= Decimal("135.00")
-        assert Decimal("135.00") - complete_maximum_bounded == Decimal("3.405")  # true headroom (NOT 12.81)
-        assert cm.fits()  # POST_PLAN reservation fits the future capacity
+        # (1) PRE_PLAN exposure -- authoritative, policy-capped
+        assert cec.preplan_maximum_bounded == pm.preplan_policy_capped_maximum_cost
+        # (2) POST_PLAN required future reservation -- realized narration netted out
+        assert cec.realized_narration_netted_out == Decimal(str(res.production_plan.narration_cost_usd))
+        assert cec.postplan_required_future_reservation == (
+            Decimal(str(res.production_plan.maximum_bounded_cost_usd)) - cec.realized_narration_netted_out
+        )
+        # (3) COMPLETE expected = PRE_PLAN expected + POST_PLAN expected
+        assert cec.complete_expected_cost == cec.preplan_expected + cec.postplan_expected_remaining
+        # (4) COMPLETE maximum bounded = PRE_PLAN max + POST_PLAN max (NOT the POST_PLAN figure alone)
+        assert cec.complete_maximum_bounded_cost == (
+            cec.preplan_maximum_bounded + cec.postplan_maximum_bounded_remaining
+        )
+        assert cec.complete_maximum_bounded_cost > cec.postplan_maximum_bounded_remaining
+        # (5) final weekly exposure (ledger form) never exceeds the ceiling
+        assert cec.final_weekly_exposure <= Decimal("135.00")
+        assert cec.ledger_upgrade_ok is True
+        # As of 2026-08-29 the authoritative fully-bounded forecast does NOT
+        # fit USD 135 (deficit reported, budget NOT adjusted). Documents the
+        # current truthful state -- change deliberately, never silently.
+        assert cec.forecast_feasible is False
+        assert cec.forecast_deficit > Decimal("0")
+        # the POST_PLAN reservation itself still fits the future capacity
+        assert cm.fits()
 
         # 130 coverage-required / 23 true contingency (the corrected classification)
         _rc, req_shots, cont_shots = bp.coverage_required_video_cost(

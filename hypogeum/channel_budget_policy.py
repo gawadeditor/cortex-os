@@ -55,6 +55,8 @@ __all__ = [
     "TruthfulPlanResult",
     "resolve_configured_weekly_limit",
     "compute_episode_cost_model",
+    "CompleteEpisodeCost",
+    "compute_complete_episode_cost",
     "compile_truthful_production_plan",
     "build_required_asset_inventory",
     "substitution_permitted",
@@ -221,6 +223,144 @@ class EpisodeCostModel:
             "channel_week_ref": self.channel_week_ref,
             "budget_policy_ref": self.budget_policy_ref,
         }
+
+
+@dataclass(frozen=True)
+class CompleteEpisodeCost:
+    """Authoritative full-episode cost, keeping PRE_PLAN and POST_PLAN
+    strictly separate and never double counting realized narration.
+
+    Two DISTINCT checks:
+
+      forecast_feasible  -- proves the forecasted fully-bounded episode
+        fits the configured weekly limit BEFORE any paid call:
+            complete_maximum_bounded_cost <= configured_weekly_budget_limit
+        where
+            complete_maximum_bounded_cost =
+                preplan_maximum_bounded (policy-capped, from
+                hypogeum.preplan_cost_model) + postplan_maximum_bounded_remaining
+        and postplan_maximum_bounded_remaining EXCLUDES the realized
+        narration already counted in PRE_PLAN.
+
+      ledger_upgrade_ok  -- the runtime invariant checked at
+        atomic_upgrade_to_plan_reservation() time, on ACTUAL spend:
+            actual_preplan_incurred + postplan_required_future_reservation
+              + other_weekly_exposure <= configured_weekly_budget_limit
+    """
+
+    configured_weekly_budget_limit: Decimal
+    other_weekly_exposure: Decimal
+
+    preplan_expected: Decimal
+    preplan_maximum_bounded: Decimal          # policy-capped
+    actual_preplan_incurred: Decimal
+
+    postplan_expected_remaining: Decimal
+    postplan_maximum_bounded_remaining: Decimal   # = required_future_reservation
+    realized_narration_netted_out: Decimal
+
+    currency: str = "USD"
+
+    @property
+    def postplan_required_future_reservation(self) -> Decimal:
+        return self.postplan_maximum_bounded_remaining
+
+    @property
+    def complete_expected_cost(self) -> Decimal:
+        return self.preplan_expected + self.postplan_expected_remaining
+
+    @property
+    def complete_maximum_bounded_cost(self) -> Decimal:
+        return self.preplan_maximum_bounded + self.postplan_maximum_bounded_remaining
+
+    @property
+    def final_weekly_exposure(self) -> Decimal:
+        """Actual ledger exposure this episode contributes at upgrade time."""
+        return (
+            self.actual_preplan_incurred
+            + self.postplan_required_future_reservation
+            + self.other_weekly_exposure
+        )
+
+    @property
+    def forecast_feasible(self) -> bool:
+        return self.complete_maximum_bounded_cost <= self.configured_weekly_budget_limit
+
+    @property
+    def forecast_deficit(self) -> Decimal:
+        gap = self.complete_maximum_bounded_cost - self.configured_weekly_budget_limit
+        return gap if gap > 0 else Decimal("0")
+
+    @property
+    def ledger_upgrade_ok(self) -> bool:
+        return self.final_weekly_exposure <= self.configured_weekly_budget_limit
+
+    @property
+    def ledger_deficit(self) -> Decimal:
+        gap = self.final_weekly_exposure - self.configured_weekly_budget_limit
+        return gap if gap > 0 else Decimal("0")
+
+    def as_dict(self) -> dict:
+        return {
+            "configured_weekly_budget_limit": str(self.configured_weekly_budget_limit),
+            "other_weekly_exposure": str(self.other_weekly_exposure),
+            "preplan_expected": str(self.preplan_expected),
+            "preplan_maximum_bounded": str(self.preplan_maximum_bounded),
+            "actual_preplan_incurred": str(self.actual_preplan_incurred),
+            "postplan_expected_remaining": str(self.postplan_expected_remaining),
+            "postplan_maximum_bounded_remaining": str(self.postplan_maximum_bounded_remaining),
+            "postplan_required_future_reservation": str(self.postplan_required_future_reservation),
+            "realized_narration_netted_out": str(self.realized_narration_netted_out),
+            "complete_expected_cost": str(self.complete_expected_cost),
+            "complete_maximum_bounded_cost": str(self.complete_maximum_bounded_cost),
+            "final_weekly_exposure": str(self.final_weekly_exposure),
+            "forecast_feasible": self.forecast_feasible,
+            "forecast_deficit": str(self.forecast_deficit),
+            "ledger_upgrade_ok": self.ledger_upgrade_ok,
+            "ledger_deficit": str(self.ledger_deficit),
+            "currency": self.currency,
+        }
+
+
+def compute_complete_episode_cost(
+    channel_id: str, episode_id: str, *,
+    preplan_model,
+    production_plan=None, narration_package: Optional[dict] = None,
+    verified_music_credit_usd: Decimal = Decimal("0"),
+    now: Optional[datetime] = None, db_path: Optional[Path] = None,
+) -> CompleteEpisodeCost:
+    """Combine the authoritative PRE_PLAN model
+    (`hypogeum.preplan_cost_model.PreplanCostModel`) with the POST_PLAN
+    `EpisodeCostModel`, netting out realized narration so it is never
+    counted in both. See `CompleteEpisodeCost` for the two distinct
+    checks."""
+    ecm = compute_episode_cost_model(
+        channel_id, episode_id, production_plan=production_plan,
+        narration_package=narration_package, verified_music_credit_usd=verified_music_credit_usd,
+        now=now, db_path=db_path,
+    )
+
+    # Realized narration is PRE_PLAN spend already carried in the plan's
+    # maximum_bounded_cost_usd / normal_expected_cost_usd -- net it out of
+    # the POST_PLAN remaining so complete_* does not double count it.
+    realized_narration = Decimal("0")
+    if production_plan is not None and bool(getattr(production_plan, "narration_is_realized", False)):
+        realized_narration = _q(getattr(production_plan, "narration_cost_usd", 0))
+
+    postplan_expected = max(Decimal("0"), ecm.expected_remaining_cost - realized_narration)
+    postplan_maximum = max(Decimal("0"), ecm.maximum_bounded_remaining_cost - realized_narration)
+
+    return CompleteEpisodeCost(
+        configured_weekly_budget_limit=ecm.configured_weekly_budget_limit,
+        other_weekly_exposure=ecm.other_weekly_exposure,
+        preplan_expected=_q(getattr(preplan_model, "preplan_expected_cost", 0)),
+        preplan_maximum_bounded=_q(getattr(preplan_model, "preplan_policy_capped_maximum_cost", 0)),
+        actual_preplan_incurred=ecm.episode_cost_incurred,
+        postplan_expected_remaining=postplan_expected,
+        postplan_maximum_bounded_remaining=postplan_maximum,
+        realized_narration_netted_out=realized_narration,
+        currency="USD",
+    )
 
 
 def build_required_asset_inventory(production_plan, *, script_package: dict, contract: dict) -> dict:

@@ -352,20 +352,47 @@ class TestCoverageRequiredClassification:
                                              weekly_video_budget_usd=135.0, db_path=d)
         a = _artifacts()
         plan = self._plan()
-        cm = bp.compute_episode_cost_model(
-            "hypogeum", "fit135", production_plan=plan, narration_package=a["narration_package"], db_path=d,
+
+        # AUTHORITATIVE PRE_PLAN bound -- derived, not hardcoded.
+        import json as _json
+        from hypogeum.authorization_store import GrantBinding
+        from hypogeum.preplan_cost_model import compute_preplan_cost_model
+        wf = _json.loads(
+            (Path(__file__).resolve().parent.parent / "channel_packages" / "hypogeum"
+             / "workflow" / "hypogeum_main_production.json").read_text()
         )
-        # Keep the classification explicit and distinct:
-        #   POST_PLAN required future reservation  = maximum_bounded_remaining_cost (~USD 122.195)
-        #   PRE_PLAN maximum bounded exposure      ~ USD 9.40 (documented estimate,
-        #                                           tools/price_complete_hypogeum_episode.py)
-        #   COMPLETE maximum bounded episode cost  = the two summed (~USD 131.595)
-        # The COMPLETE maximum is NOT 122.195, and the true headroom under
-        # USD 135 is ~USD 3.405, NOT ~USD 12.81.
-        PRE_PLAN_MAX = Decimal("9.40")
-        post_plan_required_future_reservation = cm.maximum_bounded_remaining_cost
-        complete_max = post_plan_required_future_reservation + PRE_PLAN_MAX
-        assert post_plan_required_future_reservation == Decimal("122.195")
-        assert complete_max == Decimal("131.595"), f"complete_max={complete_max}"
-        assert complete_max <= Decimal("135.00")
-        assert Decimal("135.00") - complete_max == Decimal("3.405")
+        bindings = [
+            GrantBinding(provider=p, model=m, provider_operation=o, currency="USD",
+                         max_cost_per_call=Decimal(c), max_calls=1000, max_total_spend=Decimal(t))
+            for (p, m, o, c, t) in [
+                ("openrouter", "anthropic/claude-sonnet-4.6", "text.completion", "0.60", "25.00"),
+                ("openrouter", "anthropic/claude-opus-4.6", "text.completion", "1.50", "15.00"),
+                ("perplexity", "sonar-pro", "research.query", "0.10", "5.00"),
+                ("elevenlabs", "eleven_multilingual_v2", "voice.narration_segment", "0.05", "12.00"),
+            ]
+        ]
+        pm = compute_preplan_cost_model(
+            bindings=bindings, workflow_definition=wf,
+            script_package=a["script_package"], narration_package=a["narration_package"],
+        )
+        assert pm.coverage_complete is True
+
+        cec = bp.compute_complete_episode_cost(
+            "hypogeum", "fit135", preplan_model=pm, production_plan=plan,
+            narration_package=a["narration_package"], db_path=d,
+        )
+        # Distinct quantities, no double count of realized narration.
+        assert cec.realized_narration_netted_out == Decimal(str(plan.narration_cost_usd))
+        assert cec.complete_maximum_bounded_cost == (
+            cec.preplan_maximum_bounded + cec.postplan_maximum_bounded_remaining
+        )
+        # As of 2026-08-29 the authoritative fully-bounded COMPLETE maximum
+        # exceeds USD 135. Report the deficit; the budget is NOT adjusted and
+        # no mandatory work is dropped.
+        assert cec.forecast_feasible is False
+        assert cec.complete_maximum_bounded_cost > Decimal("135.00")
+        assert cec.forecast_deficit == cec.complete_maximum_bounded_cost - Decimal("135.00")
+        # The expected case still fits.
+        assert cec.complete_expected_cost < Decimal("135.00")
+        # The POST_PLAN reservation alone (the ledger-upgrade invariant) fits.
+        assert cec.ledger_upgrade_ok is True

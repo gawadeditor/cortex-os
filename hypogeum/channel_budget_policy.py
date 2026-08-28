@@ -1,30 +1,34 @@
 """
-hypogeum/channel_budget_policy.py — bounded, Decimal-safe budget-aware
-Production Plan compilation for an autonomously admitted episode (ADR-016 §5).
+hypogeum/channel_budget_policy.py — truth-first, Decimal-safe episode cost
+model and configurable-budget evaluation (ADR-016 §5, corrected 2026-08-28).
 
-The autonomous runtime must be able to PRODUCE a complete episode within the
-approved channel weekly ceiling (Hypogeum: USD 55.00), not merely fail closed
-after compiling an unaffordable plan. Before Production Plan compilation this
-module:
+The financial limit is NOT an architectural constant. It is an
+operator-controlled, versioned Channel policy value read from the
+authoritative Channel Operations Profile
+(`channel_operations_profiles.weekly_video_budget_usd`, via
+`hypogeum.weekly_budget.resolve_channel_weekly_policy`). It may increase
+or decrease over time; when it changes, a new / revised Channel Operating
+Grant is required (the runtime never raises its own limit).
 
-  1. reads the current channel-week's authoritative exposure from the accepted
-     weekly-budget ledger (`budget_reservations`), excluding this episode's own
-     PRE_PLAN / incurred / plan rows;
-  2. reads this execution's actual incurred PRE_PLAN cost from `costs`;
-  3. computes  remaining_allowance = ceiling - other_exposure - incurred_preplan ;
-  4. compiles the plan and, if `maximum_bounded_cost_usd` exceeds the
-     allowance, applies a fixed, deterministic, zero-network reduction ladder
-     (channel-package policy, never Factory-Core creative knowledge) and
-     recompiles EXACTLY ONCE;
-  5. if the reduced plan still does not fit, raises
-     ProductionPlanBudgetInfeasibleError with the exact irreducible cost
-     components -- it never raises the ceiling, hides incurred cost, or drops
-     a mandatory deliverable to make the arithmetic pass.
+Before any POST_PLAN paid provider call, this module:
 
-The accepted plan satisfies:
-    incurred_preplan + plan.maximum_bounded_cost_usd
-        <= remaining_allowance + incurred_preplan
-        <= ceiling  (USD 55.00)
+  1. compiles the TRUTHFUL COMPLETE Production Plan -- every mandatory
+     deliverable, every Short, narration, visual coverage, music,
+     thumbnails, metadata, enhancement, plus the workflow's configured
+     retry / fallback / contingency allowance -- and exposes both
+     `expected_total_cost` and `maximum_bounded_total_cost`;
+  2. resolves the six financial concepts distinctly (see EpisodeCostModel);
+  3. compares `maximum_bounded_total_cost` with `remaining_weekly_capacity`.
+
+If it fits: reserve `required_reservation_amount` and continue.
+If it does not fit: raise ProductionPlanBudgetInfeasibleError with the
+full component-by-component breakdown and the exact deficit -- it NEVER
+raises the limit, hides incurred cost, or omits mandatory work.
+
+A cheaper ALTERNATIVE plan is produced only when the Channel Package
+explicitly permits substitutions (`substitution_permitted`), and only if
+the alternative is still a complete valid episode (coverage + deliverable
+contract re-validated).
 """
 
 from __future__ import annotations
@@ -41,153 +45,272 @@ from hypogeum.production_plan import compile_production_plan, validate_plan_cove
 
 __all__ = [
     "ProductionPlanBudgetInfeasibleError",
-    "BudgetAwarePlanResult",
-    "compute_remaining_post_plan_allowance",
-    "compile_plan_within_allowance",
-    "DEFAULT_REDUCTION_LADDER",
+    "EpisodeCostModel",
+    "TruthfulPlanResult",
+    "resolve_configured_weekly_limit",
+    "compute_episode_cost_model",
+    "compile_truthful_production_plan",
+    "substitution_permitted",
+    "DEFAULT_SUBSTITUTION_LADDER",
 ]
 
-APPROVED_CEILING_FALLBACK_USD = Decimal("55.00")
-
-# The channel-package reduction ladder. Order matters; each step is applied
-# only if the plan still exceeds the allowance after the previous step. A
-# channel package may override this list; the default is conservative and
-# never removes a mandatory deliverable, narration, the thumbnail, or
-# metadata.
-DEFAULT_REDUCTION_LADDER = (
-    "trim_non_coverage_contingency",   # step 2: drop contingency shots not needed for coverage
-    "suppress_optional_enhancement",   # step 3: skip source enhancement (delivery contract already met)
-    "downgrade_premium_video_tiers",   # step 4: route premium scenes to the channel default tier
-    "reduce_paid_attempt_ceiling",     # step 4b: lower the per-scene paid-attempt bound (floor 2)
+# A cheaper alternative plan is only ever produced when the Channel
+# Package opts in. Each step is a bounded, deterministic, zero-network
+# transform; none removes a mandatory deliverable, narration, the
+# thumbnail, metadata, or a required Short.
+DEFAULT_SUBSTITUTION_LADDER = (
+    "trim_non_coverage_contingency",
+    "suppress_optional_enhancement",
+    "downgrade_premium_video_tiers",
+    "reduce_paid_attempt_ceiling",
 )
 
 
 class ProductionPlanBudgetInfeasibleError(Exception):
-    """Even after the full bounded reduction ladder, a contract-valid
-    plan does not fit under the remaining weekly allowance. Carries the
-    exact irreducible cost breakdown so the operator can see what to
-    change (cadence, tier catalogue, deliverable contract)."""
+    """The truthful complete Production Plan's maximum bounded total cost
+    exceeds the remaining weekly capacity under the operator-configured
+    limit. Carries every input so the operator can decide: raise the
+    configured limit and re-sign the Operating Grant, change the
+    deliverable contract / tier catalogue / cadence, or permit
+    substitutions. Never resolved by the runtime lowering its own bar or
+    dropping mandatory work."""
 
-    def __init__(self, *, episode_id: str, remaining_allowance: Decimal,
-                 projected_maximum: Decimal, irreducible_components: dict):
+    def __init__(self, *, episode_id: str, cost_model: "EpisodeCostModel",
+                 component_breakdown: dict, substitution_attempted: bool):
         self.episode_id = episode_id
-        self.remaining_allowance = remaining_allowance
-        self.projected_maximum = projected_maximum
-        self.irreducible_components = irreducible_components
-        deficit = projected_maximum - remaining_allowance
+        self.cost_model = cost_model
+        self.component_breakdown = component_breakdown
+        self.substitution_attempted = substitution_attempted
+        self.deficit = cost_model.maximum_bounded_completion_cost - cost_model.remaining_weekly_capacity
         super().__init__(
-            f"episode {episode_id}: reduced plan maximum {projected_maximum} exceeds "
-            f"remaining weekly allowance {remaining_allowance} by {deficit}. "
-            f"Irreducible components: {irreducible_components}"
+            f"episode {episode_id}: maximum_bounded_completion_cost "
+            f"{cost_model.maximum_bounded_completion_cost} exceeds remaining_weekly_capacity "
+            f"{cost_model.remaining_weekly_capacity} (configured_weekly_budget_limit "
+            f"{cost_model.configured_weekly_budget_limit}) by {self.deficit}. "
+            f"Components: {component_breakdown}"
         )
 
 
+@dataclass(frozen=True)
+class EpisodeCostModel:
+    """The six financial concepts, kept strictly separate. All Decimal."""
+
+    # 1. money already spent + recorded in the costs ledger for this episode
+    actual_incurred_cost: Decimal
+    # 2. best realistic estimate to complete every mandatory deliverable
+    expected_completion_cost: Decimal
+    # 3. maximum authorized cost incl. planned retries / fallbacks /
+    #    contingencies / alternates / enhancement / other bounded paid ops
+    maximum_bounded_completion_cost: Decimal
+    # 4. operator-controlled policy value from the authoritative profile
+    configured_weekly_budget_limit: Decimal
+    # 5. configured limit minus actual+reserved exposure of OTHER work this week
+    remaining_weekly_capacity: Decimal
+    # 6. amount needed to authorize this complete plan with no hidden future spend
+    required_reservation_amount: Decimal
+
+    currency: str = "USD"
+    channel_week_ref: str = ""
+    other_week_exposure: Decimal = Decimal("0")
+    budget_policy_ref: str = ""
+
+    def fits(self) -> bool:
+        return self.maximum_bounded_completion_cost <= self.remaining_weekly_capacity
+
+    def as_dict(self) -> dict:
+        return {
+            "actual_incurred_cost": str(self.actual_incurred_cost),
+            "expected_completion_cost": str(self.expected_completion_cost),
+            "maximum_bounded_completion_cost": str(self.maximum_bounded_completion_cost),
+            "configured_weekly_budget_limit": str(self.configured_weekly_budget_limit),
+            "remaining_weekly_capacity": str(self.remaining_weekly_capacity),
+            "required_reservation_amount": str(self.required_reservation_amount),
+            "other_week_exposure": str(self.other_week_exposure),
+            "currency": self.currency,
+            "channel_week_ref": self.channel_week_ref,
+            "budget_policy_ref": self.budget_policy_ref,
+        }
+
+
 @dataclass
-class BudgetAwarePlanResult:
+class TruthfulPlanResult:
     production_plan: Any
-    remaining_allowance: Decimal
-    incurred_preplan_usd: Decimal
-    other_week_exposure_usd: Decimal
-    ceiling_usd: Decimal
-    reductions_applied: list = field(default_factory=list)
-    recompiled: bool = False
+    cost_model: EpisodeCostModel
+    coverage_sufficient: bool
+    substitution_applied: list = field(default_factory=list)
+    is_alternative_plan: bool = False
 
     def accounting_ok(self) -> bool:
-        pm = Decimal(str(self.production_plan.maximum_bounded_cost_usd))
-        return (self.incurred_preplan_usd + pm) <= self.ceiling_usd and pm <= self.remaining_allowance
+        cm = self.cost_model
+        return (
+            cm.fits()
+            and self.coverage_sufficient
+            and cm.required_reservation_amount == Decimal(str(self.production_plan.maximum_bounded_cost_usd))
+        )
 
-
-# ---------------------------------------------------------------------------
-# Allowance
-# ---------------------------------------------------------------------------
 
 def _q(x) -> Decimal:
     return Decimal(str(x if x is not None else "0"))
 
 
-def compute_remaining_post_plan_allowance(
-    channel_id: str, episode_id: str, *, config=None,
-    now: Optional[datetime] = None, db_path: Optional[Path] = None,
-) -> dict:
-    """Decimal-safe. Returns a dict with ceiling, other_week_exposure,
-    incurred_preplan, remaining_allowance -- all Decimal."""
-    from hypogeum import weekly_budget
-    from hypogeum.preplan_reservation import (
-        preplan_idempotency_key,
-        preplan_incurred_idempotency_key,
-    )
-    from hypogeum.plan_reservation import plan_weekly_idempotency_key
+# ---------------------------------------------------------------------------
+# 4. configured_weekly_budget_limit -- operator-controlled, versioned
+# ---------------------------------------------------------------------------
 
+def resolve_configured_weekly_limit(
+    channel_id: str, *, db_path: Optional[Path] = None, conn=None,
+) -> "tuple[str, Decimal, str]":
+    """Returns (timezone, configured_weekly_budget_limit, budget_policy_ref).
+
+    The limit is read from the authoritative Channel Operations Profile
+    (`weekly_video_budget_usd`) via
+    hypogeum.weekly_budget.resolve_channel_weekly_policy, which FAILS
+    CLOSED (typed WeeklyBudgetError) on a missing / malformed /
+    non-positive value -- there is NO hardcoded fallback. The
+    budget_policy_ref identifies the policy revision the limit came from
+    (the ops-profile updated_at + metadata_version), so an Operating
+    Grant can be bound to it and detected as stale when the operator
+    changes the limit."""
+    from hypogeum import weekly_budget
+
+    _own_conn = conn is None
+    conn = conn or get_connection(db_path)
+    try:
+        tz_name, ceiling = weekly_budget.resolve_channel_weekly_policy(conn, channel_id)
+        row = conn.execute(
+            "SELECT updated_at, metadata_version FROM channel_operations_profiles WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+    finally:
+        if _own_conn:
+            conn.close()
+    updated_at = (row["updated_at"] if row else "") or ""
+    meta_ver = (row["metadata_version"] if row else "") or ""
+    policy_ref = f"channel_operations_profile:{channel_id}:{meta_ver}:{updated_at}"
+    return tz_name, _q(ceiling).quantize(Decimal("0.01")), policy_ref
+
+
+# ---------------------------------------------------------------------------
+# 1/5/6 -- ledger reads
+# ---------------------------------------------------------------------------
+
+def _other_week_exposure(conn, channel_id: str, episode_id: str, scope_ref: str) -> Decimal:
+    from hypogeum.preplan_reservation import (
+        preplan_idempotency_key, preplan_incurred_idempotency_key,
+    )
+
+    own_keys = {
+        preplan_idempotency_key(channel_id, episode_id),
+        preplan_incurred_idempotency_key(channel_id, episode_id),
+    }
+    plan_key_prefix = f"plan-weekly:{channel_id}:{episode_id}:"
+    rows = conn.execute(
+        "SELECT idempotency_key, reserved_amount FROM budget_reservations "
+        "WHERE scope_kind = 'channel_weekly' AND scope_ref = ? AND status IN ('reserved','committed')",
+        (scope_ref,),
+    ).fetchall()
+    total = Decimal("0")
+    for r in rows:
+        k = r["idempotency_key"]
+        if k in own_keys or k.startswith(plan_key_prefix):
+            continue
+        total += _q(r["reserved_amount"])
+    return total
+
+
+def _incurred_for_episode(conn, episode_id: str) -> Decimal:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd), 0) AS s FROM costs WHERE episode_id = ?", (episode_id,)
+    ).fetchone()
+    return _q(row["s"])
+
+
+def compute_episode_cost_model(
+    channel_id: str, episode_id: str, *, production_plan=None,
+    now: Optional[datetime] = None, db_path: Optional[Path] = None,
+) -> EpisodeCostModel:
+    """Assemble the six financial concepts. `production_plan` supplies the
+    truthful POST_PLAN estimate/maximum; when omitted (a pre-compile
+    probe) the plan-derived fields are 0 and the model reports only
+    incurred / configured limit / remaining capacity."""
     now = now or datetime.now(timezone.utc)
     conn = get_connection(db_path)
     try:
-        tz_name, ceiling = weekly_budget.resolve_channel_weekly_policy(conn, channel_id)
-        ceiling = _q(ceiling) if ceiling else APPROVED_CEILING_FALLBACK_USD
+        from hypogeum import weekly_budget
+        tz_name, limit, policy_ref = resolve_configured_weekly_limit(channel_id, conn=conn)
         window = weekly_budget.compute_weekly_window(now, tz_name)
         scope_ref = weekly_budget.week_scope_ref(channel_id, window)
-
-        own_keys = {
-            preplan_idempotency_key(channel_id, episode_id),
-            preplan_incurred_idempotency_key(channel_id, episode_id),
-        }
-        # Plan key needs the content hash; exclude by prefix instead.
-        plan_key_prefix = f"plan-weekly:{channel_id}:{episode_id}:"
-
-        rows = conn.execute(
-            "SELECT idempotency_key, reserved_amount FROM budget_reservations "
-            "WHERE scope_kind = 'channel_weekly' AND scope_ref = ? "
-            "AND status IN ('reserved','committed')",
-            (scope_ref,),
-        ).fetchall()
-        other_exposure = Decimal("0")
-        for r in rows:
-            k = r["idempotency_key"]
-            if k in own_keys or k.startswith(plan_key_prefix):
-                continue
-            other_exposure += _q(r["reserved_amount"])
-
-        incurred_row = conn.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) AS s FROM costs WHERE episode_id = ?",
-            (episode_id,),
-        ).fetchone()
-        incurred_preplan = _q(incurred_row["s"])
+        other_exposure = _other_week_exposure(conn, channel_id, episode_id, scope_ref)
+        incurred = _incurred_for_episode(conn, episode_id)
     finally:
         conn.close()
 
-    remaining = ceiling - other_exposure - incurred_preplan
-    return {
-        "ceiling_usd": ceiling,
-        "other_week_exposure_usd": other_exposure,
-        "incurred_preplan_usd": incurred_preplan,
-        "remaining_allowance_usd": remaining,
-        "channel_week_ref": scope_ref,
-    }
+    remaining_capacity = limit - other_exposure - incurred
+
+    if production_plan is not None:
+        post_plan_expected = _q(getattr(production_plan, "normal_expected_cost_usd", 0))
+        post_plan_maximum = _q(getattr(production_plan, "maximum_bounded_cost_usd", 0))
+    else:
+        post_plan_expected = Decimal("0")
+        post_plan_maximum = Decimal("0")
+
+    return EpisodeCostModel(
+        actual_incurred_cost=incurred,
+        expected_completion_cost=incurred + post_plan_expected,
+        maximum_bounded_completion_cost=incurred + post_plan_maximum,
+        configured_weekly_budget_limit=limit,
+        remaining_weekly_capacity=remaining_capacity,
+        required_reservation_amount=post_plan_maximum,
+        currency="USD",
+        channel_week_ref=scope_ref,
+        other_week_exposure=other_exposure,
+        budget_policy_ref=policy_ref,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Deterministic reduction ladder (operates on a deep copy of visual_package)
+# Substitution opt-in (Channel Package policy, default OFF)
 # ---------------------------------------------------------------------------
 
-def _min_contingency_for_coverage(scene: dict) -> int:
-    """Number of contingency (order>=2) shots to KEEP for this beat so
-    mathematical coverage still holds. Conservative: keep 1 contingency
-    shot per beat (the coverage formula in hypogeum.production_plan
-    requires at least one fallback slot); drop the rest."""
-    return 1
+def substitution_permitted(channel_id: str, config=None, *, db_path: Optional[Path] = None) -> bool:
+    """A cheaper alternative plan is only produced when the Channel
+    Package explicitly permits substitutions. Default: NOT permitted --
+    budget insufficiency is disclosed, not silently absorbed."""
+    if config is not None and bool(getattr(config, "BUDGET_SUBSTITUTION_PERMITTED", False)):
+        return True
+    try:
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT retry_policy_json FROM channel_operations_profiles WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row["retry_policy_json"]:
+            import json
+            rp = json.loads(row["retry_policy_json"])
+            return bool(rp.get("budget_substitution_permitted", False))
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
+
+# ---------------------------------------------------------------------------
+# Deterministic substitution ladder (deep copy of visual_package)
+# ---------------------------------------------------------------------------
 
 def _apply_trim_non_coverage_contingency(vp: dict) -> Optional[str]:
     trimmed = 0
     for scene in vp.get("scenes", []):
         plan = scene.get("cinematic_coverage_plan") or {}
         shots = sorted(plan.get("shots", []), key=lambda s: s.get("shot_order", 0))
-        keep_extra = _min_contingency_for_coverage(scene)
         new_shots, kept_extra = [], 0
         for shot in shots:
             if shot.get("shot_order", 1) <= 1:
                 new_shots.append(shot)
                 continue
-            if kept_extra < keep_extra:
+            if kept_extra < 1:  # keep exactly one fallback slot for coverage
                 new_shots.append(shot)
                 kept_extra += 1
             else:
@@ -205,7 +328,7 @@ def _apply_suppress_optional_enhancement(vp: dict) -> Optional[str]:
         if spec.get("enhancement_required") is not True and not spec.get("_budget_enhancement_suppressed"):
             spec["_budget_enhancement_suppressed"] = True
             touched += 1
-    return f"suppress_optional_enhancement: suppressed on {touched} scenes" if touched else None
+    return f"suppress_optional_enhancement: {touched} scenes" if touched else None
 
 
 def _apply_downgrade_premium_video_tiers(vp: dict, default_tier: int) -> Optional[str]:
@@ -220,10 +343,6 @@ def _apply_downgrade_premium_video_tiers(vp: dict, default_tier: int) -> Optiona
 
 
 class _ConfigShim:
-    """Read-through wrapper letting the budget policy override a small set
-    of pricing-relevant config attributes without mutating the real
-    Config object."""
-
     def __init__(self, base, overrides: dict):
         self._base = base
         self._ov = overrides
@@ -238,19 +357,23 @@ class _ConfigShim:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def compile_plan_within_allowance(
+def compile_truthful_production_plan(
     *, script_package: dict, narration_package: dict, visual_package: dict,
     channel_id: str, episode_id: str, config, log=None,
     now: Optional[datetime] = None, db_path: Optional[Path] = None,
-    reduction_ladder=DEFAULT_REDUCTION_LADDER,
-) -> BudgetAwarePlanResult:
-    alloc = compute_remaining_post_plan_allowance(
-        channel_id, episode_id, config=config, now=now, db_path=db_path,
-    )
-    remaining = alloc["remaining_allowance_usd"]
-    ceiling = alloc["ceiling_usd"]
-    incurred = alloc["incurred_preplan_usd"]
+    substitution_ladder=DEFAULT_SUBSTITUTION_LADDER,
+) -> TruthfulPlanResult:
+    """Compile the truthful COMPLETE Production Plan, then evaluate it
+    against the operator-configured weekly limit.
 
+    - Fits: return with required_reservation_amount == plan.maximum_bounded_cost_usd.
+    - Does not fit, substitutions NOT permitted: raise
+      ProductionPlanBudgetInfeasibleError with the full breakdown.
+    - Does not fit, substitutions permitted: apply the bounded
+      zero-network ladder once and re-evaluate; still over ->
+      ProductionPlanBudgetInfeasibleError. A substituted plan must still
+      pass coverage + deliverable-contract validation.
+    """
     def _compile(vp, cfg):
         plan = compile_production_plan(
             script_package=script_package, narration_package=narration_package or {},
@@ -260,78 +383,105 @@ def compile_plan_within_allowance(
         return plan, cov
 
     plan, cov = _compile(visual_package, config)
-    result = BudgetAwarePlanResult(
-        production_plan=plan, remaining_allowance=remaining, incurred_preplan_usd=incurred,
-        other_week_exposure_usd=alloc["other_week_exposure_usd"], ceiling_usd=ceiling,
+    if not cov.sufficient:
+        # An incomplete plan is never valid -- it can never be made
+        # "affordable" by understating the work. Reject before any budget
+        # comparison.
+        from hypogeum.production_plan import ProductionPlanCoverageError
+        raise ProductionPlanCoverageError(
+            episode_id=episode_id, failing_beats=getattr(cov, "failing_beats", []),
+        )
+    cost_model = compute_episode_cost_model(
+        channel_id, episode_id, production_plan=plan, now=now, db_path=db_path,
     )
 
-    pm = Decimal(str(plan.maximum_bounded_cost_usd))
-    if pm <= remaining and cov.sufficient:
-        return result
+    def _breakdown(p, c) -> dict:
+        return {
+            "video_generation_max_usd": _plan_component(p, "video"),
+            "enhancement_cost_maximum_usd": float(getattr(p, "enhancement_cost_maximum_usd", 0.0) or 0.0),
+            "thumbnail_cost_maximum_usd": float(getattr(p, "thumbnail_cost_maximum_usd", 0.0) or 0.0),
+            "narration_cost_usd": float(getattr(p, "narration_cost_usd", 0.0) or 0.0),
+            "music_cost_usd": float(getattr(p, "music_cost_usd", 0.0) or 0.0),
+            "planning_call_estimate_usd": float(getattr(p, "planning_call_estimate_usd", 0.0) or 0.0),
+            "asset_count": len(getattr(p, "assets", []) or []),
+            "deliverable_ids": list(getattr(p, "deliverable_ids", []) or []),
+            "coverage_sufficient": bool(c.sufficient),
+            "actual_incurred_cost_usd": float(cost_model.actual_incurred_cost),
+            "other_week_exposure_usd": float(cost_model.other_week_exposure),
+            "expected_completion_cost_usd": float(cost_model.expected_completion_cost),
+            "maximum_bounded_completion_cost_usd": float(cost_model.maximum_bounded_completion_cost),
+        }
 
-    # ---- one bounded, deterministic, zero-network recompile ----
+    if cost_model.fits() and cov.sufficient:
+        return TruthfulPlanResult(production_plan=plan, cost_model=cost_model, coverage_sufficient=True)
+
+    permitted = substitution_permitted(channel_id, config, db_path=db_path)
+    if not permitted:
+        raise ProductionPlanBudgetInfeasibleError(
+            episode_id=episode_id, cost_model=cost_model,
+            component_breakdown=_breakdown(plan, cov), substitution_attempted=False,
+        )
+
+    # ---- one bounded, deterministic, zero-network alternative plan ----
     default_tier = int(getattr(config, "MUAPI_DEFAULT_TIER", 2) or 2)
     base_attempts = int(getattr(config, "MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", 3) or 3)
-    reduced_vp = copy.deepcopy(visual_package)
+    alt_vp = copy.deepcopy(visual_package)
     cfg_overrides: dict = {}
-    reductions: list = []
-
-    for step in reduction_ladder:
+    applied: list = []
+    for step in substitution_ladder:
         if step == "trim_non_coverage_contingency":
-            note = _apply_trim_non_coverage_contingency(reduced_vp)
+            note = _apply_trim_non_coverage_contingency(alt_vp)
         elif step == "suppress_optional_enhancement":
-            note = _apply_suppress_optional_enhancement(reduced_vp)
+            note = _apply_suppress_optional_enhancement(alt_vp)
             if note:
                 cfg_overrides["SOURCE_ENHANCEMENT_ENABLED"] = False
         elif step == "downgrade_premium_video_tiers":
-            note = _apply_downgrade_premium_video_tiers(reduced_vp, default_tier)
+            note = _apply_downgrade_premium_video_tiers(alt_vp, default_tier)
         elif step == "reduce_paid_attempt_ceiling":
             new_attempts = max(2, base_attempts - 1)
-            if new_attempts < base_attempts:
+            note = (f"reduce_paid_attempt_ceiling: {base_attempts} -> {new_attempts}"
+                    if new_attempts < base_attempts else None)
+            if note:
                 cfg_overrides["MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE"] = new_attempts
-                note = f"reduce_paid_attempt_ceiling: {base_attempts} -> {new_attempts}"
-            else:
-                note = None
-        else:  # pragma: no cover - unknown ladder step
+        else:  # pragma: no cover
             note = None
         if note:
-            reductions.append(note)
+            applied.append(note)
 
     shim = _ConfigShim(config, cfg_overrides) if cfg_overrides else config
-    reduced_plan, reduced_cov = _compile(reduced_vp, shim)
-    reduced_pm = Decimal(str(reduced_plan.maximum_bounded_cost_usd))
+    alt_plan, alt_cov = _compile(alt_vp, shim)
+    if not alt_cov.sufficient:
+        # A substitution that would drop mandatory coverage is not a valid
+        # alternative -- never silently accepted.
+        from hypogeum.production_plan import ProductionPlanCoverageError
+        raise ProductionPlanCoverageError(
+            episode_id=episode_id, failing_beats=getattr(alt_cov, "failing_beats", []),
+        )
+    alt_cost_model = compute_episode_cost_model(
+        channel_id, episode_id, production_plan=alt_plan, now=now, db_path=db_path,
+    )
 
-    result.production_plan = reduced_plan
-    result.reductions_applied = reductions
-    result.recompiled = True
-
-    if reduced_pm <= remaining and reduced_cov.sufficient:
+    if alt_cost_model.fits() and alt_cov.sufficient:
         if log is not None:
             try:
                 log.info(
-                    "budget_aware_plan_reduced", episode_id=episode_id,
-                    original_maximum=str(pm), reduced_maximum=str(reduced_pm),
-                    remaining_allowance=str(remaining), reductions=reductions,
+                    "budget_alternative_plan", episode_id=episode_id,
+                    original_maximum=str(cost_model.maximum_bounded_completion_cost),
+                    alternative_maximum=str(alt_cost_model.maximum_bounded_completion_cost),
+                    configured_limit=str(alt_cost_model.configured_weekly_budget_limit),
+                    substitutions=applied,
                 )
             except Exception:  # noqa: BLE001
                 pass
-        return result
+        return TruthfulPlanResult(
+            production_plan=alt_plan, cost_model=alt_cost_model, coverage_sufficient=bool(alt_cov.sufficient),
+            substitution_applied=applied, is_alternative_plan=True,
+        )
 
-    # ---- irreducible -> fail closed BEFORE any POST_PLAN provider I/O ----
     raise ProductionPlanBudgetInfeasibleError(
-        episode_id=episode_id, remaining_allowance=remaining, projected_maximum=reduced_pm,
-        irreducible_components={
-            "video_required_max_usd": _plan_component(reduced_plan, "video"),
-            "enhancement_cost_maximum_usd": float(getattr(reduced_plan, "enhancement_cost_maximum_usd", 0.0) or 0.0),
-            "thumbnail_cost_maximum_usd": float(getattr(reduced_plan, "thumbnail_cost_maximum_usd", 0.0) or 0.0),
-            "narration_cost_usd": float(getattr(reduced_plan, "narration_cost_usd", 0.0) or 0.0),
-            "music_cost_usd": float(getattr(reduced_plan, "music_cost_usd", 0.0) or 0.0),
-            "planning_call_estimate_usd": float(getattr(reduced_plan, "planning_call_estimate_usd", 0.0) or 0.0),
-            "coverage_sufficient": bool(reduced_cov.sufficient),
-            "reductions_attempted": reductions,
-            "other_week_exposure_usd": float(alloc["other_week_exposure_usd"]),
-            "incurred_preplan_usd": float(incurred),
-        },
+        episode_id=episode_id, cost_model=alt_cost_model,
+        component_breakdown={**_breakdown(alt_plan, alt_cov), "substitutions_attempted": applied},
+        substitution_attempted=True,
     )
 
 

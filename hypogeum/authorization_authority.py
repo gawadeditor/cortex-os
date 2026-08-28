@@ -412,10 +412,14 @@ def register_channel_operating_grant(
     register_run_grant(): no in-process caller can construct a valid
     artifact.
 
-    weekly_exposure_ceiling_usd is a CEILING, not capacity -- it must
-    equal the approved channel weekly ceiling (Hypogeum: USD 55.00). It
-    is stored and signed but the authoritative weekly gate stays the
-    weekly-budget ledger.
+    weekly_exposure_ceiling_usd is a CEILING, not capacity. It records the
+    operator-configured weekly budget limit that is effective for this
+    grant's operating period (an operator-controlled, versioned Channel
+    policy value -- NOT an architectural constant). It is stored and
+    signed; the authoritative weekly gate stays the weekly-budget ledger.
+    Runtime admission rejects the grant if this value no longer equals the
+    operator's currently-configured weekly limit (the operator must
+    re-sign the grant when the policy changes).
     """
     if currency != "USD":
         raise AuthorizationAuthorityError("Channel Operating Grant currency must be USD")

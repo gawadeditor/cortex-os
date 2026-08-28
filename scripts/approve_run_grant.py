@@ -169,7 +169,14 @@ def _register_channel_operating(args, spec: dict) -> int:
     creates no budget capacity: the weekly ledger, the PRE_PLAN
     reservation, and the plan-bound reservation stay authoritative.
 
-    Spec JSON shape:
+    `weekly_exposure_ceiling_usd` MUST equal the operator's currently
+    configured weekly budget limit for the channel
+    (`channel_operations_profiles.weekly_video_budget_usd`). It is NOT a
+    fixed constant -- if the operator changes the configured limit, this
+    grant becomes stale and admission rejects it until a new / revised
+    grant is signed with the new value.
+
+    Spec JSON shape (values below are ILLUSTRATIVE):
     {
       "grant_id": "...", "grant_version": 1,
       "channel_id": "hypogeum",
@@ -178,13 +185,14 @@ def _register_channel_operating(args, spec: dict) -> int:
       "channel_package_version": "1.0", "channel_package_checksum": "<64 hex>",
       "allowed_provider_domains": ["openrouter_text", "perplexity_research", "elevenlabs_voice", "muapi_video"],
       "cadence_snapshot": "videos_per_week:1",
-      "weekly_exposure_ceiling_usd": "55.00",
+      "weekly_exposure_ceiling_usd": "<current configured weekly_video_budget_usd, e.g. 120.00>",
       "currency": "USD",
-      "valid_from": "2026-08-01T00:00:00Z",
-      "expires_at": "2026-12-01T00:00:00Z",
-      "operating_period_ref": "hypogeum:2026-W35..W48",
+      "valid_from": "<ISO>",
+      "expires_at": "<ISO>",
+      "operating_period_ref": "<channel>:<period label>",
       "bindings": [ { "provider": "...", "model": "...", "provider_operation": "...",
-                     "max_cost_per_call": "0.50", "max_calls": 2000, "max_total_spend": "55.00" } ]
+                     "max_cost_per_call": "0.50", "max_calls": 2000,
+                     "max_total_spend": "<= configured weekly limit>" } ]
     }
     """
     from decimal import Decimal as _D

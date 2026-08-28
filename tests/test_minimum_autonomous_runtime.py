@@ -31,6 +31,7 @@ import hypogeum.runtime_admission as adm
 import hypogeum.autonomous_runtime as autoruntime
 import hypogeum.channel_budget_policy as budget_policy
 from hypogeum.approval_artifact import GrantBindingApproval, sign_approval_artifact
+from hypogeum.production_plan import ProductionPlanCoverageError
 
 _CH = "hypogeum"
 _WF_ID = "hypogeum_main_production"
@@ -40,6 +41,12 @@ _CP_VER = "1.0"
 _CP_SUM = "b" * 64
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)  # Wed -> ISO 2026-W35
 
+# The configured weekly limit is an OPERATOR POLICY VALUE, not an
+# architectural constant. The fixture deliberately uses a non-55 value so
+# that no test can silently depend on "55 is special"; individual tests
+# reconfigure it (55, 80, 120) and prove the code path is unchanged.
+_DEFAULT_LIMIT = Decimal("80.00")
+
 
 class _Log:
     def info(self, *a, **k): pass
@@ -48,7 +55,7 @@ class _Log:
 
 
 def _cfg(**over):
-    base = dict(FINANCE_BUDGET_CEILING_USD=55.0, MUAPI_DEFAULT_TIER=2,
+    base = dict(FINANCE_BUDGET_CEILING_USD=float(_DEFAULT_LIMIT), MUAPI_DEFAULT_TIER=2,
                 MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE=3)
     base.update(over)
     return SimpleNamespace(**base)
@@ -59,7 +66,7 @@ def _bindings():
         store.GrantBinding(
             provider="openrouter", model="anthropic/claude-sonnet-4",
             provider_operation="text.completion", currency="USD",
-            max_cost_per_call=Decimal("0.50"), max_calls=2000, max_total_spend=Decimal("55.00"),
+            max_cost_per_call=Decimal("0.50"), max_calls=2000, max_total_spend=Decimal("200.00"),
         ),
         store.GrantBinding(
             provider="perplexity", model="sonar-pro",
@@ -74,10 +81,25 @@ def _bindings():
     ]
 
 
+def _set_weekly_limit(db_path, amount):
+    """Reconfigure the operator-controlled weekly budget limit. No code
+    change -- just the Channel Operations Profile policy value."""
+    conn = db.get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE channel_operations_profiles SET weekly_video_budget_usd = ?, updated_at = ? "
+            "WHERE channel_id = ?",
+            (float(amount), f"upd-{amount}", _CH),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _sign_and_register_operating_grant(
     priv, db_path, *, channel_id=_CH, grant_id="op_g1", grant_version=1,
     valid_from="2026-08-01T00:00:00Z", expires_at="2026-12-31T23:59:59Z",
-    weekly_ceiling=Decimal("55.00"), cadence="videos_per_week:1", workflow_version=_WF_VER,
+    weekly_ceiling=_DEFAULT_LIMIT, cadence="videos_per_week:1", workflow_version=_WF_VER,
     domains=("openrouter_text", "perplexity_research", "elevenlabs_voice"),
     tamper=False, approver="operator_x", nonce=None,
 ):
@@ -139,7 +161,8 @@ def env(tmp_path, monkeypatch):
     channel_config.create_channel_profile(channel_id=_CH, name="Hypogeum", db_path=db_path)
     channel_config.create_channel_operations_profile(
         channel_id=_CH, channel_name="Hypogeum", timezone="UTC", operator_enabled=True,
-        production_cadence={"videos_per_week": 1}, weekly_video_budget_usd=55.0, db_path=db_path,
+        production_cadence={"videos_per_week": 1},
+        weekly_video_budget_usd=float(_DEFAULT_LIMIT), db_path=db_path,
     )
     return SimpleNamespace(tmp_path=tmp_path, db_path=db_path, priv=priv)
 
@@ -147,6 +170,24 @@ def env(tmp_path, monkeypatch):
 def _seed_topic(db_path, text="The Antikythera Mechanism"):
     from hypogeum import topics
     return topics.enqueue_topic(channel_id=_CH, topic_text=text, db_path=db_path)
+
+
+def _record_cost(db_path, episode_id, amount, call_type="script_engine"):
+    conn = db.get_connection(db_path)
+    try:
+        try:
+            conn.execute("INSERT OR IGNORE INTO runs (run_id, episode_id, status, started_at) "
+                         "VALUES ('r_mar', ?, 'running', ?)", (episode_id, NOW.isoformat()))
+        except Exception:
+            pass
+        conn.execute(
+            "INSERT INTO costs (cost_id, run_id, episode_id, provider, call_type, cost_usd, called_at) "
+            "VALUES (?, 'r_mar', ?, 'openrouter', ?, ?, ?)",
+            (f"c_{episode_id}_{call_type}_{amount}", episode_id, call_type, float(amount), NOW.isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _admit(env, *, worker_id="w1", now=NOW):
@@ -181,7 +222,8 @@ class TestScenario01SuccessfulAdmission:
         assert rec.status == "admitted"
         assert rec.channel_id == _CH
         assert rec.operating_grant_id == "op_g1"
-        assert rec.weekly_ceiling_usd == "55.00"
+        assert rec.configured_weekly_limit_usd == "80.00"   # the operator policy value, not a constant
+        assert rec.budget_policy_ref.startswith("channel_operations_profile:hypogeum:")
         assert rec.channel_week_ref.endswith("2026-W35")
         assert rec.lease_fencing_token >= 1
         assert rec.preplan_reservation_key.startswith("preplan:")
@@ -256,7 +298,7 @@ class TestScenario05ForeignChannelGrant:
         channel_config.create_channel_operations_profile(
             channel_id="other_channel", channel_name="Other", timezone="UTC",
             operator_enabled=True, production_cadence={"videos_per_week": 1},
-            weekly_video_budget_usd=55.0, db_path=env.db_path,
+            weekly_video_budget_usd=float(_DEFAULT_LIMIT), db_path=env.db_path,
         )
         _sign_and_register_operating_grant(env.priv, env.db_path, channel_id="other_channel",
                                            grant_id="op_other")
@@ -428,120 +470,291 @@ class TestScenario10NoDuplicateAfterIoClaim:
 
 
 # ===========================================================================
-# Scenario 11 — realistic complete episode plan within USD 55.00
+# Scenario 11 — truthful complete-episode plan vs. OPERATOR-CONFIGURABLE limit
+# (USD 55 is NOT an architectural constant)
 # ===========================================================================
 
-class TestScenario11BudgetFeasibility:
-    def _visual_package(self, n_scenes, tier=2, contingency_per_scene=2):
-        scenes = []
-        for i in range(n_scenes):
-            shots = [{"shot_order": 1, "primary_prompt": f"scene {i} primary"}]
-            for k in range(2, 2 + contingency_per_scene):
-                shots.append({"shot_order": k, "primary_prompt": f"scene {i} contingency {k}",
-                              "shot_id": f"s{i}_shot{k}"})
-            scenes.append({
-                "scene_id": f"s{i:02d}", "narration_reference": f"b_{i:03d}", "short_id": None,
-                "production_spec": {
-                    "provider_routing": {"primary_tier": tier, "primary_prompt": f"scene {i}"},
-                    "aspect_ratio": "16:9",
-                },
-                "cinematic_coverage_plan": {"shots": shots},
-            })
-        return {"scenes": scenes}
+def _complete_visual_package(n_scenes, *, tier=2, contingency_per_scene=2, shorts=2):
+    scenes = []
+    for i in range(n_scenes):
+        shots = [{"shot_order": 1, "primary_prompt": f"scene {i} primary"}]
+        for k in range(2, 2 + contingency_per_scene):
+            shots.append({"shot_order": k, "primary_prompt": f"scene {i} contingency {k}",
+                          "shot_id": f"s{i}_shot{k}"})
+        scenes.append({
+            "scene_id": f"s{i:02d}", "narration_reference": f"b_{i:03d}", "short_id": None,
+            "production_spec": {"provider_routing": {"primary_tier": tier, "primary_prompt": f"scene {i}"},
+                               "aspect_ratio": "16:9"},
+            "cinematic_coverage_plan": {"shots": shots},
+        })
+    for s in range(shorts):
+        scenes.append({
+            "scene_id": f"short{s:02d}", "narration_reference": f"sh_{s:03d}", "short_id": f"short{s}",
+            "production_spec": {"provider_routing": {"primary_tier": tier, "primary_prompt": f"short {s}"},
+                               "aspect_ratio": "9:16"},
+            "cinematic_coverage_plan": {"shots": [{"shot_order": 1, "primary_prompt": f"short {s}"}]},
+        })
+    return {"scenes": scenes}
 
-    def test_remaining_allowance_decimal_safe(self, env):
-        alloc = budget_policy.compute_remaining_post_plan_allowance(
-            _CH, "ep_alloc", config=_cfg(), now=NOW, db_path=env.db_path,
+
+def _script_pkg(n_scenes, shorts=2):
+    return {
+        "sections": [{"section_id": "sec1"}],
+        "shorts_scripts": [{"short_id": f"short{s}"} for s in range(shorts)],
+        "beats": (
+            [{"beat_id": f"b_{i:03d}", "deliverable_id": "main_episode"} for i in range(n_scenes)]
+            + [{"beat_id": f"sh_{s:03d}", "deliverable_id": f"short{s}"} for s in range(shorts)]
+        ),
+    }
+
+
+def _install_pricing_model(monkeypatch, *, per_shot_by_tier=None, fixed_overhead=Decimal("4.00")):
+    """A deterministic zero-network pricing model in place of the real
+    compile_production_plan. `maximum_bounded_cost_usd` is a faithful
+    function of (scene/shot count, tier, attempts, enhancement). It NEVER
+    invents a lower number than the assets imply -- so a plan cannot be
+    made affordable by understating the work."""
+    prices = per_shot_by_tier or {1: Decimal("2.50"), 2: Decimal("0.39"), 3: Decimal("0.39")}
+
+    def _compile(*, script_package, narration_package, visual_package, channel_id, episode_id, config):
+        scenes = visual_package.get("scenes", [])
+        attempts = Decimal(str(getattr(config, "MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", 3)))
+        enh_on = getattr(config, "SOURCE_ENHANCEMENT_ENABLED", True) is not False
+        vid_norm = vid_max = enh = Decimal("0")
+        n_shots = 0
+        for sc in scenes:
+            t = int(sc["production_spec"]["provider_routing"]["primary_tier"])
+            p = prices.get(t, Decimal("0.39"))
+            shots = sc["cinematic_coverage_plan"]["shots"]
+            n_shots += len(shots)
+            vid_norm += p * len(shots)
+            vid_max += p * attempts * len(shots)
+            if enh_on:
+                enh += Decimal("0.08") * len(shots)
+        norm = vid_norm + Decimal("2.00")
+        mx = vid_max + enh + fixed_overhead
+        # required beats must equal the plan's own asset beat set -> a
+        # plan that drops a required scene fails coverage below
+        beat_ids = {b["beat_id"] for b in script_package.get("beats", [])}
+        covered = {sc["narration_reference"] for sc in scenes}
+        return SimpleNamespace(
+            maximum_bounded_cost_usd=float(mx), normal_expected_cost_usd=float(norm),
+            enhancement_cost_maximum_usd=float(enh), thumbnail_cost_maximum_usd=1.0,
+            narration_cost_usd=0.5, music_cost_usd=0.5, planning_call_estimate_usd=0.05,
+            content_hash="c" * 64, channel_id=channel_id, episode_id=episode_id,
+            assets=list(range(n_shots)), deliverable_ids=sorted({b["deliverable_id"] for b in script_package.get("beats", [])}),
+            _covered=covered, _required=beat_ids,
         )
-        assert alloc["ceiling_usd"] == Decimal("55.00")
-        assert alloc["remaining_allowance_usd"] == Decimal("55.00")  # nothing incurred yet
-        assert isinstance(alloc["remaining_allowance_usd"], Decimal)
 
-    def test_reduction_ladder_brings_plan_under_ceiling_or_reports_infeasible(self, env, monkeypatch):
-        """A large first-candidate plan is compiled, then the bounded
-        deterministic ladder recompiles once. Either the reduced plan
-        fits (<= remaining allowance <= USD 55.00) with narration and
-        deliverables intact, or ProductionPlanBudgetInfeasibleError names
-        the exact irreducible components -- never a silent overspend."""
-        n_scenes = 24
-        vp_big = self._visual_package(n_scenes, tier=1, contingency_per_scene=3)
-        script_pkg = {
-            "sections": [{"section_id": "sec1"}],
-            "beats": [{"beat_id": f"b_{i:03d}", "deliverable_id": "main_episode"} for i in range(n_scenes)],
-        }
+    def _coverage(plan, nar):
+        missing = getattr(plan, "_required", set()) - getattr(plan, "_covered", set())
+        return SimpleNamespace(
+            sufficient=not missing,
+            failing_beats=[{"beat_id": b} for b in sorted(missing)],
+        )
 
-        captured = {}
-        real_compile = budget_policy.compile_production_plan
+    monkeypatch.setattr(budget_policy, "compile_production_plan", _compile)
+    monkeypatch.setattr(budget_policy, "validate_plan_coverage", _coverage)
 
-        def _stub_compile(*, script_package, narration_package, visual_package, channel_id, episode_id, config):
-            # deterministic zero-network pricing model for the shadow test:
-            scenes = visual_package.get("scenes", [])
-            tier_price = {1: Decimal("2.50"), 2: Decimal("0.39"), 3: Decimal("0.39")}
-            attempts = Decimal(str(getattr(config, "MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", 3)))
-            enh_on = getattr(config, "SOURCE_ENHANCEMENT_ENABLED", True) is not False
-            vid = Decimal("0")
-            enh = Decimal("0")
-            for s in scenes:
-                t = int(s["production_spec"]["provider_routing"]["primary_tier"])
-                p = tier_price.get(t, Decimal("0.39"))
-                shots = [sh for sh in s["cinematic_coverage_plan"]["shots"]]
-                vid += p * attempts * len(shots)
-                if enh_on:
-                    enh += Decimal("0.08") * len(shots)
-            mx = vid + enh + Decimal("2.00")  # + narration/music/thumb/planning fixed
-            captured["last_max"] = mx
-            return SimpleNamespace(
-                maximum_bounded_cost_usd=float(mx), normal_expected_cost_usd=float(mx / 3),
-                enhancement_cost_maximum_usd=float(enh), thumbnail_cost_maximum_usd=1.0,
-                narration_cost_usd=0.5, music_cost_usd=0.5, planning_call_estimate_usd=0.05,
-                content_hash="c" * 64, channel_id=channel_id, episode_id=episode_id,
-                assets=scenes, deliverable_ids=["main_episode"],
+
+class TestScenario11ConfigurableBudget:
+    def test_cost_model_keeps_the_six_concepts_separate(self, env, monkeypatch):
+        _install_pricing_model(monkeypatch)
+        # incur some PRE_PLAN cost
+        _record_cost(env.db_path, "ep_sep", Decimal("12.00"))
+        vp = _complete_visual_package(8, tier=2)
+        res = budget_policy.compile_truthful_production_plan(
+            script_package=_script_pkg(8), narration_package={}, visual_package=vp,
+            channel_id=_CH, episode_id="ep_sep", config=_cfg(), now=NOW, db_path=env.db_path,
+        )
+        cm = res.cost_model
+        assert cm.actual_incurred_cost == Decimal("12.00")
+        assert cm.expected_completion_cost > cm.actual_incurred_cost
+        assert cm.maximum_bounded_completion_cost > cm.expected_completion_cost
+        assert cm.configured_weekly_budget_limit == Decimal("80.00")
+        assert cm.remaining_weekly_capacity == Decimal("80.00") - Decimal("12.00")
+        assert cm.required_reservation_amount == Decimal(str(res.production_plan.maximum_bounded_cost_usd))
+        # concept #7: none is a substitute for another
+        assert len({cm.actual_incurred_cost, cm.expected_completion_cost,
+                    cm.maximum_bounded_completion_cost, cm.configured_weekly_budget_limit}) == 4
+
+    def test_1_complete_plan_below_configured_limit_is_admitted(self, env, monkeypatch):
+        _install_pricing_model(monkeypatch)
+        vp = _complete_visual_package(8, tier=2, contingency_per_scene=1)
+        res = budget_policy.compile_truthful_production_plan(
+            script_package=_script_pkg(8), narration_package={}, visual_package=vp,
+            channel_id=_CH, episode_id="ep_ok", config=_cfg(), now=NOW, db_path=env.db_path,
+        )
+        assert res.is_alternative_plan is False
+        assert res.substitution_applied == []
+        assert res.cost_model.fits()
+        assert res.accounting_ok()
+
+    def test_2_identical_plan_blocked_under_a_lower_configured_limit(self, env, monkeypatch):
+        _install_pricing_model(monkeypatch)
+        vp = _complete_visual_package(14, tier=1, contingency_per_scene=2)  # expensive
+        kwargs = dict(script_package=_script_pkg(14), narration_package={}, visual_package=vp,
+                      channel_id=_CH, episode_id="ep_lim", config=_cfg(), now=NOW, db_path=env.db_path)
+        # under a generous USD 500 limit it fits
+        _set_weekly_limit(env.db_path, 500.00)
+        ok = budget_policy.compile_truthful_production_plan(**kwargs)
+        assert ok.cost_model.fits()
+        # the SAME plan under USD 40 is blocked -- no code change, no reduction
+        _set_weekly_limit(env.db_path, 40.00)
+        with pytest.raises(budget_policy.ProductionPlanBudgetInfeasibleError) as ei:
+            budget_policy.compile_truthful_production_plan(**kwargs)
+        exc = ei.value
+        assert exc.cost_model.configured_weekly_budget_limit == Decimal("40.00")
+        assert exc.deficit > 0
+        assert exc.substitution_attempted is False
+        assert exc.component_breakdown["asset_count"] > 0
+
+    def test_3_raising_the_policy_allows_it_without_code_changes(self, env, monkeypatch):
+        _install_pricing_model(monkeypatch)
+        vp = _complete_visual_package(14, tier=1, contingency_per_scene=2)
+        kwargs = dict(script_package=_script_pkg(14), narration_package={}, visual_package=vp,
+                      channel_id=_CH, episode_id="ep_raise", config=_cfg(), now=NOW, db_path=env.db_path)
+        _set_weekly_limit(env.db_path, 40.00)
+        with pytest.raises(budget_policy.ProductionPlanBudgetInfeasibleError):
+            budget_policy.compile_truthful_production_plan(**kwargs)
+        # operator raises the configured policy -> same code, now admitted
+        _set_weekly_limit(env.db_path, 500.00)
+        res = budget_policy.compile_truthful_production_plan(**kwargs)
+        assert res.cost_model.fits()
+        assert res.is_alternative_plan is False
+
+    def test_operating_grant_binds_to_configured_limit_120_works_unchanged(self, env, monkeypatch):
+        """Admission works identically at USD 120 as at USD 80 -- the
+        limit is data. A grant signed for the old limit is rejected as
+        stale after the operator changes it."""
+        _set_weekly_limit(env.db_path, 120.00)
+        _sign_and_register_operating_grant(env.priv, env.db_path, weekly_ceiling=Decimal("120.00"))
+        _seed_topic(env.db_path)
+        rec = _admit(env)
+        assert rec.configured_weekly_limit_usd == "120.00"
+        # operator now lowers the limit; the existing grant is stale
+        _set_weekly_limit(env.db_path, 60.00)
+        adm.release_admission(rec.admission_id, db_path=env.db_path)
+        _seed_topic(env.db_path, text="another")
+        with pytest.raises(adm.OperatingGrantStalePolicyError):
+            adm.admit_channel_execution(_CH, config=_cfg(), worker_id="w2", log=_Log(),
+                                        now=NOW + timedelta(days=8), db_path=env.db_path)
+
+    def test_4_plan_cannot_pass_by_omitting_required_scenes(self, env, monkeypatch):
+        _install_pricing_model(monkeypatch)
+        # 12 required beats, but the visual package only covers 6 scenes
+        vp_incomplete = _complete_visual_package(6, tier=2, shorts=0)
+        with pytest.raises(ProductionPlanCoverageError):
+            _ = budget_policy.compile_truthful_production_plan(
+                script_package=_script_pkg(12, shorts=0), narration_package={}, visual_package=vp_incomplete,
+                channel_id=_CH, episode_id="ep_omit", config=_cfg(), now=NOW, db_path=env.db_path,
             )
 
-        monkeypatch.setattr(budget_policy, "compile_production_plan", _stub_compile)
-        monkeypatch.setattr(budget_policy, "validate_plan_coverage",
-                            lambda plan, nar: SimpleNamespace(sufficient=True, failing_beats=[]))
-
+    def test_4b_substitution_never_drops_a_mandatory_deliverable(self, env, monkeypatch):
+        _install_pricing_model(monkeypatch)
+        # permit substitution, give an expensive plan and a low limit
+        conn = db.get_connection(env.db_path)
         try:
-            result = budget_policy.compile_plan_within_allowance(
-                script_package=script_pkg, narration_package={}, visual_package=vp_big,
-                channel_id=_CH, episode_id="ep_budget", config=_cfg(), log=_Log(),
-                now=NOW, db_path=env.db_path,
+            conn.execute("UPDATE channel_operations_profiles SET retry_policy_json = ? WHERE channel_id=?",
+                         ('{"budget_substitution_permitted": true}', _CH))
+            conn.commit()
+        finally:
+            conn.close()
+        _set_weekly_limit(env.db_path, 30.00)
+        vp = _complete_visual_package(10, tier=1, contingency_per_scene=3, shorts=2)
+        try:
+            res = budget_policy.compile_truthful_production_plan(
+                script_package=_script_pkg(10, shorts=2), narration_package={}, visual_package=vp,
+                channel_id=_CH, episode_id="ep_sub", config=_cfg(), now=NOW, db_path=env.db_path,
             )
         except budget_policy.ProductionPlanBudgetInfeasibleError as exc:
-            assert exc.remaining_allowance == Decimal("55.00")
-            assert exc.projected_maximum > Decimal("55.00")
-            assert "reductions_attempted" in exc.irreducible_components
-            assert exc.irreducible_components["reductions_attempted"]  # ladder actually ran
+            # still infeasible even with substitutions -> reported, not faked
+            assert exc.substitution_attempted is True
             return
-        # feasible path
-        assert result.recompiled is True
-        assert result.reductions_applied
-        pm = Decimal(str(result.production_plan.maximum_bounded_cost_usd))
-        assert pm <= result.remaining_allowance <= Decimal("55.00")
-        assert result.accounting_ok()
+        # if it did fit: the alternative must still cover every required beat + every short
+        assert res.coverage_sufficient is True
+        assert set(res.production_plan.deliverable_ids) >= {"main_episode", "short0", "short1"}
 
-    def test_a_modest_episode_fits_first_try(self, env, monkeypatch):
-        vp = self._visual_package(8, tier=2, contingency_per_scene=1)
-        script_pkg = {"sections": [{"section_id": "s"}],
-                      "beats": [{"beat_id": f"b_{i:03d}", "deliverable_id": "main_episode"} for i in range(8)]}
-        monkeypatch.setattr(
-            budget_policy, "compile_production_plan",
-            lambda **kw: SimpleNamespace(
-                maximum_bounded_cost_usd=18.0, normal_expected_cost_usd=6.0,
-                enhancement_cost_maximum_usd=1.0, thumbnail_cost_maximum_usd=1.0,
-                narration_cost_usd=3.0, music_cost_usd=1.0, planning_call_estimate_usd=0.05,
-                content_hash="c" * 64, assets=[], deliverable_ids=["main_episode"]),
+    def test_7_actual_expected_and_maximum_remain_distinct_after_incurring(self, env, monkeypatch):
+        _install_pricing_model(monkeypatch)
+        _record_cost(env.db_path, "ep_d", Decimal("9.00"))
+        cm = budget_policy.compute_episode_cost_model(_CH, "ep_d", now=NOW, db_path=env.db_path)
+        assert cm.actual_incurred_cost == Decimal("9.00")
+        assert cm.expected_completion_cost == Decimal("9.00")   # no plan yet -> only incurred
+        assert cm.maximum_bounded_completion_cost == Decimal("9.00")
+        assert cm.required_reservation_amount == Decimal("0")
+
+    def test_5_reservation_is_bounded_to_planned_work_only(self, env, monkeypatch):
+        """required_reservation_amount == the plan's own maximum bounded
+        cost -- exactly the planned shots incl. their planned retry
+        allowance, and nothing more. An unplanned extra shot would raise
+        that number and therefore require a revised plan + a new
+        reservation (it cannot be generated under the old lower number)."""
+        _install_pricing_model(monkeypatch)
+        vp = _complete_visual_package(8, tier=2, contingency_per_scene=1)
+        res = budget_policy.compile_truthful_production_plan(
+            script_package=_script_pkg(8), narration_package={}, visual_package=vp,
+            channel_id=_CH, episode_id="ep_bound", config=_cfg(), now=NOW, db_path=env.db_path,
         )
-        monkeypatch.setattr(budget_policy, "validate_plan_coverage",
-                            lambda plan, nar: SimpleNamespace(sufficient=True, failing_beats=[]))
-        result = budget_policy.compile_plan_within_allowance(
-            script_package=script_pkg, narration_package={}, visual_package=vp,
-            channel_id=_CH, episode_id="ep_modest", config=_cfg(), log=_Log(), now=NOW, db_path=env.db_path,
+        planned_max = Decimal(str(res.production_plan.maximum_bounded_cost_usd))
+        assert res.cost_model.required_reservation_amount == planned_max
+        # a plan with one MORE shot is strictly more expensive
+        vp_more = _complete_visual_package(9, tier=2, contingency_per_scene=1)
+        res_more = budget_policy.compile_truthful_production_plan(
+            script_package=_script_pkg(9), narration_package={}, visual_package=vp_more,
+            channel_id=_CH, episode_id="ep_bound", config=_cfg(), now=NOW, db_path=env.db_path,
         )
-        assert result.recompiled is False
-        assert result.reductions_applied == []
-        assert result.accounting_ok()
+        assert Decimal(str(res_more.production_plan.maximum_bounded_cost_usd)) > planned_max
+
+    def test_6_revised_higher_cost_plan_needs_additional_capacity_before_io(self, env, monkeypatch):
+        """A revised Production Plan whose maximum bounded cost is higher
+        must be evaluated against remaining capacity again; if the extra
+        exposure does not fit, it fails closed BEFORE any provider I/O."""
+        _install_pricing_model(monkeypatch)
+        _set_weekly_limit(env.db_path, 60.00)
+        # v1 fits
+        v1 = budget_policy.compile_truthful_production_plan(
+            script_package=_script_pkg(10), narration_package={}, visual_package=_complete_visual_package(10, tier=2, contingency_per_scene=1),
+            channel_id=_CH, episode_id="ep_rev", config=_cfg(), now=NOW, db_path=env.db_path,
+        )
+        assert v1.cost_model.fits()
+        # v2 (many premium tier-1 scenes) is far more expensive -> blocked
+        with pytest.raises(budget_policy.ProductionPlanBudgetInfeasibleError) as ei:
+            budget_policy.compile_truthful_production_plan(
+                script_package=_script_pkg(10), narration_package={}, visual_package=_complete_visual_package(10, tier=1, contingency_per_scene=3),
+                channel_id=_CH, episode_id="ep_rev", config=_cfg(), now=NOW, db_path=env.db_path,
+            )
+        assert ei.value.deficit > 0
+        assert ei.value.cost_model.maximum_bounded_completion_cost > v1.cost_model.maximum_bounded_completion_cost
+
+    def test_8_incomplete_historical_episode_is_not_a_complete_55_episode(self):
+        """Read-only: the real incomplete Hypogeum episode's recorded
+        spend is NOT its full complete-episode cost, and the cost model
+        would not describe it as a USD-55 complete episode."""
+        import os
+        import sqlite3
+        prod = os.path.join(os.path.dirname(__file__), "..", ".hypogeum-assets", "hypogeum.db")
+        if not os.path.exists(prod):
+            pytest.skip("production DB not present in this environment")
+        c = sqlite3.connect(f"file:{prod}?mode=ro", uri=True)
+        try:
+            row = c.execute(
+                "SELECT ROUND(SUM(cost_usd),2) FROM costs WHERE episode_id = 'ep_f3619022'"
+            ).fetchone()
+            incurred = Decimal(str(row[0] or "0"))
+            if incurred == 0:
+                pytest.skip("historical episode ep_f3619022 not in this DB")
+            # its costs were recorded across canary shots + editorial batches,
+            # each authorized by its own small manual grant -- not a single
+            # complete-episode plan
+            grants = c.execute(
+                "SELECT COUNT(*) FROM run_authorization_grants WHERE episode_id = 'ep_f3619022'"
+            ).fetchone()[0]
+        finally:
+            c.close()
+        assert incurred > Decimal("55.00")   # already OVER 55 while still incomplete
+        assert grants >= 2                    # piecemeal authorization, not one plan
+        # therefore "USD 55 = a complete episode" is false by evidence
 
 
 # ===========================================================================

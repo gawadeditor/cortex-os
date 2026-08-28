@@ -1190,12 +1190,17 @@ def run_visual_package_director(
     # channel_id fails closed inside compile_production_plan() ->
     # load_deliverable_contract() with a clear ChannelPackagePolicyDriftError
     # rather than silently proceeding with an inferred or invented shape.
-    # ADR-016 §5: an autonomously ADMITTED episode compiles its plan
-    # THROUGH the bounded, Decimal-safe channel budget policy -- it computes
-    # the remaining USD 55.00 weekly allowance, and if the first candidate
-    # plan does not fit, applies one deterministic zero-network reduction
-    # ladder and recompiles once. A non-admitted (manual / legacy) run
-    # keeps the direct compile path unchanged.
+    # ADR-016 §5 (corrected 2026-08-28): an autonomously ADMITTED episode
+    # compiles its plan THROUGH the truth-first channel budget policy. It
+    # prices the COMPLETE episode (all mandatory deliverables + every
+    # Short + planned retries/fallbacks/contingency) and compares
+    # maximum_bounded_completion_cost with remaining_weekly_capacity under
+    # the OPERATOR-CONFIGURED weekly limit (from the Channel Operations
+    # Profile -- not a hardcoded number). If it does not fit and the
+    # Channel Package does not permit substitutions, the run fails closed
+    # with the full component breakdown -- no silent asset reduction, no
+    # ceiling raise, no omitted mandatory work. A non-admitted (manual /
+    # legacy) run keeps the direct compile path unchanged.
     _admitted_for_budget = False
     if channel_id:
         try:
@@ -1205,8 +1210,8 @@ def run_visual_package_director(
             _admitted_for_budget = False
 
     if _admitted_for_budget:
-        from hypogeum.channel_budget_policy import compile_plan_within_allowance  # noqa: PLC0415
-        _budget_result = compile_plan_within_allowance(
+        from hypogeum.channel_budget_policy import compile_truthful_production_plan  # noqa: PLC0415
+        _budget_result = compile_truthful_production_plan(
             script_package=script_package, narration_package=narration_package or {},
             visual_package=visual_package, channel_id=channel_id, episode_id=episode_id,
             config=config, log=log,
@@ -1217,14 +1222,18 @@ def run_visual_package_director(
             raise ProductionPlanCoverageError(
                 episode_id=episode_id, failing_beats=_plan_coverage.failing_beats,
             )
+        _cm = _budget_result.cost_model
         log.info(
-            "vpd_budget_aware_plan",
+            "vpd_truthful_budget_plan",
             episode_id=episode_id,
-            remaining_allowance_usd=str(_budget_result.remaining_allowance),
-            incurred_preplan_usd=str(_budget_result.incurred_preplan_usd),
-            plan_maximum_usd=production_plan.maximum_bounded_cost_usd,
-            recompiled=_budget_result.recompiled,
-            reductions=_budget_result.reductions_applied,
+            configured_weekly_limit_usd=str(_cm.configured_weekly_budget_limit),
+            remaining_weekly_capacity_usd=str(_cm.remaining_weekly_capacity),
+            actual_incurred_cost_usd=str(_cm.actual_incurred_cost),
+            expected_completion_cost_usd=str(_cm.expected_completion_cost),
+            maximum_bounded_completion_cost_usd=str(_cm.maximum_bounded_completion_cost),
+            required_reservation_amount_usd=str(_cm.required_reservation_amount),
+            is_alternative_plan=_budget_result.is_alternative_plan,
+            substitutions=_budget_result.substitution_applied,
         )
     else:
         production_plan = compile_production_plan(

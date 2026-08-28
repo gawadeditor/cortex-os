@@ -16,8 +16,9 @@ narration, and any paid planning assistance.
     ONE authoritative, durable, idempotent pre-production reservation is
     established against the accepted e20bdcf weekly-budget ledger:
 
-        scope_kind      = 'channel_weekly'   (same ledger, same USD 55.00
-                                              ceiling as POST_PLAN work)
+        scope_kind      = 'channel_weekly'   (same ledger and same
+                                              operator-configured weekly
+                                              limit as POST_PLAN work)
         idempotency_key = 'preplan:<channel_id>:<episode_id>'
         reserved_amount = the authoritative per-episode budget ceiling
                           (hypogeum.policy_cascade.get_effective_budget_

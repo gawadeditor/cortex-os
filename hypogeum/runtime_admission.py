@@ -16,9 +16,13 @@ them:
 
 Admission binds the admitted execution to: the Channel Operating Grant, the
 authoritative channel-week, the PRE_PLAN reservation, the workflow identity,
-the fenced worker-lease ownership identity, and the approved USD 55.00 weekly
-limit -- durably, in one row of `execution_admissions`, keyed so a restart
-replays the same identity rather than creating a second execution.
+the fenced worker-lease ownership identity, and the operator-configured
+weekly budget limit effective at admission time -- durably, in one row of
+`execution_admissions`, keyed so a restart replays the same identity rather
+than creating a second execution. The weekly limit is an operator-controlled,
+versioned Channel policy value (from `channel_operations_profiles.
+weekly_video_budget_usd`); it is NOT an architectural constant. If the
+operator changes it, the Channel Operating Grant must be re-signed.
 
 The runtime holds NO signing key. It can only RESOLVE (public key) and
 CONSUME an Operating Grant an operator signed offline; it cannot mint,
@@ -47,7 +51,7 @@ __all__ = [
     "NoEligibleTopicError",
     "PreplanReservationError",
     "AdmissionRecord",
-    "APPROVED_WEEKLY_CEILING_USD",
+    "OperatingGrantStalePolicyError",
     "LEASE_TTL_SECONDS",
     "admit_channel_execution",
     "get_admission_binding",
@@ -59,7 +63,6 @@ __all__ = [
     "release_admission",
 ]
 
-APPROVED_WEEKLY_CEILING_USD = Decimal("55.00")
 LEASE_TTL_SECONDS = 900  # fenced worker-lease TTL; renewed on heartbeat
 
 _ACTIVE_STATES = ("admitted", "plan_upgraded")
@@ -83,7 +86,14 @@ class NoActiveOperatingGrantError(AdmissionError):
 
 class OperatingGrantScopeError(AdmissionError):
     """The resolved Operating Grant does not match the channel/workflow/
-    cadence/ceiling this admission requires."""
+    cadence this admission requires."""
+
+
+class OperatingGrantStalePolicyError(AdmissionError):
+    """The resolved Operating Grant's bound weekly limit no longer equals
+    the operator-configured weekly budget limit (the operator changed the
+    policy). A new / revised Operating Grant is required -- the runtime
+    never lets an old signature silently gain (or lose) authority."""
 
 
 class NoEligibleTopicError(AdmissionError):
@@ -106,7 +116,8 @@ class AdmissionRecord:
     preplan_reservation_key: str
     workflow_id: str
     workflow_version: str
-    weekly_ceiling_usd: str
+    configured_weekly_limit_usd: str   # operator policy value at admission time (NOT an architectural constant)
+    budget_policy_ref: str
     lease_owner_id: str
     lease_fencing_token: int
     topic_id: Optional[str]
@@ -143,7 +154,8 @@ def ensure_admission_table(conn: sqlite3.Connection) -> None:
             preplan_reservation_key  TEXT NOT NULL,
             workflow_id              TEXT NOT NULL,
             workflow_version         TEXT NOT NULL,
-            weekly_ceiling_usd       TEXT NOT NULL,
+            configured_weekly_limit_usd TEXT NOT NULL,
+            budget_policy_ref        TEXT NOT NULL DEFAULT '',
             lease_owner_id           TEXT NOT NULL,
             lease_fencing_token      INTEGER NOT NULL,
             topic_id                 TEXT,
@@ -175,7 +187,8 @@ def _row_to_record(row: sqlite3.Row) -> AdmissionRecord:
         preplan_reservation_key=row["preplan_reservation_key"],
         workflow_id=row["workflow_id"],
         workflow_version=row["workflow_version"],
-        weekly_ceiling_usd=row["weekly_ceiling_usd"],
+        configured_weekly_limit_usd=row["configured_weekly_limit_usd"],
+        budget_policy_ref=(row["budget_policy_ref"] if "budget_policy_ref" in row.keys() else ""),
         lease_owner_id=row["lease_owner_id"],
         lease_fencing_token=row["lease_fencing_token"],
         topic_id=row["topic_id"],
@@ -294,9 +307,13 @@ def admit_channel_execution(
     if not (getattr(profile, "production_cadence", None) or {}):
         raise ChannelNotOperableError(f"channel {channel_id!r} has no production_cadence configured")
 
+    from hypogeum.channel_budget_policy import resolve_configured_weekly_limit  # noqa: PLC0415
+
     conn0 = get_connection(db_path)
     try:
-        tz_name, _ceiling = weekly_budget.resolve_channel_weekly_policy(conn0, channel_id)
+        tz_name, configured_limit, budget_policy_ref = resolve_configured_weekly_limit(
+            channel_id, conn=conn0,
+        )
     finally:
         conn0.close()
     window = weekly_budget.compute_weekly_window(now, tz_name)
@@ -307,7 +324,7 @@ def admit_channel_execution(
     existing = get_admission_by_id(admission_id, db_path=db_path)
     if existing is not None and existing.is_active:
         _verify_operating_grant(
-            channel_id, existing.workflow_version, profile, now_iso,
+            channel_id, existing.workflow_version, profile, now_iso, configured_limit,
             expect_grant_id=existing.operating_grant_id, db_path=db_path,
         )
         # Re-take / renew the fenced lease for the SAME owner so a restart
@@ -349,7 +366,8 @@ def admit_channel_execution(
 
     try:
         grant = _verify_operating_grant(
-            channel_id, None, profile, now_iso, expect_grant_id=None, db_path=db_path,
+            channel_id, None, profile, now_iso, configured_limit,
+            expect_grant_id=None, db_path=db_path,
         )
         workflow_id = grant.workflow_id
         workflow_version = grant.workflow_version
@@ -371,7 +389,9 @@ def admit_channel_execution(
             execution_id=execution_id, channel_week_ref=channel_week_ref,
             operating_grant_id=grant.grant_id, operating_grant_version=grant.grant_version,
             preplan_reservation_key=preplan_key, workflow_id=workflow_id,
-            workflow_version=workflow_version, lease_owner_id=worker_id,
+            workflow_version=workflow_version,
+            configured_weekly_limit_usd=configured_limit, budget_policy_ref=budget_policy_ref,
+            lease_owner_id=worker_id,
             lease_fencing_token=fencing_token, topic_id=topic_id, now_iso=now_iso,
             db_path=db_path,
         )
@@ -403,7 +423,10 @@ def admit_channel_execution(
 # Building blocks (each fails closed)
 # ---------------------------------------------------------------------------
 
-def _verify_operating_grant(channel_id, expected_workflow_version, profile, now_iso, *, expect_grant_id, db_path):
+def _verify_operating_grant(
+    channel_id, expected_workflow_version, profile, now_iso, configured_limit, *,
+    expect_grant_id, db_path,
+):
     import hypogeum.authorization_authority as authority
 
     grant = authority.resolve_active_operating_grant(channel_id, at=now_iso, db_path=db_path)
@@ -418,15 +441,23 @@ def _verify_operating_grant(channel_id, expected_workflow_version, profile, now_
         )
     if grant.channel_id != channel_id:
         raise OperatingGrantScopeError("operating grant channel mismatch")
+    if (grant.currency or "USD") != "USD":
+        raise OperatingGrantScopeError(f"operating grant currency {grant.currency!r} != USD")
     if expected_workflow_version is not None and grant.workflow_version != expected_workflow_version:
         raise OperatingGrantScopeError(
             f"operating grant workflow_version {grant.workflow_version!r} != admitted "
             f"{expected_workflow_version!r}"
         )
-    if Decimal(str(grant.weekly_exposure_ceiling_usd or "0")) != APPROVED_WEEKLY_CEILING_USD:
-        raise OperatingGrantScopeError(
-            f"operating grant weekly_exposure_ceiling_usd {grant.weekly_exposure_ceiling_usd!r} "
-            f"!= approved {APPROVED_WEEKLY_CEILING_USD}"
+    # The grant is bound to the operator-configured weekly limit that was
+    # effective when it was signed. If the operator has since changed that
+    # limit (up OR down), the old signature must NOT silently gain or lose
+    # authority -- a new / revised Operating Grant is required.
+    grant_limit = Decimal(str(grant.weekly_exposure_ceiling_usd or "0"))
+    if grant_limit != Decimal(str(configured_limit)):
+        raise OperatingGrantStalePolicyError(
+            f"operating grant weekly_exposure_ceiling_usd {grant_limit} != the "
+            f"operator-configured weekly budget limit {configured_limit} -- the budget "
+            f"policy changed; re-sign the Channel Operating Grant"
         )
     expected_cadence = _cadence_ref(profile)
     if grant.cadence_snapshot and grant.cadence_snapshot != expected_cadence:
@@ -503,7 +534,8 @@ class _NullLog:
 def _persist_admission(
     *, admission_id, channel_id, episode_id, execution_id, channel_week_ref,
     operating_grant_id, operating_grant_version, preplan_reservation_key, workflow_id,
-    workflow_version, lease_owner_id, lease_fencing_token, topic_id, now_iso, db_path,
+    workflow_version, configured_weekly_limit_usd, budget_policy_ref,
+    lease_owner_id, lease_fencing_token, topic_id, now_iso, db_path,
 ) -> AdmissionRecord:
     conn = get_connection(db_path)
     try:
@@ -521,14 +553,15 @@ def _persist_admission(
                 INSERT INTO execution_admissions
                     (admission_id, channel_id, episode_id, execution_id, channel_week_ref,
                      operating_grant_id, operating_grant_version, preplan_reservation_key,
-                     workflow_id, workflow_version, weekly_ceiling_usd, lease_owner_id,
-                     lease_fencing_token, topic_id, status, queue_id, admitted_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, ?, ?)
+                     workflow_id, workflow_version, configured_weekly_limit_usd, budget_policy_ref,
+                     lease_owner_id, lease_fencing_token, topic_id, status, queue_id,
+                     admitted_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, ?, ?)
                 """,
                 (
                     admission_id, channel_id, episode_id, execution_id, channel_week_ref,
                     operating_grant_id, operating_grant_version, preplan_reservation_key,
-                    workflow_id, workflow_version, str(APPROVED_WEEKLY_CEILING_USD),
+                    workflow_id, workflow_version, str(configured_weekly_limit_usd), budget_policy_ref,
                     lease_owner_id, lease_fencing_token, topic_id, now_iso, now_iso,
                 ),
             )

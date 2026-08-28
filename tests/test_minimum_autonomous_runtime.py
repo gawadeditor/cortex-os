@@ -559,12 +559,25 @@ def _install_pricing_model(monkeypatch, *, per_shot_by_tier=None, fixed_overhead
         # plan that drops a required scene fails coverage below
         beat_ids = {b["beat_id"] for b in script_package.get("beats", [])}
         covered = {sc["narration_reference"] for sc in scenes}
+        # real-shaped asset objects so coverage_required_video_cost() works
+        assets = []
+        for sc in scenes:
+            t = int(sc["production_spec"]["provider_routing"]["primary_tier"])
+            p = float(prices.get(t, Decimal("0.39")))
+            for sh in sc["cinematic_coverage_plan"]["shots"]:
+                assets.append(SimpleNamespace(
+                    beat_id=sc["narration_reference"], unit_price_usd=p,
+                    conservative_usable_duration_seconds=8.0,
+                    enhancement_price_usd=(0.08 if enh_on else 0.0),
+                    max_chargeable_attempts=int(attempts),
+                ))
         return SimpleNamespace(
             maximum_bounded_cost_usd=float(mx), normal_expected_cost_usd=float(norm),
             enhancement_cost_maximum_usd=float(enh), thumbnail_cost_maximum_usd=1.0,
+            thumbnail_cost_normal_usd=0.3,
             narration_cost_usd=0.5, music_cost_usd=0.5, planning_call_estimate_usd=0.05,
             content_hash="c" * 64, channel_id=channel_id, episode_id=episode_id,
-            assets=list(range(n_shots)), deliverable_ids=sorted({b["deliverable_id"] for b in script_package.get("beats", [])}),
+            assets=assets, deliverable_ids=sorted({b["deliverable_id"] for b in script_package.get("beats", [])}),
             _covered=covered, _required=beat_ids,
         )
 
@@ -590,17 +603,17 @@ class TestScenario11ConfigurableBudget:
         )
         cm = res.cost_model
         max_rem = Decimal(str(res.production_plan.maximum_bounded_cost_usd))
-        exp_rem = Decimal(str(res.production_plan.normal_expected_cost_usd))
         # non-overlapping primitives
         assert cm.configured_weekly_budget_limit == Decimal("80.00")
         assert cm.other_weekly_exposure == Decimal("0")
         assert cm.episode_cost_incurred == Decimal("12.00")
-        assert cm.expected_remaining_cost == exp_rem
+        # expected < maximum, both positive and distinct
+        assert Decimal("0") < cm.expected_remaining_cost < cm.maximum_bounded_remaining_cost
         assert cm.maximum_bounded_remaining_cost == max_rem
         # derived, each using episode_cost_incurred at most once
         assert cm.weekly_capacity_before_episode == Decimal("80.00")           # limit - other
         assert cm.future_capacity_available == Decimal("80.00") - Decimal("12.00")   # - incurred, ONCE
-        assert cm.expected_complete_episode_cost == Decimal("12.00") + exp_rem
+        assert cm.expected_complete_episode_cost == Decimal("12.00") + cm.expected_remaining_cost
         assert cm.maximum_bounded_complete_episode_cost == Decimal("12.00") + max_rem
         assert cm.required_future_reservation == max_rem   # NOT incurred + max
         # the two fit equations are always equal

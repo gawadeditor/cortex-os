@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -212,3 +214,149 @@ class TestTruthfulCompletePricing:
             visual_package=vp_rc, channel_id="hypogeum", episode_id="probe", config=_real_cfg(),
         )
         assert validate_plan_coverage(plan_rc, a["narration_package"]).sufficient is False
+
+
+# ---------------------------------------------------------------------------
+# Required-vs-contingency reclassification (2026-08-29)
+# ---------------------------------------------------------------------------
+
+class TestCoverageRequiredClassification:
+    def _plan(self, cfg=None):
+        a = _artifacts()
+        return compile_production_plan(
+            script_package=a["script_package"], narration_package=a["narration_package"],
+            visual_package=a["visual_package"], channel_id="hypogeum",
+            episode_id="reclass_probe", config=cfg or _real_cfg(),
+        )
+
+    def test_coverage_required_count_exceeds_the_one_per_beat_role_label(self):
+        """production_plan labels 1 shot/beat ROLE_REQUIRED (47 total); the
+        coverage arithmetic actually REQUIRES ~130 shots to fill the beat
+        durations. Those extra ~83 are baseline required work, not
+        contingency."""
+        a = _artifacts()
+        plan = self._plan()
+        req_cost, req_shots, cont_shots = bp.coverage_required_video_cost(plan, a["narration_package"])
+        assert req_shots > 47                          # far more than the 1-per-beat label
+        assert req_shots + cont_shots == len(plan.assets)
+        assert 100 <= req_shots <= 145                 # the coverage-required baseline
+        assert 0 < cont_shots < 40                     # a small true-contingency tail
+
+    def test_expected_cost_includes_every_coverage_required_shot(self):
+        a = _artifacts()
+        res = bp.compile_truthful_production_plan(
+            script_package=a["script_package"], narration_package=a["narration_package"],
+            visual_package=a["visual_package"], channel_id="hypogeum", episode_id="reclass2",
+            config=_real_cfg(), db_path=os.devnull,
+        ) if False else None
+        # compile_truthful needs a real DB; test the model directly with a
+        # tmp DB instead
+        import hypogeum.db as db
+        import hypogeum.channel_config as cc
+        import hypogeum.policy_cascade as pc
+        import tempfile
+        from decimal import Decimal
+        d = Path(tempfile.mkdtemp()) / "t.db"
+        db.initialize_schema(d)
+        cc.create_channel_profile(channel_id="hypogeum", name="H", db_path=d)
+        cc.create_channel_operations_profile(channel_id="hypogeum", channel_name="H", timezone="UTC",
+                                             operator_enabled=True, production_cadence={"videos_per_week": 1},
+                                             weekly_video_budget_usd=200.0, db_path=d)
+        plan = self._plan()
+        cm = bp.compute_episode_cost_model(
+            "hypogeum", "reclass2", production_plan=plan,
+            narration_package=a["narration_package"], db_path=d,
+        )
+        req_cost, req_shots, _ = bp.coverage_required_video_cost(plan, a["narration_package"])
+        # expected remaining >= the coverage-required video cost alone
+        assert cm.expected_remaining_cost >= req_cost
+        # expected < maximum, and the gap is the TRUE contingency + enhancement + thumbnail spread
+        assert cm.expected_remaining_cost < cm.maximum_bounded_remaining_cost
+        # expected is NOT the old 1-shot-per-beat understatement
+        assert cm.expected_remaining_cost > Decimal("60")
+
+    def test_removing_a_true_contingency_shot_keeps_coverage(self):
+        """The LAST shot of a beat that has more shots than its coverage
+        minimum is a true contingency -- removing it must not break
+        coverage."""
+        a = _artifacts()
+        import math
+        from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR
+        dur = {s.get("beat_reference") or s.get("beat_id"): float(s.get("duration_seconds", 0))
+               for s in a["narration_package"]["narration_segments"]}
+        vp = json.loads(json.dumps(a["visual_package"]))
+        removed = 0
+        for sc in vp["scenes"]:
+            b = sc.get("narration_reference", "")
+            shots = (sc.get("cinematic_coverage_plan") or {}).get("shots", [])
+            min_req = max(1, math.ceil(dur.get(b, 0.0) / (8.0 * MAX_EDITORIAL_SPEED_FACTOR)))
+            if len(shots) > min_req:      # has a true-contingency tail
+                sc["cinematic_coverage_plan"]["shots"] = shots[:min_req]
+                removed += (len(shots) - min_req)
+        assert removed > 0
+        plan = compile_production_plan(
+            script_package=a["script_package"], narration_package=a["narration_package"],
+            visual_package=vp, channel_id="hypogeum", episode_id="probe", config=_real_cfg(),
+        )
+        assert validate_plan_coverage(plan, a["narration_package"]).sufficient   # still complete
+
+    def test_removing_a_coverage_required_shot_breaks_coverage(self):
+        a = _artifacts()
+        vp = json.loads(json.dumps(a["visual_package"]))
+        # drop the last shot from every beat that has >= 3 shots -> removes
+        # a coverage-required shot from long beats
+        for sc in vp["scenes"]:
+            shots = (sc.get("cinematic_coverage_plan") or {}).get("shots", [])
+            if len(shots) >= 3:
+                sc["cinematic_coverage_plan"]["shots"] = shots[:-1]
+        plan = compile_production_plan(
+            script_package=a["script_package"], narration_package=a["narration_package"],
+            visual_package=vp, channel_id="hypogeum", episode_id="probe", config=_real_cfg(),
+        )
+        assert validate_plan_coverage(plan, a["narration_package"]).sufficient is False
+
+    def test_verified_cache_credit_reduces_expected_unverified_does_not(self):
+        import hypogeum.db as db
+        import hypogeum.channel_config as cc
+        import tempfile
+        from decimal import Decimal
+        d = Path(tempfile.mkdtemp()) / "t.db"
+        db.initialize_schema(d)
+        cc.create_channel_profile(channel_id="hypogeum", name="H", db_path=d)
+        cc.create_channel_operations_profile(channel_id="hypogeum", channel_name="H", timezone="UTC",
+                                             operator_enabled=True, production_cadence={"videos_per_week": 1},
+                                             weekly_video_budget_usd=200.0, db_path=d)
+        a = _artifacts()
+        plan = self._plan()
+        cm_unverified = bp.compute_episode_cost_model(
+            "hypogeum", "cache1", production_plan=plan, narration_package=a["narration_package"], db_path=d,
+        )
+        cm_verified = bp.compute_episode_cost_model(
+            "hypogeum", "cache1", production_plan=plan, narration_package=a["narration_package"],
+            verified_music_credit_usd=Decimal("21.60"), db_path=d,
+        )
+        assert cm_verified.expected_remaining_cost == cm_unverified.expected_remaining_cost - Decimal("21.60")
+        # default (no credit passed) == unverified == full fresh music priced
+        assert cm_unverified.expected_remaining_cost > cm_verified.expected_remaining_cost
+
+    def test_corrected_fully_bounded_plan_fits_135_or_reports_deficit(self):
+        import hypogeum.db as db
+        import hypogeum.channel_config as cc
+        import tempfile
+        from decimal import Decimal
+        d = Path(tempfile.mkdtemp()) / "t.db"
+        db.initialize_schema(d)
+        cc.create_channel_profile(channel_id="hypogeum", name="H", db_path=d)
+        cc.create_channel_operations_profile(channel_id="hypogeum", channel_name="H", timezone="UTC",
+                                             operator_enabled=True, production_cadence={"videos_per_week": 1},
+                                             weekly_video_budget_usd=135.0, db_path=d)
+        a = _artifacts()
+        plan = self._plan()
+        cm = bp.compute_episode_cost_model(
+            "hypogeum", "fit135", production_plan=plan, narration_package=a["narration_package"], db_path=d,
+        )
+        PRE_PLAN_MAX = Decimal("10.00")
+        complete_max = cm.maximum_bounded_remaining_cost + PRE_PLAN_MAX
+        # POST_PLAN maximum alone is ~$122; + PRE_PLAN ~$10 => ~$132 <= $135
+        assert cm.maximum_bounded_remaining_cost < Decimal("125")
+        assert complete_max <= Decimal("135.00"), f"complete_max={complete_max}"

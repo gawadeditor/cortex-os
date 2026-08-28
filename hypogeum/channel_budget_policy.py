@@ -388,14 +388,64 @@ def _incurred_for_episode(conn, episode_id: str) -> Decimal:
     return _q(row["s"])
 
 
+def coverage_required_video_cost(production_plan, narration_package: dict):
+    """Per beat, the number of video shots the coverage arithmetic
+    (hypogeum.agents.coverage_check) genuinely REQUIRES to fill that
+    beat's narration duration under the <=1.15x editorial-speed cap, and
+    the summed price of exactly that many shots. A planned shot BEYOND
+    the per-beat minimum is a TRUE contingency asset (an alternate /
+    replacement); a planned shot within the minimum is baseline required
+    work and belongs in the EXPECTED cost, not only the maximum.
+
+    Returns (required_video_cost: Decimal, required_shot_count: int,
+    true_contingency_shot_count: int).
+    """
+    import math
+    from collections import defaultdict
+    from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR
+
+    durations = {}
+    for seg in (narration_package or {}).get("narration_segments", []) or []:
+        durations[seg.get("beat_reference") or seg.get("beat_id")] = float(seg.get("duration_seconds", 0.0))
+
+    by_beat = defaultdict(list)
+    for a in getattr(production_plan, "assets", []) or []:
+        by_beat[getattr(a, "beat_id", "")].append(a)
+
+    req_cost = Decimal("0")
+    req_shots = 0
+    cont_shots = 0
+    for beat, assets in by_beat.items():
+        assets = sorted(assets, key=lambda x: float(getattr(x, "unit_price_usd", 0)))
+        nd = durations.get(beat, 0.0)
+        per_clip = float(getattr(assets[0], "conservative_usable_duration_seconds", 8.0)) * MAX_EDITORIAL_SPEED_FACTOR
+        min_req = max(1, math.ceil(nd / per_clip)) if (nd > 0 and per_clip > 0) else 1
+        min_req = min(min_req, len(assets))
+        for a in assets[:min_req]:
+            req_cost += _q(getattr(a, "unit_price_usd", 0))
+        req_shots += min_req
+        cont_shots += len(assets) - min_req
+    return req_cost, req_shots, cont_shots
+
+
 def compute_episode_cost_model(
-    channel_id: str, episode_id: str, *, production_plan=None,
+    channel_id: str, episode_id: str, *, production_plan=None, narration_package: Optional[dict] = None,
+    verified_music_credit_usd: Decimal = Decimal("0"),
     now: Optional[datetime] = None, db_path: Optional[Path] = None,
 ) -> EpisodeCostModel:
-    """Assemble the six financial concepts. `production_plan` supplies the
-    truthful POST_PLAN estimate/maximum; when omitted (a pre-compile
-    probe) the plan-derived fields are 0 and the model reports only
-    incurred / configured limit / remaining capacity."""
+    """Assemble the financial concepts. When `production_plan` is given,
+    `expected_remaining_cost` counts EVERY coverage-required video shot
+    (not only the first per beat -- see coverage_required_video_cost),
+    plus enhancement on every required clip, narration, music (priced
+    FRESH unless `verified_music_credit_usd` is passed after the planner
+    confirmed the exact reusable category tracks exist), the normal
+    thumbnail set, and the planning estimate. `maximum_bounded_remaining_cost`
+    is the plan's own maximum_bounded_cost_usd (all shots + all
+    contingency + all enhancement + fresh music + max thumbnails).
+
+    A machine-readable per-component expected-vs-maximum explanation is
+    available via `EpisodeCostModel`-adjacent helpers / the truthful-plan
+    result; see compile_truthful_production_plan."""
     now = now or datetime.now(timezone.utc)
     conn = get_connection(db_path)
     try:
@@ -409,8 +459,28 @@ def compute_episode_cost_model(
         conn.close()
 
     if production_plan is not None:
-        post_plan_expected = _q(getattr(production_plan, "normal_expected_cost_usd", 0))
         post_plan_maximum = _q(getattr(production_plan, "maximum_bounded_cost_usd", 0))
+        assets = list(getattr(production_plan, "assets", []) or [])
+        if assets and narration_package is not None:
+            req_video, req_shots, _cont = coverage_required_video_cost(production_plan, narration_package)
+            enh_per_op = (
+                _q(getattr(production_plan, "enhancement_cost_maximum_usd", 0)) / Decimal(len(assets))
+                if assets else Decimal("0")
+            )
+            fresh_music = _q(getattr(production_plan, "music_cost_usd", 0))
+            music_expected = max(Decimal("0"), fresh_music - _q(verified_music_credit_usd))
+            post_plan_expected = (
+                req_video
+                + Decimal(req_shots) * enh_per_op                      # enhancement on every required clip
+                + _q(getattr(production_plan, "narration_cost_usd", 0))
+                + music_expected
+                + _q(getattr(production_plan, "thumbnail_cost_normal_usd", 0))
+                + _q(getattr(production_plan, "planning_call_estimate_usd", 0))
+            )
+        else:
+            # no narration durations available -> fall back to the plan's
+            # own normal_expected (still separate from the maximum)
+            post_plan_expected = _q(getattr(production_plan, "normal_expected_cost_usd", 0))
     else:
         post_plan_expected = Decimal("0")
         post_plan_maximum = Decimal("0")
@@ -558,7 +628,8 @@ def compile_truthful_production_plan(
         _failing += [{"beat_id": d} for d in inventory["missing_required_deliverables"]]
         raise ProductionPlanCoverageError(episode_id=episode_id, failing_beats=_failing)
     cost_model = compute_episode_cost_model(
-        channel_id, episode_id, production_plan=plan, now=now, db_path=db_path,
+        channel_id, episode_id, production_plan=plan,
+        narration_package=narration_package or {}, now=now, db_path=db_path,
     )
 
     def _breakdown(p, c) -> dict:
@@ -588,6 +659,7 @@ def compile_truthful_production_plan(
             "min_weekly_limit_for_maximum_usd": float(
                 cost_model.min_weekly_limit_for(cost_model.maximum_bounded_remaining_cost)
             ),
+            "expected_vs_maximum_explanation": _expected_vs_max_explanation(p, narration_package or {}),
         }
 
     if cost_model.fits() and cov.sufficient:
@@ -640,7 +712,8 @@ def compile_truthful_production_plan(
             episode_id=episode_id, failing_beats=getattr(alt_cov, "failing_beats", []),
         )
     alt_cost_model = compute_episode_cost_model(
-        channel_id, episode_id, production_plan=alt_plan, now=now, db_path=db_path,
+        channel_id, episode_id, production_plan=alt_plan,
+        narration_package=narration_package or {}, now=now, db_path=db_path,
     )
 
     if alt_cost_model.fits() and alt_cov.sufficient:
@@ -673,6 +746,61 @@ def compile_truthful_production_plan(
         },
         substitution_attempted=True,
     )
+
+
+def _expected_vs_max_explanation(plan, narration_package: dict) -> dict:
+    """Machine-readable: WHY each component's maximum exceeds its expected.
+    Every difference is a specific, bounded allowance -- never hidden
+    baseline work."""
+    assets = list(getattr(plan, "assets", []) or [])
+    if not assets:
+        return {}
+    req_video, req_shots, cont_shots = coverage_required_video_cost(plan, narration_package)
+    max_video = sum(_q(getattr(a, "unit_price_usd", 0)) for a in assets)
+    enh_per_op = (
+        _q(getattr(plan, "enhancement_cost_maximum_usd", 0)) / Decimal(len(assets)) if assets else Decimal("0")
+    )
+    return {
+        "video": {
+            "expected_usd": float(req_video),
+            "maximum_usd": float(max_video),
+            "delta_usd": float(max_video - req_video),
+            "reason": (
+                f"{req_shots} coverage-required shots (baseline, in expected) + "
+                f"{cont_shots} true contingency shots (alternate/replacement footage, "
+                f"consumed only if a required shot fails QA)"
+            ),
+        },
+        "enhancement": {
+            "expected_usd": float(Decimal(req_shots) * enh_per_op),
+            "maximum_usd": float(getattr(plan, "enhancement_cost_maximum_usd", 0.0) or 0.0),
+            "delta_usd": float(_q(getattr(plan, "enhancement_cost_maximum_usd", 0)) - Decimal(req_shots) * enh_per_op),
+            "reason": "one upscale op per required clip (expected); one per every planned clip (maximum)",
+        },
+        "music": {
+            "expected_usd": float(getattr(plan, "music_cost_usd", 0.0) or 0.0),
+            "maximum_usd": float(getattr(plan, "music_cost_usd", 0.0) or 0.0),
+            "delta_usd": 0.0,
+            "reason": (
+                "priced FRESH in both -- cache reuse credited only when the planner verifies "
+                "the exact reusable category tracks exist before reservation"
+            ),
+        },
+        "thumbnail": {
+            "expected_usd": float(getattr(plan, "thumbnail_cost_normal_usd", 0.0) or 0.0),
+            "maximum_usd": float(getattr(plan, "thumbnail_cost_maximum_usd", 0.0) or 0.0),
+            "delta_usd": float(
+                _q(getattr(plan, "thumbnail_cost_maximum_usd", 0)) - _q(getattr(plan, "thumbnail_cost_normal_usd", 0))
+            ),
+            "reason": "first candidate succeeds (expected); every candidate x every attempt (maximum)",
+        },
+        "narration": {
+            "expected_usd": float(getattr(plan, "narration_cost_usd", 0.0) or 0.0),
+            "maximum_usd": float(getattr(plan, "narration_cost_usd", 0.0) or 0.0),
+            "delta_usd": 0.0,
+            "reason": "already realized -- fixed character count",
+        },
+    }
 
 
 def _plan_component(plan, prefix: str) -> float:

@@ -59,8 +59,8 @@ _REAL_PROD = {
 }
 
 # Observed PRE_PLAN (text/research/planning) cost, from the costs ledger.
-PRE_PLAN_EXPECTED_USD = Decimal("4.50")   # preplan_core ~$1.7 + VPD phase-1 ~$2.5 + $0.05
-PRE_PLAN_MAXIMUM_USD = Decimal("9.00")    # + OpenRouter/Perplexity retry allowance
+PRE_PLAN_EXPECTED_USD = Decimal("4.73")   # preplan_core ~$1.7 + VPD phase-1 ~$3.0 + $0.05
+PRE_PLAN_MAXIMUM_USD = Decimal("9.40")    # RETRY_MAX=1 on all PRE_PLAN calls
 
 
 class _Shim:
@@ -85,28 +85,38 @@ def _load(ep_dir: Path, name: str):
 
 
 def _price(cfg, sp, nar, vp, label):
+    from hypogeum.channel_budget_policy import coverage_required_video_cost
     plan = compile_production_plan(
         script_package=sp, narration_package=nar, visual_package=vp,
         channel_id="hypogeum", episode_id="pricing_probe", config=cfg,
     )
-    req = [a for a in plan.assets if a.role == ROLE_REQUIRED]
-    con = [a for a in plan.assets if a.role == ROLE_CONTINGENCY]
-    vr = sum(a.unit_price_usd for a in req)
-    vc = sum(a.unit_price_usd * a.max_chargeable_attempts for a in con)
     cov = validate_plan_coverage(plan, nar)
-    exp = Decimal(str(plan.normal_expected_cost_usd))
-    mx = Decimal(str(plan.maximum_bounded_cost_usd))
+    # CORRECTED classification: a "shot" is coverage-REQUIRED (belongs in
+    # expected) when it is needed to fill its beat's narration duration
+    # under the <=1.15x editorial-speed cap. Only shots beyond that
+    # per-beat minimum are TRUE contingency.
+    req_video, req_shots, cont_shots = coverage_required_video_cost(plan, nar)
+    max_video = sum(Decimal(str(a.unit_price_usd)) for a in plan.assets)
+    enh_per_op = Decimal(str(plan.enhancement_cost_maximum_usd)) / Decimal(len(plan.assets))
+    enh_exp = Decimal(req_shots) * enh_per_op
+    enh_max = Decimal(str(plan.enhancement_cost_maximum_usd))
+    music = Decimal(str(plan.music_cost_usd))          # FRESH -- cache unverified
+    narr = Decimal(str(plan.narration_cost_usd))
+    th_exp = Decimal(str(plan.thumbnail_cost_normal_usd))
+    th_max = Decimal(str(plan.thumbnail_cost_maximum_usd))
+    plan_est = Decimal(str(plan.planning_call_estimate_usd))
+    exp = req_video + enh_exp + narr + music + th_exp + plan_est
+    mx = max_video + enh_max + narr + music + th_max + plan_est
     print(f"\n{label}")
-    print(f"  video assets     : {len(req)} primary + {len(con)} contingency = {len(plan.assets)}"
+    print(f"  video shots      : {req_shots} coverage-required + {cont_shots} true contingency = {len(plan.assets)}"
           f"   models {dict(Counter(a.model for a in plan.assets))}")
-    print(f"  video primary    : ${vr:.2f}")
-    print(f"  video contingency: ${vc:.2f}  (max bounded)")
-    print(f"  enhancement max  : ${plan.enhancement_cost_maximum_usd:.2f}")
-    print(f"  narration        : ${plan.narration_cost_usd:.3f}  ({plan.narration_char_count} chars x $0.0003)")
-    print(f"  music            : ${plan.music_cost_usd:.2f}  ({plan.music_section_count} sections x 120s x $0.02) "
-          f"[real episodes reuse cached category tracks -> ~$0-2.40]")
-    print(f"  thumbnail        : normal ${plan.thumbnail_cost_normal_usd:.2f}   max ${plan.thumbnail_cost_maximum_usd:.2f}")
-    print(f"  planning estimate: ${plan.planning_call_estimate_usd:.2f}")
+    print(f"  video (required) : ${req_video:.2f}   video (all planned): ${max_video:.2f}")
+    print(f"  enhancement      : expected ${enh_exp:.2f} ({req_shots} ops)   max ${enh_max:.2f} ({len(plan.assets)} ops)")
+    print(f"  narration        : ${narr:.3f}  ({plan.narration_char_count} chars x $0.0003)")
+    print(f"  music            : ${music:.2f}  FRESH ({plan.music_section_count} sections x 120s x $0.02) "
+          f"-- cache credited only when verified before reservation")
+    print(f"  thumbnail        : expected ${th_exp:.2f}   max ${th_max:.2f}")
+    print(f"  planning estimate: ${plan_est:.2f}")
     print(f"  >>> POST_PLAN expected   ${exp}")
     print(f"  >>> POST_PLAN maximum    ${mx}")
     print(f"  >>> COMPLETE expected    ${PRE_PLAN_EXPECTED_USD + exp}   (PRE_PLAN ${PRE_PLAN_EXPECTED_USD} + POST_PLAN)")

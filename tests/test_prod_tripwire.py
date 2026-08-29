@@ -62,6 +62,13 @@ class TestBlocksWrites:
         with pytest.raises(ProductionAccessError):
             subprocess.run(["sqlite3", str(_PROD), "DELETE FROM runs"])
 
+    def test_cursor_write_to_production_is_blocked(self):
+        cur = sqlite3.connect(str(_PROD)).cursor()
+        with pytest.raises(ProductionAccessError):
+            cur.execute("INSERT INTO runs (run_id) VALUES ('x')")
+        # cursor reads still work
+        assert cur.execute("SELECT COUNT(*) FROM runs").fetchone()[0] >= 0
+
 
 class TestAllowsReads:
 

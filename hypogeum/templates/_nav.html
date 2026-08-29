@@ -2,7 +2,6 @@
   <a href="/dashboard" class="nav-brand">Factory OS</a>
   <div class="nav-links">
     <a href="/dashboard"   class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Factory</a>
-    <a href="/factory"     class="nav-link {% if request.path == '/factory' %}active{% endif %}">Overview</a>
     <a href="/create"     class="nav-link {% if request.path == '/create' %}active{% endif %}">Production Queue</a>
     <a href="/discover"   class="nav-link {% if request.path.startswith('/discover') %}active{% endif %}">Discovery</a>
     <a href="/channels"   class="nav-link {% if request.path.startswith('/channels') or (request.path.startswith('/channel/') and not request.path.startswith('/channel-profile')) %}active{% endif %}">Channels</a>
@@ -12,6 +11,7 @@
       <summary class="nav-ops-toggle">Operations</summary>
       <div class="nav-ops-menu">
         <div class="nav-ops-group">Production</div>
+        <a href="/factory">Factory Overview</a>
         <a href="/live">Live</a>
         <a href="/queue">Run Queue</a>
         <a href="/runs">History</a>

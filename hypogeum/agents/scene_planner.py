@@ -135,12 +135,13 @@ def build_scene_plan_input(
     Returns:
         input_package dict ready to pass to run_agent().
     """
+    short_native = bool(getattr(config, "SHORT_NATIVE_MODE", False))
     is_episode_zero = (
         episode_id == "ep_000"
         or config.EPISODE_ZERO_MAX_SCENES > 0
     )
     dedicated_shorts_enabled = config.ENABLE_DEDICATED_SHORT_GENERATION
-    suppress_shorts = is_episode_zero or not dedicated_shorts_enabled
+    suppress_shorts = short_native or is_episode_zero or not dedicated_shorts_enabled
 
     input_package: dict = {
         "task": "plan_visual_package",
@@ -150,7 +151,17 @@ def build_scene_plan_input(
         "provider_capabilities": PROVIDER_CAPABILITIES,
     }
 
-    if is_episode_zero:
+    if short_native:
+        # One vertical deliverable: a small handful of 9:16 scenes, no
+        # derived Shorts, no long-form arc.
+        input_package["generation_constraints"] = {
+            "max_main_scenes": config.EPISODE_ZERO_MAX_SCENES
+            or getattr(config, "SHORT_NATIVE_MAX_SCENES", 2) or 2,
+            "shorts_count": 0,
+            "mode": "short_native",
+            "aspect_ratio": getattr(config, "SHORT_NATIVE_ASPECT_RATIO", "9:16"),
+        }
+    elif is_episode_zero:
         input_package["generation_constraints"] = {
             "max_main_scenes": config.EPISODE_ZERO_MAX_SCENES or 5,
             "shorts_count": 0,

@@ -106,14 +106,28 @@ def run_narrative_architect(
         sources_count=sources_count,
     )
 
+    _input_package: dict = {
+        "task": "build_narrative",
+        "research_package": research_package,
+    }
+    if bool(getattr(config, "SHORT_NATIVE_MODE", False)):
+        _input_package["production_mode"] = "short_native"
+        _input_package["short_native_directive"] = {
+            "format": "single vertical short, ~45-60 seconds",
+            "structure": "exactly ONE section: a hook that opens an "
+                         "unresolved question or counter-intuitive fact, one "
+                         "turn that deepens it, one payoff that resolves it",
+            "sections": 1,
+            "shorts_selection": "empty — the short IS the whole deliverable",
+            "chapters": "none",
+            "tone": "front-load intrigue; every sentence must earn the next",
+        }
+
     narrative_package = run_agent(
         agent_name=_AGENT_NAME,
         model_slug=_CLAUDE_OPUS,
         system_prompt=SYSTEM_PROMPT,
-        input_package={
-            "task": "build_narrative",
-            "research_package": research_package,
-        },
+        input_package=_input_package,
         output_schema="narrative_package",
         episode_id=episode_id,
         max_tokens=_NA_MAX_TOKENS,

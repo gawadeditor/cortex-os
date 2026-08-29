@@ -305,6 +305,14 @@ class Config:
     QUEUE_RETRY_BACKOFF_MINUTES: str      # comma-separated minutes per retry; default: "5,20"
     ENABLE_DEDICATED_SHORT_GENERATION: bool  # allow VPD to plan/generate 9:16 Short scenes; default: false
 
+    # Short-Native production mode — one vertical ~45-60s deliverable per run
+    # (no long-form arc, no derived Shorts). Env-forced for tests/manual runs;
+    # run_pipeline also turns it on per-run for a shorts-only channel.
+    SHORT_NATIVE_MODE: bool                 # default: false
+    SHORT_NATIVE_MAX_SCENES: int            # scene cap in short-native runs; default: 2
+    SHORT_NATIVE_MAX_NARRATION_WORDS: int   # total narration budget; default: 150
+    SHORT_NATIVE_ASPECT_RATIO: str          # deliverable aspect ratio; default: "9:16"
+
     # ------------------------------------------------------------------
     # Higgsfield AI (comparison / evaluation only — not wired into pipeline)
     # ------------------------------------------------------------------
@@ -523,6 +531,18 @@ class Config:
         self.ENABLE_DEDICATED_SHORT_GENERATION = _get_bool(
             "ENABLE_DEDICATED_SHORT_GENERATION", default=True
         )
+
+        # --- Short-Native production mode ---
+        self.SHORT_NATIVE_MAX_SCENES = _get_int("SHORT_NATIVE_MAX_SCENES", default=2)
+        self.SHORT_NATIVE_MAX_NARRATION_WORDS = _get_int(
+            "SHORT_NATIVE_MAX_NARRATION_WORDS", default=150
+        )
+        self.SHORT_NATIVE_ASPECT_RATIO = _get_optional(
+            "SHORT_NATIVE_ASPECT_RATIO", default="9:16"
+        ) or "9:16"
+        self.SHORT_NATIVE_MODE = _get_bool("SHORT_NATIVE_MODE", default=False)
+        if self.SHORT_NATIVE_MODE:
+            self.apply_short_native_preset()
 
         # --- Assembly / Render ---
         # FFMPEG_BINARY: path/name of the ffmpeg executable Assembly/Video Renderer
@@ -862,6 +882,29 @@ class Config:
         if models.narration_voice_id:
             self.ELEVENLABS_VOICE_ID = models.narration_voice_id
 
+        return self
+
+    def apply_short_native_preset(self) -> "Config":
+        """
+        Put this Config into short-native mode: one vertical ~45-60s
+        deliverable per run, no long-form arc, no derived Shorts.
+
+        Idempotent. Called from __init__ when SHORT_NATIVE_MODE=true in the
+        environment, and from pipeline.run_pipeline() when the resolved
+        channel's production_cadence is shorts-only. Only tightens settings
+        (never loosens an already-lower scene cap).
+
+        Returns self for chaining.
+        """
+        self.SHORT_NATIVE_MODE = True
+        # Reuse the fully-plumbed scene-cap machinery (scene_planner /
+        # visual_package_director already honor EPISODE_ZERO_MAX_SCENES, and
+        # pipeline already forces skip_shorts when it is > 0).
+        cap = self.SHORT_NATIVE_MAX_SCENES if self.SHORT_NATIVE_MAX_SCENES > 0 else 2
+        if self.EPISODE_ZERO_MAX_SCENES <= 0 or self.EPISODE_ZERO_MAX_SCENES > cap:
+            self.EPISODE_ZERO_MAX_SCENES = cap
+        # One native vertical IS the whole deliverable — never derive Shorts.
+        self.ENABLE_DEDICATED_SHORT_GENERATION = False
         return self
 
     @property

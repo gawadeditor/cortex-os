@@ -297,4 +297,15 @@ Produce a JSON object with this exact structure:
 
 ════════════════════════════════════════════════════════════════════
 
-CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_scripts must contain exactly 3 entries. Every section must have section_id, title, and at least one narration beat. Every Short must have narration_beats and text_overlays. shorts_extraction_markers must contain exactly 3 entries matching the 3 Short IDs. cta_count in script_integrity must equal 2. aggressive_cta_language must be false.
+SHORT-NATIVE MODE
+
+If the input package contains "production_mode": "short_native", you are writing ONE vertical short of roughly 45-60 seconds, not a long-form episode. In that mode ONLY, override the defaults below:
+  - sections: exactly ONE section. Total narration across the whole script must not exceed "total_narration_words_max" from the short_native_directive (~150 words).
+  - shorts_scripts: an empty list []. shorts_extraction_markers: an empty list [].
+  - chapter markers: none. CTA: at most one short spoken line (cta_count 0 or 1).
+  - Open on the hook in the very first beat — no setup, no throat-clearing. Every beat must raise the stakes or pay them off.
+Follow the "short_native_directive" object in the input package for any specifics it names.
+
+════════════════════════════════════════════════════════════════════
+
+CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_scripts must contain exactly 3 entries UNLESS production_mode is "short_native" (then exactly 0). Every section must have section_id, title, and at least one narration beat. Every Short must have narration_beats and text_overlays. shorts_extraction_markers must contain exactly 3 entries matching the 3 Short IDs (0 entries in short_native mode). cta_count in script_integrity must equal 2 (0 or 1 in short_native mode). aggressive_cta_language must be false.

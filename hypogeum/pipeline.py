@@ -899,6 +899,25 @@ def run_pipeline(
                 channel_config.publishing.publishing_provider_by_platform
             )
 
+        # Short-native cadence resolution: a channel whose production_cadence
+        # is shorts-only (videos_per_week == 0 and shorts_per_week >= 1)
+        # produces one vertical ~45-60s deliverable per run. Turn the preset
+        # on here so every downstream agent sees it, unless an explicit
+        # SHORT_NATIVE_MODE=false in the environment opted out.
+        if not config.SHORT_NATIVE_MODE:
+            try:
+                from hypogeum.channel_config import get_channel_operations_profile
+                _ops = get_channel_operations_profile(channel_id, db_path=db_path)
+            except Exception:
+                _ops = None
+            _cadence = (_ops.production_cadence if _ops is not None else {}) or {}
+            _vpw = _cadence.get("videos_per_week")
+            _spw = _cadence.get("shorts_per_week")
+            if _vpw == 0 and isinstance(_spw, int) and _spw >= 1:
+                config.apply_short_native_preset()
+                log.info("pipeline_short_native_mode", channel_id=channel_id,
+                         shorts_per_week=_spw, max_scenes=config.EPISODE_ZERO_MAX_SCENES)
+
     # -----------------------------------------------------------------------
     # -0.5. OIS factory/channel block check — before run registration
     # If any active blocking signals exist the pipeline must not start.
@@ -1249,6 +1268,7 @@ def run_pipeline(
         # (default) or when this is an Episode Zero / validation run.
         _skip_shorts = (
             episode_id == "ep_000"
+            or config.SHORT_NATIVE_MODE
             or config.EPISODE_ZERO_MAX_SCENES > 0
             or not config.ENABLE_DEDICATED_SHORT_GENERATION
         )

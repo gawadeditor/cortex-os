@@ -1400,10 +1400,25 @@ def _validate_operations_fields(
             f"got {default_privacy_state!r}"
         )
 
+    # Cadence: a channel produces long-form videos, Shorts, or both. Either
+    # count may be present; when present it must be a non-negative int (bools
+    # rejected). videos_per_week == 0 is legal ONLY for a shorts-only channel
+    # (shorts_per_week >= 1) -- an explicit zero with nothing else configured
+    # is a config error, not "produce nothing".
     videos_per_week = production_cadence.get("videos_per_week")
-    if videos_per_week is not None and videos_per_week < 1:
+    shorts_per_week = production_cadence.get("shorts_per_week")
+    for name, value in (("videos_per_week", videos_per_week),
+                        ("shorts_per_week", shorts_per_week)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                f"production_cadence.{name} must be a non-negative integer, got {value!r}"
+            )
+    if videos_per_week == 0 and not (isinstance(shorts_per_week, int) and shorts_per_week >= 1):
         raise ValueError(
-            f"production_cadence.videos_per_week must be >= 1, got {videos_per_week}"
+            "production_cadence.videos_per_week=0 is only valid for a shorts-only "
+            "channel; set shorts_per_week >= 1 (or omit videos_per_week entirely)"
         )
 
     time_of_day = publishing_schedule.get("time_of_day")

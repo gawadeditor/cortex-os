@@ -899,17 +899,21 @@ def run_pipeline(
                 channel_config.publishing.publishing_provider_by_platform
             )
 
-        # Short-native cadence resolution: a channel whose production_cadence
-        # is shorts-only (videos_per_week == 0 and shorts_per_week >= 1)
-        # produces one vertical ~45-60s deliverable per run. Turn the preset
-        # on here so every downstream agent sees it, unless an explicit
-        # SHORT_NATIVE_MODE=false in the environment opted out.
+        # Per-channel runtime overrides from the channel's operations profile
+        # (multi-channel factory: each channel carries its own cadence and
+        # per-episode cost ceiling; the ChannelConfig bundle above only
+        # carries brand/publishing/model fields).
+        try:
+            from hypogeum.channel_config import get_channel_operations_profile
+            _ops = get_channel_operations_profile(channel_id, db_path=db_path)
+        except Exception:
+            _ops = None
+
+        # (a) Short-native cadence: a shorts-only channel (videos_per_week == 0
+        # and shorts_per_week >= 1) produces one vertical ~45-60s deliverable
+        # per run. An explicit SHORT_NATIVE_MODE=false in the environment
+        # opts out.
         if not config.SHORT_NATIVE_MODE:
-            try:
-                from hypogeum.channel_config import get_channel_operations_profile
-                _ops = get_channel_operations_profile(channel_id, db_path=db_path)
-            except Exception:
-                _ops = None
             _cadence = (_ops.production_cadence if _ops is not None else {}) or {}
             _vpw = _cadence.get("videos_per_week")
             _spw = _cadence.get("shorts_per_week")
@@ -917,6 +921,20 @@ def run_pipeline(
                 config.apply_short_native_preset()
                 log.info("pipeline_short_native_mode", channel_id=channel_id,
                          shorts_per_week=_spw, max_scenes=config.EPISODE_ZERO_MAX_SCENES)
+
+        # (b) Per-channel per-episode cost ceiling. When the channel sets an
+        # explicit cost_ceiling_usd_per_episode it overrides the global
+        # FINANCE_BUDGET_CEILING_USD for THIS run only -- every finance gate
+        # (finance_agent, preplan_reservation, production_gate) reads
+        # config.FINANCE_BUDGET_CEILING_USD, so setting it here is enough.
+        # A channel with no override inherits the factory/env ceiling.
+        _channel_ceiling = getattr(_ops, "cost_ceiling_usd_per_episode", None) if _ops is not None else None
+        if isinstance(_channel_ceiling, (int, float)) and _channel_ceiling > 0:
+            if float(_channel_ceiling) != float(config.FINANCE_BUDGET_CEILING_USD or 0.0):
+                log.info("pipeline_channel_cost_ceiling_applied", channel_id=channel_id,
+                         channel_ceiling_usd=float(_channel_ceiling),
+                         prior_env_ceiling_usd=float(config.FINANCE_BUDGET_CEILING_USD or 0.0))
+            config.FINANCE_BUDGET_CEILING_USD = float(_channel_ceiling)
 
     # -----------------------------------------------------------------------
     # -0.5. OIS factory/channel block check — before run registration

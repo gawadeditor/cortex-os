@@ -2269,6 +2269,18 @@ def _run_thumbnail_strategy(
 
     Checkpoint: loads existing thumbnail_concept_brief from disk if present.
     """
+    if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
+        # A vertical Short has no concept-driven thumbnail (the platform
+        # auto-generates a cover from a frame). Do NOT write a
+        # thumbnail_concept_brief file -- its absence is exactly what keeps
+        # CONCEPT_DRIVEN_MODE off downstream. Return a minimal in-memory
+        # shape purely for the caller's log line.
+        get_logger(episode_id=episode_id, agent="pipeline").info(
+            "pipeline_stage_skipped", agent="thumbnail_strategy", reason="short_native_mode",
+        )
+        return {"thumbnail_concept_brief_id": f"tcb_{episode_id}",
+                "episode_id": episode_id, "concepts": [], "short_native": True}
+
     pkg = _load_package(episode_id, "thumbnail_concept_brief", output_dir)
     if pkg is not None:
         log = get_logger(episode_id=episode_id, agent="pipeline")
@@ -2398,6 +2410,53 @@ def _run_source_enhancement(
     )
 
 
+def _short_native_thumbnail_package(
+    episode_id: str, output_dir: Optional[Path], log,
+) -> dict:
+    """
+    SHORT_NATIVE mode: a vertical Short has no concept-driven thumbnail --
+    the platform auto-generates a cover from a frame. Produce a minimal,
+    schema-valid thumbnail_package (persisted to disk like a real agent
+    output) so downstream checkpoint/QA/output-gate reads resolve, and the
+    concept-driven thumbnail stack is never invoked.
+    """
+    from hypogeum.agents.thumbnail_director import _AGENT_VERSION as _td_version  # noqa: PLC0415
+
+    pkg = {
+        "thumbnail_package_id": f"tp_{episode_id}",
+        "episode_id": episode_id,
+        "main_thumbnail": {"asset_id": "short_native_autocover"},
+        "short_thumbnails": [],
+        "candidates": [
+            {"candidate_id": "sn_auto_001", "rank": 1, "selected": True, "status": "auto_cover"}
+        ],
+        "thumbnail_qa_report": {"overall_status": "pass", "failures": [], "warnings": []},
+        "generation_metadata": {
+            "concept_driven": False,
+            "short_native": True,
+            "thumbnail_director_version": _td_version,
+        },
+        "package_integrity": {"production_ready": True},
+    }
+    try:
+        from hypogeum.schemas import validate
+        validate("thumbnail_package", pkg)
+    except Exception as exc:  # pragma: no cover - schema drift guard
+        log.warn("short_native_thumbnail_package_schema_warn", error=str(exc))
+
+    base = output_dir if output_dir is not None else (_ASSETS_ROOT / "episodes" / episode_id)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        (base / f"thumbnail_package_{episode_id}.json").write_text(
+            json.dumps(pkg, indent=2), encoding="utf-8",
+        )
+    except Exception as exc:
+        log.warn("short_native_thumbnail_package_write_failed", error=str(exc))
+
+    log.info("pipeline_stage_skipped", agent="thumbnail_director", reason="short_native_mode")
+    return pkg
+
+
 def _run_thumbnail_director(
     visual_package: dict,
     config: Config,
@@ -2425,6 +2484,10 @@ def _run_thumbnail_director(
     presence alone).
     """
     log = get_logger(episode_id=episode_id, agent="pipeline")
+
+    if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
+        return _short_native_thumbnail_package(episode_id, output_dir, log)
+
     pkg = _load_verified_checkpoint(
         episode_id, output_dir, _THUMBNAIL_CHECKPOINT, log,
     )

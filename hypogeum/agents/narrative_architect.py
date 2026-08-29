@@ -110,7 +110,7 @@ def run_narrative_architect(
         "task": "build_narrative",
         "research_package": research_package,
     }
-    if bool(getattr(config, "SHORT_NATIVE_MODE", False)):
+    if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _input_package["production_mode"] = "short_native"
         _input_package["short_native_directive"] = {
             "format": "single vertical short, ~45-60 seconds",

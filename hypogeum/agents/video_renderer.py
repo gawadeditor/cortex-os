@@ -222,9 +222,14 @@ def render_episode(
     music_segments: Optional[List[dict]] = None,
     short_srt_paths: Optional[Dict[str, Optional[Path]]] = None,
     ffmpeg_binary: str = "ffmpeg",
+    main_vertical: bool = False,
 ) -> dict:
     """
     Execute all ffmpeg renders for one episode and return a render_output_manifest.
+
+    main_vertical (SHORT_NATIVE mode): render the single main deliverable at
+    SHORT_RESOLUTION (1080x1920, 9:16) with scale-to-fill/crop. There are no
+    derived Shorts in this mode (timeline_plan.short_ids is empty).
 
     Renders the main episode (16:9) and all Shorts (9:16) from the supplied
     TimelinePlan. Applies narration-anchored sync with tpad freeze holds where
@@ -270,6 +275,8 @@ def render_episode(
 
     ffmpeg_errors: List[str] = []
     render_status = "success"
+
+    main_resolution = SHORT_RESOLUTION if main_vertical else MAIN_RESOLUTION
 
     # --- Main episode render ---
     main_output_path = episode_dir / f"main_{episode_id}.mp4"
@@ -321,6 +328,8 @@ def render_episode(
             log=log,
             music_segments=main_music_segments,
             ffmpeg_binary=ffmpeg_binary,
+            resolution=main_resolution,
+            vertical=main_vertical,
         )
     if not main_timeline:
         pass
@@ -435,6 +444,7 @@ def render_episode(
         covered_dur=covered_dur,
         hold_gap_dur=hold_gap_dur,
         max_scene_hold=max_scene_hold,
+        main_resolution=main_resolution,
     )
 
     # Music QA facts — used by rerender_ep.py report
@@ -466,9 +476,13 @@ def _render_main_episode(
     log,
     music_segments: Optional[List[dict]] = None,
     ffmpeg_binary: str = "ffmpeg",
+    resolution: str = MAIN_RESOLUTION,
+    vertical: bool = False,
 ) -> bool:
     """
-    Render main episode (16:9) using ffmpeg.
+    Render the main episode using ffmpeg. Default 16:9 (MAIN_RESOLUTION);
+    when vertical=True (SHORT_NATIVE mode) the single deliverable is
+    rendered 9:16 with scale-to-fill/crop, exactly like a Short.
     Returns True on success, False on failure.
 
     Post-render duration guard:
@@ -507,11 +521,12 @@ def _render_main_episode(
         narration_path=narration_path,
         music_track=music_track,
         output_path=raw_output,
-        resolution=MAIN_RESOLUTION,
+        resolution=resolution,
         episode_id=episode_id,
         music_tail_seconds=_MUSIC_TAIL_SECONDS,
         music_segments=music_segments,
         ffmpeg_binary=ffmpeg_binary,
+        is_short=vertical,
     )
     ok = _run_ffmpeg(
         cmd=cmd,
@@ -1842,6 +1857,7 @@ def _build_render_output_manifest(
     covered_dur: float,
     hold_gap_dur: float = 0.0,
     max_scene_hold: float = 0.0,
+    main_resolution: str = MAIN_RESOLUTION,
 ) -> dict:
     """
     Build the render_output_manifest — a factual record of what Video Renderer produced.
@@ -1890,7 +1906,7 @@ def _build_render_output_manifest(
         "total_narration_seconds":       round(total_narration_dur, 3),
         "covered_narration_seconds":     round(covered_dur, 3),
         # Resolution/frame-rate facts — consumed by assembly_agent for Final Render Package
-        "main_resolution":  MAIN_RESOLUTION,
+        "main_resolution":  main_resolution,
         "short_resolution": SHORT_RESOLUTION,
         "frame_rate":       FRAME_RATE,
     }

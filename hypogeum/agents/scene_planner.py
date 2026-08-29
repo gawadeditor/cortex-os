@@ -135,7 +135,7 @@ def build_scene_plan_input(
     Returns:
         input_package dict ready to pass to run_agent().
     """
-    short_native = bool(getattr(config, "SHORT_NATIVE_MODE", False))
+    short_native = (getattr(config, "SHORT_NATIVE_MODE", False) is True)
     is_episode_zero = (
         episode_id == "ep_000"
         or config.EPISODE_ZERO_MAX_SCENES > 0

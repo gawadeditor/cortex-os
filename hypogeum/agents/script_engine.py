@@ -134,14 +134,27 @@ def run_script_engine(
         shorts_count=shorts_count,
     )
 
+    _input_package: dict = {
+        "task": "write_script",
+        "narrative_package": narrative_package,
+    }
+    if bool(getattr(config, "SHORT_NATIVE_MODE", False)):
+        _max_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)
+        _input_package["production_mode"] = "short_native"
+        _input_package["short_native_directive"] = {
+            "total_narration_words_max": _max_words,
+            "sections": 1,
+            "shorts_scripts": "empty list — do not write derived Shorts",
+            "chapter_markers": "none",
+            "cta": "at most one short spoken line",
+            "pacing": "open on the hook in the first sentence; no throat-clearing",
+        }
+
     script_package = run_agent(
         agent_name=_AGENT_NAME,
         model_slug=_CLAUDE_SONNET,
         system_prompt=SYSTEM_PROMPT,
-        input_package={
-            "task": "write_script",
-            "narrative_package": narrative_package,
-        },
+        input_package=_input_package,
         output_schema="script_package",
         episode_id=episode_id,
         max_tokens=_SE_MAX_TOKENS,

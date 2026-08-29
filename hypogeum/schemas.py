@@ -312,7 +312,9 @@ def _validate_script_package(p: dict) -> None:
         _req_str(sec, s, "section_id", path=path)
         _req_str(sec, s, "title", path=path)
         _req_list(sec, s, "narration_beats", path=path, min_length=1)
-    shorts = _req_exact(p, s, "shorts_scripts", 3)
+    # allow_zero: Episode Zero / short-native runs derive no Shorts
+    # (matches the sibling shorts_selection rule in _validate_narrative_package).
+    shorts = _req_exact(p, s, "shorts_scripts", 3, allow_zero=True)
     for i, short in enumerate(shorts):
         path = f"shorts_scripts[{i}]"
         if not isinstance(short, dict):

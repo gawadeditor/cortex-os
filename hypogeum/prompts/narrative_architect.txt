@@ -329,4 +329,14 @@ Produce a JSON object with this exact structure:
 
 ════════════════════════════════════════════════════════════════════
 
-CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_selection must contain exactly 3 entries. Every section in episode_structure must have a section_id, title, narrative_purpose, entity_count, and key_claims. Every narrative_signal must include source_claim_id and derivation_rationale.
+SHORT-NATIVE MODE
+
+If the input package contains "production_mode": "short_native", the deliverable is ONE vertical short of roughly 45-60 seconds — not a long-form episode. In that mode ONLY, override the defaults below:
+  - episode_structure.sections: exactly ONE section — a hook that opens an unresolved question or a counter-intuitive fact, one turn that deepens it, one payoff that resolves it. No chapters.
+  - shorts_selection: an empty list []. The short IS the whole deliverable; there is nothing to extract from it.
+  - Keep every other field and all traceability requirements. Front-load the intrigue: the first sentence must make the viewer need the next one.
+Follow the "short_native_directive" object in the input package for any specifics it names.
+
+════════════════════════════════════════════════════════════════════
+
+CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_selection must contain exactly 3 entries UNLESS production_mode is "short_native" (then exactly 0). Every section in episode_structure must have a section_id, title, narrative_purpose, entity_count, and key_claims. Every narrative_signal must include source_claim_id and derivation_rationale.

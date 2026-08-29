@@ -138,7 +138,7 @@ def run_script_engine(
         "task": "write_script",
         "narrative_package": narrative_package,
     }
-    if bool(getattr(config, "SHORT_NATIVE_MODE", False)):
+    if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _max_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)
         _input_package["production_mode"] = "short_native"
         _input_package["short_native_directive"] = {

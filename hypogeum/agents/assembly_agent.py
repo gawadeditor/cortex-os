@@ -828,6 +828,7 @@ def run_assembly_agent(
         music_segments=music_segments,
         short_srt_paths=short_srt_paths,
         ffmpeg_binary=config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg",
+        main_vertical=(getattr(config, "SHORT_NATIVE_MODE", False) is True),
     )
     render_status = render_manifest["render_status"]
 

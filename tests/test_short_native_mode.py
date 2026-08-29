@@ -292,6 +292,57 @@ class TestPublishSlot:
 # preplan cost model scene cap
 # ---------------------------------------------------------------------------
 
+class TestOutputGateShortNativeBranch:
+
+    def _cfg(self, short_native: bool):
+        return SimpleNamespace(SHORT_NATIVE_MODE=short_native, FFMPEG_BINARY="ffmpeg")
+
+    def test_thumbnail_and_endpage_are_not_applicable(self, tmp_path):
+        import logging
+        from hypogeum.agents.production_output_gate import run_production_output_gate
+
+        assets_root = tmp_path / "assets"
+        (assets_root / "episodes" / "ep_sn").mkdir(parents=True)
+        # minimal final_render_package so the shorts checks resolve
+        (assets_root / "episodes" / "ep_sn" / "final_render_package_ep_sn.json").write_text(
+            '{"shorts_renders": []}', encoding="utf-8",
+        )
+        log = logging.getLogger("t")
+
+        res = run_production_output_gate("ep_sn", assets_root, self._cfg(True), log)
+        by_cap = {c.capability: c for c in res.checks}
+        assert by_cap["C_THUMBNAIL"].status == "pass"
+        assert "not applicable" in by_cap["C_THUMBNAIL"].reason
+        assert by_cap["E_END_PAGE"].status == "pass"
+        assert "no end-page" in by_cap["E_END_PAGE"].reason
+
+    def test_mock_config_does_not_trip_short_native(self, tmp_path):
+        # a bare Mock-ish config must NOT be treated as short-native
+        import logging
+        from hypogeum.agents.production_output_gate import run_production_output_gate
+
+        assets_root = tmp_path / "assets"
+        (assets_root / "episodes" / "ep_n").mkdir(parents=True)
+        cfg = SimpleNamespace(FFMPEG_BINARY="ffmpeg")  # no SHORT_NATIVE_MODE attr
+        res = run_production_output_gate("ep_n", assets_root, cfg, logging.getLogger("t"))
+        by_cap = {c.capability: c for c in res.checks}
+        # normal path: thumbnail check runs and fails on the missing package
+        assert by_cap["C_THUMBNAIL"].status == "fail"
+
+
+def test_renderer_main_vertical_uses_short_resolution(tmp_path):
+    from hypogeum.agents.video_renderer import _build_render_output_manifest, SHORT_RESOLUTION
+
+    m = _build_render_output_manifest(
+        episode_id="ep_x", render_status="success",
+        main_output_path=tmp_path / "main.mp4", short_output_paths=[],
+        clip_availability_rate=1.0, missing_clips=[], sections_without_music=[],
+        ffmpeg_errors=[], total_narration_dur=45.0, covered_dur=45.0,
+        main_resolution=SHORT_RESOLUTION,
+    )
+    assert m["main_resolution"] == SHORT_RESOLUTION == "1080x1920"
+
+
 def test_preplan_cost_model_applies_scene_cap():
     from hypogeum.preplan_cost_model import _scene_count
 

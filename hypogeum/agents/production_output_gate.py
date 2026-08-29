@@ -139,6 +139,9 @@ def run_production_output_gate(
     """
     episode_dir = assets_root / "episodes" / episode_id
     checks: List[GateCheckResult] = []
+    # Strict identity check: a real Config carries a real bool; a test
+    # Mock would otherwise auto-vivify a truthy attribute here.
+    short_native = getattr(config, "SHORT_NATIVE_MODE", False) is True
 
     visual_package = _load_json(episode_dir / f"visual_package_{episode_id}.json")
     thumbnail_package = _load_json(episode_dir / f"thumbnail_package_{episode_id}.json")
@@ -147,19 +150,33 @@ def run_production_output_gate(
 
     # Per-clip evaluation is shared between A (resolution/model) and F
     # (artifact compatibility) so every clip is only ffprobed once.
-    clip_evidence = _evaluate_all_clips(visual_package, assets_root)
+    clip_evidence = _evaluate_all_clips(visual_package, assets_root, short_native=short_native)
 
-    checks.append(_check_video(clip_evidence))
+    checks.append(_check_video(clip_evidence, short_native=short_native))
     checks.append(_check_visual_playback(final_render_package, episode_dir, episode_id, log))
-    checks.append(_check_thumbnail(thumbnail_package, assets_root))
+    if short_native:
+        # A vertical Short has no concept-driven thumbnail (the platform
+        # auto-generates a cover from a frame) and no end-page card.
+        checks.append(GateCheckResult(
+            capability="C_THUMBNAIL", status="pass",
+            reason="short-native deliverable: platform auto-cover, concept thumbnail not applicable",
+        ))
+    else:
+        checks.append(_check_thumbnail(thumbnail_package, assets_root))
     checks.append(_check_shorts_captions(
         final_render_package, narration_package, episode_dir, episode_id,
         ffmpeg_binary=config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg",
     ))
     checks.append(_check_shorts_visual_coverage(final_render_package, episode_dir, episode_id))
-    checks.append(_check_end_page(final_render_package, episode_dir, episode_id, log))
+    if short_native:
+        checks.append(GateCheckResult(
+            capability="E_END_PAGE", status="pass",
+            reason="short-native deliverable: Shorts carry no end-page card",
+        ))
+    else:
+        checks.append(_check_end_page(final_render_package, episode_dir, episode_id, log))
     checks.append(_check_artifact_compatibility(
-        final_render_package, thumbnail_package, clip_evidence,
+        final_render_package, thumbnail_package, clip_evidence, short_native=short_native,
     ))
 
     result = ProductionOutputGateResult(
@@ -203,8 +220,18 @@ def enforce_production_output_gate(
 # A. VIDEO + shared per-clip evaluation
 # ---------------------------------------------------------------------------
 
-def _evaluate_all_clips(visual_package: dict, assets_root: Path) -> List[dict]:
-    """One ffprobe pass per real clip, reused by checks A and F."""
+def _evaluate_all_clips(
+    visual_package: dict, assets_root: Path, short_native: bool = False,
+) -> List[dict]:
+    """One ffprobe pass per real clip, reused by checks A and F.
+
+    short_native: the deliverable is a single 9:16 vertical Short, so
+    source clips are portrait — the required source resolution is the
+    landscape requirement transposed (1080x1920 instead of 1920x1080)."""
+    req_w, req_h = (
+        (REQUIRED_SOURCE_HEIGHT, REQUIRED_SOURCE_WIDTH) if short_native
+        else (REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT)
+    )
     evidence: List[dict] = []
     scenes = (visual_package or {}).get("scenes", [])
     asset_by_scene = {
@@ -227,7 +254,7 @@ def _evaluate_all_clips(visual_package: dict, assets_root: Path) -> List[dict]:
             "fallback_used": asset.get("fallback_used"),
             "measured_width": width,
             "measured_height": height,
-            "resolution_compliant": is_resolution_compliant_clip(clip_path) if clip_path else False,
+            "resolution_compliant": is_resolution_compliant_clip(clip_path, req_w, req_h) if clip_path else False,
             "dry_run": is_dry_run_clip(clip_path) if clip_path else False,
             "compatible": compat.reusable,
             "compat_reasons": compat.reasons,
@@ -242,7 +269,11 @@ def _evaluate_all_clips(visual_package: dict, assets_root: Path) -> List[dict]:
     return evidence
 
 
-def _check_video(clip_evidence: List[dict]) -> GateCheckResult:
+def _check_video(clip_evidence: List[dict], short_native: bool = False) -> GateCheckResult:
+    req_str = (
+        f"{REQUIRED_SOURCE_HEIGHT}x{REQUIRED_SOURCE_WIDTH}" if short_native
+        else f"{REQUIRED_SOURCE_WIDTH}x{REQUIRED_SOURCE_HEIGHT}"
+    )
     if not clip_evidence:
         return GateCheckResult(
             capability="A_VIDEO", status="fail",
@@ -257,11 +288,10 @@ def _check_video(clip_evidence: List[dict]) -> GateCheckResult:
             status="fail",
             reason=(
                 f"{len(offenders)}/{len(clip_evidence)} source clip(s) measured below "
-                f"the required {REQUIRED_SOURCE_WIDTH}x{REQUIRED_SOURCE_HEIGHT} source "
-                f"resolution"
+                f"the required {req_str} source resolution"
             ),
             evidence={
-                "required_resolution": f"{REQUIRED_SOURCE_WIDTH}x{REQUIRED_SOURCE_HEIGHT}",
+                "required_resolution": req_str,
                 "models_used": models_used,
                 "offending_clips": [
                     {
@@ -1026,6 +1056,7 @@ def _check_end_page(
 
 def _check_artifact_compatibility(
     final_render_package: dict, thumbnail_package: dict, clip_evidence: List[dict],
+    short_native: bool = False,
 ) -> GateCheckResult:
     from hypogeum.agents.assembly_agent import _AGENT_VERSION as current_assembly_version  # noqa: PLC0415
     from hypogeum.agents.thumbnail_director import _AGENT_VERSION as current_thumbnail_version  # noqa: PLC0415
@@ -1039,7 +1070,10 @@ def _check_artifact_compatibility(
     else:
         problems.append("final_render_package missing")
 
-    if thumbnail_package:
+    if short_native:
+        # No concept thumbnail_package in short-native mode (see _check_thumbnail branch).
+        pass
+    elif thumbnail_package:
         produced = thumbnail_package.get("generation_metadata", {}).get("thumbnail_director_version")
         if produced != current_thumbnail_version:
             problems.append(f"thumbnail_package version {produced!r} != {current_thumbnail_version!r}")

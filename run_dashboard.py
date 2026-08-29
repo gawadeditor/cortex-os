@@ -522,6 +522,31 @@ def api_channel_activate(channel_id: str):
     }), 422
 
 
+@app.route("/api/factory/overview")
+def api_factory_overview():
+    """
+    Read-only factory-wide operational rollup: the shared clearance verdict,
+    worker heartbeat, every channel's runtime status, aggregate weekly
+    budget across channels, and the self-learning state. Never writes.
+    """
+    from hypogeum.factory_overview import get_factory_overview
+    try:
+        overview = get_factory_overview(db_path=_db_path())
+    except Exception as exc:  # get_factory_overview is fail-soft; be defensive
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "overview": overview})
+
+
+@app.route("/factory")
+def factory_overview_page():
+    from hypogeum.factory_overview import get_factory_overview
+    try:
+        overview = get_factory_overview(db_path=_db_path())
+    except Exception:
+        overview = {}
+    return render_template("factory_overview.html", overview=overview)
+
+
 @app.route("/api/channels/create", methods=["POST"])
 def api_channel_create():
     """

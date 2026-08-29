@@ -2981,38 +2981,45 @@ class TestResumeRecompilesPlanAfterCoverageChange:
         persist_production_plan(old_plan, tmp_path)
 
         # Budget-compliant NEW checkpoint: main beat now carries 3 planned shots.
+        # Shots carry the FULL structured field set a real Cinematic Director
+        # plan has -- the resume path now renders every reattached shot's
+        # primary_prompt through compile_authoritative_shot_prompt() (as the
+        # Phase-1 path already did), which refuses an incomplete shot.
+        def _ccp_shot(beat, order, purpose, movement, scale, angle):
+            return {
+                "shot_id": f"{beat}__shot{order}", "parent_beat_id": beat,
+                "shot_order": order, "shot_purpose": purpose,
+                "narrative_function": f"{beat} shot {order}",
+                "estimated_usable_duration": 8.0, "subject": "x", "action": "x",
+                "framing": "centered", "shot_scale": scale,
+                "camera_angle": angle, "camera_height": "eye_level",
+                "camera_direction": "frontal", "camera_movement": movement,
+                "lens_character": "neutral", "composition": "rule_of_thirds_left",
+                "foreground_usage": "none", "background_depth": "shallow",
+                "lighting_direction": "frontal", "screen_direction": "neutral",
+                "eye_line": "neutral", "motion_energy": "low",
+                "transition_in": "clean_cut", "transition_out": "clean_cut",
+                **({} if order == 1 else {"diversity_justification": "deliberate match-cut"}),
+            }
         new_ccp = {"episode_id": "ep_001", "beat_plans": [
             {"beat_id": "b_001", "narration_duration_seconds": 20.0,
              "progression_pattern": "wide_medium_close",
              "shots": [
-                 {"shot_id": "b_001__shot1", "parent_beat_id": "b_001", "shot_order": i,
-                  "shot_purpose": p, "estimated_usable_duration": 8.0, "subject": "x",
-                  "camera_movement": m, "shot_scale": s,
-                  "primary_prompt": f"coverage shot {i} for b_001",
-                  **({} if i == 1 else {"diversity_justification": "deliberate match-cut"})}
-                 for i, (p, m, s) in enumerate(
-                     [("establish_location", "slow_push_in", "wide_establishing"),
-                      ("character_emotion", "controlled_pull_back", "medium_close_up"),
-                      ("object_detail", "lateral_dolly_right", "close_up")], start=1)
+                 _ccp_shot("b_001", i, p, m, s, a)
+                 for i, (p, m, s, a) in enumerate(
+                     [("establish_location", "slow_push_in", "wide_establishing", "eye_level"),
+                      ("character_emotion", "controlled_pull_back", "medium_close_up", "low_angle"),
+                      ("object_detail", "lateral_dolly_right", "close_up", "high_angle")], start=1)
              ]},
             {"beat_id": "b_s01", "narration_duration_seconds": 8.0,
              "progression_pattern": "single_shot",
-             "shots": [{"shot_id": "b_s01__shot1", "parent_beat_id": "b_s01",
-                        "shot_order": 1, "shot_purpose": "establish_location",
-                        "estimated_usable_duration": 8.0, "subject": "x",
-                        "camera_movement": "slow_push_in", "shot_scale": "medium"}]},
+             "shots": [_ccp_shot("b_s01", 1, "establish_location", "slow_push_in", "medium", "eye_level")]},
             {"beat_id": "b_s02", "narration_duration_seconds": 8.0,
              "progression_pattern": "single_shot",
-             "shots": [{"shot_id": "b_s02__shot1", "parent_beat_id": "b_s02",
-                        "shot_order": 1, "shot_purpose": "establish_location",
-                        "estimated_usable_duration": 8.0, "subject": "x",
-                        "camera_movement": "slow_push_in", "shot_scale": "medium"}]},
+             "shots": [_ccp_shot("b_s02", 1, "establish_location", "slow_push_in", "medium", "eye_level")]},
             {"beat_id": "b_s03", "narration_duration_seconds": 8.0,
              "progression_pattern": "single_shot",
-             "shots": [{"shot_id": "b_s03__shot1", "parent_beat_id": "b_s03",
-                        "shot_order": 1, "shot_purpose": "establish_location",
-                        "estimated_usable_duration": 8.0, "subject": "x",
-                        "camera_movement": "slow_push_in", "shot_scale": "medium"}]},
+             "shots": [_ccp_shot("b_s03", 1, "establish_location", "slow_push_in", "medium", "eye_level")]},
         ]}
         (tmp_path / "cinematic_coverage_plan_ep_001.json").write_text(json.dumps(new_ccp))
 

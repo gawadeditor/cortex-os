@@ -2019,11 +2019,30 @@ def run_visual_package_director_from_plan(
             beat_id = scene.get("narration_reference")
             if beat_id in _coverage_plan_by_beat:
                 scene["cinematic_coverage_plan"] = _coverage_plan_by_beat[beat_id]
+        # A reattached coverage plan carries Cinematic Director's raw
+        # STRUCTURED shots (subject/action/framing/camera_*) with no
+        # primary_prompt/fallback_prompt yet. The Phase-1 path renders those
+        # once, right after Stage B, before compile_production_plan(); the
+        # resume path must do the same or compile_production_plan()'s
+        # contingency-asset loop calls assemble_video_scene_prompt("") on
+        # every shot_order >= 2 shot and dies with "scene_content must
+        # include non-empty 'scene' text". A regenerated plan is where this
+        # bites: the persisted single-shot-per-beat plan has no order >= 2
+        # shots, so the gap stayed dormant until a regen produced real
+        # multi-shot coverage. Deterministic, no LLM, idempotent.
+        from hypogeum.video_prompt_writer import render_coverage_plan_shot_prompts  # noqa: PLC0415
+        _resume_shots_rendered = 0
+        for scene in visual_package.get("scenes", []):
+            _plan = scene.get("cinematic_coverage_plan")
+            if _plan:
+                render_coverage_plan_shot_prompts(scene)
+                _resume_shots_rendered += len(_plan.get("shots", []))
         log.info(
             "vpd_resume_coverage_plan_reattached",
             episode_id=episode_id,
             beat_plans=len(_coverage_plan_by_beat),
             total_shots=sum(len(bp.get("shots", [])) for bp in _coverage_plan_by_beat.values()),
+            shot_prompts_rendered=_resume_shots_rendered,
         )
         from hypogeum.production_plan import (  # noqa: PLC0415
             compile_production_plan,

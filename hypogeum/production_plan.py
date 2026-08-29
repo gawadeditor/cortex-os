@@ -880,7 +880,18 @@ def compile_production_plan(
             # primary_prompt into submit_scene()'s scene_spec, which then
             # runs it through the SAME assemble_video_scene_prompt() call
             # as any other scene -- see the required-asset note above.
-            shot_prompt = assemble_video_scene_prompt(shot.get("primary_prompt", "") or "")
+            raw_shot_prompt = (shot.get("primary_prompt") or "").strip()
+            if not raw_shot_prompt:
+                # A contingency shot with no rendered primary_prompt cannot
+                # be generated: clip_repair_agent skips exactly this shot
+                # ("planned shot has no rendered primary_prompt"), so it must
+                # not be a priced PlannedAsset here either -- and feeding ""
+                # to assemble_video_scene_prompt() raises. VPD's
+                # render_coverage_plan_shot_prompts() is meant to have
+                # populated every shot before this call; if one is still
+                # bare, the plan simply carries no contingency asset for it.
+                continue
+            shot_prompt = assemble_video_scene_prompt(raw_shot_prompt)
             extra_scene_id = f"{scene_id}__extra{order - 1}"
             assets.append(PlannedAsset(
                 deliverable_id=deliverable_id, beat_id=beat_id,

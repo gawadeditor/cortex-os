@@ -92,6 +92,75 @@ from hypogeum.schemas import SchemaError, validate
 # ---------------------------------------------------------------------------
 
 _AGENT_NAME = "thumbnail_director"
+
+# Bounded auto-repair: how many extra main-thumbnail regenerations to
+# attempt when the generated image fails the downstream publish bar
+# (thumbnail_qa overall_status != "pass", or the TIG identity gate BLOCKS).
+# Mirrors the bounded-repair pattern in
+# hypogeum/agents/clip_repair_agent.py::fill_coverage_deficits.
+_MAX_THUMBNAIL_REPAIRS = 2
+
+_NO_HUMAN_DIRECTIVE = (
+    "ABSOLUTE CONSTRAINT: no human faces, no identifiable people, no frontal "
+    "or three-quarter portraits, no hands. A person may appear ONLY as a "
+    "full black silhouette from behind, as a small scale anchor — never a "
+    "face, never recognisable. Prefer the object / place / artifact as the "
+    "sole subject."
+)
+# The Hypogeum brand mandates a DARK background (thumbnail_identity_rules.py:
+# "dark void_black / deep_stone family, never bright / high-key"). The QA
+# feed-scale-legibility check fails ONLY when the frame collapses to
+# near-black with almost no bright region (dark_fraction >= 0.75 AND
+# legible_fraction < 0.08). So the fix is not "make it bright" -- it is
+# "keep the dark ground but light the focal subject hard".
+_FOCAL_CONTRAST_DIRECTIVE = (
+    "LEGIBILITY CONSTRAINT: keep the dark void background, but the single "
+    "dominant focal subject must be strongly lit and high-contrast — a "
+    "bright, sharply separated shape that fills the central third of the "
+    "frame and stays clearly readable when the image is downscaled to "
+    "120px wide. The lit subject must occupy enough of the frame that it "
+    "does not disappear at feed scale. No flat near-black frame."
+)
+
+
+def _augment_prompt_for_thumbnail_repair(
+    base_prompt: str,
+    qa_report: Optional[dict],
+    identity_report: Optional[dict],
+) -> "tuple[str, list]":
+    """
+    Build a repair prompt from the exact failure evidence. Returns
+    (augmented_prompt, reasons). Deterministic; no LLM call.
+    """
+    reasons: list = []
+    directives: list = []
+
+    idr = identity_report or {}
+    violations = idr.get("violations") or []
+    if idr.get("verdict") in ("BLOCKED", "error") or any(
+        str(v.get("rule_id", "")).startswith("TIG-01") for v in violations
+    ) or any(
+        "human" in str(v.get("description", "")).lower() for v in violations
+    ):
+        directives.append(_NO_HUMAN_DIRECTIVE)
+        reasons.append("identity: human-figure / TIG-01 violation")
+
+    qr = qa_report or {}
+    qa_failures = " ".join(qr.get("failures") or []) + " " + " ".join(qr.get("warnings") or [])
+    if "feed_scale_legibility" in qa_failures or "near-black" in qa_failures or "collapses" in qa_failures:
+        directives.append(_FOCAL_CONTRAST_DIRECTIVE)
+        reasons.append("qa: feed-scale legibility / exposure")
+    if "placeholder" in qa_failures:
+        reasons.append("qa: placeholder-looking image")
+
+    if not directives:
+        # QA warn we can't pin to a cause -> still nudge toward a brighter,
+        # cleaner regeneration rather than repeating the same prompt.
+        directives.append(_FOCAL_CONTRAST_DIRECTIVE)
+        reasons.append("qa/identity not 'pass' — generic brighten+clean regeneration")
+
+    augmented = base_prompt.strip() + "\n\n" + "\n".join(directives)
+    return augmented, reasons
 # Bumped 2026-08-02 (Production Output Gate policy): a thumbnail_package
 # produced by an older version was not necessarily concept-driven and was
 # not necessarily checked by thumbnail_qa.py's pixel-level placeholder
@@ -425,6 +494,123 @@ def run_thumbnail_director(
                     fail_open=False,
                 )
 
+    # ------------------------------------------------------------------
+    # Phase 3b — bounded auto-repair of the MAIN thumbnail.
+    #
+    # Root-cause fix (2026-08-29): the downstream F_THUMBNAIL / C_THUMBNAIL
+    # publish gates require thumbnail_qa.overall_status == "pass" AND a
+    # non-BLOCKED identity verdict. Before this, a generated main thumbnail
+    # that came back dark (feed-scale-legibility fail) or with a human face
+    # (TIG-01) just set production_ready=False and stopped the episode dead
+    # -- ep_f3619022 and ep_af078f34 both needed a hand-made thumbnail.
+    # Now: regenerate the main thumbnail up to _MAX_THUMBNAIL_REPAIRS times
+    # with a prompt augmented from the exact failure, re-running QA + TIG
+    # each pass. Fail-closed is unchanged if all repairs still fail.
+    # ------------------------------------------------------------------
+    repair_attempts: list = []
+    _selected = next(
+        (c for c in main_candidates if c.get("rank") == 1 and c.get("ok")),
+        next((c for c in main_candidates if c.get("ok")), None),
+    )
+
+    # Only regenerate for failures a regeneration can actually fix: a TIG
+    # identity BLOCK, or a QA image-quality failure (feed-scale legibility /
+    # near-black collapse / placeholder-looking fill). A bare "cannot verify"
+    # QA warning is a plan/OCR issue, not an image defect -- do not spend a
+    # regeneration on it.
+    _QA_REPAIRABLE_SIGNATURES = (
+        "feed_scale_legibility", "feed-scale", "placeholder_detection",
+        "placeholder", "near-black", "collapses", "crushed shadow",
+    )
+
+    def _needs_repair() -> bool:
+        if not (main_ok and _selected is not None):
+            return False
+        if tig_blocks:
+            return True
+        qa_fail_text = " ".join(thumbnail_qa_report.get("failures") or []).lower()
+        return any(sig in qa_fail_text for sig in _QA_REPAIRABLE_SIGNATURES)
+
+    _tig_enabled = bool(getattr(config, "TIG_ENABLED", True))
+    _tig_fail_open = bool(getattr(config, "TIG_FAIL_OPEN", False))
+    _repair_i = 0
+    while _needs_repair() and _repair_i < _MAX_THUMBNAIL_REPAIRS:
+        _repair_i += 1
+        aug_prompt, reasons = _augment_prompt_for_thumbnail_repair(
+            _selected.get("image_prompt") or "",
+            thumbnail_qa_report,
+            thumbnail_identity_report,
+        )
+        log.info("td_thumbnail_repair_started", attempt=_repair_i, reasons=reasons)
+        try:
+            from hypogeum.agents.thumbnail_generation_agent import generate_thumbnail
+            _overlay = _selected.get("text_overlay") if isinstance(_selected.get("text_overlay"), dict) else None
+            result = generate_thumbnail(
+                deliverable_id="main_episode",
+                image_prompt=aug_prompt,
+                aspect_ratio=_selected.get("aspect_ratio", "16:9"),
+                config=config,
+                episode_id=episode_id,
+                output_dir=_resolve_output_dir,
+                agent=_AGENT_NAME,
+                budget_guard=budget_guard,
+                text_overlay=_overlay,
+                typography_plan=_selected.get("typography_plan"),
+                typography_integration=_selected.get("typography_integration", "composited"),
+                channel_id=channel_id,
+            )
+            main_asset_id = result.asset_id
+            main_ok = True
+        except Exception as exc:  # MUAPI auth/quota/budget already halt upstream
+            log.error("td_thumbnail_repair_failed", attempt=_repair_i, error=str(exc))
+            repair_attempts.append({"attempt": _repair_i, "reasons": reasons, "error": str(exc)})
+            break
+
+        thumbnail_qa_report = run_thumbnail_qa(
+            thumbnail_local_path=main_thumb_local,
+            aspect_ratio="16:9",
+            asset_class="thumbnail_image",
+            generation_plan=generation_plan,
+            thumbnail_package=_partial_pkg_for_qa,
+        )
+        tig_blocks = False
+        if _tig_enabled:
+            from hypogeum.agents.thumbnail_identity_guardian import (
+                run_thumbnail_identity_guardian,
+            )
+            thumbnail_identity_report = run_thumbnail_identity_guardian(
+                episode_id=episode_id,
+                image_path=main_thumb_local,
+                config=config,
+                output_dir=_resolve_output_dir,
+            )
+            if thumbnail_identity_report.get("verdict", "error") in ("BLOCKED", "error") and not _tig_fail_open:
+                tig_blocks = True
+
+        repair_attempts.append({
+            "attempt": _repair_i,
+            "reasons": reasons,
+            "qa_overall_status": thumbnail_qa_report.get("overall_status"),
+            "tig_verdict": (thumbnail_identity_report or {}).get("verdict"),
+        })
+        log.info(
+            "td_thumbnail_repair_result",
+            attempt=_repair_i,
+            qa=thumbnail_qa_report.get("overall_status"),
+            tig=(thumbnail_identity_report or {}).get("verdict"),
+        )
+
+    # Reflect a repaired main asset in the A/B/C candidate list so the
+    # package, the dashboard, and downstream QA all point at the image that
+    # actually passed.
+    if repair_attempts and _selected is not None:
+        for _pc in package_candidates:
+            if _pc.get("candidate_id") == _selected.get("candidate_id"):
+                _pc["asset_id"] = main_asset_id
+                _pc["status"] = "generated"
+                _pc["repaired"] = True
+                break
+
     production_ready = main_ok and all(ok for _, _, ok in short_results) and not tig_blocks
 
     thumbnail_package = {
@@ -452,6 +638,7 @@ def run_thumbnail_director(
             "quality": config.THUMBNAIL_IMAGE_QUALITY,
             "thumbnail_director_version": _AGENT_VERSION,
             "concept_driven": concept_brief is not None,
+            "repair_attempts": repair_attempts,
         },
         "thumbnail_qa_report": thumbnail_qa_report,
         "thumbnail_identity_report": thumbnail_identity_report,

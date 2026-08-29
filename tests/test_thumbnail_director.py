@@ -1190,3 +1190,97 @@ class TestTDTIG:
             self._run_full_td(config, tmp_path)
         call_kwargs = mock_tig.call_args[1]
         assert call_kwargs.get("episode_id") == "ep_001"
+
+
+# ---------------------------------------------------------------------------
+# TestTDThumbnailRepair — bounded auto-repair of the main thumbnail
+# ---------------------------------------------------------------------------
+
+_QA_TARGET = "hypogeum.agents.thumbnail_director.run_thumbnail_qa"
+
+
+def _qa_report(status: str, failures=None) -> dict:
+    return {"overall_status": status, "checks": [],
+            "warnings": [], "failures": failures or []}
+
+
+class TestTDThumbnailRepair:
+
+    def _run(self, config, tmp_path, *, tig_side_effect, qa_side_effect, gen_side=None):
+        plan = _make_generation_plan()
+        gen = gen_side or (lambda deliverable_id, **kw: _make_thumbnail_result(deliverable_id))
+        with patch("hypogeum.agents.thumbnail_prompt_writer.run_agent", return_value=plan), \
+             patch("hypogeum.agents.thumbnail_generation_agent.generate_thumbnail",
+                   side_effect=gen) as mock_gen, \
+             patch(_QA_TARGET, side_effect=qa_side_effect), \
+             patch(_TIG_TARGET, side_effect=tig_side_effect):
+            result = run_thumbnail_director(_make_handoff_brief(), config, "ep_001", tmp_path)
+        return result, mock_gen
+
+    def test_tig_blocked_then_approved_after_one_repair(self, tmp_path):
+        config = make_config()
+        tig_seq = [_blocked_tig_report(), _approved_tig_report()]
+        result, mock_gen = self._run(
+            config, tmp_path,
+            tig_side_effect=lambda **kw: tig_seq.pop(0),
+            qa_side_effect=lambda **kw: _qa_report("pass"),
+        )
+        assert result["package_integrity"]["production_ready"] is True
+        attempts = result["generation_metadata"]["repair_attempts"]
+        assert len(attempts) == 1
+        assert attempts[0]["tig_verdict"] == "APPROVED"
+        # one extra generate_thumbnail call for the repair (4 deliverables + 1 repair)
+        assert mock_gen.call_count == 7  # 6 deliverables + 1 repair
+
+    def test_feed_scale_fail_then_pass_after_repair(self, tmp_path):
+        config = make_config()
+        qa_seq = [_qa_report("fail", ["thumbnail_feed_scale_legibility: collapses to near-black"]),
+                  _qa_report("pass")]
+        result, _ = self._run(
+            config, tmp_path,
+            tig_side_effect=lambda **kw: _approved_tig_report(),
+            qa_side_effect=lambda **kw: qa_seq.pop(0),
+        )
+        assert result["package_integrity"]["production_ready"] is True
+        assert len(result["generation_metadata"]["repair_attempts"]) == 1
+        assert result["thumbnail_qa_report"]["overall_status"] == "pass"
+
+    def test_never_passes_stays_not_ready_with_recorded_attempts(self, tmp_path):
+        config = make_config()
+        result, mock_gen = self._run(
+            config, tmp_path,
+            tig_side_effect=lambda **kw: _blocked_tig_report(),
+            qa_side_effect=lambda **kw: _qa_report("pass"),
+        )
+        assert result["package_integrity"]["production_ready"] is False
+        assert len(result["generation_metadata"]["repair_attempts"]) == 2  # _MAX_THUMBNAIL_REPAIRS
+        assert mock_gen.call_count == 8  # 6 + 2 repairs
+
+    def test_qa_warn_does_not_trigger_a_repair(self, tmp_path):
+        config = make_config()
+        result, mock_gen = self._run(
+            config, tmp_path,
+            tig_side_effect=lambda **kw: _approved_tig_report(),
+            qa_side_effect=lambda **kw: _qa_report("warn", []),  # warn, no repairable signature
+        )
+        assert result["generation_metadata"]["repair_attempts"] == []
+        assert mock_gen.call_count == 6  # no repair
+
+
+class TestAugmentPromptForRepair:
+
+    def test_tig_human_figure_adds_no_human_directive(self):
+        from hypogeum.agents.thumbnail_director import _augment_prompt_for_thumbnail_repair
+        idr = {"verdict": "BLOCKED",
+               "violations": [{"rule_id": "TIG-01", "severity": "BLOCKING",
+                               "description": "human figure visible from the side"}]}
+        aug, reasons = _augment_prompt_for_thumbnail_repair("a stone spiral", None, idr)
+        assert "no human faces" in aug.lower() and "never recognisable" in aug.lower()
+        assert any("human" in r.lower() for r in reasons)
+
+    def test_feed_scale_adds_high_key_directive(self):
+        from hypogeum.agents.thumbnail_director import _augment_prompt_for_thumbnail_repair
+        qr = {"failures": ["thumbnail_feed_scale_legibility: near-black rectangle"], "warnings": []}
+        aug, reasons = _augment_prompt_for_thumbnail_repair("a dark tunnel", qr, None)
+        assert "legibility constraint" in aug.lower() or "focal subject must be strongly lit" in aug.lower()
+        assert any("legibility" in r.lower() or "exposure" in r.lower() for r in reasons)

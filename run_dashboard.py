@@ -522,6 +522,22 @@ def api_channel_activate(channel_id: str):
     }), 422
 
 
+@app.route("/api/channels/<channel_id>/runtime")
+def api_channel_runtime(channel_id: str):
+    """
+    Read-only per-channel operational snapshot: operator flags, weekly-budget
+    headroom for the current week, worker heartbeat, queue depth, latest run,
+    next scheduled slot, factory clearance, and the derived list of blockers
+    preventing autonomous execution. Never writes.
+    """
+    from hypogeum.channel_runtime_status import get_channel_runtime_status
+    try:
+        snapshot = get_channel_runtime_status(channel_id, db_path=_db_path())
+    except Exception as exc:  # get_channel_runtime_status is fail-soft, but be defensive
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "runtime": snapshot})
+
+
 @app.route("/channels")
 def channels_page():
     db = _db_path()
@@ -530,7 +546,16 @@ def channels_page():
         channels = get_channel_summaries(db_path=db)
     except Exception:
         channels = []
-    return render_template("channels.html", channels=channels)
+    runtime_by_channel = {}
+    try:
+        from hypogeum.channel_runtime_status import get_channel_runtime_status
+        for ch in channels:
+            cid = getattr(ch, "channel_id", None) or (ch.get("channel_id") if isinstance(ch, dict) else None)
+            if cid:
+                runtime_by_channel[cid] = get_channel_runtime_status(cid, db_path=db)
+    except Exception:
+        runtime_by_channel = {}
+    return render_template("channels.html", channels=channels, runtime_by_channel=runtime_by_channel)
 
 
 @app.route("/settings")

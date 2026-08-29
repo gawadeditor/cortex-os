@@ -403,6 +403,16 @@ def compute_preplan_cost_model(
     n_segments = _narration_segment_count(narration_package, script_package)
     n_scenes = _scene_count(script_package, narration_package)
 
+    # Short-native / Episode-Zero runs truncate the scene list before any
+    # video generation (scene_planner.order_and_filter_scenes /
+    # visual_package_director both honor EPISODE_ZERO_MAX_SCENES). The paid
+    # video cost is bounded by that cap, not the raw beat count -- reflect
+    # it here so the PRE_PLAN model is not needlessly infeasible for a
+    # cheap ~45-60s Short.
+    _scene_cap = int(getattr(config, "EPISODE_ZERO_MAX_SCENES", 0) or 0)
+    if _scene_cap > 0 and n_scenes is not None:
+        n_scenes = min(n_scenes, _scene_cap)
+
     components: list[PreplanComponent] = []
 
     def _openrouter(component_id, stage, model, expected_calls, maximum_calls, bound_source, conditional=False):

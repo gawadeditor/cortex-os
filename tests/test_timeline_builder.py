@@ -457,9 +457,15 @@ class TestDeriveMusiacCategory:
         scene = {"narrative_signals": [{"signal_type": "shock_fact"}]}
         assert _derive_music_category_for_scene(scene) == "Tension"
 
-    def test_reveal_maps_to_resolution(self):
-        scene = {"narrative_signals": [{"signal_type": "reveal"}]}
+    def test_revelation_maps_to_resolution(self):
+        scene = {"narrative_signals": [{"signal_type": "true_revelation"}]}
         assert _derive_music_category_for_scene(scene) == "Resolution"
+
+    def test_bare_reveal_maps_to_mystery(self):
+        # "reveal" alone is a mystery-building beat, not a payoff — a
+        # "*_reveal" signal only resolves when it also says so.
+        scene = {"narrative_signals": [{"signal_type": "reveal"}]}
+        assert _derive_music_category_for_scene(scene) == "Mystery"
 
     def test_discovery_maps_to_discovery(self):
         scene = {"narrative_signals": [{"signal_type": "discovery"}]}
@@ -491,16 +497,23 @@ class TestDeriveMusiacCategory:
 
     def test_string_signal_type_accepted(self):
         """Signal as plain string (not dict) is also handled."""
-        scene = {"narrative_signals": ["reveal"]}
-        assert _derive_music_category_for_scene(scene) == "Resolution"
+        scene = {"narrative_signals": ["investigation"]}
+        assert _derive_music_category_for_scene(scene) == "Investigation"
 
-    def test_only_first_signal_used(self):
-        """When multiple signals are present, only the first determines the category."""
+    def test_all_signals_considered_priority_order(self):
+        """Every signal on the scene is matched; the highest-priority family
+        (Tension > Ancient > Discovery > Investigation > Resolution > Mystery)
+        wins — not merely the first signal."""
         scene = {"narrative_signals": [
-            {"signal_type": "reveal"},
-            {"signal_type": "tension"},
+            {"signal_type": "reveal"},        # -> Mystery
+            {"signal_type": "shock_fact"},    # -> Tension (higher priority)
         ]}
-        assert _derive_music_category_for_scene(scene) == "Resolution"
+        assert _derive_music_category_for_scene(scene) == "Tension"
+
+    def test_keyword_match_on_drifted_vocabulary(self):
+        """The current narrative-signal vocabulary (not the old exact enum)."""
+        scene = {"narrative_signals": ["hook", "subterranean_reveal", "eerie_wonder"]}
+        assert _derive_music_category_for_scene(scene) == "Ancient Civilizations"
 
 
 # ---------------------------------------------------------------------------

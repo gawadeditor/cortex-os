@@ -31,6 +31,11 @@ def _good_final_render_package() -> dict:
     return {
         "package_integrity": {"production_ready": True},
         "assembly_qa_report": {"overall_status": "pass"},
+        "music_log": [
+            {"log_id": "ml_main_episode_0", "section_key": "main_episode_0",
+             "category": "Mystery", "source": "channel_library",
+             "asset_id": "music/mystery/track_abc"},
+        ],
         "episode_render": {
             "video_asset_id": "vid_abc123",
             "caption_asset_id": "cap_abc123",
@@ -408,6 +413,7 @@ class TestQAAgentChecks:
         expected = {
             "c_render_package_production_ready",
             "c_assembly_qa_report",
+            "c_music_present",
             "c_main_video_asset",
             "c_captions_asset",
             "c_metadata_complete",
@@ -462,6 +468,26 @@ class TestQAAgentChecks:
         )
         statuses = {c["check_id"]: c["status"] for c in report["checks"]}
         assert statuses["c_render_package_production_ready"] == "fail"
+
+    def test_music_present_check_fails_on_empty_music_log(self, tmp_path):
+        pkg = _good_final_render_package()
+        pkg["music_log"] = []
+        report = run_qa_agent(final_render_package=pkg, episode_id="ep_test",
+                              output_dir=tmp_path)
+        statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert statuses["c_music_present"] == "fail"
+        assert report["verdict"] != "APPROVED"
+
+    def test_music_present_check_fails_when_only_failure_entries(self, tmp_path):
+        pkg = _good_final_render_package()
+        pkg["music_log"] = [
+            {"log_id": "ml_x_failed", "section_key": "s0", "category": "Mystery",
+             "source": None, "asset_id": None, "fallback_trigger": "provider_failure"},
+        ]
+        report = run_qa_agent(final_render_package=pkg, episode_id="ep_test",
+                              output_dir=tmp_path)
+        statuses = {c["check_id"]: c["status"] for c in report["checks"]}
+        assert statuses["c_music_present"] == "fail"
 
 
 # ---------------------------------------------------------------------------

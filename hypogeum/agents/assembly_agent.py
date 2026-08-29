@@ -1054,8 +1054,15 @@ def run_assembly_agent(
     _max_scene_hold = render_manifest.get("max_scene_hold_seconds", _coverage_gap) or _coverage_gap
     _dur_check_status = "fail" if _max_scene_hold > 45.0 else "pass"
 
-    # QA report overall_status
-    if render_status == "failed" or _dur_check_status == "fail":
+    # QA report overall_status.
+    # Music-completeness gate (2026-08-29 root-cause fix): when the channel
+    # requires music (Config.MUSIC_REQUIRED, default True) a render that
+    # sourced NO music at all, or left any section without music, is a hard
+    # assembly FAILURE -- not a warning that lets a silent episode ship
+    # (ep_f3619022 shipped with music_log == []).
+    _music_required = bool(getattr(config, "MUSIC_REQUIRED", True))
+    _music_missing = _music_required and (not music_log or bool(sections_without_music))
+    if render_status == "failed" or _dur_check_status == "fail" or _music_missing:
         qa_overall = "fail"
     elif render_status == "partial" or sections_without_music or missing_clips or _coverage_gap > 0:
         qa_overall = "warn"

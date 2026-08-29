@@ -341,7 +341,7 @@ MINIMAL_FINAL_RENDER_PACKAGE = {
     "thumbnail_references": [
         {"thumbnail_asset_id": "thumb_main.jpg", "format": "jpg"},
     ],
-    "music_log": [],
+    "music_log": [{"log_id": "ml_0", "section_key": "main_episode_0", "category": "Mystery", "source": "channel_library", "asset_id": "music/mystery/t"}],
     "metadata_source": {
         "episode_title": "The Antikythera Mechanism",
         "ai_disclosure_text": "This video was produced with AI assistance.",
@@ -1698,7 +1698,7 @@ class TestVerifiedCheckpoints:
                 {"short_id": "sh_001", "video_asset_id": "video/sh1", "caption_asset_id": "captions/sh1"},
             ],
             "thumbnail_references": [],
-            "music_log": [],
+            "music_log": [{"log_id": "ml_0", "section_key": "main_episode_0", "category": "Mystery", "source": "channel_library", "asset_id": "music/mystery/t"}],
             "metadata_source": {
                 "episode_title": "Test",
                 "ai_disclosure_text": "AI-assisted.",

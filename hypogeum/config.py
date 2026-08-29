@@ -705,6 +705,11 @@ class Config:
         self.ELEVENLABS_MUSIC_DEFAULT_DURATION = _get_int(
             "ELEVENLABS_MUSIC_DEFAULT_DURATION", default=120
         )
+        # Background music is a required deliverable: when True (default),
+        # a render with any section left without music is an assembly QA
+        # FAILURE, not a warning. Set MUSIC_REQUIRED=false only for a
+        # channel/run that deliberately ships silent.
+        self.MUSIC_REQUIRED = _get_bool("MUSIC_REQUIRED", default=True)
 
         # --- Phase 1J official providers ---
         self.RUNWAY_API_KEY  = _get_optional("RUNWAY_API_KEY")

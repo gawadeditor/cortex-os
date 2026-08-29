@@ -154,6 +154,26 @@ def run_qa_agent(
                    "assembly_qa_report.overall_status=pass")
 
     # ------------------------------------------------------------------
+    # Check 2b — Background music present (root-cause fix 2026-08-29)
+    # A render with an empty music_log shipped silent (ep_f3619022). The
+    # assembly QA gate already fails on this when the channel requires
+    # music; this is the explicit, named signal and a defence against a
+    # stale/hand-edited assembly_qa_report.
+    # ------------------------------------------------------------------
+    _music_log = final_render_package.get("music_log") or []
+    _music_sourced = [
+        m for m in _music_log
+        if isinstance(m, dict) and (m.get("source") or m.get("asset_id"))
+    ]
+    if not _music_sourced:
+        _add_check(checks, "c_music_present", "fail",
+                   "final_render_package.music_log has no sourced track — the render is silent")
+        failures.append("music: no background music was sourced (music_log empty)")
+    else:
+        _add_check(checks, "c_music_present", "pass",
+                   f"background music sourced for {len(_music_sourced)} section(s)")
+
+    # ------------------------------------------------------------------
     # Check 3 — Main video asset present
     # ------------------------------------------------------------------
     episode_render = final_render_package.get("episode_render", {})

@@ -456,28 +456,48 @@ def _get_beat_duration(narration_ref: str, segment_by_beat: dict) -> float:
     return float(seg.get("duration_seconds", 0.0))
 
 
+# Keyword families for mapping a scene's narrative signal(s) to one of the
+# six Music Agent categories. Substring match, not an exact enum lookup:
+# the narrative-signal vocabulary drifts over time (e.g. "hook",
+# "subterranean_reveal", "eerie_wonder", "scale_reveal", "burial_discovery"),
+# and a brittle exact dict silently collapsed every episode to a single
+# "Mystery" section (root-cause fix 2026-08-29). Order = priority.
+_MUSIC_CATEGORY_KEYWORDS = (
+    ("Tension", ("tension", "shock", "danger", "threat", "conflict", "dread",
+                 "alarm", "twist", "contradiction", "crisis", "collapse")),
+    ("Ancient Civilizations", ("ancient", "civilization", "ritual", "temple",
+                               "burial", "artifact", "subterranean", "tomb",
+                               "prehistoric", "archaeolog")),
+    ("Discovery", ("discovery", "discover", "uncover", "breakthrough",
+                   "wonder", "awe", "scale_reveal", "scale reveal", "vast")),
+    ("Investigation", ("investigation", "investigate", "evidence", "clue",
+                       "analysis", "examine", "trace", "chain of custody",
+                       "record", "document")),
+    ("Resolution", ("resolution", "resolve", "revelation", "true_revelation",
+                    "answer", "conclusion", "payoff", "closure", "the truth")),
+    ("Mystery", ("mystery", "mysterious", "eerie", "hook", "unknown", "enigma",
+                 "puzzle", "open question", "foreshadow", "hidden", "vanish",
+                 "reveal")),
+)
+
+
 def _derive_music_category_for_scene(scene: dict) -> str:
     """
-    Derive music category from scene narrative signals.
-
-    Maps the first narrative signal's signal_type to a Music Agent category.
-    Falls back to "Mystery" when no signals are present or the signal is unknown.
+    Derive a Music Agent category from a scene's narrative signals via
+    keyword-family matching (see _MUSIC_CATEGORY_KEYWORDS). Every signal on
+    the scene is considered; the first matching family in priority order
+    wins. Falls back to "Mystery" only when nothing matches at all.
     """
-    signals = scene.get("narrative_signals", [])
-    if isinstance(signals, list) and signals:
-        first_signal = signals[0]
-        signal_type = (
-            first_signal if isinstance(first_signal, str)
-            else first_signal.get("signal_type", "")
-        )
-        _signal_to_category = {
-            "mystery_deepening": "Mystery",
-            "shock_fact":        "Tension",
-            "reveal":            "Resolution",
-            "discovery":         "Discovery",
-            "investigation":     "Investigation",
-            "tension":           "Tension",
-            "foreshadowing":     "Mystery",
-        }
-        return _signal_to_category.get(signal_type.lower(), "Mystery")
+    signals = scene.get("narrative_signals", []) or []
+    tokens: list = []
+    for sig in signals if isinstance(signals, list) else []:
+        if isinstance(sig, str):
+            tokens.append(sig.lower())
+        elif isinstance(sig, dict):
+            tokens.append(str(sig.get("signal_type", "")).lower())
+            tokens.append(str(sig.get("description", "")).lower())
+    blob = " ".join(tokens)
+    for category, keywords in _MUSIC_CATEGORY_KEYWORDS:
+        if any(kw in blob for kw in keywords):
+            return category
     return "Mystery"

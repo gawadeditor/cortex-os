@@ -2364,8 +2364,32 @@ def _run_visual_package_director(
         # ALL assets must be terminal-successful to skip Phase 2 entirely.
         # Any generation_failed means submit_scene must retry those scenes.
         _TERMINAL_SUCCESS = {"generated", "reused", "dry_run", "deferred"}
+
+        def _asset_is_terminal_success(a: dict) -> bool:
+            if a.get("generation_status") in _TERMINAL_SUCCESS:
+                return True
+            # clip_repair_agent's coverage-fill path appends a contingency
+            # ("__extraN") asset to the manifest ONLY after the clip has
+            # passed qualify_asset() -- and that entry carries no
+            # generation_status key at all (it records model/tier_used/
+            # planned_shot_id instead). Treat such an entry as the terminal
+            # success it structurally is: a bare generation_status=None is a
+            # coverage-fill extra, not a failed primary, when it names a real
+            # asset_id and the planned shot it came from. Without this, an
+            # episode whose Phase 2 fully completed (every primary generated,
+            # coverage filled) is misread as incomplete on resume, needlessly
+            # re-running Cinematic Director -- which can regenerate the
+            # coverage plan and balloon the compiled Production Plan's cost
+            # bound past the finance ceiling for an episode that has nothing
+            # left to generate.
+            return (
+                a.get("generation_status") is None
+                and bool(a.get("asset_id"))
+                and bool(a.get("planned_shot_id"))
+            )
+
         phase2_done = bool(assets) and all(
-            a.get("generation_status") in _TERMINAL_SUCCESS for a in assets
+            _asset_is_terminal_success(a) for a in assets
         )
         if phase2_done:
             log.info(
@@ -2377,7 +2401,7 @@ def _run_visual_package_director(
             return existing_plan
         failed_count = sum(
             1 for a in assets
-            if a.get("generation_status") not in _TERMINAL_SUCCESS
+            if not _asset_is_terminal_success(a)
         )
         log.info(
             "pipeline_stage_skipped",

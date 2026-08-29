@@ -1646,6 +1646,54 @@ class TestCheckpointLoading:
         mock_full.assert_called_once()
         mock_resume.assert_not_called()
 
+    def test_vpd_skips_entirely_when_coverage_fill_extras_have_no_status(self, tmp_path):
+        # clip_repair_agent's coverage-fill path appends a contingency
+        # ("__extraN") asset with NO generation_status key once the clip has
+        # passed qualify_asset(). An episode whose every primary generated
+        # AND whose coverage was filled this way is Phase-2 complete and
+        # must be skipped -- not re-resumed (which re-runs Cinematic Director
+        # and can balloon the compiled plan's cost bound past the ceiling).
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        ep_dir.mkdir(parents=True)
+        import copy
+        pkg = copy.deepcopy(MINIMAL_VISUAL_PACKAGE)
+        pkg["asset_manifest"] = {"assets": [
+            {"scene_id": "s01", "asset_id": "episodes/ep_ck/video/sc_s01",
+             "generation_status": "generated"},
+            {"scene_id": "s01__extra1",
+             "asset_id": "episodes/ep_ck/video/sc_s01__extra1",
+             "model": "cached", "tier_used": 2, "planned_shot_id": "b_001__shot2"},
+        ]}
+        self._write_json(ep_dir / "visual_package_ep_ck.json", pkg)
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_visual_package_director") as mock_full, \
+             patch("hypogeum.pipeline.run_visual_package_director_from_plan") as mock_resume:
+            out = _run_visual_package_director(MINIMAL_SCRIPT_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_full.assert_not_called()
+        mock_resume.assert_not_called()
+        assert out["asset_manifest"]["assets"][1]["scene_id"] == "s01__extra1"
+
+    def test_vpd_resumes_when_a_primary_asset_has_no_status(self, tmp_path):
+        # A bare generation_status=None on a NON-extra asset (no
+        # planned_shot_id) is a genuinely incomplete primary -- still resume.
+        ep_dir = tmp_path / "episodes" / "ep_ck"
+        ep_dir.mkdir(parents=True)
+        import copy
+        pkg = copy.deepcopy(MINIMAL_VISUAL_PACKAGE)
+        pkg["asset_manifest"] = {"assets": [
+            {"scene_id": "s01", "asset_id": "episodes/ep_ck/video/sc_s01",
+             "generation_status": "generated"},
+            {"scene_id": "s02", "asset_id": "episodes/ep_ck/video/sc_s02"},
+        ]}
+        self._write_json(ep_dir / "visual_package_ep_ck.json", pkg)
+        cfg = make_config()
+        with patch("hypogeum.pipeline.run_visual_package_director") as mock_full, \
+             patch("hypogeum.pipeline.run_visual_package_director_from_plan",
+                   return_value=pkg) as mock_resume:
+            _run_visual_package_director(MINIMAL_SCRIPT_PACKAGE, cfg, "ep_ck", ep_dir)
+        mock_full.assert_not_called()
+        mock_resume.assert_called_once()
+
     def test_corrupt_checkpoint_file_causes_agent_to_run(self, tmp_path):
         ep_dir = tmp_path / "episodes" / "ep_ck"
         ep_dir.mkdir(parents=True)

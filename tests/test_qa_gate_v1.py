@@ -33,6 +33,10 @@ def _base_frp(**overrides) -> dict:
     pkg = {
         "package_integrity": {"production_ready": True},
         "assembly_qa_report": {"overall_status": "pass"},
+        "music_log": [
+            {"log_id": "ml_0", "section_key": "main_episode_0", "category": "Mystery",
+             "source": "channel_library", "asset_id": "music/mystery/t"},
+        ],
         "episode_render": {
             "video_asset_id": "vid_001",
             "caption_asset_id": "cap_001",

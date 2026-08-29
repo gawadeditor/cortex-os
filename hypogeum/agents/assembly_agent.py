@@ -1105,7 +1105,9 @@ def run_assembly_agent(
     # sourced NO music at all, or left any section without music, is a hard
     # assembly FAILURE -- not a warning that lets a silent episode ship
     # (ep_f3619022 shipped with music_log == []).
-    _music_required = bool(getattr(config, "MUSIC_REQUIRED", True))
+    # `is True`: a real Config carries a real bool; a MagicMock test config
+    # must not silently arm this new hard gate.
+    _music_required = getattr(config, "MUSIC_REQUIRED", True) is True
     _music_missing = _music_required and (not music_log or bool(sections_without_music))
     if render_status == "failed" or _dur_check_status == "fail" or _music_missing:
         qa_overall = "fail"

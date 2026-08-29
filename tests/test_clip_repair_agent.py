@@ -1537,7 +1537,9 @@ class TestQAGateIntegration:
             "thumbnail_candidates": [],
             "selected_thumbnail": None,
         }
-        topic_brief = {"topic": "Test", "channel_id": "hypogeum"}
+        topic_brief = {"topic": "Test", "channel_id": "hypogeum",
+                       "episode_title": "Clip Repair QA-Gate Test Episode",
+                       "logline": "A test logline for the assembly QA gate."}
 
         cfg = MagicMock()
         cfg.CLIP_REPAIR_ENABLED = True

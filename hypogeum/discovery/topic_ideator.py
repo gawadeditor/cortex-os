@@ -176,9 +176,25 @@ def run_topic_ideator(
         conn.close()
 
     # ── 2. Build LLM input ─────────────────────────────────────────────────
+    # Production format: a shorts-only channel wants standalone ~45-60s
+    # single-idea topics, each led by an unresolved question / counter-
+    # intuitive fact. Resolved from the channel's ChannelOperationsProfile
+    # cadence; defaults to long-form when unknown.
+    production_format = "long_form"
+    try:
+        from hypogeum.channel_config import get_channel_operations_profile
+        _ops = get_channel_operations_profile(channel_id, db_path=db_path)
+        _cad = (_ops.production_cadence if _ops is not None else {}) or {}
+        if _cad.get("videos_per_week") == 0 and isinstance(_cad.get("shorts_per_week"), int) \
+                and _cad["shorts_per_week"] >= 1:
+            production_format = "short"
+    except Exception:
+        pass
+
     input_package = {
         "channel_id": channel_id,
         "batch_id":   batch_id,
+        "production_format": production_format,
         "signal_context": {
             "has_real_analytics":     signal_ctx.get("has_real_analytics", False),
             "avg_ctr":                signal_ctx.get("avg_ctr"),

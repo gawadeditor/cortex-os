@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Factory Overview — Factory OS</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="page-header">
+  <h1>Factory Overview</h1>
+  <span class="page-meta">every channel, one view</span>
+</div>
+
+{% set agg = overview.get('aggregate', {}) %}
+{% set fc = overview.get('factory_clearance', {}) %}
+{% set wk = overview.get('worker', {}) %}
+{% set lr = overview.get('learning', {}) %}
+
+<div class="card" style="display:flex; gap:24px; flex-wrap:wrap;">
+  <div>
+    <div style="font-size:11px; color:var(--muted);">Factory clearance</div>
+    <div style="font-weight:700; color:{{ '#3fb950' if fc.get('cleared') else '#f85149' }};">
+      {{ 'CLEARED' if fc.get('cleared') else 'BLOCKED' }}
+    </div>
+    {% if not fc.get('cleared') and fc.get('reason') %}
+    <div style="font-size:11px; color:var(--muted); max-width:280px;">{{ fc.get('reason') }}</div>
+    {% endif %}
+  </div>
+  <div>
+    <div style="font-size:11px; color:var(--muted);">Worker</div>
+    <div style="font-weight:600;">
+      {{ wk.get('status') or 'never started' }}{% if wk.get('stale') %} <span style="color:#d29922;">(stale)</span>{% endif %}
+    </div>
+  </div>
+  <div>
+    <div style="font-size:11px; color:var(--muted);">Channels</div>
+    <div style="font-weight:600;">{{ agg.get('channels_autonomous_ready', 0) }} ready / {{ agg.get('channels_total', 0) }} total</div>
+  </div>
+  <div>
+    <div style="font-size:11px; color:var(--muted);">Weekly budget (all channels)</div>
+    <div style="font-weight:600;">
+      ${{ '%.2f' | format(agg.get('weekly_reserved_committed_usd', 0)) }} / ${{ '%.2f' | format(agg.get('weekly_ceiling_usd', 0)) }}
+      {% if agg.get('weekly_pct_used') is not none %}<span style="color:var(--muted);">({{ agg.get('weekly_pct_used') }}%)</span>{% endif %}
+    </div>
+  </div>
+  <div>
+    <div style="font-size:11px; color:var(--muted);">Learning</div>
+    <div style="font-weight:600;">
+      {{ lr.get('total_insights', 0) }} insights · {{ lr.get('pending_actions', 0) }} pending action{{ '' if lr.get('pending_actions', 0) == 1 else 's' }}
+    </div>
+    {% if lr.get('top_recommendation') %}
+    <div style="font-size:11px; color:var(--muted); max-width:280px;">Top: {{ lr.get('top_recommendation') }}</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px; overflow-x:auto;">
+  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+    <thead>
+      <tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--border);">
+        <th style="padding:6px 10px;">Channel</th>
+        <th style="padding:6px 10px;">Autonomous</th>
+        <th style="padding:6px 10px;">Weekly $</th>
+        <th style="padding:6px 10px;">Queue</th>
+        <th style="padding:6px 10px;">Latest run</th>
+        <th style="padding:6px 10px;">Next slot</th>
+        <th style="padding:6px 10px;">Blockers</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in overview.get('channels', []) %}
+      {% set wb = c.get('weekly_budget', {}) %}
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:6px 10px;">
+          <a href="/channel/{{ c.channel_id }}" style="color:var(--text);">{{ c.name or c.channel_id }}</a>
+          <div style="font-size:11px; color:var(--muted);">{{ c.channel_id }}</div>
+        </td>
+        <td style="padding:6px 10px; color:{{ '#3fb950' if c.get('autonomous_ready') else '#d29922' }}; font-weight:700;">
+          {{ 'READY' if c.get('autonomous_ready') else (c.get('blockers') | length ~ ' blocked') }}
+        </td>
+        <td style="padding:6px 10px;">
+          {% if wb.get('configured') %}
+            ${{ '%.2f' | format(wb.get('reserved_committed_usd') or 0) }} / ${{ '%.2f' | format(wb.get('ceiling_usd') or 0) }}
+          {% else %}<span style="color:var(--muted);">—</span>{% endif %}
+        </td>
+        <td style="padding:6px 10px;">{{ c.get('queue', {}).get('queued_topics', 0) }}q / {{ c.get('queue', {}).get('claimed_topics', 0) }}c</td>
+        <td style="padding:6px 10px;">{{ c.get('latest_run') or '—' }}</td>
+        <td style="padding:6px 10px;">{{ c.get('next_scheduled_slot') or '—' }}</td>
+        <td style="padding:6px 10px; font-size:11px; color:var(--muted); max-width:320px;">
+          {{ c.get('blockers', []) | join('; ') or '—' }}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" style="padding:20px; text-align:center; color:var(--muted);">No channels configured.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div style="margin-top:10px; font-size:11px; color:var(--muted);">
+  Generated {{ overview.get('generated_at', '') }} · <a href="/api/factory/overview">JSON</a>
+</div>
+</body>
+</html>

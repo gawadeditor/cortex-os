@@ -301,6 +301,48 @@ def _sync_analytics_background(db_path: Path, config) -> None:
         log.error("analytics_sync_error error=%s", exc)
 
 
+def _run_learning_cycle(db_path: Path) -> dict:
+    """
+    Close the self-learning loop: for every episode that has real
+    (source='api') platform analytics, run the learning engine's
+    idempotent extract_insights() -> generate_actions() pass so fresh
+    insights and pending learning_actions are always available to the
+    operator (and, in future, to discovery).
+
+    Best-effort and non-blocking — a failure for one episode is logged and
+    the sweep continues. Both learning-engine calls are INSERT-OR-IGNORE
+    idempotent, so re-running every analytics-sync cycle is safe and cheap.
+    """
+    summary = {"episodes": 0, "insights": 0, "actions": 0}
+    try:
+        from hypogeum.analytics_store import list_analytics
+        from hypogeum.learning_engine import extract_insights, generate_actions
+
+        records = list_analytics(db_path=db_path, limit=500)
+        # F8 data-integrity contract: only real API analytics drive learning.
+        episode_ids = {
+            r["episode_id"] for r in records
+            if r.get("episode_id") and (r.get("source") or "") == "api"
+        }
+        for ep in sorted(episode_ids):
+            try:
+                ins = extract_insights(ep, db_path=db_path)
+                acts = generate_actions(ep, db_path=db_path)
+                summary["episodes"] += 1
+                summary["insights"] += len(ins or [])
+                summary["actions"] += len(acts or [])
+            except Exception as exc:
+                log.error("learning_cycle_episode_error episode=%s error=%s", ep, exc)
+        if summary["episodes"]:
+            log.info(
+                "learning_cycle_complete episodes=%d insights=%d pending_actions=%d",
+                summary["episodes"], summary["insights"], summary["actions"],
+            )
+    except Exception as exc:
+        log.error("learning_cycle_error error=%s", exc)
+    return summary
+
+
 def _resolve_bundle_definitions_for_channel(channel_id: str, db_path: Path | None = None) -> list:
     """
     Real Channel-Package-driven bundle compiler (2026-08-23 — closes the
@@ -1027,6 +1069,11 @@ def run_iteration(
         log.info("analytics_sync_triggered iteration=%d", iteration)
         _sync_analytics_background(db_path=db_path, config=config)
         analytics_synced = True
+        # Close the self-learning loop right after fresh analytics land.
+        try:
+            _run_learning_cycle(db_path=db_path)
+        except Exception as exc:
+            log.error("learning_cycle_sweep_error error=%s", exc, exc_info=True)
         try:
             scheduling_evidence_result = _refresh_scheduling_evidence_for_all_channels(db_path=db_path)
         except Exception as exc:

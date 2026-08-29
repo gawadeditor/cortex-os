@@ -48,3 +48,8 @@ hypogeum/__pycache__/
 graphify-out/
 graphify-out/cost.json
 graphify-out/cache/
+
+# Ed25519 approval signing key — NEVER commit
+*.pem
+approval_ed25519_private_key.pem
+grant_spec_ep_af078f34.json

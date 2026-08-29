@@ -1234,6 +1234,57 @@ class TestAgentStubs:
         mock_pub.assert_called_once()
         assert result == fake_record
 
+    def test_non_zernio_channel_uses_direct_publish(self, tmp_path):
+        cfg, d = self._cfg_and_dir(tmp_path)
+        fake_record = {"package_metadata": {"overall_status": "published", "episode_id": "ep_001"}}
+        with patch("hypogeum.pipeline._channel_uses_zernio_transport", return_value=False), \
+             patch("hypogeum.pipeline.run_publishing_agent", return_value=fake_record) as mock_pub, \
+             patch("hypogeum.pipeline._run_zernio_publish") as mock_zern:
+            _run_publishing_agent({}, cfg, "ep_001", d, channel_id="hypogeum")
+        mock_pub.assert_called_once()
+        mock_zern.assert_not_called()
+
+    def test_zernio_routed_channel_uses_release_flow(self, tmp_path):
+        cfg, d = self._cfg_and_dir(tmp_path)
+
+        class _Res:
+            status = "published"
+            publish = None
+
+        class _RB:
+            def __init__(self, plat):
+                self.item_id = "ep_001"
+                self.platform = plat
+                self.result = _Res()
+
+        with patch("hypogeum.pipeline._channel_uses_zernio_transport", return_value=True), \
+             patch("hypogeum.pipeline._zernio_bundle_definitions",
+                   return_value=[object()]), \
+             patch("hypogeum.publishing.zernio_channel_release_trigger.process_channel_ready_bundles",
+                   return_value=[_RB("youtube"), _RB("facebook"), _RB("instagram")]), \
+             patch("hypogeum.publishing.zernio_channel_release_trigger._status_for_platform",
+                   side_effect=lambda r, p: "published"), \
+             patch("hypogeum.pipeline.run_publishing_agent") as mock_direct:
+            rec = _run_publishing_agent({}, cfg, "ep_001", d, channel_id="hypogeum")
+
+        mock_direct.assert_not_called()
+        assert rec["package_metadata"]["overall_status"] == "published"
+        assert rec["transport"] == "zernio"
+        assert {r["platform"] for r in rec["platform_results"]} == {"youtube", "facebook", "instagram"}
+        assert rec["summary"]["youtube_main_published"] is True
+        from hypogeum.schemas import validate
+        validate("publishing_record", rec)
+
+    def test_zernio_routed_but_no_bundle_def_falls_back_to_direct(self, tmp_path):
+        cfg, d = self._cfg_and_dir(tmp_path)
+        fake_record = {"package_metadata": {"overall_status": "published", "episode_id": "ep_001"}}
+        with patch("hypogeum.pipeline._channel_uses_zernio_transport", return_value=True), \
+             patch("hypogeum.pipeline._zernio_bundle_definitions", return_value=[]), \
+             patch("hypogeum.pipeline.run_publishing_agent", return_value=fake_record) as mock_pub:
+            result = _run_publishing_agent({}, cfg, "ep_001", d, channel_id="hypogeum")
+        mock_pub.assert_called_once()
+        assert result == fake_record
+
 
 # ---------------------------------------------------------------------------
 # TestPipelineExceptions

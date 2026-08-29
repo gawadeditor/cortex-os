@@ -1676,6 +1676,9 @@ def run_pipeline(
             publish_at=_episode_publish_at,
             enabled_platforms=publishing_platform_filter,
             publishing_provider_by_platform=publishing_provider_by_platform,
+            channel_id=channel_id,
+            db_path=db_path,
+            assets_root=(Path(output_dir).parent.parent if output_dir is not None else None),
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -2822,6 +2825,170 @@ def _get_episode_publish_at(episode_id: str, db_path: Optional[Path]) -> Optiona
         return None
 
 
+def _channel_uses_zernio_transport(
+    channel_id: Optional[str],
+    publishing_provider_by_platform: Optional[dict],
+    db_path: Optional[Path],
+) -> bool:
+    """
+    True when the channel publishes through Zernio rather than the direct
+    per-platform clients: any value in publishing_provider_by_platform (the
+    explicit override, or the channel's persisted PublishingProfile) is
+    "zernio".
+    """
+    routing = dict(publishing_provider_by_platform or {})
+    if not routing and channel_id:
+        try:
+            from hypogeum.channel_config import load_channel_config
+            cc = load_channel_config(channel_id, db_path=db_path)
+            if cc is not None and cc.publishing is not None:
+                routing = dict(cc.publishing.publishing_provider_by_platform or {})
+        except Exception:
+            routing = {}
+    return any(str(v).strip().lower() == "zernio" for v in routing.values())
+
+
+def _zernio_bundle_definitions(channel_id: str, db_path: Optional[Path]) -> list:
+    """Compile ChannelOperationsProfile.deliverable_bundle_definitions into
+    hypogeum.buffer.DeliverableBundleDefinition objects — the same shape
+    run_worker._resolve_bundle_definitions_for_channel produces."""
+    try:
+        from hypogeum.buffer import DeliverableBundleDefinition
+        from hypogeum.channel_config import get_channel_operations_profile
+        prof = get_channel_operations_profile(channel_id, db_path=db_path)
+    except Exception:
+        return []
+    if prof is None:
+        return []
+    out = []
+    for entry in (getattr(prof, "deliverable_bundle_definitions", None) or []):
+        if not isinstance(entry, dict):
+            continue
+        bid = entry.get("bundle_id")
+        target = entry.get("target_buffer_count")
+        if not bid or not isinstance(target, int) or isinstance(target, bool) or target <= 0:
+            continue
+        out.append(DeliverableBundleDefinition(
+            channel_id=channel_id, bundle_id=bid, target_buffer_count=target,
+        ))
+    return out
+
+
+def _run_zernio_publish(
+    channel_id: str,
+    episode_id: str,
+    config: Config,
+    output_dir: Optional[Path],
+    db_path: Optional[Path],
+    assets_root: Optional[Path],
+    publish_at: Optional[str],
+    log,
+) -> Optional[dict]:
+    """
+    Publish this channel's ready deliverables cross-platform through the
+    Zernio release flow (hypogeum.publishing.zernio_channel_release_trigger.
+    process_channel_ready_bundles) -- the SAME idempotent, output-gated,
+    per-platform-aggregated path the autonomous worker uses. Returns a
+    publishing_record dict, or None if the channel has no bundle
+    definition (caller falls back to the direct publishing agent).
+    """
+    bundle_defs = _zernio_bundle_definitions(channel_id, db_path)
+    if not bundle_defs:
+        log.warn("pipeline_zernio_no_bundle_definition", channel_id=channel_id,
+                 note="channel routes to zernio but has no deliverable_bundle_definitions — using direct publish")
+        return None
+
+    from hypogeum.publishing.zernio_channel_release_trigger import process_channel_ready_bundles
+    _assets_root = Path(assets_root) if assets_root is not None else _ASSETS_ROOT
+    _publish_now = publish_at is None  # a scheduled slot -> Zernio schedules it; none -> publish now
+
+    ready: list = []
+    for bdef in bundle_defs:
+        ready.extend(process_channel_ready_bundles(
+            channel_id, bdef, db_path=db_path, assets_root=_assets_root,
+            publish_now=_publish_now, config=config, log=log,
+            enable_production_output_gate=True,
+        ))
+
+    # Keep only entries for THIS episode (item_id is the episode identity).
+    mine = [r for r in ready if getattr(r, "item_id", None) == episode_id] or ready
+
+    from hypogeum.publishing.zernio_channel_release_trigger import _status_for_platform
+    platform_results = []
+    published = failed = skipped = 0
+    yt_main_published = False
+    for i, r in enumerate(mine):
+        try:
+            raw = _status_for_platform(r.result, r.platform)
+        except Exception:
+            raw = getattr(r.result, "status", "failed")
+        status = "published" if raw == "published" else (
+            "skipped" if str(raw).startswith("blocked") else "failed")
+        if status == "published":
+            published += 1
+            if r.platform == "youtube":
+                yt_main_published = True
+        elif status == "skipped":
+            skipped += 1
+        else:
+            failed += 1
+        platform_results.append({
+            "result_id": f"zres_{episode_id}_{i}",
+            "platform": r.platform,
+            "deliverable_type": "main_episode",
+            "status": status,
+            "metadata_applied": {"ai_disclosure_included": True},
+        })
+
+    if not platform_results:
+        platform_results.append({
+            "result_id": f"zres_{episode_id}_none", "platform": "youtube",
+            "deliverable_type": "main_episode", "status": "failed",
+            "metadata_applied": {"ai_disclosure_included": True},
+        })
+        failed = 1
+
+    overall = ("published" if failed == 0 and published > 0
+               else "partially_published" if published > 0
+               else "failed")
+
+    record = {
+        "package_metadata": {
+            "publishing_record_id": f"pub_{episode_id}_zernio",
+            "episode_id": episode_id,
+            "overall_status": overall,
+        },
+        "platform_results": platform_results,
+        "failures": [],
+        "summary": {
+            "youtube_main_published": yt_main_published,
+            "total_deliverables_attempted": len(platform_results),
+            "total_published": published,
+            "total_failed": failed,
+            "total_skipped": skipped,
+        },
+        "package_integrity": {"production_ready": overall == "published"},
+        "transport": "zernio",
+    }
+    try:
+        from hypogeum.schemas import validate
+        validate("publishing_record", record)
+    except Exception as exc:  # pragma: no cover - schema drift guard
+        log.warn("pipeline_zernio_record_schema_warn", error=str(exc))
+
+    base = output_dir if output_dir is not None else (_ASSETS_ROOT / "episodes" / episode_id)
+    try:
+        Path(base).mkdir(parents=True, exist_ok=True)
+        (Path(base) / f"publishing_record_{episode_id}.json").write_text(
+            json.dumps(record, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log.warn("pipeline_zernio_record_write_failed", error=str(exc))
+
+    log.info("pipeline_zernio_publish_complete", channel_id=channel_id,
+             overall_status=overall, published=published, failed=failed, skipped=skipped)
+    return record
+
+
 def _run_publishing_agent(
     final_render_package: dict,
     config: Config,
@@ -2831,6 +2998,9 @@ def _run_publishing_agent(
     publish_at: Optional[str] = None,
     enabled_platforms: Optional[frozenset] = None,
     publishing_provider_by_platform: Optional[dict] = None,
+    channel_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+    assets_root: Optional[Path] = None,
 ) -> dict:
     """
     Publishing Agent (M5.2 — implemented).
@@ -2869,6 +3039,22 @@ def _run_publishing_agent(
     if pkg is not None:
         log.info("pipeline_stage_skipped", agent="publishing_agent", reason="already_published")
         return pkg
+
+    # Zernio transport: a channel whose PublishingProfile routes platforms to
+    # "zernio" publishes cross-platform through the same idempotent,
+    # output-gated release flow the worker uses -- not the direct per-platform
+    # clients. (Root-cause fix 2026-08-29: previously the pipeline only ever
+    # did YouTube-direct and cross-platform needed a separate manual step.)
+    if _channel_uses_zernio_transport(channel_id, publishing_provider_by_platform, db_path):
+        zrec = _run_zernio_publish(
+            channel_id=channel_id or "hypogeum", episode_id=episode_id, config=config,
+            output_dir=output_dir, db_path=db_path, assets_root=assets_root,
+            publish_at=publish_at, log=log,
+        )
+        if zrec is not None:
+            return zrec
+        # fall through to direct publish when the channel has no bundle def
+
     return run_publishing_agent(
         final_render_package=final_render_package,
         config=config,

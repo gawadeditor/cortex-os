@@ -328,12 +328,26 @@ class TestValidation:
                 **_valid_kwargs(enabled_platforms={"myspace": True}),
             )
 
-    def test_videos_per_week_below_one_raises(self, db_path, canonical_channel):
+    def test_videos_per_week_zero_without_shorts_raises(self, db_path, canonical_channel):
         with pytest.raises(ValueError, match="videos_per_week"):
             create_channel_operations_profile(
                 db_path=db_path,
                 **_valid_kwargs(production_cadence={"videos_per_week": 0}),
             )
+
+    def test_negative_cadence_count_raises(self, db_path, canonical_channel):
+        with pytest.raises(ValueError, match="shorts_per_week"):
+            create_channel_operations_profile(
+                db_path=db_path,
+                **_valid_kwargs(production_cadence={"shorts_per_week": -1}),
+            )
+
+    def test_shorts_only_cadence_is_valid(self, db_path, canonical_channel):
+        prof = create_channel_operations_profile(
+            db_path=db_path,
+            **_valid_kwargs(production_cadence={"videos_per_week": 0, "shorts_per_week": 7}),
+        )
+        assert prof.production_cadence == {"videos_per_week": 0, "shorts_per_week": 7}
 
     def test_invalid_publishing_time_format_raises(self, db_path, canonical_channel):
         with pytest.raises(ValueError, match="HH:MM"):

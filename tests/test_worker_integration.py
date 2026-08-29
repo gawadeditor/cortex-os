@@ -481,6 +481,88 @@ class TestConcurrencyGate:
 
 
 # ===========================================================================
+# TestOperatingGrantAdmission — ADR-016: when the channel has an active
+# Channel Operating Grant, the gated executor binds a per-episode admission
+# BEFORE run_pipeline() so the provider gates route through it. When there
+# is no operating grant, nothing is bound and behaviour is unchanged
+# (covered by every other test in this file, which register no grant).
+# ===========================================================================
+
+class TestOperatingGrantAdmission:
+    def test_executor_binds_admission_when_operating_grant_active(self, db_path, project_root, monkeypatch):
+        from types import SimpleNamespace
+        import hypogeum.runtime_admission as _adm
+
+        _make_operations_profile(db_path)
+        _patch_pipeline_success(monkeypatch)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_bind")
+
+        monkeypatch.setattr(
+            "hypogeum.authorization_authority.resolve_active_operating_grant",
+            lambda channel_id, at, db_path=None: object(),
+        )
+        seen = {}
+
+        def _fake_bind(channel_id, episode_id, *, config, worker_id, db_path=None):
+            seen["episode_id"] = episode_id
+            seen["worker_id"] = worker_id
+            return SimpleNamespace(admission_id=f"admit:{channel_id}:{episode_id}")
+
+        monkeypatch.setattr(_adm, "bind_episode_admission", _fake_bind)
+
+        pr = _process_gated(db_path, project_root)
+
+        assert pr.status == "completed"
+        assert seen["episode_id"] == "ep_bind"
+
+    def test_executor_refuses_run_when_admission_fails_closed(self, db_path, project_root, monkeypatch):
+        import hypogeum.runtime_admission as _adm
+
+        _make_operations_profile(db_path)
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_refuse")
+
+        monkeypatch.setattr(
+            "hypogeum.authorization_authority.resolve_active_operating_grant",
+            lambda channel_id, at, db_path=None: object(),
+        )
+
+        def _boom(*a, **k):
+            raise _adm.OperatingGrantStalePolicyError("weekly ceiling changed -- re-sign")
+
+        monkeypatch.setattr(_adm, "bind_episode_admission", _boom)
+
+        pr = _process_gated(db_path, project_root)
+
+        assert pr.status != "completed"
+        assert call_log == []  # run_pipeline never called
+
+    def test_no_operating_grant_leaves_run_unbound(self, db_path, project_root, monkeypatch):
+        import hypogeum.runtime_admission as _adm
+
+        _make_operations_profile(db_path)
+        call_log = []
+        _patch_pipeline_success(monkeypatch, call_log)
+        enqueue(db_path=db_path, channel_id="hypogeum", episode_id="ep_plain")
+
+        called = {"bind": False}
+        _orig = _adm.bind_episode_admission
+
+        def _spy(*a, **k):
+            called["bind"] = True
+            return _orig(*a, **k)
+
+        monkeypatch.setattr(_adm, "bind_episode_admission", _spy)
+
+        pr = _process_gated(db_path, project_root)
+
+        assert pr.status == "completed"
+        assert len(call_log) == 1
+        assert called["bind"] is False  # no operating grant -> never bound
+
+
+# ===========================================================================
 # TestQueueLifecycleReused — proves claim/complete/fail/release/topic
 # lifecycle is not duplicated; the gated executor only decides whether the
 # ONE existing run_pipeline() call happens.

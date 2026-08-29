@@ -1015,3 +1015,79 @@ class TestIdleAndIsolation:
     def test_isolation_guard_blocks_prod_db_admission(self):
         with pytest.raises(AssertionError, match="TEST ISOLATION VIOLATION"):
             adm.admit_channel_execution(_CH, config=_cfg(), worker_id="w1", log=_Log(), now=NOW)
+
+
+# ===========================================================================
+# bind_episode_admission — the per-episode admission the daily-scheduler
+# gated executor establishes (ADR-016 operating grant, not the weekly
+# admit_channel_execution)
+# ===========================================================================
+
+def _set_cadence(db_path, cadence: dict):
+    conn = db.get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE channel_operations_profiles SET production_cadence_json = ?, updated_at = 'upd-cad' "
+            "WHERE channel_id = ?",
+            (__import__("json").dumps(cadence), _CH),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestBindEpisodeAdmission:
+    def test_binds_scheduled_episode_to_operating_grant(self, env):
+        _sign_and_register_operating_grant(env.priv, env.db_path, cadence="")
+        rec = adm.bind_episode_admission(
+            _CH, "ep_daily_001", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path,
+        )
+        assert rec.status == "admitted"
+        assert rec.admission_id == f"admit:{_CH}:ep_daily_001"
+        assert rec.episode_id == "ep_daily_001"
+        assert rec.operating_grant_id == "op_g1"
+        assert rec.configured_weekly_limit_usd == "80.00"
+        # get_admission_binding now activates the operating-grant provider path
+        assert adm.get_admission_binding(_CH, "ep_daily_001", db_path=env.db_path) is not None
+
+    def test_idempotent_replay_returns_same_row(self, env):
+        _sign_and_register_operating_grant(env.priv, env.db_path, cadence="")
+        r1 = adm.bind_episode_admission(_CH, "ep_x", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path)
+        r2 = adm.bind_episode_admission(_CH, "ep_x", config=_cfg(), worker_id="w2", now=NOW, db_path=env.db_path)
+        assert r1.admission_id == r2.admission_id
+        conn = db.get_connection(env.db_path)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM execution_admissions WHERE channel_id=?", (_CH,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n == 1
+
+    def test_fail_closed_when_no_operating_grant(self, env):
+        with pytest.raises(adm.NoActiveOperatingGrantError):
+            adm.bind_episode_admission(_CH, "ep_y", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path)
+
+    def test_fail_closed_on_stale_weekly_ceiling(self, env):
+        _sign_and_register_operating_grant(
+            env.priv, env.db_path, cadence="", weekly_ceiling=Decimal("80.00"),
+        )
+        _set_weekly_limit(env.db_path, 120.00)  # operator changed the money policy
+        with pytest.raises(adm.OperatingGrantStalePolicyError):
+            adm.bind_episode_admission(_CH, "ep_z", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path)
+
+    def test_cadence_retune_does_not_invalidate_when_snapshot_empty(self, env):
+        _sign_and_register_operating_grant(env.priv, env.db_path, cadence="")
+        _set_cadence(env.db_path, {"videos_per_week": 0, "shorts_per_week": 7})
+        rec = adm.bind_episode_admission(
+            _CH, "ep_c", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path,
+        )
+        assert rec.status == "admitted"
+
+    def test_complete_admission_deactivates_binding(self, env):
+        _sign_and_register_operating_grant(env.priv, env.db_path, cadence="")
+        rec = adm.bind_episode_admission(
+            _CH, "ep_done", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path,
+        )
+        adm.complete_admission(rec.admission_id, db_path=env.db_path)
+        assert adm.get_admission_binding(_CH, "ep_done", db_path=env.db_path) is None

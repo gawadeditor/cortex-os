@@ -807,13 +807,19 @@ def run_pipeline(
                           (PipelineAuthorizationRequiredError, resulting in a
                           'paused' run state) immediately before any stage
                           marked requires_authorization in
-                          _STAGE_BOUNDARY_METADATA, if no valid authorization
-                          exists for it (currently: always, since no
-                          Authorization Authority exists yet). Defaults to
-                          False, matching every existing production caller
+                          _STAGE_BOUNDARY_METADATA, if no valid stage-level
+                          authorization artifact exists for it. This is the
+                          older explicit-artifact boundary and is separate
+                          from the Authorization Authority / RunAuthorizationGrant
+                          enforcement that now gates every paid provider call
+                          at the provider boundary (hypogeum.muapi /
+                          openrouter / ... -- see hypogeum.authorization_authority
+                          and hypogeum.runtime_admission). Defaults to False,
+                          matching every existing production caller
                           (hypogeum.queue.process_next() via
                           worker_integration.py) unchanged -- real autonomous
-                          production runs are not affected by this flag.
+                          production runs are gated at the provider boundary,
+                          not by this flag.
                           Structurally independent of cancel_check, which
                           always means operator-requested cancellation (see
                           PipelineCancelledError / PipelineAuthorizationRequiredError

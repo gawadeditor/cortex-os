@@ -1027,13 +1027,58 @@ def run_assembly_agent(
         )
         shorts_titles = [{"short_id": sid, "title": ""} for sid in short_ids]
 
-    # Build metadata_source — ep_meta rarely carries title/logline (those live in
-    # topic_brief), so fall back to topic_brief when ep_meta fields are empty.
+    # Build metadata_source. Title/logline usually live in topic_brief, not
+    # ep_meta -- resolve through every upstream package that can carry them
+    # (2026-08-29 root-cause fix: ep_f3619022 shipped with an empty title
+    # because only ep_meta + topic_brief were checked and both were empty
+    # for that run, then it was published by hand).
     _tb = topic_brief or {}
+    _nar = narrative_package or {}
+    _scr = script_package or {}
+    _nar_meta = _nar.get("episode_metadata") or {}
+    _nar_struct = _nar.get("episode_structure") or {}
+
+    def _first_nonempty(*vals) -> str:
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    episode_title = _first_nonempty(
+        ep_meta.get("episode_title"), _tb.get("episode_title"),
+        _nar_meta.get("episode_title"), _nar_meta.get("title"),
+        _nar.get("topic"), _scr.get("topic"),
+    )
+    logline = _first_nonempty(
+        ep_meta.get("logline"), _tb.get("logline"),
+        _nar_meta.get("logline"), _nar_struct.get("logline"),
+    )
+
+    if not episode_title:
+        raise AssemblyAgentError(
+            f"assembly cannot seal {episode_id!r}: no episode_title found in "
+            "visual_package.episode_metadata, topic_brief, narrative_package, "
+            "or script_package -- an untitled episode must never be produced."
+        )
+
+    # A real description, never a bare logline: logline + the narrative
+    # arc's own section purposes when available.
+    _section_purposes = [
+        s.get("narrative_purpose", "").strip()
+        for s in (_nar_struct.get("sections") or [])
+        if isinstance(s, dict) and s.get("narrative_purpose", "").strip()
+    ][:3]
+    description = _first_nonempty(
+        ep_meta.get("description"), _nar_meta.get("description"),
+        (logline + ("\n\n" + " ".join(_section_purposes) if _section_purposes else "")).strip()
+        if logline else "",
+        logline,
+    )
+
     metadata_source = {
-        "episode_title": ep_meta.get("episode_title") or _tb.get("episode_title", ""),
-        "logline": ep_meta.get("logline") or _tb.get("logline", ""),
-        "description": ep_meta.get("description") or _tb.get("logline", ""),
+        "episode_title": episode_title,
+        "logline": logline,
+        "description": description,
         "section_titles": computed_section_titles,
         "shorts_titles": shorts_titles,
         "sources": formatted_sources,

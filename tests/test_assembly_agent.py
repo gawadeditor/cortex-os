@@ -2227,6 +2227,7 @@ class TestClipAvailabilityIntegration:
                 "vpd_version": "v1.3",
             },
             "episode_metadata": {
+                "episode_title": "Clip Availability Test Episode",
                 "primary_period": "Test",
                 "secondary_periods": [],
                 "tone_arc": "test",
@@ -2447,6 +2448,35 @@ class TestTopicBriefTitleFallback:
         assert result["metadata_source"]["episode_title"] == "The Great Mystery"
         assert result["metadata_source"]["logline"] == "Nobody knows."
 
+    def test_episode_title_falls_back_to_narrative_package(self, tmp_path):
+        """When neither ep_meta nor topic_brief has a title, narrative_package
+        (episode_metadata.title / .topic) is used before failing."""
+        cfg = _make_config()
+        vp = self._vp_without_title()
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(vp, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        nar = {"topic": "Malta's Hypogeum and the Vanished Skulls",
+               "episode_structure": {"logline": "Where did 7000 sets of remains go?",
+                                     "sections": [{"narrative_purpose": "Open on the myth."}]}}
+        with patch("hypogeum.agents.music_agent.generate_music_track",
+                   return_value=_make_music_track_result(tmp_path=tmp_path)):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                result = run_assembly_agent(
+                    visual_package=vp, narration_package=narration,
+                    thumbnail_package=thumbnails, config=cfg, episode_id="ep_001",
+                    output_dir=tmp_path / "ep_001", narrative_package=nar,
+                )
+        ms = result["metadata_source"]
+        assert ms["episode_title"] == "Malta's Hypogeum and the Vanished Skulls"
+        assert ms["logline"] == "Where did 7000 sets of remains go?"
+        # description is a real paragraph, not a bare logline
+        assert "Open on the myth." in ms["description"]
+        assert ms["description"] != ms["logline"]
+
     def test_ep_meta_takes_precedence_over_topic_brief(self, tmp_path):
         """episode_title from ep_meta takes precedence when both are non-empty."""
         cfg = _make_config()
@@ -2480,8 +2510,11 @@ class TestTopicBriefTitleFallback:
         assert result["metadata_source"]["episode_title"] == "Meta Title"
         assert result["metadata_source"]["logline"] == "Meta logline."
 
-    def test_no_topic_brief_keeps_empty_string(self, tmp_path):
-        """Without topic_brief and without ep_meta fields, episode_title stays empty."""
+    def test_no_title_anywhere_raises(self, tmp_path):
+        """Root-cause fix: an episode with no title in ANY upstream package
+        (visual_package / topic_brief / narrative_package / script_package)
+        must raise, never seal an untitled Final Render Package."""
+        from hypogeum.agents.assembly_agent import AssemblyAgentError
         cfg = _make_config()
         vp = self._vp_without_title()
         narration = _make_narration_package()
@@ -2496,16 +2529,15 @@ class TestTopicBriefTitleFallback:
             return_value=_make_music_track_result(tmp_path=tmp_path),
         ):
             with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
-                result = run_assembly_agent(
-                    visual_package=vp,
-                    narration_package=narration,
-                    thumbnail_package=thumbnails,
-                    config=cfg,
-                    episode_id="ep_001",
-                    output_dir=tmp_path / "ep_001",
-                )
-
-        assert result["metadata_source"]["episode_title"] == ""
+                with pytest.raises(AssemblyAgentError, match="no episode_title"):
+                    run_assembly_agent(
+                        visual_package=vp,
+                        narration_package=narration,
+                        thumbnail_package=thumbnails,
+                        config=cfg,
+                        episode_id="ep_001",
+                        output_dir=tmp_path / "ep_001",
+                    )
 
 
 # ---------------------------------------------------------------------------

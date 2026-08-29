@@ -692,6 +692,20 @@ def _check_and_refill_queue(
                 continue
 
         # ── Queue depth check ─────────────────────────────────────────────
+        # A shorts-only channel (production_cadence.videos_per_week == 0,
+        # shorts_per_week >= 1) publishes one Short per day, so it needs a
+        # deeper topic backlog than the single global default. Use the
+        # larger of the global threshold and the channel's weekly Short
+        # count so a week's worth of topics is always staged.
+        effective_threshold = threshold
+        try:
+            _cad = (ops_profile.production_cadence or {}) if ops_profile is not None else {}
+            _spw = _cad.get("shorts_per_week")
+            if _cad.get("videos_per_week") == 0 and isinstance(_spw, int) and _spw >= 1:
+                effective_threshold = max(threshold, _spw)
+        except Exception:
+            pass
+
         try:
             conn = get_connection(db_path)
             try:
@@ -707,17 +721,17 @@ def _check_and_refill_queue(
             log.error("discovery_queue_depth_error channel=%s error=%s", channel_id, exc)
             continue
 
-        if depth >= threshold:
+        if depth >= effective_threshold:
             log.debug(
                 "discovery_queue_sufficient channel=%s depth=%d threshold=%d",
-                channel_id, depth, threshold,
+                channel_id, depth, effective_threshold,
             )
             continue
 
         # ── Queue is below threshold — run discovery cycle ────────────────
         log.info(
             "discovery_triggered channel=%s depth=%d threshold=%d",
-            channel_id, depth, threshold,
+            channel_id, depth, effective_threshold,
         )
         try:
             cycle = run_discovery_cycle(channel_id, db_path=db_path)

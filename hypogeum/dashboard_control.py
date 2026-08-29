@@ -87,6 +87,58 @@ def next_thursday_publish_slot(from_dt: datetime | None = None) -> datetime:
     return candidate
 
 
+def next_daily_publish_slot(from_dt: datetime | None = None) -> datetime:
+    """
+    Return the next 14:00 UTC slot at or after from_dt.
+
+    The default publish slot for a shorts-only channel (one Short per day).
+    If it is currently before 14:00 UTC, returns today's slot; otherwise
+    tomorrow's.
+    """
+    if from_dt is None:
+        from_dt = datetime.now(timezone.utc)
+    candidate = from_dt.replace(hour=14, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    if candidate <= from_dt:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _is_shorts_only_channel(channel_id: str, db_path: Optional[Path]) -> bool:
+    try:
+        from hypogeum.channel_config import get_channel_operations_profile
+        ops = get_channel_operations_profile(channel_id, db_path=db_path)
+        cad = (ops.production_cadence if ops is not None else {}) or {}
+        spw = cad.get("shorts_per_week")
+        return cad.get("videos_per_week") == 0 and isinstance(spw, int) and spw >= 1
+    except Exception:
+        return False
+
+
+def _resolve_publish_slot(channel_id: str, db_path: Optional[Path]) -> datetime:
+    """Next publish slot for a channel: for a shorts-only channel, the next
+    daily 14:00 UTC slot staggered one day per already-queued topic (so a
+    week's backlog spreads across the week); else the long-form Thursday
+    14:00 UTC slot. Any lookup failure falls back to the Thursday slot."""
+    if not _is_shorts_only_channel(channel_id, db_path):
+        return next_thursday_publish_slot()
+    base = next_daily_publish_slot()
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM episode_topics "
+                "WHERE channel_id = ? AND status = 'queued'",
+                (channel_id,),
+            ).fetchone()
+            queued = int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        queued = 0
+    return base + timedelta(days=queued)
+
+
 def _ok(data=None, **extra) -> dict:
     result: dict = {"ok": True}
     if data is not None:
@@ -382,9 +434,11 @@ def enqueue_topic(
         )
         from hypogeum.db import get_connection
 
-        # Compute publish calendar dates before inserting
-        target_publish_at      = next_thursday_publish_slot()
-        production_deadline_at = target_publish_at - timedelta(hours=24)
+        # Compute publish calendar dates before inserting. A shorts-only
+        # channel publishes one Short per day (next 14:00 UTC); long-form
+        # channels use the weekly Thursday slot.
+        target_publish_at      = _resolve_publish_slot(channel_id, db_path)
+        production_deadline_at  = target_publish_at - timedelta(hours=24)
 
         topic_id = _enqueue(
             channel_id, topic_text,

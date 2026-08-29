@@ -83,6 +83,42 @@ def _is_prod(target) -> bool:
     return _norm(target) == _PROD_DB
 
 
+def _guard_sql(sql):
+    if isinstance(sql, str) and (_WRITE_RE.match(sql) or _UNSAFE_CREATE_RE.match(sql)):
+        raise ProductionAccessError(
+            f"BLOCKED: write against the PRODUCTION database ({_PROD_DB}): {sql.strip()[:120]!r}"
+        )
+
+
+class _WriteBlockedCursor:
+    """Proxy around a production cursor -- `conn.cursor().execute('INSERT ...')`
+    must not slip past the connection-level guard."""
+
+    __slots__ = ("_cur",)
+
+    def __init__(self, cur):
+        object.__setattr__(self, "_cur", cur)
+
+    def execute(self, sql, *a, **kw):
+        _guard_sql(sql)
+        return self._cur.execute(sql, *a, **kw)
+
+    def executemany(self, sql, *a, **kw):
+        _guard_sql(sql)
+        return self._cur.executemany(sql, *a, **kw)
+
+    def executescript(self, sql, *a, **kw):
+        for stmt in str(sql).split(";"):
+            _guard_sql(stmt)
+        return self._cur.executescript(sql, *a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+    def __iter__(self):
+        return iter(self._cur)
+
+
 class _WriteBlockedConnection:
     """Proxy around a real production sqlite3.Connection that refuses writes."""
 
@@ -92,18 +128,14 @@ class _WriteBlockedConnection:
         object.__setattr__(self, "_c", conn)
 
     def _guard(self, sql):
-        if isinstance(sql, str) and (_WRITE_RE.match(sql) or _UNSAFE_CREATE_RE.match(sql)):
-            raise ProductionAccessError(
-                f"BLOCKED: write against the PRODUCTION database "
-                f"({_PROD_DB}): {sql.strip()[:120]!r}"
-            )
+        _guard_sql(sql)
 
     def execute(self, sql, *a, **kw):
-        self._guard(sql)
+        _guard_sql(sql)
         return self._c.execute(sql, *a, **kw)
 
     def executemany(self, sql, *a, **kw):
-        self._guard(sql)
+        _guard_sql(sql)
         return self._c.executemany(sql, *a, **kw)
 
     def executescript(self, sql, *a, **kw):
@@ -118,6 +150,9 @@ class _WriteBlockedConnection:
         # No-op: every DML/DDL was already blocked at execute(), so there
         # is nothing to commit. Silent so defensive read paths don't break.
         return None
+
+    def cursor(self, *a, **kw):
+        return _WriteBlockedCursor(self._c.cursor(*a, **kw))
 
     def __getattr__(self, name):
         return getattr(self._c, name)

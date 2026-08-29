@@ -522,6 +522,55 @@ def api_channel_activate(channel_id: str):
     }), 422
 
 
+@app.route("/api/channels/create", methods=["POST"])
+def api_channel_create():
+    """
+    Create a new channel (Phase 4 — 'create a new channel from the
+    dashboard'). Accepts JSON or form fields:
+      channel_id, name (required); language, platforms (csv), timezone,
+      weekly_video_budget_usd, format ('long'|'shorts'), shorts_per_week,
+      publish_day, publish_time, narration_voice_id, description.
+    Creates the ChannelProfile bundle + a ChannelOperationsProfile
+    (operator_enabled=False — the operator opts the channel into
+    autonomous production explicitly afterwards).
+    """
+    from hypogeum.dashboard_control import create_channel
+
+    src = request.get_json(silent=True) or request.form
+    def _f(k, default=None):
+        v = src.get(k)
+        return v if v not in ("", None) else default
+
+    platforms = [p.strip() for p in str(_f("platforms", "youtube")).split(",") if p.strip()]
+    fmt = (_f("format", "long") or "long").lower()
+    if fmt == "shorts":
+        spw = int(_f("shorts_per_week", 7) or 7)
+        cadence = {"videos_per_week": 0, "shorts_per_week": spw}
+    else:
+        cadence = {"videos_per_week": int(_f("videos_per_week", 1) or 1)}
+
+    pub_sched = {}
+    if _f("publish_day") and _f("publish_time"):
+        pub_sched = {"day_of_week": _f("publish_day"), "time_of_day": _f("publish_time")}
+
+    budget = _f("weekly_video_budget_usd")
+    result = create_channel(
+        channel_id=str(_f("channel_id", "")).strip(),
+        name=str(_f("name", "")).strip(),
+        language=_f("language", "en"),
+        enabled_platforms=platforms,
+        timezone=_f("timezone", "UTC"),
+        weekly_video_budget_usd=float(budget) if budget is not None else None,
+        cadence=cadence,
+        publishing_schedule=pub_sched,
+        narration_voice_id=_f("narration_voice_id"),
+        description=_f("description", ""),
+        db_path=_db_path(),
+    )
+    status = 200 if result.get("ok") else (422 if result.get("code") in ("invalid", "duplicate") else 500)
+    return jsonify(result), status
+
+
 @app.route("/api/channels/<channel_id>/runtime")
 def api_channel_runtime(channel_id: str):
     """

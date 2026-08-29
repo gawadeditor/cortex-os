@@ -489,6 +489,83 @@ def enqueue_topic(
         return _err(str(exc))
 
 
+def create_channel(
+    channel_id: str,
+    name: str,
+    *,
+    language: str = "en",
+    enabled_platforms: Optional[list] = None,
+    timezone: str = "UTC",
+    weekly_video_budget_usd: Optional[float] = None,
+    cadence: Optional[dict] = None,
+    publishing_schedule: Optional[dict] = None,
+    narration_voice_id: Optional[str] = None,
+    description: str = "",
+    db_path: Optional[Path] = None,
+) -> dict:
+    """
+    Create a new channel from the dashboard: the ChannelProfile bundle
+    (brand + publishing + models + channel) via bootstrap_channel(), plus a
+    ChannelOperationsProfile so the autonomous worker can pick it up.
+
+    Idempotent on channel_id at the bundle level (bootstrap_channel returns
+    the existing channel); the operations profile is created only if absent.
+    Returns a Result dict.
+    """
+    if not channel_id or not str(channel_id).strip():
+        return _err("channel_id is required", "invalid")
+    if not name or not str(name).strip():
+        return _err("name is required", "invalid")
+
+    platforms = enabled_platforms or ["youtube"]
+    cadence = cadence or {"videos_per_week": 1}
+
+    try:
+        from hypogeum.channel_config import (
+            bootstrap_channel,
+            get_channel_operations_profile,
+            create_channel_operations_profile,
+        )
+
+        models: dict = {"image_provider": "muapi", "video_provider": "muapi"}
+        if narration_voice_id:
+            models["narration_voice_id"] = narration_voice_id
+
+        config_dict = {
+            "channel_id": channel_id,
+            "name": name,
+            "description": description,
+            "brand": {"language": language},
+            "publishing": {"enabled_platforms": platforms},
+            "models": models,
+        }
+        profile = bootstrap_channel(config_dict, db_path=db_path)
+        if profile is None or not getattr(profile, "channel_id", ""):
+            return _err("bootstrap_channel returned an empty profile")
+
+        ops_created = False
+        if get_channel_operations_profile(channel_id, db_path=db_path) is None:
+            create_channel_operations_profile(
+                channel_id=channel_id,
+                channel_name=name,
+                timezone=timezone,
+                operator_enabled=False,          # operator opts in explicitly later
+                unattended_operation_enabled=False,
+                production_cadence=cadence,
+                publishing_schedule=publishing_schedule or {},
+                weekly_video_budget_usd=weekly_video_budget_usd,
+                db_path=db_path,
+            )
+            ops_created = True
+
+        return _ok(channel_id=channel_id, name=name,
+                   operations_profile_created=ops_created)
+    except ValueError as exc:
+        return _err(str(exc), "invalid")
+    except Exception as exc:
+        return _err(str(exc))
+
+
 def action_resolve_signal(
     signal_id: str,
     user_id: str = _SYSTEM_USER,

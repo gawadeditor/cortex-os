@@ -38,6 +38,55 @@
       </div>
     </div>
   </div>
+  {% set rt = runtime_by_channel.get(ch.channel_id) %}
+  {% if rt %}
+  <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border, #333);">
+    <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:12px;">
+      <div>
+        <div style="color:var(--muted);">Autonomous</div>
+        <div style="font-weight:700; color:{{ '#3fb950' if rt.autonomous_ready else '#d29922' }};">
+          {{ 'READY' if rt.autonomous_ready else (rt.blockers | length ~ ' blocker' ~ ('' if rt.blockers | length == 1 else 's')) }}
+        </div>
+      </div>
+      <div>
+        <div style="color:var(--muted);">Weekly budget{% if rt.weekly_budget.week_key %} ({{ rt.weekly_budget.week_key }}){% endif %}</div>
+        <div style="font-weight:600;">
+          {% if rt.weekly_budget.configured %}
+            ${{ '%.2f' | format(rt.weekly_budget.reserved_committed_usd or 0) }} / ${{ '%.2f' | format(rt.weekly_budget.ceiling_usd or 0) }}
+            {% if rt.weekly_budget.pct_used is not none %}<span style="color:var(--muted);">({{ rt.weekly_budget.pct_used | round | int }}%)</span>{% endif %}
+          {% else %}
+            <span style="color:var(--muted);">not configured</span>
+          {% endif %}
+        </div>
+      </div>
+      <div>
+        <div style="color:var(--muted);">Worker</div>
+        <div style="font-weight:600;">
+          {{ rt.worker.status or 'never started' }}{% if rt.worker.stale %} <span style="color:#d29922;">(stale)</span>{% endif %}
+        </div>
+      </div>
+      <div>
+        <div style="color:var(--muted);">Queue</div>
+        <div style="font-weight:600;">{{ rt.queue.queued_topics }} queued / {{ rt.queue.claimed_topics }} claimed</div>
+      </div>
+      <div>
+        <div style="color:var(--muted);">Next slot</div>
+        <div style="font-weight:600;">{{ rt.schedule.next_run_at or '—' }}</div>
+      </div>
+      {% if rt.latest_run %}
+      <div>
+        <div style="color:var(--muted);">Latest run</div>
+        <div style="font-weight:600;">{{ rt.latest_run.status }} <span style="color:var(--muted);">{{ rt.latest_run.episode_id }}</span></div>
+      </div>
+      {% endif %}
+    </div>
+    {% if rt.blockers %}
+    <div style="margin-top:8px; font-size:11px; color:var(--muted);">
+      <span style="color:#d29922;">Blockers:</span> {{ rt.blockers | join('; ') }}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
   <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
     <a href="/channel/{{ ch.channel_id }}" class="btn">View</a>
     <a href="/channel/{{ ch.channel_id }}/edit" class="btn">Edit</a>

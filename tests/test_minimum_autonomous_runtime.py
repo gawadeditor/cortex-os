@@ -1091,3 +1091,33 @@ class TestBindEpisodeAdmission:
         )
         adm.complete_admission(rec.admission_id, db_path=env.db_path)
         assert adm.get_admission_binding(_CH, "ep_done", db_path=env.db_path) is None
+
+    def test_failed_admission_is_readmitted_on_retry(self, env):
+        # A prior attempt failed (fail_admission -> status 'failed'). The
+        # retry must re-admit the SAME episode so the provider gates see it
+        # as active again -- without this, a failed autonomous episode can
+        # never get video authorization on retry.
+        _sign_and_register_operating_grant(env.priv, env.db_path, cadence="")
+        r1 = adm.bind_episode_admission(
+            _CH, "ep_retry", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path,
+        )
+        adm.fail_admission(r1.admission_id, db_path=env.db_path)
+        assert adm.get_admission_binding(_CH, "ep_retry", db_path=env.db_path) is None
+
+        r2 = adm.bind_episode_admission(
+            _CH, "ep_retry", config=_cfg(), worker_id="w2", now=NOW, db_path=env.db_path,
+        )
+        assert r2.status == "admitted"
+        assert r2.admission_id == r1.admission_id
+        assert adm.get_admission_binding(_CH, "ep_retry", db_path=env.db_path) is not None
+
+    def test_completed_admission_refuses_readmission(self, env):
+        _sign_and_register_operating_grant(env.priv, env.db_path, cadence="")
+        r1 = adm.bind_episode_admission(
+            _CH, "ep_fin", config=_cfg(), worker_id="w1", now=NOW, db_path=env.db_path,
+        )
+        adm.complete_admission(r1.admission_id, db_path=env.db_path)
+        with pytest.raises(adm.AdmissionError):
+            adm.bind_episode_admission(
+                _CH, "ep_fin", config=_cfg(), worker_id="w2", now=NOW, db_path=env.db_path,
+            )

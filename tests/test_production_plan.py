@@ -229,6 +229,24 @@ class TestValidateDeliverableShape:
         with pytest.raises(DeliverableContractViolationError):
             _compile(short_ids=("short_001",))
 
+    def test_short_native_waives_the_contracts_derived_shorts(self):
+        # A shorts-only channel (Config.SHORT_NATIVE_MODE) compiles exactly
+        # [main_episode]; the on-disk contract's 3 required derived Shorts
+        # are advisory. Must not raise.
+        contract = load_deliverable_contract("hypogeum", packages_root=_HYPOGEUM_PACKAGES_ROOT)
+        sp = _make_script_package(short_ids=())
+        validate_deliverable_shape(
+            contract, sp, channel_id="hypogeum", episode_id="ep_sn", short_native=True,
+        )
+
+    def test_short_native_still_requires_exactly_main_episode(self):
+        contract = load_deliverable_contract("hypogeum", packages_root=_HYPOGEUM_PACKAGES_ROOT)
+        sp = _make_script_package(short_ids=("short_001",))  # short-native must not derive Shorts
+        with pytest.raises(DeliverableContractViolationError):
+            validate_deliverable_shape(
+                contract, sp, channel_id="hypogeum", episode_id="ep_sn", short_native=True,
+            )
+
 
 # ---------------------------------------------------------------------------
 # TestChannelIndependence — a different Channel Package, different shape,

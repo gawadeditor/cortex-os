@@ -60,9 +60,12 @@ _OPS = {
 
 
 def _openrouter_model_slugs(cfg) -> list[str]:
+    """Every `<provider>/<model>` slug in a *_MODEL* Config setting, EXCEPT
+    image models (they are not text.completion calls -- OPENROUTER_IMAGE_MODEL
+    routes through a different operation/domain when used at all)."""
     slugs = set()
     for name in dir(cfg):
-        if "MODEL" not in name:
+        if "MODEL" not in name or "IMAGE" in name:
             continue
         v = getattr(cfg, name, None)
         if isinstance(v, str) and "/" in v and " " not in v:
@@ -99,6 +102,7 @@ def _build_bindings(cfg) -> list[dict]:
         getattr(cfg, "MUAPI_T1_MODEL", "veo3-text-to-video"),
         getattr(cfg, "MUAPI_T2_MODEL", "veo3.1-lite-text-to-video"),
         getattr(cfg, "MUAPI_T3_MODEL", "veo3.1-lite-text-to-video"),
+        getattr(cfg, "MUAPI_I2V_MODEL", "veo3-image-to-video"),
     }
     for m in sorted(video_models):
         add("muapi", m, _OPS["muapi_video"][0], "2.50", 2000, "400.00")

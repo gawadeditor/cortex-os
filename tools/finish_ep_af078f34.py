@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -107,12 +108,22 @@ def main(argv: list[str] | None = None) -> int:
         "weekly_video_budget_usd": prof.weekly_video_budget_usd,
     }
 
+    try:
+        from hypogeum.production_plan import load_production_plan as _lpp
+        _pl = _lpp(EP, _EP_DIR)
+        _plan_max = float(_pl.maximum_bounded_cost_usd) if _pl is not None else None
+    except Exception:  # noqa: BLE001
+        _plan_max = None
+
     print(f"ep_af078f34 completion plan (db={db}):")
     print(f"  stale coverage clips to delete : {len(stale)}")
     print(f"  stale manifest entries to drop : {len(stale_manifest)}")
     print(f"  base clips kept                : {len(manifest) - len(stale_manifest)}")
     print(f"  channel cadence  {snap['production_cadence']}  ->  {{'videos_per_week': 1, 'shorts_per_week': 3}}")
     print(f"  weekly budget    ${snap['weekly_video_budget_usd']}  ->  ${args.weekly_budget}  (restored after)")
+    print(f"  plan max bounded cost         : "
+          f"{('$%.2f' % _plan_max) if _plan_max is not None else 'unknown'}  "
+          f"(per-episode finance ceiling raised to cover it, restored after)")
     print()
 
     if not args.apply:
@@ -132,8 +143,44 @@ def main(argv: list[str] | None = None) -> int:
     print("  [1] channel switched to long-form cadence, weekly budget raised")
     _resign_grant(f"weekly ceiling -> ${args.weekly_budget}")
 
+    _fsnap = None          # factory monthly_ceiling_usd snapshot for restore
     rc = 0
     try:
+        # 1b. Raise the per-episode FINANCE ceiling so
+        #     run_post_vpd_authorization AUTHORIZES this plan's maximum
+        #     bounded cost (~$101.56). Distinct from the weekly video budget
+        #     / operating-grant ceiling raised in step 1: the post-VPD
+        #     finance gate checks a *per-episode* ceiling resolved by
+        #     policy_cascade.get_effective_budget_ceiling() =
+        #       min( factory monthly_ceiling_usd / episodes_per_month,
+        #            env FINANCE_BUDGET_CEILING_USD )
+        #     so BOTH halves must clear the plan bound. 48 base clips are
+        #     already generated + paid; real incremental spend is only the
+        #     coverage-fill (~44 x $0.39) + music + render.
+        from hypogeum.factory_entity import (
+            get_factory_policies, update_factory_policies,
+        )
+        from hypogeum.production_plan import load_production_plan
+
+        _plan = load_production_plan(EP, _EP_DIR)
+        if _plan is None:
+            raise SystemExit(f"no persisted production plan for {EP} — cannot authorize")
+        _need = float(_plan.maximum_bounded_cost_usd)
+        _target = max(150.0, round(_need * 1.25, 2))
+        _fpol = get_factory_policies(CHANNEL, db_path=db)
+        _epm = max(1, int(_fpol.get("episodes_per_month") or 4))
+        _fsnap = float(_fpol.get("monthly_ceiling_usd") or 0.0)
+        _fnew = max(_fsnap, round(_target * _epm, 2))
+        update_factory_policies(
+            CHANNEL, {"monthly_ceiling_usd": _fnew},
+            reason=(f"ep_af078f34 completion run: per-episode finance ceiling "
+                    f"-> ${_target:.2f} (plan bound ${_need:.2f})"),
+            db_path=db,
+        )
+        os.environ["FINANCE_BUDGET_CEILING_USD"] = str(_target)
+        print(f"  [1b] finance ceiling raised: factory monthly ${_fsnap:.2f} -> "
+              f"${_fnew:.2f}; env FINANCE_BUDGET_CEILING_USD -> ${_target:.2f}")
+
         # 2. wipe stale coverage-fill clips + manifest entries
         for p in stale:
             p.unlink(missing_ok=True)
@@ -146,6 +193,34 @@ def main(argv: list[str] | None = None) -> int:
                 sc.pop("coverage_fill_status", None)
             vp_path.write_text(json.dumps(vp, indent=2))
         print(f"  [2] deleted {len(stale)} stale clips, {len(stale_manifest)} manifest entries")
+
+        # 2b. Write the post-VPD finance authorization record.
+        #     On a phase2-complete resume the pipeline skips VPD entirely
+        #     (hypogeum/pipeline.py::_run_visual_package_director returns
+        #     before run_visual_package_director_from_plan), so
+        #     run_post_vpd_authorization() never runs and
+        #     finance_post_vpd_authorization_{EP}.json is never (re)written —
+        #     then clip_repair's paid MUAPI gate fails every coverage-fill
+        #     submission with `finance_record_missing`. Write it here, once,
+        #     bound to the exact persisted plan hash the gate three-way-checks.
+        from hypogeum.config import Config
+        from hypogeum.agents.finance_agent import run_post_vpd_authorization
+
+        _rec = run_post_vpd_authorization(
+            visual_package=json.loads(vp_path.read_text()),
+            episode_id=EP,
+            config=Config(),
+            production_plan=_plan,
+            output_dir=_EP_DIR,
+        )
+        if _rec.get("verdict") == "BLOCKED":
+            raise SystemExit(
+                f"post-VPD finance still BLOCKED at ceiling ${_target:.2f}: "
+                f"{_rec.get('failures')}"
+            )
+        print(f"  [2b] post-VPD finance record written: verdict={_rec['verdict']}, "
+              f"authorized={_rec['authorized']}, "
+              f"bound_hash={_rec.get('bound_production_plan_content_hash', '')[:12]}")
 
         # 3. clear the failed admission + re-queue the topic
         conn = get_connection(db)
@@ -193,6 +268,16 @@ def main(argv: list[str] | None = None) -> int:
         _resign_grant(f"weekly ceiling restored -> ${snap['weekly_video_budget_usd']}")
         print(f"  [5] channel operations profile restored "
               f"({snap['production_cadence']}, ${snap['weekly_video_budget_usd']})")
+
+        # 5b. restore the factory per-episode finance ceiling
+        if _fsnap is not None:
+            from hypogeum.factory_entity import update_factory_policies as _restore_fpol
+            _restore_fpol(
+                CHANNEL, {"monthly_ceiling_usd": _fsnap},
+                reason="ep_af078f34 completion run: restore factory monthly ceiling",
+                db_path=db,
+            )
+            print(f"  [5b] factory monthly ceiling restored -> ${_fsnap:.2f}")
 
     return rc
 

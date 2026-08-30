@@ -363,7 +363,9 @@ def compute_complete_episode_cost(
     )
 
 
-def build_required_asset_inventory(production_plan, *, script_package: dict, contract: dict) -> dict:
+def build_required_asset_inventory(
+    production_plan, *, script_package: dict, contract: dict, short_native: bool = False,
+) -> dict:
     """Explicit, itemised inventory of EVERY paid operation the compiled
     complete plan will reach before `ready_to_publish` -- derived from the
     deliverable contract + script structure + the plan's own priced
@@ -372,17 +374,26 @@ def build_required_asset_inventory(production_plan, *, script_package: dict, con
     comparison and that every required deliverable is priced.
 
     `production_plan` is a compiled hypogeum.production_plan.ProductionPlan
-    (or a compatible object exposing .assets / the *_cost_usd fields)."""
+    (or a compatible object exposing .assets / the *_cost_usd fields).
+
+    short_native: when True (Config.SHORT_NATIVE_MODE), the run's only
+    deliverable is the main_episode vertical short; the contract's derived-
+    Short entries are advisory and are NOT counted as required/missing.
+    See hypogeum.production_plan.validate_deliverable_shape's own note on
+    why cadence must stay a pure dashboard setting."""
     from collections import Counter
 
     assets = list(getattr(production_plan, "assets", []) or [])
     roles = Counter(getattr(a, "role", "?") for a in assets)
     models = Counter(getattr(a, "model", "?") for a in assets)
+    _deliverables = contract.get("deliverables", [])
+    if short_native:
+        _deliverables = [d for d in _deliverables if d.get("kind") not in ("derived_short", "short")]
     required_deliverables = [
-        d["deliverable_id"] for d in contract.get("deliverables", []) if d.get("required")
+        d["deliverable_id"] for d in _deliverables if d.get("required")
     ]
     required_shorts = [
-        d["deliverable_id"] for d in contract.get("deliverables", [])
+        d["deliverable_id"] for d in _deliverables
         if d.get("required") and d.get("kind") in ("derived_short", "short")
     ]
     priced_deliverables = set(getattr(production_plan, "deliverable_ids", []) or [])
@@ -758,7 +769,10 @@ def compile_truthful_production_plan(
     if contract is None:
         from hypogeum.production_plan import load_deliverable_contract
         contract = load_deliverable_contract(channel_id)
-    inventory = build_required_asset_inventory(plan, script_package=script_package, contract=contract)
+    _short_native = bool(getattr(config, "SHORT_NATIVE_MODE", False))
+    inventory = build_required_asset_inventory(
+        plan, script_package=script_package, contract=contract, short_native=_short_native,
+    )
     if not cov.sufficient or inventory["missing_required_deliverables"]:
         # An incomplete plan is never valid -- it can never be made
         # "affordable" by understating the work. Reject before any budget
@@ -869,7 +883,7 @@ def compile_truthful_production_plan(
             except Exception:  # noqa: BLE001
                 pass
         alt_inventory = build_required_asset_inventory(
-            alt_plan, script_package=script_package, contract=contract,
+            alt_plan, script_package=script_package, contract=contract, short_native=_short_native,
         )
         return TruthfulPlanResult(
             production_plan=alt_plan, cost_model=alt_cost_model, coverage_sufficient=bool(alt_cov.sufficient),
@@ -881,7 +895,7 @@ def compile_truthful_production_plan(
         component_breakdown={
             **_breakdown(alt_plan, alt_cov), "substitutions_attempted": applied,
             "asset_inventory": build_required_asset_inventory(
-                alt_plan, script_package=script_package, contract=contract,
+                alt_plan, script_package=script_package, contract=contract, short_native=_short_native,
             ),
         },
         substitution_attempted=True,

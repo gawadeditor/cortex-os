@@ -495,7 +495,10 @@ def _compiled_deliverable_shape(script_package: dict) -> dict:
     return shape
 
 
-def validate_deliverable_shape(contract: dict, script_package: dict, *, channel_id: str, episode_id: str) -> None:
+def validate_deliverable_shape(
+    contract: dict, script_package: dict, *, channel_id: str, episode_id: str,
+    short_native: bool = False,
+) -> None:
     """
     Validates the episode's real, compiled script_package against the
     Channel Package's own deliverable_contract — never the reverse. Raises
@@ -503,9 +506,37 @@ def validate_deliverable_shape(contract: dict, script_package: dict, *, channel_
     deliverable count, a different deliverable_id set, a Short not
     declared as derived_from the main episode when the contract requires
     it, or any standalone Short when allow_standalone_shorts is false.
+
+    short_native: when True (Config.SHORT_NATIVE_MODE — a shorts-only
+    channel, see Config.apply_short_native_preset()), the run produces
+    exactly ONE vertical deliverable that IS the main_episode, with no
+    long-form arc and no derived Shorts. The on-disk contract's derived-
+    Short entries are then advisory-only: the compiled shape is required
+    to be exactly {main_episode} and only that deliverable's own kind is
+    checked. This keeps a channel's cadence (7 shorts/wk, 2 long + 3
+    shorts, …) a pure dashboard setting — flipping it must never require
+    re-checksumming deliverable_contract_v1.json or re-signing the
+    Channel Operating Grant bound to the package identity.
     """
     declared = {d["deliverable_id"]: d for d in contract.get("deliverables", [])}
     compiled = _compiled_deliverable_shape(script_package)
+
+    if short_native:
+        if set(compiled.keys()) != {MAIN_DELIVERABLE_ID}:
+            raise DeliverableContractViolationError(
+                channel_id, episode_id,
+                f"short-native run must compile exactly [{MAIN_DELIVERABLE_ID!r}], "
+                f"got {sorted(compiled.keys())}",
+            )
+        decl_main = declared.get(MAIN_DELIVERABLE_ID)
+        if decl_main is not None and decl_main.get("kind") != compiled[MAIN_DELIVERABLE_ID].get("kind"):
+            raise DeliverableContractViolationError(
+                channel_id, episode_id,
+                f"deliverable {MAIN_DELIVERABLE_ID!r}: declared kind "
+                f"{decl_main.get('kind')!r} != compiled kind "
+                f"{compiled[MAIN_DELIVERABLE_ID].get('kind')!r}",
+            )
+        return
 
     if set(declared.keys()) != set(compiled.keys()):
         raise DeliverableContractViolationError(
@@ -801,7 +832,10 @@ def compile_production_plan(
     from hypogeum.video_prompt_writer import assemble_video_scene_prompt  # noqa: PLC0415
 
     contract = load_deliverable_contract(channel_id, packages_root=packages_root)
-    validate_deliverable_shape(contract, script_package, channel_id=channel_id, episode_id=episode_id)
+    validate_deliverable_shape(
+        contract, script_package, channel_id=channel_id, episode_id=episode_id,
+        short_native=bool(getattr(config, "SHORT_NATIVE_MODE", False)),
+    )
 
     requested_duration = resolve_canonical_clip_duration(config)
     max_chargeable_attempts = resolve_max_chargeable_attempts(config, episode_id=episode_id)

@@ -1631,6 +1631,7 @@ def _append_end_page(
     music_track=None,
     body_duration: float = 0.0,
     music_segment_start_seconds: float = 0.0,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> bool:
     """
     Append a static end-page PNG card to the main episode video.
@@ -1703,7 +1704,7 @@ def _append_end_page(
             # Independent of video — video is a clean cut (no fade=t=in below).
             _ep_music_fade = min(_END_CARD_MUSIC_FADE_SECONDS, max(0.01, duration))
             ep_cmd = [
-                "ffmpeg", "-y",
+                ffmpeg_binary, "-y",
                 "-loop", "1",
                 "-framerate", str(FRAME_RATE),
                 "-t", f"{duration:.3f}",
@@ -1733,7 +1734,7 @@ def _append_end_page(
             ]
         else:
             ep_cmd = [
-                "ffmpeg", "-y",
+                ffmpeg_binary, "-y",
                 "-loop", "1",
                 "-framerate", str(FRAME_RATE),
                 "-t", f"{duration:.3f}",
@@ -1787,7 +1788,7 @@ def _append_end_page(
         # music bed, which is exactly what this policy forbids.
         total_dur = body_duration + duration
         concat_cmd = [
-            "ffmpeg", "-y",
+            ffmpeg_binary, "-y",
             "-i", str(body_path),
             "-i", str(clip_path),
             "-filter_complex",

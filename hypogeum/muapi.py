@@ -832,21 +832,32 @@ def _submit_scene_via_gate(
     # disagreement fails closed HERE, before any envelope is compiled,
     # any authorization is minted, and any paid provider call is made.
     # ------------------------------------------------------------------
+    # A Channel Operating Grant (ADR-016 grant_kind='channel_operating') is
+    # signed ONCE per channel, before any episode's Production Plan exists, so
+    # it carries no production_plan_content_hash by design. Its plan binding is
+    # enforced differently and just as strictly: the plan-bound weekly
+    # reservation established at admission + issue_child_authorization()'s
+    # envelope.dependency_checksums.plan == verified-plan-hash check below (see
+    # authorization_authority.issue_child_authorization, grant_kind branch).
+    # The three-way grant-hash agreement below applies only to per-episode
+    # 'run' grants, which ARE signed against a specific compiled plan.
+    _is_operating_grant = getattr(grant, "grant_kind", "run") == "channel_operating"
     grant_plan_hash = getattr(grant, "production_plan_content_hash", None)
-    if not grant_plan_hash:
-        return None, (
-            f"grant_plan_unbound: grant {grant.grant_id}@{grant.grant_version} "
-            f"carries no production_plan_content_hash -- grants registered before "
-            f"plan binding fail closed; register a new RunAuthorizationGrant bound "
-            f"to this episode's verified persisted Production Plan"
-        )
-    if grant_plan_hash != production_plan.content_hash:
-        return None, (
-            f"grant_plan_mismatch: grant {grant.grant_id}@{grant.grant_version} is bound "
-            f"to content_hash={grant_plan_hash[:12]} but the verified persisted plan has "
-            f"content_hash={production_plan.content_hash[:12]} -- changing or replacing "
-            f"the plan invalidates authorization; re-register the grant"
-        )
+    if not _is_operating_grant:
+        if not grant_plan_hash:
+            return None, (
+                f"grant_plan_unbound: grant {grant.grant_id}@{grant.grant_version} "
+                f"carries no production_plan_content_hash -- grants registered before "
+                f"plan binding fail closed; register a new RunAuthorizationGrant bound "
+                f"to this episode's verified persisted Production Plan"
+            )
+        if grant_plan_hash != production_plan.content_hash:
+            return None, (
+                f"grant_plan_mismatch: grant {grant.grant_id}@{grant.grant_version} is bound "
+                f"to content_hash={grant_plan_hash[:12]} but the verified persisted plan has "
+                f"content_hash={production_plan.content_hash[:12]} -- changing or replacing "
+                f"the plan invalidates authorization; re-register the grant"
+            )
     finance_plan_hash, finance_denial = _load_post_vpd_finance_plan_hash(episode_id, output_dir)
     if finance_denial is not None:
         return None, finance_denial

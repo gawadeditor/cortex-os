@@ -140,7 +140,11 @@ def build_spec(channel_id: str, db: Path, *, days_valid: int) -> dict:
     domains = sorted({d for (_op, d) in _OPS.values()})
 
     return {
-        "grant_id": f"op_grant_{channel_id}_{now:%Y%m%d}",
+        # timestamped to the second so re-signing (e.g. after a weekly-budget
+        # change) is a fresh grant + approval artifact, never a UNIQUE clash
+        # on {grant_id}:approval. resolve_active_operating_grant picks the
+        # most recently registered active one for the channel.
+        "grant_id": f"op_grant_{channel_id}_{now:%Y%m%dT%H%M%S}",
         "grant_version": 1,
         "channel_id": channel_id,
         "workflow_id": wf["workflow_id"],

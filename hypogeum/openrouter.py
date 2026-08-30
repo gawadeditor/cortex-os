@@ -516,23 +516,35 @@ def _call_openrouter_via_gate(
     operation_payload_content = operation_payload_bytes.decode("utf-8")
     operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
 
-    expected_output_identity = f"episodes/{episode_id}/text/{attempt_label}"
-    deterministic_output_path = f".hypogeum-assets/episodes/{episode_id}/text/{attempt_label}.json"
+    # attempt_label identifies the RETRY (agent + primary/fallback + attempt N).
+    # An agent that makes several DISTINCT gated calls in one stage (e.g. the
+    # Executive Producer: validation_scorecard, then topic_brief) would otherwise
+    # reuse one attempt_label across all of them and collide on the ledger's
+    # UNIQUE(grant, provider, model, operation, idempotency_key) -- the second
+    # call is rejected as a mismatched-envelope replay of the first. Fold in a
+    # payload discriminator so each distinct call has its own identity while a
+    # genuine retry (identical payload, incremented attempt N) still gets a
+    # fresh key via attempt_label, and a true replay (same payload, same N)
+    # still collapses to the same idempotent key.
+    call_label = f"{attempt_label}_{operation_payload_sha256[:12]}"
+
+    expected_output_identity = f"episodes/{episode_id}/text/{call_label}"
+    deterministic_output_path = f".hypogeum-assets/episodes/{episode_id}/text/{call_label}.json"
     max_cost = _estimate_max_cost_ceiling(model_slug, messages, max_tokens)
-    authorization_id = f"{episode_id}:{agent or 'text'}:{attempt_label}"
+    authorization_id = f"{episode_id}:{agent or 'text'}:{call_label}"
 
     try:
         envelope = GenerationExecutionEnvelope.create(
             envelope_schema_version=_TEXT_ENVELOPE_SCHEMA_VERSION, envelope_version=1, channel_id=channel_id,
             channel_package_version=package_identity["version"], channel_package_checksum=package_identity["checksum"],
             execution_id=episode_id, workflow_version=workflow_binding["workflow_version"],
-            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=attempt_label,
+            plan_version="live", plan_checksum=plan_checksum, planned_shot_id=call_label,
             structured_spec_checksum=structured_spec_checksum, compiler_identity=_TEXT_COMPILER_IDENTITY,
             compiler_version="1", operation_payload_content=operation_payload_content,
             operation_payload_sha256=operation_payload_sha256, operation_payload_schema_version=_TEXT_SCHEMA_VERSION,
             content_provenance={
                 "compiler": _TEXT_COMPILER_IDENTITY, "compiler_version": "1",
-                "source_work_item_id": attempt_label, "rendered_at": at,
+                "source_work_item_id": call_label, "rendered_at": at,
             },
             provider=_TEXT_PROVIDER, model=model_slug, provider_operation=_TEXT_PROVIDER_OPERATION,
             deterministic_output_path=deterministic_output_path, expected_output_identity=expected_output_identity,
@@ -547,18 +559,18 @@ def _call_openrouter_via_gate(
         )
         authorization = authority.issue_child_authorization(envelope, grant.grant_id, grant.grant_version, at=at)
     except Exception as exc:  # noqa: BLE001 -- any compile/authorize failure here is a clean non-network denial
-        raise FallbackFailed(f"Text gate authorization failed for {attempt_label!r}: {exc}") from exc
+        raise FallbackFailed(f"Text gate authorization failed for {call_label!r}: {exc}") from exc
 
     conn = db.get_connection()
     try:
         authorization_store.persist_execution_envelope(conn, envelope)
 
         adapter_registry.register_adapter(_TEXT_PROVIDER, model_slug, _TEXT_PROVIDER_OPERATION, "1.0", OpenrouterTextAdapter)
-        lease_owner_id = f"openrouter_text_adapter:{attempt_label}"
+        lease_owner_id = f"openrouter_text_adapter:{call_label}"
         lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
         lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
         if lease is None:
-            raise FallbackFailed(f"Text gate lease unavailable for {attempt_label!r}")
+            raise FallbackFailed(f"Text gate lease unavailable for {call_label!r}")
 
         receipt_store = WriteAheadReceiptStore(_ASSETS_ROOT / "episodes" / episode_id)
         live_sources = submission_gate.LiveSources(
@@ -566,7 +578,7 @@ def _call_openrouter_via_gate(
             structured_spec_checksum=structured_spec_checksum, compiler_version="1",
         )
         scopes = [
-            bs.ScopeRequest(bs.BudgetScopeKind.CALL, attempt_label, max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, call_label, max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
         ]
         result = submission_gate.submit(
@@ -600,7 +612,7 @@ def _call_openrouter_via_gate(
             raise TruncatedResponse(evidence.get("completion_tokens", 0), evidence.get("max_tokens_set", max_tokens))
         if exc_class == "HardFailure":
             raise HardFailure(message, http_status=evidence.get("http_status"))
-        raise FallbackFailed(f"Text gate denied for {attempt_label!r}: [{result.denied_at_check}] {result.reason}")
+        raise FallbackFailed(f"Text gate denied for {call_label!r}: [{result.denied_at_check}] {result.reason}")
 
     evidence = result.adapter_result.evidence
     return CallResult(

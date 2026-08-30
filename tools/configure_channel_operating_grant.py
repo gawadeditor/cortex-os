@@ -56,6 +56,11 @@ _OPS = {
     "muapi_video": ("video.text_to_video", "muapi_video"),
     "muapi_image": ("image.reference", "muapi_image"),
     "muapi_thumbnail": ("image.thumbnail", "muapi_thumbnail"),
+    # Source Enhancement's video upscaler (hypogeum/providers/muapi_video_upscaler.py).
+    # Since 61fddc1 the upscaler resolves the Channel Operating Grant like every
+    # other paid MUAPI call, so the grant must carry a binding for it or every
+    # sub-1080p coverage-fill / source clip fails `gate_authorization_failed`.
+    "muapi_upscale": ("upscale.video", "muapi_upscale"),
 }
 
 
@@ -110,6 +115,10 @@ def _build_bindings(cfg) -> list[dict]:
         _OPS["muapi_image"][0], "1.00", 500, "60.00")
     add("muapi", getattr(cfg, "THUMBNAIL_IMAGE_MODEL", "gpt-image-2-text-to-image"),
         _OPS["muapi_thumbnail"][0], "1.00", 500, "60.00")
+    # Video upscaler (Source Enhancement). MODEL_NAME + operation are fixed
+    # in hypogeum/providers/muapi_video_upscaler.py (UPSCALE_CEILING_USD = $0.10
+    # per call); generous per-binding bounds, the weekly ledger is the real cap.
+    add("muapi", "ai-video-upscaler", _OPS["muapi_upscale"][0], "0.25", 4000, "200.00")
     return b
 
 

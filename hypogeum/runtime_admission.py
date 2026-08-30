@@ -496,6 +496,40 @@ def bind_episode_admission(
         )
         return existing
 
+    if existing is not None and not existing.is_active:
+        # A prior attempt for THIS episode ended (fail_admission / release).
+        # 'completed' is terminal -- never re-run a finished episode. Any
+        # other non-active state ('failed', 'released') is a retry: re-verify
+        # the operating grant + re-establish the pre-plan reservation, then
+        # flip the row back to 'admitted' so the muapi / openrouter /
+        # perplexity / elevenlabs gates (which read get_admission_binding(),
+        # status IN active) authorise this attempt's spend again. Without
+        # this, every retry of a failed autonomous episode is silently
+        # unauthorised for video and dies at the first paid scene.
+        if existing.status == "completed":
+            raise AdmissionError(
+                f"episode {episode_id!r} already completed under admission "
+                f"{admission_id!r} -- refusing re-admission"
+            )
+        grant = _verify_operating_grant(
+            channel_id, existing.workflow_version, profile, now_iso, configured_limit,
+            expect_grant_id=existing.operating_grant_id, db_path=db_path,
+        )
+        _establish_preplan_reservation(
+            channel_id, episode_id, config, log, db_path=db_path,
+        )
+        record = _transition(admission_id, "admitted", db_path=db_path)
+        if log is not None:
+            try:
+                log.info(
+                    "runtime_admission_episode_readmitted", channel_id=channel_id,
+                    episode_id=episode_id, admission_id=admission_id,
+                    prior_status=existing.status, operating_grant_id=grant.grant_id,
+                )
+            except Exception:  # noqa: BLE001 -- logging must never break admission
+                pass
+        return record
+
     grant = _verify_operating_grant(
         channel_id, None, profile, now_iso, configured_limit,
         expect_grant_id=None, db_path=db_path,

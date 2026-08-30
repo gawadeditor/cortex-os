@@ -100,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         update_channel_operations_profile,
     )
     from hypogeum.channel_profile import update_channel_profile
-    from hypogeum.scheduler import create_schedule
+    from hypogeum.db import get_connection
+    from hypogeum.scheduler import create_schedule, set_schedule_status
 
     if get_channel_operations_profile(CHANNEL_ID, db_path=db) is None:
         print(f"ERROR: no ChannelOperationsProfile for {CHANNEL_ID!r} in {db}.", file=sys.stderr)
@@ -112,6 +113,24 @@ def main(argv: list[str] | None = None) -> int:
         deliverable_bundle_definitions=BUNDLES,
     )
     update_channel_profile({"yt_videos_per_week": 0, "yt_shorts_per_week": 7}, db_path=db)
+
+    # Idempotent: retire every existing channel-scoped schedule for this
+    # channel so we never end up with two daily schedules double-dispatching
+    # (max_runs_per_day is NOT enforced by scheduler.tick).
+    conn = get_connection(db)
+    try:
+        existing = conn.execute(
+            "SELECT schedule_id, label, status FROM schedules "
+            "WHERE scope = 'channel' AND channel_id = ?",
+            (CHANNEL_ID,),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in existing:
+        if row["status"] != "disabled":
+            set_schedule_status(row["schedule_id"], "disabled", db_path=db)
+            print(f"  retired prior schedule {row['schedule_id']} ({row['label']})")
+
     sched = create_schedule(
         scope="channel", channel_id=CHANNEL_ID, cadence="daily",
         next_run_at=schedule_at, max_runs_per_day=1,

@@ -699,6 +699,39 @@ def _load_post_vpd_finance_plan_hash(
     return bound_hash, None
 
 
+def _resolve_authorization_grant(channel_id: str, episode_id: Optional[str], *, at: str):
+    """Resolve the RunAuthorizationGrant that authorizes a paid MUAPI call
+    for (channel_id, episode_id) -- shared by every muapi provider-gate
+    resolution site.
+
+    Resolution order mirrors hypogeum.openrouter's own exactly (ADR-016):
+    an execution that hypogeum.runtime_admission has ADMITTED under a
+    Channel Operating Grant -- persisted state, read via
+    get_admission_binding(), never a caller flag -- MUST route through the
+    operating grant with NO paid legacy fallback. Otherwise fall back to a
+    per-episode 'run' grant.
+
+    Returns (grant, admitted_under_operating_grant):
+      grant not None                 -> route via the gate with this grant.
+      grant None,  admitted True     -> admitted but the operating grant no
+                                        longer resolves -> caller MUST fail
+                                        closed (no legacy path).
+      grant None,  admitted False    -> no authorization at all.
+    """
+    import hypogeum.authorization_authority as _authority
+
+    admitted = False
+    if episode_id:
+        try:
+            from hypogeum.runtime_admission import get_admission_binding  # noqa: PLC0415
+            admitted = get_admission_binding(channel_id, episode_id) is not None
+        except Exception:  # noqa: BLE001 -- admission table absent => not admitted
+            admitted = False
+    if admitted:
+        return _authority.resolve_active_operating_grant(channel_id, at=at), True
+    return _authority.resolve_active_grant(channel_id, episode_id or "unknown_episode", at=at), False
+
+
 def _submit_scene_via_gate(
     *, channel_id: str, grant, prompt: str, tier: int, reference_image_url: Optional[str],
     scene_id: str, short_id: Optional[str], aspect_ratio: str, requested_duration: float,
@@ -1373,18 +1406,26 @@ def submit_scene(
     # docstring and tests/test_muapi_gate_path.py for the full
     # before/after contract.
     if channel_id is not None:
-        import hypogeum.authorization_authority as _authority
-        grant = _authority.resolve_active_grant(channel_id, eid, at=datetime.now(timezone.utc).isoformat())
+        grant, _admitted = _resolve_authorization_grant(
+            channel_id, eid, at=datetime.now(timezone.utc).isoformat()
+        )
         if grant is None:
-            log.warn("muapi_gate_enforced_no_active_grant", scene_id=scene_id, channel_id=channel_id)
+            log.warn(
+                "muapi_gate_enforced_no_active_grant",
+                scene_id=scene_id, channel_id=channel_id, admitted_under_operating_grant=_admitted,
+            )
             return {
                 "scene_id": scene_id, "asset_id": None, "generation_status": "generation_failed",
                 "provider": "muapi", "tier_used": None, "model_used": None, "prompt_used": None,
                 "fallback_used": False,
                 "failure_reason": (
+                    "admitted_autonomous_execution_without_active_operating_grant: "
+                    f"channel_id={channel_id!r} is admitted but no Channel Operating Grant "
+                    "resolves -- fail closed, no legacy path"
+                    if _admitted else
                     f"no_active_authorization_grant: channel_id={channel_id!r} identifies an enforced "
                     "channel context with no legacy fallback available -- register a RunAuthorizationGrant "
-                    "before retrying"
+                    "(or a Channel Operating Grant) before retrying"
                 ),
             }
         manifest, failure_reason = _submit_scene_via_gate(
@@ -1747,8 +1788,14 @@ def generate_reference_image(
     # own identical branch for the full rationale. Skipped entirely
     # unless channel_id is supplied AND a real, verified grant resolves.
     if channel_id is not None:
-        import hypogeum.authorization_authority as _authority
-        grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+        grant, _admitted = _resolve_authorization_grant(
+            channel_id, episode_id, at=datetime.now(timezone.utc).isoformat()
+        )
+        if _admitted and grant is None:
+            raise MUAPIError(
+                f"Reference image for entity {entity_id!r}: channel {channel_id!r} is admitted "
+                "under a Channel Operating Grant but none resolves -- fail closed, no legacy path"
+            )
         if grant is not None:
             gate_result, gate_failure_reason = _generate_reference_image_via_gate(
                 channel_id=channel_id, grant=grant, entity_id=entity_id, prompt=visual_spec_text,
@@ -3499,8 +3546,14 @@ def _attempt_thumbnail_generation(
 
     def _generate_one(model: str) -> None:
         if channel_id is not None:
-            import hypogeum.authorization_authority as _authority
-            grant = _authority.resolve_active_grant(channel_id, episode_id, at=datetime.now(timezone.utc).isoformat())
+            grant, _admitted = _resolve_authorization_grant(
+                channel_id, episode_id, at=datetime.now(timezone.utc).isoformat()
+            )
+            if _admitted and grant is None:
+                raise MUAPIError(
+                    f"Thumbnail {deliverable_id!r}: channel {channel_id!r} is admitted under a "
+                    "Channel Operating Grant but none resolves -- fail closed, no legacy path"
+                )
             if grant is not None:
                 _generate_thumbnail_via_gate(
                     channel_id=channel_id, grant=grant, model=model, deliverable_id=deliverable_id,

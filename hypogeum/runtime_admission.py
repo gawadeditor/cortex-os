@@ -54,6 +54,7 @@ __all__ = [
     "OperatingGrantStalePolicyError",
     "LEASE_TTL_SECONDS",
     "admit_channel_execution",
+    "bind_episode_admission",
     "get_admission_binding",
     "get_admission_by_id",
     "mark_admission_plan_upgraded",
@@ -417,6 +418,111 @@ def admit_channel_execution(
     except Exception as exc:  # noqa: BLE001
         _release_channel_lease(channel_id, worker_id, fencing_token, now_iso, db_path=db_path)
         raise AdmissionError(f"admission_failed_unexpectedly: {exc}") from exc
+
+
+def bind_episode_admission(
+    channel_id: str,
+    episode_id: str,
+    *,
+    config,
+    worker_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+    log=None,
+    db_path: Optional[Path] = None,
+) -> AdmissionRecord:
+    """Per-episode admission for the daily-scheduler autonomous path.
+
+    Unlike admit_channel_execution() -- which is one WEEKLY admission that
+    itself claims a topic and enqueues -- this binds an episode the
+    scheduler ALREADY scheduled and enqueued to the channel's active
+    Channel Operating Grant, so every paid PRE_PLAN provider call routes
+    through the submission gate with NO paid legacy fallback (the
+    get_admission_binding() check hypogeum.muapi / openrouter / perplexity
+    / elevenlabs read from persisted state, never a caller flag).
+
+    Fails closed (an AdmissionError subclass, no side effects that outlive
+    the failure) on: missing / disabled channel profile, no cadence
+    configured, no active Channel Operating Grant, an Operating Grant
+    whose bound weekly ceiling no longer equals the operator-configured
+    limit (OperatingGrantStalePolicyError -- the operator changed the
+    money policy; re-sign required), or a PRE_PLAN reservation denial.
+
+    Idempotent: keyed admit:{channel_id}:{episode_id}. A replay re-verifies
+    the grant and returns the same row. The caller (the gated pipeline
+    executor) ends it with complete_admission() / fail_admission().
+
+    No fenced channel lease is taken here: per-channel concurrency is
+    already serialised upstream by the queue claim and
+    hypogeum.worker_integration.count_active_runs_for_channel(). The row's
+    lease_owner_id records worker_id for provenance; lease_fencing_token
+    is 0 (the subsequent complete_/fail_admission() lease release is a
+    harmless no-op against a lease that was never acquired).
+    """
+    from hypogeum import weekly_budget
+    from hypogeum.channel_config import get_channel_operations_profile
+    from hypogeum.channel_budget_policy import resolve_configured_weekly_limit
+
+    now = now or datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    profile = get_channel_operations_profile(channel_id, db_path=db_path)
+    if profile is None:
+        raise ChannelNotOperableError(f"no ChannelOperationsProfile for {channel_id!r}")
+    if not bool(getattr(profile, "operator_enabled", getattr(profile, "enabled", True))):
+        raise ChannelNotOperableError(f"channel {channel_id!r} is not operator-enabled")
+    if not (getattr(profile, "production_cadence", None) or {}):
+        raise ChannelNotOperableError(f"channel {channel_id!r} has no production_cadence configured")
+
+    conn0 = get_connection(db_path)
+    try:
+        _tz_name, configured_limit, budget_policy_ref = resolve_configured_weekly_limit(
+            channel_id, conn=conn0,
+        )
+    finally:
+        conn0.close()
+    window = weekly_budget.compute_weekly_window(now, _tz_name)
+    channel_week_ref = weekly_budget.week_scope_ref(channel_id, window)
+    admission_id = f"admit:{channel_id}:{episode_id}"
+
+    existing = get_admission_by_id(admission_id, db_path=db_path)
+    if existing is not None and existing.is_active:
+        # Replay: re-verify the grant still resolves and its bound weekly
+        # ceiling still matches the operator policy -- a stale-policy change
+        # since the row was written must not let the old admission keep
+        # authorising spend.
+        _verify_operating_grant(
+            channel_id, existing.workflow_version, profile, now_iso, configured_limit,
+            expect_grant_id=existing.operating_grant_id, db_path=db_path,
+        )
+        return existing
+
+    grant = _verify_operating_grant(
+        channel_id, None, profile, now_iso, configured_limit,
+        expect_grant_id=None, db_path=db_path,
+    )
+    preplan_key = _establish_preplan_reservation(
+        channel_id, episode_id, config, log, db_path=db_path,
+    )
+    record = _persist_admission(
+        admission_id=admission_id, channel_id=channel_id, episode_id=episode_id,
+        execution_id=episode_id, channel_week_ref=channel_week_ref,
+        operating_grant_id=grant.grant_id, operating_grant_version=grant.grant_version,
+        preplan_reservation_key=preplan_key, workflow_id=grant.workflow_id,
+        workflow_version=grant.workflow_version,
+        configured_weekly_limit_usd=configured_limit, budget_policy_ref=budget_policy_ref,
+        lease_owner_id=(worker_id or "gated-executor"), lease_fencing_token=0,
+        topic_id=None, now_iso=now_iso, db_path=db_path,
+    )
+    if log is not None:
+        try:
+            log.info(
+                "runtime_admission_episode_bound", channel_id=channel_id, episode_id=episode_id,
+                admission_id=admission_id, operating_grant_id=grant.grant_id,
+                configured_weekly_limit_usd=str(configured_limit),
+            )
+        except Exception:  # noqa: BLE001 -- logging must never break admission
+            pass
+    return record
 
 
 # ---------------------------------------------------------------------------

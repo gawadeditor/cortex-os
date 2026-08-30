@@ -772,14 +772,54 @@ def build_gated_pipeline_executor(
 
         save_worker_attempt(attempt, project_root=project_root)
 
+        # ADR-016: when the channel has an active Channel Operating Grant,
+        # bind this episode to it BEFORE run_pipeline() so every paid
+        # PRE_PLAN provider call routes through the submission gate (the
+        # hypogeum.runtime_admission.get_admission_binding() check that
+        # muapi / openrouter / perplexity / elevenlabs read from persisted
+        # state). When there is no operating grant, nothing is bound and
+        # the per-episode-grant / legacy authorisation path is unchanged --
+        # a manually-granted run is not affected.
+        _admission_id = None
         try:
-            run_pipeline(
+            import hypogeum.authorization_authority as _authority  # noqa: PLC0415
+
+            _now_iso = datetime.now(timezone.utc).isoformat()
+            if _authority.resolve_active_operating_grant(
+                channel_id, at=_now_iso, db_path=db_path
+            ) is not None:
+                from hypogeum.runtime_admission import bind_episode_admission  # noqa: PLC0415
+
+                _rec = bind_episode_admission(
+                    channel_id, episode_id, config=config, worker_id=worker_id,
+                    db_path=db_path,
+                )
+                _admission_id = _rec.admission_id
+        except Exception as exc:  # noqa: BLE001 -- AdmissionError (fail closed) or unexpected
+            _refuse(f"operating_grant_admission_denied: {exc}")
+            return
+
+        try:
+            result = run_pipeline(
                 topic_input=topic_input, episode_id=episode_id, config=config,
                 channel_id=channel_id, db_path=db_path, cancel_check=cancel_check,
                 publishing_platform_filter=frozenset(eligible_platforms),
                 youtube_privacy=resolved_privacy,
             )
             attempt.success = True
+            if _admission_id is not None and getattr(result, "status", None) == "completed":
+                from hypogeum.runtime_admission import complete_admission  # noqa: PLC0415
+
+                complete_admission(_admission_id, db_path=db_path)
+        except BaseException:
+            if _admission_id is not None:
+                from hypogeum.runtime_admission import fail_admission  # noqa: PLC0415
+
+                try:
+                    fail_admission(_admission_id, db_path=db_path)
+                except Exception:  # noqa: BLE001 -- never mask the real failure
+                    pass
+            raise
         finally:
             attempt.finished_at = datetime.now(timezone.utc).isoformat()
             progress_risk = compute_stage_schedule_risk(plan, episode_id, db_path=db_path)

@@ -53,3 +53,4 @@ graphify-out/cache/
 *.pem
 approval_ed25519_private_key.pem
 grant_spec_ep_af078f34.json
+operating_grant_spec_*.json

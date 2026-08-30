@@ -146,11 +146,16 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
                 generation_time_s=time.time() - t0,
             )
 
-        # POST_PLAN paid upscale is GATE-ONLY.
+        # POST_PLAN paid upscale is GATE-ONLY. Resolution mirrors every other
+        # muapi gate site (ADR-016): an episode ADMITTED under a Channel
+        # Operating Grant routes through that grant; otherwise a per-episode
+        # 'run' grant. Without this, an autonomous (operating-grant) episode's
+        # 720p source clips can never be upscaled to the 1080p the production
+        # output gate requires -> the short renders but is never released.
         grant = None
         if channel_id is not None:
-            import hypogeum.authorization_authority as _authority
-            grant = _authority.resolve_active_grant(
+            from hypogeum.muapi import _resolve_authorization_grant  # noqa: PLC0415
+            grant, _admitted = _resolve_authorization_grant(
                 channel_id, episode_id, at=datetime.now(timezone.utc).isoformat(),
             )
         if grant is None:

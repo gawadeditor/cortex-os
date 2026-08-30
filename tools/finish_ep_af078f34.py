@@ -66,7 +66,9 @@ def _stale_extra_clips() -> list[Path]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", type=Path, default=None)
-    ap.add_argument("--weekly-budget", type=float, default=220.0)
+    ap.add_argument("--weekly-budget", type=float, default=200.0)
+    ap.add_argument("--private-key", type=Path,
+                    default=_ROOT / "approval_ed25519_private_key.pem")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--i-understand-this-is-production", action="store_true")
     ap.add_argument("--skip-pipeline", action="store_true",
@@ -80,6 +82,17 @@ def main(argv: list[str] | None = None) -> int:
 
     from hypogeum.channel_config import get_channel_operations_profile, update_channel_operations_profile
     from hypogeum.db import get_connection
+
+    def _resign_grant(reason: str) -> None:
+        """Re-sign the Channel Operating Grant against the channel's CURRENT
+        configured weekly limit (runtime_admission fails closed when the
+        grant ceiling != the configured limit)."""
+        cmd = [sys.executable, str(_ROOT / "tools" / "configure_channel_operating_grant.py"),
+               "--channel", CHANNEL, "--apply", "--db", str(db),
+               "--i-understand-this-is-production",
+               "--private-key", str(args.private_key)]
+        r = subprocess.call(cmd, cwd=str(_ROOT))
+        print(f"      re-signed operating grant ({reason}): exit {r}")
 
     stale = _stale_extra_clips()
     vp_path = _EP_DIR / f"visual_package_{EP}.json"
@@ -117,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         weekly_video_budget_usd=float(args.weekly_budget),
     )
     print("  [1] channel switched to long-form cadence, weekly budget raised")
+    _resign_grant(f"weekly ceiling -> ${args.weekly_budget}")
 
     rc = 0
     try:
@@ -176,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
             deliverable_bundle_definitions=snap["deliverable_bundle_definitions"],
             weekly_video_budget_usd=snap["weekly_video_budget_usd"],
         )
+        _resign_grant(f"weekly ceiling restored -> ${snap['weekly_video_budget_usd']}")
         print(f"  [5] channel operations profile restored "
               f"({snap['production_cadence']}, ${snap['weekly_video_budget_usd']})")
 

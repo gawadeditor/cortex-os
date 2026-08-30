@@ -54,3 +54,7 @@ graphify-out/cache/
 approval_ed25519_private_key.pem
 grant_spec_ep_af078f34.json
 operating_grant_spec_*.json
+
+# Local environment backups / scratch PR bodies — never commit
+.env.bak.*
+PR_BODY.md

@@ -101,9 +101,41 @@
       Source: {{ qa.video_file or "no video" }}{% if qa.video_size_mb %} ({{ qa.video_size_mb }}MB){% endif %}
       &ensp;|&ensp;
       {{ qa.total_duration_min }}min &ensp;|&ensp;
-      {{ qa.clip_count_present }}/{{ qa.scene_count_expected }} clips
+      {{ qa.clip_count_present }}/{{ qa.scene_count_expected }} scene clips{% if qa.extra_clip_count %} (+{{ qa.extra_clip_count }} extra){% endif %}
     </div>
   </div>
+</div>
+
+{# ── Pipeline result — the artifacts the pipeline actually writes ────────── #}
+<div class="qa-card" style="margin:14px 0;">
+  <h3>Pipeline result</h3>
+  <ul class="check-list">
+    <li class="check-item">
+      <span class="check-icon {% if qa.qa_verdict and qa.qa_verdict|upper in ['APPROVED','PASS'] %}check-pass{% elif qa.qa_verdict|upper == 'REJECTED' %}check-fail{% else %}check-warn{% endif %}">•</span>
+      <div><strong>QA Agent verdict:</strong> {{ qa.qa_verdict or "not run" }}</div>
+    </li>
+    <li class="check-item">
+      <span class="check-icon {% if qa.render_ready %}check-pass{% else %}check-fail{% endif %}">•</span>
+      <div><strong>Render viable:</strong> {{ "yes" if qa.render_ready else "no — assembly did not produce a viable package" }}</div>
+    </li>
+    <li class="check-item">
+      <span class="check-icon {% if qa.coverage.insufficient_beats == 0 %}check-pass{% elif qa.coverage.insufficient_beats <= 2 %}check-warn{% else %}check-fail{% endif %}">•</span>
+      <div><strong>Visual coverage:</strong>
+        {% if qa.coverage.insufficient_beats %}{{ qa.coverage.insufficient_beats }} beat(s) short{% else %}sufficient{% endif %}
+        &ensp;({{ qa.coverage.video_s }}s video vs {{ qa.coverage.narration_s }}s narration{% if qa.coverage.ratio_pct %}, {{ qa.coverage.ratio_pct }}%{% endif %})
+      </div>
+    </li>
+    <li class="check-item">
+      <span class="check-icon {% if qa.music_sourced %}check-pass{% else %}check-fail{% endif %}">•</span>
+      <div><strong>Background music:</strong> {{ "sourced" if qa.music_sourced else "not sourced — render would be silent" }}</div>
+    </li>
+  </ul>
+  {% if qa.qa_failures %}
+  <div style="margin-top:8px;">
+    <strong style="color:#b23;">QA failures:</strong>
+    <ul style="margin:4px 0 0 18px;">{% for f in qa.qa_failures %}<li>{{ f }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
 </div>
 
 {# ── Check list + Metric tiles ──────────────────────────────────────────── #}

@@ -124,6 +124,10 @@ def _channels(db: Path, now: datetime) -> list:
             "queue": rt.get("queue", {}),
             "latest_run": (rt.get("latest_run") or {}).get("status") if rt.get("latest_run") else None,
             "next_scheduled_slot": rt.get("schedule", {}).get("next_run_at"),
+            "last_run_bucket": ((rt.get("health") or {}).get("latest") or {}).get("bucket"),
+            "consecutive_failures": (rt.get("health") or {}).get("consecutive_failures", 0),
+            "operating_grant_active": (rt.get("operating_grant") or {}).get("active"),
+            "operating_grant_days_left": (rt.get("operating_grant") or {}).get("days_left"),
         })
     return rows
 
@@ -138,10 +142,17 @@ def _aggregate(channels: list) -> dict:
         if wb.get("configured"):
             reserved += float(wb.get("reserved_committed_usd") or 0.0)
             ceiling += float(wb.get("ceiling_usd") or 0.0)
+    failed_last = sum(
+        1 for c in channels
+        if c.get("last_run_bucket") and c["last_run_bucket"] not in ("ok", "in_progress", "operator_stopped")
+    )
+    no_grant = sum(1 for c in channels if c.get("operating_grant_active") is False)
     return {
         "channels_total": total,
         "channels_autonomous_ready": ready,
         "channels_blocked": total - ready,
+        "channels_with_failed_last_run": failed_last,
+        "channels_without_operating_grant": no_grant,
         "weekly_reserved_committed_usd": round(reserved, 2),
         "weekly_ceiling_usd": round(ceiling, 2),
         "weekly_pct_used": (round(reserved / ceiling * 100, 1) if ceiling > 0 else None),

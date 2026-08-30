@@ -310,3 +310,83 @@ class TestQueueAndRun:
         assert snap["latest_run"] is not None
         assert snap["latest_run"]["run_id"] == "run_x"
         assert snap["latest_run"]["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Real run-health + operating-grant blockers (not just static config)
+# ---------------------------------------------------------------------------
+
+def _add_run(db: Path, run_id: str, status: str, error: str | None = None, started: str | None = None) -> None:
+    from hypogeum.db import get_connection
+    conn = get_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO runs (run_id, episode_id, started_at, completed_at, status, channel_id, error_message) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (run_id, f"ep_{run_id}", started or _now(), _now(), status, CHANNEL_ID, error),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestRunHealthBlockers:
+    def test_last_run_failed_is_a_blocker(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        _add_run(db, "r1", "failed",
+                 "Episode blocked by QA Agent (verdict=REJECTED). Failures: [...]",
+                 started="2026-08-01T00:00:00+00:00")
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert snap["health"]["latest"]["bucket"] == "qa_rejected"
+        assert any("last run failed: qa_rejected" in b for b in snap["blockers"])
+        assert snap["autonomous_ready"] is False
+
+    def test_three_consecutive_failures_escalates(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        for i in range(3):
+            _add_run(db, f"rf{i}", "failed", "finance gate BLOCKED",
+                     started=f"2026-08-0{i+1}T00:00:00+00:00")
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert snap["health"]["consecutive_failures"] == 3
+        assert any("consecutive failed runs" in b for b in snap["blockers"])
+
+    def test_operator_stopped_last_run_is_not_a_blocker(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        _add_run(db, "rs", "failed", "run stopped by operator — muapi generation was in progress",
+                 started="2026-08-01T00:00:00+00:00")
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert not any("last run failed" in b for b in snap["blockers"])
+
+    def test_completed_last_run_clears_health(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        _add_run(db, "rf", "failed", "boom", started="2026-08-01T00:00:00+00:00")
+        _add_run(db, "rok", "completed", None, started="2026-08-02T00:00:00+00:00")
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert snap["health"]["consecutive_failures"] == 0
+        assert not any("last run failed" in b for b in snap["blockers"])
+
+
+class TestOperatingGrantBlocker:
+    def test_operator_enabled_without_grant_is_a_blocker(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert snap["operating_grant"]["active"] is False
+        assert any("no active Channel Operating Grant" in b for b in snap["blockers"])
+
+    def test_grant_section_present_and_typed(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        og = snap["operating_grant"]
+        for k in ("active", "grant_id", "expires_at", "weekly_exposure_ceiling_usd"):
+            assert k in og

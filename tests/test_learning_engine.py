@@ -450,3 +450,99 @@ class TestFeedbackLoopIntegrity:
         # dismissed should not appear (only pending and applied)
         for rec in recs.values():
             assert rec["status"] != "dismissed"
+
+
+# ===========================================================================
+# content_volume — the one dimension that maps to a real channel change
+# ===========================================================================
+
+import json as _json
+from hypogeum.db import get_connection as _gc
+from hypogeum.channel_config import (
+    create_channel_profile, create_channel_operations_profile,
+    get_channel_operations_profile,
+)
+from hypogeum.learning_engine import generate_cadence_recommendation, get_channel_recommendations
+
+
+_CV_CH = "cv_channel"
+
+
+def _cv_channel(db_path, cadence):
+    create_channel_profile(channel_id=_CV_CH, name="CV", db_path=db_path)
+    create_channel_operations_profile(
+        channel_id=_CV_CH, channel_name="CV", timezone="UTC", operator_enabled=True,
+        production_cadence=cadence, weekly_video_budget_usd=80.0, db_path=db_path,
+    )
+
+
+def _cv_episode_with_api_retention(db_path, ep, pct):
+    conn = _gc(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO runs (run_id, episode_id, started_at, status, channel_id) VALUES (?,?,?,?,?)",
+            (f"r_{ep}", ep, "2026-08-01T00:00:00Z", "completed", _CV_CH),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    from hypogeum.analytics_store import store_platform_metrics
+    store_platform_metrics(ep, "youtube", {"avg_view_pct": pct, "views": 1000},
+                           source="api", db_path=db_path)
+
+
+class TestContentVolumeRecommendation:
+    def test_needs_three_api_episodes(self, db_path):
+        _cv_channel(db_path, {"shorts_per_week": 5})
+        _cv_episode_with_api_retention(db_path, "cv_ep1", 62)
+        _cv_episode_with_api_retention(db_path, "cv_ep2", 60)
+        assert generate_cadence_recommendation(_CV_CH, db_path=db_path) is None
+        _cv_episode_with_api_retention(db_path, "cv_ep3", 61)
+        rec = generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        assert rec is not None and rec["dimension"] == "content_volume"
+        assert rec["action_type"] == "increase"
+
+    def test_low_retention_recommends_decrease(self, db_path):
+        _cv_channel(db_path, {"shorts_per_week": 7})
+        for i, p in enumerate((22, 18, 25)):
+            _cv_episode_with_api_retention(db_path, f"cv_lo{i}", p)
+        rec = generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        assert rec["action_type"] == "decrease"
+
+    def test_apply_increase_changes_cadence(self, db_path):
+        _cv_channel(db_path, {"shorts_per_week": 5})
+        for i, p in enumerate((62, 60, 61)):
+            _cv_episode_with_api_retention(db_path, f"cv_hi{i}", p)
+        rec = generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        res = apply_action(rec["action_id"], db_path=db_path)
+        assert res["ok"] is True
+        assert res["cadence_before"] == 5 and res["cadence_after"] == 6
+        prof = get_channel_operations_profile(_CV_CH, db_path=db_path)
+        assert prof.production_cadence["shorts_per_week"] == 6
+
+    def test_apply_at_max_bound_is_rejected(self, db_path):
+        _cv_channel(db_path, {"shorts_per_week": 10})
+        aid = store_action({
+            "dimension": "content_volume", "action_type": "increase",
+            "rationale": "grow", "status": "pending",
+            "evidence_json": _json.dumps({"channel_id": _CV_CH}),
+        }, db_path=db_path)
+        res = apply_action(aid, db_path=db_path)
+        assert res["ok"] is False and res.get("code") == "at_bound"
+        prof = get_channel_operations_profile(_CV_CH, db_path=db_path)
+        assert prof.production_cadence["shorts_per_week"] == 10  # unchanged
+
+    def test_other_dimensions_stay_advisory(self, db_path):
+        aid = store_action({"source_episode": "ep9", "dimension": "hook",
+                            "action_type": "change", "rationale": "advisory"}, db_path=db_path)
+        res = apply_action(aid, db_path=db_path)
+        assert res["ok"] is True and "cadence_after" not in res
+
+    def test_channel_scoped_recommendations(self, db_path):
+        _cv_channel(db_path, {"shorts_per_week": 5})
+        for i, p in enumerate((62, 60, 61)):
+            _cv_episode_with_api_retention(db_path, f"cv_s{i}", p)
+        generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        recs = get_channel_recommendations(_CV_CH, db_path=db_path)
+        assert "content_volume" in recs
+        assert get_channel_recommendations("some_other_channel", db_path=db_path) == {}

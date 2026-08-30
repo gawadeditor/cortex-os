@@ -122,9 +122,19 @@
       {% if rt.latest_run %}
       <div>
         <div style="color:var(--muted);">Latest run</div>
-        <div style="font-weight:600;">{{ rt.latest_run.status }} <span style="color:var(--muted);">{{ rt.latest_run.episode_id }}</span></div>
+        <div style="font-weight:600;">
+          {{ rt.latest_run.status }}
+          {% set hb = (rt.health or {}).get('latest') or {} %}
+          {% if hb.bucket and hb.bucket not in ['ok','in_progress'] %}<span style="color:#d29922;">· {{ hb.bucket }}</span>{% endif %}
+        </div>
       </div>
       {% endif %}
+      <div>
+        <div style="color:var(--muted);">Operating grant</div>
+        <div style="font-weight:600; color:{{ '#3fb950' if (rt.operating_grant or {}).get('active') else '#d29922' }};">
+          {% if (rt.operating_grant or {}).get('active') %}active ({{ rt.operating_grant.days_left }}d){% else %}none{% endif %}
+        </div>
+      </div>
     </div>
     {% if rt.blockers %}
     <div style="margin-top:8px; font-size:11px; color:var(--muted);">

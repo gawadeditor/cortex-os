@@ -313,10 +313,12 @@ def _run_learning_cycle(db_path: Path) -> dict:
     the sweep continues. Both learning-engine calls are INSERT-OR-IGNORE
     idempotent, so re-running every analytics-sync cycle is safe and cheap.
     """
-    summary = {"episodes": 0, "insights": 0, "actions": 0}
+    summary = {"episodes": 0, "insights": 0, "actions": 0, "cadence_recs": 0}
     try:
         from hypogeum.analytics_store import list_analytics
-        from hypogeum.learning_engine import extract_insights, generate_actions
+        from hypogeum.learning_engine import (
+            extract_insights, generate_actions, generate_cadence_recommendation,
+        )
 
         records = list_analytics(db_path=db_path, limit=500)
         # F8 data-integrity contract: only real API analytics drive learning.
@@ -333,10 +335,23 @@ def _run_learning_cycle(db_path: Path) -> dict:
                 summary["actions"] += len(acts or [])
             except Exception as exc:
                 log.error("learning_cycle_episode_error episode=%s error=%s", ep, exc)
-        if summary["episodes"]:
+
+        # Per-channel content_volume (weekly-cadence) recommendation.
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if not cid:
+                    continue
+                if generate_cadence_recommendation(cid, db_path=db_path) is not None:
+                    summary["cadence_recs"] += 1
+        except Exception as exc:
+            log.error("learning_cycle_cadence_error error=%s", exc)
+
+        if summary["episodes"] or summary["cadence_recs"]:
             log.info(
-                "learning_cycle_complete episodes=%d insights=%d pending_actions=%d",
-                summary["episodes"], summary["insights"], summary["actions"],
+                "learning_cycle_complete episodes=%d insights=%d pending_actions=%d cadence_recs=%d",
+                summary["episodes"], summary["insights"], summary["actions"], summary["cadence_recs"],
             )
     except Exception as exc:
         log.error("learning_cycle_error error=%s", exc)

@@ -4394,25 +4394,53 @@ def _compute_episode_qa(episode_id: str) -> dict | None:
         sid = f"s{i+1:02d}"
         beat_dur[sid] = s["duration_seconds"]
 
-    # ── Present scene clips ────────────────────────────────────────────────
+    # ── Present scene clips (video/ AND video/sh_short_*/) ─────────────────
     clips_dir = ep_dir / "video"
-    clip_files: dict[str, float] = {}
+    clip_files: dict[str, float] = {}       # scene_id -> primary clip duration
+    extra_clip_count = 0
     if clips_dir.exists():
-        for c in sorted(clips_dir.glob("sc_*.mp4")):
+        _globs = list(clips_dir.glob("sc_*.mp4")) + list(clips_dir.glob("sh_short_*/sc_*.mp4"))
+        for c in sorted(_globs):
+            stem = c.stem.replace("sc_", "")
+            if _re.search(r"__extra\d+$", stem) or stem.endswith(".enhanced"):
+                extra_clip_count += 1
+                continue
             dur = _ffprobe_dur(c)
-            sid = c.stem.replace("sc_", "")
             if dur is not None:
-                clip_files[sid] = dur
+                clip_files[stem] = dur
 
     clip_count_present  = len(clip_files)
     missing_scene_ids   = [sid for sid in scene_ids if sid not in clip_files]
 
-    # ── Render manifest ────────────────────────────────────────────────────
-    mani = _jp("render_output_manifest")
-    manifest_missing  = mani.get("missing_clips", [])
-    max_hold_manifest = mani.get("max_scene_hold_seconds", 0)
-    render_status     = mani.get("render_status", "unknown")
-    clip_avail_rate   = mani.get("clip_availability_rate", 0)
+    # ── Pipeline artifacts (the REAL ones the pipeline writes) ─────────────
+    frp = _jp("final_render_package")
+    _pi = frp.get("package_integrity", {}) or {}
+    render_ready = bool(_pi.get("production_ready"))
+    render_status = (
+        frp.get("render_status")
+        or (frp.get("episode_render", {}) or {}).get("render_status")
+        or "unknown"
+    )
+    music_log = frp.get("music_log") or []
+    music_sourced = any(
+        isinstance(m, dict) and (m.get("source") or m.get("asset_id")) for m in music_log
+    )
+    _cov = frp.get("coverage_check_summary") or {}
+    _acr = frp.get("additional_coverage_required") or {}
+    insufficient_beats = (
+        _acr.get("insufficient_beats")
+        or len(_acr.get("requests", []) or [])
+        or len(_cov.get("insufficient_beats", []) or [])
+        or 0
+    )
+    clip_avail_rate = _cov.get("clip_availability_rate", 0) or 0
+    manifest_missing = _acr.get("requests", []) or []
+    max_hold_manifest = _cov.get("max_scene_hold_seconds", 0) or 0
+
+    # QA verdict — qa_approval_report is the sealed one; qa_report is the raw pass.
+    _qa = _jp("qa_approval_report") or _jp("qa_report")
+    qa_verdict = _qa.get("verdict") or _qa.get("overall_status")
+    qa_failures = list(_qa.get("failures", []) or [])
 
     # ── Per-scene hold/loop (beats covered by video file) ─────────────────
     # Figure out how many beats fit in the video's audio duration
@@ -4533,12 +4561,42 @@ def _compute_episode_qa(episode_id: str) -> dict | None:
            ok=av_delta is not None and av_delta < 1.0, warn=False,
            detail=f"delta={av_delta}s" if av_delta is not None else "could not measure")
     _check("Render status complete",
-           ok=render_status == "complete", warn=render_status == "partial",
+           ok=render_status in ("complete", "completed"), warn=render_status == "partial",
            detail=f"render_status={render_status}, availability={clip_avail_rate*100:.0f}%")
+    _check("Pipeline render_package viable",
+           ok=render_ready, warn=False,
+           detail="production_ready=True" if render_ready
+                  else "production_ready=False — assembly did not produce a viable package")
+    _check("Coverage sufficient",
+           ok=insufficient_beats == 0, warn=0 < insufficient_beats <= 2,
+           detail=(f"{insufficient_beats} beat(s) short of visual coverage"
+                   if insufficient_beats else
+                   f"narration {total_narration:.0f}s vs video "
+                   f"{round(total_unique_clip_s):.0f}s covered"))
+    _check("Background music sourced",
+           ok=music_sourced, warn=False,
+           detail=f"{len(music_log)} music_log entr(y/ies)" if music_sourced
+                  else "music_log empty — render would be silent")
+    if qa_verdict:
+        _check("QA Agent verdict",
+               ok=str(qa_verdict).upper() in ("APPROVED", "PASS"),
+               warn=str(qa_verdict).upper() in ("WARN", "WARNING"),
+               detail=f"verdict={qa_verdict}"
+                      + (f" — {qa_failures[0]}" if qa_failures else ""))
 
     fails = sum(1 for c in checks if c["status"] == "fail")
     warns = sum(1 for c in checks if c["status"] == "warn")
-    verdict = "PASS" if fails == 0 and warns == 0 else ("WARN" if fails == 0 else "FAIL")
+    # The QA Agent's own sealed verdict wins when present.
+    if qa_verdict and str(qa_verdict).upper() == "REJECTED":
+        verdict = "FAIL"
+    elif qa_verdict and str(qa_verdict).upper() == "APPROVED" and fails == 0:
+        verdict = "PASS" if warns == 0 else "WARN"
+    else:
+        verdict = "PASS" if fails == 0 and warns == 0 else ("WARN" if fails == 0 else "FAIL")
+
+    narration_video_ratio_pct = (
+        round(total_unique_clip_s / total_narration * 100, 1) if total_narration else None
+    )
 
     return {
         "episode_id":           episode_id,
@@ -4574,6 +4632,17 @@ def _compute_episode_qa(episode_id: str) -> dict | None:
         "verdict":              verdict,
         "fail_count":           fails,
         "warn_count":           warns,
+        "extra_clip_count":     extra_clip_count,
+        "render_ready":         render_ready,
+        "qa_verdict":           qa_verdict,
+        "qa_failures":          qa_failures,
+        "music_sourced":        music_sourced,
+        "coverage": {
+            "narration_s":        round(total_narration, 1),
+            "video_s":            round(total_unique_clip_s, 1),
+            "ratio_pct":          narration_video_ratio_pct,
+            "insufficient_beats": insufficient_beats,
+        },
     }
 
 
@@ -5921,8 +5990,20 @@ def channel_detail(channel_id):
     brand     = get_brand_detail(channel["brand_profile_id"], db_path=db)     if channel.get("brand_profile_id")      else None
     model     = get_model_detail(channel["model_profile_id"], db_path=db)     if channel.get("model_profile_id")      else None
     publishing = get_publishing_detail(channel["publishing_profile_id"], db_path=db) if channel.get("publishing_profile_id") else None
+    runtime = recommendations = None
+    try:
+        from hypogeum.channel_runtime_status import get_channel_runtime_status
+        runtime = get_channel_runtime_status(channel_id, db_path=db)
+    except Exception:
+        runtime = None
+    try:
+        from hypogeum.learning_engine import get_channel_recommendations
+        recommendations = get_channel_recommendations(channel_id, db_path=db)
+    except Exception:
+        recommendations = {}
     return render_template("channel_detail.html",
-                           channel=channel, brand=brand, model=model, publishing=publishing)
+                           channel=channel, brand=brand, model=model, publishing=publishing,
+                           runtime=runtime, recommendations=recommendations)
 
 
 @app.route("/channel/<channel_id>/edit", methods=["GET", "POST"])

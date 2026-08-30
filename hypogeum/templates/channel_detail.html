@@ -52,6 +52,61 @@
   <a href="/" class="btn" style="margin-left:auto;">← Dashboard</a>
 </div>
 
+{# ── Autonomous health (real state, not just config) ── #}
+{% if runtime %}
+<div class="card">
+  <div class="card-title">
+    Autonomous status —
+    <span class="badge badge-{{ 'active' if runtime.autonomous_ready else 'unknown' }}">
+      {{ 'ready' if runtime.autonomous_ready else 'blocked' }}
+    </span>
+  </div>
+  {% if runtime.blockers %}
+  <ul style="margin:6px 0 10px 18px; color:#b23;">
+    {% for b in runtime.blockers %}<li>{{ b }}</li>{% endfor %}
+  </ul>
+  {% else %}
+  <div class="field-row"><span class="field-val muted">nothing is blocking an autonomous run</span></div>
+  {% endif %}
+  {% set og = runtime.operating_grant or {} %}
+  <div class="field-row"><span class="field-label">Operating grant</span>
+    <span class="field-val {% if not og.active %}muted{% endif %}">
+      {% if og.active %}active — expires in {{ og.days_left }}d{% if og.ceiling_matches_config == false %} · ceiling MISMATCH (re-sign){% endif %}
+      {% else %}none — run tools/configure_channel_operating_grant.py{% endif %}
+    </span>
+  </div>
+  {% set h = runtime.health or {} %}
+  {% if h.latest %}
+  <div class="field-row"><span class="field-label">Last run</span>
+    <span class="field-val">{{ h.latest.status }}{% if h.latest.bucket and h.latest.bucket != 'ok' %} · {{ h.latest.bucket }}{% endif %}
+      {% if h.consecutive_failures > 1 %} · {{ h.consecutive_failures }} consecutive failures{% endif %}</span>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ── Learning recommendations for this channel ── #}
+{% if recommendations %}
+<div class="card">
+  <div class="card-title">Learning recommendations</div>
+  {% for dim, r in recommendations.items() %}
+  <div class="field-row">
+    <span class="field-label">{{ dim }}</span>
+    <span class="field-val">
+      <strong>{{ r.action_type }}</strong> — {{ r.rationale }}
+      <span class="muted">(confidence {{ r.confidence }}, {{ r.status }})</span>
+      {% if r.status == 'pending' %}
+      <button class="btn" style="margin-left:8px;"
+              onclick="fetch('/api/learning/action/{{ r.action_id }}/apply',{method:'POST'}).then(()=>location.reload())">
+        {% if dim == 'content_volume' %}Approve cadence change{% else %}Acknowledge{% endif %}
+      </button>
+      {% endif %}
+    </span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 {# ── Channel profile ── #}
 <div class="card">
   <div class="card-title">Channel Profile</div>

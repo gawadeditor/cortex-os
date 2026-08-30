@@ -344,6 +344,10 @@ _ACTION_TEMPLATES: dict[str, dict[str, tuple[str, str]]] = {
         "negative": ("decrease", "Consider shorter format — retention signals suggest viewers leaving before content ends"),
         "positive": ("prefer",   "Current duration well matched to audience — maintain episode length"),
     },
+    "content_volume": {
+        "negative": ("decrease", "Reduce this channel's weekly cadence — audience retention is trending below the level that sustains more output"),
+        "positive": ("increase", "Raise this channel's weekly cadence — retention is strong enough to support more output"),
+    },
     "publishing_time": {
         "negative": ("test",  "Test different publishing schedule — current timing may not maximise initial velocity"),
         "positive": ("prefer","Current publishing time driving good early traction"),
@@ -481,16 +485,153 @@ def generate_actions(
     return list_actions(status="pending", db_path=db_path)
 
 
+# ---------------------------------------------------------------------------
+# content_volume — the ONE learning dimension that maps to a concrete,
+# executable channel change (production_cadence). All other dimensions
+# stay advisory (apply_action just records the operator's acknowledgement).
+# ---------------------------------------------------------------------------
+
+_CADENCE_MIN = 1
+_CADENCE_MAX = 10
+_RETENTION_GROW_ABOVE = 0.55
+_RETENTION_SHRINK_BELOW = 0.35
+_CADENCE_MIN_EPISODES = 3
+
+
+def _channel_episode_ids(channel_id: str, db_path: Optional[Path]) -> list[str]:
+    from hypogeum.db import get_connection
+    conn = get_connection(db_path or _DEFAULT_DB)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT episode_id FROM runs WHERE channel_id = ? AND episode_id IS NOT NULL "
+            "UNION SELECT DISTINCT episode_id FROM episode_topics "
+            "WHERE channel_id = ? AND episode_id IS NOT NULL",
+            (channel_id, channel_id),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def _dominant_cadence_field(cadence: dict) -> Optional[str]:
+    """The production_cadence key the recommendation nudges: the largest
+    positive per-week count (shorts_per_week vs videos_per_week)."""
+    best, best_val = None, 0
+    for k in ("shorts_per_week", "videos_per_week"):
+        v = int(cadence.get(k) or 0)
+        if v > best_val:
+            best, best_val = k, v
+    return best
+
+
+def generate_cadence_recommendation(
+    channel_id: str,
+    db_path:    Optional[Path] = None,
+) -> Optional[dict]:
+    """Emit at most one pending `content_volume` learning_action for a
+    channel, from the trend of its real (source='api') audience retention.
+    Requires >= 3 episodes with API analytics; otherwise returns None and
+    stores nothing. Skips if a pending content_volume action already exists
+    for this channel."""
+    for a in list_actions(status="pending", db_path=db_path):
+        if a["dimension"] == "content_volume" and (a.get("evidence") or {}).get("channel_id") == channel_id:
+            return a
+
+    retentions: list[float] = []
+    latest_ep = None
+    for ep in _channel_episode_ids(channel_id, db_path):
+        rec = get_episode_analytics(ep, db_path=db_path)
+        for _plat, d in rec.items():
+            if (d.get("source") or "").lower() != "api":
+                continue
+            avp = d.get("avg_view_pct")
+            if avp is not None:
+                avp = float(avp)
+                # avg_view_pct is stored on a 0-100 scale; normalise to 0-1.
+                retentions.append(avp / 100.0 if avp > 1.5 else avp)
+                latest_ep = ep
+    if len(retentions) < _CADENCE_MIN_EPISODES:
+        return None
+
+    avg = sum(retentions) / len(retentions)
+    if avg >= _RETENTION_GROW_ABOVE:
+        key, strength = "positive", round(min(1.0, (avg - _RETENTION_GROW_ABOVE) / 0.4), 3)
+    elif avg <= _RETENTION_SHRINK_BELOW:
+        key, strength = "negative", round(-min(1.0, (_RETENTION_SHRINK_BELOW - avg) / 0.35), 3)
+    else:
+        return None
+
+    action_type, base = _ACTION_TEMPLATES["content_volume"][key]
+    store_action({
+        "source_episode": latest_ep,
+        "dimension":      "content_volume",
+        "action_type":    action_type,
+        "rationale":      f"{base}. Mean API retention {avg:.0%} over {len(retentions)} snapshot(s)",
+        "evidence_json":  _json.dumps({
+            "channel_id": channel_id,
+            "avg_view_pct": round(avg, 4),
+            "n_snapshots": len(retentions),
+        }),
+        "status":     "pending",
+        "created_at": _now_iso(),
+    }, db_path=db_path)
+    return list_actions(status="pending", db_path=db_path)[-1] if list_actions(status="pending", db_path=db_path) else None
+
+
 def apply_action(
     action_id: str,
     db_path:   Optional[Path] = None,
 ) -> dict:
-    """Mark a learning_action as applied. Returns Result."""
+    """Acknowledge a learning_action.
+
+    For `content_volume` this EXECUTES: it nudges the channel's
+    production_cadence by +/-1 (bounded [1, 10]) on its dominant per-week
+    field, via channel_config.update_channel_operations_profile. Every
+    other dimension is advisory -- apply just records the acknowledgement.
+    """
     action = get_action(action_id, db_path=db_path)
     if action is None:
         return _err(f"action {action_id!r} not found", "not_found")
     if action["status"] != "pending":
         return _err(f"action is {action['status']!r}, not pending", "invalid_status")
+
+    if action["dimension"] == "content_volume":
+        ev = action.get("evidence") or {}
+        channel_id = ev.get("channel_id")
+        if not channel_id:
+            return _err("content_volume action carries no channel_id", "invalid_evidence")
+        try:
+            from hypogeum.channel_config import (
+                get_channel_operations_profile, update_channel_operations_profile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(f"channel_config unavailable: {exc}")
+        prof = get_channel_operations_profile(channel_id, db_path=db_path)
+        if prof is None:
+            return _err(f"no ChannelOperationsProfile for {channel_id!r}", "not_found")
+        cadence = dict(getattr(prof, "production_cadence", None) or {})
+        field = _dominant_cadence_field(cadence)
+        if field is None:
+            return _err(f"channel {channel_id!r} has no positive per-week cadence to adjust", "no_cadence")
+        delta = 1 if action["action_type"] == "increase" else -1
+        before = int(cadence.get(field) or 0)
+        after = max(_CADENCE_MIN, min(_CADENCE_MAX, before + delta))
+        if after == before:
+            return _err(
+                f"{field} is already at the {'max' if delta > 0 else 'min'} bound ({before}) — not changed",
+                "at_bound",
+            )
+        cadence[field] = after
+        ok = update_channel_operations_profile(channel_id, production_cadence=cadence, db_path=db_path)
+        if not ok:
+            return _err("update_channel_operations_profile failed")
+        if not update_action_status(action_id, "applied", db_path=db_path):
+            return _err("action status update failed after cadence change")
+        return _ok(
+            action_id=action_id, status="applied", channel_id=channel_id,
+            cadence_field=field, cadence_before=before, cadence_after=after,
+        )
+
     ok = update_action_status(action_id, "applied", db_path=db_path)
     if not ok:
         return _err("update failed")
@@ -513,21 +654,47 @@ def dismiss_action(
     return _ok(action_id=action_id, status="dismissed")
 
 
-def get_recommendations(db_path: Optional[Path] = None) -> dict:
+def _action_channel(action: dict, db_path: Optional[Path]) -> Optional[str]:
+    """Best-effort channel attribution for a learning_action: explicit in
+    the evidence (content_volume), else via the source episode's channel."""
+    ev = action.get("evidence") or {}
+    if ev.get("channel_id"):
+        return ev["channel_id"]
+    ep = action.get("source_episode") or ev.get("source_episode")
+    if isinstance(ep, list):
+        ep = ep[0] if ep else None
+    if not ep:
+        return None
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path or _DEFAULT_DB)
+        try:
+            row = conn.execute(
+                "SELECT channel_id FROM runs WHERE episode_id = ? AND channel_id IS NOT NULL "
+                "UNION SELECT channel_id FROM episode_topics WHERE episode_id = ? AND channel_id IS NOT NULL "
+                "LIMIT 1",
+                (ep, ep),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def get_recommendations(db_path: Optional[Path] = None, *, channel_id: Optional[str] = None) -> dict:
     """
     Build a per-dimension recommendation dict from applied + pending actions.
-    Applied actions carry higher confidence than pending ones.
+    Applied actions carry higher confidence than pending ones. When
+    channel_id is given, only actions attributable to that channel are kept.
 
     Returns:
         {
           "<dimension>": {
-            "action_type": str,
-            "rationale": str,
-            "confidence": float,    # 0.0–1.0
-            "source_episodes": list[str],
-            "status": "applied" | "pending",
-          },
-          ...
+            "action_type": str, "rationale": str, "confidence": float,
+            "source_episodes": list[str], "status": "applied"|"pending",
+            "action_id": str,
+          }, ...
         }
     """
     recs: dict = {}
@@ -536,8 +703,10 @@ def get_recommendations(db_path: Optional[Path] = None) -> dict:
             dim = action["dimension"]
             if dim in recs:
                 continue   # applied takes precedence over pending
+            if channel_id is not None and _action_channel(action, db_path) != channel_id:
+                continue
             evidence = action.get("evidence") or {}
-            source_eps = evidence.get("source_episode") or []
+            source_eps = evidence.get("source_episode") or action.get("source_episode") or []
             if isinstance(source_eps, str):
                 source_eps = [source_eps]
             avg_str = abs(evidence.get("avg_signal_strength", 0.5))
@@ -551,6 +720,11 @@ def get_recommendations(db_path: Optional[Path] = None) -> dict:
                 "action_id":       action["action_id"],
             }
     return recs
+
+
+def get_channel_recommendations(channel_id: str, db_path: Optional[Path] = None) -> dict:
+    """Thin wrapper: recommendations attributable to one channel."""
+    return get_recommendations(db_path, channel_id=channel_id)
 
 
 def get_factory_learning_state(db_path: Optional[Path] = None) -> dict:

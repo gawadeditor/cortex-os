@@ -55,6 +55,7 @@ VALID_STATUSES   = frozenset({"pending", "applied", "dismissed"})
 VALID_DIMENSIONS = frozenset({
     "thumbnail", "title", "hook", "pacing", "topic",
     "publishing_time", "duration", "description",
+    "content_volume",   # channel weekly-cadence recommendation (ADR-016 era)
 })
 VALID_ACTION_TYPES = frozenset({"prefer", "avoid", "increase", "decrease", "test", "change"})
 

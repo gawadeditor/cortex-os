@@ -318,8 +318,166 @@ def _factory_clearance(channel_id: str, db: Path) -> dict:
 # Composition
 # ---------------------------------------------------------------------------
 
+_OK_LAST_RUN_STATES = ("completed", "complete", "ready_to_publish", "succeeded", "success")
+
+
+def _classify_run_failure(error_message: Optional[str]) -> str:
+    """Coarse failure bucket for a runs.error_message. Kept in sync with the
+    taxonomy in memory:project-pipeline-failure-review so the dashboard and
+    that review speak the same language."""
+    if not error_message:
+        return "ok"
+    m = error_message.lower()
+    if "qa agent" in m and "reject" in m:
+        return "qa_rejected"
+    if "finance" in m and "block" in m:
+        return "finance_blocked"
+    if "ceiling would be exceeded" in m or "budgetceiling" in m:
+        return "weekly_budget"
+    if "credits exhausted" in m or "http 402" in m:
+        return "openrouter_credits"
+    if "no compiled production plan" in m or "productionplanmissing" in m:
+        return "no_production_plan"
+    if "muapi_gate_enforced_no_active_grant" in m or "no_active_authorization_grant" in m \
+            or "operating grant" in m:
+        return "no_authorization_grant"
+    if "scene_content must include" in m or "additional_coverage_required" in m \
+            or "coverage" in m:
+        return "coverage"
+    if "truncated" in m and "max_token" in m:
+        return "llm_truncated"
+    if "orphaned" in m or "worker not active" in m:
+        return "run_orphaned"
+    if "research_director" in m and ("non-dict" in m or "could not parse" in m):
+        return "rd_bad_json"
+    if "anthropic_api_key is not set" in m:
+        return "no_anthropic_key"
+    if "bga pass" in m:
+        return "bga_rejected"
+    if "thumbnail" in m and ("block" in m or "pre-generation" in m):
+        return "thumbnail_pregen_block"
+    if "timed out" in m or "timeout" in m or "connection reset" in m:
+        return "network_timeout"
+    if "muapi budget exhausted" in m:
+        return "muapi_episode_budget"
+    if "stopped by operator" in m or "terminated manually" in m or "cancelled" in m:
+        return "operator_stopped"
+    if "rejected by executive producer" in m:
+        return "ep_rejected"
+    return "other"
+
+
+def _run_health(channel_id: str, db: Path, now_utc: datetime) -> dict:
+    """Recent pipeline-run outcomes for the channel, straight off runs.channel_id.
+    Distinguishes 'configured to run' from 'actually making progress'."""
+    out = {
+        "latest": None,
+        "consecutive_failures": 0,
+        "last_success_at": None,
+        "recent_buckets": [],
+    }
+    try:
+        from hypogeum.db import get_connection
+
+        conn = get_connection(db)
+        try:
+            rows = conn.execute(
+                """
+                SELECT run_id, episode_id, status, started_at, completed_at, error_message
+                FROM runs
+                WHERE channel_id = ?
+                ORDER BY started_at DESC
+                LIMIT 8
+                """,
+                (channel_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return out
+
+        def _is_fail(r) -> bool:
+            return str(r["status"]).lower() in ("failed", "error")
+
+        top = rows[0]
+        out["latest"] = {
+            "run_id": top["run_id"],
+            "episode_id": top["episode_id"],
+            "status": top["status"],
+            "completed_at": top["completed_at"],
+            "error_message": top["error_message"],
+            "bucket": _classify_run_failure(top["error_message"]) if _is_fail(top)
+            else ("ok" if str(top["status"]).lower() in _OK_LAST_RUN_STATES else "in_progress"),
+        }
+        streak = 0
+        for r in rows:
+            if _is_fail(r):
+                streak += 1
+                out["recent_buckets"].append(_classify_run_failure(r["error_message"]))
+            else:
+                break
+        out["consecutive_failures"] = streak
+        for r in rows:
+            if str(r["status"]).lower() in _OK_LAST_RUN_STATES:
+                out["last_success_at"] = r["completed_at"] or r["started_at"]
+                break
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def _operating_grant(channel_id: str, db: Path, now_utc: datetime) -> dict:
+    """ADR-016 Channel Operating Grant status for the channel: is there an
+    active, in-window, signature-verified grant, and does its bound weekly
+    ceiling still match the operator-configured budget."""
+    out = {
+        "active": False,
+        "grant_id": None,
+        "expires_at": None,
+        "days_left": None,
+        "weekly_exposure_ceiling_usd": None,
+        "ceiling_matches_config": None,
+    }
+    try:
+        import hypogeum.authorization_authority as _authority
+
+        grant = _authority.resolve_active_operating_grant(
+            channel_id, at=now_utc.isoformat(), db_path=db,
+        )
+        if grant is None:
+            return out
+        out["active"] = True
+        out["grant_id"] = grant.grant_id
+        out["expires_at"] = grant.expires_at
+        exp = _parse_iso(grant.expires_at)
+        if exp is not None:
+            out["days_left"] = round((exp - now_utc).total_seconds() / 86400, 1)
+        gc = _to_decimal(getattr(grant, "weekly_exposure_ceiling_usd", None))
+        if gc is not None:
+            out["weekly_exposure_ceiling_usd"] = float(gc)
+        try:
+            from hypogeum.channel_budget_policy import resolve_configured_weekly_limit
+            from hypogeum.db import get_connection
+
+            conn = get_connection(db)
+            try:
+                _tz, configured, _ref = resolve_configured_weekly_limit(channel_id, conn=conn)
+            finally:
+                conn.close()
+            if gc is not None:
+                out["ceiling_matches_config"] = (gc == _to_decimal(configured))
+        except Exception:  # noqa: BLE001 -- config unreadable; leave match as None
+            pass
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def _derive_blockers(identity: dict, ops: dict, budget: dict,
-                     clearance: dict, schedule: dict) -> list:
+                     clearance: dict, schedule: dict,
+                     health: Optional[dict] = None,
+                     grant: Optional[dict] = None) -> list:
     """Human-readable list of why the channel cannot run autonomously right
     now. Empty list == nothing structural is stopping an autonomous run."""
     blockers: list = []
@@ -355,6 +513,32 @@ def _derive_blockers(identity: dict, ops: dict, budget: dict,
     if not schedule.get("has_active_schedule"):
         blockers.append("no active channel schedule (autonomous loop has no trigger)")
 
+    # --- actual-progress signals (not just static config) ---------------
+    health = health or {}
+    grant = grant or {}
+    latest = health.get("latest") or {}
+    bucket = latest.get("bucket")
+    streak = int(health.get("consecutive_failures") or 0)
+    if streak >= 3:
+        blockers.append(f"{streak} consecutive failed runs (last: {bucket}) — needs attention")
+    elif bucket and bucket not in ("ok", "in_progress", "operator_stopped"):
+        blockers.append(f"last run failed: {bucket}")
+
+    if health.get("_worker_stale_active_schedule"):
+        blockers.append("worker heartbeat is stale while a schedule is active — autonomous loop is not dispatching")
+
+    if ops.get("configured") and ops.get("operator_enabled"):
+        if grant.get("active") is False:
+            blockers.append(
+                "no active Channel Operating Grant — autonomous paid generation "
+                "will fail closed (sign one: tools/configure_channel_operating_grant.py)"
+            )
+        elif grant.get("ceiling_matches_config") is False:
+            blockers.append(
+                "Channel Operating Grant weekly ceiling no longer matches the "
+                "configured weekly budget — re-sign the operating grant"
+            )
+
     return blockers
 
 
@@ -382,8 +566,14 @@ def get_channel_runtime_status(
     queue_run = _queue_and_run(channel_id, db)
     schedule = _schedule(channel_id, db)
     clearance = _factory_clearance(channel_id, db)
+    health = _run_health(channel_id, db, now)
+    grant = _operating_grant(channel_id, db, now)
 
-    blockers = _derive_blockers(identity, ops, budget, clearance, schedule)
+    health["_worker_stale_active_schedule"] = bool(
+        worker.get("stale") and schedule.get("has_active_schedule")
+    )
+    blockers = _derive_blockers(identity, ops, budget, clearance, schedule, health, grant)
+    health.pop("_worker_stale_active_schedule", None)
 
     return {
         "channel_id": channel_id,
@@ -398,6 +588,8 @@ def get_channel_runtime_status(
             "claimed_topics": queue_run.get("claimed_topics", 0),
         },
         "latest_run": queue_run.get("latest_run"),
+        "health": health,
+        "operating_grant": grant,
         "schedule": schedule,
         "factory_clearance": clearance,
         "blockers": blockers,

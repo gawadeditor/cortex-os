@@ -47,6 +47,7 @@ Logging events emitted:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -140,10 +141,23 @@ def run_script_engine(
     }
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _max_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)
+        _beat_secs = float(getattr(config, "SHORT_NATIVE_MAX_BEAT_SECONDS", 8.5) or 8.5)
+        _wps = float(getattr(config, "SHORT_NATIVE_WORDS_PER_SECOND", 2.9) or 2.9)
+        _per_beat_words = max(8, int(_beat_secs * _wps))
+        _beat_lo = max(3, _max_words // _per_beat_words)
+        _beat_hi = max(_beat_lo, min(8, _max_words // max(1, int(6.0 * _wps))))
         _input_package["production_mode"] = "short_native"
         _input_package["short_native_directive"] = {
             "total_narration_words_max": _max_words,
             "sections": 1,
+            "narration_beats": (
+                f"{_beat_lo} to {_beat_hi} beats. EACH beat becomes exactly one "
+                f"8-second vertical video clip, so each beat's spoken narration "
+                f"MUST be sayable in {_beat_secs:.0f} seconds or less — hard cap "
+                f"{_per_beat_words} words per beat. A beat that runs long will be "
+                f"truncated automatically; write within the budget."
+            ),
+            "per_beat_words_max": _per_beat_words,
             "shorts_scripts": "empty list — do not write derived Shorts",
             "chapter_markers": "none",
             "cta": "at most one short spoken line",
@@ -169,6 +183,9 @@ def run_script_engine(
     for short in script_package.get("shorts_scripts", []):
         humanize_beats(short.get("narration_beats", []))
 
+    if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
+        _enforce_short_native_budget(script_package, config, log)
+
     output_sections = len(script_package.get("sections", []))
     cta_count       = script_package.get("script_integrity", {}).get("cta_count", 0)
     output_shorts   = len(script_package.get("shorts_scripts", []))
@@ -183,3 +200,94 @@ def run_script_engine(
     )
 
     return script_package
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _enforce_short_native_budget(script_package: dict, config, log) -> None:
+    """Deterministically make a short-native script fit its clip budget.
+
+    SHORT_NATIVE gives every narration beat its own single 8s vertical clip
+    (see scene_planner.build_scene_plan_input). If a beat's narration runs
+    longer than one clip can cover, Assembly is forced onto the coverage-fill
+    path -- the exact thing short-native exists to avoid. The LLM directive
+    asks for a compliant script; this pass guarantees one, with no extra
+    model call:
+
+      1. per beat: keep only the leading whole sentences that fit
+         SHORT_NATIVE_MAX_BEAT_SECONDS (always keep at least one sentence).
+      2. across beats, in order: once the running total passes
+         SHORT_NATIVE_MAX_NARRATION_WORDS, drop the remaining beats
+         (never below 3 beats / 1 beat minimum).
+      3. drop any text_overlay whose beat_reference no longer exists.
+    """
+    wps = float(getattr(config, "SHORT_NATIVE_WORDS_PER_SECOND", 2.9) or 2.9)
+    max_beat_words = max(8, int(float(
+        getattr(config, "SHORT_NATIVE_MAX_BEAT_SECONDS", 8.5) or 8.5) * wps))
+    max_total_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)
+
+    sections = script_package.get("sections", []) or []
+    if not sections:
+        return
+
+    trimmed_beats = 0
+    dropped_beats = 0
+    running_total = 0
+    kept_beat_ids: set = set()
+
+    for section in sections:
+        beats = section.get("narration_beats", []) or []
+        new_beats: list = []
+        for beat in beats:
+            text = (beat.get("text") or "").strip()
+            words = text.split()
+            # (1) per-beat sentence-boundary trim
+            if len(words) > max_beat_words:
+                sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+                kept, count = [], 0
+                for sent in sentences:
+                    sw = len(sent.split())
+                    if kept and count + sw > max_beat_words:
+                        break
+                    kept.append(sent)
+                    count += sw
+                if not kept:  # single sentence already over budget — hard word cut
+                    kept = [" ".join(words[:max_beat_words])]
+                    count = max_beat_words
+                new_text = " ".join(kept).strip()
+                if new_text != text:
+                    beat["text"] = new_text
+                    trimmed_beats += 1
+                    words = new_text.split()
+            # (2) total-budget beat drop (keep >=3 where possible, >=1 always)
+            if new_beats and running_total >= max_total_words and len(new_beats) >= 3:
+                dropped_beats += 1
+                continue
+            running_total += len(words)
+            new_beats.append(beat)
+            if beat.get("beat_id"):
+                kept_beat_ids.add(beat["beat_id"])
+        section["narration_beats"] = new_beats or beats[:1]
+        for b in section["narration_beats"]:
+            if b.get("beat_id"):
+                kept_beat_ids.add(b["beat_id"])
+
+    # (3) prune now-dangling overlays
+    dropped_overlays = 0
+    for short in script_package.get("shorts_scripts", []) or []:
+        ov = short.get("text_overlays", []) or []
+        keep = [o for o in ov if o.get("beat_reference") in kept_beat_ids]
+        dropped_overlays += len(ov) - len(keep)
+        short["text_overlays"] = keep
+
+    if trimmed_beats or dropped_beats or dropped_overlays:
+        log.info(
+            "se_short_native_budget_enforced",
+            trimmed_beats=trimmed_beats,
+            dropped_beats=dropped_beats,
+            dropped_overlays=dropped_overlays,
+            per_beat_words_max=max_beat_words,
+            total_words_max=max_total_words,
+            final_total_words=running_total,
+        )

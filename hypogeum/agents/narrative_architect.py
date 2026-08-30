@@ -112,12 +112,19 @@ def run_narrative_architect(
     }
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _input_package["production_mode"] = "short_native"
+        _mbw = int(float(getattr(config, "SHORT_NATIVE_MAX_BEAT_SECONDS", 8.5) or 8.5)
+                   * float(getattr(config, "SHORT_NATIVE_WORDS_PER_SECOND", 2.9) or 2.9))
         _input_package["short_native_directive"] = {
-            "format": "single vertical short, ~45-60 seconds",
+            "format": "single vertical short, ~45-55 seconds total",
             "structure": "exactly ONE section: a hook that opens an "
                          "unresolved question or counter-intuitive fact, one "
                          "turn that deepens it, one payoff that resolves it",
             "sections": 1,
+            "beats": (
+                f"plan 5 to 7 short beats. Each beat is ONE 8-second video "
+                f"clip; keep each beat's narration under ~{_mbw} words so it "
+                f"fits a single clip."
+            ),
             "shorts_selection": "empty — the short IS the whole deliverable",
             "chapters": "none",
             "tone": "front-load intrigue; every sentence must earn the next",

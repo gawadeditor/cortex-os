@@ -88,10 +88,11 @@ class TestConfigPreset:
 
 class TestScenePlannerInput:
 
-    def _script(self) -> dict:
+    def _script(self, beats: int = 6) -> dict:
         return {
             "episode_metadata": {"archetype": "mystery"},
-            "sections": [{"section_id": "s1", "title": "T", "narration_beats": [{"beat_id": "b1"}]}],
+            "sections": [{"section_id": "s1", "title": "T",
+                          "narration_beats": [{"beat_id": f"b{i}"} for i in range(beats)]}],
             "shorts_scripts": [],
         }
 
@@ -101,12 +102,17 @@ class TestScenePlannerInput:
 
         c = Config()
         c.apply_short_native_preset()
-        pkg = build_scene_plan_input(self._script(), c, "ep_x")
+        pkg = build_scene_plan_input(self._script(beats=6), c, "ep_x")
         gc = pkg["generation_constraints"]
         assert gc["mode"] == "short_native"
         assert gc["aspect_ratio"] == "9:16"
         assert gc["shorts_count"] == 0
-        assert gc["max_main_scenes"] == c.EPISODE_ZERO_MAX_SCENES
+        # one scene per narration beat, capped at SHORT_NATIVE_MAX_SCENES
+        assert gc["max_main_scenes"] == 6
+        assert gc["scene_granularity"] == "exactly one scene per narration beat"
+        # a script with more beats than the cap is clamped to the cap
+        big = build_scene_plan_input(self._script(beats=20), c, "ep_x")
+        assert big["generation_constraints"]["max_main_scenes"] == c.SHORT_NATIVE_MAX_SCENES
 
     def test_normal_config_unchanged(self):
         from hypogeum.config import Config

@@ -309,9 +309,11 @@ class Config:
     # (no long-form arc, no derived Shorts). Env-forced for tests/manual runs;
     # run_pipeline also turns it on per-run for a shorts-only channel.
     SHORT_NATIVE_MODE: bool                 # default: false
-    SHORT_NATIVE_MAX_SCENES: int            # scene cap in short-native runs; default: 2
+    SHORT_NATIVE_MAX_SCENES: int            # scene cap in short-native runs; default: 8 (one per beat)
     SHORT_NATIVE_MAX_NARRATION_WORDS: int   # total narration budget; default: 150
     SHORT_NATIVE_ASPECT_RATIO: str          # deliverable aspect ratio; default: "9:16"
+    SHORT_NATIVE_MAX_BEAT_SECONDS: float    # per-beat narration ceiling so one 8s clip covers it; default: 8.5
+    SHORT_NATIVE_WORDS_PER_SECOND: float    # narration-rate estimate for the per-beat budget; default: 2.9
 
     # ------------------------------------------------------------------
     # Higgsfield AI (comparison / evaluation only — not wired into pipeline)
@@ -533,10 +535,20 @@ class Config:
         )
 
         # --- Short-Native production mode ---
-        self.SHORT_NATIVE_MAX_SCENES = _get_int("SHORT_NATIVE_MAX_SCENES", default=2)
+        # Default scene cap is one per narration beat (a ~50s short is 6-7
+        # beats): each beat is covered by its own single 8s video clip, so
+        # Assembly never has to reach the coverage-fill path for a
+        # short-native episode.
+        self.SHORT_NATIVE_MAX_SCENES = _get_int("SHORT_NATIVE_MAX_SCENES", default=8)
         self.SHORT_NATIVE_MAX_NARRATION_WORDS = _get_int(
             "SHORT_NATIVE_MAX_NARRATION_WORDS", default=150
         )
+        self.SHORT_NATIVE_MAX_BEAT_SECONDS = _get_float(
+            "SHORT_NATIVE_MAX_BEAT_SECONDS", default=8.5
+        ) or 8.5
+        self.SHORT_NATIVE_WORDS_PER_SECOND = _get_float(
+            "SHORT_NATIVE_WORDS_PER_SECOND", default=2.9
+        ) or 2.9
         self.SHORT_NATIVE_ASPECT_RATIO = _get_optional(
             "SHORT_NATIVE_ASPECT_RATIO", default="9:16"
         ) or "9:16"

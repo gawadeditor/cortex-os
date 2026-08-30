@@ -6020,6 +6020,144 @@ def channel_edit(channel_id):
     return render_template("channel_edit.html", channel=channel)
 
 
+# ── Channel operations / production plan edit ──────────────────────────────
+
+@app.route("/channel/<channel_id>/operations", methods=["GET", "POST"])
+def channel_operations_edit(channel_id):
+    """Edit the channel's PRODUCTION PLAN from the dashboard: cadence
+    (shorts/week, videos/week), weekly video budget, per-episode cost
+    ceiling, the autonomous on/off switches, timezone and publish slot.
+
+    On save it also keeps the channel's daily `channel`-scoped schedule in
+    sync with the cadence (a shorts-only channel gets exactly one daily
+    schedule; switching mix rebuilds it) — the same effect
+    tools/configure_hypogeum_shorts_only.py has, done from the UI.
+    """
+    from datetime import datetime, time, timedelta, timezone as _tz
+    from hypogeum.channel_config import (
+        get_channel_operations_profile, update_channel_operations_profile,
+    )
+    from hypogeum.scheduler import create_schedule, set_schedule_status
+    from hypogeum.db import get_connection
+
+    db = _db_path()
+    prof = get_channel_operations_profile(channel_id, db_path=db)
+    if prof is None:
+        return render_template("not_found.html", kind="Channel operations profile", id=channel_id), 404
+
+    if request.method == "POST":
+        f = request.form
+        errors, notes = [], []
+
+        def _int(name, default):
+            try:
+                return max(0, int(f.get(name, default)))
+            except (TypeError, ValueError):
+                errors.append(f"{name} must be a whole number")
+                return default
+
+        spw = _int("shorts_per_week", (prof.production_cadence or {}).get("shorts_per_week", 0))
+        vpw = _int("videos_per_week", (prof.production_cadence or {}).get("videos_per_week", 0))
+        if spw == 0 and vpw == 0:
+            errors.append("at least one of shorts/week or videos/week must be > 0")
+
+        updates = {
+            "production_cadence": {"videos_per_week": vpw, "shorts_per_week": spw},
+        }
+
+        try:
+            wk = float(f.get("weekly_video_budget_usd", prof.weekly_video_budget_usd or 0))
+            if wk <= 0:
+                errors.append("weekly video budget must be > 0")
+            else:
+                updates["weekly_video_budget_usd"] = wk
+        except (TypeError, ValueError):
+            errors.append("weekly video budget must be a number")
+
+        _cc = (f.get("cost_ceiling_usd_per_episode") or "").strip()
+        if _cc == "":
+            updates["cost_ceiling_usd_per_episode"] = None
+        else:
+            try:
+                updates["cost_ceiling_usd_per_episode"] = float(_cc)
+            except ValueError:
+                errors.append("per-episode cost ceiling must be a number or blank")
+
+        tzname = (f.get("timezone") or prof.timezone or "UTC").strip()
+        updates["timezone"] = tzname
+
+        pub_day = (f.get("publish_day") or (prof.publishing_schedule or {}).get("day_of_week") or "thursday").strip().lower()
+        pub_time = (f.get("publish_time") or (prof.publishing_schedule or {}).get("time_of_day") or "18:00").strip()
+        updates["publishing_schedule"] = {"day_of_week": pub_day, "time_of_day": pub_time}
+
+        for flag in ("operator_enabled", "unattended_operation_enabled", "discovery_enabled",
+                     "production_enabled", "publishing_enabled", "analytics_sync_enabled"):
+            updates[flag] = flag in f
+
+        # shorts-only channel -> a single `short` deliverable bundle sized to
+        # the weekly count; a mixed channel keeps its existing bundle defs.
+        shorts_only = (vpw == 0 and spw >= 1)
+        if shorts_only:
+            updates["deliverable_bundle_definitions"] = [
+                {"bundle_id": "short", "target_buffer_count": spw}
+            ]
+
+        if errors:
+            return render_template("channel_operations_edit.html", channel_id=channel_id,
+                                   prof=prof, errors=errors, form=f), 400
+
+        try:
+            update_channel_operations_profile(channel_id, db_path=db, **updates)
+        except (ValueError, RuntimeError) as exc:
+            return render_template("channel_operations_edit.html", channel_id=channel_id,
+                                   prof=prof, errors=[str(exc)], form=f), 400
+
+        # keep the channel-scoped daily schedule in sync with the cadence
+        try:
+            conn = get_connection(db)
+            try:
+                existing = conn.execute(
+                    "SELECT schedule_id, status FROM schedules "
+                    "WHERE scope='channel' AND channel_id=?", (channel_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+            for row in existing:
+                if row["status"] != "disabled":
+                    set_schedule_status(row["schedule_id"], "disabled", db_path=db)
+            now = datetime.now(_tz.utc)
+            nxt = datetime.combine(now.date(), time(14, 0), tzinfo=_tz.utc)
+            if nxt <= now:
+                nxt += timedelta(days=1)
+            cadence = "daily" if shorts_only else "weekly"
+            sched = create_schedule(
+                scope="channel", channel_id=channel_id, cadence=cadence,
+                next_run_at=nxt, max_runs_per_day=1,
+                label=f"{channel_id}_{'daily_shorts' if shorts_only else 'weekly'}",
+                db_path=db,
+            )
+            notes.append(f"schedule rebuilt: {cadence} (next {nxt:%Y-%m-%d %H:%M} UTC)")
+        except Exception as exc:  # noqa: BLE001 -- schedule sync is best-effort
+            notes.append(f"schedule not synced automatically: {exc}")
+
+        # surface the operating-grant implication of a budget change
+        try:
+            from hypogeum.channel_runtime_status import get_channel_runtime_status
+            rt = get_channel_runtime_status(channel_id, db_path=db)
+            og = rt.get("operating_grant") or {}
+            if og.get("active") and og.get("ceiling_matches_config") is False:
+                notes.append("weekly budget changed — the Channel Operating Grant's ceiling "
+                             "no longer matches; re-sign it (tools/configure_channel_operating_grant.py)")
+        except Exception:  # noqa: BLE001
+            pass
+
+        _flash = "; ".join(notes) if notes else "saved"
+        return redirect(url_for("channel_detail", channel_id=channel_id) + f"?ops_saved={_flash}")
+
+    return render_template("channel_operations_edit.html", channel_id=channel_id,
+                           prof=prof, errors=[], form={})
+
+
 # ── Brand profile edit ─────────────────────────────────────────────────────
 
 _BRAND_ALLOWED = frozenset({

@@ -49,8 +49,16 @@
 <div class="page-header">
   <h1>{{ channel.name }}</h1>
   <span class="badge badge-{{ 'active' if channel.status == 'active' else 'unknown' }}">{{ channel.status }}</span>
-  <a href="/" class="btn" style="margin-left:auto;">← Dashboard</a>
+  <a href="/channel/{{ channel.channel_id|e }}/operations" class="btn btn-edit" style="margin-left:auto;">Edit production plan</a>
+  <a href="/" class="btn">← Dashboard</a>
 </div>
+
+{% if request.args.get('ops_saved') %}
+<div class="card" style="border-color:var(--green);">
+  <span class="ok">✓ Production plan saved</span>
+  <span class="muted" style="margin-left:8px;">{{ request.args.get('ops_saved') }}</span>
+</div>
+{% endif %}
 
 {# ── Autonomous health (real state, not just config) ── #}
 {% if runtime %}

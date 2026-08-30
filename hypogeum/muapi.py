@@ -1152,7 +1152,11 @@ def _submit_scene_via_gate(
         # and released only by its creating attempt on a pre-provider
         # failure (see the compensating-release sites above/below).
         scopes = [
-            bs.ScopeRequest(bs.BudgetScopeKind.CALL, scene_id, max_cost, "USD"),
+            # episode-scoped: a bare scene_id makes CALL a cumulative cross-episode
+            # budget (db.reserve_budget sums a scope_ref's non-released reservations
+            # for all time), so scene "s01" of episode 2 is denied by episode 1's
+            # committed reservation. See the openrouter gate for the same fix.
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"{episode_id}:{scene_id}", max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
         ]
         result = submission_gate.submit(
@@ -1706,7 +1710,7 @@ def _generate_reference_image_via_gate(
             structured_spec_checksum=structured_spec_checksum, compiler_version="1",
         )
         scopes = [
-            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"ref_{entity_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"{episode_id}:ref_{entity_id}", max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
         ]
         result = submission_gate.submit(
@@ -3391,7 +3395,7 @@ def _generate_thumbnail_via_gate(
             structured_spec_checksum=structured_spec_checksum, compiler_version="1",
         )
         scopes = [
-            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"thumb_{deliverable_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"{episode_id}:thumb_{deliverable_id}", max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
         ]
         result = submission_gate.submit(

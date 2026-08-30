@@ -772,7 +772,7 @@ def _generate_narration_via_gate(
             structured_spec_checksum=structured_spec_checksum, compiler_version="1",
         )
         scopes = [
-            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"narr_{beat_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"{episode_id}:narr_{beat_id}", max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
         ]
         result = submission_gate.submit(
@@ -1588,7 +1588,7 @@ def _generate_music_via_gate(
             structured_spec_checksum=structured_spec_checksum, compiler_version="1",
         )
         scopes = [
-            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"music_{track_id}", max_cost, "USD"),
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"{episode_id}:music_{track_id}", max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
         ]
         result = submission_gate.submit(

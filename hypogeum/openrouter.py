@@ -578,7 +578,14 @@ def _call_openrouter_via_gate(
             structured_spec_checksum=structured_spec_checksum, compiler_version="1",
         )
         scopes = [
-            bs.ScopeRequest(bs.BudgetScopeKind.CALL, call_label, max_cost, "USD"),
+            # CALL scope_ref MUST be unique per (episode, call): db.reserve_budget
+            # denies when the sum of a scope_ref's non-released reservations (across
+            # ALL episodes, for all time -- committed rows keep counting) would
+            # exceed the ceiling. A bare per-call label makes CALL a cumulative
+            # budget that fills up after the first episode. authorization_id is
+            # already episode+call unique and is the idempotency key, so a resume
+            # replays the same reservation rather than stacking a new one.
+            bs.ScopeRequest(bs.BudgetScopeKind.CALL, authorization_id, max_cost, "USD"),
             bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or max_cost, "USD"),
         ]
         result = submission_gate.submit(

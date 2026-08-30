@@ -877,6 +877,30 @@ def _make_shot(
     }
 
 
+def _prepend_primary_shot(shots: list, beat_id: str) -> list:
+    """Coverage-fill (fill_coverage_deficits) walks the coverage plan from
+    shot_order >= 2 -- shot_order 1 is the beat's PRIMARY scene clip slot,
+    which hypogeum.production_plan.compile_production_plan() prices as the
+    REQUIRED asset and clip_repair_agent skips. These tests pass their
+    "extra" shots as orders 1..N; renumber them to 2..N+1 and prepend a
+    synthetic order-1 primary so the first *extra* the walk selects is the
+    caller's first shot, and the caller's shot list (mutated in place) still
+    points at the right shot_ids for _seed_existing_extra()."""
+    for i, s in enumerate(shots):
+        s["shot_order"] = i + 2
+        s["shot_id"] = f"{beat_id}__shot{i + 2}"
+        s["parent_beat_id"] = beat_id
+    # A distinct diversity signature so the synthetic primary never collides
+    # with a caller shot in used_shot_keys (real coverage plans are all
+    # distinct; these fixtures often leave every field at its default).
+    primary = _make_shot(1, beat_id=beat_id, camera_angle="birds_eye",
+                         shot_scale="extreme_wide", composition="frame_within_frame",
+                         camera_movement="crane_up", camera_direction="rear",
+                         primary_prompt="PRIMARY_SLOT_PROMPT",
+                         fallback_prompt="PRIMARY_SLOT_FALLBACK")
+    return [primary] + shots
+
+
 def _make_s29_style_scene(shots: list, primary_prompt: str = "A sealed medieval tunnel, candlelight.") -> dict:
     """A scene shaped like the real ep_f3619022 s29 case: one beat whose
     narration (46.858s) far exceeds its 8s base clip, with a
@@ -892,7 +916,7 @@ def _make_s29_style_scene(shots: list, primary_prompt: str = "A sealed medieval 
         "beat_id": "b_029",
         "narration_duration_seconds": 46.858,
         "progression_pattern": "establish_develop_reveal",
-        "shots": shots,
+        "shots": _prepend_primary_shot(shots, "b_029"),
     }
     return scene
 
@@ -1171,7 +1195,9 @@ class TestCoverageFillShotDiversity:
             a.get("planned_shot_id") for a in vp["asset_manifest"]["assets"]
             if a.get("scene_id", "").startswith("s29__extra")
         ]
-        assert recorded_ids == ["b_029__shot1"]
+        # shot_order 1 is the primary slot; the first coverage-fill extra is
+        # the caller's first shot, renumbered to shot_order 2 by the fixture.
+        assert recorded_ids == ["b_029__shot2"]
 
 
 # ---------------------------------------------------------------------------

@@ -540,12 +540,22 @@ def fill_coverage_deficits(
             if (a.get("scene_id") or "").startswith(existing_extra_prefix)
             and a.get("planned_shot_id")
         }
+        # shot_order 1 is the beat's PRIMARY scene clip's slot (sc_{sid}) --
+        # hypogeum.production_plan.compile_production_plan() declares
+        # contingency PlannedAssets only from shot_order >= 2, naming them
+        # sc_{sid}__extra1 (from shot_order 2), __extra2 (shot_order 3), ... .
+        # This coverage-fill walk MUST use the same offset or __extra1 is
+        # submitted with shot_order 1's prompt and the paid video gate rejects
+        # it (prompt_mismatch / undeclared_asset) against the plan's declared
+        # __extra fingerprints -- the off-by-one that stalled ep_af078f34 and
+        # the first autonomous short.
         available_shots = [
-            sh for sh in planned_shots if sh.get("shot_id") not in represented_shot_ids
+            sh for sh in planned_shots
+            if sh.get("shot_order", 1) > 1 and sh.get("shot_id") not in represented_shot_ids
         ]
         used_shot_keys: Set[tuple] = {
             shot_diversity_key(sh) for sh in planned_shots
-            if sh.get("shot_id") in represented_shot_ids
+            if sh.get("shot_id") in represented_shot_ids or sh.get("shot_order", 1) <= 1
         }
         if represented_shot_ids:
             log.info(

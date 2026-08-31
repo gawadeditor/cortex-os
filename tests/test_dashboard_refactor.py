@@ -446,13 +446,13 @@ class TestOperationsCollapsed:
         details_match = re.search(r'<details[^>]*>(.*?)</details>', html, re.DOTALL)
         assert details_match is not None
         inner = details_match.group(1)
-        assert "/runs" in inner or "/preflight" in inner or "/approvals" in inner
+        # advanced/system links stay collapsed in "More"
+        assert "/infrastructure" in inner or "/prompts" in inner or "/command" in inner
 
-    def test_pending_approvals_link_in_operations(self, client, db):
-        html = _html(client, db)
-        details_match = re.search(r'<details[^>]*>(.*?)</details>', html, re.DOTALL)
-        assert details_match is not None
-        assert '/approvals' in details_match.group(1)
+    def test_pending_approvals_reachable_from_review_subnav(self, client, db):
+        # approvals moved from the Operations dropdown to the Review section tabs
+        html = client.get("/attention").get_data(as_text=True)
+        assert '/approvals' in html
 
 
 # ===========================================================================

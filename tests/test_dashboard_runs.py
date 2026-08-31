@@ -778,38 +778,40 @@ class TestFlaskTopicEnqueue:
 # ===========================================================================
 
 class TestNavPresent:
-    def _nav_links_present(self, text):
-        assert "/runs"      in text
-        assert "/episodes"  in text
-        assert "/approvals" in text
-        # /signals is not in the shared _nav.html; it appears on dashboard home and
-        # command page only — not a primary nav item on runs/episodes/approvals pages
-        # /preflight is in the Command page's Investigate section, not primary nav
+    # the shared _nav.html now carries the six core sections; cross-section
+    # links live in each page's own _subnav.html, not on every page.
+    _CORE = ("/dashboard", "/channels", "/create", "/attention", "/providers", "/channel-profile")
+
+    def _core_nav_present(self, text):
+        assert 'class="site-nav"' in text
+        for href in self._CORE:
+            assert href in text, f"core nav link {href} missing"
 
     def test_dashboard_has_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/dashboard")
-        self._nav_links_present(r.get_data(as_text=True))
+        self._core_nav_present(client.get("/dashboard").get_data(as_text=True))
 
     def test_runs_page_has_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/runs")
-        self._nav_links_present(r.get_data(as_text=True))
+        text = client.get("/runs").get_data(as_text=True)
+        self._core_nav_present(text)
+        assert 'class="sub-nav"' in text and "/failures" in text  # Production sub-nav
 
     def test_episodes_page_has_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/episodes")
-        self._nav_links_present(r.get_data(as_text=True))
+        text = client.get("/episodes").get_data(as_text=True)
+        self._core_nav_present(text)
+        assert 'class="sub-nav"' in text and "/approvals" in text  # Review sub-nav
 
     def test_approvals_page_has_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/approvals")
-        self._nav_links_present(r.get_data(as_text=True))
+        text = client.get("/approvals").get_data(as_text=True)
+        self._core_nav_present(text)
+        assert "/episodes" in text  # Review sub-nav
 
     def test_signals_page_has_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/signals")
-        self._nav_links_present(r.get_data(as_text=True))
+        self._core_nav_present(client.get("/signals").get_data(as_text=True))
 
 
 # ===========================================================================

@@ -36,12 +36,15 @@
 
 
 <div class="page-header">
-  <h1>Channel Profile</h1>
+  <div>
+    <span class="eyebrow">Settings</span>
+    <h1>Channel Profile</h1>
+  </div>
   <span class="page-meta">Identity and weekly content targets</span>
 </div>
 
 {% if flash %}
-<div class="save-banner">&#x2713;&ensp;Profile saved.</div>
+<div class="flash flash-ok">✓ Profile saved.</div>
 {% endif %}
 
 <form method="POST" action="/channel-profile/save" class="profile-form">
@@ -80,17 +83,17 @@
       <div class="color-row">
         <div class="color-swatch">
           <input type="color" name="primary_color"
-                 value="{{ profile.primary_color or 'var(--good)' }}">
+                 value="{{ profile.primary_color or '#4ec26f' }}">
           <span style="font-size:12px; color:var(--muted)">Primary</span>
         </div>
         <div class="color-swatch">
           <input type="color" name="secondary_color"
-                 value="{{ profile.secondary_color or 'var(--info)' }}">
+                 value="{{ profile.secondary_color or '#58a6ff' }}">
           <span style="font-size:12px; color:var(--muted)">Secondary</span>
         </div>
         <div class="color-swatch">
           <input type="color" name="accent_color"
-                 value="{{ profile.accent_color or 'var(--warn)' }}">
+                 value="{{ profile.accent_color or '#f0a838' }}">
           <span style="font-size:12px; color:var(--muted)">Accent</span>
         </div>
       </div>

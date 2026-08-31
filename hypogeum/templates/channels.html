@@ -4,12 +4,28 @@
   <meta charset="utf-8">
   <title>Channels — Factory OS</title>
   {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .ch-card { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: start; }
+    .ch-name { font-family: var(--font-display); font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+    .ch-name a { color: var(--text); }
+    .ch-meta { font-size: 12px; color: var(--muted); margin-top: 3px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ch-completeness { text-align: right; font-size: 12.5px; }
+    .ch-checks { font-size: 11px; color: var(--faint); margin-top: 2px; display: flex; gap: 8px; justify-content: flex-end; }
+    .ch-checks .ok { color: var(--good); } .ch-checks .no { color: var(--faint); }
+    .ch-rt { grid-column: 1 / -1; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hairline);
+             display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px 18px; }
+    .ch-rt-k { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+    .ch-rt-v { font-size: 13px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+    .ch-blockers { grid-column: 1 / -1; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+    .ch-actions { grid-column: 1 / -1; margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  </style>
 </head>
 <body>
 {% include '_nav.html' %}
-
 {% from '_subnav.html' import subnav %}
 {{ subnav('channels') }}
+
 <div class="container">
 
 <div class="page-header spread">
@@ -18,104 +34,85 @@
     <h1>Channels</h1>
     <span class="page-meta">{{ channels | length }} channel{% if channels | length != 1 %}s{% endif %} configured</span>
   </div>
-  <a href="/channels/new" class="btn btn-primary">+ Build a channel</a>
+  <a href="/channels/new" class="btn btn-primary">{{ icon('plus') }} Build a channel</a>
 </div>
 
 {% if channels %}
+<div class="stack">
 {% for ch in channels %}
-<div class="card">
-  <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
-    <div style="flex:1; min-width:0;">
-      <div style="font-size:16px; font-weight:700;">
-        <a href="/channel/{{ ch.channel_id }}" style="color:var(--text);">{{ ch.name or ch.channel_id }}</a>
-      </div>
-      <div style="font-size:12px; color:var(--muted); margin-top:3px;">
-        {{ ch.channel_id }}
-        &mdash;
+{% set rt = runtime_by_channel.get(ch.channel_id) %}
+<div class="card {{ 'is-good' if rt and rt.autonomous_ready else ('is-warn' if rt else '') }}">
+  <div class="ch-card">
+    <div>
+      <div class="ch-name"><a href="/channel/{{ ch.channel_id }}">{{ ch.name or ch.channel_id }}</a></div>
+      <div class="ch-meta">
+        <span class="mono">{{ ch.channel_id }}</span>
         <span class="badge badge-{{ ch.status }}">{{ ch.status }}</span>
       </div>
     </div>
-    <div style="text-align:right; flex-shrink:0;">
-      <div style="font-size:13px; font-weight:600;">
-        {{ (ch.profile_completeness * 100) | round | int }}% complete
-      </div>
-      <div style="font-size:11px; color:var(--muted); margin-top:2px;">
-        Brand: {{ "✓" if ch.brand_complete else "✕" }}
-        &nbsp;Publishing: {{ "✓" if ch.publishing_complete else "✕" }}
-        &nbsp;Models: {{ "✓" if ch.models_complete else "✕" }}
+    <div class="ch-completeness">
+      <div style="font-weight:700;">{{ (ch.profile_completeness * 100) | round | int }}%<span class="muted" style="font-weight:400;font-size:11px;"> set up</span></div>
+      <div class="ch-checks">
+        <span class="{{ 'ok' if ch.brand_complete else 'no' }}">brand</span>
+        <span class="{{ 'ok' if ch.publishing_complete else 'no' }}">publishing</span>
+        <span class="{{ 'ok' if ch.models_complete else 'no' }}">models</span>
       </div>
     </div>
-  </div>
-  {% set rt = runtime_by_channel.get(ch.channel_id) %}
-  {% if rt %}
-  <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
-    <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:12px;">
+
+    {% if rt %}
+    <div class="ch-rt">
       <div>
-        <div style="color:var(--muted);">Autonomous</div>
-        <div style="font-weight:700; color:{{ 'var(--good)' if rt.autonomous_ready else 'var(--warn)' }};">
-          {{ 'READY' if rt.autonomous_ready else (rt.blockers | length ~ ' blocker' ~ ('' if rt.blockers | length == 1 else 's')) }}
+        <div class="ch-rt-k">Autonomous</div>
+        <div class="ch-rt-v {{ 'ok' if rt.autonomous_ready else 'warn' }}">
+          {{ 'Ready' if rt.autonomous_ready else (rt.blockers | length ~ ' blocker' ~ ('' if rt.blockers | length == 1 else 's')) }}
         </div>
       </div>
       <div>
-        <div style="color:var(--muted);">Weekly budget{% if rt.weekly_budget.week_key %} ({{ rt.weekly_budget.week_key }}){% endif %}</div>
-        <div style="font-weight:600;">
-          {% if rt.weekly_budget.configured %}
-            ${{ '%.2f' | format(rt.weekly_budget.reserved_committed_usd or 0) }} / ${{ '%.2f' | format(rt.weekly_budget.ceiling_usd or 0) }}
-            {% if rt.weekly_budget.pct_used is not none %}<span style="color:var(--muted);">({{ rt.weekly_budget.pct_used | round | int }}%)</span>{% endif %}
-          {% else %}
-            <span style="color:var(--muted);">not configured</span>
-          {% endif %}
+        <div class="ch-rt-k">Weekly budget{% if rt.weekly_budget.week_key %} · {{ rt.weekly_budget.week_key }}{% endif %}</div>
+        <div class="ch-rt-v">
+          {% if rt.weekly_budget.configured %}${{ '%.0f' | format(rt.weekly_budget.reserved_committed_usd or 0) }} / ${{ '%.0f' | format(rt.weekly_budget.ceiling_usd or 0) }}{% if rt.weekly_budget.pct_used is not none %} <span class="muted">({{ rt.weekly_budget.pct_used | round | int }}%)</span>{% endif %}
+          {% else %}<span class="muted">not configured</span>{% endif %}
         </div>
       </div>
       <div>
-        <div style="color:var(--muted);">Worker</div>
-        <div style="font-weight:600;">
-          {{ rt.worker.status or 'never started' }}{% if rt.worker.stale %} <span style="color:var(--warn);">(stale)</span>{% endif %}
-        </div>
+        <div class="ch-rt-k">Worker</div>
+        <div class="ch-rt-v">{{ rt.worker.status or 'never started' }}{% if rt.worker.stale %} <span class="warn">stale</span>{% endif %}</div>
       </div>
       <div>
-        <div style="color:var(--muted);">Queue</div>
-        <div style="font-weight:600;">{{ rt.queue.queued_topics }} queued / {{ rt.queue.claimed_topics }} claimed</div>
+        <div class="ch-rt-k">Queue</div>
+        <div class="ch-rt-v">{{ rt.queue.queued_topics }} / {{ rt.queue.claimed_topics }}</div>
       </div>
       <div>
-        <div style="color:var(--muted);">Next slot</div>
-        <div style="font-weight:600;">{{ rt.schedule.next_run_at or '—' }}</div>
+        <div class="ch-rt-k">Next slot</div>
+        <div class="ch-rt-v">{{ rt.schedule.next_run_at or '—' }}</div>
       </div>
-      {% if rt.latest_run %}
       <div>
-        <div style="color:var(--muted);">Latest run</div>
-        <div style="font-weight:600;">
-          {{ rt.latest_run.status }}
-          {% set hb = (rt.health or {}).get('latest') or {} %}
-          {% if hb.bucket and hb.bucket not in ['ok','in_progress'] %}<span style="color:var(--warn);">· {{ hb.bucket }}</span>{% endif %}
-        </div>
-      </div>
-      {% endif %}
-      <div>
-        <div style="color:var(--muted);">Operating grant</div>
-        <div style="font-weight:600; color:{{ 'var(--good)' if (rt.operating_grant or {}).get('active') else 'var(--warn)' }};">
-          {% if (rt.operating_grant or {}).get('active') %}active ({{ rt.operating_grant.days_left }}d){% else %}none{% endif %}
+        <div class="ch-rt-k">Operating grant</div>
+        <div class="ch-rt-v {{ 'ok' if (rt.operating_grant or {}).get('active') else 'warn' }}">
+          {% if (rt.operating_grant or {}).get('active') %}active · {{ rt.operating_grant.days_left }}d{% else %}none{% endif %}
         </div>
       </div>
     </div>
     {% if rt.blockers %}
-    <div style="margin-top:8px; font-size:11px; color:var(--muted);">
-      <span style="color:var(--warn);">Blockers:</span> {{ rt.blockers | join('; ') }}
-    </div>
+    <div class="ch-blockers"><span class="warn">Blockers:</span> {{ rt.blockers | join('; ') }}</div>
     {% endif %}
-  </div>
-  {% endif %}
-  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
-    <a href="/channel/{{ ch.channel_id }}" class="btn">View</a>
-    <a href="/channel/{{ ch.channel_id }}/edit" class="btn">Edit</a>
+    {% endif %}
+
+    <div class="ch-actions">
+      <a href="/channel/{{ ch.channel_id }}" class="btn btn-sm">Open</a>
+      <a href="/channel/{{ ch.channel_id }}/operations" class="btn btn-sm">Production plan</a>
+    </div>
   </div>
 </div>
 {% endfor %}
+</div>
 {% else %}
-<div class="card">
-  <div class="no-data" style="text-align:center; padding:30px 0">
-    No channels configured.
-    <a href="/channel-profile" style="margin-left:6px;">Set up a channel →</a>
+<div class="empty">
+  <div class="empty-title">No channels yet</div>
+  Build your first channel — the wizard takes you from a rough idea to a monetisable niche,
+  a name with checked handles, and a full brand identity.
+  <div class="btn-row" style="justify-content:center; margin-top:12px;">
+    <a href="/channels/new" class="btn btn-primary">{{ icon('plus') }} Build a channel</a>
   </div>
 </div>
 {% endif %}

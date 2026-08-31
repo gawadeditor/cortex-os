@@ -9,14 +9,24 @@
   'production': [('Queue','/create'), ('Live','/live'), ('Run history','/runs'), ('Failures','/failures'), ('Discovery','/discover')],
   'review':     [('Attention','/attention'), ('Approvals','/approvals'), ('Episodes','/episodes'), ('Preflight','/preflight')],
   'credentials':[('AI providers','/providers'), ('Platform connections','/platforms')],
-  'settings':   [('Channel profile','/channel-profile'), ('Infrastructure config','/infrastructure/config'), ('Setup checklist','/setup')],
+  'settings':   [('Channel profile','/channel-profile'), ('Setup checklist','/setup')],
+  'governance': [('Decisions','/decisions'), ('Reviews','/decision-reviews'), ('Inputs','/decision-inputs'), ('Plans','/execution-plans')],
 } -%}
 {%- set tabs = groups.get(section, []) -%}
 {%- if tabs -%}
+  {#- longest-matching tab wins, so /analytics/platform beats /analytics -#}
+  {%- set ns = namespace(best='', blen=-1) -%}
+  {%- for _l, h in tabs -%}
+    {%- set hit = (p == h) or p.startswith(h.rstrip('/') + '/')
+                  or (h == '/create' and p.startswith('/create'))
+                  or (h == '/channels' and (p == '/channels' or p.startswith('/channel/')))
+                  or (h == '/runs' and p.startswith('/run/'))
+                  or (h == '/episodes' and p.startswith('/episode/')) -%}
+    {%- if hit and h|length > ns.blen -%}{%- set ns.best = h -%}{%- set ns.blen = h|length -%}{%- endif -%}
+  {%- endfor -%}
 <nav class="sub-nav" aria-label="{{ section }} sections">
   {%- for label, href in tabs -%}
-    {%- set is_active = (p == href) or (href != '/create' and href != '/channels' and p.startswith(href + '/')) or (href == '/create' and p.startswith('/create')) or (href == '/channels' and (p == '/channels' or p.startswith('/channel/'))) or (href == '/runs' and p.startswith('/run/')) or (href == '/episodes' and p.startswith('/episode/')) -%}
-  <a href="{{ href }}" class="sub-nav-link {{ 'active' if is_active }}">{{ label }}</a>
+  <a href="{{ href }}" class="sub-nav-link {{ 'active' if href == ns.best }}">{{ label }}</a>
   {%- endfor -%}
 </nav>
 {%- endif -%}

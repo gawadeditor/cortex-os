@@ -44,16 +44,24 @@ def test_primary_nav_is_exactly_the_six_core_sections(client):
     assert hrefs == CORE, f"primary nav drifted from the six-core spec: {hrefs ^ CORE}"
 
 
-def test_secondary_links_live_in_a_collapsed_details(client):
+def test_more_menu_holds_the_module_and_advanced_destinations(client):
     html = _nav_html(client)
     m = re.search(r"<details[^>]*class=\"nav-ops-details\"[^>]*>(.*?)</details>", html, re.DOTALL)
     assert m, "the 'More' menu must be a <details>"
     inner = m.group(1)
-    # a representative sample of what must be reachable from More
-    for href in ("/analytics", "/intelligence/learning", "/live", "/runs", "/failures",
-                 "/approvals", "/episodes", "/decisions", "/infrastructure",
-                 "/infrastructure/workers", "/prompts", "/compare", "/command", "/preflight"):
+    for href in ("/analytics", "/intelligence/learning", "/infrastructure",
+                 "/decisions", "/command", "/prompts", "/compare"):
         assert href in inner, f"{href} missing from the More menu"
+
+
+def test_production_and_review_detail_reachable_via_section_subnav(client):
+    # these are NOT in the top nav anymore — they live in the section tab rows
+    prod = client.get("/create").get_data(as_text=True)
+    for href in ("/live", "/runs", "/failures", "/discover"):
+        assert href in prod, f"{href} not reachable from the Production sub-nav"
+    rev = client.get("/attention").get_data(as_text=True)
+    for href in ("/approvals", "/episodes", "/preflight"):
+        assert href in rev, f"{href} not reachable from the Review sub-nav"
 
 
 def test_every_nav_href_resolves(client):

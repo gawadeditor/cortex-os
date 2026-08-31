@@ -1,11 +1,7 @@
-<div class="sub-nav" style="border-bottom: 2px solid var(--border); margin-bottom: 4px;">
-  <a href="/intelligence/performance"
-     class="sub-nav-link {% if request.path.startswith('/intelligence/performance') or request.path.startswith('/intelligence/platform') %}active{% endif %}"
-     style="font-weight:600;">Performance</a>
-  <a href="/intelligence/learning"
-     class="sub-nav-link {% if request.path.startswith('/intelligence/learning') %}active{% endif %}"
-     style="font-weight:600;">Learning</a>
-  <a href="/intelligence/sync"
-     class="sub-nav-link {% if request.path.startswith('/intelligence/sync') %}active{% endif %}"
-     style="font-weight:600;">Sync Health</a>
-</div>
+{%- set p = request.path -%}
+<nav class="sub-nav" aria-label="analytics &amp; intelligence sections">
+  <a href="/analytics" class="sub-nav-link {{ 'active' if p == '/analytics' or p.startswith('/analytics/') }}">Analytics</a>
+  <a href="/intelligence/performance" class="sub-nav-link {{ 'active' if p.startswith('/intelligence/performance') or p.startswith('/intelligence/platform') }}">Performance</a>
+  <a href="/intelligence/learning" class="sub-nav-link {{ 'active' if p.startswith('/intelligence/learning') }}">Learning</a>
+  <a href="/intelligence/sync" class="sub-nav-link {{ 'active' if p.startswith('/intelligence/sync') }}">Sync health</a>
+</nav>

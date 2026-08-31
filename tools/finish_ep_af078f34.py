@@ -233,6 +233,78 @@ def main(argv: list[str] | None = None) -> int:
               f"authorized={_rec['authorized']}, "
               f"bound_hash={_rec.get('bound_production_plan_content_hash', '')[:12]}")
 
+        # 2c. Clear stuck non-terminal authorization + write-ahead receipt
+        #     state for coverage-fill __extra slots that a prior interrupted
+        #     run left in 'submitted'/'authorized' WITHOUT a qualified clip.
+        #     The submission gate refuses a fresh attempt on such a slot
+        #     (`03_authorization_active_and_unconsumed`,
+        #     `05_idempotency_key_unconsumed`), so s01/s02/s17's missing
+        #     clips could never be regenerated. A slot IS done iff its
+        #     scene_id ({beat}__extra{N}) appears as an asset_manifest
+        #     entry — those rows/receipts are left untouched. Reservation /
+        #     grant-consumption ledger rows are NEVER touched here (real
+        #     prior spend stays recorded; 'reserved' rows expire on their
+        #     own). Only meaningful with --keep-coverage.
+        import shutil as _shutil
+
+        _vp_now = json.loads(vp_path.read_text())
+        _done_slots = {
+            (a.get("scene_id") or "")
+            for a in (_vp_now.get("asset_manifest") or {}).get("assets", [])
+            if "__extra" in (a.get("scene_id") or "")
+        }
+
+        def _slot_of(idem_or_auth_id: str) -> str:
+            # ep_af078f34:s01__extra1:primary          -> s01__extra1
+            # ep_af078f34:upscale:s01__extra1          -> s01__extra1
+            s = idem_or_auth_id
+            if s.startswith(f"{EP}:"):
+                s = s[len(EP) + 1:]
+            if s.startswith("upscale:"):
+                s = s[len("upscale:"):]
+            if s.endswith(":primary"):
+                s = s[: -len(":primary")]
+            return s
+
+        _TERMINAL = {
+            "consumed", "allocated", "qualified", "rejected",
+            "technical_validation_failed", "superseded", "cancelled",
+            "invalidated_source_changed", "preflight_failed",
+        }
+        _conn = get_connection(db)
+        _cleared_auth = 0
+        try:
+            _rows = list(_conn.execute(
+                "SELECT authorization_id, current_state FROM authorization_records "
+                "WHERE authorization_id LIKE ?", (f"{EP}:%__extra%",)))
+            for _r in _rows:
+                _aid, _st = _r["authorization_id"], _r["current_state"]
+                if "__extra" not in _aid:
+                    continue
+                if _slot_of(_aid) in _done_slots:
+                    continue          # a real, qualified clip — keep its record
+                if _st in _TERMINAL:
+                    continue
+                _conn.execute(
+                    "DELETE FROM authorization_records WHERE authorization_id=?", (_aid,))
+                _cleared_auth += 1
+            _conn.commit()
+        finally:
+            _conn.close()
+
+        _receipts_dir = _EP_DIR / "receipts"
+        _cleared_rcpt = 0
+        if _receipts_dir.is_dir():
+            for _d in _receipts_dir.iterdir():
+                if "__extra" not in _d.name:
+                    continue
+                if _slot_of(_d.name) in _done_slots:
+                    continue
+                _shutil.rmtree(_d, ignore_errors=True)
+                _cleared_rcpt += 1
+        print(f"  [2c] cleared {_cleared_auth} stuck authorization records + "
+              f"{_cleared_rcpt} write-ahead receipt dirs for un-generated __extra slots")
+
         # 3. clear the failed admission + re-queue the topic
         conn = get_connection(db)
         try:

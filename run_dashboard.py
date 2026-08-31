@@ -566,11 +566,17 @@ def api_channel_create():
         v = src.get(k)
         return v if v not in ("", None) else default
 
-    platforms = [p.strip() for p in str(_f("platforms", "youtube")).split(",") if p.strip()]
+    if isinstance(src, dict) and isinstance(src.get("platforms"), list):
+        platforms = [str(p).strip() for p in src["platforms"] if str(p).strip()]
+    else:
+        platforms = [p.strip() for p in str(_f("platforms", "youtube")).split(",") if p.strip()]
     fmt = (_f("format", "long") or "long").lower()
-    if fmt == "shorts":
+    if fmt in ("shorts", "shorts_only"):
         spw = int(_f("shorts_per_week", 7) or 7)
         cadence = {"videos_per_week": 0, "shorts_per_week": spw}
+    elif fmt == "mixed":
+        cadence = {"videos_per_week": int(_f("videos_per_week", 1) or 1),
+                   "shorts_per_week": int(_f("shorts_per_week", 0) or 0)}
     else:
         cadence = {"videos_per_week": int(_f("videos_per_week", 1) or 1)}
 
@@ -578,22 +584,134 @@ def api_channel_create():
     if _f("publish_day") and _f("publish_time"):
         pub_sched = {"day_of_week": _f("publish_day"), "time_of_day": _f("publish_time")}
 
+    def _dict(k):
+        v = src.get(k)
+        return v if isinstance(v, dict) else {}
+
     budget = _f("weekly_video_budget_usd")
+    ceiling = _f("cost_ceiling_usd_per_episode")
     result = create_channel(
         channel_id=str(_f("channel_id", "")).strip(),
         name=str(_f("name", "")).strip(),
         language=_f("language", "en"),
         enabled_platforms=platforms,
         timezone=_f("timezone", "UTC"),
-        weekly_video_budget_usd=float(budget) if budget is not None else None,
+        weekly_video_budget_usd=float(budget) if budget not in (None, "") else None,
+        cost_ceiling_usd_per_episode=float(ceiling) if ceiling not in (None, "") else None,
         cadence=cadence,
         publishing_schedule=pub_sched,
         narration_voice_id=_f("narration_voice_id"),
         description=_f("description", ""),
+        brand=_dict("brand"),
+        models=_dict("models"),
+        publishing=_dict("publishing"),
         db_path=_db_path(),
     )
     status = 200 if result.get("ok") else (422 if result.get("code") in ("invalid", "duplicate") else 500)
     return jsonify(result), status
+
+
+@app.route("/api/channel-readiness/<channel_id>")
+def api_channel_readiness(channel_id: str):
+    """Plain-language readiness report — activation gates + runtime blockers +
+    budget sanity + Zernio links. Read-only. Used by the Channel Builder
+    wizard's Review step and the channel detail page."""
+    try:
+        from hypogeum.channel_readiness import get_channel_readiness
+        return jsonify({"ok": True, "readiness": get_channel_readiness(channel_id, db_path=_db_path())})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/channel-builder/suggest", methods=["POST"])
+def api_channel_builder_suggest():
+    """
+    LLM-assisted visual/brand identity for the wizard. Takes {description,
+    format, name} and returns a proposal the client edits. Degrades to
+    {ok: False} on any gate/model failure — the wizard then just lets the
+    operator fill the fields manually.
+    """
+    src = request.get_json(silent=True) or {}
+    desc = str(src.get("description", "")).strip()
+    fmt = str(src.get("format", "long")).strip()
+    name = str(src.get("name", "")).strip()
+    if not desc:
+        return jsonify({"ok": False, "error": "describe the channel first"}), 422
+
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "channel_identity",
+            "strict": True,
+            "schema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["persona_name", "tone", "target_audience", "visual_style",
+                             "voice_guidelines", "content_pillars", "color_palette"],
+                "properties": {
+                    "persona_name": {"type": "string"},
+                    "tone": {"type": "string"},
+                    "target_audience": {"type": "string"},
+                    "visual_style": {"type": "string"},
+                    "voice_guidelines": {"type": "string"},
+                    "content_pillars": {"type": "array", "items": {"type": "string"}},
+                    "color_palette": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["primary", "secondary", "accent"],
+                        "properties": {"primary": {"type": "string"},
+                                       "secondary": {"type": "string"},
+                                       "accent": {"type": "string"}},
+                    },
+                },
+            },
+        },
+    }
+    sys_p = (
+        "You are a brand director for an autonomous documentary-media studio. "
+        "Given a channel brief, propose ONE distinctive brand identity: a persona, "
+        "a specific tone (3-5 adjectives), the target audience, a concrete visual "
+        "style (materials, palette mood, camera/lighting language), voice guidelines "
+        "for the narrator (2-3 sentences, pacing + register), 3-4 content pillars, "
+        "and a 3-colour palette as hex. Be opinionated and specific to THIS brief — "
+        "never generic. Output JSON only."
+    )
+    user_p = f"Channel name: {name or '(unnamed)'}\nFormat: {fmt}\nBrief: {desc}"
+    try:
+        from hypogeum.config import Config
+        from hypogeum.openrouter import call_claude
+        cfg = Config()
+        res = call_claude(
+            model_slug=getattr(cfg, "OPENROUTER_SONNET_MODEL_ID", "anthropic/claude-sonnet-4.6"),
+            messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": user_p}],
+            max_tokens=900, config=cfg, agent="channel_builder",
+            response_format=schema, allow_model_fallback=True,
+        )
+        text = getattr(res, "text", None) or getattr(res, "content", None) or ""
+        proposal = _json.loads(text)
+        return jsonify({"ok": True, "proposal": proposal})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"suggestion unavailable ({exc}); fill the fields manually"}), 200
+
+
+@app.route("/channels/new")
+def channel_builder_page():
+    """The guided Channel Builder wizard."""
+    from hypogeum.config import Config
+    _cfg = Config()
+    defaults = {
+        "models": {
+            "episode_producer": "anthropic/claude-sonnet-4.6",
+            "research_director": "anthropic/claude-opus-4.6",
+            "thumbnail_planner": "openai/gpt-5.5-pro",
+            "brand_guardian_p1": "anthropic/claude-sonnet-4.6",
+            "brand_guardian_p2": "openai/gpt-5.5-pro",
+            "image_provider": "muapi", "video_provider": "muapi",
+        },
+        "shorts_ceiling": 20, "long_ceiling": 60,
+        "voices": [
+            {"id": "j9jfwdrw7BRfcR43Qohk", "label": "Documentary narrator (deep, measured)"},
+        ],
+    }
+    return render_template("channel_builder.html", defaults=defaults)
 
 
 @app.route("/api/channels/<channel_id>/runtime")

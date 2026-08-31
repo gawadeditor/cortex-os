@@ -46,8 +46,38 @@
         <a href="/command">Command</a>
       </div>
     </details>
+    <span class="worker-pill is-stopped" id="worker-pill" title="Production worker">
+      <span class="wp-dot"></span><span id="wp-label">worker</span>
+      <button id="wp-toggle" type="button">·</button>
+    </span>
   </div>
 </nav>
+<script>
+(function(){
+  var pill=document.getElementById('worker-pill'), lbl=document.getElementById('wp-label'), btn=document.getElementById('wp-toggle');
+  if(!pill) return;
+  var running=false;
+  function paint(s){
+    running = (s==='running'||s==='claiming');
+    pill.className='worker-pill '+(running?'is-running':(s==='idle'?'is-idle':'is-stopped'));
+    lbl.textContent = running?'worker running':(s==='idle'?'worker idle':'worker stopped');
+    btn.textContent = running?'Stop':'Start';
+  }
+  function poll(){
+    fetch('/api/worker/status').then(function(r){return r.json();}).then(function(d){
+      paint(d.running ? (d.status||'running') : 'stopped');
+    }).catch(function(){ paint('stopped'); });
+  }
+  btn.addEventListener('click', function(){
+    btn.disabled=true; btn.textContent='…';
+    fetch('/api/worker/'+(running?'stop':'start'), {method:'POST'})
+      .then(function(r){return r.json();})
+      .then(function(){ setTimeout(function(){ btn.disabled=false; poll(); }, 1200); })
+      .catch(function(){ btn.disabled=false; poll(); });
+  });
+  poll(); setInterval(poll, 15000);
+})();
+</script>
 <style>
   .nav-ops-details { position: relative; }
   .nav-ops-toggle  { padding: 4px 10px; border-radius: var(--radius); color: var(--muted);

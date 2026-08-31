@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Build a channel — Factory OS</title>
+  {% include '_base_style.html' %}
+  <style>
+    .cb-wrap { max-width: 1180px; margin: 0 auto; }
+    .cb-hero { margin: 8px 0 26px; }
+    .cb-hero h1 { font-size: 34px; font-weight: 800; letter-spacing: -.03em; margin: 6px 0 8px; }
+    .cb-grid { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: 24px; align-items: start; }
+    @media (max-width: 900px) { .cb-grid { grid-template-columns: 1fr; } .cb-aside { order: -1; } }
+
+    .cb-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+                padding: 26px; box-shadow: var(--shadow-2); position: relative; overflow: hidden; }
+    .cb-panel::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+                        background: linear-gradient(90deg, var(--accent), transparent 70%); }
+    .cb-step-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+    .cb-step-head h2 { font-size: 21px; font-weight: 700; letter-spacing: -.02em; }
+    .cb-step-sub { color: var(--muted); font-size: 13.5px; margin-bottom: 22px; line-height: 1.6; max-width: 60ch; }
+
+    .cb-two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 620px) { .cb-two { grid-template-columns: 1fr; } }
+
+    .cb-choice { display: grid; gap: 10px; }
+    .cb-opt { border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 14px 16px;
+              cursor: pointer; transition: all var(--dur) var(--ease); background: var(--bg-2); }
+    .cb-opt:hover { border-color: var(--accent-line); }
+    .cb-opt.sel { border-color: var(--accent); background: var(--accent-bg); box-shadow: 0 0 0 3px var(--accent-bg); }
+    .cb-opt-t { font-weight: 700; font-size: 14px; }
+    .cb-opt-d { font-size: 12.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+
+    .cb-nav { display: flex; justify-content: space-between; gap: 12px; margin-top: 26px;
+              padding-top: 20px; border-top: 1px solid var(--border); }
+
+    .cb-aside { position: sticky; top: 16px; }
+    .cb-spec { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 20px; }
+    .cb-spec h3 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint);
+                  font-family: var(--font-mono); font-weight: 600; margin-bottom: 14px; }
+    .cb-spec-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px;
+                   padding: 7px 0; border-bottom: 1px solid var(--hairline); }
+    .cb-spec-row:last-child { border-bottom: none; }
+    .cb-spec-k { color: var(--faint); }
+    .cb-spec-v { color: var(--text); text-align: right; font-variant-numeric: tabular-nums; max-width: 62%; }
+    .cb-spec-v.is-empty { color: var(--faint); }
+
+    .cb-suggest { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 16px; }
+    .cb-suggesting { color: var(--accent); font-size: 12px; }
+
+    .cb-pills { display: flex; flex-wrap: wrap; gap: 7px; }
+    .cb-pill { border: 1px solid var(--border-strong); border-radius: 999px; padding: 5px 12px;
+               font-size: 12.5px; cursor: pointer; user-select: none; transition: all var(--dur) var(--ease); }
+    .cb-pill:hover { border-color: var(--accent-line); }
+    .cb-pill.sel { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+
+    .cb-swatches { display: flex; gap: 8px; margin-top: 8px; }
+    .cb-sw { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border-strong); }
+
+    .cb-done { text-align: center; padding: 14px 0 8px; }
+    .cb-done .big { font-family: var(--font-display); font-size: 22px; font-weight: 800; margin: 8px 0; }
+    #cb-readiness .rd-item:first-child { padding-top: 0; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="cb-wrap">
+  <div class="breadcrumb"><a href="/channels">Channels</a><span class="breadcrumb-sep">›</span><span>New channel</span></div>
+
+  <div class="cb-hero">
+    <span class="eyebrow">New channel</span>
+    <h1>Build a channel</h1>
+    <p class="lede">Seven steps from a name to a channel the factory can produce and
+      publish on its own. Every choice has a sane default — change what matters, skip the rest.</p>
+  </div>
+
+  <div class="stepper" id="cb-stepper"></div>
+
+  <div class="cb-grid">
+    <div>
+      <div class="cb-panel" id="cb-panel"></div>
+      <div class="cb-nav">
+        <button class="btn btn-ghost" id="cb-back">← Back</button>
+        <button class="btn btn-primary" id="cb-next">Continue →</button>
+      </div>
+    </div>
+
+    <div class="cb-aside">
+      <div class="cb-spec">
+        <h3>Channel spec</h3>
+        <div id="cb-spec"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="cb-toast"></div>
+
+<script>
+const DEFAULTS = {{ defaults | tojson }};
+const S = {
+  step: 0,
+  channel_id: "", name: "", description: "", language: "en", timezone: "UTC",
+  format: "shorts", shorts_per_week: 7, videos_per_week: 1,
+  brand: { persona_name:"", tone:"", target_audience:"", visual_style:"", voice_guidelines:"",
+           content_pillars:[], color_palette:{primary:"",secondary:"",accent:""} },
+  narration_voice_id: DEFAULTS.voices[0].id,
+  publishing: { ai_disclosure_required:true, auto_thumbnail:true, auto_captions:true },
+  models: Object.assign({}, DEFAULTS.models),
+  advancedModels: false,
+  platforms: ["youtube","tiktok","instagram","facebook"],
+  weekly_video_budget_usd: 135,
+  cost_ceiling_usd_per_episode: DEFAULTS.shorts_ceiling,
+  created: null, readiness: null,
+};
+
+const STEPS = ["Identity","Content","Identity ✨","Narration","Models","Publishing & budget","Review"];
+const $ = s => document.querySelector(s);
+function toast(msg, ok){ const t=$("#cb-toast"); t.textContent=msg; t.className="toast show "+(ok?"toast-ok":"toast-err"); setTimeout(()=>t.className="toast",2600); }
+function slug(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"").slice(0,40); }
+function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function renderStepper(){
+  $("#cb-stepper").innerHTML = STEPS.map((label,i)=>{
+    const cls = i<S.step ? "done" : (i===S.step ? "current" : "");
+    const line = i<STEPS.length-1 ? '<span class="stp-line"></span>' : '';
+    return `<span class="stp ${cls}"><span class="stp-n">${i<S.step?'✓':i+1}</span><span class="hide-sm">${label}</span></span>${line}`;
+  }).join("");
+}
+
+function renderSpec(){
+  const rows = [
+    ["ID", S.channel_id],
+    ["Name", S.name],
+    ["Format", S.format==='shorts' ? `Shorts · ${S.shorts_per_week}/wk`
+              : S.format==='mixed' ? `Mixed · ${S.videos_per_week} long + ${S.shorts_per_week} shorts`
+              : `Long-form · ${S.videos_per_week}/wk`],
+    ["Persona", S.brand.persona_name],
+    ["Tone", S.brand.tone],
+    ["Visual", S.brand.visual_style ? S.brand.visual_style.slice(0,60)+(S.brand.visual_style.length>60?"…":"") : ""],
+    ["Platforms", S.platforms.join(", ")],
+    ["Weekly budget", S.weekly_video_budget_usd ? "$"+S.weekly_video_budget_usd : ""],
+    ["Per-episode ceiling", S.cost_ceiling_usd_per_episode ? "$"+S.cost_ceiling_usd_per_episode : "inherit"],
+  ];
+  $("#cb-spec").innerHTML = rows.map(([k,v])=>
+    `<div class="cb-spec-row"><span class="cb-spec-k">${k}</span><span class="cb-spec-v ${v?'':'is-empty'}">${esc(v)||'—'}</span></div>`
+  ).join("");
+}
+
+const TONES = ["investigative","evidence-based","measured","cinematic","authoritative","curious","urgent","warm","irreverent","minimal"];
+
+function panel(){
+  switch(S.step){
+  case 0: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 1</span><h2>Identity</h2></div>
+    <p class="cb-step-sub">Who is this channel and what does it cover? One clear paragraph — the identity step uses it to propose a look.</p>
+    <div class="cb-two">
+      <div class="field"><label>Channel name</label><input id="f-name" value="${esc(S.name)}" placeholder="The Hypogeum Chronicles"></div>
+      <div class="field"><label>Channel ID</label><input id="f-id" value="${esc(S.channel_id)}" placeholder="auto from name"><div class="hint">lowercase, used in URLs and the DB</div></div>
+    </div>
+    <div class="field"><label>What is this channel about?</label><textarea id="f-desc" placeholder="Investigation-led documentary shorts about archaeological sites whose records went missing — evidence before conclusions, no sensationalism.">${esc(S.description)}</textarea></div>
+    <div class="cb-two">
+      <div class="field"><label>Language</label><input id="f-lang" value="${esc(S.language)}"></div>
+      <div class="field"><label>Timezone (IANA)</label><input id="f-tz" value="${esc(S.timezone)}" placeholder="Asia/Dubai"></div>
+    </div>`;
+
+  case 1: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 2</span><h2>Content & cadence</h2></div>
+    <p class="cb-step-sub">Shorts-only is the autonomous factory default: one vertical clip per day, published immediately.</p>
+    <div class="cb-choice">
+      ${[["shorts","Shorts only","One ~50s vertical video per slot, published now. No weekly bundle."],
+         ["long","Long-form","Full documentary episodes on a weekly schedule."],
+         ["mixed","Mixed","Long-form episodes plus derived shorts."]].map(([v,t,d])=>
+        `<div class="cb-opt ${S.format===v?'sel':''}" data-fmt="${v}"><div class="cb-opt-t">${t}</div><div class="cb-opt-d">${d}</div></div>`).join("")}
+    </div>
+    <div class="cb-two" style="margin-top:16px">
+      ${S.format!=='long' ? `<div class="field"><label>Shorts per week</label><input id="f-spw" type="number" min="1" max="21" value="${S.shorts_per_week}"></div>`:''}
+      ${S.format!=='shorts' ? `<div class="field"><label>Long videos per week</label><input id="f-vpw" type="number" min="0" max="7" value="${S.videos_per_week}"></div>`:''}
+    </div>`;
+
+  case 2: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 3</span><h2>Visual & brand identity</h2></div>
+    <p class="cb-step-sub">Let the studio propose a distinctive identity from your brief, then edit anything.</p>
+    <button class="btn btn-primary cb-suggest" id="f-suggest">✨ Suggest identity</button> <span class="cb-suggesting" id="f-sugstat"></span>
+    <div class="cb-two">
+      <div class="field"><label>Persona</label><input id="b-persona" value="${esc(S.brand.persona_name)}" placeholder="The Archivist"></div>
+      <div class="field"><label>Target audience</label><input id="b-aud" value="${esc(S.brand.target_audience)}" placeholder="history & archaeology enthusiasts, 25–55"></div>
+    </div>
+    <div class="field"><label>Tone</label>
+      <div class="cb-pills" id="b-tones">${TONES.map(t=>`<span class="cb-pill ${(S.brand.tone||'').includes(t)?'sel':''}" data-t="${t}">${t}</span>`).join("")}</div>
+      <input id="b-tone" value="${esc(S.brand.tone)}" style="margin-top:8px" placeholder="or type your own">
+    </div>
+    <div class="field"><label>Visual style</label><textarea id="b-vis" placeholder="warm earth tones, underground & ancient architecture, atmospheric darkness, raking light on stone">${esc(S.brand.visual_style)}</textarea></div>
+    <div class="field"><label>Narrator voice guidelines</label><textarea id="b-voice" placeholder="Authoritative yet accessible. Evidence before conclusions. Pacing measured — let revelations land.">${esc(S.brand.voice_guidelines)}</textarea></div>
+    <div class="field"><label>Content pillars (comma-separated)</label><input id="b-pillars" value="${esc((S.brand.content_pillars||[]).join(', '))}" placeholder="lost records, misread evidence, colonial-era archaeology, acoustics"></div>
+    <div class="field"><label>Palette</label><input id="b-pal" value="${esc([S.brand.color_palette.primary,S.brand.color_palette.secondary,S.brand.color_palette.accent].filter(Boolean).join(', '))}" placeholder="#1c1a17, #c9a24b, #e7ddc9">
+      <div class="cb-swatches" id="b-swatch"></div></div>`;
+
+  case 3: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 4</span><h2>Narration & disclosure</h2></div>
+    <p class="cb-step-sub">The narrator voice and the platform-compliance defaults.</p>
+    <div class="field"><label>Narration voice</label>
+      <select id="n-voice">${DEFAULTS.voices.map(v=>`<option value="${v.id}" ${v.id===S.narration_voice_id?'selected':''}>${esc(v.label)}</option>`).join("")}
+        <option value="__custom__">Custom voice ID…</option></select>
+      <input id="n-voice-custom" style="margin-top:8px;display:none" placeholder="ElevenLabs voice_id">
+    </div>
+    <div class="cb-choice">
+      ${[["ai_disclosure_required","AI disclosure on posts","Adds the required AI-generated disclosure. Keep on."],
+         ["auto_thumbnail","Auto thumbnail","Generate a thumbnail per deliverable."],
+         ["auto_captions","Auto captions","Burn captions into shorts."]].map(([k,t,d])=>
+        `<div class="cb-opt ${S.publishing[k]?'sel':''}" data-pub="${k}"><div class="cb-opt-t">${t}</div><div class="cb-opt-d">${d}</div></div>`).join("")}
+    </div>`;
+
+  case 4: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 5</span><h2>Models</h2></div>
+    <p class="cb-step-sub">The recommended set is tuned for documentary production. Override only if you know why.</p>
+    <div class="cb-opt ${!S.advancedModels?'sel':''}" data-models="rec"><div class="cb-opt-t">Recommended</div><div class="cb-opt-d">Sonnet 4.6 producer · Opus 4.6 research · GPT-5.5-pro thumbnails · MUAPI image & video</div></div>
+    <div class="cb-opt ${S.advancedModels?'sel':''}" data-models="adv" style="margin-top:10px"><div class="cb-opt-t">Advanced</div><div class="cb-opt-d">Set each agent's model and the media providers.</div></div>
+    <div id="m-adv" style="display:${S.advancedModels?'block':'none'};margin-top:16px">
+      ${[["episode_producer","Episode producer"],["research_director","Research director"],["thumbnail_planner","Thumbnail planner"],
+         ["brand_guardian_p1","Brand guardian P1"],["brand_guardian_p2","Brand guardian P2"],
+         ["image_provider","Image provider"],["video_provider","Video provider"]].map(([k,l])=>
+        `<div class="field"><label>${l}</label><input id="m-${k}" value="${esc(S.models[k]||'')}"></div>`).join("")}
+    </div>`;
+
+  case 5: {
+    const rec = S.format==='shorts' ? DEFAULTS.shorts_ceiling : DEFAULTS.long_ceiling;
+    return `
+    <div class="cb-step-head"><span class="eyebrow">Step 6</span><h2>Publishing & budget</h2></div>
+    <p class="cb-step-sub">Every platform publishes through Zernio. Budget guardrails stop a runaway run before it spends.</p>
+    <div class="field"><label>Platforms</label>
+      <div class="cb-pills" id="p-plats">${["youtube","tiktok","instagram","facebook"].map(p=>
+        `<span class="cb-pill ${S.platforms.includes(p)?'sel':''}" data-p="${p}">${p}</span>`).join("")}</div></div>
+    <div class="cb-two">
+      <div class="field"><label>Weekly budget (USD)</label><input id="p-budget" type="number" min="0" value="${S.weekly_video_budget_usd}"></div>
+      <div class="field"><label>Per-episode ceiling (USD)</label><input id="p-ceiling" type="number" min="0" value="${S.cost_ceiling_usd_per_episode||''}" placeholder="${rec}">
+        <div class="hint">A ${S.format==='shorts'?'~60s short':'long episode'} costs ≈ $${S.format==='shorts'?'9–11':'40–60'}. The admission hold reserves this whole amount — set it near the real cost so a tight weekly budget doesn't deny a run. Recommended ≈ $${rec}.</div></div>
+    </div>`;
+  }
+
+  case 6: {
+    if (S.created) return `
+      <div class="cb-done">
+        <span class="eyebrow">Created</span>
+        <div class="big">${esc(S.name)} is set up</div>
+        <p class="lede" style="margin:0 auto 20px">The channel exists with the operator switch <b>off</b>. Finish activation below.</p>
+      </div>
+      <h3 class="card-title">Readiness</h3>
+      <div id="cb-readiness">${readinessHtml()}</div>
+      <div class="btn-row" style="margin-top:18px">
+        <a class="btn" href="/channel/${esc(S.channel_id)}">Open channel →</a>
+        <a class="btn" href="/channel/${esc(S.channel_id)}/operations">Production plan →</a>
+      </div>`;
+    return `
+    <div class="cb-step-head"><span class="eyebrow">Step 7</span><h2>Review</h2></div>
+    <p class="cb-step-sub">This creates the channel with the operator switch off. Nothing runs until you turn it on and sign the operating grant.</p>
+    <div id="cb-review"></div>`;
+  }
+  }
+}
+
+function readinessHtml(){
+  const r = S.readiness;
+  if (!r) return '<p class="muted">Checking…</p>';
+  const mark = { ok:'✓', warn:'!', blocker:'✕' };
+  return r.items.map(i=>`
+    <div class="rd-item">
+      <span class="rd-mark rd-${i.level}">${mark[i.level]}</span>
+      <div><div class="rd-title">${esc(i.title)}</div>
+        <div class="rd-detail">${esc(i.detail)}${i.fix?`<br><span class="accent-text">Fix:</span> ${esc(i.fix)}`:''}</div></div>
+    </div>`).join("");
+}
+
+function bind(){
+  const p = $("#cb-panel");
+  if (S.step===0){
+    p.querySelector("#f-name").oninput = e=>{ S.name=e.target.value; if(!S._idTouched) { S.channel_id=slug(S.name); p.querySelector("#f-id").value=S.channel_id; } renderSpec(); };
+    p.querySelector("#f-id").oninput = e=>{ S._idTouched=true; S.channel_id=slug(e.target.value); renderSpec(); };
+    p.querySelector("#f-desc").oninput = e=> S.description=e.target.value;
+    p.querySelector("#f-lang").oninput = e=> S.language=e.target.value;
+    p.querySelector("#f-tz").oninput = e=>{ S.timezone=e.target.value; };
+  }
+  if (S.step===1){
+    p.querySelectorAll(".cb-opt[data-fmt]").forEach(o=> o.onclick=()=>{ S.format=o.dataset.fmt; S.cost_ceiling_usd_per_episode = S.format==='shorts'?DEFAULTS.shorts_ceiling:DEFAULTS.long_ceiling; render(); });
+    const spw=p.querySelector("#f-spw"), vpw=p.querySelector("#f-vpw");
+    if(spw) spw.oninput=e=> S.shorts_per_week=+e.target.value;
+    if(vpw) vpw.oninput=e=> S.videos_per_week=+e.target.value;
+  }
+  if (S.step===2){
+    p.querySelector("#f-suggest").onclick = suggest;
+    p.querySelectorAll(".cb-pill[data-t]").forEach(el=> el.onclick=()=>{ S.brand.tone=el.dataset.t; p.querySelector("#b-tone").value=el.dataset.t; render(); });
+    const g=(id,f)=>{ const el=p.querySelector(id); if(el) el.oninput=e=>{ f(e.target.value); renderSpec(); }; };
+    g("#b-persona", v=> S.brand.persona_name=v);
+    g("#b-aud", v=> S.brand.target_audience=v);
+    g("#b-tone", v=> S.brand.tone=v);
+    g("#b-vis", v=> S.brand.visual_style=v);
+    g("#b-voice", v=> S.brand.voice_guidelines=v);
+    g("#b-pillars", v=> S.brand.content_pillars = v.split(",").map(x=>x.trim()).filter(Boolean));
+    const pal=p.querySelector("#b-pal");
+    pal.oninput = e=>{ const c=e.target.value.split(",").map(x=>x.trim()); S.brand.color_palette={primary:c[0]||"",secondary:c[1]||"",accent:c[2]||""}; drawSwatch(); };
+    drawSwatch();
+  }
+  if (S.step===3){
+    const sel=p.querySelector("#n-voice"), cust=p.querySelector("#n-voice-custom");
+    sel.onchange = e=>{ if(e.target.value==='__custom__'){ cust.style.display='block'; } else { cust.style.display='none'; S.narration_voice_id=e.target.value; } };
+    cust.oninput = e=> S.narration_voice_id=e.target.value.trim();
+    p.querySelectorAll(".cb-opt[data-pub]").forEach(o=> o.onclick=()=>{ const k=o.dataset.pub; S.publishing[k]=!S.publishing[k]; o.classList.toggle("sel",S.publishing[k]); });
+  }
+  if (S.step===4){
+    p.querySelectorAll(".cb-opt[data-models]").forEach(o=> o.onclick=()=>{ S.advancedModels = o.dataset.models==='adv'; render(); });
+    ["episode_producer","research_director","thumbnail_planner","brand_guardian_p1","brand_guardian_p2","image_provider","video_provider"].forEach(k=>{
+      const el=p.querySelector("#m-"+k); if(el) el.oninput=e=> S.models[k]=e.target.value.trim();
+    });
+  }
+  if (S.step===5){
+    p.querySelectorAll(".cb-pill[data-p]").forEach(el=> el.onclick=()=>{ const pl=el.dataset.p; const i=S.platforms.indexOf(pl); if(i<0)S.platforms.push(pl); else S.platforms.splice(i,1); el.classList.toggle("sel",S.platforms.includes(pl)); renderSpec(); });
+    p.querySelector("#p-budget").oninput = e=>{ S.weekly_video_budget_usd=+e.target.value; renderSpec(); };
+    p.querySelector("#p-ceiling").oninput = e=>{ S.cost_ceiling_usd_per_episode = e.target.value?+e.target.value:null; renderSpec(); };
+  }
+  if (S.step===6 && !S.created){
+    p.querySelector("#cb-review").innerHTML = $("#cb-spec").innerHTML;
+  }
+}
+
+function drawSwatch(){
+  const box = document.querySelector("#b-swatch"); if(!box) return;
+  const c = S.brand.color_palette;
+  box.innerHTML = [c.primary,c.secondary,c.accent].map(h=> h?`<span class="cb-sw" style="background:${esc(h)}"></span>`:'').join("");
+}
+
+async function suggest(){
+  const st = $("#f-sugstat"); st.textContent = "thinking…";
+  try{
+    const r = await fetch("/api/channel-builder/suggest",{method:"POST",headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({description:S.description, format:S.format, name:S.name})});
+    const d = await r.json();
+    if(!d.ok || !d.proposal){ st.textContent = d.error || "unavailable — fill manually"; return; }
+    const pr = d.proposal;
+    S.brand.persona_name = pr.persona_name || S.brand.persona_name;
+    S.brand.tone = pr.tone || S.brand.tone;
+    S.brand.target_audience = pr.target_audience || S.brand.target_audience;
+    S.brand.visual_style = pr.visual_style || S.brand.visual_style;
+    S.brand.voice_guidelines = pr.voice_guidelines || S.brand.voice_guidelines;
+    S.brand.content_pillars = pr.content_pillars || S.brand.content_pillars;
+    if(pr.color_palette) S.brand.color_palette = pr.color_palette;
+    st.textContent = "✓ proposal applied — edit anything";
+    render();
+  }catch(e){ st.textContent = "unavailable — fill manually"; }
+}
+
+function validate(){
+  if (S.step===0){ if(!S.name.trim()) return "name is required"; if(!S.channel_id) return "channel ID is required"; }
+  return null;
+}
+
+async function create(){
+  $("#cb-next").disabled = true; $("#cb-next").textContent = "Creating…";
+  try{
+    const payload = {
+      channel_id:S.channel_id, name:S.name, description:S.description, language:S.language, timezone:S.timezone,
+      format:S.format, shorts_per_week:S.shorts_per_week, videos_per_week:S.videos_per_week,
+      narration_voice_id:S.narration_voice_id, platforms:S.platforms,
+      weekly_video_budget_usd:S.weekly_video_budget_usd, cost_ceiling_usd_per_episode:S.cost_ceiling_usd_per_episode,
+      brand:S.brand, models:(S.advancedModels?S.models:{}), publishing:S.publishing,
+    };
+    const r = await fetch("/api/channels/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const d = await r.json();
+    if(!d.ok){ toast(d.error||"create failed", false); $("#cb-next").disabled=false; $("#cb-next").textContent="Create channel"; return; }
+    S.created = d;
+    render();
+    const rr = await fetch("/api/channel-readiness/"+encodeURIComponent(S.channel_id));
+    const rd = await rr.json();
+    S.readiness = rd.readiness || null;
+    if($("#cb-readiness")) $("#cb-readiness").innerHTML = readinessHtml();
+  }catch(e){ toast(String(e), false); $("#cb-next").disabled=false; }
+}
+
+function render(){
+  renderStepper(); renderSpec();
+  $("#cb-panel").innerHTML = panel();
+  bind();
+  $("#cb-back").style.visibility = S.step===0 ? "hidden" : "visible";
+  const nx = $("#cb-next");
+  if (S.step===6 && !S.created){ nx.textContent = "Create channel"; nx.disabled=false; }
+  else if (S.step===6 && S.created){ nx.style.display="none"; $("#cb-back").style.display="none"; }
+  else { nx.textContent = "Continue →"; nx.disabled=false; nx.style.display=""; }
+}
+
+$("#cb-back").onclick = ()=>{ if(S.step>0){ S.step--; render(); } };
+$("#cb-next").onclick = ()=>{
+  if (S.step===6){ create(); return; }
+  const err = validate(); if(err){ toast(err,false); return; }
+  S.step++; render();
+};
+render();
+</script>
+<style>@media(max-width:700px){.hide-sm{display:none}.stp-line{width:12px}}</style>
+</body>
+</html>

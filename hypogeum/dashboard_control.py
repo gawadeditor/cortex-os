@@ -497,51 +497,89 @@ def create_channel(
     enabled_platforms: Optional[list] = None,
     timezone: str = "UTC",
     weekly_video_budget_usd: Optional[float] = None,
+    cost_ceiling_usd_per_episode: Optional[float] = None,
     cadence: Optional[dict] = None,
     publishing_schedule: Optional[dict] = None,
     narration_voice_id: Optional[str] = None,
     description: str = "",
+    brand: Optional[dict] = None,
+    models: Optional[dict] = None,
+    publishing: Optional[dict] = None,
     db_path: Optional[Path] = None,
 ) -> dict:
     """
-    Create a new channel from the dashboard: the ChannelProfile bundle
-    (brand + publishing + models + channel) via bootstrap_channel(), plus a
-    ChannelOperationsProfile so the autonomous worker can pick it up.
+    Create a new channel from the dashboard / Channel Builder wizard: the
+    ChannelProfile bundle (brand + publishing + models + channel) via
+    bootstrap_channel(), plus a ChannelOperationsProfile so the autonomous
+    worker can pick it up.
 
-    Idempotent on channel_id at the bundle level (bootstrap_channel returns
-    the existing channel); the operations profile is created only if absent.
-    Returns a Result dict.
+    brand:      persona_name, tone, target_audience, visual_style,
+                voice_guidelines, color_palette, content_pillars, hashtags.
+    models:     episode_producer, research_director, thumbnail_planner,
+                brand_guardian_p1/p2, image_provider, video_provider
+                (narration_voice_id is also accepted here or as the top-level
+                kwarg).
+    publishing: ai_disclosure_required, auto_thumbnail, auto_captions,
+                default_tags. enabled_platforms all route to 'zernio'.
+
+    Idempotent on channel_id at the bundle level. Returns a Result dict.
     """
     if not channel_id or not str(channel_id).strip():
         return _err("channel_id is required", "invalid")
     if not name or not str(name).strip():
         return _err("name is required", "invalid")
 
-    platforms = enabled_platforms or ["youtube"]
+    platforms = list(enabled_platforms or ["youtube"])
     cadence = cadence or {"videos_per_week": 1}
+    brand = dict(brand or {})
+    models_in = dict(models or {})
+    publishing_in = dict(publishing or {})
 
     try:
         from hypogeum.channel_config import (
             bootstrap_channel,
             get_channel_operations_profile,
             create_channel_operations_profile,
+            update_channel_operations_profile,
         )
 
-        models: dict = {"image_provider": "muapi", "video_provider": "muapi"}
+        models_cfg: dict = {"image_provider": "muapi", "video_provider": "muapi"}
+        models_cfg.update({k: v for k, v in models_in.items() if v})
         if narration_voice_id:
-            models["narration_voice_id"] = narration_voice_id
+            models_cfg["narration_voice_id"] = narration_voice_id
+
+        brand.setdefault("language", language)
+
+        pub_cfg = {
+            "enabled_platforms": platforms,
+            # every social platform publishes through Zernio for this factory
+            "publishing_provider_by_platform": {p: "zernio" for p in platforms},
+            "ai_disclosure_required": bool(publishing_in.get("ai_disclosure_required", True)),
+            "auto_thumbnail": bool(publishing_in.get("auto_thumbnail", True)),
+            "auto_captions": bool(publishing_in.get("auto_captions", True)),
+        }
+        if publishing_in.get("default_tags"):
+            pub_cfg["default_tags"] = list(publishing_in["default_tags"])
 
         config_dict = {
             "channel_id": channel_id,
             "name": name,
             "description": description,
-            "brand": {"language": language},
-            "publishing": {"enabled_platforms": platforms},
-            "models": models,
+            "brand": brand,
+            "publishing": pub_cfg,
+            "models": models_cfg,
         }
         profile = bootstrap_channel(config_dict, db_path=db_path)
         if profile is None or not getattr(profile, "channel_id", ""):
             return _err("bootstrap_channel returned an empty profile")
+
+        # shorts-only channel -> the shorts-factory config we converged on:
+        # one `short` bundle, NO weekly bundle-cycle / per-deliverable
+        # schedule policy (publish-now), so a produced Short is not blocked
+        # as a "partial bundle".
+        _vpw = cadence.get("videos_per_week")
+        _spw = cadence.get("shorts_per_week")
+        shorts_only = _vpw == 0 and isinstance(_spw, int) and _spw >= 1
 
         ops_created = False
         if get_channel_operations_profile(channel_id, db_path=db_path) is None:
@@ -554,12 +592,19 @@ def create_channel(
                 production_cadence=cadence,
                 publishing_schedule=publishing_schedule or {},
                 weekly_video_budget_usd=weekly_video_budget_usd,
+                cost_ceiling_usd_per_episode=cost_ceiling_usd_per_episode,
                 db_path=db_path,
             )
             ops_created = True
+            if shorts_only:
+                update_channel_operations_profile(
+                    channel_id, db_path=db_path,
+                    deliverable_bundle_definitions=[{"bundle_id": "short", "target_buffer_count": _spw}],
+                    bundle_cycle_policy={}, deliverable_schedule_policy={},
+                )
 
         return _ok(channel_id=channel_id, name=name,
-                   operations_profile_created=ops_created)
+                   operations_profile_created=ops_created, shorts_only=shorts_only)
     except ValueError as exc:
         return _err(str(exc), "invalid")
     except Exception as exc:

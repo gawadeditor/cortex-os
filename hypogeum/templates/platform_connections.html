@@ -5,7 +5,7 @@
   <title>Platform Connections — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
-    .plat-grid       { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px,1fr));
+    .plat-grid       { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px,1fr));
                        gap: var(--gap); margin-top: var(--gap); }
 
     .plat-card       { background: var(--surface); border: 1px solid var(--border);
@@ -26,84 +26,53 @@
     .plat-name       { font-size: 16px; font-weight: 700; }
     .plat-status-row { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 
-    /* Status badges */
     .badge-verified  { font-size: 11px; padding: 2px 8px; border-radius: 99px;
                        background: #0f2016; border: 1px solid #2ea043; color: #3fb950; }
-    .badge-saved     { font-size: 11px; padding: 2px 8px; border-radius: 99px;
-                       background: #1a1200; border: 1px solid #8b6914; color: #d29922; }
-    .badge-partial   { font-size: 11px; padding: 2px 8px; border-radius: 99px;
-                       background: #1a0a00; border: 1px solid var(--yellow); color: var(--yellow); }
     .badge-failed    { font-size: 11px; padding: 2px 8px; border-radius: 99px;
                        background: #1a0000; border: 1px solid var(--red); color: var(--red); }
     .badge-missing   { font-size: 11px; padding: 2px 8px; border-radius: 99px;
                        background: #111; border: 1px solid var(--border); color: var(--muted); }
 
-    /* Credentials table */
-    .cred-table      { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
-    .cred-table th   { text-align: left; color: var(--muted); font-weight: 600;
-                       text-transform: uppercase; font-size: 10px; letter-spacing:.05em;
-                       padding: 0 0 6px 0; border-bottom: 1px solid var(--border); }
-    .cred-table td   { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.04);
-                       vertical-align: middle; }
-    .cred-table tr:last-child td { border-bottom: none; }
+    .acct-row        { display: flex; align-items: baseline; gap: 8px; margin: 4px 0; }
+    .acct-user       { font-family: monospace; font-size: 13px; color: var(--text); }
+    .acct-disp       { font-size: 12px; color: var(--muted); }
 
-    .cred-key        { font-family: monospace; color: var(--text); min-width: 180px; }
-    .cred-label      { color: var(--muted); font-size: 11px; display: block; }
+    .stat-grid       { display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+                       margin: 14px 0; }
+    .stat            { background: rgba(255,255,255,.03); border: 1px solid var(--border);
+                       border-radius: var(--radius); padding: 8px 10px; }
+    .stat-num        { font-size: 18px; font-weight: 700; color: var(--text);
+                       font-variant-numeric: tabular-nums; }
+    .stat-lbl        { font-size: 10px; color: var(--muted); text-transform: uppercase;
+                       letter-spacing: .05em; }
 
-    .src-badge       { display: inline-block; font-size: 10px; padding: 1px 5px;
-                       border-radius: 3px; font-family: monospace; }
-    .src-env         { background: #001a3d; color: #4c9de8; border: 1px solid #1e4a7c; }
-    .src-sp          { background: #0f2016; color: #3fb950; border: 1px solid #2ea043; }
-    .src-missing     { background: #1a0000; color: var(--muted); border: 1px solid #333; }
-
-    .cred-val        { font-family: monospace; font-size: 11px; color: var(--muted);
-                       word-break: break-all; }
-    .cred-age        { font-size: 10px; color: var(--muted); white-space: nowrap; }
-    .cred-expiry     { font-size: 10px; color: var(--yellow); white-space: nowrap; }
-    .cred-expiry-warn{ color: var(--red); }
-
-    /* Account ID row */
-    .account-row     { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px 0;
-                       padding: 8px 10px; background: rgba(255,255,255,.03);
-                       border-radius: var(--radius); border: 1px solid var(--border); }
-    .account-label   { font-size: 10px; color: var(--muted); font-weight: 600;
-                       text-transform: uppercase; letter-spacing:.05em; width: 80px; flex-shrink:0; }
-    .account-val     { font-family: monospace; font-size: 12px; color: var(--text); }
-    .account-missing { font-size: 12px; color: var(--muted); }
-
-    /* Verification block */
     .verif-block     { font-size: 11px; color: var(--muted); margin: 6px 0; }
     .verif-block .ts { font-family: monospace; }
-    .verif-warn      { font-size: 11px; color: var(--yellow); margin-top: 2px; }
     .verif-error     { font-size: 11px; color: var(--red); margin-top: 4px; }
 
-    /* Note */
     .plat-note       { font-size: 11px; color: var(--muted); line-height: 1.5;
-                       margin: 8px 0; padding: 8px; background: rgba(255,255,255,.02);
+                       margin: 10px 0 0 0; padding: 8px; background: rgba(255,255,255,.02);
                        border-radius: 4px; border-left: 2px solid var(--border); }
 
-    /* Missing pills */
-    .missing-block   { margin-top: 8px; }
-    .missing-label   { font-size: 10px; font-weight: 700; color: var(--yellow);
-                       text-transform: uppercase; letter-spacing:.05em; margin-bottom: 4px; }
-    .missing-pill    { display: inline-block; font-family: monospace; font-size: 10px;
-                       padding: 1px 6px; margin: 2px 3px 2px 0;
-                       background: #1a1200; border: 1px solid var(--yellow);
-                       border-radius: 3px; color: var(--yellow); }
-
-    /* Actions */
     .plat-actions    { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-    .btn-authorize   { font-size: 12px; padding: 5px 12px; border-radius: var(--radius);
-                       border: 1px solid var(--green); color: var(--green);
-                       background: rgba(46,160,67,.08); cursor: pointer;
-                       text-decoration: none; display: inline-block; }
-    .btn-authorize:hover { background: rgba(46,160,67,.16); }
-    .btn-verify      { font-size: 12px; padding: 5px 12px; border-radius: var(--radius);
+    .btn-link        { font-size: 12px; padding: 5px 12px; border-radius: var(--radius);
                        border: 1px solid var(--border); color: var(--muted);
-                       background: transparent; cursor: pointer; }
-    .btn-verify:hover { border-color: var(--blue); color: var(--text); }
-    .btn-disabled    { opacity: .4; pointer-events: none; }
-    .verify-result   { font-size: 11px; margin-top: 6px; min-height: 14px; }
+                       background: transparent; text-decoration: none; display: inline-block; }
+    .btn-link:hover  { border-color: var(--blue); color: var(--text); }
+
+    .zernio-bar      { display: flex; align-items: center; gap: 10px; margin-top: var(--gap);
+                       padding: 12px 16px; background: var(--surface);
+                       border: 1px solid var(--border); border-radius: var(--radius); }
+    .zernio-dot      { width: 8px; height: 8px; border-radius: 99px; flex-shrink: 0; }
+    .zernio-dot-ok   { background: #3fb950; }
+    .zernio-dot-bad  { background: var(--red); }
+    .zernio-txt      { font-size: 13px; color: var(--text); }
+    .zernio-sub      { font-size: 11px; color: var(--muted); }
+    .btn-sync        { margin-left: auto; font-size: 12px; padding: 5px 12px;
+                       border-radius: var(--radius); border: 1px solid var(--green);
+                       color: var(--green); background: rgba(46,160,67,.08); cursor: pointer; }
+    .btn-sync:hover  { background: rgba(46,160,67,.16); }
+    .sync-result     { font-size: 11px; margin-left: 8px; }
   </style>
 </head>
 <body>
@@ -117,20 +86,32 @@
 
 <div class="page-header">
   <h1>Platform Connections</h1>
-  <span class="page-meta">OAuth health, token status, and publish state per platform</span>
+  <span class="page-meta">Every social account is linked through Zernio — connection health and audience come from Zernio's API</span>
+</div>
+
+{% set zapi = platforms[0].zernio_api_active if platforms else false %}
+<div class="zernio-bar">
+  <span class="zernio-dot {{ 'zernio-dot-ok' if zapi else 'zernio-dot-bad' }}"></span>
+  <div>
+    <div class="zernio-txt">Zernio API — {{ 'connected' if zapi else 'no active key' }}</div>
+    <div class="zernio-sub">
+      {% if platforms and platforms[0].zernio_api_label %}{{ platforms[0].zernio_api_label }}{% else %}provider = zernio, secret_profiles{% endif %}
+      · publishes and reports for all four platforms
+    </div>
+  </div>
+  <button class="btn-sync" onclick="syncZernio(this)">Sync from Zernio</button>
+  <span class="sync-result" id="sync-result"></span>
 </div>
 
 <div class="plat-grid">
 {% for p in platforms %}
 {% set vstatus = p.vstatus %}
-
 <div class="plat-card
   {% if vstatus == 'verified' %}plat-card-ok
   {% elif vstatus == 'failed' %}plat-card-fail
-  {% elif vstatus in ('saved','partial') %}plat-card-warn
+  {% elif vstatus == 'saved' %}plat-card-warn
   {% endif %}">
 
-  {# ── Header ──────────────────────────────────────── #}
   <div class="plat-header">
     <div class="plat-icon
       {% if p.id == 'youtube' %}plat-icon-yt
@@ -142,93 +123,41 @@
     <span class="plat-name">{{ p.label }}</span>
     <div class="plat-status-row">
       {% if vstatus == 'verified' %}
-        <span class="badge-verified">✓ Verified</span>
+        <span class="badge-verified">✓ {{ p.status_label }}</span>
       {% elif vstatus == 'failed' %}
-        <span class="badge-failed">✗ Failed</span>
-      {% elif vstatus == 'saved' %}
-        <span class="badge-saved">● Token saved</span>
-      {% elif vstatus == 'partial' %}
-        <span class="badge-partial">◑ Partial</span>
+        <span class="badge-failed">✗ {{ p.status_label }}</span>
       {% else %}
-        <span class="badge-missing">Not configured</span>
+        <span class="badge-missing">{{ p.status_label }}</span>
       {% endif %}
     </div>
   </div>
 
-  {# ── Account ID ──────────────────────────────────── #}
-  <div class="account-row">
-    <span class="account-label">{{ p.account_label }}</span>
-    {% if p.account_id %}
-      <span class="account-val">{{ p.account_id }}</span>
-    {% else %}
-      <span class="account-missing">— not configured —</span>
-    {% endif %}
+  {% if p.username or p.display_label %}
+  <div class="acct-row">
+    {% if p.username %}<span class="acct-user">@{{ p.username }}</span>{% endif %}
+    {% if p.display_label and p.display_label != p.username %}<span class="acct-disp">{{ p.display_label }}</span>{% endif %}
+  </div>
+  {% endif %}
+
+  <div class="stat-grid">
+    <div class="stat">
+      <div class="stat-num">{{ p.followers_count if p.followers_count is not none else '—' }}</div>
+      <div class="stat-lbl">Followers</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ p.analytics_records }}</div>
+      <div class="stat-lbl">Analytics records</div>
+    </div>
   </div>
 
-  {# ── Credentials table ───────────────────────────── #}
-  <table class="cred-table">
-    <thead>
-      <tr>
-        <th>Credential</th>
-        <th>Source</th>
-        <th>Value</th>
-        <th>Age</th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for c in p.credentials %}
-    <tr>
-      <td class="cred-key">
-        {{ c.key }}
-        {% if c.sp_label %}<span class="cred-label">{{ c.sp_label }}</span>{% endif %}
-      </td>
-      <td>
-        {% if c.source == 'secret_profile' %}
-          <span class="src-badge src-sp">secret_profile</span>
-        {% elif c.source == 'env' %}
-          <span class="src-badge src-env">env</span>
-        {% else %}
-          <span class="src-badge src-missing">missing</span>
-        {% endif %}
-      </td>
-      <td class="cred-val">
-        {% if c.is_id and c.masked %}
-          {{ c.masked }}
-        {% elif c.masked %}
-          {{ c.masked }}
-        {% else %}
-          <span style="color:var(--muted);">—</span>
-        {% endif %}
-      </td>
-      <td>
-        {% if c.get('expiry_warning') %}
-          <span class="cred-expiry{% if 'soon' in c.expiry_warning %} cred-expiry-warn{% endif %}">
-            {{ c.expiry_warning }}
-          </span>
-        {% elif c.age_days is not none %}
-          <span class="cred-age">{{ c.age_days }}d ago</span>
-        {% else %}
-          <span class="cred-age" style="color:transparent;">—</span>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-
-  {# ── Last verified ───────────────────────────────── #}
   <div class="verif-block">
     {% if p.verified_at %}
-      Last verified: <span class="ts">{{ p.verified_at }} UTC</span>
-      {% if p.latency_ms is not none %}
-        {% if p.latency_ms == 0 %}
-          <span style="color:var(--yellow);">(format check only — no live probe)</span>
-        {% else %}
-          ({{ p.latency_ms }}ms)
-        {% endif %}
-      {% endif %}
+      Synced from Zernio: <span class="ts">{{ p.verified_at }}</span>
     {% else %}
-      Last verified: <span style="color:var(--muted);">never</span>
+      <span style="color:var(--muted);">Not yet synced from Zernio</span>
+    {% endif %}
+    {% if p.followers_age_days is not none %}
+      · followers {{ p.followers_age_days }}d old
     {% endif %}
   </div>
 
@@ -236,91 +165,42 @@
   <div class="verif-error">✗ {{ p.error }}</div>
   {% endif %}
 
-  {# ── Missing requirements ────────────────────────── #}
-  {% if p.missing %}
-  <div class="missing-block">
-    <div class="missing-label">Missing</div>
-    {% for req in p.missing %}
-    <span class="missing-pill">{{ req }}</span>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  {# ── Note ────────────────────────────────────────── #}
-  {% if p.note %}
   <div class="plat-note">{{ p.note }}</div>
-  {% endif %}
 
-  {# ── Actions ─────────────────────────────────────── #}
   <div class="plat-actions">
-    {% if p.authorize_url %}
-    <a href="{{ p.authorize_url }}" class="btn-authorize">{{ p.authorize_label }}</a>
+    {% if p.profile_url %}
+    <a href="{{ p.profile_url }}" target="_blank" rel="noopener" class="btn-link">Open {{ p.label }} →</a>
     {% endif %}
-    {% if p.get('refresh_url') %}
-    <button class="btn-authorize" onclick="refreshToken(this, '{{ p.id }}', '{{ p.refresh_url }}')">
-      {{ p.refresh_label or 'Refresh Token' }}
-    </button>
-    <span class="verify-result" id="rr-{{ p.id }}"></span>
-    {% endif %}
-    <button class="btn-verify {% if not p.credentials or p.id == 'tiktok' and vstatus == 'missing' %}btn-disabled{% endif %}"
-            onclick="verifyPlatform(this, '{{ p.id }}')">
-      Verify
-    </button>
-    <span class="verify-result" id="vr-{{ p.id }}"></span>
+    <a href="https://zernio.com" target="_blank" rel="noopener" class="btn-link">Manage on Zernio →</a>
   </div>
-
 </div>
 {% endfor %}
 </div>
 
 <script>
-function refreshToken(btn, provider, url) {
-  var el = document.getElementById('rr-' + provider);
+function syncZernio(btn) {
+  var el = document.getElementById('sync-result');
   btn.disabled = true;
-  btn.textContent = 'Refreshing…';
+  var orig = btn.textContent;
+  btn.textContent = 'Syncing…';
   el.textContent = '';
-  fetch(url, {method: 'POST'})
+  fetch('/api/platforms/zernio/sync', {method: 'POST'})
     .then(function(r){ return r.json(); })
     .then(function(d){
       btn.disabled = false;
-      btn.textContent = 'Refresh Token';
+      btn.textContent = orig;
       if (d.ok) {
         el.style.color = 'var(--green)';
-        el.textContent = '✓ ' + (d.message || 'Token refreshed');
+        el.textContent = '✓ ' + (d.synced || 0) + ' account(s) synced';
+        setTimeout(function(){ location.reload(); }, 700);
       } else {
         el.style.color = 'var(--red)';
-        el.textContent = '✗ ' + (d.error || d.note || 'Refresh failed');
+        el.textContent = '✗ ' + (d.error || 'sync failed');
       }
     })
-    .catch(function(e){
+    .catch(function(){
       btn.disabled = false;
-      btn.textContent = 'Refresh Token';
-      el.style.color = 'var(--red)';
-      el.textContent = '✗ network error';
-    });
-}
-
-function verifyPlatform(btn, provider) {
-  var el = document.getElementById('vr-' + provider);
-  btn.disabled = true;
-  btn.textContent = 'Verifying…';
-  el.textContent = '';
-  fetch('/api/providers/verify/' + provider, {method: 'POST'})
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      btn.disabled = false;
-      btn.textContent = 'Verify';
-      if (d.ok || d.status === 'verified') {
-        el.style.color = 'var(--green)';
-        el.textContent = '✓ Verified' + (d.latency_ms ? ' (' + d.latency_ms + 'ms)' : '');
-      } else {
-        el.style.color = 'var(--red)';
-        el.textContent = '✗ ' + (d.error || d.status || 'failed');
-      }
-    })
-    .catch(function(e){
-      btn.disabled = false;
-      btn.textContent = 'Verify';
+      btn.textContent = orig;
       el.style.color = 'var(--red)';
       el.textContent = '✗ network error';
     });

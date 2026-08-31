@@ -321,6 +321,46 @@ class TestGetPlatformConnectionState:
         assert yt["connection_state"] == "connected"
         assert yt["real_count"] >= 1
 
+    def test_zernio_account_is_connection_source_of_truth(self, db):
+        # A Zernio provider_account wins over any direct secret_profile:
+        # no direct YouTube cred here, but an active Zernio youtube account.
+        from hypogeum.publishing.provider_repository import upsert_provider_account
+        upsert_provider_account(
+            db, provider_id="zernio", platform="youtube",
+            external_account_id="acc_yt", display_label="The Hypogeum",
+            status="active", needs_reconnection=False,
+            metadata={"username": "thehypogeum", "followers_count": 3,
+                      "has_analytics_access": True, "synced_at": "2026-08-31T00:00:00+00:00"},
+        )
+        result = get_platform_connection_state(db_path=db)
+        yt = result["platforms"]["youtube"]
+        assert yt["connection_via"] == "zernio"
+        assert yt["has_credential"] is True
+        assert yt["account"]["username"] == "thehypogeum"
+        assert yt["account"]["followers_count"] == 3
+        assert result["any_connected"] is True
+
+    def test_zernio_needs_reconnection_maps_to_published_no_cred(self, db):
+        from hypogeum.publishing.provider_repository import upsert_provider_account
+        upsert_provider_account(
+            db, provider_id="zernio", platform="tiktok",
+            external_account_id="acc_tk", status="needs_reconnection",
+            needs_reconnection=True, metadata={"username": "thehypogeum1"},
+        )
+        result = get_platform_connection_state(db_path=db)
+        tk = result["platforms"]["tiktok"]
+        assert tk["connection_via"] == "zernio"
+        assert tk["has_credential"] is False
+        assert tk["connection_state"] == "published_no_cred"
+        assert tk["connection_label"] == "Reconnect on Zernio"
+
+    def test_no_zernio_row_falls_back_to_direct_credential(self, db_with_credential):
+        # db_with_credential has a direct youtube secret_profile, no Zernio rows.
+        result = get_platform_connection_state(db_path=db_with_credential)
+        yt = result["platforms"]["youtube"]
+        assert yt["connection_via"] == "direct"
+        assert yt["has_credential"] is True
+
     def test_mock_only_no_credential_is_demo_only(self, db_with_mock):
         result = get_platform_connection_state(db_path=db_with_mock)
         yt = result["platforms"]["youtube"]

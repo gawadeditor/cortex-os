@@ -209,21 +209,44 @@ def get_platform_connection_state(db_path: Optional[Path] = None) -> dict:
     analytics = detect_real_vs_mock_analytics(db_path)
     creds      = _load_credentials(db_path)
     published  = _load_published_platforms(db_path)
+    zernio     = _load_zernio_accounts(db_path)
 
     platforms: dict = {}
     any_connected = any_real = any_mock = False
 
     for p in PLATFORMS:
         pdata   = analytics["by_platform"].get(p, _empty_platform_data())
-        cred    = creds.get(p, {"status": "none"})
         has_pub = p in published
+        zern    = zernio.get(p)
 
-        has_cred     = cred["status"] == "active"
         has_real     = pdata["has_real"]
         has_mock     = pdata["has_mock"]
         real_count   = pdata["real_count"]
         mock_count   = pdata["mock_count"]
-        cred_status  = cred["status"]
+
+        # Connection source of truth: Zernio owns the OAuth links to every
+        # social platform for this factory (it publishes and reports health).
+        # A per-platform Zernio account row wins over any legacy direct
+        # secret_profile; the secret_profile path is the fallback only for a
+        # platform Zernio has never reported.
+        if zern is not None:
+            connection_via = "zernio"
+            cred_status    = zern["status"]           # active|needs_reconnection|disconnected
+            has_cred       = zern["is_active"]
+            account        = {
+                "username":               zern.get("username") or zern.get("display_label") or "",
+                "display_label":          zern.get("display_label") or "",
+                "followers_count":        zern.get("followers_count"),
+                "followers_last_updated": zern.get("followers_last_updated"),
+                "profile_url":            zern.get("profile_url") or "",
+                "last_verified_at":       zern.get("last_verified_at"),
+            }
+        else:
+            connection_via = "direct"
+            cred           = creds.get(p, {"status": "none"})
+            cred_status    = cred["status"]
+            has_cred       = cred_status == "active"
+            account        = None
 
         # Determine connection_state
         if has_cred and has_real:
@@ -234,6 +257,10 @@ def get_platform_connection_state(db_path: Optional[Path] = None) -> dict:
             connection_state = "connected_no_data"
             connection_label = "Connected"
             data_label       = "No analytics imported yet"
+        elif connection_via == "zernio" and cred_status == "needs_reconnection":
+            connection_state = "published_no_cred"
+            connection_label = "Reconnect on Zernio"
+            data_label       = "Re-connect required"
         elif has_pub and not has_cred:
             connection_state = "published_no_cred"
             connection_label = "Credential expired"
@@ -251,6 +278,8 @@ def get_platform_connection_state(db_path: Optional[Path] = None) -> dict:
             "name":              _PLATFORM_DISPLAY[p],
             "has_credential":    has_cred,
             "credential_status": cred_status,
+            "connection_via":    connection_via,   # "zernio" | "direct"
+            "account":           account,          # Zernio account info, or None
             "has_published":     has_pub,
             "data_state":        pdata["data_state"],
             "real_count":        real_count,
@@ -279,6 +308,23 @@ def get_platform_connection_state(db_path: Optional[Path] = None) -> dict:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _load_zernio_accounts(db_path: Optional[Path]) -> dict:
+    """
+    {platform: {status, is_active, needs_reconnection, username, display_label,
+     followers_count, followers_last_updated, profile_url, last_verified_at}}
+    for every platform Zernio has reported. Reads the local provider_accounts
+    snapshot only — non-blocking, no network call (sync_zernio_accounts()
+    refreshes it out of band). Empty dict on any error or when Zernio has
+    never been synced.
+    """
+    try:
+        from hypogeum.publishing.zernio_accounts import get_zernio_accounts_snapshot
+        snap = get_zernio_accounts_snapshot(db_path)
+        return snap.get("by_platform", {}) or {}
+    except Exception:
+        return {}
+
 
 def _load_credentials(db_path: Optional[Path]) -> dict:
     """

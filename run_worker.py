@@ -1093,6 +1093,18 @@ def run_iteration(
     if not dry_run and iteration % _ANALYTICS_SYNC_EVERY_N == 0:
         log.info("analytics_sync_triggered iteration=%d", iteration)
         _sync_analytics_background(db_path=db_path, config=config)
+        # Refresh the Zernio account snapshot (connection health + follower
+        # counts) that the dashboard's platform pages read non-blockingly.
+        try:
+            from hypogeum.publishing.zernio_accounts import sync_zernio_accounts
+            _zr = sync_zernio_accounts(db_path)
+            if _zr["ok"]:
+                log.info("zernio_accounts_synced count=%d analytics_access=%s",
+                         _zr["synced"], _zr["has_analytics_access"])
+            else:
+                log.debug("zernio_accounts_sync_skip reason=%s", _zr["error"])
+        except Exception as exc:  # noqa: BLE001
+            log.error("zernio_accounts_sync_error error=%s", exc)
         analytics_synced = True
         # Close the self-learning loop right after fresh analytics land.
         try:

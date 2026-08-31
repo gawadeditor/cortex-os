@@ -41,6 +41,7 @@ SAFETY: dry-run by default; refuses .hypogeum-assets/hypogeum.db without
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -112,6 +113,16 @@ def main(argv: list[str] | None = None) -> int:
         "production_cadence": dict(prof.production_cadence or {}),
         "deliverable_bundle_definitions": list(prof.deliverable_bundle_definitions or []),
         "weekly_video_budget_usd": prof.weekly_video_budget_usd,
+        # hypogeum_weekly_release_v1 requires main_episode + short_001/2/3
+        # published as ONE synchronized weekly release. The Zernio
+        # aggregation model groups deliverables by identical platform-set
+        # (main -> {youtube}; shorts -> {youtube,tiktok}; short_003 ->
+        # +instagram), so a one-off publish of this episode always presents
+        # a "partial bundle" to the cycle scheduler -> blocked_schedule.
+        # Cleared for this publish, restored exactly after. (Obsolete for
+        # the channel's shorts-only direction anyway — remove it from the
+        # dashboard for good.)
+        "bundle_cycle_policy": copy.deepcopy(prof.bundle_cycle_policy or {}),
     }
 
     try:
@@ -145,8 +156,10 @@ def main(argv: list[str] | None = None) -> int:
             {"bundle_id": "short", "target_buffer_count": 3},
         ],
         weekly_video_budget_usd=float(args.weekly_budget),
+        bundle_cycle_policy={},   # publish this episode's deliverables independently
     )
-    print("  [1] channel switched to long-form cadence, weekly budget raised")
+    print("  [1] channel switched to long-form cadence, weekly budget raised, "
+          "bundle_cycle_policy cleared for the publish")
     _resign_grant(f"weekly ceiling -> ${args.weekly_budget}")
 
     _fsnap = None          # factory monthly_ceiling_usd snapshot for restore
@@ -381,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             production_cadence=snap["production_cadence"],
             deliverable_bundle_definitions=snap["deliverable_bundle_definitions"],
             weekly_video_budget_usd=snap["weekly_video_budget_usd"],
+            bundle_cycle_policy=snap["bundle_cycle_policy"],
         )
         _resign_grant(f"weekly ceiling restored -> ${snap['weekly_video_budget_usd']}")
         print(f"  [5] channel operations profile restored "

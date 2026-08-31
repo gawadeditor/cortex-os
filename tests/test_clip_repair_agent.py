@@ -1365,6 +1365,54 @@ class TestCoverageFillPlanAwareResume:
         events = [c.args[0] for c in log.error.call_args_list]
         assert "coverage_fill_shot_plan_exhausted" in events
 
+    def test_resume_reattaches_existing_on_disk_clips_without_regenerating(self):
+        """The ep_af078f34 regression: a beat whose full declared coverage
+        was already generated + qualified by a prior run (manifest entries
+        AND real files on disk) must have those clips RETURNED so a resumed
+        assembly re-attaches them to the timeline -- with zero new
+        generation. Before the fix fill_coverage_deficits() returned only
+        clips generated in the current call, so every already-filled beat
+        was re-flagged insufficient on resume."""
+        from hypogeum.agents.clip_repair_agent import fill_coverage_deficits
+
+        scene, shots = self._five_shot_plan_scene()
+        vp = _make_visual_package([scene])
+        _seed_existing_extra(vp, "s29", 1, shots[1]["shot_id"])
+        _seed_existing_extra(vp, "s29", 2, shots[2]["shot_id"])
+
+        cfg = _make_config(max_generated=5)
+        cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = 5
+        log = MagicMock()
+        beat = _make_s29_beat(deficit_seconds=16.0)  # exactly covered by 2 x 8.0s
+        submitted = []
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            submitted.append(scene_spec)
+            return {"generation_status": "generated"}
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            ep_video = Path(tmp) / "episodes" / "ep_s29" / "video"
+            ep_video.mkdir(parents=True, exist_ok=True)
+            for slot in (1, 2):
+                (ep_video / f"sc_s29__extra{slot}.mp4").write_bytes(b"EXISTING-CLIP")
+            with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+                 patch("hypogeum.agents.clip_repair_agent._probe_extra_clip_duration", return_value=8.0):
+                result = fill_coverage_deficits(
+                    insufficient_beats=[beat],
+                    visual_package=vp,
+                    assets_root=Path(tmp),
+                    config=cfg,
+                    episode_id="ep_s29",
+                    log=log,
+                )
+
+        assert submitted == [], "must not regenerate a beat already fully covered on disk"
+        assert len(result.get("s29", [])) == 2, "both existing on-disk clips must be returned for re-attach"
+        assert all(p.name.startswith("sc_s29__extra") for p in result["s29"])
+        events = [c.args[0] for c in log.error.call_args_list]
+        assert "coverage_fill_beat_unresolvable" not in events
+
     def test_fresh_call_unaffected_by_unrelated_beats_manifest_entries(self):
         """A different beat's already-represented shots must never affect
         this beat's own shot selection -- represented-shot lookup is

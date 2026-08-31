@@ -566,6 +566,37 @@ def fill_coverage_deficits(
                 available_shots=len(available_shots),
                 existing_extra_slots=len(existing_extra_ids),
             )
+
+        # Resume completeness (2026-08-31): re-attach the coverage-fill
+        # clips this beat ALREADY holds on the asset_manifest — qualified
+        # and paid for by a prior run — so a resumed assembly counts them
+        # toward coverage even for a beat that needs zero NEW generation.
+        # Without this, fill_coverage_deficits() returned ONLY clips it
+        # generated in the current call, so an interrupted-then-resumed
+        # coverage-fill (ep_af078f34: 83/86 clips over ~5h, then a restart)
+        # re-flagged every already-filled beat as insufficient because
+        # check_timeline_coverage() never saw the existing footage.
+        from hypogeum.muapi import scene_file_path as _scene_file_path  # noqa: PLC0415
+        existing_extra_paths: List[Path] = []
+        for _a in manifest_assets:
+            _asid = _a.get("scene_id") or ""
+            if not _asid.startswith(existing_extra_prefix):
+                continue
+            _p = _scene_file_path(output_dir, _asid, beat.short_id)
+            if _p.exists() and _p not in existing_extra_paths:
+                existing_extra_paths.append(_p)
+        if existing_extra_paths:
+            new_paths.extend(existing_extra_paths)
+            for _p in existing_extra_paths:
+                remaining -= _probe_extra_clip_duration(_p)
+            log.info(
+                "coverage_fill_existing_clips_reattached",
+                episode_id=episode_id,
+                scene_id=sid,
+                reattached=len(existing_extra_paths),
+                remaining_deficit_seconds=round(max(0.0, remaining), 3),
+            )
+
         next_shot_idx = 0  # index into available_shots, not planned_shots
 
         # Cost-visibility estimate (planning only — the real stopping

@@ -74,6 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--i-understand-this-is-production", action="store_true")
     ap.add_argument("--skip-pipeline", action="store_true",
                     help="do steps 1-3 + 5 only (wipe + reconfig + restore), not the run")
+    ap.add_argument("--keep-coverage", action="store_true",
+                    help="do NOT wipe existing sc_*__extra*.mp4 coverage-fill clips "
+                         "(step 2). Use for a resume that only needs to fill the few "
+                         "beats a prior run left unresolved (e.g. transient "
+                         "gate_lease_unavailable at startup), keeping the clips "
+                         "already generated + paid for.")
     args = ap.parse_args(argv)
 
     db = (args.db or _PROD_DB).resolve()
@@ -182,17 +188,22 @@ def main(argv: list[str] | None = None) -> int:
               f"${_fnew:.2f}; env FINANCE_BUDGET_CEILING_USD -> ${_target:.2f}")
 
         # 2. wipe stale coverage-fill clips + manifest entries
-        for p in stale:
-            p.unlink(missing_ok=True)
-        if stale_manifest:
-            vp["asset_manifest"]["assets"] = [
-                a for a in manifest if "__extra" not in (a.get("scene_id") or "")
-            ]
-            # also drop any generation_status the base scenes carry for extras
-            for sc in vp.get("scenes", []):
-                sc.pop("coverage_fill_status", None)
-            vp_path.write_text(json.dumps(vp, indent=2))
-        print(f"  [2] deleted {len(stale)} stale clips, {len(stale_manifest)} manifest entries")
+        if args.keep_coverage:
+            print(f"  [2] --keep-coverage: kept {len(stale)} existing coverage clips "
+                  f"/ {len(stale_manifest)} manifest entries; Assembly fills only "
+                  f"the beats still short")
+        else:
+            for p in stale:
+                p.unlink(missing_ok=True)
+            if stale_manifest:
+                vp["asset_manifest"]["assets"] = [
+                    a for a in manifest if "__extra" not in (a.get("scene_id") or "")
+                ]
+                # also drop any generation_status the base scenes carry for extras
+                for sc in vp.get("scenes", []):
+                    sc.pop("coverage_fill_status", None)
+                vp_path.write_text(json.dumps(vp, indent=2))
+            print(f"  [2] deleted {len(stale)} stale clips, {len(stale_manifest)} manifest entries")
 
         # 2b. Write the post-VPD finance authorization record.
         #     On a phase2-complete resume the pipeline skips VPD entirely

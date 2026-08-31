@@ -345,6 +345,28 @@ def _backfill_canonical_platform_metadata(
         existing_entries.extend(new_entries)
         changed = True
 
+    # Backfill thumbnail_ref onto ANY existing main_episode entry that is
+    # missing it — not only entries generated in this call. An entry
+    # written by an earlier run (before the openrouter POST_PLAN
+    # plan-binding fix, or before resolve_canonical_main_thumbnail
+    # tolerated a stale-report warn) is present but carries
+    # thumbnail_ref=None, so `missing_platforms` above is empty and the
+    # per-creation backfill never reaches it — leaving cross_platform_
+    # readiness to fail youtube/main_episode forever on "thumbnail_ref is
+    # absent".
+    _main_needs_thumb = [
+        e for e in existing_entries
+        if e.get("deliverable_id") == MAIN_EPISODE_DELIVERABLE_ID and not e.get("thumbnail_ref")
+    ]
+    if _main_needs_thumb:
+        try:
+            _thumb = resolve_canonical_main_thumbnail(episode_id, episode_dir)
+            for e in _main_needs_thumb:
+                e["thumbnail_ref"] = _thumb.asset_id
+            changed = True
+        except ThumbnailResolutionError:
+            pass  # readiness's own F_THUMBNAIL check is the real gate
+
     if not changed:
         return final_render_package
 

@@ -747,10 +747,20 @@ def resolve_canonical_main_thumbnail(episode_id: str, episode_dir: Path) -> Reso
 
     qa_report = package.get("thumbnail_qa_report") or {}
     qa_status = qa_report.get("overall_status")
-    if qa_status != "pass":
+    qa_failures = qa_report.get("failures") or []
+    # Block on a hard "fail", or on a "warn" that carries real failures.
+    # A "warn" with an EMPTY failures list is advisory only — most often a
+    # check that was SKIPPED, not one that flagged a defect (e.g.
+    # "thumbnail_headline_embedded: main candidate not found in
+    # candidates — headline check skipped" on an older package layout,
+    # even though production_output_gate._check_thumbnail re-runs the QA
+    # fresh and passes). Matching that gate's "block only on real
+    # failures" philosophy here unblocks youtube/main_episode publishing
+    # for a thumbnail that is genuinely fine.
+    if qa_status == "fail" or (qa_status != "pass" and qa_failures):
         raise ThumbnailResolutionError(
-            reason=f"thumbnail_qa_report.overall_status is {qa_status!r}, not 'pass' — {qa_report.get('failures')}",
-            evidence={"qa_status": qa_status, "failures": qa_report.get("failures")},
+            reason=f"thumbnail_qa_report.overall_status is {qa_status!r} with failures {qa_failures}",
+            evidence={"qa_status": qa_status, "failures": qa_failures},
         )
 
     identity_report = package.get("thumbnail_identity_report") or {}

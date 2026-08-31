@@ -554,25 +554,27 @@ class TestSSERouteReturns:
 # ===========================================================================
 
 class TestNavExpandedPhaseD:
-    def _check_nav(self, text):
-        assert "/live"  in text
-        assert "/queue" in text
-        # /failures is in the Command page's Investigate section, not primary nav
+    # post-IA restructure: Live / Run history / Failures are Production
+    # section tabs, reachable from the Production sub-nav on those pages,
+    # not repeated on the top nav of every page.
+    def _check_production_subnav(self, text):
+        assert 'class="sub-nav"' in text
+        assert "/live" in text
+        assert "/runs" in text
 
     def test_dashboard_has_phase_d_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/dashboard")
-        self._check_nav(r.get_data(as_text=True))
+        # Home links to live/runs from its run-queue + latest-episodes cards
+        text = client.get("/dashboard").get_data(as_text=True)
+        assert "/live" in text
 
     def test_live_page_has_phase_d_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/live")
-        self._check_nav(r.get_data(as_text=True))
+        self._check_production_subnav(client.get("/live").get_data(as_text=True))
 
     def test_runs_page_has_phase_d_nav(self, flask_client):
         client, _ = flask_client
-        r = client.get("/runs")
-        self._check_nav(r.get_data(as_text=True))
+        self._check_production_subnav(client.get("/runs").get_data(as_text=True))
 
 
 # ===========================================================================

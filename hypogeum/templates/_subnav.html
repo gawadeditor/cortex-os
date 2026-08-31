@@ -24,10 +24,12 @@
                   or (h == '/episodes' and p.startswith('/episode/')) -%}
     {%- if hit and h|length > ns.blen -%}{%- set ns.best = h -%}{%- set ns.blen = h|length -%}{%- endif -%}
   {%- endfor -%}
+<div class="container">
 <nav class="sub-nav" aria-label="{{ section }} sections">
   {%- for label, href in tabs -%}
   <a href="{{ href }}" class="sub-nav-link {{ 'active' if href == ns.best }}">{{ label }}</a>
   {%- endfor -%}
 </nav>
+</div>
 {%- endif -%}
 {%- endmacro -%}

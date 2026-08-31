@@ -90,6 +90,28 @@
       .catch(function(){ btn.disabled=false; poll(); });
   });
   poll(); setInterval(poll, 15000);
+
+  /* ── presentation skin: count-up on [data-countup] numbers ── */
+  function countUp(){
+    if (root.dataset.skin !== 'presentation') return;
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll('[data-countup]').forEach(function(el){
+      if (el._counted) return; el._counted = true;
+      var target = parseFloat(el.getAttribute('data-countup'));
+      if (!isFinite(target)) return;
+      var dec = (el.getAttribute('data-countup').split('.')[1] || '').length;
+      var t0 = null, dur = 900;
+      function step(ts){
+        if (!t0) t0 = ts;
+        var p = Math.min((ts - t0) / dur, 1);
+        var e = 1 - Math.pow(1 - p, 3);
+        el.textContent = (target * e).toFixed(dec);
+        if (p < 1) requestAnimationFrame(step); else el.textContent = target.toFixed(dec);
+      }
+      requestAnimationFrame(step);
+    });
+  }
+  countUp();
 })();
 </script>
 

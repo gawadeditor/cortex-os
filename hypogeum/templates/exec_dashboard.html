@@ -223,24 +223,24 @@
 {% set rd = report.readiness_score if report and report.readiness_score is not none else none %}
 {% set _rh = (state.run_health if state else none) or {} %}
 {% set _srate = _rh.get('success_rate') if _rh.get is defined else none %}
-<div class="t1">
+<div class="t1 skin-stagger">
   <div class="t1-card {{ 'is-good' if (rd or 0) >= 85 else ('is-warn' if (rd or 0) >= 60 else 'is-critical') if rd is not none else '' }}">
-    <div class="t1-val">{% if rd is not none %}{{ rd }}<span style="font-size:16px;font-weight:600;color:var(--faint)">%</span>{% else %}—{% endif %}</div>
+    <div class="t1-val">{% if rd is not none %}<span data-countup="{{ rd }}">{{ rd }}</span><span style="font-size:16px;font-weight:600;color:var(--faint)">%</span>{% else %}—{% endif %}</div>
     <div class="t1-lbl">Factory readiness</div>
     {% if rd is not none %}<div class="t1-bar"><i style="width:{{ rd }}%"></i></div>{% endif %}
   </div>
   <div class="t1-card {{ 'is-accent' if (fh0.active_count or 0) > 0 }}">
-    <div class="t1-val">{{ fh0.active_count or 0 }}</div>
+    <div class="t1-val" data-countup="{{ fh0.active_count or 0 }}">{{ fh0.active_count or 0 }}</div>
     <div class="t1-lbl">In production</div>
     <div class="t1-sub">{% if (fh0.active_count or 0) > 0 %}<a href="/live">live view →</a>{% else %}idle{% endif %}</div>
   </div>
   <div class="t1-card {{ 'is-warn' if (fh0.queued_count or 0) > 0 }}">
-    <div class="t1-val">{{ fh0.queued_count or 0 }}</div>
+    <div class="t1-val" data-countup="{{ fh0.queued_count or 0 }}">{{ fh0.queued_count or 0 }}</div>
     <div class="t1-lbl">Queued</div>
     <div class="t1-sub">{% if (fh0.queued_count or 0) > 0 %}<a href="/create">production queue →</a>{% else %}nothing waiting{% endif %}</div>
   </div>
   <div class="t1-card {{ 'is-critical' if (fh0.failed_count or 0) > 0 else 'is-good' }}">
-    <div class="t1-val">{{ fh0.failed_count or 0 }}</div>
+    <div class="t1-val" data-countup="{{ fh0.failed_count or 0 }}">{{ fh0.failed_count or 0 }}</div>
     <div class="t1-lbl">Failed runs</div>
     <div class="t1-sub">{% if (fh0.failed_count or 0) > 0 %}<a href="/failures" class="err">review →</a>{% elif _srate is not none %}{{ (_srate * 100) | round | int }}% success rate{% else %}none{% endif %}</div>
   </div>

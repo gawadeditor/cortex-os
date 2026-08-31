@@ -212,6 +212,35 @@ def order_and_filter_scenes(
     """
     scenes_sorted = sorted(scenes, key=lambda s: s.get("scene_index", 0))
 
+    # ── Short-native: force the deliverable aspect ratio deterministically.
+    # generation_constraints.aspect_ratio is a *soft* hint the LLM has been
+    # observed to ignore, leaving production_spec.aspect_ratio at the "16:9"
+    # default → veo generates landscape → production_output_gate rejects every
+    # clip (it requires 1080x1920 for a short-native episode). This pass is the
+    # single deterministic guarantee that every scene is portrait before it
+    # reaches muapi.submit_scene (which reads visual_spec.aspect_ratio, sourced
+    # from production_spec.aspect_ratio in the VPD).
+    if getattr(config, "SHORT_NATIVE_MODE", False) is True:
+        want = getattr(config, "SHORT_NATIVE_ASPECT_RATIO", "9:16") or "9:16"
+        forced = 0
+        _out = []
+        for s in scenes_sorted:
+            ps = dict(s.get("production_spec") or {})
+            if ps.get("aspect_ratio") != want:
+                forced += 1
+            ps["aspect_ratio"] = want
+            s = {**s, "production_spec": ps}
+            _out.append(s)
+        scenes_sorted = _out
+        if forced:
+            log.warn(
+                "short_native_aspect_forced",
+                scenes=forced,
+                total=len(scenes_sorted),
+                aspect_ratio=want,
+                reason="LLM left production_spec.aspect_ratio non-portrait",
+            )
+
     # Defense-in-depth: if dedicated short generation is disabled, strip any short
     # scenes that Claude may have planned despite generation_constraints.shorts_count=0.
     if not config.ENABLE_DEDICATED_SHORT_GENERATION:

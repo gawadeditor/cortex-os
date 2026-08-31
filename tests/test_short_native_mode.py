@@ -123,6 +123,50 @@ class TestScenePlannerInput:
         assert gc.get("mode") != "short_native"
 
 
+class TestOrderAndFilterForcesPortrait:
+    """order_and_filter_scenes must deterministically force every scene to
+    9:16 in short-native mode — the LLM ignores the soft constraint."""
+
+    def _scenes(self):
+        return [
+            {"scene_index": 1, "scene_id": "sc_1", "production_spec": {"aspect_ratio": "16:9", "duration_seconds": 8}},
+            {"scene_index": 0, "scene_id": "sc_0"},  # no production_spec at all
+            {"scene_index": 2, "scene_id": "sc_2", "production_spec": {"aspect_ratio": "9:16"}},
+        ]
+
+    def test_short_native_forces_9_16_on_every_scene(self):
+        from types import SimpleNamespace
+        from hypogeum.agents.scene_planner import order_and_filter_scenes
+
+        cfg = SimpleNamespace(
+            SHORT_NATIVE_MODE=True, SHORT_NATIVE_ASPECT_RATIO="9:16",
+            ENABLE_DEDICATED_SHORT_GENERATION=False, EPISODE_ZERO_MAX_SCENES=0,
+        )
+        warnings = []
+        log = SimpleNamespace(warn=lambda ev, **kw: warnings.append((ev, kw)),
+                              info=lambda *a, **k: None)
+        src = self._scenes()
+        out = order_and_filter_scenes(src, cfg, log)
+
+        assert all(s["production_spec"]["aspect_ratio"] == "9:16" for s in out)
+        # input not mutated
+        assert src[0]["production_spec"]["aspect_ratio"] == "16:9"
+        # warned once, counting the 2 non-portrait scenes it fixed
+        assert any(ev == "short_native_aspect_forced" and kw["scenes"] == 2 for ev, kw in warnings)
+
+    def test_non_short_native_leaves_aspect_alone(self):
+        from types import SimpleNamespace
+        from hypogeum.agents.scene_planner import order_and_filter_scenes
+
+        cfg = SimpleNamespace(
+            SHORT_NATIVE_MODE=False, ENABLE_DEDICATED_SHORT_GENERATION=True,
+            EPISODE_ZERO_MAX_SCENES=0,
+        )
+        log = SimpleNamespace(warn=lambda *a, **k: None, info=lambda *a, **k: None)
+        out = order_and_filter_scenes(self._scenes(), cfg, log)
+        assert out[1]["production_spec"]["aspect_ratio"] == "16:9"  # unchanged
+
+
 # ---------------------------------------------------------------------------
 # narrative architect + script engine input injection
 # ---------------------------------------------------------------------------

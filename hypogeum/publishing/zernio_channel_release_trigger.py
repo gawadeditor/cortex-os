@@ -867,6 +867,26 @@ def process_channel_ready_bundles(
     resolved_config = config or Config()
     resolved_log = log or get_logger(episode_id=None, agent="zernio_channel_release_trigger")
 
+    # A shorts-only channel (cadence videos_per_week == 0, shorts_per_week >= 1)
+    # produces short-native, portrait deliverables. production_output_gate must
+    # know this so it requires 1080x1920 per clip — otherwise a landscape clip
+    # that slipped through passes the gate and a portrait one is wrongly
+    # rejected. The env default (SHORT_NATIVE_MODE=false) is right for the
+    # generic case; here we derive it from the channel itself.
+    if getattr(resolved_config, "SHORT_NATIVE_MODE", False) is not True:
+        try:
+            from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
+            _ops = get_channel_operations_profile(channel_id, db_path=db_path)
+            _cad = (getattr(_ops, "production_cadence", None) or {}) if _ops else {}
+            if _cad.get("videos_per_week") == 0 and isinstance(_cad.get("shorts_per_week"), int) \
+               and _cad.get("shorts_per_week") >= 1:
+                resolved_config.SHORT_NATIVE_MODE = True
+                resolved_log.info(
+                    "short_native_mode_derived_from_cadence channel_id=%s", channel_id
+                )
+        except Exception:  # fail-soft — never block publishing on this
+            pass
+
     item_ids = resolve_complete_item_ids_for_channel(channel_id, db_path=db_path)
     demand_items = gather_channel_demand_items(
         bundle_definition, item_ids=item_ids, current_cycle_item_ids=current_cycle_item_ids,

@@ -65,7 +65,8 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _setup_channel(db_path, channel_id=CHANNEL_ID, *, platforms_enabled=("youtube",), deliverable_schedule_policy=None):
+def _setup_channel(db_path, channel_id=CHANNEL_ID, *, platforms_enabled=("youtube",),
+                   deliverable_schedule_policy=None, production_cadence=None):
     brand = create_brand_profile(name=f"{channel_id} Brand", db_path=db_path)
     model = create_model_profile(name=f"{channel_id} Model", db_path=db_path)
     pub = create_publishing_profile(name=f"{channel_id} Publishing", db_path=db_path)
@@ -80,12 +81,13 @@ def _setup_channel(db_path, channel_id=CHANNEL_ID, *, platforms_enabled=("youtub
     # legacy/manual callers and is deliberately never relied on by these tests.
     if deliverable_schedule_policy is None:
         deliverable_schedule_policy = {"main_episode": {"day_of_week": "sunday", "time_of_day": "14:00"}}
+    _extra = {"production_cadence": production_cadence} if production_cadence is not None else {}
     create_channel_operations_profile(
         channel_id=channel_id, channel_name=channel_id, timezone="UTC",
         publishing_schedule={"day_of_week": "sunday", "time_of_day": "14:00"},
         enabled_platforms={p: True for p in platforms_enabled},
         deliverable_schedule_policy=deliverable_schedule_policy,
-        db_path=db_path,
+        db_path=db_path, **_extra,
     )
 
 
@@ -848,3 +850,54 @@ class TestBuildPublishPackageResolvesTitleAndDescription:
         assert by_item["ep_good"].result.status == "published"
         assert by_item["ep_bad"].result.status == "blocked_metadata"
         assert by_item["ep_bad"].result.blocked_reason is not None
+
+
+class TestShortNativeModeDerivedFromCadence:
+    """A shorts-only channel (videos_per_week == 0, shorts_per_week >= 1)
+    must run production_output_gate with SHORT_NATIVE_MODE=True so it
+    requires 1080x1920 per clip — the env default is false."""
+
+    def _capture_gate_config(self, monkeypatch):
+        import hypogeum.publishing.zernio_channel_release_trigger as trig
+        from hypogeum.agents.production_output_gate import ProductionOutputGateResult
+        seen = {}
+
+        def _fake_gate(item_id, assets_root, config, log):
+            seen["short_native"] = getattr(config, "SHORT_NATIVE_MODE", None)
+            return ProductionOutputGateResult(
+                passed=True, episode_id=item_id, evaluated_at=_now_iso(), checks=[],
+            )
+
+        monkeypatch.setattr(trig, "run_production_output_gate", _fake_gate)
+        return seen
+
+    def test_shorts_only_cadence_flips_short_native(self, db_path, assets_root, monkeypatch):
+        _setup_channel(
+            db_path,
+            deliverable_schedule_policy={"short": {"day_of_week": "monday", "time_of_day": "18:00"}},
+            production_cadence={"videos_per_week": 0, "shorts_per_week": 7},
+        )
+        _seed_complete_episode(db_path, assets_root, "ep_sn", title="A Real Title")
+        _fully_bind(db_path)
+        seen = self._capture_gate_config(monkeypatch)
+
+        process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            enable_production_output_gate=True,
+        )
+        assert seen.get("short_native") is True
+
+    def test_long_form_cadence_leaves_short_native_off(self, db_path, assets_root, monkeypatch):
+        _setup_channel(
+            db_path,
+            production_cadence={"videos_per_week": 2, "shorts_per_week": 0},
+        )
+        _seed_complete_episode(db_path, assets_root, "ep_lf", title="A Real Title")
+        _fully_bind(db_path)
+        seen = self._capture_gate_config(monkeypatch)
+
+        process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            enable_production_output_gate=True,
+        )
+        assert seen.get("short_native") in (False, None)

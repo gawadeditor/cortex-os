@@ -54,8 +54,8 @@
     </div>
   </div>
   {% if d.run.error_message %}
-  <div style="margin-top:12px; padding:10px 12px; background:#3a0f0a;
-              border:1px solid #da3633; border-radius:var(--radius);">
+  <div style="margin-top:12px; padding:10px 12px; background:var(--critical-bg);
+              border:1px solid var(--critical); border-radius:var(--radius);">
     <div style="font-size:11px; color:var(--red); text-transform:uppercase;
                 letter-spacing:.05em; margin-bottom:4px;">Error</div>
     <pre style="font-size:12px; color:var(--red); white-space:pre-wrap; word-break:break-all;">{{ d.run.error_message }}</pre>
@@ -101,11 +101,11 @@
 {# ── Recovery Panel (failed runs only) ── #}
 {% if recovery and d.run.status == 'failed' %}
 <div class="card" style="border-color:
-  {% if recovery.failure_class == 'resumable' %}#2ea043
+  {% if recovery.failure_class == 'resumable' %}var(--good)
   {% elif recovery.failure_class == 'finance_gate' %}#d4a017
-  {% elif recovery.failure_class == 'retryable' %}#8b6914
-  {% elif recovery.failure_class == 'fatal' %}#da3633
-  {% else %}#8b6914{% endif %};">
+  {% elif recovery.failure_class == 'retryable' %}var(--warn)
+  {% elif recovery.failure_class == 'fatal' %}var(--critical)
+  {% else %}var(--warn){% endif %};">
 
   <div class="card-title" style="display:flex; align-items:center; gap:8px;">
     <span style="color:
@@ -169,7 +169,7 @@
 
   <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
     {% if recovery.can_rerun %}
-    <button class="btn" style="background:rgba(46,160,67,.12); border-color:#2ea043; color:var(--green);"
+    <button class="btn" style="background:rgba(46,160,67,.12); border-color:var(--good); color:var(--green);"
             id="btn-rerun" onclick="rerunEpisode('{{ d.run.run_id }}', this)">
       ▶ Re-run Episode
     </button>
@@ -180,7 +180,7 @@
 
   {# ── Duplicate queue panel — hidden until JS reveals it ── #}
   <div id="duplicate-panel" style="display:none; margin-top:14px; padding:12px 14px;
-       background:#1a1200; border:1px solid #8b6914; border-radius:var(--radius);">
+       background:var(--warn-bg); border:1px solid var(--warn); border-radius:var(--radius);">
     <div style="font-size:11px; color:var(--yellow); text-transform:uppercase;
                 letter-spacing:.05em; margin-bottom:6px;">Existing Queued Entry Detected</div>
     <div style="font-size:13px; margin-bottom:10px;">
@@ -194,7 +194,7 @@
     </div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
       <a id="btn-use-existing" href="/create" class="btn"
-         style="background:rgba(46,160,67,.08); border-color:#2ea043; color:var(--green);">
+         style="background:rgba(46,160,67,.08); border-color:var(--good); color:var(--green);">
         ✓ Use Existing Queued Run →
       </a>
       <button class="btn" style="border-color:var(--red); color:var(--red);"

@@ -57,15 +57,15 @@
                      letter-spacing: .05em; margin-top: 4px; }
 
     /* Status badge chip */
-    .badge-worker-idle      { background: #0d1f12; color: var(--green); border: 1px solid #2ea043; }
-    .badge-worker-running   { background: #0d1620; color: var(--blue);  border: 1px solid #1f6feb; }
-    .badge-worker-claiming  { background: #0d1620; color: var(--blue);  border: 1px solid #1f6feb; }
-    .badge-worker-error     { background: #1f0a09; color: var(--red);   border: 1px solid #da3633; }
+    .badge-worker-idle      { background: #0d1f12; color: var(--green); border: 1px solid var(--good); }
+    .badge-worker-running   { background: var(--info-bg); color: var(--blue);  border: 1px solid var(--info); }
+    .badge-worker-claiming  { background: var(--info-bg); color: var(--blue);  border: 1px solid var(--info); }
+    .badge-worker-error     { background: var(--critical-bg); color: var(--red);   border: 1px solid var(--critical); }
     .badge-worker-unknown   { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
-    .badge-worker-paused    { background: #1e1a00; color: var(--yellow); border: 1px solid #9e6a03; }
-    .badge-worker-cancelling { background: #1e0a1e; color: #d2a8ff; border: 1px solid #8957e5; }
-    .dot-cancelling { background: #8957e5; animation: pulse 0.8s ease-in-out infinite; }
-    .badge-queue-paused { background: #1e1a00; color: var(--yellow); border: 1px solid #9e6a03;
+    .badge-worker-paused    { background: var(--warn-bg); color: var(--yellow); border: 1px solid var(--warn); }
+    .badge-worker-cancelling { background: #1e0a1e; color: #c9a6ff; border: 1px solid #8b5cf6; }
+    .dot-cancelling { background: #8b5cf6; animation: pulse 0.8s ease-in-out infinite; }
+    .badge-queue-paused { background: var(--warn-bg); color: var(--yellow); border: 1px solid var(--warn);
                           font-size:10px; padding:1px 8px; border-radius:3px; display:inline-block; }
     .btn-cancel-run { font-size: 10px; padding: 2px 8px; border-radius: var(--radius);
                       border: 1px solid var(--red); color: var(--red);
@@ -110,7 +110,7 @@
     .tl-total  { font-weight: 700; color: var(--text); }
     .default-rule-tag { display: inline-block; font-size: 9px; font-weight: 700;
                         letter-spacing: .06em; padding: 1px 5px; border-radius: 3px;
-                        background: #1a1200; border: 1px solid var(--yellow);
+                        background: var(--warn-bg); border: 1px solid var(--yellow);
                         color: var(--yellow); text-transform: uppercase; margin-bottom:6px; }
     .pub-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap);
                  font-size: 12px; }
@@ -600,7 +600,7 @@
         <td style="padding:4px 8px; color:var(--muted);">{{ loop.index }}</td>
         <td style="padding:4px 8px;">
           {% if item.cancel_requested %}
-          <span style="color:#d2a8ff; font-weight:600;">CANCELLING</span>
+          <span style="color:#c9a6ff; font-weight:600;">CANCELLING</span>
           {% else %}
           <span style="color:{% if item.status == 'claimed' %}var(--blue){% else %}var(--yellow){% endif %}; font-weight:600;">
             {{ item.status | upper }}
@@ -631,7 +631,7 @@
             ✕ Cancel Run
           </button>
           {% elif item.cancel_requested %}
-          <span style="font-size:10px; color:#d2a8ff;">cancelling…</span>
+          <span style="font-size:10px; color:#c9a6ff;">cancelling…</span>
           {% else %}
           <span style="font-size:10px; color:var(--muted);">—</span>
           {% endif %}
@@ -870,9 +870,9 @@ function cancelRun(queueId, btn) {
       var row = document.getElementById('qrow-' + queueId);
       if (row) {
         var statusCell = row.cells[1];
-        if (statusCell) statusCell.innerHTML = '<span style="color:#d2a8ff; font-weight:600;">CANCELLING</span>';
+        if (statusCell) statusCell.innerHTML = '<span style="color:#c9a6ff; font-weight:600;">CANCELLING</span>';
         var actionCell = row.cells[8];
-        if (actionCell) actionCell.innerHTML = '<span style="font-size:10px; color:#d2a8ff;">cancelling…</span>';
+        if (actionCell) actionCell.innerHTML = '<span style="font-size:10px; color:#c9a6ff;">cancelling…</span>';
       }
     } else {
       btn.disabled = false;

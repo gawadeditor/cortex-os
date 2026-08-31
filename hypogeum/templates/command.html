@@ -15,9 +15,9 @@
       padding: 18px 20px; border-radius: var(--radius); margin-bottom: var(--gap);
       border-width: 2px; border-style: solid;
     }
-    .factory-banner-healthy  { background: #0d1f14; border-color: #2ea043; }
-    .factory-banner-degraded { background: #1f1800; border-color: #9e6a03; }
-    .factory-banner-blocked  { background: #1f0a09; border-color: #da3633; }
+    .factory-banner-healthy  { background: #0d1f14; border-color: var(--good); }
+    .factory-banner-degraded { background: #1f1800; border-color: var(--warn); }
+    .factory-banner-blocked  { background: var(--critical-bg); border-color: var(--critical); }
     .factory-banner-unknown  { background: var(--surface); border-color: var(--border); }
     .factory-banner-icon { font-size: 28px; flex-shrink: 0; line-height: 1; padding-top: 2px; }
     .factory-banner-body { flex: 1; min-width: 0; }
@@ -55,7 +55,7 @@
     .decision-card:last-child { margin-bottom: 0; }
     .dc-critical { border-left: 3px solid var(--red); }
     .dc-high     { border-left: 3px solid var(--yellow); }
-    .dc-medium   { border-left: 3px solid #9e6a03; }
+    .dc-medium   { border-left: 3px solid var(--warn); }
     .dc-low      { border-left: 3px solid var(--border); }
     .dc-icon { flex-shrink: 0; font-size: 13px; padding-top: 2px; width: 16px; text-align: center; }
     .dc-body { flex: 1; min-width: 0; }
@@ -68,7 +68,7 @@
       white-space: pre-wrap; word-break: break-word;
     }
     .dc-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-    .btn-primary { background: #1a2a3a; border-color: var(--blue); color: var(--blue); }
+    .btn-primary { background: var(--info-bg); border-color: var(--blue); color: var(--blue); }
     .btn-primary:hover { background: #1f3a4a; }
     .empty-state {
       padding: 18px 20px; color: var(--muted); font-size: 13px;
@@ -131,20 +131,20 @@
                      gap: 10px; }
     .provider-card { background: var(--bg); border: 1px solid var(--border);
                      border-radius: var(--radius); padding: 12px 14px; }
-    .provider-card-configured { border-color: #2ea043; }
-    .provider-card-untested   { border-color: #9e6a03; }
-    .provider-card-missing    { border-color: #da3633; }
-    .provider-card-expired    { border-color: #da3633; }
+    .provider-card-configured { border-color: var(--good); }
+    .provider-card-untested   { border-color: var(--warn); }
+    .provider-card-missing    { border-color: var(--critical); }
+    .provider-card-expired    { border-color: var(--critical); }
     .provider-card-revoked    { border-color: var(--muted); }
     .provider-name { font-weight: 600; font-size: 13px; margin-bottom: 4px;
                      display: flex; align-items: center; gap: 6px; }
     .provider-badge { font-size: 10px; font-weight: 700; padding: 1px 6px;
                       border-radius: 8px; text-transform: uppercase; }
-    .provider-badge-configured { background: #1a3a22; color: var(--green); }
-    .provider-badge-untested   { background: #3a2e0d; color: var(--yellow); }
-    .provider-badge-missing    { background: #3a0f0a; color: var(--red); }
-    .provider-badge-expired    { background: #3a0f0a; color: var(--red); }
-    .provider-badge-revoked    { background: #1e2430; color: var(--muted); }
+    .provider-badge-configured { background: var(--good-bg); color: var(--green); }
+    .provider-badge-untested   { background: var(--warn-bg); color: var(--yellow); }
+    .provider-badge-missing    { background: var(--critical-bg); color: var(--red); }
+    .provider-badge-expired    { background: var(--critical-bg); color: var(--red); }
+    .provider-badge-revoked    { background: var(--overlay); color: var(--muted); }
     .provider-req  { font-size: 10px; color: var(--muted); margin-top: 2px; }
     .provider-note { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
   </style>

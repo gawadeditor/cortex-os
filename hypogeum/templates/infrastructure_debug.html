@@ -12,8 +12,8 @@
 
     .debug-card { background: var(--surface); border: 1px solid var(--border);
                   border-radius: var(--radius); padding: 16px 18px; }
-    .debug-card-available { border-color: #2ea043; }
-    .debug-card-degraded  { border-color: #9e6a03; }
+    .debug-card-available { border-color: var(--good); }
+    .debug-card-degraded  { border-color: var(--warn); }
     .debug-card-unknown   { border-style: dashed; }
 
     .dc-header { display: flex; align-items: center; gap: 8px;
@@ -36,7 +36,7 @@
     .dc-link { font-size: 12px; padding: 4px 12px; border: 1px solid var(--border);
                border-radius: var(--radius); color: var(--muted); text-decoration: none; }
     .dc-link:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
-    .dc-link-available { border-color: #2ea043; color: var(--green); }
+    .dc-link-available { border-color: var(--good); color: var(--green); }
     .dc-link-available:hover { background: #0d1f12; color: var(--green); }
 
     /* Summary banner */
@@ -50,7 +50,7 @@
                 letter-spacing: .05em; margin-top: 4px; }
 
     /* Warning note */
-    .dev-note { background: #1e1a00; border: 1px solid #9e6a03;
+    .dev-note { background: var(--warn-bg); border: 1px solid var(--warn);
                 border-radius: var(--radius); padding: 10px 14px;
                 font-size: 12px; color: var(--yellow); margin-bottom: var(--gap);
                 display: flex; gap: 8px; align-items: flex-start; }

@@ -12,8 +12,8 @@
       margin-bottom: var(--gap); display: flex; align-items: baseline;
       gap: 12px; border: 1px solid;
     }
-    .engine-ready   { background:#0d1f14; border-color:#2ea043; }
-    .engine-partial { background:#1f1800; border-color:#9e6a03; }
+    .engine-ready   { background:#0d1f14; border-color:var(--good); }
+    .engine-partial { background:#1f1800; border-color:var(--warn); }
     .engine-not_ready { background:var(--surface); border-color:var(--border); }
     .engine-level { font-size:13px; font-weight:700; text-transform:uppercase;
                     letter-spacing:.05em; }
@@ -30,7 +30,7 @@
     .dec-card:last-child { margin-bottom:0; }
     .dec-card-1 { border-left:3px solid var(--red); }
     .dec-card-2 { border-left:3px solid var(--yellow); }
-    .dec-card-3 { border-left:3px solid #9e6a03; }
+    .dec-card-3 { border-left:3px solid var(--warn); }
     .dec-card-4 { border-left:3px solid var(--border); }
     .dec-header { display:flex; align-items:baseline; gap:10px; margin-bottom:8px;
                   flex-wrap:wrap; }

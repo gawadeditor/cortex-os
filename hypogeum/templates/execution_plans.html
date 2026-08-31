@@ -27,13 +27,13 @@
 
     .risk-badge { font-size: 10px; font-weight: 700; padding: 2px 8px;
                   border-radius: 8px; white-space: nowrap; }
-    .risk-low     { background: #1a3a22; color: var(--green); }
-    .risk-medium  { background: #3a2e0d; color: var(--yellow); }
-    .risk-high    { background: #3a0f0a; color: var(--red); }
+    .risk-low     { background: var(--good-bg); color: var(--green); }
+    .risk-medium  { background: var(--warn-bg); color: var(--yellow); }
+    .risk-high    { background: var(--critical-bg); color: var(--red); }
     .risk-blocked { background: #2a1a2a; color: var(--muted); }
 
     .mode-badge { font-size: 10px; font-weight: 700; padding: 2px 8px;
-                  border-radius: 8px; background: #1a2a3a; color: var(--blue); }
+                  border-radius: 8px; background: var(--info-bg); color: var(--blue); }
 
     .plan-summary { font-size: 13px; color: var(--text); margin-bottom: 8px; line-height: 1.5; }
 
@@ -50,7 +50,7 @@
 
     .blockers-box {
       font-size: 11px; color: var(--red); font-family: monospace;
-      background: #1f0a09; border: 1px solid #da3633;
+      background: var(--critical-bg); border: 1px solid var(--critical);
       border-radius: 3px; padding: 5px 10px; margin-bottom: 8px;
     }
 
@@ -65,13 +65,13 @@
                  margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
 
     /* ── Buttons ── */
-    .btn-approve { border-color: #2ea043; color: var(--green); }
-    .btn-approve:hover { background: #1a3a22; }
-    .btn-reject  { border-color: #da3633; color: var(--red); }
-    .btn-reject:hover  { background: #3a0f0a; }
+    .btn-approve { border-color: var(--good); color: var(--green); }
+    .btn-approve:hover { background: var(--good-bg); }
+    .btn-reject  { border-color: var(--critical); color: var(--red); }
+    .btn-reject:hover  { background: var(--critical-bg); }
     .btn-cancel  { border-color: var(--muted); color: var(--muted); }
     .btn-dryrun  { border-color: var(--blue); color: var(--blue); }
-    .btn-dryrun:hover  { background: #1a2a3a; }
+    .btn-dryrun:hover  { background: var(--info-bg); }
 
     /* ── Sections ── */
     .plan-section { margin-bottom: var(--gap); }
@@ -97,8 +97,8 @@
              border-radius: var(--radius); font-size: 13px; z-index: 999;
              background: var(--surface); border: 1px solid var(--border);
              display: none; }
-    #toast.ok  { border-color: #2ea043; color: var(--green); }
-    #toast.err { border-color: #da3633; color: var(--red); }
+    #toast.ok  { border-color: var(--good); color: var(--green); }
+    #toast.err { border-color: var(--critical); color: var(--red); }
   </style>
 </head>
 <body>
@@ -114,7 +114,7 @@
 </div>
 
 <!-- ── Safety notice — impossible to miss ── -->
-<div style="background:#1f1800; border:2px solid #9e6a03; border-radius:var(--radius);
+<div style="background:#1f1800; border:2px solid var(--warn); border-radius:var(--radius);
             padding:14px 18px; margin-bottom:var(--gap); font-size:13px;">
   <strong style="color:var(--yellow);">DRY-RUN ONLY</strong>
   <span style="color:var(--muted); margin-left:8px;">

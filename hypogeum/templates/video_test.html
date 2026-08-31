@@ -31,7 +31,7 @@
                      gap: var(--gap); }
     .clip-card     { background: var(--surface); border: 1px solid var(--border);
                      border-radius: var(--radius); overflow: hidden; }
-    .clip-card.pass{ border-color: #2ea043; }
+    .clip-card.pass{ border-color: var(--good); }
     .clip-card.warn{ border-color: var(--yellow); }
     .clip-card.fail{ border-color: var(--red); }
     .clip-card.missing-card { opacity: .6; }
@@ -48,20 +48,20 @@
     .clip-scene    { font-size: 14px; font-weight: 700; font-family: monospace; }
 
     .verdict-badge { font-size: 10px; padding: 2px 7px; border-radius: 99px; }
-    .vb-pass       { background: #0f2016; color: #3fb950; border: 1px solid #2ea043; }
-    .vb-warn       { background: #1a1200; color: var(--yellow); border: 1px solid var(--yellow); }
-    .vb-fail       { background: #1a0000; color: var(--red); border: 1px solid var(--red); }
+    .vb-pass       { background: var(--good-bg); color: var(--good); border: 1px solid var(--good); }
+    .vb-warn       { background: var(--warn-bg); color: var(--yellow); border: 1px solid var(--yellow); }
+    .vb-fail       { background: var(--critical-bg); color: var(--red); border: 1px solid var(--red); }
 
     .tier-badge    { font-size: 10px; padding: 2px 6px; border-radius: 3px;
                      font-family: monospace; }
     .tier-1        { background: #1a0a3d; color: #a78bfa; border: 1px solid #4c1d95; }
-    .tier-2        { background: #001a3d; color: #60a5fa; border: 1px solid #1e4a7c; }
-    .tier-3        { background: #0f2016; color: #6ee7b7; border: 1px solid #064e3b; }
+    .tier-2        { background: var(--info-bg); color: #60a5fa; border: 1px solid var(--info); }
+    .tier-3        { background: var(--good-bg); color: #6ee7b7; border: 1px solid #064e3b; }
 
     .risk-badge    { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
-    .risk-high     { background: #1a0000; color: var(--red); border: 1px solid var(--red); }
-    .risk-medium   { background: #1a1200; color: var(--yellow); border: 1px solid #8b6914; }
-    .risk-low      { background: #0f2016; color: var(--green); border: 1px solid #2ea043; }
+    .risk-high     { background: var(--critical-bg); color: var(--red); border: 1px solid var(--red); }
+    .risk-medium   { background: var(--warn-bg); color: var(--yellow); border: 1px solid var(--warn); }
+    .risk-low      { background: var(--good-bg); color: var(--green); border: 1px solid var(--good); }
     .risk-na       { background: #111; color: var(--muted); border: 1px solid var(--border); }
 
     /* Metric rows */
@@ -85,7 +85,7 @@
     /* Fail reasons */
     .fail-reasons  { margin-top: 6px; }
     .fail-pill     { display: inline-block; font-size: 10px; padding: 1px 6px;
-                     background: #1a0000; border: 1px solid var(--red);
+                     background: var(--critical-bg); border: 1px solid var(--red);
                      border-radius: 3px; color: var(--red); margin: 2px 3px 2px 0; }
 
     /* ── Side-by-side compare ─────────────────────── */

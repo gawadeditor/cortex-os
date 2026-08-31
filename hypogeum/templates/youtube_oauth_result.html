@@ -21,8 +21,8 @@
 </div>
 
 {% if ok %}
-<div class="card" style="max-width:520px; border-color:#2ea043; padding:18px;">
-  <div style="color:#3fb950; font-weight:700; font-size:15px; margin-bottom:8px;">
+<div class="card" style="max-width:520px; border-color:var(--good); padding:18px;">
+  <div style="color:var(--good); font-weight:700; font-size:15px; margin-bottom:8px;">
     &#x2713; Authorization complete
   </div>
   <div style="font-size:13px; color:var(--muted); line-height:1.6;">
@@ -64,9 +64,9 @@
   </div>
 
   {% if error == "redirect_uri_mismatch" %}
-  <div style="margin-top:12px; padding:10px 12px; background:#1a1200;
+  <div style="margin-top:12px; padding:10px 12px; background:var(--warn-bg);
               border:1px solid var(--yellow); border-radius:var(--radius);
-              font-size:12px; color:#d29922; line-height:1.6;">
+              font-size:12px; color:var(--warn); line-height:1.6;">
     <strong>Fix:</strong> Add this exact redirect URI to your Google Cloud Console project:<br>
     <code style="color:var(--text);">{{ redirect_uri }}</code><br><br>
     Go to APIs &amp; Services → Credentials → your OAuth 2.0 Client ID → Authorized redirect URIs.

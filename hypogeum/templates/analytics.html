@@ -181,7 +181,7 @@
   </div>
 {% elif _scored | length == 1 %}
   {% set _best = _scored[0] %}
-  <div class="card" style="border-color:#2ea043; margin-bottom:var(--gap);">
+  <div class="card" style="border-color:var(--good); margin-bottom:var(--gap);">
     <div class="card-title ok">Top Episode</div>
     <a href="/analytics/episode/{{ _best.episode_id }}" style="font-weight:600;">{{ _best.episode_id }}</a>
     <span class="muted" style="font-size:12px; margin-left:8px;">

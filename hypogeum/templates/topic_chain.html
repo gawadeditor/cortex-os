@@ -22,18 +22,18 @@
     .entity-hdr  { display:flex; align-items:center; gap:8px; margin-bottom:4px;
                    font-weight:600; }
     .badge-small { font-size:10px; padding:1px 6px; border-radius:3px; }
-    .bs-planned  { background:#0d1a00; color:#3fb950; border:1px solid #2ea043; }
-    .bs-ready    { background:#001a2e; color:#58a6ff; border:1px solid #1f6feb; }
-    .bs-live     { background:#0d1a00; color:#3fb950; border:1px solid #2ea043; }
-    .bs-failed   { background:#2d0f0f; color:#ff7b72; border:1px solid #da3633; }
+    .bs-planned  { background:#0d1a00; color:var(--good); border:1px solid var(--good); }
+    .bs-ready    { background:#001a2e; color:var(--info); border:1px solid var(--info); }
+    .bs-live     { background:#0d1a00; color:var(--good); border:1px solid var(--good); }
+    .bs-failed   { background:var(--critical-bg); color:var(--critical); border:1px solid var(--critical); }
     .bs-pending  { background:#111; color:var(--muted); border:1px solid var(--border); }
-    .bs-uploaded { background:#001a2e; color:#58a6ff; border:1px solid #1f6feb; }
-    .bs-queued   { background:#1a1200; color:#d29922; border:1px solid #8b6914; }
+    .bs-uploaded { background:#001a2e; color:var(--info); border:1px solid var(--info); }
+    .bs-queued   { background:var(--warn-bg); color:var(--warn); border:1px solid var(--warn); }
     .platform-row { display:flex; align-items:center; gap:8px; padding:4px 0;
                     border-bottom:1px solid rgba(255,255,255,.05); font-size:11px; }
     .platform-row:last-child { border-bottom:none; }
     .method-chip { font-size:9px; padding:1px 5px; border-radius:3px;
-                   background:#001a3d; color:#4c9de8; border:1px solid #1e4a7c; }
+                   background:var(--info-bg); color:var(--info); border:1px solid var(--info); }
     .none-msg    { font-size:12px; color:var(--muted); font-style:italic; padding:8px 0; }
   </style>
 </head>
@@ -168,7 +168,7 @@
   <div style="font-size:11px; color:var(--muted);">
     <strong style="color:var(--text);">Publish methods:</strong>
     <span class="method-chip">api_scheduled</span> — platform API sets publishAt (YouTube, Meta) ·
-    <span class="method-chip" style="background:#1a1200; color:#d29922; border-color:#8b6914;">due_time_upload</span> — must upload at due time (TikTok)
+    <span class="method-chip" style="background:var(--warn-bg); color:var(--warn); border-color:var(--warn);">due_time_upload</span> — must upload at due time (TikTok)
   </div>
 </div>
 

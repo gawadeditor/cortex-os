@@ -144,7 +144,7 @@
   <div id="failures-section">
     {% if failures.runs %}
       {% for r in failures.runs %}
-      <div class="run-card" style="border-color:#da3633;">
+      <div class="run-card" style="border-color:var(--critical);">
         <div class="run-card-header">
           <a href="/run/{{ r.run_id }}" class="err" style="font-weight:600;">{{ r.run_id[:12] }}…</a>
           <span class="badge badge-failed">failed</span>

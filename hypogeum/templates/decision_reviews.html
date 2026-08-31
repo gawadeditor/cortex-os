@@ -45,12 +45,12 @@
                 margin-top: 4px; }
 
     /* ── Accept/reject buttons ── */
-    .btn-accept { border-color: #2ea043; color: var(--green); }
-    .btn-accept:hover { background: #1a3a22; }
-    .btn-reject { border-color: #da3633; color: var(--red); }
-    .btn-reject:hover { background: #3a0f0a; }
+    .btn-accept { border-color: var(--good); color: var(--green); }
+    .btn-accept:hover { background: var(--good-bg); }
+    .btn-reject { border-color: var(--critical); color: var(--red); }
+    .btn-reject:hover { background: var(--critical-bg); }
     .btn-plan { border-color: var(--blue); color: var(--blue); }
-    .btn-plan:hover { background: #1a2a3a; }
+    .btn-plan:hover { background: var(--info-bg); }
 
     /* ── Section ── */
     .rev-section { margin-bottom: var(--gap); }
@@ -63,8 +63,8 @@
              border-radius: var(--radius); font-size: 13px; z-index: 999;
              background: var(--surface); border: 1px solid var(--border);
              display: none; }
-    #toast.ok  { border-color: #2ea043; color: var(--green); }
-    #toast.err { border-color: #da3633; color: var(--red); }
+    #toast.ok  { border-color: var(--good); color: var(--green); }
+    #toast.err { border-color: var(--critical); color: var(--red); }
   </style>
 </head>
 <body>

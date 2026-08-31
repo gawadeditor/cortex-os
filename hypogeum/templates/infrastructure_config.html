@@ -14,9 +14,9 @@
     /* ── Config card ── */
     .cfg-card        { background: var(--surface); border: 1px solid var(--border);
                        border-radius: var(--radius); padding: 14px 16px; }
-    .cfg-card-ok     { border-color: #2ea043; }
-    .cfg-card-warn   { border-color: #9e6a03; }
-    .cfg-card-err    { border-color: #da3633; }
+    .cfg-card-ok     { border-color: var(--good); }
+    .cfg-card-warn   { border-color: var(--warn); }
+    .cfg-card-err    { border-color: var(--critical); }
     .cfg-card-empty  { opacity: .75; border-style: dashed; }
 
     /* Card header */
@@ -49,9 +49,9 @@
     .health-banner { padding: 10px 14px; border-radius: var(--radius);
                      margin-bottom: var(--gap); font-size: 13px;
                      display: flex; align-items: center; gap: 10px; }
-    .hb-ready { background: #0d1f12; border: 1px solid #2ea043; color: var(--green); }
-    .hb-block { background: #1f0a09; border: 1px solid #da3633; color: var(--red); }
-    .hb-warn  { background: #1e1a00; border: 1px solid #9e6a03; color: var(--yellow); }
+    .hb-ready { background: #0d1f12; border: 1px solid var(--good); color: var(--green); }
+    .hb-block { background: var(--critical-bg); border: 1px solid var(--critical); color: var(--red); }
+    .hb-warn  { background: var(--warn-bg); border: 1px solid var(--warn); color: var(--yellow); }
   </style>
 </head>
 <body>

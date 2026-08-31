@@ -4,13 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Edit Model Profile — Factory OS</title>
+  {% include '_base_style.html' %}
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #0d1117; --surface: #161b22; --border: #30363d;
-      --text: #e6edf3; --muted: #8b949e; --green: #3fb950;
-      --yellow: #d29922; --red: #f85149; --blue: #58a6ff; --radius: 6px; --gap: 16px;
-    }
     body { background: var(--bg); color: var(--text);
            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
            font-size: 14px; line-height: 1.5; padding: var(--gap); max-width: 640px; }
@@ -36,8 +32,8 @@
            border: 1px solid var(--border); border-radius: var(--radius);
            background: transparent; color: var(--text); font-size: 13px;
            font-family: inherit; cursor: pointer; text-decoration: none; }
-    .btn-save { background: #1a3a22; border-color: #2ea043; color: var(--green); }
-    .btn-save:hover { background: #22502e; }
+    .btn-save { background: var(--good-bg); border-color: var(--good); color: var(--green); }
+    .btn-save:hover { background: var(--good-bg); }
     .btn:hover { border-color: var(--blue); color: var(--blue); }
   </style>
 </head>

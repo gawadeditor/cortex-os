@@ -17,11 +17,11 @@
     /* ── Verdict banner ─────────────────────────────── */
     .verdict-banner   { border-radius: var(--radius); padding: 14px 18px;
                         display: flex; align-items: center; gap: 16px; margin-bottom: var(--gap); }
-    .verdict-pass     { background: #0f2016; border: 1px solid #2ea043; }
-    .verdict-warn     { background: #1a1200; border: 1px solid var(--yellow); }
-    .verdict-fail     { background: #1a0000; border: 1px solid var(--red); }
+    .verdict-pass     { background: var(--good-bg); border: 1px solid var(--good); }
+    .verdict-warn     { background: var(--warn-bg); border: 1px solid var(--yellow); }
+    .verdict-fail     { background: var(--critical-bg); border: 1px solid var(--red); }
     .verdict-label    { font-size: 22px; font-weight: 800; }
-    .verdict-pass .verdict-label { color: #3fb950; }
+    .verdict-pass .verdict-label { color: var(--good); }
     .verdict-warn .verdict-label { color: var(--yellow); }
     .verdict-fail .verdict-label { color: var(--red); }
     .verdict-sub      { font-size: 13px; color: var(--muted); }
@@ -65,11 +65,11 @@
     .loop-bar.high    { background: var(--red); }
     .loop-bar.med     { background: var(--yellow); }
     .badge-missing-sc { font-size: 9px; padding: 1px 5px; border-radius: 3px;
-                        background: #1a0000; color: var(--red); border: 1px solid var(--red); }
+                        background: var(--critical-bg); color: var(--red); border: 1px solid var(--red); }
     .badge-not-in-vid { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                         background: #111; color: var(--muted); border: 1px solid var(--border); }
     .badge-ok         { font-size: 9px; padding: 1px 5px; border-radius: 3px;
-                        background: #0f2016; color: var(--green); border: 1px solid var(--green); }
+                        background: var(--good-bg); color: var(--green); border: 1px solid var(--green); }
   </style>
 </head>
 <body>
@@ -274,7 +274,7 @@
   {% for sid in qa.missing_scene_ids %}
   <span style="display:inline-block; font-family:monospace; font-size:11px;
                padding:2px 8px; margin:3px 4px 3px 0;
-               background:#1a0000; border:1px solid var(--red);
+               background:var(--critical-bg); border:1px solid var(--red);
                border-radius:3px; color:var(--red);">{{ sid }}</span>
   {% endfor %}
 </div>

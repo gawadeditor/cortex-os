@@ -14,9 +14,9 @@
     /* ── Platform card ── */
     .conn-card              { background: var(--surface); border: 1px solid var(--border);
                               border-radius: var(--radius); padding: 16px; }
-    .conn-card-connected    { border-color: #2ea043; }
-    .conn-card-degraded     { border-color: #9e6a03; }
-    .conn-card-expired      { border-color: #da3633; border-style: dashed; }
+    .conn-card-connected    { border-color: var(--good); }
+    .conn-card-degraded     { border-color: var(--warn); }
+    .conn-card-expired      { border-color: var(--critical); border-style: dashed; }
     .conn-card-disconnected { border-color: var(--border); opacity: .85; }
 
     /* Header */
@@ -41,9 +41,9 @@
     @keyframes blink { 50% { opacity: .3; } }
 
     /* Status badge */
-    .badge-connected    { background:#0d1f12; color:var(--green); border:1px solid #2ea043; }
-    .badge-degraded     { background:#1e1a00; color:var(--yellow); border:1px solid #9e6a03; }
-    .badge-expired      { background:#1f0a09; color:var(--red);   border:1px solid #da3633; }
+    .badge-connected    { background:#0d1f12; color:var(--green); border:1px solid var(--good); }
+    .badge-degraded     { background:var(--warn-bg); color:var(--yellow); border:1px solid var(--warn); }
+    .badge-expired      { background:var(--critical-bg); color:var(--red);   border:1px solid var(--critical); }
     .badge-disconnected { background:var(--surface); color:var(--muted); border:1px solid var(--border); }
     .badge-unknown      { background:var(--surface); color:var(--muted); border:1px solid var(--border); }
 
@@ -56,8 +56,8 @@
 
     /* Expiry warning pill */
     .expiry-pill { display: inline-block; font-size: 11px; padding: 1px 7px;
-                   border-radius: 8px; background: #1e1a00;
-                   color: var(--yellow); border: 1px solid #9e6a03; margin-top: 2px; }
+                   border-radius: 8px; background: var(--warn-bg);
+                   color: var(--yellow); border: 1px solid var(--warn); margin-top: 2px; }
 
     /* Authorize link */
     .auth-link { display: inline-block; margin-top: 10px; font-size: 12px;

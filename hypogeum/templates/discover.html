@@ -46,8 +46,8 @@
     .rationale-lbl { font-weight: 600; text-transform: uppercase; font-size: 10px;
                      letter-spacing: .04em; color: var(--muted); padding-top: 2px; }
     .risk-pill { display: inline-block; padding: 1px 7px; border-radius: 10px;
-                 font-size: 11px; background: #3a2e0d; color: var(--yellow);
-                 border: 1px solid #9e6a03; }
+                 font-size: 11px; background: var(--warn-bg); color: var(--yellow);
+                 border: 1px solid var(--warn); }
 
     /* Queued badge */
     .badge-queued { display: inline-flex; align-items: center; gap: 4px;
@@ -78,13 +78,13 @@
                       font-size: 13px; color: var(--muted); margin-bottom: var(--gap); }
     .failed-banner { padding: 12px 16px; background: rgba(248,81,73,.08);
                      border: 1px solid rgba(248,81,73,.3); border-radius: var(--radius);
-                     font-size: 13px; color: var(--red, #f85149); margin-bottom: var(--gap); }
+                     font-size: 13px; color: var(--red, var(--critical)); margin-bottom: var(--gap); }
 
     /* Status bar inline */
     #discover-status { font-size: 12px; padding: 3px 10px; border-radius: var(--radius);
                        display: none; align-items: center; gap: 6px; }
     #discover-status.running { display: flex; color: var(--muted); }
-    #discover-status.error   { display: flex; color: var(--red, #f85149);
+    #discover-status.error   { display: flex; color: var(--red, var(--critical));
                                 background: rgba(248,81,73,.1); padding: 4px 10px; }
 
     .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
@@ -199,7 +199,7 @@
   <button type="button" onclick="resetDiscovery()"
           style="margin-left:12px; font-size:11px; padding:2px 8px; background:none;
                  border:1px solid rgba(248,81,73,.4); border-radius:var(--radius);
-                 color:var(--red,#f85149); cursor:pointer;">Retry</button>
+                 color:var(--red,var(--critical)); cursor:pointer;">Retry</button>
 </div>
 {% endif %}
 
@@ -505,11 +505,11 @@ function submitManualTopic() {
       if (input) input.value = '';
       setTimeout(function() { window.location.reload(); }, 800);
     } else {
-      if (status) { status.style.color = 'var(--red,#f85149)'; status.textContent = d.error || 'Failed.'; }
+      if (status) { status.style.color = 'var(--red,var(--critical))'; status.textContent = d.error || 'Failed.'; }
     }
   })
   .catch(function(e) {
-    if (status) { status.style.color = 'var(--red,#f85149)'; status.textContent = e.message; }
+    if (status) { status.style.color = 'var(--red,var(--critical))'; status.textContent = e.message; }
   });
 }
 

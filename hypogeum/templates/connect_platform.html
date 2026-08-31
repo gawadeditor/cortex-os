@@ -13,10 +13,10 @@
                     color: var(--text); border-radius: var(--radius);
                     padding: 8px 10px; }
     .cred-field:focus { outline: none; border-color: var(--blue); }
-    .save-banner  { background: #0f2016; border: 1px solid var(--green);
+    .save-banner  { background: var(--good-bg); border: 1px solid var(--green);
                     border-radius: var(--radius); padding: 10px 14px;
                     color: var(--green); font-size: 13px; margin-bottom: var(--gap); }
-    .warning-note { background: #1a1200; border: 1px solid var(--yellow);
+    .warning-note { background: var(--warn-bg); border: 1px solid var(--yellow);
                     border-radius: var(--radius); padding: 10px 14px;
                     color: var(--yellow); font-size: 12px; margin-bottom: var(--gap); }
   </style>
@@ -42,8 +42,8 @@
 </div>
 
 {% if platform == "youtube" %}
-<div class="card connect-card" style="border-color:#2ea043; margin-bottom:var(--gap);">
-  <div class="card-title" style="color:#3fb950;">Re-authorize with Google</div>
+<div class="card connect-card" style="border-color:var(--good); margin-bottom:var(--gap);">
+  <div class="card-title" style="color:var(--good);">Re-authorize with Google</div>
   <p class="instructions">
     The fastest way to connect YouTube is through the automated OAuth flow.
     Clicking the button below opens Google's consent screen; after approval
@@ -52,7 +52,7 @@
   <div style="margin-bottom:10px; font-size:12px; color:var(--muted);">
     Scope requested: <code>yt-analytics.readonly</code><br>
     Redirect URI: <code>{{ request.host_url | trim('/') }}/platforms/youtube/oauth_callback</code><br>
-    <span style="color:#d29922;">&#x26A0;&ensp;This redirect URI must be listed in your Google Cloud Console project
+    <span style="color:var(--warn);">&#x26A0;&ensp;This redirect URI must be listed in your Google Cloud Console project
     (APIs &amp; Services → Credentials → your OAuth 2.0 client ID → Authorized redirect URIs).</span>
   </div>
   <a href="/platforms/youtube/authorize" class="btn btn-save">Authorize with Google →</a>

@@ -36,14 +36,14 @@
                       border-radius: var(--radius); padding: 7px 14px; flex-shrink: 0; }
 
     /* ── Banners ────────────────────────────────────────────── */
-    .demo-banner  { background: #1e1a00; border: 1px solid var(--yellow);
+    .demo-banner  { background: var(--warn-bg); border: 1px solid var(--yellow);
                     border-radius: var(--radius); padding: 10px 14px;
                     color: var(--yellow); font-size: 12px;
                     margin-bottom: var(--gap);
                     display: flex; gap: 8px; align-items: flex-start; }
-    .error-banner { background: #2d0f0f; border: 1px solid var(--red);
+    .error-banner { background: var(--critical-bg); border: 1px solid var(--red);
                     border-radius: var(--radius); padding: 12px 16px;
-                    color: #ff7b72; margin-bottom: var(--gap); }
+                    color: var(--critical); margin-bottom: var(--gap); }
 
     /* ── Platform cards ─────────────────────────────────────── */
     .platform-grid  { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
@@ -52,8 +52,8 @@
     .platform-card  { background: var(--surface); border: 1px solid var(--border);
                       border-radius: var(--radius); padding: 13px 14px;
                       transition: border-color .15s, box-shadow .15s; }
-    .platform-card:hover { border-color: #404850; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
-    .platform-card-on      { border-color: #2ea043; }
+    .platform-card:hover { border-color: var(--border-strong); box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+    .platform-card-on      { border-color: var(--good); }
     .platform-card-on:hover { border-color: var(--green); }
     .platform-card-demo    { border-color: var(--yellow); border-style: dashed; }
     .platform-card-expired { border-color: var(--red); border-style: dashed; }
@@ -149,9 +149,9 @@
       border: 1px solid var(--border); margin-bottom: var(--gap);
       background: var(--surface);
     }
-    .next-action-critical { border-color: var(--red);    background: #1f0a09; }
-    .next-action-warning  { border-color: var(--yellow); background: #1e1a00; }
-    .next-action-info     { border-color: var(--blue);   background: #0d1620; }
+    .next-action-critical { border-color: var(--red);    background: var(--critical-bg); }
+    .next-action-warning  { border-color: var(--yellow); background: var(--warn-bg); }
+    .next-action-info     { border-color: var(--blue);   background: var(--info-bg); }
     .next-action-icon { font-size: 20px; flex-shrink: 0; }
     .next-action-body { flex: 1; }
     .next-action-label { font-size: 14px; font-weight: 600; }

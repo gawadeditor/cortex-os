@@ -169,8 +169,8 @@
 {# If run is no longer active, show completion banner #}
 {% if d.run.status not in ('running',) %}
 <div class="card" style="margin-top:var(--gap); border-color:
-  {% if d.run.status == 'complete' or d.run.status == 'completed' %}#2ea043
-  {% elif d.run.status == 'failed' %}#da3633
+  {% if d.run.status == 'complete' or d.run.status == 'completed' %}var(--good)
+  {% elif d.run.status == 'failed' %}var(--critical)
   {% else %}var(--border){% endif %};">
   <div style="display:flex; justify-content:space-between; align-items:center;">
     <span class="{% if d.run.status in ('complete','completed') %}ok{% elif d.run.status == 'failed' %}err{% else %}muted{% endif %}" style="font-size:15px; font-weight:600;">

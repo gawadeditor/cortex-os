@@ -17,8 +17,8 @@
                    padding: 10px 12px; font-family: monospace; font-size: 12px; color: var(--muted);
                    white-space: pre; overflow-x: auto; margin-top: 6px; }
     textarea { width: 100%; min-height: 160px; font-family: monospace; font-size: 12px; }
-    .demo-warning { background: #2a2a1a; border: 1px solid #9e6a03; border-radius: var(--radius);
-                    padding: 8px 12px; font-size: 12px; color: #d29922; margin-top: 8px; }
+    .demo-warning { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: var(--radius);
+                    padding: 8px 12px; font-size: 12px; color: var(--warn); margin-top: 8px; }
     .already-imported { background: var(--surface); border: 1px solid var(--border);
                         border-radius: var(--radius); padding: 12px 14px;
                         margin-bottom: var(--gap); font-size: 13px; }
@@ -52,7 +52,7 @@
 </div>
 
 {# ── Migration-only banner ── #}
-<div style="background:#1e1a00; border:1px solid var(--yellow); border-radius:var(--radius);
+<div style="background:var(--warn-bg); border:1px solid var(--yellow); border-radius:var(--radius);
             padding:10px 14px; margin-bottom:var(--gap); font-size:12px; color:var(--yellow);
             display:flex; gap:10px; align-items:flex-start;">
   <span style="flex-shrink:0;">&#9888;</span>
@@ -87,15 +87,15 @@
 
 {# ── YouTube auto-sync section (shown when connected) ── #}
 {% if youtube_connected %}
-<div class="card" style="margin-bottom:var(--gap); padding:14px 16px; border-color:#2ea043;">
-  <div class="card-title" style="color:#3fb950;">YouTube Analytics Sync</div>
+<div class="card" style="margin-bottom:var(--gap); padding:14px 16px; border-color:var(--good);">
+  <div class="card-title" style="color:var(--good);">YouTube Analytics Sync</div>
   <div style="font-size:13px; color:var(--muted); margin-bottom:10px; line-height:1.6;">
     YouTube is connected. Pull real performance data for all published videos automatically —
     no manual export or paste required.
     {% if youtube_last_synced %}
     <br><span style="font-size:12px;">Last synced: <strong style="color:var(--text);">{{ youtube_last_synced[:19] | replace("T", " ") }} UTC</strong></span>
     {% else %}
-    <br><span style="font-size:12px; color:#d29922;">Never synced — click below to fetch your first real analytics.</span>
+    <br><span style="font-size:12px; color:var(--warn);">Never synced — click below to fetch your first real analytics.</span>
     {% endif %}
   </div>
   <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
@@ -105,7 +105,7 @@
     </button>
     <button id="btn-yt-full" class="btn" onclick="syncYouTube(event,900)"
             title="Full history (~2.5 years) — use on first sync or after a gap"
-            style="border-color:#3fb950; color:#3fb950;">
+            style="border-color:var(--good); color:var(--good);">
       Full Sync (900 days)
     </button>
     <span id="yt-sync-status" style="font-size:13px; color:var(--muted);"></span>
@@ -148,10 +148,10 @@ function syncYouTube(event, windowDays) {
     if (fullBtn)  fullBtn.disabled  = false;
     if (d.ok) {
       status.textContent = '✓ Synced ' + d.synced_count + ' video' + (d.synced_count !== 1 ? 's' : '');
-      status.style.color = '#3fb950';
+      status.style.color = 'var(--good)';
       if (d.errors && d.errors.length > 0) {
         result.style.display = 'block';
-        result.style.color = '#d29922';
+        result.style.color = 'var(--warn)';
         result.textContent = 'Warnings: ' + d.errors.join('; ');
       }
       if (d.synced_count > 0) {

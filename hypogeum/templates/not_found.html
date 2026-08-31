@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <title>Not found — Factory OS</title>
   <style>
-    body { background: var(--bg); color: #e6edf3;
+    body { background: var(--bg); color: var(--text);
            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
            font-size: 14px; padding: 24px; }
     a { color: var(--info); }
@@ -13,8 +13,12 @@
 </head>
 <body>
 {% include "_nav.html" %}
+
+<div class="container">
+
   <h1>Not Found</h1>
   <p>{{ kind }} <code>{{ id }}</code> does not exist.</p>
   <p style="margin-top:12px;"><a href="/">← Dashboard</a></p>
+</div><!-- /.container -->
 </body>
 </html>

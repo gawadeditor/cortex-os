@@ -831,28 +831,28 @@ class TestFlaskHtmlRoutes:
         client, ids = flask_client
         r = client.get(f"/channel/{ids['channel_id']}")
         text = r.get_data(as_text=True)
-        assert "Brand Profile" in text
+        assert "Brand identity" in text
 
     def test_channel_detail_shows_model(self, flask_client):
         client, ids = flask_client
         r = client.get(f"/channel/{ids['channel_id']}")
         text = r.get_data(as_text=True)
-        assert "Model Profile" in text
+        assert "Models" in text
 
     def test_channel_detail_shows_publishing(self, flask_client):
         client, ids = flask_client
         r = client.get(f"/channel/{ids['channel_id']}")
         text = r.get_data(as_text=True)
-        assert "Publishing Profile" in text
+        assert "Publishing" in text
 
     def test_channel_detail_has_edit_links(self, flask_client):
         client, ids = flask_client
         r = client.get(f"/channel/{ids['channel_id']}")
         text = r.get_data(as_text=True)
-        assert "Edit Channel" in text
-        assert "Edit Brand" in text
-        assert "Edit Model" in text
-        assert "Edit Publishing" in text
+        assert "Edit channel" in text
+        assert "Edit brand" in text
+        assert "Edit models" in text
+        assert "Edit publishing" in text
 
     def test_channel_detail_has_brand_edit_href(self, flask_client):
         client, ids = flask_client

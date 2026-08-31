@@ -37,7 +37,7 @@
                border-radius: var(--radius); color: var(--muted); text-decoration: none; }
     .dc-link:hover { border-color: var(--blue); color: var(--blue); text-decoration: none; }
     .dc-link-available { border-color: var(--good); color: var(--green); }
-    .dc-link-available:hover { background: #0d1f12; color: var(--green); }
+    .dc-link-available:hover { background: var(--good-bg); color: var(--green); }
 
     /* Summary banner */
     .debug-banner { display: flex; gap: var(--gap); flex-wrap: wrap;
@@ -58,6 +58,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 {% include '_infrastructure_subnav.html' %}
 
 <div class="page-header">
@@ -152,5 +155,6 @@
   &ensp;·&ensp; This page only links to existing tools. No tests are executed here.
 </div>
 
+</div><!-- /.container -->
 </body>
 </html>

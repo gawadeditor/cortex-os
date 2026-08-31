@@ -70,6 +70,9 @@
 <body>
 {% include "_nav.html" %}
 
+<div class="container">
+
+
 <div class="page-header">
   <h1>Decision Reviews</h1>
   <span class="page-meta">
@@ -286,5 +289,6 @@ function syncReviews() {
   .catch(function(e){ res.textContent = 'Request failed'; btn.disabled = false; });
 }
 </script>
+</div><!-- /.container -->
 </body>
 </html>

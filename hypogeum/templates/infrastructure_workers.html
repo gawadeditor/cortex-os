@@ -57,13 +57,13 @@
                      letter-spacing: .05em; margin-top: 4px; }
 
     /* Status badge chip */
-    .badge-worker-idle      { background: #0d1f12; color: var(--green); border: 1px solid var(--good); }
+    .badge-worker-idle      { background: var(--good-bg); color: var(--green); border: 1px solid var(--good); }
     .badge-worker-running   { background: var(--info-bg); color: var(--blue);  border: 1px solid var(--info); }
     .badge-worker-claiming  { background: var(--info-bg); color: var(--blue);  border: 1px solid var(--info); }
     .badge-worker-error     { background: var(--critical-bg); color: var(--red);   border: 1px solid var(--critical); }
     .badge-worker-unknown   { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
     .badge-worker-paused    { background: var(--warn-bg); color: var(--yellow); border: 1px solid var(--warn); }
-    .badge-worker-cancelling { background: #1e0a1e; color: #c9a6ff; border: 1px solid #8b5cf6; }
+    .badge-worker-cancelling { background: rgba(139,92,246,.12); color: #c9a6ff; border: 1px solid #8b5cf6; }
     .dot-cancelling { background: #8b5cf6; animation: pulse 0.8s ease-in-out infinite; }
     .badge-queue-paused { background: var(--warn-bg); color: var(--yellow); border: 1px solid var(--warn);
                           font-size:10px; padding:1px 8px; border-radius:3px; display:inline-block; }
@@ -124,6 +124,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 {% include '_infrastructure_subnav.html' %}
 
 <div class="page-header">
@@ -986,5 +989,6 @@ function scheduleAction(scheduleId, action, btn) {
 }
 </script>
 
+</div><!-- /.container -->
 </body>
 </html>

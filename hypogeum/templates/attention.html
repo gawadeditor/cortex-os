@@ -49,7 +49,7 @@
     .attn-tile-yellow { border-color: rgba(210,153,34,.3); }
 
     /* ── All-clear banner ── */
-    .all-clear { background: #0d1f12; border: 1px solid var(--good);
+    .all-clear { background: var(--good-bg); border: 1px solid var(--good);
                  border-radius: var(--radius); padding: 20px 24px;
                  text-align: center; color: var(--green); }
     .all-clear-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
@@ -65,6 +65,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 
 <div class="page-header">
   <h1>Attention</h1>
@@ -366,5 +369,6 @@ function postAction(url, confirmMsg) {
   .catch(function(e) { showToast('Request failed: ' + e, false); });
 }
 </script>
+</div><!-- /.container -->
 </body>
 </html>

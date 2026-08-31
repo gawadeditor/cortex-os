@@ -17,6 +17,9 @@
 <body>
 {% include '_nav.html' %}
 
+<div class="container">
+
+
 <div class="page-header">
   <h1>Queue Monitor</h1>
   <span class="page-meta" id="last-updated">Auto-refreshes every 5 s</span>
@@ -104,5 +107,6 @@ function pollQueue() {
 }
 setInterval(pollQueue, 5000);
 </script>
+</div><!-- /.container -->
 </body>
 </html>

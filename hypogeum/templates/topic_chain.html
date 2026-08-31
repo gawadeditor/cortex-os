@@ -22,12 +22,12 @@
     .entity-hdr  { display:flex; align-items:center; gap:8px; margin-bottom:4px;
                    font-weight:600; }
     .badge-small { font-size:10px; padding:1px 6px; border-radius:3px; }
-    .bs-planned  { background:#0d1a00; color:var(--good); border:1px solid var(--good); }
-    .bs-ready    { background:#001a2e; color:var(--info); border:1px solid var(--info); }
-    .bs-live     { background:#0d1a00; color:var(--good); border:1px solid var(--good); }
+    .bs-planned  { background:var(--good-bg); color:var(--good); border:1px solid var(--good); }
+    .bs-ready    { background:var(--info-bg); color:var(--info); border:1px solid var(--info); }
+    .bs-live     { background:var(--good-bg); color:var(--good); border:1px solid var(--good); }
     .bs-failed   { background:var(--critical-bg); color:var(--critical); border:1px solid var(--critical); }
     .bs-pending  { background:#111; color:var(--muted); border:1px solid var(--border); }
-    .bs-uploaded { background:#001a2e; color:var(--info); border:1px solid var(--info); }
+    .bs-uploaded { background:var(--info-bg); color:var(--info); border:1px solid var(--info); }
     .bs-queued   { background:var(--warn-bg); color:var(--warn); border:1px solid var(--warn); }
     .platform-row { display:flex; align-items:center; gap:8px; padding:4px 0;
                     border-bottom:1px solid rgba(255,255,255,.05); font-size:11px; }
@@ -39,6 +39,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 
 <div class="breadcrumb">
   <a href="/create">Production Queue</a>
@@ -177,5 +180,6 @@
   <a href="/api/topics/{{ topic_id }}/chain" class="btn" style="margin-left:8px;">JSON →</a>
 </div>
 
+</div><!-- /.container -->
 </body>
 </html>

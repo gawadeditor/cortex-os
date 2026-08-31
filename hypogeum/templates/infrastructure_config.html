@@ -49,13 +49,16 @@
     .health-banner { padding: 10px 14px; border-radius: var(--radius);
                      margin-bottom: var(--gap); font-size: 13px;
                      display: flex; align-items: center; gap: 10px; }
-    .hb-ready { background: #0d1f12; border: 1px solid var(--good); color: var(--green); }
+    .hb-ready { background: var(--good-bg); border: 1px solid var(--good); color: var(--green); }
     .hb-block { background: var(--critical-bg); border: 1px solid var(--critical); color: var(--red); }
     .hb-warn  { background: var(--warn-bg); border: 1px solid var(--warn); color: var(--yellow); }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 {% include '_infrastructure_subnav.html' %}
 
 <div class="page-header">
@@ -396,5 +399,6 @@
   &ensp;·&ensp; <a href="/preflight" style="color:var(--muted);">Environment checklist →</a>
 </div>
 
+</div><!-- /.container -->
 </body>
 </html>

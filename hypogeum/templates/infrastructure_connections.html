@@ -41,7 +41,7 @@
     @keyframes blink { 50% { opacity: .3; } }
 
     /* Status badge */
-    .badge-connected    { background:#0d1f12; color:var(--green); border:1px solid var(--good); }
+    .badge-connected    { background:var(--good-bg); color:var(--green); border:1px solid var(--good); }
     .badge-degraded     { background:var(--warn-bg); color:var(--yellow); border:1px solid var(--warn); }
     .badge-expired      { background:var(--critical-bg); color:var(--red);   border:1px solid var(--critical); }
     .badge-disconnected { background:var(--surface); color:var(--muted); border:1px solid var(--border); }
@@ -77,6 +77,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 {% include '_infrastructure_subnav.html' %}
 
 <div class="page-header">
@@ -255,5 +258,6 @@
   &ensp;·&ensp; <a href="/analytics/sync" style="color:var(--muted);">Sync status →</a>
 </div>
 
+</div><!-- /.container -->
 </body>
 </html>

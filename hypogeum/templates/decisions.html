@@ -12,8 +12,8 @@
       margin-bottom: var(--gap); display: flex; align-items: baseline;
       gap: 12px; border: 1px solid;
     }
-    .engine-ready   { background:#0d1f14; border-color:var(--good); }
-    .engine-partial { background:#1f1800; border-color:var(--warn); }
+    .engine-ready   { background:var(--good-bg); border-color:var(--good); }
+    .engine-partial { background:var(--warn-bg); border-color:var(--warn); }
     .engine-not_ready { background:var(--surface); border-color:var(--border); }
     .engine-level { font-size:13px; font-weight:700; text-transform:uppercase;
                     letter-spacing:.05em; }
@@ -78,6 +78,9 @@
 </head>
 <body>
 {% include "_nav.html" %}
+
+<div class="container">
+
 
 <div class="page-header">
   <h1>Decisions</h1>
@@ -214,5 +217,6 @@ function syncReviews() {
   .catch(function(e){ res.textContent = 'Request failed'; btn.disabled = false; });
 }
 </script>
+</div><!-- /.container -->
 </body>
 </html>

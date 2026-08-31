@@ -15,8 +15,8 @@
       padding: 18px 20px; border-radius: var(--radius); margin-bottom: var(--gap);
       border-width: 2px; border-style: solid;
     }
-    .factory-banner-healthy  { background: #0d1f14; border-color: var(--good); }
-    .factory-banner-degraded { background: #1f1800; border-color: var(--warn); }
+    .factory-banner-healthy  { background: var(--good-bg); border-color: var(--good); }
+    .factory-banner-degraded { background: var(--warn-bg); border-color: var(--warn); }
     .factory-banner-blocked  { background: var(--critical-bg); border-color: var(--critical); }
     .factory-banner-unknown  { background: var(--surface); border-color: var(--border); }
     .factory-banner-icon { font-size: 28px; flex-shrink: 0; line-height: 1; padding-top: 2px; }
@@ -69,7 +69,7 @@
     }
     .dc-actions { display: flex; gap: 6px; flex-wrap: wrap; }
     .btn-primary { background: var(--info-bg); border-color: var(--blue); color: var(--blue); }
-    .btn-primary:hover { background: #1f3a4a; }
+    .btn-primary:hover { background: color-mix(in srgb, var(--info) 22%, transparent); }
     .empty-state {
       padding: 18px 20px; color: var(--muted); font-size: 13px;
       background: var(--surface); border: 1px solid var(--border);
@@ -151,6 +151,9 @@
 </head>
 <body>
 {% include "_nav.html" %}
+
+<div class="container">
+
 
 {%- set level = cmd.factory_status.level | lower -%}
 {%- set lvl_icons = {'healthy': '●', 'degraded': '▲', 'blocked': '■', 'unknown': '○'} -%}
@@ -536,5 +539,6 @@
   </div>
 </div>
 
+</div><!-- /.container -->
 </body>
 </html>

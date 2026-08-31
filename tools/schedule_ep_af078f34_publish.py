@@ -30,6 +30,7 @@ without --i-understand-this-is-production.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--db", type=Path, default=None)
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--i-understand-this-is-production", action="store_true")
+    ap.add_argument("--skip-main", action="store_true",
+                    help="schedule only the Shorts (main episode still blocked by a live Zernio post)")
     args = ap.parse_args(argv)
 
     db = (args.db or _PROD_DB).resolve()
@@ -107,12 +110,28 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = get_connection(db)
     try:
+        # Deleting a complete per-episode publish subtree. FK chain is
+        # provider_content_mappings -> publishing_receipts -> publishing_
+        # attempts -> publication_intents; drop FK enforcement for this
+        # one transaction rather than hand-order 4 dependent deletes.
+        # The operator has already deleted the matching Zernio posts, so
+        # every one of these rows is stale.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        _atts = [r[0] for r in conn.execute(
+            "SELECT attempt_id FROM publishing_attempts WHERE episode_id=?", (EP,))]
+        ncm = nr = 0
+        for aid in _atts:
+            ncm += conn.execute("DELETE FROM provider_content_mappings WHERE attempt_id=?", (aid,)).rowcount
+            nr += conn.execute("DELETE FROM publishing_receipts WHERE attempt_id=?", (aid,)).rowcount
+        ncm += conn.execute("DELETE FROM provider_content_mappings WHERE episode_id=?", (EP,)).rowcount
         n1 = conn.execute("DELETE FROM publishing_attempts WHERE episode_id=?", (EP,)).rowcount
         n2 = conn.execute("DELETE FROM publication_intents WHERE episode_id=?", (EP,)).rowcount
         conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
     finally:
         conn.close()
-    print(f"\n[1] deleted {n1} publishing_attempts + {n2} publication_intents rows")
+    print(f"\n[1] deleted {ncm} provider_content_mappings + {nr} publishing_receipts + "
+          f"{n1} publishing_attempts + {n2} publication_intents rows")
 
     # ---- 2. build package + explicit schedule plan ----------------------
     policy = _resolve_platform_deliverable_policy(CHANNEL, db)
@@ -121,12 +140,32 @@ def main(argv: list[str] | None = None) -> int:
         for did, dt in _SCHEDULE.items()
     })
 
+    import dataclasses
+    _frp = json.loads((_ASSETS / "episodes" / EP / f"final_render_package_{EP}.json").read_text())
+    _short_caption = {
+        e.get("short_id"): (e.get("caption") or "")
+        for e in ((_frp.get("metadata_source") or {}).get("shorts_captions") or [])
+    }
+
     def _run(bundle_id: str, platforms: list[str], deliverable_ids: list[str]) -> None:
         pkg = build_publish_package_from_episode_dir(
             CHANNEL, EP, bundle_id, _ASSETS, db_path=db,
             enable_metadata_backfill=False, config=cfg,
             platform_deliverable_policy=policy, target_platforms=platforms,
         )
+        # Zernio's multi-platform call sends ONE root `content` to every
+        # platform (per-platform variance is meant to ride in
+        # platformSpecificData, which publish_episode_package does not
+        # populate). _pick_root_title_description picks YouTube's ~2.5-2.8k
+        # char description, which Instagram (2200 limit) rejects. For a
+        # Short, replace the root content with its own short_grounded
+        # caption (~0.9-1.1k chars) — fits every platform, and a YouTube
+        # Short does not need the long-form blurb.
+        if pkg.shorts:
+            pkg = dataclasses.replace(pkg, shorts=[
+                dataclasses.replace(s, description=_short_caption.get(s.deliverable_id) or s.description)
+                for s in pkg.shorts
+            ])
         present = [d.deliverable_id for d in pkg.all_deliverables()]
         want = [d for d in deliverable_ids if d in present]
         print(f"\n[pkg {bundle_id}] deliverables on disk: {present}; publishing {want} -> {platforms}")
@@ -139,7 +178,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {dv.deliverable_id:14} status={dv.status} error={dv.error!r} "
                   f"platform_results={getattr(dv, 'platform_results', None)}")
 
-    _run("main_episode", _MAIN_PLATFORMS, ["main_episode"])
+    if args.skip_main:
+        print("\n--skip-main: not touching the main episode this run")
+    else:
+        _run("main_episode", _MAIN_PLATFORMS, ["main_episode"])
     _run("short", _SHORT_PLATFORMS, ["short_001", "short_002", "short_003"])
 
     print("\nDone. Check the Zernio dashboard — every post should now be 'scheduled' "

@@ -225,13 +225,17 @@ def _evaluate_all_clips(
 ) -> List[dict]:
     """One ffprobe pass per real clip, reused by checks A and F.
 
-    short_native: the deliverable is a single 9:16 vertical Short, so
-    source clips are portrait — the required source resolution is the
-    landscape requirement transposed (1080x1920 instead of 1920x1080)."""
-    req_w, req_h = (
-        (REQUIRED_SOURCE_HEIGHT, REQUIRED_SOURCE_WIDTH) if short_native
-        else (REQUIRED_SOURCE_WIDTH, REQUIRED_SOURCE_HEIGHT)
-    )
+    short_native: the whole deliverable is a single 9:16 vertical Short, so
+    every source clip is portrait. Independently, a LONG-FORM episode also
+    carries its derived Shorts' scenes (source_type == "short") in the same
+    visual_package — those clips are legitimately 1080x1920 portrait while
+    the main_episode scenes are 1920x1080 landscape. The required source
+    resolution is therefore resolved PER SCENE from its own source_type
+    (hypogeum.artifact_compatibility.required_source_resolution), never one
+    episode-wide value — otherwise a long-form episode's Shorts clips fail
+    A_VIDEO / F_ARTIFACT_COMPATIBILITY against the landscape requirement."""
+    from hypogeum.artifact_compatibility import required_source_resolution  # noqa: PLC0415
+
     evidence: List[dict] = []
     scenes = (visual_package or {}).get("scenes", [])
     asset_by_scene = {
@@ -243,7 +247,9 @@ def _evaluate_all_clips(
         asset = asset_by_scene.get(sid, {})
         asset_id = scene.get("asset_id") or asset.get("asset_id")
         clip_path = assets_root / f"{asset_id}.mp4" if asset_id else None
-        compat = evaluate_video_clip_compatibility(clip_path)
+        scene_source_type = "short" if short_native else (scene.get("source_type") or "main_episode")
+        req_w, req_h = required_source_resolution(scene_source_type)
+        compat = evaluate_video_clip_compatibility(clip_path, source_type=scene_source_type)
         width, height = probe_resolution(clip_path) if clip_path else (0, 0)
         evidence.append({
             "scene_id": sid,
@@ -254,6 +260,8 @@ def _evaluate_all_clips(
             "fallback_used": asset.get("fallback_used"),
             "measured_width": width,
             "measured_height": height,
+            "source_type": scene_source_type,
+            "required_resolution": f"{req_w}x{req_h}",
             "resolution_compliant": is_resolution_compliant_clip(clip_path, req_w, req_h) if clip_path else False,
             "dry_run": is_dry_run_clip(clip_path) if clip_path else False,
             "compatible": compat.reusable,
@@ -270,10 +278,6 @@ def _evaluate_all_clips(
 
 
 def _check_video(clip_evidence: List[dict], short_native: bool = False) -> GateCheckResult:
-    req_str = (
-        f"{REQUIRED_SOURCE_HEIGHT}x{REQUIRED_SOURCE_WIDTH}" if short_native
-        else f"{REQUIRED_SOURCE_WIDTH}x{REQUIRED_SOURCE_HEIGHT}"
-    )
     if not clip_evidence:
         return GateCheckResult(
             capability="A_VIDEO", status="fail",
@@ -288,10 +292,9 @@ def _check_video(clip_evidence: List[dict], short_native: bool = False) -> GateC
             status="fail",
             reason=(
                 f"{len(offenders)}/{len(clip_evidence)} source clip(s) measured below "
-                f"the required {req_str} source resolution"
+                f"their deliverable's required source resolution"
             ),
             evidence={
-                "required_resolution": req_str,
                 "models_used": models_used,
                 "offending_clips": [
                     {
@@ -299,6 +302,7 @@ def _check_video(clip_evidence: List[dict], short_native: bool = False) -> GateC
                         "model": c["model"],
                         "tier_used": c["tier_used"],
                         "measured_resolution": f"{c['measured_width']}x{c['measured_height']}",
+                        "required_resolution": c.get("required_resolution"),
                     }
                     for c in offenders
                 ],
@@ -714,14 +718,25 @@ def _check_shorts_captions(
 
 def _verify_burned_captions(mp4_path: Path, srt_path: Path) -> dict:
     """
-    Real-output proof, not metadata inference: extract one frame during an
-    active caption cue and one frame with no active cue, crop both to the
-    bottom caption-safe region, and require a measurable increase in
-    near-white pixel presence in the active-cue frame. White fill + black
-    outline burned-in text produces a detectable bright-pixel cluster that
-    a caption-free frame of the same footage does not.
+    Real-output proof, not metadata inference: burned-in white-fill/
+    black-outline text puts a persistent bright-pixel cluster in the
+    bottom caption-safe band whenever a cue is active.
+
+    A single active-vs-gap frame pair (the pre-2026-08-31 method) is not
+    reliable: the underlying footage's own brightness in that band swings
+    far more than a caption's contribution (lamps, torches, fire measure
+    0.01 -> 0.36 bright-fraction across one Short), so one unlucky bright
+    "gap" frame or one dark, fading-in first cue produced a false FAIL on
+    Shorts whose captions are plainly visible. Instead sample the MIDPOINT
+    of several cues spread across the video (text fully rendered, not
+    fading) and several genuinely caption-free points, and decide on the
+    distribution: pass when the median active band is delta brighter than
+    the *darkest* gap sample, OR when a majority of individual active
+    samples clear that bar. A Short with NO burned captions has every
+    active sample statistically indistinguishable from its gaps and still
+    fails closed.
     """
-    from hypogeum.agents.video_renderer import _parse_srt_cues, _srt_timestamp_to_ass  # noqa: PLC0415
+    from hypogeum.agents.video_renderer import _parse_srt_cues  # noqa: PLC0415
 
     try:
         cues = _parse_srt_cues(srt_path.read_text(encoding="utf-8"))
@@ -730,30 +745,56 @@ def _verify_burned_captions(mp4_path: Path, srt_path: Path) -> dict:
     if not cues:
         return {"status": "fail", "reason": "SRT has no cues to verify against"}
 
-    active_start_str = cues[0][0]  # "H:MM:SS.cc"
-    active_t = _ass_time_to_seconds(active_start_str) + 0.3
-    gap_t = max(0.0, active_t - 0.25) if active_t > 0.5 else None
-    # If the first cue starts near t=0, use the tail of the video (after the
-    # last cue) as the caption-free comparison frame instead.
-    if gap_t is None:
-        last_end_str = cues[-1][1]
-        gap_t = _ass_time_to_seconds(last_end_str) + 0.5
+    def _mid(cue) -> float:
+        return (_ass_time_to_seconds(cue[0]) + _ass_time_to_seconds(cue[1])) / 2.0
 
-    active_frac = _bright_pixel_fraction_in_caption_zone(mp4_path, active_t)
-    gap_frac = _bright_pixel_fraction_in_caption_zone(mp4_path, gap_t)
-    if active_frac is None or gap_frac is None:
+    # Up to 8 active samples: cue midpoints evenly spaced through the cue
+    # list, skipping the very first (fade-in / short opener) when possible.
+    pool = cues[1:] if len(cues) > 3 else cues
+    n = min(8, len(pool))
+    step = max(1, len(pool) // n)
+    active_ts = [_mid(pool[i]) for i in range(0, len(pool), step)][:n]
+
+    # Gap samples: before the first cue and after the last, where the
+    # footage carries no burned text. Both ends of a Short are usually its
+    # darkest frames; take several and keep the DARKEST as the bar to beat.
+    first_start = _ass_time_to_seconds(cues[0][0])
+    last_end = _ass_time_to_seconds(cues[-1][1])
+    gap_ts = [t for t in (
+        first_start - 0.5, first_start - 0.3,
+        last_end + 0.3, last_end + 0.6, last_end + 1.0,
+    ) if t >= 0.0]
+    if not gap_ts:
+        gap_ts = [max(0.0, first_start - 0.15)]
+
+    active_fracs = [
+        f for f in (_bright_pixel_fraction_in_caption_zone(mp4_path, t) for t in active_ts)
+        if f is not None
+    ]
+    gap_fracs = [
+        f for f in (_bright_pixel_fraction_in_caption_zone(mp4_path, t) for t in gap_ts)
+        if f is not None
+    ]
+    if not active_fracs or not gap_fracs:
         return {"status": "fail", "reason": "could not extract/inspect comparison frames"}
 
-    delta = active_frac - gap_frac
-    passed = delta >= _CAPTION_MIN_BRIGHT_DELTA
+    active_fracs.sort()
+    med_active = active_fracs[len(active_fracs) // 2]
+    gap_bar = min(gap_fracs)
+    clearing = sum(1 for a in active_fracs if a - gap_bar >= _CAPTION_MIN_BRIGHT_DELTA)
+    passed = (
+        (med_active - gap_bar) >= _CAPTION_MIN_BRIGHT_DELTA
+        or clearing >= (len(active_fracs) // 2 + 1)
+    )
     return {
         "status": "pass" if passed else "fail",
         "reason": (
-            f"bright-pixel fraction in caption zone: active={active_frac:.4f} "
-            f"gap={gap_frac:.4f} delta={delta:.4f} (threshold {_CAPTION_MIN_BRIGHT_DELTA})"
+            f"caption-zone bright fraction: median active={med_active:.4f} "
+            f"vs darkest gap={gap_bar:.4f} (delta threshold {_CAPTION_MIN_BRIGHT_DELTA}); "
+            f"{clearing}/{len(active_fracs)} active samples clear the bar"
         ),
-        "active_t": round(active_t, 2),
-        "gap_t": round(gap_t, 2),
+        "active_samples": [round(f, 4) for f in active_fracs],
+        "gap_samples": [round(f, 4) for f in gap_fracs],
     }
 
 
@@ -960,7 +1001,17 @@ def _black_pixel_fraction(mp4_path: Path, timestamp_s: float) -> Optional[float]
 # E. END-PAGE CONTINUITY
 # ---------------------------------------------------------------------------
 
-_END_PAGE_BOUNDARY_WINDOW_S = 1.5  # silence overlapping this window around the boundary = discontinuity
+_END_PAGE_BOUNDARY_WINDOW_S = 1.5  # a music gap this far BEFORE the body ends is a real discontinuity
+# The renderer's end-card music fade (video_renderer._END_CARD_MUSIC_FADE_SECONDS,
+# a 2026-08-06 production-directing rule: the ONE natural fade-out, starting AT the
+# card entrance and reaching silence within its first seconds) means the music
+# audibly carries ACROSS the body->card seam and only then fades to silence over
+# the rest of the (deliberately quiet) end card. The real defect this check
+# guards against is a music gap that reaches the seam itself — music already gone
+# at or before the transition, or a hard cut. A silence that begins strictly
+# after the seam, once the music has demonstrably crossed it, is the intended
+# fade + quiet outro, not a discontinuity.
+_END_PAGE_SEAM_SILENCE_TOLERANCE_S = 0.5
 
 
 def _check_end_page(
@@ -1014,15 +1065,22 @@ def _check_end_page(
     silence_segments = _detect_silence(main_mp4)
     boundary_silence = [
         s for s in silence_segments
-        if s["start"] <= body_end + _END_PAGE_BOUNDARY_WINDOW_S
+        if s["start"] <= body_end + _END_PAGE_SEAM_SILENCE_TOLERANCE_S
         and s["end"] >= body_end - _END_PAGE_BOUNDARY_WINDOW_S
     ]
     if boundary_silence:
         return GateCheckResult(
             capability="E_END_PAGE",
             status="fail",
-            reason="silence/discontinuity detected at the body-to-end-page boundary",
-            evidence={"body_end_s": round(body_end, 3), "boundary_silence": boundary_silence},
+            reason=(
+                "silence/discontinuity detected at the body-to-end-page seam "
+                "(music does not carry across the transition)"
+            ),
+            evidence={
+                "body_end_s": round(body_end, 3),
+                "seam_tolerance_s": _END_PAGE_SEAM_SILENCE_TOLERANCE_S,
+                "boundary_silence": boundary_silence,
+            },
             remediation="Verify _append_end_page's music_segment_start_seconds offset; re-render the end page.",
         )
     return GateCheckResult(

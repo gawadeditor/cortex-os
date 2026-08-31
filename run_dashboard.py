@@ -7571,6 +7571,15 @@ def api_worker_start():
         }), 409
 
     _ASSETS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+    # A prior /api/worker/stop leaves stop_requested="1" in worker_control;
+    # the daemon consumes+clears it on its first iteration, so without this
+    # the freshly started worker would immediately stop itself. An explicit
+    # "start" means the operator wants it running now -- clear the flag.
+    try:
+        from hypogeum.db import set_worker_control
+        set_worker_control("stop_requested", "0", db_path=_db_path())
+    except Exception:
+        pass
     log_fh = open(_WORKER_LOG_FILE, "a")  # append so history is preserved
     try:
         import sys as _sys

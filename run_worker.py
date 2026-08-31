@@ -224,7 +224,17 @@ def _acquire_worker_singleton_lock() -> str | None:
     try:
         if _WORKER_PID_FILE.exists():
             existing_pid_str = _WORKER_PID_FILE.read_text().strip()
-            if existing_pid_str:
+            if existing_pid_str and int(existing_pid_str) == _os.getpid():
+                # Our OWN pid, pre-written by run_dashboard.py's
+                # /api/worker/start: it Popen's this process, then writes
+                # proc.pid to this shared file before our (slow) imports
+                # reach here. Not a second process -- fall through and
+                # re-write it + register the atexit cleanup as normal.
+                log.info(
+                    "worker_pid_file_is_self existing_pid=%s — dashboard pre-registered this process",
+                    existing_pid_str,
+                )
+            elif existing_pid_str:
                 existing_pid = int(existing_pid_str)
                 try:
                     _os.kill(existing_pid, 0)

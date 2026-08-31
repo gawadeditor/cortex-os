@@ -23,6 +23,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
 
 <div class="container">
 
@@ -64,7 +65,7 @@
 {% set _pending = d.actions | selectattr('status', 'equalto', 'pending') | list %}
 {% if _pending %}
 <div class="action-banner">
-  <span style="font-size:18px; flex-shrink:0;">⚡</span>
+  {{ icon("bolt", "i-lg") }}
   <div class="action-banner-body">
     <div class="action-banner-title">
       {{ _pending | length }} pending action{% if _pending | length != 1 %}s{% endif %} from this episode

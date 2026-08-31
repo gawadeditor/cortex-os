@@ -66,6 +66,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('production') }}
@@ -141,17 +142,17 @@
         {% if t.source == 'rerun' %}
           <span style="font-size:11px; color:var(--yellow); background:rgba(210,153,34,.12);
                        border:1px solid rgba(210,153,34,.3); border-radius:10px; padding:1px 7px;
-                       font-weight:600;">&#8635; recover</span>
+                       font-weight:600;">{{ icon('refresh') }} recover</span>
           {% if t.episode_id %}
           <span style="font-size:11px; color:var(--muted);">
             <code style="font-size:10px;">{{ t.episode_id }}</code>
           </span>
           {% endif %}
         {% elif t.source == 'discovered' %}
-          <span class="prov-discovered">&#128270; discovered</span>
+          <span class="prov-discovered">{{ icon('discovery') }} discovered</span>
           {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
         {% else %}
-          <span>&#9998; manual</span>
+          <span>{{ icon('pencil') }} manual</span>
         {% endif %}
         {% if t.created_at %}<span>added {{ t.created_at[:10] }}</span>{% endif %}
         <span>priority {{ t.priority }}</span>
@@ -162,7 +163,7 @@
       {% if t.source == 'rerun' %}
       <div style="margin-top:6px; padding:8px 10px; background:rgba(210,153,34,.06);
                   border:1px solid rgba(210,153,34,.2); border-radius:var(--radius); font-size:11px;">
-        <div style="font-weight:600; color:var(--yellow); margin-bottom:4px;">&#8635; Recovery run — what will happen:</div>
+        <div style="font-weight:600; color:var(--yellow); margin-bottom:4px;">{{ icon('refresh') }} Recovery run — what will happen:</div>
         <ul style="margin:0; padding-left:14px; color:var(--muted); line-height:1.8;">
           <li>Same episode_id preserved: <code style="font-size:10px;">{{ t.episode_id or '(set at pickup)' }}</code></li>
           <li>Completed Stage A skeleton + Stage B prompt batches reused from disk</li>
@@ -212,7 +213,7 @@
                     box-shadow:0 4px 12px rgba(0,0,0,.4);">
           {% if t.source == 'rerun' %}
           <div style="font-size:11px; color:var(--yellow); font-weight:600; margin-bottom:5px;">
-            &#8635; Recovery run
+            {{ icon('refresh') }} Recovery run
           </div>
           <div style="font-size:11px; color:var(--muted); margin-bottom:8px;">
             Worker will resume using saved checkpoints.
@@ -232,7 +233,7 @@
             <input type="hidden" name="platforms"  value="youtube">
             <button type="submit" class="btn {% if t.source == 'rerun' %}btn-approve{% endif %}"
                     style="font-size:11px; padding:4px 12px; width:100%;">
-              {% if t.source == 'rerun' %}&#8635; Resume run now{% else %}&#9654; Start now{% endif %}
+              {% if t.source == 'rerun' %}{{ icon('refresh') }} Resume run now{% else %}{{ icon('play') }} Start now{% endif %}
             </button>
           </form>
           {% else %}

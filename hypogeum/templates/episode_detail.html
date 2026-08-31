@@ -474,6 +474,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_subnav.html' import subnav %}
+{{ subnav('review') }}
+{% from '_icons.html' import icon %}
 
 <div class="container">
 
@@ -985,11 +988,11 @@
     <button class="btn btn-resume"
             onclick="resumeEpisode('{{ d.episode_id }}', 'narration')"
             title="Generate missing narration beats only, then rebuild.">
-      🎙 Resume Narration
+      {{ icon("mic") }} Resume Narration
     </button>
     {% if da.get('has_render') %}
     <a href="/episode/{{ d.episode_id }}/render" class="btn" download>
-      ⬇ Download Render ({{ da.render_size_mb }}MB)
+      {{ icon("download") }} Download Render ({{ da.render_size_mb }}MB)
     </a>
     {% endif %}
   </div>
@@ -1032,7 +1035,7 @@ function resumeEpisode(episodeId, kind) {
   {% if da.get('has_render') %}
   <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
     <span class="ok">✓ Rendered ({{ da.render_size_mb }} MB)</span>
-    <a href="/episode/{{ d.episode_id }}/render" class="btn" download>⬇ Download MP4</a>
+    <a href="/episode/{{ d.episode_id }}/render" class="btn" download>{{ icon("download") }} Download MP4</a>
   </div>
   {% else %}
   <div class="muted">No render found. Run assembly to generate.</div>
@@ -1069,7 +1072,7 @@ function resumeEpisode(episodeId, kind) {
       {% else %}
         <div class="ok" style="margin-bottom:8px;">✓ Thumbnail file present</div>
       {% endif %}
-      <a href="/episode/{{ d.episode_id }}/thumbnail" class="btn" download>⬇ Download</a>
+      <a href="/episode/{{ d.episode_id }}/thumbnail" class="btn" download>{{ icon("download") }} Download</a>
     </div>
   </div>
   {% else %}
@@ -1083,7 +1086,7 @@ function resumeEpisode(episodeId, kind) {
   {% if da.get('has_narration') %}
   <div class="stat-row">
     <span class="stat-label">Narration ({{ da.narration_size_mb }} MB)</span>
-    <a href="/episode/{{ d.episode_id }}/narration" class="btn" download>⬇ Download MP3</a>
+    <a href="/episode/{{ d.episode_id }}/narration" class="btn" download>{{ icon("download") }} Download MP3</a>
   </div>
   {% else %}
   <div class="stat-row"><span class="stat-label muted">No narration found</span></div>
@@ -1091,7 +1094,7 @@ function resumeEpisode(episodeId, kind) {
   {% if da.get('has_captions') %}
   <div class="stat-row">
     <span class="stat-label">Captions (SRT)</span>
-    <a href="/episode/{{ d.episode_id }}/captions" class="btn" download>⬇ Download SRT</a>
+    <a href="/episode/{{ d.episode_id }}/captions" class="btn" download>{{ icon("download") }} Download SRT</a>
   </div>
   {% else %}
   <div class="stat-row"><span class="stat-label muted">No captions found</span></div>

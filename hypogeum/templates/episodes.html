@@ -61,6 +61,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('review') }}
@@ -100,16 +101,16 @@
   </div>
   {% for t in claimed_topics %}
   <div class="claimed-item">
-    <div class="queue-rank">&#9654;</div>
+    <div class="queue-rank">{{ icon('chevron-down') }}</div>
     <div class="queue-body">
       <div class="queue-text">{{ t.topic_text }}</div>
       <div class="queue-meta">
         {% if t.source == 'discovered' %}
-          <span class="prov-disc">&#128270; discovered</span>
+          <span class="prov-disc">{{ icon('discovery') }} discovered</span>
           {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
           {% if t.candidate_id %}<span class="cand-chip">cand {{ t.candidate_id[:8] }}</span>{% endif %}
         {% else %}
-          <span>&#9998; manual</span>
+          <span>{{ icon('pencil') }} manual</span>
         {% endif %}
         <span>{{ t.channel_id }}</span>
         {% if t.claimed_at %}<span>started {{ t.claimed_at[:10] }}</span>{% endif %}
@@ -147,11 +148,11 @@
       <div class="queue-text">{{ t.topic_text }}</div>
       <div class="queue-meta">
         {% if t.source == 'discovered' %}
-          <span class="prov-disc">&#128270; discovered</span>
+          <span class="prov-disc">{{ icon('discovery') }} discovered</span>
           {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
           {% if t.candidate_id %}<span class="cand-chip">cand {{ t.candidate_id[:8] }}</span>{% endif %}
         {% else %}
-          <span>&#9998; manual</span>
+          <span>{{ icon('pencil') }} manual</span>
         {% endif %}
         <span>{{ t.channel_id }}</span>
         {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
@@ -169,7 +170,7 @@
         <summary style="list-style:none; cursor:pointer; font-size:11px; color:var(--muted);
                         padding:4px 8px; border:1px solid var(--border); border-radius:var(--radius);
                         white-space:nowrap; background:transparent;">
-          Options &#9654;
+          Options {{ icon('chevron-down') }}
         </summary>
         <div style="position:absolute; right:0; margin-top:4px; z-index:10;
                     background:var(--surface); border:1px solid var(--border);
@@ -185,7 +186,7 @@
             <input type="hidden" name="quality_mode" value="balanced">
             <input type="hidden" name="platforms"    value="youtube">
             <button type="submit" class="btn btn-approve"
-                    style="font-size:11px; padding:4px 12px; width:100%;">&#9654; Force-start now</button>
+                    style="font-size:11px; padding:4px 12px; width:100%;">{{ icon('chevron-down') }} Force-start now</button>
           </form>
         </div>
       </details>
@@ -272,14 +273,14 @@
   <summary style="padding:10px 16px; background:var(--surface);
                   border:1px solid var(--border); border-radius:var(--radius);
                   font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px;">
-    <span style="font-size:10px; display:inline-block; transition:transform .15s;">&#9654;</span>
+    <span style="font-size:10px; display:inline-block; transition:transform .15s;">{{ icon('chevron-down') }}</span>
     Advanced: queue a topic manually
     <span style="font-size:11px; margin-left:4px;">(bypasses discovery scoring)</span>
   </summary>
   <div class="card override-form" style="border-top:none; border-radius:0 0 var(--radius) var(--radius); padding:16px; margin-top:0;">
     {% if not preflight.ready %}
     <div class="warn" style="font-size:12px; margin-bottom:10px;">
-      &#9888; Preflight has {{ preflight.blocker_count }} blocker(s) —
+      {{ icon('warning') }} Preflight has {{ preflight.blocker_count }} blocker(s) —
       topics can be queued but pipeline won't start until resolved.
       <a href="/preflight">View preflight &#8594;</a>
     </div>

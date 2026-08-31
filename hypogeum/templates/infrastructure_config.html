@@ -23,7 +23,7 @@
     .cfg-header { display: flex; align-items: center; gap: 8px;
                   margin-bottom: 10px; flex-wrap: wrap; }
     .cfg-title  { font-size: 13px; font-weight: 700; }
-    .cfg-icon   { font-size: 16px; }
+    .cfg-icon   { font-size: 17px; color: var(--accent); display:inline-flex; vertical-align:-2px; }
 
     /* Stat rows */
     .cfg-row { display: flex; justify-content: space-between; align-items: baseline;
@@ -56,6 +56,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
 
 <div class="container">
 
@@ -108,7 +109,7 @@
 {% set fac = config.factory %}
 <div class="cfg-card {% if fac.status == 'active' %}cfg-card-ok{% elif fac.channel_count == 0 %}cfg-card-empty{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">🏭</span>
+    <span class="cfg-icon">{{ icon("factory") }}</span>
     <span class="cfg-title">Factory Profile</span>
     <span class="badge badge-{{ fac.status if fac.status in ('active','paused','unknown') else 'unknown' }}"
           style="font-size:10px; padding:1px 7px; margin-left:auto;">
@@ -142,7 +143,7 @@
 {# ── Channels ── #}
 <div class="cfg-card {% if config.channels %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">📺</span>
+    <span class="cfg-icon">{{ icon("channels") }}</span>
     <span class="cfg-title">Channels ({{ config.channels | length }})</span>
   </div>
   {% if config.channels %}
@@ -165,7 +166,7 @@
 {# ── Schedules ── #}
 <div class="cfg-card {% if config.schedules %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">📅</span>
+    <span class="cfg-icon">{{ icon("calendar") }}</span>
     <span class="cfg-title">Schedules ({{ config.schedules | length }})</span>
   </div>
   {% if config.schedules %}
@@ -196,7 +197,7 @@
 {% set pub = config.publishing %}
 <div class="cfg-card {% if pub %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">📤</span>
+    <span class="cfg-icon">{{ icon("upload") }}</span>
     <span class="cfg-title">Publishing</span>
   </div>
   {% if pub %}
@@ -251,7 +252,7 @@
 {% set mod = config.providers %}
 <div class="cfg-card {% if mod %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">🤖</span>
+    <span class="cfg-icon">{{ icon("robot") }}</span>
     <span class="cfg-title">Model Defaults</span>
   </div>
   {% if mod %}
@@ -294,7 +295,7 @@
 {% set bud = config.budgets %}
 <div class="cfg-card {% if bud.ceiling_configured %}cfg-card-ok{% else %}cfg-card-warn{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">💰</span>
+    <span class="cfg-icon">{{ icon("dollar") }}</span>
     <span class="cfg-title">Budget</span>
   </div>
   <div class="cfg-row">
@@ -322,7 +323,7 @@
 {% set br = config.brand %}
 <div class="cfg-card {% if br %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">🎨</span>
+    <span class="cfg-icon">{{ icon("palette") }}</span>
     <span class="cfg-title">Brand</span>
   </div>
   {% if br %}
@@ -361,7 +362,7 @@
 {# ── Environment Health ── #}
 <div class="cfg-card {% if env.ready %}cfg-card-ok{% elif env.blocker_count > 0 %}cfg-card-err{% else %}cfg-card-warn{% endif %}">
   <div class="cfg-header">
-    <span class="cfg-icon">🔧</span>
+    <span class="cfg-icon">{{ icon("wrench") }}</span>
     <span class="cfg-title">Environment</span>
     <span class="badge badge-{{ 'ready' if env.ready else 'blocked' if env.blocker_count > 0 else 'degraded' }}"
           style="font-size:10px; padding:1px 7px; margin-left:auto;">

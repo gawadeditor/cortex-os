@@ -18,7 +18,7 @@
                         text-decoration: none; }
 
     .ic-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-    .ic-icon   { font-size: 22px; }
+    .ic-icon   { font-size: 20px; color: var(--accent); display:inline-flex; }
     .ic-title  { font-size: 15px; font-weight: 700; color: var(--text); }
 
     .ic-desc   { font-size: 12px; color: var(--muted); margin-bottom: 12px;
@@ -37,6 +37,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
 
 <div class="container">
 
@@ -64,7 +65,7 @@
   {# ── Workers ── #}
   <a href="/infrastructure/workers" class="infra-card">
     <div class="ic-header">
-      <span class="ic-icon">⚙️</span>
+      <span class="ic-icon">{{ icon("settings") }}</span>
       <span class="ic-title">Workers</span>
       {% if w.error > 0 %}
         <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ w.error }} error</span>
@@ -101,7 +102,7 @@
   {# ── Providers ── #}
   <a href="/infrastructure/providers" class="infra-card">
     <div class="ic-header">
-      <span class="ic-icon">🤖</span>
+      <span class="ic-icon">{{ icon("robot") }}</span>
       <span class="ic-title">Providers</span>
       {% if p.degraded > 0 %}
         <span class="badge badge-degraded" style="font-size:10px; margin-left:auto;">{{ p.degraded }} degraded</span>
@@ -136,7 +137,7 @@
   {# ── Connections ── #}
   <a href="/infrastructure/connections" class="infra-card">
     <div class="ic-header">
-      <span class="ic-icon">🔗</span>
+      <span class="ic-icon">{{ icon("link") }}</span>
       <span class="ic-title">Connections</span>
       {% if c.expired > 0 %}
         <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ c.expired }} expired</span>
@@ -175,7 +176,7 @@
   {# ── Config ── #}
   <a href="/infrastructure/config" class="infra-card">
     <div class="ic-header">
-      <span class="ic-icon">⚙</span>
+      <span class="ic-icon">{{ icon("wrench") }}</span>
       <span class="ic-title">Config</span>
       {% if k.blocker_count > 0 %}
         <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ k.blocker_count }} blocker{% if k.blocker_count != 1 %}s{% endif %}</span>

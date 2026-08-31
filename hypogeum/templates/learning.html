@@ -26,6 +26,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
 
 <div class="container">
 
@@ -54,7 +55,7 @@
 {# ── Items requiring human review (below confidence threshold) ── #}
 {% if state.pending_actions_list %}
 <div class="action-banner">
-  <span style="font-size:20px; flex-shrink:0;">⚡</span>
+  {{ icon("bolt", "i-lg") }}
   <div class="action-banner-body">
     <div class="action-banner-title">
       {{ state.pending_actions_list | length }} item{% if state.pending_actions_list | length != 1 %}s{% endif %} require your review

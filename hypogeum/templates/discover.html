@@ -101,6 +101,7 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('production') }}
@@ -135,7 +136,7 @@
 <div style="margin-bottom:var(--gap); padding:8px 12px; background:rgba(210,153,34,.06);
             border:1px solid rgba(210,153,34,.2); border-radius:var(--radius);
             font-size:11px; color:var(--muted); line-height:1.7;">
-  <strong style="color:var(--yellow);">&#9888; Scoring status: rubric-based, not analytics-backed.</strong>
+  <strong style="color:var(--yellow);">{{ icon('warning') }} Scoring status: rubric-based, not analytics-backed.</strong>
   Scores reflect an LLM-assigned breakdown across 8 dimensions (click potential, curiosity gap,
   evidence strength, visual potential, retention, feasibility, channel fit, novelty).
   Scores vary per candidate (typical range 0.45–0.85) but are not yet calibrated against
@@ -151,7 +152,7 @@
   <summary style="padding:8px 14px; background:var(--surface); border:1px solid var(--border);
                   border-radius:var(--radius); font-size:12px; color:var(--muted);
                   list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
-    <span style="font-size:10px;">&#9654;</span>
+    <span style="font-size:10px;">{{ icon('chevron-down') }}</span>
     Emergency: manually trigger discovery cycle
     <span style="font-size:11px; margin-left:4px;">(scheduled worker handles this automatically)</span>
   </summary>
@@ -199,7 +200,7 @@
 {# ── Failed banner ── #}
 {% if discovery_status == 'failed' and discovery_error %}
 <div class="failed-banner">
-  &#9888; {{ discovery_error }}
+  {{ icon('warning') }} {{ discovery_error }}
   <button type="button" onclick="resetDiscovery()"
           style="margin-left:12px; font-size:11px; padding:2px 8px; background:none;
                  border:1px solid rgba(248,81,73,.4); border-radius:var(--radius);
@@ -226,7 +227,7 @@
   {% set already_queued = c.candidate_id in queued_set %}
   <div class="candidate-row {% if c.selected %}is-selected{% endif %}">
     <div class="candidate-rank {% if c.selected %}rank-selected{% endif %}">
-      {% if c.selected %}&#9733;{% else %}{{ loop.index }}{% endif %}
+      {% if c.selected %}{{ icon('sparkle') }}{% else %}{{ loop.index }}{% endif %}
     </div>
     <div class="candidate-body">
       <div class="candidate-topic {% if c.selected %}topic-selected{% endif %}">
@@ -244,7 +245,7 @@
         </div>
         <span class="source-tag">{{ c.source }}</span>
         {% if c.selected %}<span class="badge badge-active">top pick</span>{% endif %}
-        {% if already_queued %}<span class="badge-queued">&#10003; queued</span>{% endif %}
+        {% if already_queued %}<span class="badge-queued">{{ icon('check') }} queued</span>{% endif %}
         {% if c.status == 'approved' and not already_queued %}
           <span class="badge badge-active">approved</span>
         {% elif c.status == 'rejected' %}
@@ -339,7 +340,7 @@
   </div>
   {% else %}
   <div class="empty-state">
-    <div style="font-size:32px;">&#128269;</div>
+    <div style="font-size:32px;">{{ icon('discovery') }}</div>
     <div style="font-weight:600; color:var(--text); margin-top:8px; margin-bottom:6px;">No candidates yet</div>
     <div>The discovery worker will score candidates on its next scheduled run.</div>
     <div style="margin-top:6px; font-size:12px;">
@@ -355,7 +356,7 @@
   <summary style="padding:8px 14px; background:var(--surface); border:1px solid var(--border);
                   border-radius:var(--radius); font-size:12px; color:var(--muted);
                   list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
-    <span style="font-size:10px;">&#9654;</span>
+    <span style="font-size:10px;">{{ icon('chevron-down') }}</span>
     Production queue
     <span style="font-size:11px; margin-left:4px;">— {{ queued_topics|length }} topic{% if queued_topics|length != 1 %}s{% endif %} waiting
       &ensp;·&ensp; <a href="/create" style="color:var(--blue);" onclick="event.stopPropagation()">Full queue view &#8594;</a>
@@ -371,13 +372,13 @@
         <div class="queue-topic-text">{{ t.topic_text }}</div>
         <div class="queue-meta">
           {% if t.source == 'rerun' %}
-            <span style="color:var(--yellow); font-weight:600;">&#8635; recover</span>
+            <span style="color:var(--yellow); font-weight:600;">{{ icon('refresh') }} recover</span>
             {% if t.episode_id %}<span style="font-size:10px;"><code>{{ t.episode_id }}</code></span>{% endif %}
           {% elif t.source == 'discovered' %}
-            <span class="queue-source-disc">&#128270; discovered</span>
+            <span class="queue-source-disc">{{ icon('discovery') }} discovered</span>
             {% if t.discovery_score is not none and t.discovery_score %}<span>score {{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
           {% else %}
-            <span class="queue-source-manual">&#9998; manual</span>
+            <span class="queue-source-manual">{{ icon('pencil') }} manual</span>
           {% endif %}
           {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
           <span>priority {{ t.priority }}</span>
@@ -397,7 +398,7 @@
           <input type="hidden" name="platforms" value="youtube">
           <button type="submit" class="btn {% if t.source == 'rerun' %}btn-approve{% endif %}"
                   style="font-size:11px; padding:3px 10px; white-space:nowrap;">
-            {% if t.source == 'rerun' %}&#8635; Resume{% else %}&#9654; Start{% endif %}
+            {% if t.source == 'rerun' %}&#8635; Resume{% else %}{{ icon('chevron-down') }} Start{% endif %}
           </button>
         </form>
         <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
@@ -416,7 +417,7 @@
   <details>
     <summary style="cursor:pointer; font-size:12px; color:var(--muted); padding:8px 0;
                     list-style:none; display:flex; align-items:center; gap:6px;">
-      <span style="font-size:10px;">&#9654;</span>
+      <span style="font-size:10px;">{{ icon('chevron-down') }}</span>
       Override: queue a custom topic manually
     </summary>
     <div style="padding: 12px 0;">
@@ -474,12 +475,12 @@ function runDiscovery() {
       window.location.href = '/discover?channel_id=' + encodeURIComponent(_channelId);
     } else {
       if (btn) { btn.disabled = false; btn.textContent = 'Run Discovery Cycle'; }
-      _setStatus('error', '&#9888; ' + (d.error || 'Discovery failed'));
+      _setStatus('error', '{{ icon('warning') }} ' + (d.error || 'Discovery failed'));
     }
   })
   .catch(function(e) {
     if (btn) { btn.disabled = false; btn.textContent = 'Run Discovery Cycle'; }
-    _setStatus('error', '&#9888; ' + (e.message || 'Network error'));
+    _setStatus('error', '{{ icon('warning') }} ' + (e.message || 'Network error'));
   });
 }
 

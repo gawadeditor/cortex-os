@@ -1,0 +1,23 @@
+{#- Section sub-navigation. Renders the tab row for a core section; the
+    active tab is derived from request.path so pages don't pass anything.
+    Usage:  {% from '_subnav.html' import subnav %}   {{ subnav('production') }}
+    Sections: production · review · credentials · settings · channels -#}
+{%- macro subnav(section) -%}
+{%- set p = request.path -%}
+{%- set groups = {
+  'channels':   [('Channels','/channels'), ('Build a channel','/channels/new')],
+  'production': [('Queue','/create'), ('Live','/live'), ('Run history','/runs'), ('Failures','/failures'), ('Discovery','/discover')],
+  'review':     [('Attention','/attention'), ('Approvals','/approvals'), ('Episodes','/episodes'), ('Preflight','/preflight')],
+  'credentials':[('AI providers','/providers'), ('Platform connections','/platforms')],
+  'settings':   [('Channel profile','/channel-profile'), ('Infrastructure config','/infrastructure/config'), ('Setup checklist','/setup')],
+} -%}
+{%- set tabs = groups.get(section, []) -%}
+{%- if tabs -%}
+<nav class="sub-nav" aria-label="{{ section }} sections">
+  {%- for label, href in tabs -%}
+    {%- set is_active = (p == href) or (href != '/create' and href != '/channels' and p.startswith(href + '/')) or (href == '/create' and p.startswith('/create')) or (href == '/channels' and (p == '/channels' or p.startswith('/channel/'))) or (href == '/runs' and p.startswith('/run/')) or (href == '/episodes' and p.startswith('/episode/')) -%}
+  <a href="{{ href }}" class="sub-nav-link {{ 'active' if is_active }}">{{ label }}</a>
+  {%- endfor -%}
+</nav>
+{%- endif -%}
+{%- endmacro -%}

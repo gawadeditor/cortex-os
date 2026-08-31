@@ -25,6 +25,10 @@ client_secrets.json
 .claude/skills/graphify/references/*
 !.claude/skills/graphify/references/*.md
 
+# ui-ux-pro-max — vendored (mandatory per DECISION_LOG.md ADR-009)
+!.claude/skills/ui-ux-pro-max/
+!.claude/skills/ui-ux-pro-max/**
+
 # Octogent integration
 .octogent/
 

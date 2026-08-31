@@ -186,7 +186,8 @@ class TestChannelHeader:
 
     def test_factory_health_section_rendered(self, client, db):
         html = _html(client, db)
-        assert "Factory Health" in html
+        # health now reads from the tier-1 KPI strip + the "Factory status" card
+        assert "Factory readiness" in html or "Factory status" in html
 
     def test_factory_health_shows_readable_status(self, client, db):
         html = _html(client, db)
@@ -434,11 +435,11 @@ class TestOperationsCollapsed:
 
     def test_operations_summary_inside_details(self, client, db):
         html = _html(client, db)
-        assert "Operations" in html
-        # Verify it is inside a <details> element
+        # The secondary nav menu ("More" — modules + advanced) is collapsed.
+        assert "More" in html
         details_match = re.search(r'<details[^>]*>(.*?)</details>', html, re.DOTALL)
         assert details_match is not None
-        assert "Operations" in details_match.group(1)
+        assert "More" in details_match.group(1)
 
     def test_debug_links_inside_collapsed_section(self, client, db):
         html = _html(client, db)
@@ -451,7 +452,7 @@ class TestOperationsCollapsed:
         html = _html(client, db)
         details_match = re.search(r'<details[^>]*>(.*?)</details>', html, re.DOTALL)
         assert details_match is not None
-        assert "Pending Approvals" in details_match.group(1)
+        assert '/approvals' in details_match.group(1)
 
 
 # ===========================================================================
@@ -467,9 +468,9 @@ class TestF13NavRefactor:
         nav_links = _re.findall(r'class="nav-link[^"]*"[^>]*href="([^"]+)"', html)
         if not nav_links:
             nav_links = _re.findall(r'href="([^"]+)"[^>]*class="nav-link', html)
-        operator_paths = {"/dashboard", "/create", "/episodes", "/channels",
-                          "/providers", "/providers/video-test", "/platforms", "/discover",
-                          "/analytics", "/settings"}
+        # surface-area IA: six core sections only (docs/dashboard-surface-area.md)
+        operator_paths = {"/dashboard", "/channels", "/create", "/attention",
+                          "/providers", "/channel-profile"}
         for href in nav_links:
             assert href in operator_paths, (
                 f"Non-operator nav item found: {href!r}. "
@@ -492,7 +493,7 @@ class TestF13NavRefactor:
 
     def test_dashboard_contains_factory_health(self, client, db):
         html = _html(client, db)
-        assert "Factory Health" in html
+        assert "Factory readiness" in html or "Factory status" in html
 
     def test_dashboard_contains_production_section(self, client, db):
         html = _html(client, db)

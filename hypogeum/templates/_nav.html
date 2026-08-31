@@ -1,37 +1,50 @@
+{% from '_icons.html' import icon %}
+{% set p = request.path %}
+{% set sec_channels   = p == '/channels' or p.startswith('/channels/') or (p.startswith('/channel/') and not p.startswith('/channel-profile')) or p.startswith('/brand/') or p.startswith('/model/') or p.startswith('/publishing/') %}
+{% set sec_production = p in ['/create','/live','/runs','/failures','/queue'] or p.startswith('/discover') or p.startswith('/run/') or p.startswith('/create/') %}
+{% set sec_review     = p in ['/attention','/approvals','/episodes','/preflight'] or p.startswith('/episode/') or p.startswith('/approvals/') %}
+{% set sec_creds      = p in ['/providers','/platforms'] or p.startswith('/platforms/') or p.startswith('/providers/') %}
+{% set sec_settings   = p in ['/channel-profile','/setup'] or p.startswith('/infrastructure/config') %}
+{% set sec_home       = p == '/dashboard' or p == '/' %}
+
 <nav class="site-nav">
   <a href="/dashboard" class="nav-brand">Factory OS</a>
-  <div class="nav-links">
-    <a href="/dashboard"   class="nav-link {% if request.path == '/dashboard' %}active{% endif %}">Factory</a>
-    <a href="/create"     class="nav-link {% if request.path == '/create' %}active{% endif %}">Production Queue</a>
-    <a href="/discover"   class="nav-link {% if request.path.startswith('/discover') %}active{% endif %}">Discovery</a>
-    <a href="/channels"   class="nav-link {% if request.path.startswith('/channels') or (request.path.startswith('/channel/') and not request.path.startswith('/channel-profile')) %}active{% endif %}">Channels</a>
-    <a href="/providers"  class="nav-link {% if request.path == '/providers' %}active{% endif %}">AI Providers</a>
-    <a href="/platforms"  class="nav-link {% if request.path == '/platforms' %}active{% endif %}">Platform Connections</a>
+
+  <div class="nav-links" id="nav-primary">
+    <a href="/dashboard"       class="nav-link {{ 'active' if sec_home }}">{{ icon('home') }}<span>Home</span></a>
+    <a href="/channels"        class="nav-link {{ 'active' if sec_channels }}">{{ icon('channels') }}<span>Channels</span></a>
+    <a href="/create"          class="nav-link {{ 'active' if sec_production }}">{{ icon('production') }}<span>Production</span></a>
+    <a href="/attention"       class="nav-link {{ 'active' if sec_review }}">{{ icon('review') }}<span>Review</span></a>
+    <a href="/providers"       class="nav-link {{ 'active' if sec_creds }}">{{ icon('credentials') }}<span>Credentials</span></a>
+    <a href="/channel-profile" class="nav-link {{ 'active' if sec_settings }}">{{ icon('settings') }}<span>Settings</span></a>
+
     <details class="nav-ops-details">
-      <summary class="nav-ops-toggle">Operations</summary>
+      <summary class="nav-ops-toggle">{{ icon('more') }}<span>More</span></summary>
       <div class="nav-ops-menu">
-        <div class="nav-ops-group">Production</div>
-        <a href="/factory">Factory Overview</a>
-        <a href="/live">Live</a>
-        <a href="/queue">Run Queue</a>
-        <a href="/runs">History</a>
-        <a href="/failures">Failures</a>
-        <div class="nav-ops-group">Escalations</div>
-        <a href="/attention">Attention</a>
-        <a href="/approvals">Pending Approvals</a>
-        <a href="/preflight">System Checks</a>
-        <div class="nav-ops-group">Intelligence</div>
-        <a href="/episodes">Episodes</a>
-        <a href="/intelligence/performance">Performance</a>
-        <a href="/intelligence/learning">Learning</a>
-        <a href="/intelligence/sync">Sync Health</a>
+        <div class="nav-ops-group">Modules</div>
+        <a href="/analytics">{{ icon('analytics') }} Analytics</a>
+        <a href="/intelligence/learning">{{ icon('learning') }} Learning</a>
+        <a href="/intelligence/performance">{{ icon('analytics') }} Performance</a>
+        <a href="/intelligence/sync">{{ icon('refresh') }} Sync health</a>
+
+        <div class="nav-ops-group">Production detail</div>
+        <a href="/live">{{ icon('live') }} Live</a>
+        <a href="/queue">{{ icon('queue') }} Run queue</a>
+        <a href="/runs">{{ icon('runs') }} Run history</a>
+        <a href="/failures">{{ icon('failures') }} Failures</a>
+        <a href="/discover">{{ icon('discovery') }} Discovery</a>
+
+        <div class="nav-ops-group">Review detail</div>
+        <a href="/approvals">{{ icon('review') }} Approvals</a>
+        <a href="/episodes">{{ icon('grid') }} Episodes</a>
+        <a href="/preflight">{{ icon('check') }} Preflight checks</a>
+
         <div class="nav-ops-group">Governance</div>
         <a href="/decisions">Decisions</a>
-        <a href="/decision-reviews">Reviews</a>
-        <a href="/execution-plans">Plans</a>
-        <a href="/decision-inputs">Inputs</a>
-        <div class="nav-ops-group">Config</div>
-        <a href="/channel-profile">Channel Profile</a>
+        <a href="/decision-reviews">Decision reviews</a>
+        <a href="/decision-inputs">Decision inputs</a>
+        <a href="/execution-plans">Execution plans</a>
+
         <div class="nav-ops-group">Infrastructure</div>
         <a href="/infrastructure">Overview</a>
         <a href="/infrastructure/workers">Workers</a>
@@ -39,21 +52,47 @@
         <a href="/infrastructure/connections">Connections</a>
         <a href="/infrastructure/config">Config</a>
         <a href="/infrastructure/debug">Debug</a>
-        <div class="nav-ops-group">Debug</div>
-        <a href="/providers/video-test">Video Test</a>
-        <a href="/compare">Model Comparison</a>
-        <a href="/prompts">Prompt Registry</a>
-        <a href="/command">Command</a>
+
+        <div class="nav-ops-group">Advanced</div>
+        <a href="/factory">Factory overview</a>
+        <a href="/compare">Model comparison</a>
+        <a href="/prompts">Prompt registry</a>
+        <a href="/command">Command centre</a>
+        <a href="/providers/video-test">Video test</a>
       </div>
     </details>
+  </div>
+
+  <div class="nav-tail">
+    <button class="skin-toggle" id="skin-toggle" type="button" title="Presentation skin">
+      {{ icon('sparkle') }}<span id="skin-label">Base</span>
+    </button>
     <span class="worker-pill is-stopped" id="worker-pill" title="Production worker">
       <span class="wp-dot"></span><span id="wp-label">worker</span>
       <button id="wp-toggle" type="button">·</button>
     </span>
   </div>
 </nav>
+
 <script>
 (function(){
+  /* ── presentation skin toggle (per-viewer, localStorage) ── */
+  var root = document.documentElement, st = document.getElementById('skin-toggle'),
+      sl = document.getElementById('skin-label');
+  function applySkin(s){
+    if (s === 'presentation') { root.dataset.skin = 'presentation'; if(sl) sl.textContent = 'Presentation'; if(st) st.classList.add('on'); }
+    else { delete root.dataset.skin; if(sl) sl.textContent = 'Base'; if(st) st.classList.remove('on'); }
+  }
+  var saved = 'base';
+  try { saved = localStorage.getItem('factoryos-skin') || 'base'; } catch(e){}
+  applySkin(saved);
+  if (st) st.addEventListener('click', function(){
+    var next = (root.dataset.skin === 'presentation') ? 'base' : 'presentation';
+    applySkin(next);
+    try { localStorage.setItem('factoryos-skin', next); } catch(e){}
+  });
+
+  /* ── worker status pill ── */
   var pill=document.getElementById('worker-pill'), lbl=document.getElementById('wp-label'), btn=document.getElementById('wp-toggle');
   if(!pill) return;
   var running=false;
@@ -78,21 +117,47 @@
   poll(); setInterval(poll, 15000);
 })();
 </script>
+
 <style>
+  .site-nav { gap: 14px; }
+  .nav-link { display: inline-flex; align-items: center; gap: 7px; }
+  .nav-link .i { color: var(--faint); transition: color var(--dur) var(--ease); }
+  .nav-link:hover .i, .nav-link.active .i { color: currentColor; }
+  .nav-tail { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+  .skin-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px;
+                 border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface);
+                 color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+                 white-space: nowrap; transition: all var(--dur) var(--ease); }
+  .skin-toggle:hover { color: var(--text); border-color: var(--accent-line); }
+  .skin-toggle.on { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+  .skin-toggle .i { width: .95em; height: .95em; }
+
   .nav-ops-details { position: relative; }
-  .nav-ops-toggle  { padding: 4px 10px; border-radius: var(--radius); color: var(--muted);
-                     font-size: 13px; cursor: pointer; list-style: none; user-select: none; }
+  .nav-ops-toggle  { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
+                     border-radius: var(--radius-sm); color: var(--muted); font-size: 13px; font-weight: 500;
+                     cursor: pointer; list-style: none; user-select: none; }
   .nav-ops-toggle::-webkit-details-marker { display: none; }
   .nav-ops-toggle:hover { background: var(--surface); color: var(--text); }
-  .nav-ops-menu    { position: absolute; top: 100%; right: 0; min-width: 190px; z-index: 100;
-                     background: var(--surface); border: 1px solid var(--border);
-                     border-radius: var(--radius); padding: 6px 0; margin-top: 4px;
-                     box-shadow: 0 4px 16px rgba(0,0,0,.4); }
-  .nav-ops-menu a  { display: block; padding: 5px 14px; font-size: 13px; color: var(--muted);
-                     text-decoration: none; white-space: nowrap; }
-  .nav-ops-menu a:hover { color: var(--text); background: rgba(255,255,255,.04); text-decoration: none; }
-  .nav-ops-group   { padding: 8px 14px 2px; font-size: 10px; font-weight: 700;
-                     text-transform: uppercase; letter-spacing: .07em; color: var(--border);
-                     border-top: 1px solid var(--border); margin-top: 2px; }
-  .nav-ops-group:first-child { border-top: none; margin-top: 0; padding-top: 4px; }
+  .nav-ops-toggle .i { color: var(--faint); }
+  .nav-ops-menu    { position: absolute; top: 100%; right: 0; min-width: 230px; z-index: 100;
+                     background: var(--surface); border: 1px solid var(--border-strong);
+                     border-radius: var(--radius); padding: 6px; margin-top: 6px;
+                     box-shadow: var(--shadow-lg); max-height: 70vh; overflow-y: auto;
+                     display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+  @media (max-width: 560px) { .nav-ops-menu { grid-template-columns: 1fr; min-width: 200px; } }
+  .nav-ops-menu a  { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: var(--radius-sm);
+                     font-size: 12.5px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+  .nav-ops-menu a:hover { color: var(--text); background: var(--raised); text-decoration: none; }
+  .nav-ops-menu a .i { color: var(--faint); width: .95em; height: .95em; }
+  .nav-ops-group   { grid-column: 1 / -1; padding: 9px 9px 3px; font-size: 10px; font-weight: 700;
+                     text-transform: uppercase; letter-spacing: .08em; color: var(--faint);
+                     border-top: 1px solid var(--hairline); margin-top: 3px; }
+  .nav-ops-group:first-child { border-top: none; margin-top: 0; }
+
+  @media (max-width: 720px) {
+    .nav-link span { display: none; }
+    .nav-link { padding: 6px 8px; }
+    .nav-ops-toggle span { display: none; }
+  }
 </style>

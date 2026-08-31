@@ -5,12 +5,44 @@
   <meta http-equiv="refresh" content="30">
   <title>Factory — Factory OS</title>
   {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
   <style>
-    /* ── F9 Executive Dashboard ───────────────────────────────── */
+    /* ── Home / Control room ──────────────────────────────────── */
     @keyframes fadeUp {
       from { opacity: 0; transform: translateY(8px); }
       to   { opacity: 1; transform: translateY(0); }
     }
+
+    /* hero band — subtle in base, a forge glow in the presentation skin */
+    .home-hero { position: relative; border-radius: var(--radius-lg);
+                 padding: 4px 4px 0; margin-bottom: var(--space-lg); }
+    :root[data-skin="presentation"] .home-hero {
+      background: var(--skin-hero); padding: var(--space-lg) var(--space-lg) 2px;
+      border: 1px solid var(--hairline); }
+
+    /* tier-1 KPI strip — the "is it healthy / running / stuck" answer */
+    .t1 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+          margin-bottom: var(--space-lg); }
+    @media (max-width: 720px) { .t1 { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 380px) { .t1 { grid-template-columns: 1fr; } }
+    .t1-card { position: relative; background: var(--skin-elevate, var(--surface));
+               border: 1px solid var(--border); border-radius: var(--radius);
+               padding: 16px 18px 15px; overflow: hidden; box-shadow: var(--shadow-sm); }
+    .t1-card::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+                      background: var(--border-strong); }
+    .t1-card.is-good::after { background: var(--good); }
+    .t1-card.is-warn::after { background: var(--warn); }
+    .t1-card.is-critical::after { background: var(--critical); }
+    .t1-card.is-accent::after { background: var(--accent); }
+    .t1-val { font-family: var(--font-display); font-size: 34px; font-weight: 800;
+              line-height: 1; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+    .t1-lbl { font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+              letter-spacing: .09em; color: var(--faint); margin-top: 7px; }
+    .t1-sub { font-size: 11.5px; color: var(--muted); margin-top: 3px;
+              display: flex; align-items: center; gap: 5px; }
+    .t1-bar { height: 5px; border-radius: 3px; background: var(--overlay); margin-top: 9px; overflow: hidden; }
+    .t1-bar > i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+
     .exec-section { animation: fadeUp .3s ease both; }
     .exec-section:nth-child(1) { animation-delay: .04s; }
     .exec-section:nth-child(2) { animation-delay: .08s; }
@@ -23,12 +55,14 @@
     /* ── Channel header ─────────────────────────────────────── */
     .exec-header    { display: flex; align-items: center; gap: 18px;
                       margin-bottom: 4px; flex-wrap: wrap; }
-    .exec-logo      { width: 52px; height: 52px; border-radius: 10px;
-                      background: var(--border); display: flex;
+    .exec-logo      { width: 52px; height: 52px; border-radius: 12px;
+                      background: var(--accent-bg); border: 1px solid var(--accent-line);
+                      color: var(--accent); display: flex;
                       align-items: center; justify-content: center;
-                      font-size: 26px; flex-shrink: 0; overflow: hidden; }
-    .exec-logo img  { width: 52px; height: 52px; object-fit: cover; border-radius: 10px; }
-    .exec-channel-name { font-size: 22px; font-weight: 700; line-height: 1.15; }
+                      font-size: 24px; flex-shrink: 0; overflow: hidden; }
+    .exec-logo img  { width: 52px; height: 52px; object-fit: cover; border-radius: 12px; }
+    .exec-channel-name { font-family: var(--font-display); font-size: var(--h2); font-weight: 800;
+                         line-height: 1.15; letter-spacing: var(--display-tracking); }
     .exec-meta      { font-size: 12px; color: var(--muted); margin-top: 4px;
                       display: flex; gap: 14px; flex-wrap: wrap; }
     .status-pill    { display: flex; align-items: center; gap: 10px; margin-left: auto;
@@ -176,6 +210,7 @@
 
 <div class="container">
 
+<div class="home-hero">
 <div class="page-header">
   <div>
     <span class="eyebrow">Factory OS</span>
@@ -183,6 +218,34 @@
   </div>
   <span class="page-meta">Is the factory healthy? · What is running? · What needs attention?</span>
 </div>
+
+{% set fh0 = overview.factory_health if overview and overview.factory_health else {} %}
+{% set rd = report.readiness_score if report and report.readiness_score is not none else none %}
+{% set _rh = (state.run_health if state else none) or {} %}
+{% set _srate = _rh.get('success_rate') if _rh.get is defined else none %}
+<div class="t1">
+  <div class="t1-card {{ 'is-good' if (rd or 0) >= 85 else ('is-warn' if (rd or 0) >= 60 else 'is-critical') if rd is not none else '' }}">
+    <div class="t1-val">{% if rd is not none %}{{ rd }}<span style="font-size:16px;font-weight:600;color:var(--faint)">%</span>{% else %}—{% endif %}</div>
+    <div class="t1-lbl">Factory readiness</div>
+    {% if rd is not none %}<div class="t1-bar"><i style="width:{{ rd }}%"></i></div>{% endif %}
+  </div>
+  <div class="t1-card {{ 'is-accent' if (fh0.active_count or 0) > 0 }}">
+    <div class="t1-val">{{ fh0.active_count or 0 }}</div>
+    <div class="t1-lbl">In production</div>
+    <div class="t1-sub">{% if (fh0.active_count or 0) > 0 %}<a href="/live">live view →</a>{% else %}idle{% endif %}</div>
+  </div>
+  <div class="t1-card {{ 'is-warn' if (fh0.queued_count or 0) > 0 }}">
+    <div class="t1-val">{{ fh0.queued_count or 0 }}</div>
+    <div class="t1-lbl">Queued</div>
+    <div class="t1-sub">{% if (fh0.queued_count or 0) > 0 %}<a href="/create">production queue →</a>{% else %}nothing waiting{% endif %}</div>
+  </div>
+  <div class="t1-card {{ 'is-critical' if (fh0.failed_count or 0) > 0 else 'is-good' }}">
+    <div class="t1-val">{{ fh0.failed_count or 0 }}</div>
+    <div class="t1-lbl">Failed runs</div>
+    <div class="t1-sub">{% if (fh0.failed_count or 0) > 0 %}<a href="/failures" class="err">review →</a>{% elif _srate is not none %}{{ (_srate * 100) | round | int }}% success rate{% else %}none{% endif %}</div>
+  </div>
+</div>
+</div><!-- /.home-hero -->
 
 {% if attention_summary and attention_summary.total > 0 %}
 <div class="action-banner">
@@ -228,7 +291,7 @@
     <div class="exec-logo">
       {% if cp and cp.logo_path %}
       <img src="{{ cp.logo_path }}" alt="logo">
-      {% else %}📺{% endif %}
+      {% else %}{{ icon('channels', 'i-lg') }}{% endif %}
     </div>
     <div style="flex:1; min-width:0">
       <div class="exec-channel-name">{{ ch_name }}</div>
@@ -245,22 +308,28 @@
     {% if report %}
     <div class="status-pill">
       <span class="badge badge-{{ report.readiness_level | lower }}">{{ report.readiness_level }}</span>
-      <span style="font-size:12px; color:var(--muted)">{{ report.readiness_score }}% Factory Readiness</span>
     </div>
     {% endif %}
   </div>
 
-  <div class="card-title" style="margin-top:10px">Channels</div>
+  <div class="card-title" style="margin-top:14px">Channels</div>
   {% if state.channels %}
+    <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:2px;">
     {% for ch in state.channels %}
-    <div style="font-size:13px; padding:3px 0; color:var(--muted)">
-      <a href="/channel/{{ ch.channel_id }}" style="color:var(--text); font-weight:600">{{ ch.name }}</a>
-      &mdash; {{ ch.status }}
-    </div>
+      <a href="/channel/{{ ch.channel_id }}"
+         style="display:inline-flex; align-items:center; gap:7px; padding:6px 12px; font-size:12.5px;
+                border:1px solid var(--border-strong); border-radius:999px; color:var(--text);">
+        <span class="perf-dot perf-dot-{{ 'ok' if ch.status == 'active' else 'muted' }}"></span>
+        <strong style="font-weight:600;">{{ ch.name }}</strong>
+        <span class="muted">{{ ch.status }}</span>
+      </a>
     {% endfor %}
+    </div>
   {% else %}
-    <div class="no-data">No channels configured yet.
-      <a href="/channel-profile">Set up your channel profile →</a>
+    <div class="empty" style="padding:20px;">
+      <div class="empty-title">No channels yet</div>
+      Build your first channel — the wizard walks you through niche, name and identity.
+      <div class="btn-row" style="justify-content:center; margin-top:10px;"><a href="/channels/new" class="btn btn-primary">Build a channel</a></div>
     </div>
   {% endif %}
 </div>
@@ -269,46 +338,20 @@
    1b. FACTORY HEALTH
 ══════════════════════════════════════════════════════════════════ #}
 {% set fh = overview.factory_health if overview and overview.factory_health else {} %}
-<div class="card exec-section">
-  <div class="card-title" style="margin-bottom:10px;">Factory Health</div>
-  <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
-    <div style="font-size:22px; font-weight:700; min-width:120px;">
-      {% set fhlabel = fh.status_label if fh else 'Needs Setup' %}
-      {% if fhlabel == 'Ready' %}
-        <span class="ok">Ready</span>
-      {% elif fhlabel == 'Blocked' %}
-        <span class="err">Blocked</span>
-      {% elif fhlabel == 'Degraded' %}
-        <span class="warn">Degraded</span>
-      {% else %}
-        <span class="warn">{{ fhlabel }}</span>
-      {% endif %}
+{% set fhlabel = fh.status_label if fh else 'Needs Setup' %}
+{% if overview and overview.primary_cta and overview.primary_cta.label %}
+{% set cta = overview.primary_cta %}
+<div class="card exec-section {{ 'is-good' if fhlabel == 'Ready' else ('is-critical' if fhlabel == 'Blocked' else 'is-warn') }}"
+     style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+  <div style="flex:1; min-width:200px;">
+    <div class="card-title" style="margin-bottom:4px;">Factory status —
+      <span class="{{ 'ok' if fhlabel == 'Ready' else ('err' if fhlabel == 'Blocked' else 'warn') }}">{{ fhlabel }}</span>
     </div>
-    <div class="kpi-strip" style="margin-bottom:0">
-      <div class="kpi-card">
-        <div class="kpi-val">{{ fh.active_count if fh else 0 }}</div>
-        <div class="kpi-lbl">In Production</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-val">{{ fh.queued_count if fh else 0 }}</div>
-        <div class="kpi-lbl">Queued</div>
-      </div>
-    </div>
+    <div style="font-size:12.5px; color:var(--muted);">{{ cta.description }}</div>
   </div>
-  {# Primary CTA — one main action #}
-  {% if overview and overview.primary_cta and overview.primary_cta.label %}
-  {% set cta = overview.primary_cta %}
-  <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);
-              display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
-    <div style="flex:1; min-width:0; font-size:12px; color:var(--muted);">
-      {{ cta.description }}
-    </div>
-    <a href="{{ cta.url }}" class="btn btn-approve" style="flex-shrink:0; white-space:nowrap;">
-      {{ cta.label }}
-    </a>
-  </div>
-  {% endif %}
+  <a href="{{ cta.url }}" class="btn btn-primary" style="flex-shrink:0; white-space:nowrap;">{{ cta.label }}</a>
 </div>
+{% endif %}
 
 {# ═══════════════════════════════════════════════════════════════
    NEXT REQUIRED ACTION  (surfaced early — operator control room)
@@ -316,9 +359,9 @@
 {% if next_action %}
 <div class="next-action next-action-{{ next_action.urgency }} exec-section">
   <div class="next-action-icon">
-    {% if next_action.urgency == 'critical' %}🚫
-    {% elif next_action.urgency == 'warning' %}⚠️
-    {% else %}▶{% endif %}
+    {% if next_action.urgency == 'critical' %}{{ icon('x', 'i-lg') }}
+    {% elif next_action.urgency == 'warning' %}{{ icon('warning', 'i-lg') }}
+    {% else %}{{ icon('play', 'i-lg') }}{% endif %}
   </div>
   <div class="next-action-body">
     <div class="next-action-label">{{ next_action.label }}</div>

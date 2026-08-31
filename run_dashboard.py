@@ -5998,9 +5998,14 @@ def channel_detail(channel_id):
         recommendations = get_channel_recommendations(channel_id, db_path=db)
     except Exception:
         recommendations = {}
+    try:
+        from hypogeum.channel_readiness import get_channel_readiness
+        readiness = get_channel_readiness(channel_id, db_path=db)
+    except Exception:
+        readiness = None
     return render_template("channel_detail.html",
                            channel=channel, brand=brand, model=model, publishing=publishing,
-                           runtime=runtime, recommendations=recommendations)
+                           runtime=runtime, recommendations=recommendations, readiness=readiness)
 
 
 @app.route("/channel/<channel_id>/edit", methods=["GET", "POST"])

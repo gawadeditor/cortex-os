@@ -482,14 +482,29 @@ def compile_schedule_plan_from_channel_package(
             )
             continue
 
+        # publish_now=True means "the schedule is moot, release now" — a
+        # deliverable with no policy entry needs no slot at all in that
+        # case, so require_explicit_policy does not block it and the
+        # fallback publishing_schedule is never consulted. This is what
+        # lets a shorts-only channel (production_cadence.videos_per_week==0)
+        # publish each freshly produced Short immediately without a
+        # per-deliverable deliverable_schedule_policy (compute_next_publish_slot()
+        # is weekly-only and cannot express a daily release).
+        if publish_now:
+            entries[deliverable_id] = DeliverableSchedule(
+                scheduled_for=effective_now, timezone_name=profile.timezone,
+                publish_now=True,
+            )
+            continue
+
         if require_explicit_policy:
             return ScheduleCompilationResult(
                 channel_id=channel_id, schedule_plan=None, blocked=True,
                 blocked_reason=(
                     f"channel_id={channel_id!r} has no deliverable_schedule_policy entry for "
-                    f"deliverable_id={deliverable_id!r} — autonomous publishing requires an explicit "
-                    f"schedule for every deliverable; the single fallback publishing_schedule slot is "
-                    f"never applied in this mode"
+                    f"deliverable_id={deliverable_id!r} — autonomous scheduled publishing requires an "
+                    f"explicit schedule for every deliverable; the single fallback publishing_schedule "
+                    f"slot is never applied in this mode (use publish_now=True to release immediately)"
                 ),
             )
 
@@ -507,8 +522,7 @@ def compile_schedule_plan_from_channel_package(
                 ),
             )
         entries[deliverable_id] = DeliverableSchedule(
-            scheduled_for=(effective_now if publish_now else fallback_slot_dt),
-            timezone_name=profile.timezone, publish_now=publish_now,
+            scheduled_for=fallback_slot_dt, timezone_name=profile.timezone, publish_now=False,
         )
 
     plan = SchedulePlan(channel_id=channel_id, entries=entries)

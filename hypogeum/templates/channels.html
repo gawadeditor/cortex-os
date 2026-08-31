@@ -78,9 +78,9 @@
         {{ (ch.profile_completeness * 100) | round | int }}% complete
       </div>
       <div style="font-size:11px; color:var(--muted); margin-top:2px;">
-        Brand: {{ "&#x2713;" if ch.brand_complete else "&times;" }}
-        &nbsp;Publishing: {{ "&#x2713;" if ch.publishing_complete else "&times;" }}
-        &nbsp;Models: {{ "&#x2713;" if ch.models_complete else "&times;" }}
+        Brand: {{ "✓" if ch.brand_complete else "✕" }}
+        &nbsp;Publishing: {{ "✓" if ch.publishing_complete else "✕" }}
+        &nbsp;Models: {{ "✓" if ch.models_complete else "✕" }}
       </div>
     </div>
   </div>

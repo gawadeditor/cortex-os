@@ -5974,12 +5974,20 @@ def channel_operations_edit(channel_id):
             updates[flag] = flag in f
 
         # shorts-only channel -> a single `short` deliverable bundle sized to
-        # the weekly count; a mixed channel keeps its existing bundle defs.
+        # the weekly count, and NO weekly bundle-cycle / per-deliverable
+        # schedule policy: each produced Short is published immediately
+        # (run_worker._process_channel_publishing passes publish_now=True for
+        # a videos_per_week==0 channel). A leftover hypogeum_weekly_release_v1
+        # bundle_cycle_policy would otherwise block every Short as a "partial
+        # bundle" (it demands a main_episode). A mixed channel keeps its
+        # existing bundle defs and cycle policy untouched.
         shorts_only = (vpw == 0 and spw >= 1)
         if shorts_only:
             updates["deliverable_bundle_definitions"] = [
                 {"bundle_id": "short", "target_buffer_count": spw}
             ]
+            updates["bundle_cycle_policy"] = {}
+            updates["deliverable_schedule_policy"] = {}
 
         if errors:
             return render_template("channel_operations_edit.html", channel_id=channel_id,
@@ -5991,31 +5999,47 @@ def channel_operations_edit(channel_id):
             return render_template("channel_operations_edit.html", channel_id=channel_id,
                                    prof=prof, errors=[str(exc)], form=f), 400
 
-        # keep the channel-scoped daily schedule in sync with the cadence
+        # keep the channel-scoped daily schedule in sync with the cadence --
+        # REUSE the existing schedule row whose label matches the current
+        # cadence instead of creating a fresh one every save (that left a
+        # trail of disabled duplicates). Every other channel schedule is
+        # disabled.
         try:
-            conn = get_connection(db)
-            try:
-                existing = conn.execute(
-                    "SELECT schedule_id, status FROM schedules "
-                    "WHERE scope='channel' AND channel_id=?", (channel_id,),
-                ).fetchall()
-            finally:
-                conn.close()
-            for row in existing:
-                if row["status"] != "disabled":
-                    set_schedule_status(row["schedule_id"], "disabled", db_path=db)
+            from hypogeum.scheduler import set_next_run
             now = datetime.now(_tz.utc)
             nxt = datetime.combine(now.date(), time(14, 0), tzinfo=_tz.utc)
             if nxt <= now:
                 nxt += timedelta(days=1)
             cadence = "daily" if shorts_only else "weekly"
-            sched = create_schedule(
-                scope="channel", channel_id=channel_id, cadence=cadence,
-                next_run_at=nxt, max_runs_per_day=1,
-                label=f"{channel_id}_{'daily_shorts' if shorts_only else 'weekly'}",
-                db_path=db,
-            )
-            notes.append(f"schedule rebuilt: {cadence} (next {nxt:%Y-%m-%d %H:%M} UTC)")
+            label = f"{channel_id}_{'daily_shorts' if shorts_only else 'weekly'}"
+
+            conn = get_connection(db)
+            try:
+                existing = conn.execute(
+                    "SELECT schedule_id, status, label FROM schedules "
+                    "WHERE scope='channel' AND channel_id=? ORDER BY created_at DESC",
+                    (channel_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+
+            reuse_id = next((r["schedule_id"] for r in existing if r["label"] == label), None)
+            for r in existing:
+                if r["schedule_id"] == reuse_id:
+                    continue
+                if r["status"] != "disabled":
+                    set_schedule_status(r["schedule_id"], "disabled", db_path=db)
+
+            if reuse_id:
+                set_schedule_status(reuse_id, "active", db_path=db)
+                set_next_run(reuse_id, nxt, db_path=db)
+                notes.append(f"schedule kept: {cadence} (next {nxt:%Y-%m-%d %H:%M} UTC)")
+            else:
+                create_schedule(
+                    scope="channel", channel_id=channel_id, cadence=cadence,
+                    next_run_at=nxt, max_runs_per_day=1, label=label, db_path=db,
+                )
+                notes.append(f"schedule created: {cadence} (next {nxt:%Y-%m-%d %H:%M} UTC)")
         except Exception as exc:  # noqa: BLE001 -- schedule sync is best-effort
             notes.append(f"schedule not synced automatically: {exc}")
 

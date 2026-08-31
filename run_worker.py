@@ -508,11 +508,23 @@ def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
         if not bundle_definitions:
             continue
 
+        # A shorts-only channel (videos_per_week == 0, shorts_per_week >= 1)
+        # publishes each freshly produced Short immediately — there is no
+        # weekly bundle drop to schedule against, and compute_next_publish_slot()
+        # (weekly-only) cannot express a daily release. Any mixed/long-form
+        # channel keeps the scheduled path (publish_now=False).
+        _cad = (ops_profile.production_cadence or {})
+        _spw = _cad.get("shorts_per_week")
+        publish_immediately = (
+            _cad.get("videos_per_week") == 0 and isinstance(_spw, int) and _spw >= 1
+        )
+
         try:
             channel_results = []
             for bundle_def in bundle_definitions:
                 channel_results.extend(process_channel_ready_bundles(
                     channel_id, bundle_def, db_path=db_path, assets_root=assets_root,
+                    publish_now=publish_immediately,
                 ))
         except Exception as exc:
             log.error("publishing_channel_error channel=%s error=%s", channel_id, exc, exc_info=True)

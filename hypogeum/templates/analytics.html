@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Performance — Factory OS</title>
   {% include '_base_style.html' %}
+{% from '_charts.html' import sparkline, bullet %}
 </head>
 <body>
 {% include '_nav.html' %}
@@ -64,6 +65,39 @@
     <div class="kpi-lbl">Pending actions</div>
   </div>
 </div>
+
+{# ── Views + retention trend across tracked episodes ── #}
+{% set _trend = overview.episodes | reverse | list %}
+{% set _views_series = _trend | map(attribute='total_views') | map('default', 0) | map('int') | list %}
+{% set _ret_series   = _trend | selectattr('avg_view_pct') | map(attribute='avg_view_pct') | list %}
+{% if (_views_series | select | list | length) >= 4 or (_ret_series | length) >= 4 %}
+<div class="grid grid-2" style="margin-bottom:var(--gap);">
+  {% if (_views_series | select | list | length) >= 4 %}
+  <div class="card">
+    <div class="card-title">Views · last {{ _views_series | length }} episodes</div>
+    <div class="row" style="gap:14px;">
+      {{ sparkline(_views_series, 220, 44, 'info') }}
+      <div>
+        <div style="font-size:20px; font-weight:800; font-variant-numeric:tabular-nums;">{{ "{:,}".format(_views_series | sum) }}</div>
+        <div class="muted" style="font-size:11px;">total · latest {{ "{:,}".format(_views_series[-1]) }}</div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  {% if (_ret_series | length) >= 4 %}
+  <div class="card">
+    <div class="card-title">Retention trend</div>
+    <div class="row" style="gap:14px;">
+      {{ sparkline(_ret_series, 220, 44, 'good') }}
+      <div>
+        <div style="font-size:20px; font-weight:800; font-variant-numeric:tabular-nums;">{{ "%.0f%%"|format((_ret_series | sum / (_ret_series | length)) * 100) }}</div>
+        <div class="muted" style="font-size:11px;">average across {{ _ret_series | length }}</div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 
 {# ── Platform health cards ── #}
 <div class="health-grid">
@@ -222,18 +256,22 @@
         <td style="text-align:right; font-variant-numeric:tabular-nums;">
           {% if ep.total_views %}{{ "{:,}".format(ep.total_views|int) }}{% else %}<span class="muted">—</span>{% endif %}
         </td>
-        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+        <td style="min-width:110px;">
           {% if ep.avg_ctr %}
-            <span class="{% if ep.avg_ctr < 0.02 %}err{% elif ep.avg_ctr > 0.05 %}ok{% else %}warn{% endif %}">
-              {{ "%.1f%%"|format(ep.avg_ctr * 100) }}
-            </span>
+            <div class="spread" style="gap:8px;">
+              <span style="width:64px;">{{ bullet(ep.avg_ctr, 0.10, 0.02, 0.05) }}</span>
+              <span class="{% if ep.avg_ctr < 0.02 %}err{% elif ep.avg_ctr > 0.05 %}ok{% else %}warn{% endif %}"
+                    style="font-variant-numeric:tabular-nums; font-size:12px;">{{ "%.1f%%"|format(ep.avg_ctr * 100) }}</span>
+            </div>
           {% else %}<span class="muted">—</span>{% endif %}
         </td>
-        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+        <td style="min-width:110px;">
           {% if ep.avg_view_pct %}
-            <span class="{% if ep.avg_view_pct < 0.3 %}err{% elif ep.avg_view_pct > 0.5 %}ok{% else %}warn{% endif %}">
-              {{ "%.0f%%"|format(ep.avg_view_pct * 100) }}
-            </span>
+            <div class="spread" style="gap:8px;">
+              <span style="width:64px;">{{ bullet(ep.avg_view_pct, 1.0, 0.3, 0.5) }}</span>
+              <span class="{% if ep.avg_view_pct < 0.3 %}err{% elif ep.avg_view_pct > 0.5 %}ok{% else %}warn{% endif %}"
+                    style="font-variant-numeric:tabular-nums; font-size:12px;">{{ "%.0f%%"|format(ep.avg_view_pct * 100) }}</span>
+            </div>
           {% else %}<span class="muted">—</span>{% endif %}
         </td>
         <td style="text-align:right;">

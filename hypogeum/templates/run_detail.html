@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Run {{ d.run.run_id[:12] }} — Factory OS</title>
   {% include '_base_style.html' %}
+  {% from '_charts.html' import hbar %}
   <style>
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
     @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
@@ -443,6 +444,47 @@ function submitRaiseCeiling(btn) {
   });
 }
 </script>
+{% endif %}
+
+{# ── Where the time (and money) went ── #}
+{% set _timed = d.stages | selectattr('duration_ms') | list %}
+{% if _timed | length >= 3 %}
+{% set _maxdur = (_timed | map(attribute='duration_ms') | max) %}
+{% set _maxcost = (d.stages | map(attribute='cost_usd') | map('default', 0) | map('float') | max) or 0 %}
+<div class="card">
+  <div class="card-title">Stage breakdown — {{ d.stage_count }} stages · ${{ "%.2f"|format(d.total_cost_usd) }} total</div>
+  <div class="table-wrap" style="border:none;">
+  <table>
+    <thead><tr><th>Stage</th><th style="width:34%;">Duration</th><th style="width:26%;">Cost</th></tr></thead>
+    <tbody>
+      {% for s in d.stages %}
+      {% if s.duration_ms or s.cost_usd %}
+      <tr>
+        <td>
+          <span class="{{ 'ok' if s.status == 'completed' else ('err' if s.status == 'failed' else 'muted') }}">{{ s.stage_name }}</span>
+          {% if s.model_slug %}<br><span class="mono muted" style="font-size:10.5px;">{{ s.model_slug }}</span>{% endif %}
+        </td>
+        <td>
+          <div class="spread" style="gap:8px;">
+            <span style="flex:1;">{{ hbar(s.duration_ms or 0, _maxdur, 'accent' if s.status != 'failed' else 'critical') }}</span>
+            <span class="mono" style="font-size:11px; white-space:nowrap;">{{ s.duration_fmt }}</span>
+          </div>
+        </td>
+        <td>
+          {% if s.cost_usd and s.cost_usd > 0 %}
+          <div class="spread" style="gap:8px;">
+            <span style="flex:1;">{{ hbar(s.cost_usd, _maxcost, 'good') }}</span>
+            <span class="mono" style="font-size:11px; white-space:nowrap;">${{ "%.3f"|format(s.cost_usd) }}</span>
+          </div>
+          {% else %}<span class="muted" style="font-size:11px;">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
 {% endif %}
 
 {# ── Stage timeline ── #}

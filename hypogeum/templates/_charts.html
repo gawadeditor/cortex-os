@@ -1,0 +1,51 @@
+{#- Factory OS inline SVG charts — no libraries, no JS, offline-safe.
+    Every macro renders a <title> for hover and expects the caller to keep
+    the numeric value visible next to it (accessibility: color is never the
+    only signal).  {% from '_charts.html' import sparkline, hbar, bullet %}
+-#}
+
+{#- sparkline(values): area+line trend. values = list of numbers. -#}
+{%- macro sparkline(values, width=132, height=30, tone='accent') -%}
+  {%- set vals = values | map('float') | list -%}
+  {%- if vals | length >= 2 -%}
+    {%- set lo = vals | min -%}{%- set hi = vals | max -%}
+    {%- set span = (hi - lo) if (hi - lo) > 0 else 1 -%}
+    {%- set n = vals | length -%}
+    {%- set pts = [] -%}
+    {%- for v in vals -%}
+      {%- set x = (loop.index0 / (n - 1) * (width - 2) + 1) | round(2) -%}
+      {%- set y = (height - 2 - (v - lo) / span * (height - 5) + 1) | round(2) -%}
+      {%- set _ = pts.append(x ~ ',' ~ y) -%}
+    {%- endfor -%}
+  <svg class="spark spark-{{ tone }}" viewBox="0 0 {{ width }} {{ height }}" preserveAspectRatio="none"
+       role="img" aria-label="trend across {{ n }} points, {{ vals[0]|round|int }} to {{ vals[-1]|round|int }}">
+    <title>{{ vals[0]|round|int }} → {{ vals[-1]|round|int }} (min {{ lo|round|int }}, max {{ hi|round|int }})</title>
+    <polygon points="1,{{ height - 1 }} {{ pts | join(' ') }} {{ width - 1 }},{{ height - 1 }}" class="spark-fill"/>
+    <polyline points="{{ pts | join(' ') }}" class="spark-line"/>
+    <circle cx="{{ pts[-1].split(',')[0] }}" cy="{{ pts[-1].split(',')[1] }}" r="2" class="spark-dot"/>
+  </svg>
+  {%- else -%}<span class="muted" style="font-size:11px;">—</span>{%- endif -%}
+{%- endmacro -%}
+
+{#- hbar(value, max): one horizontal bar. tone = accent|good|warn|critical. -#}
+{%- macro hbar(value, max, tone='accent', track=true) -%}
+  {%- set pct = (value / max * 100) if max and max > 0 else 0 -%}
+  {%- set pct = 100 if pct > 100 else (0 if pct < 0 else pct) -%}
+  <span class="hbar {{ 'hbar-track' if track }}" title="{{ value }} of {{ max }}">
+    <i class="hbar-fill hbar-{{ tone }}" style="width:{{ pct | round(1) }}%"></i>
+  </span>
+{%- endmacro -%}
+
+{#- bullet(value, max, warn, good): mini performance-vs-threshold bar.
+    below warn = critical zone, warn..good = ok zone, >= good = good zone. -#}
+{%- macro bullet(value, max, warn, good) -%}
+  {%- set v = (value / max * 100) if max and max > 0 else 0 -%}
+  {%- set v = 100 if v > 100 else (0 if v < 0 else v) -%}
+  {%- set tone = 'critical' if value < warn else ('good' if value >= good else 'warn') -%}
+  <span class="bullet" title="{{ (value * 100) | round(1) }}% (target ≥ {{ (good * 100) | round | int }}%)">
+    <i class="bullet-zone" style="left:0;width:{{ (warn / max * 100) | round(1) }}%"></i>
+    <i class="bullet-zone bz-ok" style="left:{{ (warn / max * 100) | round(1) }}%;width:{{ ((good - warn) / max * 100) | round(1) }}%"></i>
+    <i class="bullet-val bullet-{{ tone }}" style="width:{{ v | round(1) }}%"></i>
+    <i class="bullet-mark" style="left:{{ (good / max * 100) | round(1) }}%"></i>
+  </span>
+{%- endmacro -%}

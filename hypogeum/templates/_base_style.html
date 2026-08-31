@@ -475,6 +475,30 @@
     .flash-ok  { background: var(--good-bg); border: 1px solid color-mix(in srgb, var(--good) 50%, var(--border)); color: var(--good); }
     .flash-err { background: var(--critical-bg); border: 1px solid color-mix(in srgb, var(--critical) 50%, var(--border)); color: var(--critical); }
 
+    /* ── Inline SVG charts (_charts.html) ── */
+    .spark { width: 132px; height: 30px; display: inline-block; vertical-align: middle; overflow: visible; }
+    .spark-fill  { fill: color-mix(in srgb, var(--accent) 16%, transparent); stroke: none; }
+    .spark-line  { fill: none; stroke: var(--accent); stroke-width: 1.5;
+                   stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+    .spark-dot   { fill: var(--accent); }
+    .spark-good .spark-fill { fill: var(--good-bg); } .spark-good .spark-line, .spark-good .spark-dot { stroke: var(--good); fill: var(--good); }
+    .spark-info .spark-fill { fill: var(--info-bg); } .spark-info .spark-line, .spark-info .spark-dot { stroke: var(--info); fill: var(--info); }
+
+    .hbar { position: relative; display: inline-block; width: 100%; min-width: 60px; height: 8px;
+            border-radius: 4px; vertical-align: middle; }
+    .hbar-track { background: var(--overlay); }
+    .hbar-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: 4px; background: var(--accent); }
+    .hbar-good { background: var(--good); } .hbar-warn { background: var(--warn); }
+    .hbar-critical { background: var(--critical); } .hbar-info { background: var(--info); }
+
+    .bullet { position: relative; display: inline-block; width: 100%; min-width: 72px; height: 10px;
+              border-radius: 3px; background: var(--overlay); vertical-align: middle; overflow: hidden; }
+    .bullet-zone { position: absolute; top: 0; height: 100%; background: var(--critical-bg); }
+    .bullet-zone.bz-ok { background: var(--warn-bg); }
+    .bullet-val { position: absolute; left: 0; top: 2px; height: 6px; border-radius: 3px; background: var(--accent); }
+    .bullet-good { background: var(--good); } .bullet-warn { background: var(--warn); } .bullet-critical { background: var(--critical); }
+    .bullet-mark { position: absolute; top: -1px; width: 2px; height: 12px; background: var(--text); }
+
     /* ── New shared primitives (opt-in; used by the wizard + refreshed pages) ── */
     .container { max-width: 1440px; margin: 0 auto; }
     .grid { display: grid; gap: var(--gap); }

@@ -506,7 +506,24 @@ def _call_openrouter_via_gate(
         channel_id, _HYPOGEUM_WORKFLOW_ID, _HYPOGEUM_WORKFLOW_VERSION,
     )
 
-    plan_checksum = hashlib.sha256(_canonical_json_bytes({"agent": agent, "attempt_label": attempt_label})).hexdigest()
+    # Plan binding: a POST_PLAN paid text call (canonical/shorts metadata,
+    # coverage-plan regen, BGA, ...) is verified by
+    # capability_boundary._verify_post_plan_weekly_binding against the
+    # episode's canonical Production Plan content_hash -- the same exact-
+    # identity binding the media paths carry. When that plan exists, bind
+    # to it; otherwise (PRE_PLAN: EP scoring / research / narrative / script
+    # / first narration) there is no plan yet, so fall back to a synthetic
+    # per-call checksum and the PRE_PLAN reservation path governs instead.
+    _canon_plan = None
+    try:
+        from hypogeum.production_plan import canonical_episode_dir, load_production_plan  # noqa: PLC0415
+        _canon_plan = load_production_plan(episode_id, canonical_episode_dir(episode_id))
+    except Exception:  # noqa: BLE001 -- no verifiable plan => PRE_PLAN synthetic checksum
+        _canon_plan = None
+    plan_checksum = (
+        _canon_plan.content_hash if _canon_plan is not None
+        else hashlib.sha256(_canonical_json_bytes({"agent": agent, "attempt_label": attempt_label})).hexdigest()
+    )
     structured_spec_checksum = hashlib.sha256(_canonical_json_bytes({"model_slug": model_slug, "max_tokens": max_tokens})).hexdigest()
 
     operation_payload_bytes = encode_text_payload(

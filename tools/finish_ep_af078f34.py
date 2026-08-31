@@ -305,6 +305,40 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [2c] cleared {_cleared_auth} stuck authorization records + "
               f"{_cleared_rcpt} write-ahead receipt dirs for un-generated __extra slots")
 
+        # 2d. Clear ALL publishing-phase text-gate state (canonical /
+        #     shorts metadata). Those agents regenerate their output fresh
+        #     on every publish attempt and are not checkpointed, so a prior
+        #     attempt's non-terminal AuthorizationRecords + write-ahead
+        #     receipts (e.g. left 'unknown_acceptance' by a plan-hash
+        #     denial before the openrouter POST_PLAN plan-binding fix) block
+        #     the deterministic first attempt of the next run
+        #     (05_idempotency_key_unconsumed).
+        _META_PREFIXES = ("canonical_metadata", "shorts_metadata")
+        _mconn = get_connection(db)
+        _cleared_meta = 0
+        try:
+            for _r in _mconn.execute(
+                "SELECT authorization_id, current_state FROM authorization_records "
+                "WHERE authorization_id LIKE ?", (f"{EP}:%",)):
+                _aid, _st = _r["authorization_id"], _r["current_state"]
+                if not any(p in _aid for p in _META_PREFIXES):
+                    continue
+                if _st in _TERMINAL:
+                    continue
+                _mconn.execute(
+                    "DELETE FROM authorization_records WHERE authorization_id=?", (_aid,))
+                _cleared_meta += 1
+            _mconn.commit()
+        finally:
+            _mconn.close()
+        if _receipts_dir.is_dir():
+            for _d in _receipts_dir.iterdir():
+                if any(p in _d.name for p in _META_PREFIXES):
+                    _shutil.rmtree(_d, ignore_errors=True)
+                    _cleared_meta += 1
+        print(f"  [2d] cleared {_cleared_meta} publishing-phase metadata "
+              f"auth records + receipt dirs (regenerated fresh each publish)")
+
         # 3. clear the failed admission + re-queue the topic
         conn = get_connection(db)
         try:

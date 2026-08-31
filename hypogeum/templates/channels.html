@@ -8,8 +8,11 @@
 <body>
 {% include '_nav.html' %}
 
+<div class="container">
+
 <div class="page-header spread">
   <div>
+    <span class="eyebrow">Factory</span>
     <h1>Channels</h1>
     <span class="page-meta">{{ channels | length }} channel{% if channels | length != 1 %}s{% endif %} configured</span>
   </div>
@@ -43,7 +46,7 @@
   </div>
   {% set rt = runtime_by_channel.get(ch.channel_id) %}
   {% if rt %}
-  <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border, #333);">
+  <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
     <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:12px;">
       <div>
         <div style="color:var(--muted);">Autonomous</div>
@@ -114,5 +117,6 @@
   </div>
 </div>
 {% endif %}
+</div><!-- /.container -->
 </body>
 </html>

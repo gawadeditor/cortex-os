@@ -16,8 +16,8 @@
     .queue-text  { font-size:14px; font-weight:500; line-height:1.4; margin-bottom:4px; }
     .queue-provenance { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); }
     .prov-discovered { color:var(--blue); }
-    .score-chip { font-family:monospace; font-size:11px; color:var(--green);
-                  background:rgba(63,185,80,.1); border:1px solid rgba(63,185,80,.25);
+    .score-chip { font-family:var(--font-mono); font-size:11px; color:var(--green);
+                  background:var(--good-bg); border:1px solid color-mix(in srgb, var(--good) 30%, transparent);
                   border-radius:8px; padding:0 6px; }
     .queue-actions { display:flex; gap:6px; flex-shrink:0; align-items:center; }
 
@@ -67,8 +67,13 @@
 <body>
 {% include '_nav.html' %}
 
+<div class="container">
+
 <div class="page-header">
-  <h1>Production Queue</h1>
+  <div>
+    <span class="eyebrow">Create</span>
+    <h1>Production Queue</h1>
+  </div>
   <span class="page-meta">Topics queued for autonomous production</span>
 </div>
 
@@ -336,11 +341,9 @@
       </div>
 
       <div style="padding-top:8px; border-top:1px solid var(--border);">
-        <button type="submit"
-                style="padding:9px 24px; font-size:14px; font-weight:600;
-                       background:var(--green); color:var(--bg); border:none;
-                       border-radius:var(--radius); cursor:pointer; font-family:inherit;"
-                {% if launch_blocked %}disabled style="opacity:.5; cursor:not-allowed;"{% endif %}>
+        <button type="submit" class="btn btn-primary"
+                style="padding:9px 24px; font-size:14px;"
+                {% if launch_blocked %}disabled{% endif %}>
           Start Production
         </button>
         {% if launch_blocked %}
@@ -352,6 +355,8 @@
     </form>
   </div>
 </details>
+
+</div><!-- /.container -->
 
 </body>
 </html>

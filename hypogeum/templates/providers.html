@@ -19,17 +19,18 @@
 
     /* Access-mode badge */
     .badge-direct-ph    { font-size: 10px; padding: 2px 6px; border-radius: 3px;
-                          background: #2a2a2a; color: var(--muted); border: 1px solid var(--border); }
+                          background: var(--overlay); color: var(--muted); border: 1px solid var(--border); }
     .badge-muapi-del    { font-size: 10px; padding: 2px 6px; border-radius: 3px;
                           background: var(--info-bg); color: var(--info); border: 1px solid var(--info); }
 
     /* Capability pills */
     .cap-row            { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
     .cap-pill           { font-size: 10px; padding: 2px 7px; border-radius: 99px;
-                          background: #1a2a1a; color: #6ab46a; border: 1px solid #2a442a; }
-    .cap-pill-llm       { background: #1a1a2a; color: #6a6ae8; border-color: #2a2a6a; }
-    .cap-pill-audio     { background: #2a1a1a; color: #e87a4a; border-color: #6a2a1a; }
-    .cap-pill-pub       { background: #1a2a2a; color: #4ac4c4; border-color: #1a5a5a; }
+                          background: var(--good-bg); color: var(--good);
+                          border: 1px solid color-mix(in srgb, var(--good) 30%, transparent); }
+    .cap-pill-llm       { background: rgba(139,92,246,.12); color: #c9a6ff; border-color: rgba(139,92,246,.4); }
+    .cap-pill-audio     { background: var(--warn-bg); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+    .cap-pill-pub       { background: var(--info-bg); color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, transparent); }
 
     /* Two-row status table */
     .status-table       { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px; }
@@ -47,7 +48,7 @@
 
     /* Operational readiness badges */
     .or-ready           { font-size: 11px; font-weight: 700; color: var(--green); }
-    .or-ready-muapi     { font-size: 11px; font-weight: 700; color: #4ac4c4; }
+    .or-ready-muapi     { font-size: 11px; font-weight: 700; color: var(--info); }
     .or-not-tested      { font-size: 11px; color: var(--muted); }
     .or-skipped         { font-size: 11px; color: var(--muted); }
     .or-auth-fail       { font-size: 11px; font-weight: 700; color: var(--red); }
@@ -122,8 +123,8 @@
     .cmp-card-fail      { border-color: var(--red); }
     .cmp-card-skip      { opacity: 0.65; border-style: dashed; }
     .cmp-thumb          { width: 100%; aspect-ratio: 16/9; object-fit: cover;
-                          border-radius: 3px; margin-bottom: 10px; background: #111; }
-    .cmp-thumb-ph       { width: 100%; aspect-ratio: 16/9; background: #111;
+                          border-radius: 3px; margin-bottom: 10px; background: var(--bg); }
+    .cmp-thumb-ph       { width: 100%; aspect-ratio: 16/9; background: var(--bg);
                           border-radius: 3px; margin-bottom: 10px;
                           display: flex; align-items: center; justify-content: center;
                           font-size: 12px; color: var(--muted); }
@@ -133,15 +134,21 @@
     .cmp-err            { font-size: 11px; color: var(--red); margin-top: 6px;
                           font-family: monospace; word-break: break-word; }
     .cmp-src-badge      { font-size: 10px; padding: 1px 5px; border-radius: 3px;
-                          background: #1a2a1a; color: #6ab46a; border: 1px solid #2a442a; }
-    .cmp-src-badge-env  { background: #1a1a2a; color: #6a6ae8; border-color: #2a2a6a; }
+                          background: var(--good-bg); color: var(--good);
+                          border: 1px solid color-mix(in srgb, var(--good) 30%, transparent); }
+    .cmp-src-badge-env  { background: rgba(139,92,246,.12); color: #c9a6ff; border-color: rgba(139,92,246,.4); }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
+<div class="container">
+
 <div class="page-header">
-  <h1>AI Providers</h1>
+  <div>
+    <span class="eyebrow">Infrastructure</span>
+    <h1>AI Providers</h1>
+  </div>
   <span class="page-meta">Provider credentials, capability status, and cost</span>
   <a href="/setup" class="btn" style="margin-left:auto;">Factory Setup →</a>
 </div>
@@ -572,6 +579,8 @@
   Generation readiness shows the result of the last Phase 1C smoke test.
   &nbsp;|&nbsp; <a href="/setup">Factory Setup →</a>
 </div>
+
+</div><!-- /.container -->
 
 <script>
 function testProvider(btn, provider) {

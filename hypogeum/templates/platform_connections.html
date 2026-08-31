@@ -31,15 +31,15 @@
     .badge-failed    { font-size: 11px; padding: 2px 8px; border-radius: 99px;
                        background: var(--critical-bg); border: 1px solid var(--red); color: var(--red); }
     .badge-missing   { font-size: 11px; padding: 2px 8px; border-radius: 99px;
-                       background: #111; border: 1px solid var(--border); color: var(--muted); }
+                       background: var(--overlay); border: 1px solid var(--border); color: var(--muted); }
 
     .acct-row        { display: flex; align-items: baseline; gap: 8px; margin: 4px 0; }
-    .acct-user       { font-family: monospace; font-size: 13px; color: var(--text); }
+    .acct-user       { font-family: var(--font-mono); font-size: 13px; color: var(--text); }
     .acct-disp       { font-size: 12px; color: var(--muted); }
 
     .stat-grid       { display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
                        margin: 14px 0; }
-    .stat            { background: rgba(255,255,255,.03); border: 1px solid var(--border);
+    .stat            { background: var(--bg-2); border: 1px solid var(--border);
                        border-radius: var(--radius); padding: 8px 10px; }
     .stat-num        { font-size: 18px; font-weight: 700; color: var(--text);
                        font-variant-numeric: tabular-nums; }
@@ -51,7 +51,7 @@
     .verif-error     { font-size: 11px; color: var(--red); margin-top: 4px; }
 
     .plat-note       { font-size: 11px; color: var(--muted); line-height: 1.5;
-                       margin: 10px 0 0 0; padding: 8px; background: rgba(255,255,255,.02);
+                       margin: 10px 0 0 0; padding: 8px; background: var(--bg-2);
                        border-radius: 4px; border-left: 2px solid var(--border); }
 
     .plat-actions    { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
@@ -70,13 +70,15 @@
     .zernio-sub      { font-size: 11px; color: var(--muted); }
     .btn-sync        { margin-left: auto; font-size: 12px; padding: 5px 12px;
                        border-radius: var(--radius); border: 1px solid var(--green);
-                       color: var(--green); background: rgba(46,160,67,.08); cursor: pointer; }
-    .btn-sync:hover  { background: rgba(46,160,67,.16); }
+                       color: var(--green); background: var(--good-bg); cursor: pointer; }
+    .btn-sync:hover  { background: color-mix(in srgb, var(--good) 22%, transparent); }
     .sync-result     { font-size: 11px; margin-left: 8px; }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
 
 <div class="breadcrumb">
   <a href="/dashboard">Dashboard</a>
@@ -176,6 +178,8 @@
 </div>
 {% endfor %}
 </div>
+
+</div><!-- /.container -->
 
 <script>
 function syncZernio(btn) {

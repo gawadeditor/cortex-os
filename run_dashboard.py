@@ -692,6 +692,192 @@ def api_channel_builder_suggest():
         return jsonify({"ok": False, "error": f"suggestion unavailable ({exc}); fill the fields manually"}), 200
 
 
+def _cb_call_claude_json(sys_p: str, user_p: str, schema: dict, *, max_tokens: int = 1100):
+    """Shared helper for the wizard's LLM steps. Returns the parsed dict or
+    raises. Callers degrade to {ok: False} 200 so the wizard never hard-blocks."""
+    from hypogeum.config import Config
+    from hypogeum.openrouter import call_claude
+    cfg = Config()
+    res = call_claude(
+        model_slug=getattr(cfg, "OPENROUTER_SONNET_MODEL_ID", "anthropic/claude-sonnet-4.6"),
+        messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": user_p}],
+        max_tokens=max_tokens, config=cfg, agent="channel_builder",
+        response_format=schema, allow_model_fallback=True,
+    )
+    text = getattr(res, "text", None) or getattr(res, "content", None) or ""
+    return _json.loads(text)
+
+
+@app.route("/api/channel-builder/genres", methods=["POST"])
+def api_channel_builder_genres():
+    """
+    Step 1 of the wizard: take a rough content concept and propose 5-6
+    monetisable niches to choose from. Estimates are the model's general
+    knowledge only (a brand-new channel has no analytics) — the payload is
+    labelled as such and the wizard shows a warning. Degrades to
+    {ok: False} 200.
+    """
+    src = request.get_json(silent=True) or {}
+    concept = str(src.get("concept", "")).strip()
+    language = str(src.get("language", "en")).strip() or "en"
+    if not concept:
+        return jsonify({"ok": False, "error": "describe the idea first"}), 422
+
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "channel_genres", "strict": True,
+            "schema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["genres"],
+                "properties": {"genres": {
+                    "type": "array", "minItems": 4, "maxItems": 6,
+                    "items": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["name", "why_monetisable", "audience",
+                                     "example_topics", "revenue_band", "competition"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "why_monetisable": {"type": "string"},
+                            "audience": {"type": "string"},
+                            "example_topics": {"type": "array", "items": {"type": "string"}},
+                            "revenue_band": {"type": "string",
+                                             "enum": ["low", "medium", "high", "very high"]},
+                            "competition": {"type": "string",
+                                            "enum": ["low", "medium", "high"]},
+                        },
+                    },
+                }},
+            },
+        },
+    }
+    sys_p = (
+        "You advise operators of an autonomous short-form video factory on which "
+        "niche to launch a NEW channel in. Given a rough content concept, return "
+        "4-6 concrete sub-niches worth pursuing. For each: a specific name, one "
+        "sentence on why it monetises (ad RPM drivers, sponsor demand, product "
+        "affinity), the core audience, 3 example video topics, a coarse revenue "
+        "band, and a competition level. Base this on general market knowledge — "
+        "you have NO analytics for this channel. Prefer niches that suit faceless "
+        "AI-produced short documentary video. Output JSON only, in "
+        f"{language!r} for human-readable fields."
+    )
+    try:
+        data = _cb_call_claude_json(sys_p, f"Concept: {concept}", schema)
+        return jsonify({"ok": True, "genres": data.get("genres", []),
+                        "disclaimer": "Estimates from the model's general knowledge — "
+                                      "not backed by your channel's data or a live market feed."})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"genre suggestions unavailable ({exc}); "
+                                              f"type a niche in manually"}), 200
+
+
+@app.route("/api/channel-builder/names", methods=["POST"])
+def api_channel_builder_names():
+    """
+    Step 2: propose channel names + a matching social handle for the chosen
+    concept/niche. The wizard lets the operator pick one, edit it, and run
+    the handle-availability check. Degrades to {ok: False} 200.
+    """
+    src = request.get_json(silent=True) or {}
+    concept = str(src.get("concept", "")).strip()
+    genre = str(src.get("genre", "")).strip()
+    language = str(src.get("language", "en")).strip() or "en"
+    if not concept and not genre:
+        return jsonify({"ok": False, "error": "pick a niche first"}), 422
+
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "channel_names", "strict": True,
+            "schema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["names"],
+                "properties": {"names": {
+                    "type": "array", "minItems": 4, "maxItems": 6,
+                    "items": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["name", "handle", "rationale"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "handle": {"type": "string"},
+                            "rationale": {"type": "string"},
+                        },
+                    },
+                }},
+            },
+        },
+    }
+    sys_p = (
+        "You name new video channels. Given a concept and niche, propose 4-6 "
+        "distinct channel names. For each, give a lowercase social handle "
+        "(letters/numbers/underscores/periods only, <=25 chars, no leading/"
+        "trailing separator, usable identically on YouTube, TikTok, Instagram "
+        "and Facebook) and one sentence of rationale. Vary the style: literal, "
+        "evocative, wordmark. Avoid names that obviously collide with big "
+        "existing brands. Output JSON only; keep the rationale in "
+        f"{language!r}."
+    )
+    user_p = f"Concept: {concept or '(from niche)'}\nNiche: {genre or '(unspecified)'}"
+    try:
+        data = _cb_call_claude_json(sys_p, user_p, schema)
+        return jsonify({"ok": True, "names": data.get("names", [])})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"name suggestions unavailable ({exc}); "
+                                              f"type a name in manually"}), 200
+
+
+_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._]{1,28}[a-z0-9]$")
+
+
+def _check_one_handle(url: str, timeout: float = 4.0) -> dict:
+    """Best-effort existence probe for a public profile URL. Never raises.
+    200 -> taken, 404 -> available, anything else (block page, redirect,
+    timeout) -> unknown."""
+    import requests as _req
+    hdrs = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+    try:
+        r = _req.get(url, headers=hdrs, timeout=timeout, allow_redirects=True)
+        if r.status_code == 404:
+            return {"status": "available", "url": url}
+        if r.status_code == 200:
+            return {"status": "taken", "url": url}
+        return {"status": "unknown", "url": url, "note": f"HTTP {r.status_code}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "unknown", "url": url, "note": str(exc)[:80]}
+
+
+@app.route("/api/channel-builder/handle-availability", methods=["POST"])
+def api_channel_builder_handle_availability():
+    """
+    Best-effort check of one handle across YouTube / TikTok / Instagram /
+    Facebook. These sites bot-protect their profile pages, so 'unknown' is a
+    normal result — the wizard always tells the operator to confirm manually.
+    Never blocks channel creation.
+    """
+    src = request.get_json(silent=True) or {}
+    handle = str(src.get("handle", "")).strip().lstrip("@").lower()
+    if not handle:
+        return jsonify({"ok": False, "error": "enter a handle first"}), 422
+    if not _HANDLE_RE.match(handle):
+        return jsonify({"ok": False, "error": "handle: 3-30 chars, a-z 0-9 . _ only, "
+                                              "no leading/trailing separator"}), 422
+
+    targets = {
+        "youtube":   f"https://www.youtube.com/@{handle}",
+        "tiktok":    f"https://www.tiktok.com/@{handle}",
+        "instagram": f"https://www.instagram.com/{handle}/",
+        "facebook":  f"https://www.facebook.com/{handle}",
+    }
+    results = {k: _check_one_handle(v) for k, v in targets.items()}
+    return jsonify({
+        "ok": True, "handle": handle, "results": results,
+        "disclaimer": "Best-effort only — these platforms block automated checks, "
+                      "so 'unknown' is common. Confirm on each platform before you commit.",
+    })
+
+
 @app.route("/channels/new")
 def channel_builder_page():
     """The guided Channel Builder wizard."""
@@ -709,6 +895,15 @@ def channel_builder_page():
         "shorts_ceiling": 20, "long_ceiling": 60,
         "voices": [
             {"id": "j9jfwdrw7BRfcR43Qohk", "label": "Documentary narrator (deep, measured)"},
+        ],
+        # shown only if the LLM genre step is unavailable — the operator can
+        # still pick a starting niche or type their own.
+        "fallback_genres": [
+            "Explainer / how-things-work", "History & mysteries",
+            "Science & space", "True crime & unsolved cases",
+            "Personal finance & money", "Health, sleep & longevity",
+            "Tech news & AI", "Nature & wildlife facts",
+            "Kids' learning (numbers, letters, animals)", "Folklore & mythology",
         ],
     }
     return render_template("channel_builder.html", defaults=defaults)

@@ -88,6 +88,70 @@ def test_suggest_requires_a_description(client):
     assert r.status_code == 422
 
 
+def test_genres_requires_a_concept(client):
+    r = client.post("/api/channel-builder/genres", data=json.dumps({"concept": ""}),
+                    content_type="application/json")
+    assert r.status_code == 422
+
+
+def test_genres_degrades_soft_on_model_failure(client, monkeypatch):
+    import hypogeum.openrouter as orr
+    monkeypatch.setattr(orr, "call_claude", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no model")))
+    r = client.post("/api/channel-builder/genres",
+                    data=json.dumps({"concept": "videos for kids about animals"}),
+                    content_type="application/json")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is False and "manually" in body["error"]
+
+
+def test_genres_ok_shape(client, monkeypatch):
+    import run_dashboard as server
+    fake = {"genres": [{"name": "Animal facts for toddlers", "why_monetisable": "high CPM kids ed",
+                        "audience": "parents of 2-5yo", "example_topics": ["cats", "whales", "ants"],
+                        "revenue_band": "high", "competition": "medium"}]}
+    monkeypatch.setattr(server, "_cb_call_claude_json", lambda *a, **k: fake)
+    r = client.post("/api/channel-builder/genres",
+                    data=json.dumps({"concept": "kids animal content"}),
+                    content_type="application/json")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["genres"][0]["name"] == "Animal facts for toddlers"
+    assert "disclaimer" in body
+
+
+def test_names_degrades_soft(client, monkeypatch):
+    import hypogeum.openrouter as orr
+    monkeypatch.setattr(orr, "call_claude", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    r = client.post("/api/channel-builder/names",
+                    data=json.dumps({"concept": "kids animal content", "genre": "animal facts"}),
+                    content_type="application/json")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is False
+
+
+def test_handle_availability_rejects_bad_handles(client):
+    for bad in ["", "a", "has spaces", "_leading", "way_too_long_of_a_handle_string_here_yeah"]:
+        r = client.post("/api/channel-builder/handle-availability",
+                        data=json.dumps({"handle": bad}), content_type="application/json")
+        assert r.status_code == 422, bad
+
+
+def test_handle_availability_shape(client, monkeypatch):
+    import run_dashboard as server
+    monkeypatch.setattr(server, "_check_one_handle",
+                        lambda url, timeout=4.0: {"status": "available", "url": url})
+    r = client.post("/api/channel-builder/handle-availability",
+                    data=json.dumps({"handle": "the.test_channel"}),
+                    content_type="application/json")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True and body["handle"] == "the.test_channel"
+    assert set(body["results"]) == {"youtube", "tiktok", "instagram", "facebook"}
+    assert body["results"]["youtube"]["status"] == "available"
+
+
 def test_readiness_endpoint(client):
     client.post("/api/channels/create",
                 data=json.dumps({"channel_id": "rdtest", "name": "RD", "format": "shorts",

@@ -30,6 +30,20 @@
     .cb-opt.sel { border-color: var(--accent); background: var(--accent-bg); box-shadow: 0 0 0 3px var(--accent-bg); }
     .cb-opt-t { font-weight: 700; font-size: 14px; }
     .cb-opt-d { font-size: 12.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+    .cb-opt-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+    .cb-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+              border-radius: 999px; padding: 2px 8px; border: 1px solid var(--border-strong); color: var(--muted); }
+    .cb-tag.rev-high, .cb-tag.rev-veryhigh { background: var(--good-bg); color: var(--good);
+              border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+    .cb-tag.rev-medium { background: var(--warn-bg); color: var(--warn);
+              border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+    .cb-tag.comp-high { background: var(--critical-bg); color: var(--critical);
+              border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
+
+    .cb-warn { background: var(--warn-bg); border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+               color: var(--warn); font-size: 12px; border-radius: var(--radius); padding: 10px 13px;
+               margin: 14px 0; line-height: 1.55; }
 
     .cb-nav { display: flex; justify-content: space-between; gap: 12px; margin-top: 26px;
               padding-top: 20px; border-top: 1px solid var(--border); }
@@ -42,11 +56,11 @@
                    padding: 7px 0; border-bottom: 1px solid var(--hairline); }
     .cb-spec-row:last-child { border-bottom: none; }
     .cb-spec-k { color: var(--faint); }
-    .cb-spec-v { color: var(--text); text-align: right; font-variant-numeric: tabular-nums; max-width: 62%; }
+    .cb-spec-v { color: var(--text); text-align: right; max-width: 62%; word-break: break-word; }
     .cb-spec-v.is-empty { color: var(--faint); }
 
     .cb-suggest { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 16px; }
-    .cb-suggesting { color: var(--accent); font-size: 12px; }
+    .cb-suggesting { color: var(--accent); font-size: 12px; margin-left: 8px; }
 
     .cb-pills { display: flex; flex-wrap: wrap; gap: 7px; }
     .cb-pill { border: 1px solid var(--border-strong); border-radius: 999px; padding: 5px 12px;
@@ -56,6 +70,19 @@
 
     .cb-swatches { display: flex; gap: 8px; margin-top: 8px; }
     .cb-sw { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border-strong); }
+
+    /* handle availability */
+    .cb-hb-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 12px; }
+    @media (max-width: 520px) { .cb-hb-grid { grid-template-columns: 1fr; } }
+    .cb-hb { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border);
+             border-radius: var(--radius); padding: 9px 12px; background: var(--bg-2); font-size: 12.5px; }
+    .cb-hb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
+    .cb-hb.st-available .cb-hb-dot { background: var(--good); }
+    .cb-hb.st-taken .cb-hb-dot { background: var(--critical); }
+    .cb-hb-p { font-weight: 600; text-transform: capitalize; }
+    .cb-hb-s { color: var(--muted); margin-left: auto; }
+    .cb-hb.st-available .cb-hb-s { color: var(--good); }
+    .cb-hb.st-taken .cb-hb-s { color: var(--critical); }
 
     .cb-done { text-align: center; padding: 14px 0 8px; }
     .cb-done .big { font-family: var(--font-display); font-size: 22px; font-weight: 800; margin: 8px 0; }
@@ -71,8 +98,9 @@
   <div class="cb-hero">
     <span class="eyebrow">New channel</span>
     <h1>Build a channel</h1>
-    <p class="lede">Seven steps from a name to a channel the factory can produce and
-      publish on its own. Every choice has a sane default — change what matters, skip the rest.</p>
+    <p class="lede">Start from a rough idea. The studio proposes a monetisable niche,
+      names and handles, then a full identity — you steer every step, and the channel
+      the factory can run on its own comes out the other end.</p>
   </div>
 
   <div class="stepper" id="cb-stepper"></div>
@@ -101,7 +129,11 @@
 const DEFAULTS = {{ defaults | tojson }};
 const S = {
   step: 0,
-  channel_id: "", name: "", description: "", language: "en", timezone: "UTC",
+  concept: "", language: "en", timezone: "UTC",
+  genre: "", genreList: [], genreDisclaimer: "",
+  name: "", channel_id: "", handle: "",
+  nameList: [], handleResults: null, handleDisclaimer: "",
+  _idTouched: false,
   format: "shorts", shorts_per_week: 7, videos_per_week: 1,
   brand: { persona_name:"", tone:"", target_audience:"", visual_style:"", voice_guidelines:"",
            content_pillars:[], color_palette:{primary:"",secondary:"",accent:""} },
@@ -115,10 +147,18 @@ const S = {
   created: null, readiness: null,
 };
 
-const STEPS = ["Identity","Content","Identity ✨","Narration","Models","Publishing & budget","Review"];
+const STEPS = ["Concept","Niche","Name & handles","Visual identity","Content & cadence",
+               "Narration","Models","Publishing & budget","Review"];
+const REVIEW_STEP = STEPS.length - 1;
 const $ = s => document.querySelector(s);
 function toast(msg, ok){ const t=$("#cb-toast"); t.textContent=msg; t.className="toast show "+(ok?"toast-ok":"toast-err"); setTimeout(()=>t.className="toast",2600); }
-function slug(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"").slice(0,40); }
+function slug(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"").slice(0,40); }
+function handleize(s){ return (s||"").toLowerCase().replace(/[^a-z0-9._]+/g,"").replace(/^[._]+|[._]+$/g,"").slice(0,25); }
+// a non-Latin name (Arabic, CJK…) slugs to nothing — fall back to the handle,
+// then the niche, then a timestamp, so the channel ID is never empty.
+function deriveId(){
+  return slug(S.name) || slug(S.handle) || slug(S.genre) || ("ch_" + Date.now().toString(36));
+}
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 function renderStepper(){
@@ -131,14 +171,15 @@ function renderStepper(){
 
 function renderSpec(){
   const rows = [
-    ["ID", S.channel_id],
+    ["Concept", S.concept ? S.concept.slice(0,70)+(S.concept.length>70?"…":"") : ""],
+    ["Niche", S.genre],
     ["Name", S.name],
+    ["Handle", S.handle ? "@"+S.handle : ""],
     ["Format", S.format==='shorts' ? `Shorts · ${S.shorts_per_week}/wk`
               : S.format==='mixed' ? `Mixed · ${S.videos_per_week} long + ${S.shorts_per_week} shorts`
               : `Long-form · ${S.videos_per_week}/wk`],
     ["Persona", S.brand.persona_name],
     ["Tone", S.brand.tone],
-    ["Visual", S.brand.visual_style ? S.brand.visual_style.slice(0,60)+(S.brand.visual_style.length>60?"…":"") : ""],
     ["Platforms", S.platforms.join(", ")],
     ["Weekly budget", S.weekly_video_budget_usd ? "$"+S.weekly_video_budget_usd : ""],
     ["Per-episode ceiling", S.cost_ceiling_usd_per_episode ? "$"+S.cost_ceiling_usd_per_episode : "inherit"],
@@ -148,25 +189,103 @@ function renderSpec(){
   ).join("");
 }
 
-const TONES = ["investigative","evidence-based","measured","cinematic","authoritative","curious","urgent","warm","irreverent","minimal"];
+const TONES = ["investigative","evidence-based","measured","cinematic","authoritative","curious","urgent","warm","playful","irreverent","minimal"];
 
 function panel(){
   switch(S.step){
+
   case 0: return `
-    <div class="cb-step-head"><span class="eyebrow">Step 1</span><h2>Identity</h2></div>
-    <p class="cb-step-sub">Who is this channel and what does it cover? One clear paragraph — the identity step uses it to propose a look.</p>
-    <div class="cb-two">
-      <div class="field"><label>Channel name</label><input id="f-name" value="${esc(S.name)}" placeholder="The Hypogeum Chronicles"></div>
-      <div class="field"><label>Channel ID</label><input id="f-id" value="${esc(S.channel_id)}" placeholder="auto from name"><div class="hint">lowercase, used in URLs and the DB</div></div>
-    </div>
-    <div class="field"><label>What is this channel about?</label><textarea id="f-desc" placeholder="Investigation-led documentary shorts about archaeological sites whose records went missing — evidence before conclusions, no sensationalism.">${esc(S.description)}</textarea></div>
+    <div class="cb-step-head"><span class="eyebrow">Step 1</span><h2>What's the idea?</h2></div>
+    <p class="cb-step-sub">A sentence or two is enough — "educational videos for kids in Arabic", "unsolved
+      historical disappearances". The next step turns this into concrete, monetisable niches to choose from.</p>
+    <div class="field"><label>Channel concept</label>
+      <textarea id="f-concept" placeholder="e.g. Short, calm explainer videos about how everyday technology works, aimed at curious adults.">${esc(S.concept)}</textarea></div>
     <div class="cb-two">
       <div class="field"><label>Language</label><input id="f-lang" value="${esc(S.language)}"></div>
       <div class="field"><label>Timezone (IANA)</label><input id="f-tz" value="${esc(S.timezone)}" placeholder="Asia/Dubai"></div>
     </div>`;
 
-  case 1: return `
-    <div class="cb-step-head"><span class="eyebrow">Step 2</span><h2>Content & cadence</h2></div>
+  case 1: {
+    const list = S.genreList.length ? S.genreList : (DEFAULTS.fallback_genres||[]).map(n=>({name:n}));
+    const isRich = S.genreList.length > 0;
+    return `
+    <div class="cb-step-head"><span class="eyebrow">Step 2</span><h2>Pick a niche</h2></div>
+    <p class="cb-step-sub">Choose the sub-niche to launch in. Suggestions are ranked for a faceless,
+      AI-produced short-video channel.</p>
+    <button class="btn btn-primary" id="f-genrun">✨ Suggest niches</button>
+    <span class="cb-suggesting" id="f-genstat"></span>
+    ${S.genreDisclaimer ? `<div class="cb-warn">⚠ ${esc(S.genreDisclaimer)}</div>` : ''}
+    <div class="cb-choice" style="margin-top:14px">
+      ${list.map((g,i)=>`
+        <div class="cb-opt ${S.genre===g.name?'sel':''}" data-genre="${esc(g.name)}">
+          <div class="cb-opt-t">${esc(g.name)}</div>
+          ${g.why_monetisable?`<div class="cb-opt-d">${esc(g.why_monetisable)}</div>`:''}
+          ${g.audience?`<div class="cb-opt-d"><b>Audience:</b> ${esc(g.audience)}</div>`:''}
+          ${g.example_topics&&g.example_topics.length?`<div class="cb-opt-d"><b>Examples:</b> <bdi>${esc(g.example_topics.join('  ·  '))}</bdi></div>`:''}
+          ${(g.revenue_band||g.competition)?`<div class="cb-opt-meta">
+            ${g.revenue_band?`<span class="cb-tag rev-${esc(g.revenue_band.replace(/\\s/g,''))}">${esc(g.revenue_band)} revenue</span>`:''}
+            ${g.competition?`<span class="cb-tag comp-${esc(g.competition)}">${esc(g.competition)} competition</span>`:''}
+          </div>`:''}
+        </div>`).join("")}
+    </div>
+    <div class="field" style="margin-top:16px"><label>${isRich?'…or write your own niche':'Niche'}</label>
+      <input id="f-genre" value="${esc(S.genre)}" placeholder="type a niche in your own words"></div>`;
+  }
+
+  case 2: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 3</span><h2>Name &amp; handles</h2></div>
+    <p class="cb-step-sub">Pick a name, then check the handle across all four platforms. The check is
+      best-effort — always confirm on each platform before you commit.</p>
+    <button class="btn btn-primary" id="f-namerun">✨ Suggest names</button>
+    <span class="cb-suggesting" id="f-namestat"></span>
+    <div class="cb-choice" style="margin:14px 0">
+      ${S.nameList.map(n=>`
+        <div class="cb-opt ${S.name===n.name?'sel':''}" data-name="${esc(n.name)}" data-handle="${esc(n.handle||'')}">
+          <div class="cb-opt-t"><bdi>${esc(n.name)}</bdi>${n.handle?` <span class="muted" style="font-weight:400" dir="ltr">· @${esc(n.handle)}</span>`:''}</div>
+          ${n.rationale?`<div class="cb-opt-d">${esc(n.rationale)}</div>`:''}
+        </div>`).join("")}
+    </div>
+    <div class="cb-two">
+      <div class="field"><label>Channel name</label><input id="f-name" value="${esc(S.name)}" placeholder="The Hypogeum Chronicles"></div>
+      <div class="field"><label>Channel ID</label><input id="f-id" value="${esc(S.channel_id)}" placeholder="auto from name"><div class="hint">lowercase, used in URLs and the DB</div></div>
+    </div>
+    <div class="field"><label>Social handle</label>
+      <input id="f-handle" value="${esc(S.handle)}" placeholder="thehypogeumchronicles">
+      <div class="hint">one handle used on YouTube, TikTok, Instagram &amp; Facebook · a-z 0-9 . _</div>
+    </div>
+    <button class="btn" id="f-hcheck">Check availability</button>
+    <span class="cb-suggesting" id="f-hstat"></span>
+    ${S.handleResults ? `
+      <div class="cb-hb-grid">
+        ${["youtube","tiktok","instagram","facebook"].map(p=>{
+          const r = S.handleResults[p] || {status:"unknown"};
+          return `<a class="cb-hb st-${r.status}" href="${esc(r.url||'#')}" target="_blank" rel="noopener">
+            <span class="cb-hb-dot"></span><span class="cb-hb-p">${p}</span>
+            <span class="cb-hb-s">${r.status}${r.note?` · ${esc(r.note)}`:''}</span></a>`;
+        }).join("")}
+      </div>
+      ${S.handleDisclaimer?`<div class="cb-warn">⚠ ${esc(S.handleDisclaimer)}</div>`:''}` : ''}`;
+
+  case 3: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 4</span><h2>Visual &amp; brand identity</h2></div>
+    <p class="cb-step-sub">Let the studio propose a distinctive identity from your concept and niche, then edit anything.</p>
+    <button class="btn btn-primary" id="f-suggest">✨ Suggest identity</button> <span class="cb-suggesting" id="f-sugstat"></span>
+    <div class="cb-two">
+      <div class="field"><label>Persona</label><input id="b-persona" value="${esc(S.brand.persona_name)}" placeholder="The Archivist"></div>
+      <div class="field"><label>Target audience</label><input id="b-aud" value="${esc(S.brand.target_audience)}" placeholder="history &amp; archaeology enthusiasts, 25–55"></div>
+    </div>
+    <div class="field"><label>Tone</label>
+      <div class="cb-pills" id="b-tones">${TONES.map(t=>`<span class="cb-pill ${(S.brand.tone||'').includes(t)?'sel':''}" data-t="${t}">${t}</span>`).join("")}</div>
+      <input id="b-tone" value="${esc(S.brand.tone)}" style="margin-top:8px" placeholder="or type your own">
+    </div>
+    <div class="field"><label>Visual style</label><textarea id="b-vis" placeholder="warm earth tones, underground &amp; ancient architecture, atmospheric darkness, raking light on stone">${esc(S.brand.visual_style)}</textarea></div>
+    <div class="field"><label>Narrator voice guidelines</label><textarea id="b-voice" placeholder="Authoritative yet accessible. Evidence before conclusions. Pacing measured — let revelations land.">${esc(S.brand.voice_guidelines)}</textarea></div>
+    <div class="field"><label>Content pillars (comma-separated)</label><input id="b-pillars" value="${esc((S.brand.content_pillars||[]).join(', '))}" placeholder="lost records, misread evidence, colonial-era archaeology, acoustics"></div>
+    <div class="field"><label>Palette</label><input id="b-pal" value="${esc([S.brand.color_palette.primary,S.brand.color_palette.secondary,S.brand.color_palette.accent].filter(Boolean).join(', '))}" placeholder="#1c1a17, #c9a24b, #e7ddc9">
+      <div class="cb-swatches" id="b-swatch"></div></div>`;
+
+  case 4: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 5</span><h2>Content &amp; cadence</h2></div>
     <p class="cb-step-sub">Shorts-only is the autonomous factory default: one vertical clip per day, published immediately.</p>
     <div class="cb-choice">
       ${[["shorts","Shorts only","One ~50s vertical video per slot, published now. No weekly bundle."],
@@ -179,26 +298,8 @@ function panel(){
       ${S.format!=='shorts' ? `<div class="field"><label>Long videos per week</label><input id="f-vpw" type="number" min="0" max="7" value="${S.videos_per_week}"></div>`:''}
     </div>`;
 
-  case 2: return `
-    <div class="cb-step-head"><span class="eyebrow">Step 3</span><h2>Visual & brand identity</h2></div>
-    <p class="cb-step-sub">Let the studio propose a distinctive identity from your brief, then edit anything.</p>
-    <button class="btn btn-primary cb-suggest" id="f-suggest">✨ Suggest identity</button> <span class="cb-suggesting" id="f-sugstat"></span>
-    <div class="cb-two">
-      <div class="field"><label>Persona</label><input id="b-persona" value="${esc(S.brand.persona_name)}" placeholder="The Archivist"></div>
-      <div class="field"><label>Target audience</label><input id="b-aud" value="${esc(S.brand.target_audience)}" placeholder="history & archaeology enthusiasts, 25–55"></div>
-    </div>
-    <div class="field"><label>Tone</label>
-      <div class="cb-pills" id="b-tones">${TONES.map(t=>`<span class="cb-pill ${(S.brand.tone||'').includes(t)?'sel':''}" data-t="${t}">${t}</span>`).join("")}</div>
-      <input id="b-tone" value="${esc(S.brand.tone)}" style="margin-top:8px" placeholder="or type your own">
-    </div>
-    <div class="field"><label>Visual style</label><textarea id="b-vis" placeholder="warm earth tones, underground & ancient architecture, atmospheric darkness, raking light on stone">${esc(S.brand.visual_style)}</textarea></div>
-    <div class="field"><label>Narrator voice guidelines</label><textarea id="b-voice" placeholder="Authoritative yet accessible. Evidence before conclusions. Pacing measured — let revelations land.">${esc(S.brand.voice_guidelines)}</textarea></div>
-    <div class="field"><label>Content pillars (comma-separated)</label><input id="b-pillars" value="${esc((S.brand.content_pillars||[]).join(', '))}" placeholder="lost records, misread evidence, colonial-era archaeology, acoustics"></div>
-    <div class="field"><label>Palette</label><input id="b-pal" value="${esc([S.brand.color_palette.primary,S.brand.color_palette.secondary,S.brand.color_palette.accent].filter(Boolean).join(', '))}" placeholder="#1c1a17, #c9a24b, #e7ddc9">
-      <div class="cb-swatches" id="b-swatch"></div></div>`;
-
-  case 3: return `
-    <div class="cb-step-head"><span class="eyebrow">Step 4</span><h2>Narration & disclosure</h2></div>
+  case 5: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 6</span><h2>Narration &amp; disclosure</h2></div>
     <p class="cb-step-sub">The narrator voice and the platform-compliance defaults.</p>
     <div class="field"><label>Narration voice</label>
       <select id="n-voice">${DEFAULTS.voices.map(v=>`<option value="${v.id}" ${v.id===S.narration_voice_id?'selected':''}>${esc(v.label)}</option>`).join("")}
@@ -212,10 +313,10 @@ function panel(){
         `<div class="cb-opt ${S.publishing[k]?'sel':''}" data-pub="${k}"><div class="cb-opt-t">${t}</div><div class="cb-opt-d">${d}</div></div>`).join("")}
     </div>`;
 
-  case 4: return `
-    <div class="cb-step-head"><span class="eyebrow">Step 5</span><h2>Models</h2></div>
+  case 6: return `
+    <div class="cb-step-head"><span class="eyebrow">Step 7</span><h2>Models</h2></div>
     <p class="cb-step-sub">The recommended set is tuned for documentary production. Override only if you know why.</p>
-    <div class="cb-opt ${!S.advancedModels?'sel':''}" data-models="rec"><div class="cb-opt-t">Recommended</div><div class="cb-opt-d">Sonnet 4.6 producer · Opus 4.6 research · GPT-5.5-pro thumbnails · MUAPI image & video</div></div>
+    <div class="cb-opt ${!S.advancedModels?'sel':''}" data-models="rec"><div class="cb-opt-t">Recommended</div><div class="cb-opt-d">Sonnet 4.6 producer · Opus 4.6 research · GPT-5.5-pro thumbnails · MUAPI image &amp; video</div></div>
     <div class="cb-opt ${S.advancedModels?'sel':''}" data-models="adv" style="margin-top:10px"><div class="cb-opt-t">Advanced</div><div class="cb-opt-d">Set each agent's model and the media providers.</div></div>
     <div id="m-adv" style="display:${S.advancedModels?'block':'none'};margin-top:16px">
       ${[["episode_producer","Episode producer"],["research_director","Research director"],["thumbnail_planner","Thumbnail planner"],
@@ -224,10 +325,10 @@ function panel(){
         `<div class="field"><label>${l}</label><input id="m-${k}" value="${esc(S.models[k]||'')}"></div>`).join("")}
     </div>`;
 
-  case 5: {
+  case 7: {
     const rec = S.format==='shorts' ? DEFAULTS.shorts_ceiling : DEFAULTS.long_ceiling;
     return `
-    <div class="cb-step-head"><span class="eyebrow">Step 6</span><h2>Publishing & budget</h2></div>
+    <div class="cb-step-head"><span class="eyebrow">Step 8</span><h2>Publishing &amp; budget</h2></div>
     <p class="cb-step-sub">Every platform publishes through Zernio. Budget guardrails stop a runaway run before it spends.</p>
     <div class="field"><label>Platforms</label>
       <div class="cb-pills" id="p-plats">${["youtube","tiktok","instagram","facebook"].map(p=>
@@ -239,13 +340,14 @@ function panel(){
     </div>`;
   }
 
-  case 6: {
+  case 8: {
     if (S.created) return `
       <div class="cb-done">
         <span class="eyebrow">Created</span>
         <div class="big">${esc(S.name)} is set up</div>
         <p class="lede" style="margin:0 auto 20px">The channel exists with the operator switch <b>off</b>. Finish activation below.</p>
       </div>
+      ${S.handle ? `<div class="cb-warn">Reserve <b>@${esc(S.handle)}</b> on YouTube, TikTok, Instagram and Facebook now, then connect the accounts in Zernio.</div>` : ''}
       <h3 class="card-title">Readiness</h3>
       <div id="cb-readiness">${readinessHtml()}</div>
       <div class="btn-row" style="margin-top:18px">
@@ -253,7 +355,7 @@ function panel(){
         <a class="btn" href="/channel/${esc(S.channel_id)}/operations">Production plan →</a>
       </div>`;
     return `
-    <div class="cb-step-head"><span class="eyebrow">Step 7</span><h2>Review</h2></div>
+    <div class="cb-step-head"><span class="eyebrow">Step 9</span><h2>Review</h2></div>
     <p class="cb-step-sub">This creates the channel with the operator switch off. Nothing runs until you turn it on and sign the operating grant.</p>
     <div id="cb-review"></div>`;
   }
@@ -274,21 +376,48 @@ function readinessHtml(){
 
 function bind(){
   const p = $("#cb-panel");
+
   if (S.step===0){
-    p.querySelector("#f-name").oninput = e=>{ S.name=e.target.value; if(!S._idTouched) { S.channel_id=slug(S.name); p.querySelector("#f-id").value=S.channel_id; } renderSpec(); };
-    p.querySelector("#f-id").oninput = e=>{ S._idTouched=true; S.channel_id=slug(e.target.value); renderSpec(); };
-    p.querySelector("#f-desc").oninput = e=> S.description=e.target.value;
+    p.querySelector("#f-concept").oninput = e=>{ S.concept=e.target.value; renderSpec(); };
     p.querySelector("#f-lang").oninput = e=> S.language=e.target.value;
-    p.querySelector("#f-tz").oninput = e=>{ S.timezone=e.target.value; };
+    p.querySelector("#f-tz").oninput = e=> S.timezone=e.target.value;
   }
+
   if (S.step===1){
-    p.querySelectorAll(".cb-opt[data-fmt]").forEach(o=> o.onclick=()=>{ S.format=o.dataset.fmt; S.cost_ceiling_usd_per_episode = S.format==='shorts'?DEFAULTS.shorts_ceiling:DEFAULTS.long_ceiling; render(); });
-    const spw=p.querySelector("#f-spw"), vpw=p.querySelector("#f-vpw");
-    if(spw) spw.oninput=e=> S.shorts_per_week=+e.target.value;
-    if(vpw) vpw.oninput=e=> S.videos_per_week=+e.target.value;
+    p.querySelector("#f-genrun").onclick = suggestGenres;
+    p.querySelectorAll(".cb-opt[data-genre]").forEach(o=> o.onclick=()=>{
+      S.genre = o.dataset.genre; render();
+    });
+    p.querySelector("#f-genre").oninput = e=>{ S.genre=e.target.value; renderSpec(); };
   }
+
   if (S.step===2){
-    p.querySelector("#f-suggest").onclick = suggest;
+    p.querySelector("#f-namerun").onclick = suggestNames;
+    p.querySelectorAll(".cb-opt[data-name]").forEach(o=> o.onclick=()=>{
+      S.name = o.dataset.name;
+      if (o.dataset.handle) S.handle = handleize(o.dataset.handle);
+      if (!S._idTouched) S.channel_id = deriveId();
+      S.handleResults = null;
+      render();
+    });
+    p.querySelector("#f-name").oninput = e=>{
+      S.name=e.target.value;
+      if(!S._idTouched){ S.channel_id=deriveId(); p.querySelector("#f-id").value=S.channel_id; }
+      renderSpec();
+    };
+    p.querySelector("#f-id").oninput = e=>{ S._idTouched=true; S.channel_id=slug(e.target.value); renderSpec(); };
+    p.querySelector("#f-handle").oninput = e=>{
+      const v = handleize(e.target.value);
+      if (v !== e.target.value) e.target.value = v;
+      S.handle=v; S.handleResults=null;
+      if(!S._idTouched){ S.channel_id=deriveId(); const idf=p.querySelector("#f-id"); if(idf) idf.value=S.channel_id; }
+      renderSpec();
+    };
+    p.querySelector("#f-hcheck").onclick = checkHandle;
+  }
+
+  if (S.step===3){
+    p.querySelector("#f-suggest").onclick = suggestIdentity;
     p.querySelectorAll(".cb-pill[data-t]").forEach(el=> el.onclick=()=>{ S.brand.tone=el.dataset.t; p.querySelector("#b-tone").value=el.dataset.t; render(); });
     const g=(id,f)=>{ const el=p.querySelector(id); if(el) el.oninput=e=>{ f(e.target.value); renderSpec(); }; };
     g("#b-persona", v=> S.brand.persona_name=v);
@@ -301,24 +430,35 @@ function bind(){
     pal.oninput = e=>{ const c=e.target.value.split(",").map(x=>x.trim()); S.brand.color_palette={primary:c[0]||"",secondary:c[1]||"",accent:c[2]||""}; drawSwatch(); };
     drawSwatch();
   }
-  if (S.step===3){
+
+  if (S.step===4){
+    p.querySelectorAll(".cb-opt[data-fmt]").forEach(o=> o.onclick=()=>{ S.format=o.dataset.fmt; S.cost_ceiling_usd_per_episode = S.format==='shorts'?DEFAULTS.shorts_ceiling:DEFAULTS.long_ceiling; render(); });
+    const spw=p.querySelector("#f-spw"), vpw=p.querySelector("#f-vpw");
+    if(spw) spw.oninput=e=> S.shorts_per_week=+e.target.value;
+    if(vpw) vpw.oninput=e=> S.videos_per_week=+e.target.value;
+  }
+
+  if (S.step===5){
     const sel=p.querySelector("#n-voice"), cust=p.querySelector("#n-voice-custom");
     sel.onchange = e=>{ if(e.target.value==='__custom__'){ cust.style.display='block'; } else { cust.style.display='none'; S.narration_voice_id=e.target.value; } };
     cust.oninput = e=> S.narration_voice_id=e.target.value.trim();
     p.querySelectorAll(".cb-opt[data-pub]").forEach(o=> o.onclick=()=>{ const k=o.dataset.pub; S.publishing[k]=!S.publishing[k]; o.classList.toggle("sel",S.publishing[k]); });
   }
-  if (S.step===4){
+
+  if (S.step===6){
     p.querySelectorAll(".cb-opt[data-models]").forEach(o=> o.onclick=()=>{ S.advancedModels = o.dataset.models==='adv'; render(); });
     ["episode_producer","research_director","thumbnail_planner","brand_guardian_p1","brand_guardian_p2","image_provider","video_provider"].forEach(k=>{
       const el=p.querySelector("#m-"+k); if(el) el.oninput=e=> S.models[k]=e.target.value.trim();
     });
   }
-  if (S.step===5){
+
+  if (S.step===7){
     p.querySelectorAll(".cb-pill[data-p]").forEach(el=> el.onclick=()=>{ const pl=el.dataset.p; const i=S.platforms.indexOf(pl); if(i<0)S.platforms.push(pl); else S.platforms.splice(i,1); el.classList.toggle("sel",S.platforms.includes(pl)); renderSpec(); });
     p.querySelector("#p-budget").oninput = e=>{ S.weekly_video_budget_usd=+e.target.value; renderSpec(); };
     p.querySelector("#p-ceiling").oninput = e=>{ S.cost_ceiling_usd_per_episode = e.target.value?+e.target.value:null; renderSpec(); };
   }
-  if (S.step===6 && !S.created){
+
+  if (S.step===REVIEW_STEP && !S.created){
     p.querySelector("#cb-review").innerHTML = $("#cb-spec").innerHTML;
   }
 }
@@ -329,11 +469,52 @@ function drawSwatch(){
   box.innerHTML = [c.primary,c.secondary,c.accent].map(h=> h?`<span class="cb-sw" style="background:${esc(h)}"></span>`:'').join("");
 }
 
-async function suggest(){
+async function suggestGenres(){
+  const st=$("#f-genstat"); st.textContent="thinking…";
+  try{
+    const r = await fetch("/api/channel-builder/genres",{method:"POST",headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({concept:S.concept, language:S.language})});
+    const d = await r.json();
+    if(!d.ok || !d.genres || !d.genres.length){ st.textContent = d.error || "unavailable — type a niche in"; return; }
+    S.genreList = d.genres; S.genreDisclaimer = d.disclaimer || "";
+    st.textContent = "✓ "+d.genres.length+" niches — pick one or edit";
+    render();
+  }catch(e){ st.textContent = "unavailable — type a niche in"; }
+}
+
+async function suggestNames(){
+  const st=$("#f-namestat"); st.textContent="thinking…";
+  try{
+    const r = await fetch("/api/channel-builder/names",{method:"POST",headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({concept:S.concept, genre:S.genre, language:S.language})});
+    const d = await r.json();
+    if(!d.ok || !d.names || !d.names.length){ st.textContent = d.error || "unavailable — type a name in"; return; }
+    S.nameList = d.names;
+    st.textContent = "✓ "+d.names.length+" names — pick one or edit";
+    render();
+  }catch(e){ st.textContent = "unavailable — type a name in"; }
+}
+
+async function checkHandle(){
+  const st=$("#f-hstat");
+  if(!S.handle){ st.textContent="enter a handle first"; return; }
+  st.textContent="checking…";
+  try{
+    const r = await fetch("/api/channel-builder/handle-availability",{method:"POST",headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({handle:S.handle})});
+    const d = await r.json();
+    if(!d.ok){ st.textContent = d.error || "check failed"; return; }
+    S.handleResults = d.results; S.handleDisclaimer = d.disclaimer || "";
+    st.textContent = "";
+    render();
+  }catch(e){ st.textContent = "check unavailable"; }
+}
+
+async function suggestIdentity(){
   const st = $("#f-sugstat"); st.textContent = "thinking…";
   try{
     const r = await fetch("/api/channel-builder/suggest",{method:"POST",headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({description:S.description, format:S.format, name:S.name})});
+      body: JSON.stringify({description:(S.concept + (S.genre? ("\n\nNiche: "+S.genre):"")), format:S.format, name:S.name})});
     const d = await r.json();
     if(!d.ok || !d.proposal){ st.textContent = d.error || "unavailable — fill manually"; return; }
     const pr = d.proposal;
@@ -350,19 +531,24 @@ async function suggest(){
 }
 
 function validate(){
-  if (S.step===0){ if(!S.name.trim()) return "name is required"; if(!S.channel_id) return "channel ID is required"; }
+  if (S.step===0 && !S.concept.trim()) return "describe the idea first";
+  if (S.step===1 && !S.genre.trim()) return "pick or type a niche";
+  if (S.step===2){ if(!S.name.trim()) return "name is required"; if(!S.channel_id) return "channel ID is required"; }
   return null;
 }
 
 async function create(){
   $("#cb-next").disabled = true; $("#cb-next").textContent = "Creating…";
   try{
+    const description = S.concept + (S.genre ? ("\n\nNiche / genre: " + S.genre) : "");
+    const brand = Object.assign({}, S.brand);
+    if (S.handle) brand.hashtags = ["@" + S.handle];
     const payload = {
-      channel_id:S.channel_id, name:S.name, description:S.description, language:S.language, timezone:S.timezone,
+      channel_id:S.channel_id, name:S.name, description, language:S.language, timezone:S.timezone,
       format:S.format, shorts_per_week:S.shorts_per_week, videos_per_week:S.videos_per_week,
       narration_voice_id:S.narration_voice_id, platforms:S.platforms,
       weekly_video_budget_usd:S.weekly_video_budget_usd, cost_ceiling_usd_per_episode:S.cost_ceiling_usd_per_episode,
-      brand:S.brand, models:(S.advancedModels?S.models:{}), publishing:S.publishing,
+      brand, models:(S.advancedModels?S.models:{}), publishing:S.publishing,
     };
     const r = await fetch("/api/channels/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     const d = await r.json();
@@ -382,14 +568,14 @@ function render(){
   bind();
   $("#cb-back").style.visibility = S.step===0 ? "hidden" : "visible";
   const nx = $("#cb-next");
-  if (S.step===6 && !S.created){ nx.textContent = "Create channel"; nx.disabled=false; }
-  else if (S.step===6 && S.created){ nx.style.display="none"; $("#cb-back").style.display="none"; }
+  if (S.step===REVIEW_STEP && !S.created){ nx.textContent = "Create channel"; nx.disabled=false; nx.style.display=""; }
+  else if (S.step===REVIEW_STEP && S.created){ nx.style.display="none"; $("#cb-back").style.display="none"; }
   else { nx.textContent = "Continue →"; nx.disabled=false; nx.style.display=""; }
 }
 
 $("#cb-back").onclick = ()=>{ if(S.step>0){ S.step--; render(); } };
 $("#cb-next").onclick = ()=>{
-  if (S.step===6){ create(); return; }
+  if (S.step===REVIEW_STEP){ create(); return; }
   const err = validate(); if(err){ toast(err,false); return; }
   S.step++; render();
 };

@@ -304,7 +304,14 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
                 structured_spec_checksum=structured_spec_checksum, compiler_version="1",
             )
             scopes = [
-                bs.ScopeRequest(bs.BudgetScopeKind.CALL, scene_id, UPSCALE_CEILING_USD, "USD"),
+                # Episode-scoped CALL ref (matches the 6 sites fixed in bbbd22d):
+                # a bare scene_id ref accumulates committed reservations across
+                # every episode + every re-run forever, so a resumed
+                # coverage-fill upscale (ep_af078f34: s02__extra2 attempted in
+                # 3 prior runs) hit `17_budget_scope_configuration: ceiling
+                # would be exceeded`. episode_id makes the ref unique per run
+                # target without ever colliding cross-episode.
+                bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"{episode_id}:{scene_id}", UPSCALE_CEILING_USD, "USD"),
                 bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or UPSCALE_CEILING_USD, "USD"),
             ]
             result = submission_gate.submit(

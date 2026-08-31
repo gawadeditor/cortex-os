@@ -119,10 +119,18 @@ def main(argv: list[str] | None = None) -> int:
         # (main -> {youtube}; shorts -> {youtube,tiktok}; short_003 ->
         # +instagram), so a one-off publish of this episode always presents
         # a "partial bundle" to the cycle scheduler -> blocked_schedule.
-        # Cleared for this publish, restored exactly after. (Obsolete for
-        # the channel's shorts-only direction anyway — remove it from the
-        # dashboard for good.)
+        # We swap it for a flat per-deliverable schedule for the publish
+        # (process_channel_ready_bundles hardcodes
+        # require_explicit_schedule_policy=True, so EVERY deliverable needs
+        # an explicit entry or it blocks closed). Both restored exactly
+        # after. (The weekly-release cycle is obsolete for the channel's
+        # shorts-only direction anyway — remove it from the dashboard.)
         "bundle_cycle_policy": copy.deepcopy(prof.bundle_cycle_policy or {}),
+        "deliverable_schedule_policy": copy.deepcopy(prof.deliverable_schedule_policy or {}),
+    }
+    _PUBLISH_SCHED = {
+        did: {"day_of_week": "monday", "time_of_day": "18:00", "timezone": "UTC"}
+        for did in ("main_episode", "short_001", "short_002", "short_003")
     }
 
     try:
@@ -156,10 +164,11 @@ def main(argv: list[str] | None = None) -> int:
             {"bundle_id": "short", "target_buffer_count": 3},
         ],
         weekly_video_budget_usd=float(args.weekly_budget),
-        bundle_cycle_policy={},   # publish this episode's deliverables independently
+        bundle_cycle_policy={},                       # drop the partial-bundle sync requirement
+        deliverable_schedule_policy=_PUBLISH_SCHED,   # explicit per-deliverable schedule
     )
-    print("  [1] channel switched to long-form cadence, weekly budget raised, "
-          "bundle_cycle_policy cleared for the publish")
+    print("  [1] channel switched to long-form cadence, weekly budget raised; "
+          "bundle_cycle_policy -> flat deliverable_schedule_policy for the publish")
     _resign_grant(f"weekly ceiling -> ${args.weekly_budget}")
 
     _fsnap = None          # factory monthly_ceiling_usd snapshot for restore
@@ -395,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
             deliverable_bundle_definitions=snap["deliverable_bundle_definitions"],
             weekly_video_budget_usd=snap["weekly_video_budget_usd"],
             bundle_cycle_policy=snap["bundle_cycle_policy"],
+            deliverable_schedule_policy=snap["deliverable_schedule_policy"],
         )
         _resign_grant(f"weekly ceiling restored -> ${snap['weekly_video_budget_usd']}")
         print(f"  [5] channel operations profile restored "

@@ -467,9 +467,18 @@ def compile_schedule_plan_from_channel_package(
                     channel_id=channel_id, schedule_plan=None, blocked=True,
                     blocked_reason=f"channel_id={channel_id!r} {exc.reason}",
                 )
+            # publish_now=True means "the schedule is moot, release now":
+            # the downstream adapter (hypogeum.publishing.zernio.publish)
+            # rejects publish_now=True paired with a FUTURE scheduled_for
+            # (or future platform override) as contradictory. Pin every
+            # slot to effective_now and drop the future per-platform
+            # overrides so an immediate one-off release of a channel that
+            # has an explicit deliverable_schedule_policy is not blocked by
+            # its own (future) policy slots.
             entries[deliverable_id] = DeliverableSchedule(
-                scheduled_for=slot_dt, timezone_name=entry_tz, publish_now=publish_now,
-                platform_scheduled_for_by_platform=platform_overrides,
+                scheduled_for=(effective_now if publish_now else slot_dt),
+                timezone_name=entry_tz, publish_now=publish_now,
+                platform_scheduled_for_by_platform=({} if publish_now else platform_overrides),
             )
             continue
 
@@ -498,7 +507,8 @@ def compile_schedule_plan_from_channel_package(
                 ),
             )
         entries[deliverable_id] = DeliverableSchedule(
-            scheduled_for=fallback_slot_dt, timezone_name=profile.timezone, publish_now=publish_now,
+            scheduled_for=(effective_now if publish_now else fallback_slot_dt),
+            timezone_name=profile.timezone, publish_now=publish_now,
         )
 
     plan = SchedulePlan(channel_id=channel_id, entries=entries)

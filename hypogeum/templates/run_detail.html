@@ -22,6 +22,9 @@
 <body>
 {% include '_nav.html' %}
 
+<div class="container">
+
+
 <div class="page-header">
   <h1>Run <code>{{ d.run.run_id[:12] }}…</code></h1>
   <span class="badge badge-{{ d.run.status }}">{{ d.run.status }}</span>
@@ -102,7 +105,7 @@
 {% if recovery and d.run.status == 'failed' %}
 <div class="card" style="border-color:
   {% if recovery.failure_class == 'resumable' %}var(--good)
-  {% elif recovery.failure_class == 'finance_gate' %}#d4a017
+  {% elif recovery.failure_class == 'finance_gate' %}var(--warn)
   {% elif recovery.failure_class == 'retryable' %}var(--warn)
   {% elif recovery.failure_class == 'fatal' %}var(--critical)
   {% else %}var(--warn){% endif %};">
@@ -110,7 +113,7 @@
   <div class="card-title" style="display:flex; align-items:center; gap:8px;">
     <span style="color:
       {% if recovery.failure_class == 'resumable' %}var(--green)
-      {% elif recovery.failure_class == 'finance_gate' %}#d4a017
+      {% elif recovery.failure_class == 'finance_gate' %}var(--warn)
       {% elif recovery.failure_class == 'fatal' %}var(--red)
       {% else %}var(--yellow){% endif %};">
       {% if recovery.failure_class == 'resumable' %}⟳ Resumable
@@ -214,9 +217,9 @@
 {# ── Finance Gate Panel (finance_gate failures only) ── #}
 {% if recovery and recovery.failure_class == 'finance_gate' %}
 {% set fg = recovery.finance_gate_detail %}
-<div class="card" style="border-color:#d4a017; margin-bottom:var(--gap);">
+<div class="card" style="border-color:var(--warn); margin-bottom:var(--gap);">
 
-  <div class="card-title" style="display:flex; align-items:center; gap:8px; color:#d4a017;">
+  <div class="card-title" style="display:flex; align-items:center; gap:8px; color:var(--warn);">
     💰 Finance Gate — Budget Ceiling Exceeded
     <span style="font-size:11px; color:var(--muted); font-weight:400;">{{ recovery.failed_stage }}</span>
   </div>
@@ -237,10 +240,10 @@
         ${{ "%.2f"|format(fg.budget_ceiling_usd) }}
       </div>
     </div>
-    <div style="background:var(--bg); border:1px solid #d4a017; border-radius:var(--radius);
+    <div style="background:var(--bg); border:1px solid var(--warn); border-radius:var(--radius);
                 padding:10px 12px; text-align:center;">
       <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px;">Overage</div>
-      <div style="font-size:20px; font-weight:700; color:#d4a017; font-family:monospace;">
+      <div style="font-size:20px; font-weight:700; color:var(--warn); font-family:monospace;">
         +${{ "%.4f"|format(fg.overage_usd) }}
       </div>
     </div>
@@ -299,7 +302,7 @@
   <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px;">
 
     <button class="btn" id="btn-finance-approve"
-            style="background:rgba(210,160,23,.12); border-color:#d4a017; color:#d4a017;"
+            style="background:rgba(210,160,23,.12); border-color:var(--warn); color:var(--warn);"
             onclick="financeApprove('{{ d.run.run_id }}', this)">
       ✓ Approve this run once
     </button>
@@ -318,7 +321,7 @@
   <div id="finance-approve-note" style="display:none; margin-bottom:12px; padding:10px 12px;
        background:rgba(210,160,23,.07); border:1px solid rgba(210,160,23,.3);
        border-radius:var(--radius); font-size:12px;">
-    <div style="font-weight:600; color:#d4a017; margin-bottom:6px;">Approve this run once</div>
+    <div style="font-weight:600; color:var(--warn); margin-bottom:6px;">Approve this run once</div>
     <div style="color:var(--muted); margin-bottom:8px;">
       Creates a single-use approval (expires 24 h). The run will proceed past the ceiling.
       The ceiling itself is not changed — future runs will still be gated.
@@ -332,7 +335,7 @@
                       background:var(--bg); border:1px solid var(--border);
                       border-radius:var(--radius); color:var(--text);">
       </div>
-      <button class="btn" style="background:rgba(210,160,23,.15); border-color:#d4a017; color:#d4a017; white-space:nowrap;"
+      <button class="btn" style="background:rgba(210,160,23,.15); border-color:var(--warn); color:var(--warn); white-space:nowrap;"
               onclick="submitFinanceApprove('{{ d.run.run_id }}', this)">
         Confirm Approval
       </button>
@@ -700,5 +703,6 @@ function cancelQueueEntry(btn) {
     });
 }
 </script>
+</div><!-- /.container -->
 </body>
 </html>

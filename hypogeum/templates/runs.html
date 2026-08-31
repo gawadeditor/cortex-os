@@ -6,15 +6,20 @@
   <title>Runs — Factory OS</title>
   {% include '_base_style.html' %}
   <style>
-    .badge-orphaned { background:#2a1a00; color:var(--warn); border:1px solid var(--warn); }
+    .badge-orphaned { background:var(--warn-bg); color:var(--warn); border:1px solid var(--warn); }
     .orphan-note { font-size:10px; color:var(--warn); display:block; margin-top:2px; }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
+<div class="container">
+
 <div class="page-header">
-  <h1>Runs</h1>
+  <div>
+    <span class="eyebrow">Operations</span>
+    <h1>Runs</h1>
+  </div>
   <span class="page-meta">{{ runs | length }} run{% if runs | length != 1 %}s{% endif %}</span>
 </div>
 
@@ -30,6 +35,7 @@
 
 {% if runs %}
 <div class="card" style="padding: 0;">
+  <div class="table-wrap" style="border:none;">
   <table>
     <thead>
       <tr>
@@ -90,10 +96,12 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </div>
 {% else %}
 <div class="empty">No runs found{% if status_filter %} with status "{{ status_filter }}"{% endif %}.</div>
 {% endif %}
 
+</div><!-- /.container -->
 </body>
 </html>

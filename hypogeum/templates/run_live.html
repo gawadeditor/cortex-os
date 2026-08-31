@@ -33,14 +33,14 @@
                      letter-spacing: .05em; }
 
     /* Log pane */
-    .log-pane { background: #0a0d12; border: 1px solid var(--border); border-radius: var(--radius);
+    .log-pane { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
                 padding: 12px; height: 320px; overflow-y: auto; font-family: monospace;
                 font-size: 12px; line-height: 1.5; }
     .log-line   { margin-bottom: 2px; white-space: pre-wrap; word-break: break-all; }
     .log-info   { color: var(--muted); }
     .log-warn   { color: var(--yellow); }
     .log-error  { color: var(--red); }
-    .log-ts     { color: #444d56; margin-right: 8px; }
+    .log-ts     { color: var(--border-strong); margin-right: 8px; }
     .log-agent  { color: var(--blue); margin-right: 6px; }
     .log-event  { color: var(--text); }
 
@@ -61,6 +61,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 
 <div class="page-header">
   <h1>
@@ -316,5 +319,6 @@ function pollStatus() {
 setInterval(pollStatus, 3000);
 {% endif %}
 </script>
+</div><!-- /.container -->
 </body>
 </html>

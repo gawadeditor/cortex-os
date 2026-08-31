@@ -40,13 +40,16 @@
     .btn-save { background: var(--good-bg); border-color: var(--good); color: var(--green); }
     .btn-save:hover { background: var(--good-bg); }
     .btn:hover { border-color: var(--blue); color: var(--blue); }
-    .errors { background: #3a1a1a; border: 1px solid var(--red); border-radius: var(--radius);
+    .errors { background: var(--critical-bg); border: 1px solid var(--red); border-radius: var(--radius);
               padding: 12px 14px; margin-bottom: var(--gap); }
-    .errors li { margin-left: 18px; color: #ffb0a8; }
+    .errors li { margin-left: 18px; color: var(--critical); }
   </style>
 </head>
 <body>
 {% include "_nav.html" %}
+
+<div class="container">
+
 
 <div class="page-header">
   <h1>Production plan — {{ channel_id }}</h1>
@@ -149,5 +152,6 @@
   </div>
 </form>
 
+</div><!-- /.container -->
 </body>
 </html>

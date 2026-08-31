@@ -26,6 +26,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 {% include '_intelligence_subnav.html' %}
 
 {% set _DIM_CLS = {
@@ -237,5 +240,6 @@ function showToast(msg, ok) {
   setTimeout(function() { t.className = 'toast'; }, 3000);
 }
 </script>
+</div><!-- /.container -->
 </body>
 </html>

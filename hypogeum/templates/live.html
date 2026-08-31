@@ -51,6 +51,9 @@
 <body>
 {% include '_nav.html' %}
 
+<div class="container">
+
+
 <div class="page-header">
   <h1><span class="live-dot" id="live-dot"></span>Live Operations</h1>
   <span id="refresh-ts" class="page-meta">Polling every 3 s</span>
@@ -231,5 +234,6 @@ function pollLive() {
 pollLive();
 setInterval(pollLive, 3000);
 </script>
+</div><!-- /.container -->
 </body>
 </html>

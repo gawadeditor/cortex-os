@@ -13,7 +13,7 @@
     .method-tab.active { background: var(--surface); border-color: var(--blue); color: var(--blue); }
     .method-panel { display: none; }
     .method-panel.active { display: block; }
-    .format-hint { background: #0a0d12; border: 1px solid var(--border); border-radius: var(--radius);
+    .format-hint { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
                    padding: 10px 12px; font-family: monospace; font-size: 12px; color: var(--muted);
                    white-space: pre; overflow-x: auto; margin-top: 6px; }
     textarea { width: 100%; min-height: 160px; font-family: monospace; font-size: 12px; }
@@ -27,6 +27,9 @@
 </head>
 <body>
 {% include '_nav.html' %}
+
+<div class="container">
+
 
 {# ── Secondary nav ── #}
 <div class="sub-nav">
@@ -295,5 +298,6 @@ document.getElementById('import-form').addEventListener('submit', function() {
 });
 {% endif %}
 </script>
+</div><!-- /.container -->
 </body>
 </html>

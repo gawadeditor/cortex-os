@@ -152,6 +152,24 @@ def _resolve_preplan_max(channel_id: str, config, db_path: Optional[Path]) -> De
             f"per-episode budget ceiling for channel {channel_id!r} is unreadable "
             f"({effective!r}) -- PRE_PLAN exposure cannot be bounded"
         ) from exc
+
+    # The channel's own explicit per-episode ceiling
+    # (ChannelOperationsProfile.cost_ceiling_usd_per_episode) tightens the
+    # PRE_PLAN hold when set. pipeline.py already applies it to
+    # config.FINANCE_BUDGET_CEILING_USD, but that happens INSIDE run_pipeline
+    # -- after this admission-time reservation -- so a shorts-only channel
+    # (a ~60s Short compiles to a ~$9 plan) would otherwise be held at the
+    # full long-form per-episode ceiling and starve its weekly budget.
+    try:
+        from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
+        _ops = get_channel_operations_profile(channel_id, db_path=db_path)
+        _chan_ceiling = getattr(_ops, "cost_ceiling_usd_per_episode", None) if _ops else None
+        if isinstance(_chan_ceiling, (int, float)) and _chan_ceiling > 0:
+            _cc = Decimal(str(_chan_ceiling))
+            if amount <= 0 or _cc < amount:
+                amount = _cc
+    except Exception:  # noqa: BLE001 -- never let a profile read break admission
+        pass
     if not amount.is_finite() or amount <= 0:
         raise PreplanUnboundedError(
             f"no positive per-episode budget ceiling is configured for channel {channel_id!r} "

@@ -7348,24 +7348,7 @@ def intelligence_learning_page():
 
 @app.route("/intelligence/sync")
 def intelligence_sync_page():
-    from hypogeum.youtube_analytics import get_last_youtube_sync
     from hypogeum.platform_sync import get_sync_log, get_last_sync_by_platform
-    from hypogeum.meta_analytics import get_meta_token, get_meta_token_expiry
-    youtube_connected = False
-    try:
-        from hypogeum.config import Config as _Cfg
-        _cfg = _Cfg()
-        youtube_connected = bool(
-            _cfg.YOUTUBE_REFRESH_TOKEN
-            and _cfg.YOUTUBE_CLIENT_ID
-            and _cfg.YOUTUBE_CLIENT_SECRET
-        )
-    except Exception:
-        pass
-    try:
-        youtube_last_synced = get_last_youtube_sync(db_path=_db_path())
-    except Exception:
-        youtube_last_synced = None
     _sync_ch = request.args.get("channel_id") or _scope_channel()
     try:
         sync_log = get_sync_log(limit=30, db_path=_db_path(), channel_id=_sync_ch or None)
@@ -7376,30 +7359,6 @@ def intelligence_sync_page():
                                                           channel_id=_sync_ch or None)
     except Exception:
         last_sync_by_platform = {}
-
-    # Build real credential state for non-YouTube platforms
-    def _cred_state(platform: str) -> dict:
-        token  = get_meta_token(platform, db_path=_db_path())
-        expiry = get_meta_token_expiry(platform, db_path=_db_path())
-        expired = False
-        if expiry:
-            try:
-                from datetime import datetime, timezone
-                exp_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
-                expired = exp_dt < datetime.now(timezone.utc)
-            except Exception:
-                pass
-        return {
-            "has_token":  bool(token),
-            "expired":    expired,
-            "expiry":     expiry,
-        }
-
-    platform_creds = {
-        "tiktok":    _cred_state("tiktok"),
-        "instagram": _cred_state("instagram"),
-        "facebook":  _cred_state("facebook"),
-    }
 
     # Channel scope: drive the cards from this channel's Zernio bindings.
     channel_bindings = {}
@@ -7426,15 +7385,51 @@ def intelligence_sync_page():
         except Exception:  # noqa: BLE001
             channel_bindings = {}
 
+    # Factory scope: aggregate the Zernio account pool + which channels bind each.
+    factory_accounts = []
+    if not _sync_ch:
+        try:
+            import json as _json
+            from hypogeum.db import get_connection as _gc
+            _c = _gc(_db_path())
+            try:
+                acc_rows = [dict(r) for r in _c.execute(
+                    "SELECT provider_account_id, provider_id, platform, display_label, "
+                    "external_account_id, status, needs_reconnection, metadata_json "
+                    "FROM provider_accounts ORDER BY platform, display_label")]
+                bind_rows = [dict(r) for r in _c.execute(
+                    "SELECT channel_id, provider_account_id, enabled "
+                    "FROM channel_provider_bindings WHERE capability = 'publishing'")]
+            finally:
+                _c.close()
+            chan_name = {c["channel_id"]: c["name"] for c in _nav_channels()}
+            bound_by_acc = {}
+            for b in bind_rows:
+                if not b.get("enabled"):
+                    continue
+                bound_by_acc.setdefault(b["provider_account_id"], []).append(
+                    chan_name.get(b["channel_id"], b["channel_id"]))
+            for a in acc_rows:
+                meta = {}
+                try:
+                    meta = _json.loads(a.get("metadata_json") or "{}")
+                except Exception:  # noqa: BLE001
+                    meta = {}
+                a["username"] = meta.get("username")
+                a["followers_count"] = meta.get("followers_count")
+                a["synced_at"] = meta.get("synced_at")
+                a["bound_channels"] = sorted(set(bound_by_acc.get(a["provider_account_id"], [])))
+                factory_accounts.append(a)
+        except Exception:  # noqa: BLE001
+            factory_accounts = []
+
     flash = request.args.get("flash")
     return render_template(
         "analytics_sync.html",
-        youtube_connected=youtube_connected,
-        youtube_last_synced=youtube_last_synced,
         sync_log=sync_log,
         last_sync_by_platform=last_sync_by_platform,
-        platform_creds=platform_creds,
         channel_bindings=channel_bindings,
+        factory_accounts=factory_accounts,
         flash=flash,
     )
 

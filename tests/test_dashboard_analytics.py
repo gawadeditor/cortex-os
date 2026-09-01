@@ -616,25 +616,25 @@ class TestAnalyticsUX:
             "Quick Sync button must not appear in page-header"
         )
 
-    def test_sync_page_shows_connector_not_implemented(self, flask_client_bare):
-        """Non-YouTube platforms show credential status on sync page."""
+    def test_sync_page_is_zernio_centric(self, flask_client_bare):
+        """The sync page routes account connection through Zernio / the
+        Publishing tab -- no direct per-platform OAuth CTAs."""
         r = flask_client_bare.get("/intelligence/sync")
         assert r.status_code == 200
         body = r.data.decode()
-        # Connectors are now implemented; without credentials they show "Credential required"
-        assert "Credential required" in body, (
-            "Non-YouTube platforms must show credential status"
-        )
+        assert "Zernio" in body
+        for dead in ("/platforms/connect/tiktok", "/platforms/connect/instagram",
+                     "/platforms/connect/facebook", "Connect TikTok",
+                     "Connect Instagram", "Connect Facebook"):
+            assert dead not in body, f"stale direct-OAuth affordance still present: {dead}"
 
-    def test_sync_page_shows_youtube_autosync_status(self, flask_client_bare):
-        """YouTube card must show auto-sync state (Active or Requires OAuth)."""
+    def test_sync_page_empty_state_points_to_publishing_tab(self, flask_client_bare):
+        """With no connected accounts, the factory view tells the operator
+        where accounts are connected."""
         r = flask_client_bare.get("/intelligence/sync")
         assert r.status_code == 200
         body = r.data.decode()
-        assert "Auto-sync" in body, "YouTube card must show Auto-sync state"
-        assert ("Active" in body or "Requires OAuth" in body or "oauth_required" in body), (
-            "YouTube auto-sync must show a readable state"
-        )
+        assert "Publishing" in body and "No platform accounts connected" in body
 
     def test_platform_page_no_import_button_in_header(self, flask_client_bare):
         """Platform page header must not have an Import button."""

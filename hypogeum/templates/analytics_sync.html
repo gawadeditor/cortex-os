@@ -52,12 +52,11 @@
 
 <div class="card" style="margin-bottom:var(--gap);">
   <p style="font-size:12px; color:var(--muted); line-height:1.55; margin:0;">
-    Publishing and analytics go through <strong>Zernio</strong>. Connect each
-    platform account on a channel's
-    {% if scope_channel %}<a href="/channel/{{ scope_channel }}/publishing?scope={{ scope_channel }}">Publishing tab</a>{% else %}<strong>Publishing</strong> tab{% endif %};
-    the OAuth cards below are the older direct-connection path (YouTube only,
-    for the legacy sync). The log shows this
-    {% if scope_channel %}channel's{% else %}factory's{% endif %} recent syncs.
+    Publishing and analytics go through <strong>Zernio</strong>. Platform
+    accounts are connected per channel — open a channel and use its
+    {% if scope_channel %}<a href="/channel/{{ scope_channel }}/publishing?scope={{ scope_channel }}">Publishing tab</a>{% else %}<strong>Publishing</strong> tab{% endif %}
+    to connect and bind accounts. This
+    {% if scope_channel %}shows <strong>{{ scope_channel }}</strong>'s bindings and sync history{% else %}factory view aggregates every Zernio account and which channels bind it{% endif %}.
   </p>
 </div>
 
@@ -100,161 +99,67 @@
 </div>
 {% else %}
 
-{# factory scope — legacy direct-connection view #}
-<div class="platform-grid">
-
-  {# YouTube — auto-sync #}
-  {% set yt_last = last_sync_by_platform.get('youtube') %}
-  <div class="platform-card {% if youtube_connected %}platform-card-ok{% else %}platform-card-err{% endif %}">
-    <div class="platform-name">
-      <span class="perf-dot {% if youtube_connected %}perf-dot-ok{% else %}perf-dot-warn{% endif %}"></span>
-      YouTube
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Connection</span>
-      <span class="stat-val {% if youtube_connected %}ok{% else %}err{% endif %}">
-        {% if youtube_connected %}Connected{% else %}OAuth required{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val">
-        {% if youtube_connected %}<span class="ok">Active</span>{% else %}<span class="warn">Requires OAuth</span>{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
-        {% if youtube_last_synced %}{{ youtube_last_synced[:19] | replace("T", " ") }}{% else %}Never{% endif %}
-      </span>
-    </div>
-    {% if yt_last %}
-    <div class="platform-stat">
-      <span class="stat-lbl">Last result</span>
-      <span class="stat-val">{{ yt_last.records_imported }} records</span>
-    </div>
-    {% endif %}
-    {% if not youtube_connected %}
-    <div style="margin-top:8px;">
-      <a href="/platforms/connect/youtube" class="btn" style="font-size:11px;">Connect YouTube →</a>
-    </div>
-    {% endif %}
+{# ── Factory scope — the Zernio account pool, aggregated across channels ── #}
+{% if factory_accounts %}
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <div class="table-wrap" style="border:none;">
+  <table>
+    <thead>
+      <tr>
+        <th>Platform</th>
+        <th>Account</th>
+        <th>Status</th>
+        <th>Followers</th>
+        <th>Bound to</th>
+        <th>Synced</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in factory_accounts %}
+      {% set last = last_sync_by_platform.get(a.platform) %}
+      <tr>
+        <td style="text-transform:capitalize; font-weight:600;">{{ a.platform }}</td>
+        <td>
+          {{ a.display_label or a.username or '—' }}
+          {% if a.username %}<br><span class="muted" style="font-size:11px;">@{{ a.username }}</span>{% endif %}
+        </td>
+        <td>
+          {% if a.needs_reconnection %}
+            <span class="badge badge-failed">reconnect</span>
+          {% elif a.status == 'active' %}
+            <span class="badge badge-complete">active</span>
+          {% else %}
+            <span class="badge">{{ a.status or 'unknown' }}</span>
+          {% endif %}
+        </td>
+        <td class="muted" style="font-variant-numeric:tabular-nums;">
+          {{ a.followers_count if a.followers_count is not none else '—' }}
+        </td>
+        <td style="font-size:11px;">
+          {% if a.bound_channels %}
+            {% for ch in a.bound_channels %}<span class="badge" style="background:var(--raised);">{{ ch }}</span> {% endfor %}
+          {% else %}
+            <span class="warn">no channel bound</span>
+          {% endif %}
+        </td>
+        <td class="muted" style="font-size:11px;">
+          {% if last %}{{ last.synced_at[:19].replace("T"," ") }}
+            {%- if last.records_imported %} · {{ last.records_imported }} rec{% endif %}
+          {% elif a.synced_at %}{{ a.synced_at[:19].replace("T"," ") }} (profile)
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   </div>
-
-  {# TikTok — credential check, manual import only #}
-  {% set tk_cred = platform_creds.get('tiktok', {}) if platform_creds else {} %}
-  {% set tk_last = last_sync_by_platform.get('tiktok') %}
-  <div class="platform-card {% if tk_cred.has_token and not tk_cred.expired %}platform-card-ok{% elif tk_cred.expired %}platform-card-err{% else %}platform-card-skip{% endif %}">
-    <div class="platform-name">
-      <span class="perf-dot {% if tk_cred.has_token and not tk_cred.expired %}perf-dot-ok{% elif tk_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
-      TikTok
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Connection</span>
-      <span class="stat-val {% if tk_cred.expired %}err{% elif tk_cred.has_token %}ok{% endif %}">
-        {% if tk_cred.expired %}Credential expired{% elif tk_cred.has_token %}Connected{% else %}Not connected{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val">
-        {% if tk_cred.has_token and not tk_cred.expired %}<span class="ok">Active (TikTok Video API)</span>
-        {% elif tk_cred.expired %}<span class="err">Re-connect required</span>
-        {% else %}<span style="color:var(--muted);">Credential required</span>{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="color:var(--muted);">
-        {% if tk_last %}{{ tk_last.synced_at[:19].replace("T"," ") }}{% else %}—{% endif %}
-      </span>
-    </div>
-    {% if not tk_cred.has_token or tk_cred.expired %}
-    <div style="margin-top:8px;">
-      <a href="/platforms/connect/tiktok" class="btn" style="font-size:11px;">
-        {% if tk_cred.expired %}Reconnect TikTok →{% else %}Connect TikTok →{% endif %}
-      </a>
-    </div>
-    {% endif %}
-  </div>
-
-  {# Instagram — Meta Graph API auto-sync #}
-  {% set ig_cred = platform_creds.get('instagram', {}) if platform_creds else {} %}
-  {% set ig_last = last_sync_by_platform.get('instagram') %}
-  <div class="platform-card {% if ig_cred.has_token and not ig_cred.expired %}platform-card-ok{% elif ig_cred.expired %}platform-card-err{% else %}platform-card-skip{% endif %}">
-    <div class="platform-name">
-      <span class="perf-dot {% if ig_cred.has_token and not ig_cred.expired %}perf-dot-ok{% elif ig_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
-      Instagram
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Connection</span>
-      <span class="stat-val {% if ig_cred.expired %}err{% elif ig_cred.has_token %}ok{% endif %}">
-        {% if ig_cred.expired %}Credential expired{% elif ig_cred.has_token %}Connected{% else %}Not connected{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val">
-        {% if ig_cred.has_token and not ig_cred.expired %}<span class="ok">Active (Meta Graph API)</span>
-        {% elif ig_cred.expired %}<span class="err">Re-connect required</span>
-        {% else %}<span style="color:var(--muted);">Credential required</span>{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
-        {% if ig_last %}{{ ig_last.synced_at[:19].replace("T"," ") }} — {{ ig_last.records_imported or 0 }} records
-        {% else %}Never{% endif %}
-      </span>
-    </div>
-    {% if not ig_cred.has_token or ig_cred.expired %}
-    <div style="margin-top:8px;">
-      <a href="/platforms/connect/instagram" class="btn" style="font-size:11px;">
-        {% if ig_cred.expired %}Reconnect Instagram →{% else %}Connect Instagram →{% endif %}
-      </a>
-    </div>
-    {% endif %}
-  </div>
-
-  {# Facebook — Meta Graph API auto-sync #}
-  {% set fb_cred = platform_creds.get('facebook', {}) if platform_creds else {} %}
-  {% set fb_last = last_sync_by_platform.get('facebook') %}
-  <div class="platform-card {% if fb_cred.has_token and not fb_cred.expired %}platform-card-ok{% elif fb_cred.expired %}platform-card-err{% else %}platform-card-skip{% endif %}">
-    <div class="platform-name">
-      <span class="perf-dot {% if fb_cred.has_token and not fb_cred.expired %}perf-dot-ok{% elif fb_cred.expired %}perf-dot-err{% else %}perf-dot-muted{% endif %}"></span>
-      Facebook
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Connection</span>
-      <span class="stat-val {% if fb_cred.expired %}err{% elif fb_cred.has_token %}ok{% endif %}">
-        {% if fb_cred.expired %}Credential expired{% elif fb_cred.has_token %}Connected{% else %}Not connected{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Auto-sync</span>
-      <span class="stat-val">
-        {% if fb_cred.has_token and not fb_cred.expired %}<span class="ok">Active (Meta Graph API)</span>
-        {% elif fb_cred.expired %}<span class="err">Re-connect required</span>
-        {% else %}<span style="color:var(--muted);">Credential required</span>{% endif %}
-      </span>
-    </div>
-    <div class="platform-stat">
-      <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
-        {% if fb_last %}{{ fb_last.synced_at[:19].replace("T"," ") }} — {{ fb_last.records_imported or 0 }} records
-        {% else %}Never{% endif %}
-      </span>
-    </div>
-    {% if not fb_cred.has_token or fb_cred.expired %}
-    <div style="margin-top:8px;">
-      <a href="/platforms/connect/facebook" class="btn" style="font-size:11px;">
-        {% if fb_cred.expired %}Reconnect Facebook →{% else %}Connect Facebook →{% endif %}
-      </a>
-    </div>
-    {% endif %}
-  </div>
-
 </div>
+{% else %}
+<div class="empty" style="margin-bottom:var(--gap);">
+  No platform accounts connected yet. Open a channel and connect its accounts
+  on the <strong>Publishing</strong> tab (via Zernio).
+</div>
+{% endif %}
 {% endif %}{# /channel-vs-factory #}
 
 {# ── Sync log ── #}

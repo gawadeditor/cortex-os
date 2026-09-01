@@ -100,13 +100,53 @@
   </div>
 
   <div class="card">
+    <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+      <span>Profile copy for each platform</span>
+      <form method="post" style="margin:0;">
+        <input type="hidden" name="action" value="draft_profiles">
+        <button type="submit" class="btn btn-primary" style="font-size:11px;">{{ icon('sparkle') }} Draft from the brand</button>
+      </form>
+    </div>
+    <p class="pl-hint" style="margin-top:0;">
+      Generates the About / bio text for {{ channel.name }}'s YouTube, TikTok,
+      Instagram and Facebook pages from its brand profile. Cortex can't write
+      to the platforms — paste each block into the platform's own settings.
+    </p>
+    {% if drafted_profiles %}
+      {% if drafted_profiles._error %}
+        <div class="flash flash-err">Couldn't draft the copy: {{ drafted_profiles._error }}</div>
+      {% else %}
+        {% for label, key in [('YouTube — About','youtube_about'), ('TikTok bio','tiktok_bio'),
+                              ('Instagram bio','instagram_bio'), ('Facebook Page intro','facebook_intro'),
+                              ('Tagline','tagline')] %}
+        {% if drafted_profiles.get(key) %}
+        <div style="margin-top:12px;">
+          <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--faint);">{{ label }}</div>
+          <textarea readonly rows="{{ 5 if key == 'youtube_about' else 2 }}" onclick="this.select()"
+            style="width:100%; margin-top:4px; padding:9px 11px; border:1px solid var(--border-strong);
+                   border-radius:var(--radius-sm); background:var(--raised); color:var(--text);
+                   font:inherit; font-size:12.5px; resize:vertical;">{{ drafted_profiles[key] }}</textarea>
+        </div>
+        {% endif %}
+        {% endfor %}
+        {% if drafted_profiles.keywords %}
+        <div style="margin-top:12px;">
+          <div style="font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--faint);">Discovery keywords</div>
+          <div style="margin-top:4px; font-size:12.5px; color:var(--muted);">{{ drafted_profiles.keywords | join(', ') }}</div>
+        </div>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="card">
     <div class="card-title">How this works</div>
     <p class="pl-hint">
       Cortex publishes through Zernio. Connect each platform account (a YouTube
-      channel, a TikTok account, …) <strong>in Zernio</strong>, run
-      <a href="/platforms">Platforms → Sync from Zernio</a>, then bind the right
-      account to <strong>{{ channel.name }}</strong> here. Each channel binds its
-      own accounts — connecting a platform for one channel never affects another.
+      channel, a TikTok account, …) <strong>in Zernio</strong>, hit
+      <strong>Refresh from Zernio</strong> above, then bind the right account to
+      <strong>{{ channel.name }}</strong> here. Each channel binds its own
+      accounts — connecting a platform for one channel never affects another.
       The same account is bound for both publishing and analytics.
     </p>
   </div>

@@ -941,6 +941,44 @@ def api_channel_builder_handle_availability():
     })
 
 
+def _draft_platform_profiles(*, name="", handle="", persona="", genre="",
+                             concept="", language="en"):
+    """Shared LLM call: the profile copy for each platform's own page.
+    Raises on failure. Used by the wizard and the channel Publishing page."""
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "platform_profiles", "strict": True,
+            "schema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["youtube_about", "tiktok_bio", "instagram_bio",
+                             "facebook_intro", "tagline", "keywords"],
+                "properties": {
+                    "youtube_about":  {"type": "string"},
+                    "tiktok_bio":     {"type": "string"},
+                    "instagram_bio":  {"type": "string"},
+                    "facebook_intro": {"type": "string"},
+                    "tagline":        {"type": "string"},
+                    "keywords":       {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+    }
+    sys_p = (
+        "You write the profile copy for a new video channel's pages on each "
+        "platform. Return: a YouTube About (2-3 short paragraphs, what the "
+        "channel is + upload rhythm + a soft CTA), a TikTok bio (<=80 chars), "
+        "an Instagram bio (<=150 chars, may use line breaks), a Facebook Page "
+        "intro (1-2 sentences), a one-line tagline, and 6-10 discovery "
+        "keywords. Match the persona and niche exactly; no hashtag spam, no "
+        f"emoji walls. Write human-readable fields in {language!r}. JSON only."
+    )
+    user_p = (f"Channel: {name or '(unnamed)'}  @{handle or '(no handle)'}\n"
+              f"Persona: {persona or '(none)'}\nNiche: {genre or '(unspecified)'}\n"
+              f"Concept: {concept or '(from niche)'}")
+    return _cb_call_claude_json(sys_p, user_p, schema, max_tokens=1200)
+
+
 @app.route("/api/channel-builder/platform-profiles", methods=["POST"])
 def api_channel_builder_platform_profiles():
     """
@@ -987,11 +1025,9 @@ def api_channel_builder_platform_profiles():
         "keywords. Match the persona and niche exactly; no hashtag spam, no "
         f"emoji walls. Write human-readable fields in {language!r}. JSON only."
     )
-    user_p = (f"Channel: {name or '(unnamed)'}  @{handle or '(no handle)'}\n"
-              f"Persona: {persona or '(none)'}\nNiche: {genre or '(unspecified)'}\n"
-              f"Concept: {concept or '(from niche)'}")
     try:
-        data = _cb_call_claude_json(sys_p, user_p, schema, max_tokens=1200)
+        data = _draft_platform_profiles(name=name, handle=handle, persona=persona,
+                                        genre=genre, concept=concept, language=language)
         return jsonify({"ok": True, "profiles": data})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": f"profile copy unavailable ({exc}); "
@@ -6703,7 +6739,24 @@ def channel_publishing_page(channel_id):
 
     from hypogeum.publishing import provider_repository as _pr
 
-    if request.method == "POST":
+    drafted_profiles = None
+    if request.method == "POST" and request.form.get("action") == "draft_profiles":
+        # Render inline (not a redirect) so the generated copy survives.
+        brand = (get_brand_detail(channel["brand_profile_id"], db_path=db)
+                 if channel.get("brand_profile_id") else None)
+        try:
+            drafted_profiles = _draft_platform_profiles(
+                name=channel.get("name", ""),
+                handle="",
+                persona=(getattr(brand, "persona_name", "") or getattr(brand, "tone", "")) if brand else "",
+                genre=(getattr(brand, "target_audience", "") or "") if brand else "",
+                concept=(getattr(brand, "voice_guidelines", "") or "") if brand else "",
+                language=(getattr(brand, "language", "en") or "en") if brand else "en",
+            )
+        except Exception as exc:  # noqa: BLE001
+            drafted_profiles = {"_error": str(exc)}
+
+    if request.method == "POST" and request.form.get("action") != "draft_profiles":
         action   = request.form.get("action")
         platform = request.form.get("platform", "")
         flash = "err"
@@ -6791,6 +6844,7 @@ def channel_publishing_page(channel_id):
                            channel=channel, wanted_platforms=wanted or list(zernio_pool.keys()),
                            bound=bound, zernio_pool=zernio_pool,
                            accounts_by_platform=accounts_by_platform,
+                           drafted_profiles=drafted_profiles,
                            flash=request.args.get("flash"))
 
 

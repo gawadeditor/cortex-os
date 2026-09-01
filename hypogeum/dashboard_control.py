@@ -677,14 +677,18 @@ def create_channel(
 
         # Scaffold the on-disk Channel Package (workflow + policies + manifest)
         # from the hypogeum template so the channel can resolve a workflow
-        # binding / be granted an Operating Grant. Never fails channel creation.
+        # binding / be granted an Operating Grant. Only on the production
+        # default DB (db_path is None) — a test/isolated caller passes an
+        # explicit db_path and must not write into the repo's channel_packages/.
+        # Never fails channel creation.
         package_scaffolded = False
-        try:
-            from hypogeum.channel_package_scaffold import scaffold_channel_package
-            _sc = scaffold_channel_package(channel_id, db_path=db_path)
-            package_scaffolded = bool(_sc.get("ok"))
-        except Exception:  # noqa: BLE001
-            pass
+        if db_path is None:
+            try:
+                from hypogeum.channel_package_scaffold import scaffold_channel_package
+                _sc = scaffold_channel_package(channel_id, db_path=db_path)
+                package_scaffolded = bool(_sc.get("ok"))
+            except Exception:  # noqa: BLE001
+                pass
 
         return _ok(channel_id=channel_id, name=name,
                    operations_profile_created=ops_created, shorts_only=shorts_only,

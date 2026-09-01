@@ -6925,7 +6925,7 @@ def channel_operating_grant_page(channel_id):
                                    error="the amount you typed doesn't match this "
                                          "channel's weekly budget — nothing signed"), 422
 
-        if not channel_package_exists(channel_id):
+        if db is None and not channel_package_exists(channel_id):
             scaffold_channel_package(channel_id, db_path=db)
         res = sign_channel_operating_grant(
             channel_id,

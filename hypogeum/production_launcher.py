@@ -110,9 +110,32 @@ def launch_episode_from_dashboard(
     if missing:
         return {"status": "blocked", "missing": missing}
 
-    # --- create episode record before submitting ---
-    episode_id = _generate_episode_id()
     db_resolved = Path(db_path) if db_path else _DEFAULT_DB_PATH
+
+    # --- already queued? don't create anything, don't error ---
+    try:
+        from hypogeum.dashboard_runs import list_episode_topics
+        _norm = " ".join(topic.strip().lower().split())
+        for row in list_episode_topics(channel_id=channel_id, db_path=db_path, limit=200):
+            if row.get("status") in ("queued", "claimed") and \
+               " ".join((row.get("topic_text") or "").strip().lower().split()) == _norm:
+                return {"status": "already_queued", "topic_id": row.get("topic_id"),
+                        "episode_id": row.get("episode_id")}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # --- enqueue the topic FIRST, then create the episode record only on success ---
+    episode_id = _generate_episode_id()
+    from hypogeum.dashboard_control import enqueue_topic
+    enqueue_result = enqueue_topic(
+        channel_id, topic,
+        priority=0,
+        db_path=db_path,
+        source="manual",
+        episode_id=episode_id,
+    )
+    if not enqueue_result.get("ok"):
+        return {"status": "blocked", "missing": [enqueue_result.get("error", "enqueue failed")]}
 
     try:
         from hypogeum.db import get_connection, initialize_schema, insert_episode
@@ -127,18 +150,6 @@ def launch_episode_from_dashboard(
             conn.close()
     except Exception as exc:
         return {"status": "blocked", "missing": [f"DB error creating episode: {exc}"]}
-
-    # --- submit to the canonical queue — never executes directly ---
-    from hypogeum.dashboard_control import enqueue_topic
-    enqueue_result = enqueue_topic(
-        channel_id, topic,
-        priority=0,
-        db_path=db_path,
-        source="manual",
-        episode_id=episode_id,
-    )
-    if not enqueue_result.get("ok"):
-        return {"status": "blocked", "missing": [enqueue_result.get("error", "enqueue failed")]}
 
     from hypogeum.queue import enqueue as enqueue_queue_item
     queue_id = enqueue_queue_item(

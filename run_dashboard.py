@@ -501,17 +501,28 @@ def create_page():
     except Exception:
         setup_preflight = {"ready": False, "blockers": [], "blocker_count": 0}
     error = request.args.get("error")
+    flash = request.args.get("flash")
+    ch    = _scope_channel()
     try:
-        queued_topics = list_episode_topics(status="queued", db_path=db)[:10]
+        queued_topics = list_episode_topics(status="queued", channel_id=ch or None, db_path=db)[:15]
     except Exception:
         queued_topics = []
+    try:
+        from hypogeum.db import get_worker_control
+        worker_running = get_worker_control("worker_status", "stopped", db_path=db) in ("running", "claiming", "idle")
+        queue_paused   = get_worker_control("queue_paused", "0", db_path=db) == "1"
+    except Exception:  # noqa: BLE001
+        worker_running, queue_paused = False, False
     return render_template(
         "create.html",
         channels=channels,
         preflight=preflight,
         setup_preflight=setup_preflight,
         error=error,
+        flash=flash,
         queued_topics=queued_topics,
+        worker_running=worker_running,
+        queue_paused=queue_paused,
     )
 
 
@@ -545,8 +556,49 @@ def create_launch():
     if result["status"] == "launched":
         return redirect(url_for("episode_detail_page", episode_id=result["episode_id"]))
 
+    if result["status"] == "already_queued":
+        # not an error — the topic is in the queue; bump it to the front so
+        # the worker takes it next.
+        tid = result.get("topic_id")
+        if tid:
+            _prioritize_topic(tid)
+        return redirect(url_for("create_page") + "?flash=already_queued")
+
     error_str = "; ".join(result.get("missing", ["unknown error"]))
     return redirect(url_for("create_page") + f"?error={quote_plus(error_str)}")
+
+
+def _prioritize_topic(topic_id: str) -> bool:
+    """Move a queued topic to the front of its channel's queue + set its
+    production deadline to now, so the worker's next consume picks it up."""
+    try:
+        from hypogeum.db import get_connection
+        from datetime import datetime, timezone
+        conn = get_connection(_db_path())
+        try:
+            conn.execute(
+                "UPDATE episode_topics SET priority = -1000, "
+                "production_deadline_at = ?, updated_at = ? "
+                "WHERE topic_id = ? AND status IN ('queued','claimed')",
+                (datetime.now(timezone.utc).isoformat(),
+                 datetime.now(timezone.utc).isoformat(), topic_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@app.route("/create/prioritize", methods=["POST"])
+def create_prioritize():
+    """'Start now' on a topic that is already queued — bump its priority
+    rather than trying (and failing) to enqueue it again."""
+    topic_id = request.form.get("topic_id", "").strip()
+    ok = _prioritize_topic(topic_id) if topic_id else False
+    return redirect(url_for("create_page")
+                    + ("?flash=prioritized" if ok else "?error=could+not+prioritize+that+topic"))
 
 
 @app.route("/api/channels/<channel_id>/activate", methods=["POST"])

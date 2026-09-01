@@ -113,10 +113,37 @@
 
 {% set launch_blocked = setup_blockers %}
 
+{% if flash == 'already_queued' %}
+<div class="flash flash-ok">That topic is already in the queue — moved it to the front. It runs on the worker's next cycle.</div>
+{% elif flash == 'prioritized' %}
+<div class="flash flash-ok">Moved to the front of the queue — the worker picks it up next.</div>
+{% endif %}
+
+{% if not worker_running or queue_paused %}
+<div class="action-banner" style="border-color:var(--warn);">
+  <div class="action-banner-body">
+    <div class="action-banner-title">
+      {% if queue_paused %}Queue is paused{% else %}Worker is stopped{% endif %}
+    </div>
+    <div class="action-banner-sub">Queued topics won't produce until the worker is running and the queue is live.</div>
+  </div>
+  <button class="btn btn-primary" id="start-worker-btn">Start the worker</button>
+</div>
+<script>
+document.getElementById('start-worker-btn').addEventListener('click', function(){
+  var b=this; b.disabled=true; b.textContent='…';
+  fetch('/api/worker/resume-queue',{method:'POST'}).then(function(){
+    return fetch('/api/worker/start',{method:'POST'});
+  }).then(function(){ setTimeout(function(){ location.reload(); }, 1500); })
+    .catch(function(){ b.disabled=false; b.textContent='Start the worker'; });
+});
+</script>
+{% endif %}
+
 {# ── Autonomous-operation note ── #}
 <p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
   The worker picks the next topic automatically on schedule.
-  Use <strong>▶ Start</strong> only to force an immediate run outside the normal cycle.
+  <strong>Start now</strong> just moves a queued topic to the front of the line.
 </p>
 
 {# ── Primary: Production Queue ── #}
@@ -225,17 +252,26 @@
           </div>
           {% endif %}
           {% if not launch_blocked %}
+          {% if t.source == 'rerun' %}
           <form method="POST" action="/create/launch">
             <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
             <input type="hidden" name="topic"      value="{{ t.topic_text }}">
             <input type="hidden" name="video_type" value="long_video">
             <input type="hidden" name="quality_mode" value="balanced">
             <input type="hidden" name="platforms"  value="youtube">
-            <button type="submit" class="btn {% if t.source == 'rerun' %}btn-approve{% endif %}"
-                    style="font-size:11px; padding:4px 12px; width:100%;">
-              {% if t.source == 'rerun' %}{{ icon('refresh') }} Resume run now{% else %}{{ icon('play') }} Start now{% endif %}
+            <button type="submit" class="btn btn-approve" style="font-size:11px; padding:4px 12px; width:100%;">
+              {{ icon('refresh') }} Resume run now
             </button>
           </form>
+          {% else %}
+          <form method="POST" action="/create/prioritize">
+            <input type="hidden" name="topic_id" value="{{ t.topic_id }}">
+            <button type="submit" class="btn" style="font-size:11px; padding:4px 12px; width:100%;"
+                    title="Move to the front of the queue">
+              {{ icon('play') }} Start now
+            </button>
+          </form>
+          {% endif %}
           {% else %}
           <span style="font-size:11px; color:var(--muted);">Launch blocked — resolve factory blockers first.</span>
           {% endif %}

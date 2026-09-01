@@ -4305,8 +4305,9 @@ def _build_job_payload(
       - All other models: resolution field omitted (provider determines from aspect_ratio)
 
     I2V conditioning — field names differ by provider:
-      - Veo3 / Veo3.1 I2V: images_list = [url]  (array)
-      - Runway I2V:         image_url   = url    (single string; confirmed 2026-06-06 live probe:
+      - Veo3 / Veo3.1 I2V:  images_list = [url]  (array)
+      - Seedance I2V:        images_list = [url]  (array; 2026-06-06 benchmark)
+      - Runway I2V:          image_url   = url    (single string; confirmed 2026-06-06 live probe:
                             422 body {"loc":["body","image_url"],"msg":"Field required"})
       - Only included when reference_image_url is non-empty
     """
@@ -4338,6 +4339,17 @@ def _build_job_payload(
             # Confirmed 2026-06-06 via live probe — 422 body: {"loc": ["body","image_url"],
             # "msg": "Field required"}. NOTE: Veo3/Veo3.1 I2V uses "images_list" (array) — different.
             payload["image_url"] = reference_image_url
+
+    elif "seedance" in model:
+        # Seedance family (seedance-pro-t2v-fast, seedance-pro-i2v-fast,
+        # seedance-lite-i2v, seedance-2-mini-*, ...). Substring-matched so a
+        # channel can adopt any current Seedance variant via the bake-off
+        # without this file changing. Duration is left to the provider default
+        # (~5s, ffprobe-confirmed 2026-09-01); the I2V variants take the
+        # reference image as images_list = [url] (array), same as Veo3 —
+        # confirmed in the 2026-06-06 Seedance benchmark.
+        if reference_image_url:
+            payload["images_list"] = [reference_image_url]
 
     # For image models: no duration or images_list
     return payload

@@ -1560,6 +1560,22 @@ class TestInternalHelpers:
         )
         assert payload["duration"] == 8
 
+    def test_seedance_i2v_payload_uses_images_list_and_no_duration(self):
+        # Seedance family is substring-matched: any current variant (t2v-fast,
+        # i2v-fast, lite-i2v, 2-mini-*) an operator adopts via the bake-off.
+        payload = _build_job_payload(
+            "prompt", "seedance-pro-i2v-fast", "9:16", 8.0, "http://ref.png"
+        )
+        assert payload["images_list"] == ["http://ref.png"]
+        assert "image_url" not in payload   # NOT the runway single-string field
+        assert "duration" not in payload    # provider default (~5s)
+
+    def test_seedance_t2v_payload_is_bare_prompt_and_aspect(self):
+        payload = _build_job_payload(
+            "prompt", "seedance-pro-t2v-fast", "9:16", 8.0, None
+        )
+        assert payload == {"prompt": "prompt", "aspect_ratio": "9:16"}
+
     def test_veo3_fast_payload_sends_aspect_ratio(self):
         # veo3-fast-text-to-video (legacy) is in _VEO3_MODELS — no duration, no resolution.
         payload = _build_job_payload(

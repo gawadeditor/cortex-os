@@ -875,10 +875,14 @@ def compile_production_plan(
     # price was captured from the live MUAPI catalogue at adoption, so planning
     # can price a model that is not in muapi.MODEL_CREDIT_COSTS.
     try:
-        from hypogeum.channel_config import resolve_channel_video_model  # noqa: PLC0415
+        from hypogeum.channel_config import (  # noqa: PLC0415
+            resolve_channel_i2v_model, resolve_channel_video_model,
+        )
         _channel_video_model, _channel_video_price = resolve_channel_video_model(channel_id)
+        _channel_i2v_model, _channel_i2v_price = resolve_channel_i2v_model(channel_id)
     except Exception:  # noqa: BLE001
         _channel_video_model, _channel_video_price = None, None
+        _channel_i2v_model, _channel_i2v_price = None, None
 
     # Scenes whose first primary entity is a final-locked entity will be routed
     # to the I2V model at submission time (submit_scene() conditions on that
@@ -935,7 +939,12 @@ def compile_production_plan(
             reference_image_url = _I2V_PLAN_SENTINEL
         tier = int(routing.get("primary_tier") or getattr(config, "MUAPI_DEFAULT_TIER", 2))
         model = _resolve_scene_model(tier, reference_image_url, config, channel_id)
-        _cp = _channel_video_price if model == _channel_video_model else None
+        if model == _channel_video_model:
+            _cp = _channel_video_price
+        elif model == _channel_i2v_model:
+            _cp = _channel_i2v_price
+        else:
+            _cp = None
         unit_price = resolve_video_price(model, episode_id=episode_id, channel_price=_cp)
         aspect_ratio = prod_spec.get("aspect_ratio", "16:9")
         # The declared prompt is the FULLY ASSEMBLED provider payload text

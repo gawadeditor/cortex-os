@@ -55,3 +55,17 @@ def test_channel_without_adopted_model_is_unchanged(monkeypatch):
     )
     assert _muapi_video_models(_build_bindings(_Cfg(), "ch")) == \
         _muapi_video_models(_build_bindings(_Cfg()))
+
+
+def test_channel_adopted_i2v_model_is_also_authorized(monkeypatch):
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_i2v_model",
+        lambda cid, db_path=None: ("runway-image-to-video", 0.15),
+    )
+    models = _muapi_video_models(_build_bindings(_Cfg(), "twinkle"))
+    assert "seedance-pro-t2v-fast" in models
+    assert "runway-image-to-video" in models

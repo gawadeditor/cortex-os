@@ -4146,7 +4146,9 @@ def _resolve_scene_model(
     Video Model bake-off) when one exists.
 
     Resolution order:
-      1. reference_image_url set -> the I2V model (always; conditioning path).
+      1. reference_image_url set -> an I2V model (always; conditioning path):
+         the channel's adopted video_i2v_model when it has one, else the
+         global config.MUAPI_I2V_MODEL.
       2. A global cost/safety mode is active (SMOKE_TEST_MODE / MUAPI_CHEAP_MODE
          / MUAPI_RUNWAY_ONLY_MODE) -> _tier_to_model(). These explicit operator
          overrides win over a channel preference.
@@ -4159,6 +4161,18 @@ def _resolve_scene_model(
     stays satisfied.
     """
     if reference_image_url:
+        # A channel that adopted its own I2V model (ModelProfile.video_i2v_model
+        # — e.g. runway-image-to-video @ $0.15) uses it instead of the global
+        # config.MUAPI_I2V_MODEL (veo3-image-to-video @ $2.50), so a cheap-T2V
+        # channel is not forced to 40x cost on every entity-consistency scene.
+        if channel_id:
+            try:
+                from hypogeum.channel_config import resolve_channel_i2v_model
+                i2v_override, _i2v_price = resolve_channel_i2v_model(channel_id)
+                if i2v_override:
+                    return i2v_override
+            except Exception:  # noqa: BLE001
+                pass
         return config.MUAPI_I2V_MODEL
     if (getattr(config, "SMOKE_TEST_MODE", False)
             or getattr(config, "MUAPI_CHEAP_MODE", False)
@@ -4193,10 +4207,15 @@ def _resolve_gate_unit_price(
         return float(price)
     if channel_id:
         try:
-            from hypogeum.channel_config import resolve_channel_video_model  # noqa: PLC0415
+            from hypogeum.channel_config import (  # noqa: PLC0415
+                resolve_channel_i2v_model, resolve_channel_video_model,
+            )
             ch_model, ch_price = resolve_channel_video_model(channel_id)
             if ch_model and model == ch_model and ch_price and float(ch_price) > 0:
                 return float(ch_price)
+            i2v_model, i2v_price = resolve_channel_i2v_model(channel_id)
+            if i2v_model and model == i2v_model and i2v_price and float(i2v_price) > 0:
+                return float(i2v_price)
         except Exception:  # noqa: BLE001
             pass
     try:

@@ -110,6 +110,34 @@
              value="{{ model.video_provider|e }}">
     </div>
 
+    <div class="section-heading">Image-to-video model (entity-consistency scenes)</div>
+
+    <div class="field">
+      <label for="video_i2v_model">I2V model slug</label>
+      <input type="text" id="video_i2v_model" name="video_i2v_model"
+             value="{{ (model.video_i2v_model or '')|e }}"
+             placeholder="e.g. runway-image-to-video">
+      <div class="hint">Blank = use the global default (veo3-image-to-video, $2.50/clip).
+        Set this to a cheaper I2V model so scenes that lock a recurring character
+        don't pay the premium. The T2V model is chosen on the "Compare video models" page.</div>
+    </div>
+
+    <div class="field">
+      <label for="video_i2v_model_price_usd">I2V price per clip (USD)</label>
+      <input type="text" id="video_i2v_model_price_usd" name="video_i2v_model_price_usd"
+             value="{{ model.video_i2v_model_price_usd if model.video_i2v_model_price_usd is not none else '' }}"
+             placeholder="e.g. 0.15">
+      <div class="hint">Needed only if the model isn't in Cortex's built-in price table.</div>
+    </div>
+
+    <div class="field">
+      <label for="video_i2v_model_duration_seconds">I2V clip duration (seconds)</label>
+      <input type="text" id="video_i2v_model_duration_seconds" name="video_i2v_model_duration_seconds"
+             value="{{ model.video_i2v_model_duration_seconds if model.video_i2v_model_duration_seconds is not none else '' }}"
+             placeholder="e.g. 8">
+      <div class="hint">The real delivered clip length. Blank = assume 8s.</div>
+    </div>
+
     <div class="actions">
       <button type="submit" class="btn btn-save">Save Changes</button>
       <a href="/" class="btn">Cancel</a>

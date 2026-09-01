@@ -259,6 +259,20 @@ class ModelProfile:
     # fails downstream. None = no measurement on record yet; callers fall
     # back to the 8s conservative default.
     video_model_duration_seconds: Optional[float] = None
+    # Per-channel IMAGE-TO-VIDEO model. When a scene conditions on a locked
+    # entity's reference image (submit_scene sets reference_image_url), the
+    # pipeline routes it to an I2V model — globally config.MUAPI_I2V_MODEL
+    # (veo3-image-to-video, $2.50/clip). A channel on a cheap T2V model
+    # (e.g. seedance @ $0.06) would otherwise pay 40x that for every
+    # entity-consistency scene, blowing its per-episode ceiling. Set this to
+    # the channel's chosen I2V model (e.g. runway-image-to-video @ $0.15) and
+    # it wins over the global default for that channel's I2V scenes. None =
+    # use the global MUAPI_I2V_MODEL, unchanged. The price/duration mirror
+    # the T2V trio above (needed wherever the model is off muapi's static
+    # tables, exactly as for video_model).
+    video_i2v_model:   Optional[str]   = None
+    video_i2v_model_price_usd: Optional[float] = None
+    video_i2v_model_duration_seconds: Optional[float] = None
     created_at:        str            = ""
     metadata_version:  str            = METADATA_VERSION
 
@@ -626,6 +640,9 @@ _MODEL_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("video_model", "TEXT"),
     ("video_model_price_usd", "REAL"),
     ("video_model_duration_seconds", "REAL"),
+    ("video_i2v_model", "TEXT"),
+    ("video_i2v_model_price_usd", "REAL"),
+    ("video_i2v_model_duration_seconds", "REAL"),
 ]
 
 
@@ -719,6 +736,14 @@ def _row_to_model(row) -> ModelProfile:
         video_model_duration_seconds = (
             row["video_model_duration_seconds"]
             if "video_model_duration_seconds" in row.keys() else None),
+        video_i2v_model   = (
+            row["video_i2v_model"] if "video_i2v_model" in row.keys() else None),
+        video_i2v_model_price_usd = (
+            row["video_i2v_model_price_usd"]
+            if "video_i2v_model_price_usd" in row.keys() else None),
+        video_i2v_model_duration_seconds = (
+            row["video_i2v_model_duration_seconds"]
+            if "video_i2v_model_duration_seconds" in row.keys() else None),
         created_at        = row["created_at"],
         metadata_version  = row["metadata_version"],
     )
@@ -1162,6 +1187,7 @@ def update_model_profile(
         "brand_guardian_p1", "brand_guardian_p2", "narration_voice_id",
         "image_provider", "video_provider", "video_model", "video_model_price_usd",
         "video_model_duration_seconds",
+        "video_i2v_model", "video_i2v_model_price_usd", "video_i2v_model_duration_seconds",
     }
     try:
         assignments, params = [], []
@@ -1221,6 +1247,42 @@ def resolve_channel_video_model(
         return mp.video_model, mp.video_model_price_usd
     except Exception:  # noqa: BLE001
         return None, None
+
+
+def resolve_channel_i2v_model(
+    channel_id: str, db_path: Optional[Path] = None,
+) -> tuple[Optional[str], Optional[float]]:
+    """The IMAGE-TO-VIDEO model a channel has adopted, and its captured price.
+    (None, None) when the channel has no model profile or no adopted I2V
+    model — callers then fall back to the global config.MUAPI_I2V_MODEL.
+    Never raises. Mirrors resolve_channel_video_model for the I2V path."""
+    try:
+        ch = get_channel_profile(channel_id, db_path=db_path)
+        if not ch or not ch.model_profile_id:
+            return None, None
+        mp = get_model_profile(ch.model_profile_id, db_path=db_path)
+        if not mp or not mp.video_i2v_model:
+            return None, None
+        return mp.video_i2v_model, mp.video_i2v_model_price_usd
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def resolve_channel_i2v_duration(
+    channel_id: str, db_path: Optional[Path] = None,
+) -> Optional[float]:
+    """The measured clip duration of the channel's adopted I2V model, or None.
+    Mirrors resolve_channel_video_duration for the I2V path."""
+    try:
+        ch = get_channel_profile(channel_id, db_path=db_path)
+        if not ch or not ch.model_profile_id:
+            return None
+        mp = get_model_profile(ch.model_profile_id, db_path=db_path)
+        if not mp or not mp.video_i2v_model or not mp.video_i2v_model_duration_seconds:
+            return None
+        return float(mp.video_i2v_model_duration_seconds)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def resolve_channel_video_duration(

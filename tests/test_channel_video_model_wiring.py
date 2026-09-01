@@ -261,3 +261,64 @@ def test_compute_shot_budget_plans_more_shots_for_short_clip_model(monkeypatch):
     budget_with_channel = compute_shot_budget(12.0, c, "twinkle")
     budget_without_channel = compute_shot_budget(12.0, c, None)
     assert budget_with_channel > budget_without_channel
+
+
+# ── per-channel I2V model (cheap image-to-video for entity scenes) ──
+
+def test_channel_i2v_model_wins_over_global_default(tmp_path):
+    db = tmp_path / "t.db"
+    mp = _channel_with_model(db, "twk", "seedance-pro-t2v-fast", 0.06)
+    from hypogeum.channel_config import update_model_profile, resolve_channel_i2v_model
+    update_model_profile(mp.model_profile_id, db_path=db,
+                         video_i2v_model="runway-image-to-video",
+                         video_i2v_model_price_usd=0.15)
+    assert resolve_channel_i2v_model("twk", db_path=db) == ("runway-image-to-video", 0.15)
+
+    import hypogeum.channel_config as cc
+    orig = cc._resolve_db_path
+    cc._resolve_db_path = lambda p: db
+    try:
+        c = _cfg()
+        # reference image set -> the channel's I2V model, not the global veo3
+        assert _resolve_scene_model(2, "http://ref.png", c, "twk") == "runway-image-to-video"
+        # a channel with no I2V model set -> still the global default
+        _channel_with_model(db, "twk2", "seedance-pro-t2v-fast", 0.06)
+        assert _resolve_scene_model(2, "http://ref.png", c, "twk2") == c.MUAPI_I2V_MODEL
+    finally:
+        cc._resolve_db_path = orig
+
+
+def test_plan_and_gate_price_the_channel_i2v_model_identically(monkeypatch):
+    from hypogeum.muapi import _resolve_gate_unit_price
+    from hypogeum.production_plan import resolve_video_price
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_i2v_model",
+        lambda cid, db_path=None: ("some-exotic-i2v-model", 0.22),
+    )
+    # off-table I2V model priced from the channel record, same both sides
+    gate = _resolve_gate_unit_price("some-exotic-i2v-model", "twk", "ep")
+    plan = resolve_video_price("some-exotic-i2v-model", episode_id="ep", channel_price=0.22)
+    assert gate == plan == 0.22
+
+
+def test_production_plan_prices_i2v_scenes_at_channel_i2v_price(monkeypatch):
+    from tests.test_production_plan import _compile
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_i2v_model",
+        lambda cid, db_path=None: ("runway-image-to-video", 0.15),
+    )
+    plan = _compile(visual_package=_vp_with_final_locked_primary())
+    by_scene = {a.scene_id: a for a in plan.assets if a.role == "required"}
+    # s01 final-locked primary -> the channel's I2V model at its price ($0.15,
+    # NOT the $2.50 global veo3-image-to-video)
+    assert by_scene["s01"].model == "runway-image-to-video"
+    assert by_scene["s01"].unit_price_usd == 0.15
+    assert by_scene["s02"].model == "seedance-pro-t2v-fast"

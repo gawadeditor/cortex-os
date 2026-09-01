@@ -7238,13 +7238,34 @@ _MODEL_ALLOWED = frozenset({
     "name", "episode_producer", "research_director", "thumbnail_planner",
     "brand_guardian_p1", "brand_guardian_p2", "narration_voice_id",
     "image_provider", "video_provider",
+    # Per-channel image-to-video model (entity-conditioned scenes). The T2V
+    # model is adopted via the bake-off; the I2V model is set here directly
+    # (e.g. runway-image-to-video @ $0.15 instead of the global
+    # veo3-image-to-video @ $2.50). Price/duration let planning cost a model
+    # that is off muapi's static tables.
+    "video_i2v_model", "video_i2v_model_price_usd", "video_i2v_model_duration_seconds",
+})
+
+_MODEL_NUMERIC_FIELDS = frozenset({
+    "video_i2v_model_price_usd", "video_i2v_model_duration_seconds",
 })
 
 @app.route("/model/<model_profile_id>/edit", methods=["GET", "POST"])
 def model_edit(model_profile_id):
     db = _db_path()
     if request.method == "POST":
-        updates = {k: v for k, v in request.form.items() if k in _MODEL_ALLOWED}
+        updates = {}
+        for k, v in request.form.items():
+            if k not in _MODEL_ALLOWED:
+                continue
+            if k in _MODEL_NUMERIC_FIELDS:
+                v = v.strip()
+                try:
+                    updates[k] = float(v) if v else None
+                except ValueError:
+                    updates[k] = None
+            else:
+                updates[k] = (v.strip() or None) if k.startswith("video_i2v_model") else v
         edit_model_profile(model_profile_id, updates, db_path=db)
         return redirect(url_for("model_edit", model_profile_id=model_profile_id))
     model = get_model_detail(model_profile_id, db_path=db)

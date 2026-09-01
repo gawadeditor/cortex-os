@@ -85,9 +85,10 @@ def _build_bindings(cfg, channel_id: str | None = None) -> list[dict]:
     the tighter limit for a legitimate call.
 
     `channel_id` (when given) also authorizes that channel's per-channel
-    adopted video model (ModelProfile.video_model, set via the Video Model
-    bake-off) -- production routes every scene through it, so the grant must
-    carry a binding for it or every paid video call is denied at the gate.
+    adopted models -- video_model (the bake-off T2V model) and video_i2v_model
+    (its I2V model for entity-conditioned scenes). Production routes scenes
+    through those, so the grant must carry a binding for each or every paid
+    video call is denied at the gate.
     """
     b: list[dict] = []
 
@@ -117,10 +118,15 @@ def _build_bindings(cfg, channel_id: str | None = None) -> list[dict]:
     }
     if channel_id:
         try:
-            from hypogeum.channel_config import resolve_channel_video_model
+            from hypogeum.channel_config import (
+                resolve_channel_i2v_model, resolve_channel_video_model,
+            )
             _ch_model, _ = resolve_channel_video_model(channel_id)
             if _ch_model:
                 video_models.add(_ch_model)
+            _ch_i2v, _ = resolve_channel_i2v_model(channel_id)
+            if _ch_i2v:
+                video_models.add(_ch_i2v)
         except Exception:
             pass
     for m in sorted(video_models):

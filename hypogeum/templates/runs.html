@@ -35,6 +35,14 @@
   <a href="/runs?status=awaiting_publish_approval" class="filter-link {% if status_filter == 'awaiting_publish_approval' %}active{% endif %}">Awaiting Publish</a>
 </div>
 
+{% set superseded_n = runs | selectattr('superseded') | list | length %}
+{% if superseded_n %}
+<p style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+  {{ superseded_n }} of these failed on an episode that was later published —
+  <a href="#" id="toggle-superseded">show / hide</a>.
+</p>
+{% endif %}
+
 {% if runs %}
 <div class="card" style="padding: 0;">
   <div class="table-wrap" style="border:none;">
@@ -52,9 +60,10 @@
     </thead>
     <tbody>
       {% for r in runs %}
-      <tr>
+      <tr class="{{ 'run-superseded' if r.superseded }}"{% if r.superseded %} style="opacity:.45;"{% endif %}>
         <td>
           <a href="/run/{{ r.run_id }}">{{ r.run_id[:12] }}…</a>
+          {% if r.superseded %}<span class="badge" style="background:var(--raised);color:var(--faint);font-size:9px;">superseded</span>{% endif %}
         </td>
         <td>
           <a href="/episode/{{ r.episode_id }}" style="font-size:12px; color:var(--text);">
@@ -105,5 +114,17 @@
 {% endif %}
 
 </div><!-- /.container -->
+<script>
+(function(){
+  var t = document.getElementById('toggle-superseded');
+  if(!t) return;
+  var hidden = true;
+  document.querySelectorAll('.run-superseded').forEach(function(r){ r.style.display='none'; });
+  t.addEventListener('click', function(e){
+    e.preventDefault(); hidden = !hidden;
+    document.querySelectorAll('.run-superseded').forEach(function(r){ r.style.display = hidden ? 'none' : ''; });
+  });
+})();
+</script>
 </body>
 </html>

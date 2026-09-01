@@ -84,6 +84,7 @@ def list_runs(
                        r.status, r.exit_code, r.error_message,
                        e.title  AS episode_title,
                        e.topic  AS episode_topic,
+                       e.status AS episode_status,
                        COALESCE(SUM(c.cost_usd), 0.0) AS total_cost_usd,
                        COUNT(DISTINCT se.stage_exec_id) AS stage_count
                 FROM runs r
@@ -97,7 +98,13 @@ def list_runs(
             """, params).fetchall()
         finally:
             conn.close()
-        return [_row_to_dict(r) for r in rows]
+        out = [_row_to_dict(r) for r in rows]
+        for d in out:
+            d["superseded"] = (
+                d.get("status") in ("failed", "cancelled")
+                and (d.get("episode_status") or "") in ("complete", "completed", "published")
+            )
+        return out
     except Exception:
         return []
 

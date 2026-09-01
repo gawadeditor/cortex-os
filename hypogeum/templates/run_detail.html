@@ -104,8 +104,22 @@
 </div>
 {% endif %}
 
+{% if superseded %}
+<div class="card is-good">
+  <div class="card-title">Historical attempt</div>
+  <p style="font-size:13px; color:var(--muted); margin:0; line-height:1.6;">
+    Episode <code>{{ d.run.episode_id }}</code> was later completed and
+    published. This is one of its earlier failed attempts — kept for the
+    record. <strong>Re-running is disabled</strong> (it would reproduce a
+    published episode).
+    {% if d.episode and d.episode.title %}<br>{{ d.episode.title }}{% endif %}
+  </p>
+  <a href="/episode/{{ d.run.episode_id }}" class="btn" style="margin-top:10px;">View the episode →</a>
+</div>
+{% endif %}
+
 {# ── Recovery Panel (failed runs only) ── #}
-{% if recovery and d.run.status == 'failed' %}
+{% if recovery and d.run.status == 'failed' and not superseded %}
 <div class="card" style="border-color:
   {% if recovery.failure_class == 'resumable' %}var(--good)
   {% elif recovery.failure_class == 'finance_gate' %}var(--warn)

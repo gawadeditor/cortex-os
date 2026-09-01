@@ -4566,13 +4566,42 @@ def _classify_run_recovery(detail: dict) -> dict:
     }
 
 
+def _episode_is_done(episode_id: str) -> bool:
+    """The episode this run was for was later completed or published — a
+    failed run of it is history, not a re-run candidate."""
+    if not episode_id:
+        return False
+    try:
+        from hypogeum.db import get_connection
+        c = get_connection(_db_path())
+        try:
+            st = c.execute("SELECT status FROM episodes WHERE episode_id=?",
+                           (episode_id,)).fetchone()
+            if st and st[0] in ("complete", "completed", "published"):
+                return True
+            pub = c.execute("SELECT 1 FROM publication_intents "
+                            "WHERE episode_id=? AND status='succeeded' LIMIT 1",
+                            (episode_id,)).fetchone()
+            return pub is not None
+        finally:
+            c.close()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @app.route("/run/<run_id>")
 def run_detail_page(run_id):
     detail = get_run_detail(run_id, db_path=_db_path())
     if detail is None:
         return render_template("not_found.html", kind="Run", id=run_id), 404
     recovery = _classify_run_recovery(detail) if detail["run"].get("status") == "failed" else {}
-    return render_template("run_detail.html", d=detail, recovery=recovery, fmt_duration=fmt_duration)
+    superseded = (detail["run"].get("status") in ("failed", "cancelled")
+                  and _episode_is_done(detail["run"].get("episode_id", "")))
+    if superseded and recovery:
+        recovery["can_rerun"] = False
+        recovery["superseded"] = True
+    return render_template("run_detail.html", d=detail, recovery=recovery,
+                           superseded=superseded, fmt_duration=fmt_duration)
 
 
 def _find_active_duplicate_topic(channel_id: str, topic_text: str, db_path) -> dict | None:

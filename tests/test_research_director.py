@@ -1278,3 +1278,22 @@ class TestSystemPrompt:
                    side_effect=capture):
             run_research_director(BRIEF, cfg, EPISODE_ID)
         assert captured[0] == SYSTEM_PROMPT
+
+
+class TestChannelRegisterPhases:
+    """The research phases adapt to the channel's register (channel separation)."""
+
+    def test_default_is_investigative(self):
+        from hypogeum.agents.research_director import _research_phases_for, _RESEARCH_PHASES
+        assert _research_phases_for(None) is _RESEARCH_PHASES
+        assert _research_phases_for({"tone": "investigative", "genre": "documentary history"}) is _RESEARCH_PHASES
+
+    def test_gentle_channel_gets_gentle_phases(self):
+        from hypogeum.agents.research_director import _research_phases_for, _GENTLE_RESEARCH_PHASES
+        got = _research_phases_for({"tone": "gentle soothing", "genre": "bedtime stories for toddlers"})
+        assert got is _GENTLE_RESEARCH_PHASES
+        # stable phase_ids, adapted keywords
+        assert [p["phase_id"] for p in got] == [p["phase_id"] for p in _RESEARCH_PHASES]
+        joined = " ".join(p["query_template"] for p in got)
+        assert "peer reviewed" not in joined
+        assert "archaeological" not in joined

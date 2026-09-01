@@ -78,6 +78,13 @@ MAIN_RESOLUTION  = "1920x1080"
 SHORT_RESOLUTION = "1080x1920"
 FRAME_RATE       = 30
 
+# A short-native deliverable must stay under a minute (every social platform's
+# Shorts/Reels ceiling, and the operator requirement). Narration is already
+# word-budgeted to land well under this; this is the hard, deterministic
+# backstop applied at render time so the invariant cannot be violated by a
+# script that overran its word budget. Overrun is logged loudly.
+SHORT_NATIVE_HARD_MAX_SECONDS = 58.0
+
 
 class InsufficientCoverageError(Exception):
     """
@@ -510,6 +517,20 @@ def _render_main_episode(
 
     narr_duration = sum_timeline_duration(timeline)
     expected_duration = narr_duration + _MUSIC_TAIL_SECONDS
+
+    # Hard backstop: a short-native deliverable never exceeds a minute, no
+    # matter what the script engine produced. The word budget should keep
+    # narration well under this; if it didn't, cut and shout.
+    if vertical and expected_duration > SHORT_NATIVE_HARD_MAX_SECONDS:
+        log.warn(
+            "short_native_duration_capped",
+            episode_id=episode_id,
+            narration_seconds=round(narr_duration, 2),
+            expected_seconds=round(expected_duration, 2),
+            capped_to=SHORT_NATIVE_HARD_MAX_SECONDS,
+            reason="script overran the short-native word budget",
+        )
+        expected_duration = SHORT_NATIVE_HARD_MAX_SECONDS
 
     # Render to a raw temp path first, then always apply a duration trim pass.
     # This guarantees the final body is exactly expected_duration regardless of

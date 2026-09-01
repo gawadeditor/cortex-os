@@ -1725,3 +1725,77 @@ class TestResolutionNormalization:
             is_short=True,
         )
         assert "-vf" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# Short-native hard duration backstop
+# ---------------------------------------------------------------------------
+
+class TestShortNativeDurationCap:
+    """A short-native (vertical) deliverable is trimmed to stay under a
+    minute no matter how long the narration ran."""
+
+    def _run(self, tmp_path, monkeypatch, *, total_beat_seconds, vertical):
+        from hypogeum.agents import video_renderer as vr
+
+        clip = tmp_path / "c.mp4"; clip.write_bytes(b"FAKEVIDEO")
+        # beats of <=7s each (fully covered by an 8s clip), summing to ~total
+        each = 7.0
+        n = max(1, round(total_beat_seconds / each))
+        each = total_beat_seconds / n
+        timeline = [_make_entry(scene_index=i, scene_id=f"sc_{i}",
+                                duration_seconds=each, clip_duration_seconds=8.0,
+                                clip_path=clip) for i in range(n)]
+
+        seen = {}
+        monkeypatch.setattr(vr, "_run_ffmpeg",
+                            lambda **kw: (kw["output_path"].write_bytes(b"OUT") or True))
+        def _fake_trim(*, input_path, target_duration, output_path, **kw):
+            seen["target"] = target_duration
+            output_path.write_bytes(b"TRIMMED")
+            return True
+        monkeypatch.setattr(vr, "_trim_video_to_duration", _fake_trim)
+        monkeypatch.setattr(vr, "_probe_output_duration", lambda p: seen.get("target", 0.0))
+
+        # probe of the raw body: pretend it came out at the full narration length
+        import subprocess as _sp
+        class _R:
+            returncode = 0
+            stdout = ('{"streams":[{"codec_type":"video","duration":"%f"},'
+                      '{"codec_type":"audio","duration":"%f"}]}' % (total_beat_seconds, total_beat_seconds))
+        monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
+
+        vr._render_main_episode(
+            timeline=timeline, narration_path=None, music_track=None,
+            output_path=tmp_path / "main.mp4", episode_id="ep_t",
+            timeout=60, log=_NullLog(), vertical=vertical,
+        )
+        return seen["target"]
+
+    def test_vertical_over_a_minute_is_capped(self, tmp_path, monkeypatch):
+        target = self._run(tmp_path, monkeypatch, total_beat_seconds=72.0, vertical=True)
+        assert target == vr_SHORT_MAX()
+        assert target < 60.0
+
+    def test_vertical_under_the_cap_is_untouched(self, tmp_path, monkeypatch):
+        target = self._run(tmp_path, monkeypatch, total_beat_seconds=38.0, vertical=True)
+        assert target == pytest.approx(38.0 + _music_tail())
+
+    def test_landscape_is_never_capped(self, tmp_path, monkeypatch):
+        # a 90s landscape body stays 90s (+ tail); the cap only applies vertical
+        target = self._run(tmp_path, monkeypatch, total_beat_seconds=90.0, vertical=False)
+        assert target == pytest.approx(90.0 + _music_tail())
+
+
+class _NullLog:
+    def __getattr__(self, _): return lambda *a, **k: None
+
+
+def vr_SHORT_MAX():
+    from hypogeum.agents.video_renderer import SHORT_NATIVE_HARD_MAX_SECONDS
+    return SHORT_NATIVE_HARD_MAX_SECONDS
+
+
+def _music_tail():
+    from hypogeum.agents.video_renderer import _MUSIC_TAIL_SECONDS
+    return _MUSIC_TAIL_SECONDS

@@ -104,6 +104,24 @@ def _load_bible() -> dict:
     return _cache
 
 
+def _route_to_active_channel(fn_name: str, mode: str) -> Optional[str]:
+    """If a channel with its own brand profile is active for this pipeline
+    run (hypogeum.brand.channel_identity.active_channel), return that
+    channel's directive instead of Hypogeum's. Returns None to mean 'no
+    routing — use the canonical Hypogeum identity below'. Never raises."""
+    try:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        ch = channel_identity.current_channel()
+        if not ch or not channel_identity.channel_uses_own_brand_profile(ch):
+            return None
+        builder = getattr(channel_identity, "build_channel_visual_identity_directive"
+                          if fn_name == "build_visual_identity_directive"
+                          else "build_channel_visual_identity_directive_compact")
+        return builder(ch, mode)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def get_brand_spec_version() -> str:
     """Return the Brand Bible version string (e.g. 'v1.1')."""
     return _load_bible()["_meta"]["bible_version"]
@@ -198,6 +216,13 @@ def get_adaptive_video_forbidden_items() -> list:
     thumbnail-tier list) — adaptive tier does not forbid natural
     environmental colors (blue sky, blue sea, natural greenery).
     """
+    try:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        ch = channel_identity.current_channel()
+        if ch and channel_identity.channel_uses_own_brand_profile(ch):
+            return channel_identity.get_channel_adaptive_video_forbidden_items(ch)
+    except Exception:  # noqa: BLE001
+        pass
     finish = get_visual_finish_rules()
     return list(finish["forbidden"]) + [
         "arbitrary teal-and-orange cinematic color grading",
@@ -274,6 +299,10 @@ def build_visual_identity_directive(mode: str = "generic") -> str:
     if mode not in _VALID_MODES:
         mode = "generic"
 
+    _routed = _route_to_active_channel("build_visual_identity_directive", mode)
+    if _routed is not None:
+        return _routed
+
     level = get_enforcement_level(mode)
     if level == "adaptive":
         return _build_adaptive_video_directive(mode)
@@ -306,6 +335,11 @@ def build_visual_identity_directive_compact(mode: str = "generic") -> str:
     """
     if mode not in _VALID_MODES:
         mode = "generic"
+
+    _routed = _route_to_active_channel("build_visual_identity_directive_compact", mode)
+    if _routed is not None:
+        return _routed
+
     level = get_enforcement_level(mode)
     if level != "full":
         return build_visual_identity_directive(mode)

@@ -32,10 +32,37 @@ Public API:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from pathlib import Path
 from typing import Optional
 
 from hypogeum.brand import visual_identity
+
+# The channel whose identity is active for the current pipeline run. Set once
+# by hypogeum.pipeline.run_pipeline() via active_channel(); read by
+# hypogeum.brand.visual_identity's directive builders so every generation
+# surface (video scenes, thumbnails, entity references) inherits it without
+# threading channel_id through each call site. A run compiles its Production
+# Plan and submits its assets in the same process, so the plan's declared
+# prompt fingerprints and the submission gate see the same active channel.
+_ACTIVE_CHANNEL: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "hypogeum_active_channel", default=None)
+
+
+@contextlib.contextmanager
+def active_channel(channel_id: Optional[str]):
+    """Set the active channel for the duration of the block."""
+    token = _ACTIVE_CHANNEL.set(channel_id or None)
+    try:
+        yield
+    finally:
+        _ACTIVE_CHANNEL.reset(token)
+
+
+def current_channel() -> Optional[str]:
+    """The active channel id, or None."""
+    return _ACTIVE_CHANNEL.get()
 
 _BRAND_BIBLE_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "brand_guardian"
 
@@ -164,6 +191,18 @@ def build_channel_visual_identity_directive(
     level = visual_identity.get_enforcement_level(
         mode if mode in visual_identity._VALID_MODES else "generic")
     return _profile_directive(bp, channel_name, mode, level)
+
+
+def build_channel_visual_identity_directive_compact(
+    channel_id: Optional[str], mode: str = "generic", db_path: Optional[Path] = None,
+) -> str:
+    """Compact form. The profile-derived directive is already concise (no
+    per-swatch palette tables), so this returns the same text as the full
+    form for a channel with its own profile; otherwise it delegates to
+    visual_identity's compact builder."""
+    if not channel_uses_own_brand_profile(channel_id, db_path):
+        return visual_identity.build_visual_identity_directive_compact(mode)
+    return build_channel_visual_identity_directive(channel_id, mode, db_path)
 
 
 def get_channel_adaptive_video_forbidden_items(

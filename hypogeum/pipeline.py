@@ -1009,6 +1009,12 @@ def run_pipeline(
     # Tracks the in-progress stage for audit failure recording in the except block.
     _current_stage_id: Optional[str] = None
     _current_stage_t0: str = ""
+    # The whole run — plan compile AND every asset submission — sees one active
+    # channel, so per-channel brand identity (hypogeum.brand.channel_identity)
+    # reaches every generation surface and the plan's declared prompt
+    # fingerprints match what the submission gate produces.
+    from hypogeum.brand import channel_identity as _channel_identity  # noqa: PLC0415
+    _channel_id_token = _channel_identity._ACTIVE_CHANNEL.set(channel_id)
     try:
         run_id = register_run(episode_id=episode_id, config=config, channel_id=channel_id, workflow_binding=_workflow_binding, db_path=db_path)
         set_run_context(run_id=run_id, episode_id=episode_id, db_path=db_path)
@@ -2011,6 +2017,11 @@ def run_pipeline(
             except Exception:
                 pass
         raise
+    finally:
+        try:
+            _channel_identity._ACTIVE_CHANNEL.reset(_channel_id_token)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

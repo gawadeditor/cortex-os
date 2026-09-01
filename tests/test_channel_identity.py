@@ -58,6 +58,30 @@ def test_profile_directive_for_channel_with_own_brand(tmp_path):
         cc._resolve_db_path = orig
 
 
+def test_active_channel_contextvar_routes_and_resets(tmp_path):
+    db = tmp_path / "t.db"
+    _seed_kids(db)
+    import hypogeum.channel_config as cc
+    orig = cc._resolve_db_path
+    cc._resolve_db_path = lambda p: db
+    try:
+        base_full = visual_identity.build_visual_identity_directive("thumbnail")
+        base_compact = visual_identity.build_visual_identity_directive_compact("thumbnail")
+        with channel_identity.active_channel("kids"):
+            assert "pastel" in visual_identity.build_visual_identity_directive("thumbnail").lower()
+            assert "pastel" in visual_identity.build_visual_identity_directive_compact("thumbnail").lower()
+            assert any("fantasy-art" in x
+                       for x in visual_identity.get_adaptive_video_forbidden_items())
+        # cleanly reset after the block
+        assert visual_identity.build_visual_identity_directive("thumbnail") == base_full
+        assert visual_identity.build_visual_identity_directive_compact("thumbnail") == base_compact
+        # a channel with its own brand bible (hypogeum) is never routed
+        with channel_identity.active_channel("hypogeum"):
+            assert visual_identity.build_visual_identity_directive("thumbnail") == base_full
+    finally:
+        cc._resolve_db_path = orig
+
+
 def test_assemble_prompt_threads_channel_id(tmp_path):
     db = tmp_path / "t.db"
     _seed_kids(db)

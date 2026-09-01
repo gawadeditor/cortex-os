@@ -232,6 +232,32 @@
 </details>
 {% endif %}
 
+{% if changelog %}
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <div style="padding:12px 16px 0;">
+    <div class="card-title">What Cortex changed — Channel Learning</div>
+    <p class="muted" style="font-size:11px; margin:2px 0 8px;">
+      Applied learning actions that became a standing directive for a channel's
+      next episode. Cadence changes execute directly and aren't listed here.
+    </p>
+  </div>
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>When</th><th>Channel</th><th>Dimension</th><th>Directive</th><th></th></tr></thead>
+    <tbody>
+    {% for d in changelog %}
+    <tr {% if not d.active %}style="opacity:.5;"{% endif %}>
+      <td class="muted" style="font-size:11px; white-space:nowrap;">{{ (d.created_at or '')[:16].replace('T',' ') }}</td>
+      <td style="font-size:12px;">{{ d.channel_name }}</td>
+      <td><span class="badge" style="background:var(--raised); font-size:10px;">{{ d.dimension }}</span></td>
+      <td style="font-size:12px;">{{ d.directive_text }}</td>
+      <td class="muted" style="font-size:10px;">{{ 'active' if d.active else 'superseded' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endif %}
+
 <div id="toast" class="toast"></div>
 <script>
 function showToast(msg, ok) {

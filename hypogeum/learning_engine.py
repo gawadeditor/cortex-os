@@ -632,10 +632,37 @@ def apply_action(
             cadence_field=field, cadence_before=before, cadence_after=after,
         )
 
+    # Advisory dimensions (thumbnail / hook / pacing / topic / title /
+    # description) become a channel-scoped learning directive the relevant
+    # agent reads on the next episode — Channel Learning. Falls back to a
+    # plain acknowledgement when no channel can be attributed.
+    dim = action["dimension"]
+    directive_result = None
+    try:
+        from hypogeum.channel_learning import record_directive, _ADVISORY_DIMENSIONS
+        if dim in _ADVISORY_DIMENSIONS:
+            channel_id = _action_channel(action, db_path)
+            if channel_id:
+                ev = action.get("evidence") or {}
+                directive_result = record_directive(
+                    channel_id, dim, action["action_type"],
+                    action.get("rationale") or f"{action['action_type']} — {dim}",
+                    source_action_id=action_id,
+                    source_episode=action.get("source_episode")
+                    or (ev.get("source_episode") if isinstance(ev.get("source_episode"), str) else None),
+                    db_path=db_path,
+                )
+    except Exception as exc:  # noqa: BLE001
+        directive_result = {"ok": False, "error": str(exc)}
+
     ok = update_action_status(action_id, "applied", db_path=db_path)
     if not ok:
         return _err("update failed")
-    return _ok(action_id=action_id, status="applied")
+    out = _ok(action_id=action_id, status="applied")
+    if directive_result and directive_result.get("ok"):
+        out["directive_id"] = directive_result["directive_id"]
+        out["channel_id"] = directive_result["channel_id"]
+    return out
 
 
 def dismiss_action(

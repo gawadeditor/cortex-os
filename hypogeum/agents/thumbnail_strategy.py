@@ -167,7 +167,7 @@ def _build_strategy_brief(
     diff_hyp = topic_brief.get("differentiation_hypothesis", "")
     competitive_gap = diff_hyp[:250] if diff_hyp else ""
 
-    return {
+    brief = {
         "episode_id": topic_brief.get("topic_id") or topic_brief.get("episode_id", ""),
         "episode_title": topic_brief.get("episode_title", ""),
         "hook_language": hook_language,
@@ -177,6 +177,22 @@ def _build_strategy_brief(
         "audience_profile": audience_profile,
         "topic_category": category,
     }
+
+    # Channel Learning: thumbnail directives this channel has accrued from
+    # its own analytics (hypogeum.channel_learning). Advisory to the model;
+    # empty for a channel with no learning history.
+    try:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        from hypogeum.channel_learning import directive_texts  # noqa: PLC0415
+        ch = channel_identity.current_channel()
+        if ch:
+            learned = directive_texts(ch, "thumbnail")
+            if learned:
+                brief["channel_thumbnail_learning"] = learned
+    except Exception:  # noqa: BLE001
+        pass
+
+    return brief
 
 
 # ---------------------------------------------------------------------------

@@ -7520,7 +7520,18 @@ def intelligence_episode_page(episode_id):
 @app.route("/intelligence/learning")
 def intelligence_learning_page():
     state = get_learning_state(db_path=_db_path())
-    return render_template("learning.html", state=state)
+    # "What Cortex changed and why" — applied learning directives per channel.
+    changelog = []
+    try:
+        from hypogeum.channel_learning import list_channel_changelog
+        for c in _nav_channels():
+            for d in list_channel_changelog(c["channel_id"], limit=25, db_path=_db_path()):
+                d["channel_name"] = c["name"]
+                changelog.append(d)
+        changelog.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    except Exception:  # noqa: BLE001
+        changelog = []
+    return render_template("learning.html", state=state, changelog=changelog)
 
 
 @app.route("/intelligence/sync")

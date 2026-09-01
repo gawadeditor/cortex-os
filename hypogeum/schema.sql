@@ -1045,6 +1045,32 @@ CREATE INDEX IF NOT EXISTS idx_la_dimension ON learning_actions(dimension);
 CREATE INDEX IF NOT EXISTS idx_la_episode   ON learning_actions(source_episode);
 
 -- ---------------------------------------------------------------------------
+-- channel_learning_directives — the executable output of an applied
+-- learning_action. Where content_volume nudges production_cadence directly,
+-- the advisory dimensions (thumbnail / hook / pacing / topic / ...) each
+-- become a short, channel-scoped directive here that the relevant agent
+-- reads on the next episode. This is Channel Learning — scoped to one
+-- channel, never cross-channel (that is Factory Learning). See
+-- hypogeum/channel_learning.py.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS channel_learning_directives (
+    directive_id     TEXT    NOT NULL PRIMARY KEY,
+    channel_id       TEXT    NOT NULL,
+    dimension        TEXT    NOT NULL,   -- thumbnail|hook|pacing|topic|title|description
+    action_type      TEXT    NOT NULL,   -- prefer|avoid|change|test|increase|decrease
+    directive_text   TEXT    NOT NULL,   -- the instruction the agent injects
+    source_action_id TEXT,
+    source_episode   TEXT,
+    created_at       TEXT    NOT NULL,
+    superseded_at    TEXT,               -- set when a newer directive for the
+                                         -- same (channel, dimension) replaces it
+    active           INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_cld_channel   ON channel_learning_directives(channel_id, active);
+CREATE INDEX IF NOT EXISTS idx_cld_dimension ON channel_learning_directives(channel_id, dimension, active);
+
+-- ---------------------------------------------------------------------------
 -- Phase E Views
 -- ---------------------------------------------------------------------------
 

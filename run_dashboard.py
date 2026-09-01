@@ -6888,7 +6888,8 @@ def publishing_edit(publishing_profile_id):
 
 @app.route("/api/analytics/overview", methods=["GET"])
 def api_analytics_overview():
-    return jsonify(get_analytics_overview(db_path=_db_path()))
+    ch = request.args.get("channel_id") or _scope_channel()
+    return jsonify(get_analytics_overview(db_path=_db_path(), channel_id=ch or None))
 
 
 @app.route("/api/analytics/platform/<platform>", methods=["GET"])
@@ -7054,8 +7055,10 @@ def api_learning_action_dismiss(action_id):
 # ===========================================================================
 
 def _render_analytics_overview():
-    """Shared logic for /intelligence/performance."""
-    overview = get_analytics_overview(db_path=_db_path())
+    """Shared logic for /intelligence/performance. Scopes to the active
+    channel when the left rail is on a channel."""
+    ch = request.args.get("channel_id") or _scope_channel()
+    overview = get_analytics_overview(db_path=_db_path(), channel_id=ch or None)
     from hypogeum.dashboard_api import get_channel_summaries
     channels = get_channel_summaries(db_path=_db_path())
     youtube_connected = False

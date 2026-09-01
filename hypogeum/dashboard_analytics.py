@@ -39,11 +39,109 @@ def _safe_sum(vals: list) -> float:
 # Overview
 # ===========================================================================
 
-def get_analytics_overview(db_path: Optional[Path] = None) -> dict:
+def _analytics_key_channel_map(conn) -> dict:
     """
-    Factory-wide analytics summary: per-platform KPIs, recent snapshots,
-    episode performance table, action / insight counts.
-    Non-blocking.
+    platform_analytics.episode_id in production is often the *title text*,
+    not an ep_xxxx id. Map every distinct key to a channel_id via: exact
+    id match in runs / episode_topics, then title match against
+    episodes.title / titles.title_text / episode_topics.topic_text.
+    Keys that resolve to nothing are omitted (shown only in factory scope).
+    """
+    keys = set()
+    try:
+        for r in conn.execute("SELECT DISTINCT episode_id FROM platform_analytics"):
+            if r[0]:
+                keys.add(r[0])
+    except Exception:  # noqa: BLE001
+        return {}
+
+    # id -> channel
+    id_chan: dict[str, str] = {}
+    for sql in ("SELECT episode_id, channel_id FROM runs "
+                "WHERE episode_id IS NOT NULL AND channel_id IS NOT NULL",
+                "SELECT episode_id, channel_id FROM episode_topics "
+                "WHERE episode_id IS NOT NULL AND channel_id IS NOT NULL"):
+        try:
+            for r in conn.execute(sql):
+                id_chan.setdefault(r[0], r[1])
+        except Exception:  # noqa: BLE001
+            pass
+
+    # title -> channel  (title -> episode_id -> channel; and topic_text direct)
+    title_chan: dict[str, str] = {}
+    try:
+        for r in conn.execute(
+            "SELECT e.title AS t, r.channel_id AS c FROM episodes e "
+            "JOIN runs r ON r.run_id = e.run_id "
+            "WHERE e.title IS NOT NULL AND r.channel_id IS NOT NULL"):
+            title_chan.setdefault(r["t"], r["c"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for r in conn.execute(
+            "SELECT t.title_text AS t, r.channel_id AS c FROM titles t "
+            "JOIN runs r ON r.run_id = t.run_id "
+            "WHERE t.title_text IS NOT NULL AND r.channel_id IS NOT NULL"):
+            title_chan.setdefault(r["t"], r["c"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for r in conn.execute(
+            "SELECT topic_text AS t, channel_id AS c FROM episode_topics "
+            "WHERE topic_text IS NOT NULL AND channel_id IS NOT NULL"):
+            title_chan.setdefault(r["t"], r["c"])
+    except Exception:  # noqa: BLE001
+        pass
+
+    # platform -> the single channel bound to it (fallback for keys that
+    # match no episode/title — e.g. after old episodes were cleaned out).
+    plat_owner: dict[str, str] = {}
+    try:
+        seen: dict[str, set] = {}
+        for r in conn.execute(
+            "SELECT platform, channel_id FROM channel_provider_bindings "
+            "WHERE enabled = 1 AND capability = 'publishing'"):
+            seen.setdefault(r[0], set()).add(r[1])
+        plat_owner = {p: next(iter(cs)) for p, cs in seen.items() if len(cs) == 1}
+    except Exception:  # noqa: BLE001
+        pass
+    key_plats: dict[str, set] = {}
+    try:
+        for r in conn.execute("SELECT DISTINCT episode_id, platform FROM platform_analytics"):
+            key_plats.setdefault(r[0], set()).add(r[1])
+    except Exception:  # noqa: BLE001
+        pass
+
+    out: dict[str, str] = {}
+    for k in keys:
+        if k in id_chan:
+            out[k] = id_chan[k]
+            continue
+        if k in title_chan:
+            out[k] = title_chan[k]
+            continue
+        hit = None
+        for t, c in title_chan.items():
+            if t and (t.startswith(k[:40]) or k.startswith(t[:40])):
+                hit = c
+                break
+        if hit:
+            out[k] = hit
+            continue
+        # fallback: attribute to the sole channel bound to this key's platform(s)
+        owners = {plat_owner[p] for p in key_plats.get(k, set()) if p in plat_owner}
+        if len(owners) == 1:
+            out[k] = next(iter(owners))
+    return out
+
+
+def get_analytics_overview(db_path: Optional[Path] = None,
+                           channel_id: Optional[str] = None) -> dict:
+    """
+    Analytics summary: per-platform KPIs, recent snapshots, episode
+    performance table, action / insight counts. Factory-wide by default;
+    scoped to one channel when ``channel_id`` is given (rows whose key
+    cannot be attributed to a channel are then excluded). Non-blocking.
     """
     try:
         from hypogeum.db import get_connection
@@ -52,6 +150,8 @@ def get_analytics_overview(db_path: Optional[Path] = None) -> dict:
 
         conn = get_connection(db)
         try:
+            if channel_id:
+                return _channel_scoped_overview(conn, channel_id)
             # Platform breakdown from view
             try:
                 plat_rows = conn.execute("SELECT * FROM v_platform_kpis").fetchall()
@@ -104,6 +204,75 @@ def get_analytics_overview(db_path: Optional[Path] = None) -> dict:
             "pending_action_count": 0,
             "total_insights":       0,
         }
+
+
+def _channel_scoped_overview(conn, channel_id: str) -> dict:
+    """Analytics overview computed straight from platform_analytics (real API
+    rows only) for the keys that resolve to ``channel_id``."""
+    kmap = _analytics_key_channel_map(conn)
+    mine = {k for k, c in kmap.items() if c == channel_id}
+
+    empty = {"platform_breakdown": {}, "recent_snapshots": [], "episodes": [],
+             "pending_action_count": 0, "total_insights": 0, "channel_scoped": True}
+    if not mine:
+        return empty
+
+    rows = []
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT episode_id, platform, snapshot_date, views, ctr, avg_view_pct, "
+            "avg_watch_time_s, total_watch_time_s, likes, comments, shares, saves, "
+            "imported_at, source FROM platform_analytics WHERE source='api' "
+            "ORDER BY snapshot_date DESC")]
+    except Exception:  # noqa: BLE001
+        return empty
+    rows = [r for r in rows if r["episode_id"] in mine]
+    if not rows:
+        return empty
+
+    # latest snapshot per (key, platform)
+    latest: dict = {}
+    for r in rows:
+        latest.setdefault((r["episode_id"], r["platform"]), r)
+
+    platform_breakdown: dict = {}
+    episodes: dict = {}
+    for (key, plat), r in latest.items():
+        pb = platform_breakdown.setdefault(plat, {
+            "platform": plat, "episode_count": 0, "total_views": 0,
+            "avg_ctr": None, "avg_retention": None})
+        pb["episode_count"] += 1
+        pb["total_views"] += r["views"] or 0
+        _ctrs = [x for x in (pb.get("_ctrs") or []) + [r["ctr"]] if x is not None]
+        _rets = [x for x in (pb.get("_rets") or []) + [r["avg_view_pct"]] if x is not None]
+        pb["_ctrs"], pb["_rets"] = _ctrs, _rets
+        pb["avg_ctr"] = round(sum(_ctrs) / len(_ctrs), 4) if _ctrs else None
+        pb["avg_retention"] = round(sum(_rets) / len(_rets), 4) if _rets else None
+
+        ep = episodes.setdefault(key, {
+            "episode_id": key, "episode_title": key, "platforms": 0,
+            "total_views": 0, "avg_ctr": None, "avg_retention": None,
+            "insight_count": 0})
+        ep["platforms"] += 1
+        ep["total_views"] += r["views"] or 0
+        if r["ctr"] is not None:
+            ep["avg_ctr"] = r["ctr"]
+        if r["avg_view_pct"] is not None:
+            ep["avg_retention"] = r["avg_view_pct"]
+
+    for pb in platform_breakdown.values():
+        pb.pop("_ctrs", None)
+        pb.pop("_rets", None)
+
+    return {
+        "platform_breakdown":   platform_breakdown,
+        "recent_snapshots":     rows[:10],
+        "episodes":             sorted(episodes.values(),
+                                       key=lambda e: -(e["total_views"] or 0)),
+        "pending_action_count": 0,
+        "total_insights":       0,
+        "channel_scoped":       True,
+    }
 
 
 # ===========================================================================

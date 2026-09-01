@@ -255,19 +255,25 @@ def main(argv: list[str] | None = None) -> int:
               f"  their scheduled_runs: {sr_n}\n")
 
     # ---- local files ---------------------------------------------
+    # Every directory directly under .hypogeum-assets/episodes/ whose name is
+    # not a kept/held episode is cruft: DB-tracked stale episodes AND pure
+    # filesystem orphans (ep_000, bare-UUID run dirs, val_*/probe scaffolding)
+    # that never had a DB row.
     dirs_del: list[Path] = []
-    if not args.skip_local_files:
-        for ep in remove_eps:
-            d = _EPISODES_DIR / ep
-            if d.exists():
+    if not args.skip_local_files and _EPISODES_DIR.exists():
+        protect = keep | held
+        for d in sorted(_EPISODES_DIR.iterdir()):
+            if d.is_dir() and d.name not in protect:
                 dirs_del.append(d)
         total = sum(
             sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
             for d in dirs_del)
-        print(f"=== local-files ===\n  episode dirs to delete: {len(dirs_del)} "
-              f"({total / 1e9:.2f} GB)")
-        for d in dirs_del:
-            print(f"    {d}")
+        print(f"=== local-files ===\n  episode/run dirs to delete: {len(dirs_del)} "
+              f"({total / 1e9:.2f} GB)  [keeping {sorted(protect)}]")
+        for d in dirs_del[:40]:
+            print(f"    {d.name}")
+        if len(dirs_del) > 40:
+            print(f"    … and {len(dirs_del) - 40} more")
         print()
 
     # ---- logs ---------------------------------------------------

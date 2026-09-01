@@ -110,6 +110,21 @@ def test_apply_keeps_published_and_held_only(seeded):
         conn.close()
 
 
+def test_local_files_removes_orphan_dirs_keeps_held(seeded, tmp_path, monkeypatch):
+    import tools.cleanup_factory_state as mod
+    eps = tmp_path / "episodes"
+    eps.mkdir()
+    for name in ("ep_pub", "ep_hold", "ep_stale", "ep_000",
+                 "0a5cbece-f107-428e-9126-42b643aa16aa", "val_probe"):
+        (eps / name).mkdir()
+        (eps / name / "x.bin").write_bytes(b"0" * 10)
+    monkeypatch.setattr(mod, "_EPISODES_DIR", eps)
+    mod.main(["--db", str(seeded), "--skip-logs", "--apply"])
+    remaining = sorted(p.name for p in eps.iterdir())
+    # ep_pub is published (kept), ep_hold is held; everything else is cruft
+    assert remaining == ["ep_hold", "ep_pub"]
+
+
 def test_purge_unpublished_complete_flag(seeded):
     from tools.cleanup_factory_state import main
     main(["--db", str(seeded), "--skip-local-files", "--skip-logs",

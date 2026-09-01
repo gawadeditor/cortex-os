@@ -6897,7 +6897,9 @@ def api_analytics_platform(platform):
     if platform not in _VALID_PLATFORMS:
         return jsonify({"error": f"unknown platform {platform!r}"}), 400
     limit = min(int(request.args.get("limit", 50)), 200)
-    return jsonify(get_platform_summary(platform, db_path=_db_path(), limit=limit))
+    ch = request.args.get("channel_id") or _scope_channel()
+    return jsonify(get_platform_summary(platform, db_path=_db_path(), limit=limit,
+                                        channel_id=ch or None))
 
 
 @app.route("/api/analytics/episode/<episode_id>", methods=["GET"])
@@ -7092,7 +7094,8 @@ def intelligence_performance_page():
 def intelligence_platform_page(platform):
     if platform not in _VALID_PLATFORMS:
         return render_template("not_found.html", kind="Platform", id=platform), 404
-    summary = get_platform_summary(platform, db_path=_db_path())
+    ch = request.args.get("channel_id") or _scope_channel()
+    summary = get_platform_summary(platform, db_path=_db_path(), channel_id=ch or None)
     return render_template("analytics_platform.html",
                            summary=summary, platform=platform)
 

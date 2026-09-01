@@ -283,49 +283,69 @@ def get_platform_summary(
     platform: str,
     db_path:  Optional[Path] = None,
     limit:    int             = 50,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
-    KPIs and episode list for one platform.
-    Non-blocking.
+    KPIs and one-row-per-episode list for one platform. Deduplicates the
+    daily snapshots to the latest per episode (so views aren't summed across
+    dates). Scopes to a channel when channel_id is given. Non-blocking.
     """
+    _empty = {"platform": platform, "kpis": {}, "episodes": [],
+              "best_episode": None, "worst_episode": None,
+              "channel_scoped": bool(channel_id)}
     try:
-        records = list_analytics(platform=platform, db_path=db_path, limit=limit)
+        records = list_analytics(platform=platform, db_path=db_path, limit=500)
 
-        # Aggregate KPIs
-        views          = _safe_sum(r.get("views")           for r in records)
-        total_watch    = _safe_sum(r.get("total_watch_time_s") for r in records)
-        avg_ctr        = _safe_avg([r.get("ctr")            for r in records])
-        avg_view_pct   = _safe_avg([r.get("avg_view_pct")   for r in records])
-        avg_watch_time = _safe_avg([r.get("avg_watch_time_s") for r in records])
+        if channel_id:
+            try:
+                from hypogeum.db import get_connection
+                from hypogeum.dashboard_live import _db as _resolve_db
+                conn = get_connection(_resolve_db(db_path))
+                try:
+                    kmap = _analytics_key_channel_map(conn)
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001
+                kmap = {}
+            mine = {k for k, c in kmap.items() if c == channel_id}
+            records = [r for r in records if r.get("episode_id") in mine]
+            if not records:
+                return _empty
 
-        # Best / worst by avg_view_pct
-        scored = [r for r in records if r.get("avg_view_pct") is not None]
+        # latest snapshot per episode
+        latest: dict = {}
+        for r in sorted(records, key=lambda x: x.get("snapshot_date") or ""):
+            latest[r.get("episode_id")] = r
+        rows = sorted(latest.values(), key=lambda r: -(r.get("views") or 0))
+
+        views          = _safe_sum(r.get("views") for r in rows)
+        total_watch    = _safe_sum(r.get("total_watch_time_s") for r in rows)
+        avg_ctr        = _safe_avg([r.get("ctr") for r in rows])
+        avg_view_pct   = _safe_avg([r.get("avg_view_pct") for r in rows])
+        avg_watch_time = _safe_avg([r.get("avg_watch_time_s") for r in rows])
+
+        scored = [r for r in rows if r.get("avg_view_pct") is not None]
         best  = max(scored, key=lambda r: r["avg_view_pct"]) if scored else None
         worst = min(scored, key=lambda r: r["avg_view_pct"]) if scored else None
 
         return {
             "platform": platform,
             "kpis": {
-                "episodes_tracked": len({r["episode_id"] for r in records}),
-                "total_snapshots":  len(records),
-                "avg_ctr":          avg_ctr,
-                "avg_view_pct":     avg_view_pct,
-                "avg_watch_time_s": avg_watch_time,
-                "total_views":      int(views),
+                "episodes_tracked":   len(rows),
+                "total_snapshots":    len(records),
+                "avg_ctr":            avg_ctr,
+                "avg_view_pct":       avg_view_pct,
+                "avg_watch_time_s":   avg_watch_time,
+                "total_views":        int(views),
                 "total_watch_time_s": total_watch,
             },
-            "episodes":      records,
+            "episodes":      rows,
             "best_episode":  best,
             "worst_episode": worst,
+            "channel_scoped": bool(channel_id),
         }
     except Exception:
-        return {
-            "platform": platform,
-            "kpis":     {},
-            "episodes": [],
-            "best_episode":  None,
-            "worst_episode": None,
-        }
+        return _empty
 
 
 # ===========================================================================

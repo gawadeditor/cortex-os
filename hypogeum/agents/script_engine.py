@@ -164,6 +164,14 @@ def run_script_engine(
             "pacing": "open on the hook in the first sentence; no throat-clearing",
         }
 
+    # Channel Learning: hook / pacing directives from this channel's own
+    # retention analytics (hypogeum.channel_learning). Advisory to the model.
+    try:
+        from hypogeum.channel_learning import learning_input_block  # noqa: PLC0415
+        _input_package.update(learning_input_block(channel_id, "hook", "pacing"))
+    except Exception:  # noqa: BLE001
+        pass
+
     script_package = run_agent(
         agent_name=_AGENT_NAME,
         model_slug=_CLAUDE_SONNET,

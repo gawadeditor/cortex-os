@@ -111,6 +111,26 @@ def directive_texts(
         return []
 
 
+def learning_input_block(
+    channel_id: Optional[str], *dimensions: str, db_path: Optional[Path] = None,
+) -> dict:
+    """A compact block for an agent's input_package:
+    {"channel_learning": {dimension: [directive_text, ...], ...}} — only the
+    dimensions that actually have an active directive. {} when nothing
+    applies. Never raises."""
+    if not channel_id:
+        return {}
+    try:
+        block: dict = {}
+        for dim in (dimensions or _ADVISORY_DIMENSIONS):
+            texts = directive_texts(channel_id, dim, db_path=db_path)
+            if texts:
+                block[dim] = texts
+        return {"channel_learning": block} if block else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def deactivate_directive(directive_id: str, *, db_path: Optional[Path] = None) -> bool:
     initialize_schema(db_path)
     conn = get_connection(db_path)

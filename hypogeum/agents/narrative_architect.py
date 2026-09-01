@@ -130,6 +130,14 @@ def run_narrative_architect(
             "tone": "front-load intrigue; every sentence must earn the next",
         }
 
+    # Channel Learning: hook / pacing directives this channel accrued from its
+    # own retention analytics (hypogeum.channel_learning). Advisory to the model.
+    try:
+        from hypogeum.channel_learning import learning_input_block  # noqa: PLC0415
+        _input_package.update(learning_input_block(channel_id, "hook", "pacing"))
+    except Exception:  # noqa: BLE001
+        pass
+
     narrative_package = run_agent(
         agent_name=_AGENT_NAME,
         model_slug=_CLAUDE_OPUS,

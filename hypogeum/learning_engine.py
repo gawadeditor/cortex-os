@@ -281,6 +281,20 @@ def _engagement_insights(
                 "detail": f"Save rate {save_rate:.1%} — strong evergreen / reference value",
             })
 
+    # Comment rate — "did this provoke discussion", distinct from shares
+    comment_rate = _ratio("comments")
+    if comment_rate is not None and comment_rate > 0.01:
+        insights.append({
+            "episode_id":    episode_id,
+            "platform":      platform,
+            "created_at":    now,
+            "insight_type":  "high_discussion",
+            "affected_dim":  "topic",
+            "signal_strength": min(1.0, round(comment_rate * 30, 3)),
+            "threshold_used": "comments/views > 1%",
+            "detail": f"Comment rate {comment_rate:.1%} — topic drives strong discussion; a repeatable angle",
+        })
+
     # Like rate — broad engagement
     like_rate = _ratio("likes")
     if like_rate is not None:

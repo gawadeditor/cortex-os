@@ -191,10 +191,17 @@ def run_topic_ideator(
     except Exception:
         pass
 
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for
+        _brief = channel_brief_for(channel_id)
+    except Exception:  # noqa: BLE001
+        _brief = {}
+
     input_package = {
         "channel_id": channel_id,
         "batch_id":   batch_id,
         "production_format": production_format,
+        "channel_brief": _brief,
         "signal_context": {
             "has_real_analytics":     signal_ctx.get("has_real_analytics", False),
             "avg_ctr":                signal_ctx.get("avg_ctr"),

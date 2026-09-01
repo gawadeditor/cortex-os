@@ -178,15 +178,29 @@ def _build_strategy_brief(
         "topic_category": category,
     }
 
+    # Channel identity: the editorial brief for the active channel, so the CTR
+    # strategist works from THIS channel's genre / audience / tone rather than
+    # any hardcoded default. Resolved from the pipeline-set contextvar.
+    active_channel_id: Optional[str] = None
+    try:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        active_channel_id = channel_identity.current_channel()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for  # noqa: PLC0415
+        brief["channel_brief"] = channel_brief_for(active_channel_id)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Channel Learning: thumbnail directives this channel has accrued from
     # its own analytics (hypogeum.channel_learning). Advisory to the model;
     # empty for a channel with no learning history.
     try:
-        from hypogeum.brand import channel_identity  # noqa: PLC0415
         from hypogeum.channel_learning import directive_texts  # noqa: PLC0415
-        ch = channel_identity.current_channel()
-        if ch:
-            learned = directive_texts(ch, "thumbnail")
+        if active_channel_id:
+            learned = directive_texts(active_channel_id, "thumbnail")
             if learned:
                 brief["channel_thumbnail_learning"] = learned
     except Exception:  # noqa: BLE001

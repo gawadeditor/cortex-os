@@ -23,6 +23,8 @@ Public API:
 
 from __future__ import annotations
 
+from typing import Optional
+
 from hypogeum.config import Config
 
 
@@ -119,6 +121,7 @@ def build_scene_plan_input(
     script_package: dict,
     config: Config,
     episode_id: str,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Build the full input_package for the Claude scene-planning call.
@@ -150,6 +153,11 @@ def build_scene_plan_input(
         ),
         "provider_capabilities": PROVIDER_CAPABILITIES,
     }
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for
+        input_package["channel_brief"] = channel_brief_for(channel_id)
+    except Exception:  # noqa: BLE001
+        pass
 
     if short_native:
         # One vertical deliverable: ONE 9:16 scene per narration beat, so

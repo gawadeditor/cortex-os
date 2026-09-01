@@ -331,6 +331,24 @@ def _tier_provider_family(tier: int, config: Config) -> str:
     return "seedance" if "seedance" in model else "veo"
 
 
+def _bga_allowed_for_active_channel() -> bool:
+    """
+    The Brand Guardian Agent enforces the Hypogeum brand bible exclusively
+    (docs/brand_guardian/brand_bible_hypogeum.json). Running it against any
+    other channel would impose Hypogeum's near-black documentary aesthetic on
+    a channel it does not belong to. Gate BGA to the Hypogeum channel until a
+    per-channel brand-enforcement path exists.
+
+    Returns True when the active channel is Hypogeum or unknown (legacy path).
+    """
+    try:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        ch = (channel_identity.current_channel() or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        return True
+    return ch in ("", "hypogeum")
+
+
 def _resolve_stage_b_mode(scenes: list[dict], config: Config) -> str:
     """
     Determine which provider family(s) are present across a Stage B batch,
@@ -480,7 +498,7 @@ def run_visual_package_director(
     )
     _resolve_output_dir.mkdir(parents=True, exist_ok=True)
 
-    input_package = build_scene_plan_input(script_package, config, episode_id)
+    input_package = build_scene_plan_input(script_package, config, episode_id, channel_id)
 
     constraints = input_package.get("generation_constraints")
     if constraints:
@@ -1161,7 +1179,7 @@ def run_visual_package_director(
     # ------------------------------------------------------------------
     # BGA Pass 1 — brand compliance gate (before MUAPI spend)
     # ------------------------------------------------------------------
-    if config.BGA_ENABLED:
+    if config.BGA_ENABLED and _bga_allowed_for_active_channel():
         from hypogeum.agents.brand_guardian_agent import BGARejectedError, run_bga_pass1
         run_bga_pass1(visual_package, episode_id, config, _resolve_output_dir)
 
@@ -2096,7 +2114,7 @@ def run_visual_package_director_from_plan(
                     )
 
     # BGA Pass 1 — brand compliance gate on resume path (before MUAPI spend)
-    if config.BGA_ENABLED:
+    if config.BGA_ENABLED and _bga_allowed_for_active_channel():
         from hypogeum.agents.brand_guardian_agent import run_bga_pass1
         run_bga_pass1(visual_package, episode_id, config, _resolve_output_dir)
 

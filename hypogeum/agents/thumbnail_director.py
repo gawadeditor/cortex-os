@@ -251,6 +251,7 @@ def run_thumbnail_director(
         episode_id=episode_id,
         output_dir=_resolve_output_dir,
         log=log,
+        channel_id=channel_id,
     )
 
     # ------------------------------------------------------------------

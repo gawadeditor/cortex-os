@@ -331,7 +331,31 @@ def _write_report(report: dict, tig_dir: Path, episode_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _default_identity_rules_resolver(deliverable_class: str):
+    """Resolve the identity contract for `deliverable_class`, honouring the
+    active channel. For a non-Hypogeum channel with its own brand profile the
+    contract is derived from that profile (channel_thumbnail_identity) so its
+    thumbnails are never graded against Hypogeum's cinematic-mystery aesthetic;
+    the Hypogeum channel (and any profile-less channel) keeps the canonical
+    Hypogeum Channel Package rules."""
     from hypogeum.brand.thumbnail_identity_rules import get_thumbnail_identity_rules
+
+    try:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        active = (channel_identity.current_channel() or "").strip()
+    except Exception:  # noqa: BLE001
+        active = ""
+
+    if active and active.lower() != "hypogeum":
+        try:
+            from hypogeum.brand.channel_thumbnail_identity import (  # noqa: PLC0415
+                channel_thumbnail_identity_rules,
+            )
+            derived = channel_thumbnail_identity_rules(active, deliverable_class)
+            if derived is not None:
+                return derived
+        except Exception:  # noqa: BLE001
+            pass
+
     return get_thumbnail_identity_rules(deliverable_class)
 
 

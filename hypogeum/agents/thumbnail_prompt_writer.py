@@ -150,6 +150,7 @@ def write_thumbnail_prompts(
     output_dir: Path,
     log,
     concept_brief: Optional[dict] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Send the Thumbnail Handoff Brief (and optionally a concept brief) to Claude
@@ -195,6 +196,11 @@ def write_thumbnail_prompts(
     }
     if concept_driven:
         input_package["thumbnail_concept_brief"] = concept_brief
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for
+        input_package["channel_brief"] = channel_brief_for(channel_id)
+    except Exception:  # noqa: BLE001
+        pass
 
     generation_plan = run_agent(
         agent_name=_AGENT_NAME,
@@ -206,6 +212,7 @@ def write_thumbnail_prompts(
         max_tokens=config.TD_PLANNING_MAX_TOKENS,
         config=config,
         output_dir=output_dir,
+        channel_id=channel_id,
     )
 
     if concept_driven:

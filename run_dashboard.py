@@ -1647,9 +1647,14 @@ def providers_models_page():
     if request.args.get("sync") == "1":
         _mr.sync_from_muapi(db_path=_db_path())
         return redirect("/providers/models")
+    try:
+        from hypogeum.provider_evidence import leaderboard as _lb
+        evidence = _lb(source="bakeoff", min_n=1, db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        evidence = []
     return render_template(
         "providers_models.html",
-        models=models, by_life=by_life, changed=changed,
+        models=models, by_life=by_life, changed=changed, evidence=evidence,
         total=len(models),
         last_synced=(max((m["last_synced_at"] for m in models), default=None)),
     )

@@ -44,6 +44,31 @@
 </div>
 {% endif %}
 
+{% if evidence %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Evidence — from bake-off runs</div>
+  <p class="muted" style="font-size:11px; margin:2px 0 8px;">
+    Real attempts: success rate, latency, cost, motion. This is what the
+    capability-evolution loop will compare a candidate model against.
+  </p>
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>Model</th><th>n</th><th>Success</th><th>Latency</th><th>Cost</th><th>Motion</th></tr></thead>
+    <tbody>
+    {% for e in evidence %}
+    <tr>
+      <td class="mono" style="font-size:11px;">{{ e.model_id }}</td>
+      <td class="muted">{{ e.n }}</td>
+      <td style="font-variant-numeric:tabular-nums;">{{ '%.0f%%' | format(e.success_rate * 100) }}</td>
+      <td class="muted" style="font-variant-numeric:tabular-nums;">{{ e.avg_latency_s if e.avg_latency_s is not none else '—' }}s</td>
+      <td style="font-variant-numeric:tabular-nums;">{% if e.avg_cost_usd is not none %}${{ '%.3f' | format(e.avg_cost_usd) }}{% else %}—{% endif %}</td>
+      <td class="muted">{{ e.avg_quality if e.avg_quality is not none else '—' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endif %}
+
 {% if changed %}
 <div class="card" style="margin-bottom:var(--gap);">
   <div class="card-title">Recent price changes</div>

@@ -1100,6 +1100,31 @@ CREATE INDEX IF NOT EXISTS idx_mr_category  ON model_registry(category, lifecycl
 CREATE INDEX IF NOT EXISTS idx_mr_lifecycle ON model_registry(lifecycle_status);
 
 -- ---------------------------------------------------------------------------
+-- provider_evidence — one row per real generation attempt: model, outcome,
+-- latency, cost, and (when measurable) a quality proxy. Passive Provider
+-- Learning (Phase 6): the evidence the Factory Evolution loop compares
+-- candidates against. Factory Learning — cross-channel. See
+-- hypogeum/provider_evidence.py.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS provider_evidence (
+    evidence_id    TEXT    NOT NULL PRIMARY KEY,
+    provider       TEXT    NOT NULL DEFAULT 'muapi',
+    model_id       TEXT    NOT NULL,
+    source         TEXT    NOT NULL,   -- 'bakeoff' | 'production' | ...
+    ok             INTEGER NOT NULL,
+    failure_reason TEXT,
+    latency_s      REAL,
+    cost_usd       REAL,
+    quality_proxy  REAL,               -- e.g. motion score 0-100, or None
+    duration_s     REAL,
+    channel_id     TEXT,
+    episode_id     TEXT,
+    recorded_at    TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pe_model ON provider_evidence(model_id, recorded_at);
+
+-- ---------------------------------------------------------------------------
 -- Phase E Views
 -- ---------------------------------------------------------------------------
 

@@ -407,6 +407,18 @@ def _execute_run(run_id, run_dir, prompt, models, aspect_ratio, config, price_ma
                           run_dir / f"{_safe(model)}.mp4", config, 8.0,
                           price_map.get(model, 2.5))
         results.append(r)
+        # Passive Provider Learning — every bake-off clip is real evidence.
+        try:
+            from hypogeum.provider_evidence import record as _pe_record
+            _pe_record("muapi", model, source="bakeoff", ok=r["ok"],
+                       failure_reason=r.get("error"), latency_s=r.get("latency_s"),
+                       cost_usd=(r["price_usd"] if r["ok"] and not
+                                 getattr(config, "MUAPI_DRY_RUN", False) else None),
+                       quality_proxy=r.get("motion_score"),
+                       duration_s=r.get("duration_s"),
+                       channel_id=get_bakeoff(run_id).get("channel_id"))
+        except Exception:  # noqa: BLE001
+            pass
         manifest["results"] = results
         manifest["done"] = i + 1
         manifest["now_running"] = models[i + 1] if i + 1 < len(models) else None

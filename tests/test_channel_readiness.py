@@ -71,3 +71,26 @@ def test_missing_channel_is_safe(db):
     r = get_channel_readiness("nope", db_path=db)
     assert r["ready"] is False
     assert r["items"]  # produced items, did not raise
+
+
+def _item(r, id_):
+    return next((i for i in r["items"] if i["id"] == id_), None)
+
+
+def test_configured_but_not_activated_channel_shows_activation_item(db):
+    _seed(db)
+    r = get_channel_readiness("ch1", db_path=db)
+    act = _item(r, "channel.activated")
+    assert act is not None
+    # a fresh channel is in 'draft' CALOG state -> not activated
+    assert act["level"] in ("blocker", "warn")
+    assert "not activated" in act["title"].lower()
+
+
+def test_activated_channel_shows_ok_activation_item(db):
+    _seed(db)
+    from hypogeum.calog import set_channel_state
+    set_channel_state("ch1", "active", db_path=db)
+    r = get_channel_readiness("ch1", db_path=db)
+    act = _item(r, "channel.activated")
+    assert act is not None and act["level"] == "ok"

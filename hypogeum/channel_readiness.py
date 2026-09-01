@@ -47,6 +47,7 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
     items: list[dict] = []
 
     # ── 1. activation gates (calog) ─────────────────────────────────────
+    _gates_all_pass = True
     try:
         from hypogeum.calog import run_activation_check  # noqa: PLC0415
         res = run_activation_check(channel_id, db_path=db_path)
@@ -54,13 +55,52 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
             if g.passed:
                 items.append(_item(f"gate.{g.gate}", "ok", _GATE_TITLE.get(g.gate, g.gate), g.reason))
             else:
+                _gates_all_pass = False
                 items.append(_item(
                     f"gate.{g.gate}", "blocker", _GATE_TITLE.get(g.gate, g.gate), g.reason,
                     _GATE_FIX.get(g.gate),
                 ))
     except Exception as exc:  # noqa: BLE001
+        _gates_all_pass = False
         items.append(_item("gate.error", "warn", "Activation gates",
                            f"could not evaluate activation gates: {exc}"))
+
+    # ── 1b. actually activated? (calog state machine) ──────────────────
+    # The gates above only say activation is ALLOWED. A channel whose gates
+    # all pass but whose CALOG state is still 'draft'/'configured' has never
+    # been activated — the autonomous worker skips it every tick with
+    # "not runnable (state: 'draft')", which is invisible to an operator
+    # staring at an all-green readiness panel. This is the single item that
+    # tells them the channel is switched off and how to switch it on.
+    try:
+        from hypogeum.calog import get_channel_state  # noqa: PLC0415
+        _state = get_channel_state(channel_id, db_path=db_path)
+        _activate_fix = (f"Click Activate on this channel's page "
+                         f"(or POST /api/channels/{channel_id}/activate).")
+        if _state == "active":
+            items.append(_item("channel.activated", "ok", "Channel activated",
+                               "the channel is live — the worker will pick up its queued work."))
+        elif _state in ("draft", "configured"):
+            items.append(_item(
+                "channel.activated",
+                "blocker" if _gates_all_pass else "warn",
+                "Channel not activated",
+                f"the channel is in '{_state}' state and has never been activated, so the "
+                f"autonomous worker skips it every cycle. "
+                + ("All activation gates pass — one click switches it on."
+                   if _gates_all_pass else "Clear the activation-gate blockers above first."),
+                _activate_fix if _gates_all_pass else None,
+            ))
+        elif _state == "paused":
+            items.append(_item("channel.activated", "warn", "Channel paused",
+                               "the channel was activated then paused — the worker will not run it.",
+                               f"Resume it (POST /api/channels/{channel_id}/resume)."))
+        else:  # blocked / archived / error
+            items.append(_item("channel.activated", "blocker", "Channel not runnable",
+                               f"the channel is in '{_state}' state — the worker will not run it."))
+    except Exception as exc:  # noqa: BLE001
+        items.append(_item("channel.activated", "warn", "Channel activation state",
+                           f"could not read activation state: {exc}"))
 
     # ── 2. runtime status (grant, worker, schedule, weekly budget) ──────
     rt: dict = {}

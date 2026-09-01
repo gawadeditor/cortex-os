@@ -100,6 +100,20 @@
         <span class="ok">{{ c.ok }} ok</span>
       </div>
     </div>
+    {% set act = readiness['items'] | selectattr('id', 'equalto', 'channel.activated') | list | first %}
+    {% if act and act.level != 'ok' and 'not activated' in act.title | lower and act.fix %}
+    <div class="rd-item" style="align-items:center;">
+      <span class="rd-mark rd-blocker">✕</span>
+      <div style="flex:1;">
+        <div class="rd-title">This channel is switched off</div>
+        <div class="rd-detail">{{ act.detail }}</div>
+      </div>
+      <button class="btn btn-primary" style="white-space:nowrap;"
+              onclick="this.disabled=true;this.textContent='Activating…';fetch('/api/channels/{{ channel.channel_id|e }}/activate',{method:'POST'}).then(r=>r.json()).then(d=>{if(d.ok){location.reload()}else{this.disabled=false;this.textContent='Activate channel';alert(d.failure_reason||d.error||'activation failed')}})">
+        Activate channel
+      </button>
+    </div>
+    {% endif %}
     {% for i in readiness['items'] %}
     <div class="rd-item">
       <span class="rd-mark rd-{{ i.level }}">{{ '✓' if i.level == 'ok' else ('!' if i.level == 'warn' else '✕') }}</span>

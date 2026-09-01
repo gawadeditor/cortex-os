@@ -7175,6 +7175,31 @@ def intelligence_sync_page():
         "facebook":  _cred_state("facebook"),
     }
 
+    # Channel scope: drive the cards from this channel's Zernio bindings.
+    channel_bindings = {}
+    if _sync_ch:
+        try:
+            from hypogeum.publishing.provider_repository import resolve_active_binding
+            from hypogeum.db import get_connection as _gc
+            _acc = {}
+            _c = _gc(_db_path())
+            try:
+                for row in _c.execute(
+                    "SELECT provider_account_id, display_label, external_account_id, status "
+                    "FROM provider_accounts"):
+                    _acc[row["provider_account_id"]] = dict(row)
+            finally:
+                _c.close()
+            for p in ("youtube", "tiktok", "instagram", "facebook"):
+                b = resolve_active_binding(_db_path(), channel_id=_sync_ch,
+                                           capability="publishing", platform=p)
+                channel_bindings[p] = {
+                    "bound": bool(b),
+                    "account": _acc.get(b["provider_account_id"]) if b else None,
+                }
+        except Exception:  # noqa: BLE001
+            channel_bindings = {}
+
     flash = request.args.get("flash")
     return render_template(
         "analytics_sync.html",
@@ -7183,6 +7208,7 @@ def intelligence_sync_page():
         sync_log=sync_log,
         last_sync_by_platform=last_sync_by_platform,
         platform_creds=platform_creds,
+        channel_bindings=channel_bindings,
         flash=flash,
     )
 

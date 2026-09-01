@@ -33,22 +33,14 @@
 
 <div class="container">
 
-{% include '_intelligence_subnav.html' %}
-
-{# ── Performance sub-nav ── #}
+{% set _q = ('?scope=' ~ scope_channel) if scope_channel else '' %}
 <div class="sub-nav">
-  <a href="/intelligence/performance"          class="sub-nav-link">Portfolio</a>
-  <a href="/intelligence/platform/youtube"     class="sub-nav-link">YouTube</a>
-  <a href="/intelligence/platform/tiktok"      class="sub-nav-link">TikTok</a>
-  <a href="/intelligence/platform/instagram"   class="sub-nav-link">Instagram</a>
-  <a href="/intelligence/platform/facebook"    class="sub-nav-link">Facebook</a>
-  <a href="/intelligence/sync"                 class="sub-nav-link active">Sync Health</a>
-</div>
-
-<div class="breadcrumb">
-  <a href="/intelligence/performance">Intelligence</a>
-  <span class="breadcrumb-sep">/</span>
-  <span>Sync Health</span>
+  <a href="/intelligence/performance{{ _q }}"        class="sub-nav-link">Portfolio</a>
+  <a href="/intelligence/platform/youtube{{ _q }}"   class="sub-nav-link">YouTube</a>
+  <a href="/intelligence/platform/tiktok{{ _q }}"    class="sub-nav-link">TikTok</a>
+  <a href="/intelligence/platform/instagram{{ _q }}" class="sub-nav-link">Instagram</a>
+  <a href="/intelligence/platform/facebook{{ _q }}"  class="sub-nav-link">Facebook</a>
+  <a href="/intelligence/sync{{ _q }}"               class="sub-nav-link active">Sync Health</a>
 </div>
 
 <div class="page-header">
@@ -76,6 +68,39 @@
 {% endif %}
 
 {# ── Per-platform cards ── #}
+{% if scope_channel and channel_bindings %}
+<div class="platform-grid">
+  {% for p in ['youtube', 'tiktok', 'instagram', 'facebook'] %}
+  {% set cb = channel_bindings.get(p, {}) %}
+  {% set last = last_sync_by_platform.get(p) %}
+  <div class="platform-card {% if cb.bound %}platform-card-ok{% endif %}">
+    <div class="platform-name">
+      <span class="perf-dot {% if cb.bound %}perf-dot-ok{% else %}perf-dot-warn{% endif %}"></span>
+      {{ p | capitalize }}
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">Account</span>
+      <span class="stat-val {% if cb.bound %}ok{% else %}warn{% endif %}" style="font-family:sans-serif;">
+        {% if cb.bound %}{{ cb.account.display_label if cb.account else 'connected' }}{% else %}not connected{% endif %}
+      </span>
+    </div>
+    <div class="platform-stat">
+      <span class="stat-lbl">Last sync</span>
+      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
+        {% if last %}{{ last.synced_at[:19].replace("T"," ") }}{% else %}—{% endif %}
+      </span>
+    </div>
+    <div style="margin-top:8px;">
+      <a href="/channel/{{ scope_channel }}/publishing?scope={{ scope_channel }}" class="btn" style="font-size:11px;">
+        {% if cb.bound %}Manage →{% else %}Connect via Zernio →{% endif %}
+      </a>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+
+{# factory scope — legacy direct-connection view #}
 <div class="platform-grid">
 
   {# YouTube — auto-sync #}
@@ -230,6 +255,7 @@
   </div>
 
 </div>
+{% endif %}{# /channel-vs-factory #}
 
 {# ── Sync log ── #}
 <div class="card" style="padding:12px 16px; margin-bottom:var(--gap);">
@@ -248,7 +274,11 @@
   </div>
   {% endfor %}
   {% else %}
-  <div style="color:var(--muted); font-size:13px;">No sync history yet. Sync runs automatically in the background when YouTube is connected.</div>
+  <div style="color:var(--muted); font-size:13px;">
+    No sync history {% if scope_channel %}for this channel {% endif %}yet.
+    Analytics sync runs automatically in the background once the platform
+    accounts are connected.
+  </div>
   {% endif %}
 </div>
 

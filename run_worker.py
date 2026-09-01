@@ -92,6 +92,7 @@ _DEFAULT_INTERVAL = 60  # seconds between iterations
 # Override with env var ANALYTICS_SYNC_EVERY_N_ITERATIONS.
 import os as _os
 _ANALYTICS_SYNC_EVERY_N = int(_os.environ.get("ANALYTICS_SYNC_EVERY_N_ITERATIONS", "60"))
+_HEALTH_CHECK_EVERY_N = int(_os.environ.get("HEALTH_CHECK_EVERY_N_ITERATIONS", "5"))
 
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1145,23 @@ def run_iteration(
             log.info("publishing_skipped_not_cleared reason=%s", clearance.reason)
     else:
         publishing_result = {"skipped_reason": "auto_zernio_publishing_disabled"}
+
+    # Runtime health sweep — run_all_checks() emits an OIS signal (and, if a
+    # notification channel is configured, an operator alert via
+    # hypogeum.notifications.route_signal) for worker/queue/stuck-run/
+    # repeated-failure/provider/disk/memory/backup problems. Previously only
+    # run when the dashboard health endpoint was hit — never periodically.
+    if not dry_run and iteration % _HEALTH_CHECK_EVERY_N == 0:
+        try:
+            from hypogeum.observability import run_all_checks
+            _hc = run_all_checks(db_path=db_path, config=config)
+            if not _hc.get("healthy", True):
+                _bad = [c["check"] for c in _hc.get("checks", []) if not c.get("healthy")]
+                log.warning("health_sweep unhealthy=%s", _bad)
+            else:
+                log.debug("health_sweep ok")
+        except Exception as exc:  # noqa: BLE001
+            log.error("health_sweep_error error=%s", exc)
 
     # Step 4: background analytics sync — every _ANALYTICS_SYNC_EVERY_N iterations
     analytics_synced = False

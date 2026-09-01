@@ -68,7 +68,7 @@ _AGENT_PROMPT_ATTRS = {
     "script_engine":            ("hypogeum.agents.script_engine",            "SYSTEM_PROMPT"),
     "visual_package_director":  ("hypogeum.agents.visual_package_director",  "SYSTEM_PROMPT"),
     "thumbnail_prompt_writer":  ("hypogeum.agents.thumbnail_prompt_writer",  "SYSTEM_PROMPT"),
-    "thumbnail_identity_guardian": ("hypogeum.agents.thumbnail_identity_guardian", "_SYSTEM_PROMPT"),
+    "thumbnail_identity_guardian": ("hypogeum.agents.thumbnail_identity_guardian", "_GENERIC_TEMPLATE"),
     "brand_guardian_agent":     ("hypogeum.agents.brand_guardian_agent",     "SYSTEM_PROMPT"),
     "topic_ideator":            ("hypogeum.discovery.topic_ideator",         "SYSTEM_PROMPT"),
     "thumbnail_strategy":       ("hypogeum.agents.thumbnail_strategy",       "SYSTEM_PROMPT"),

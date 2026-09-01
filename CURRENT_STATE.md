@@ -26,29 +26,83 @@ Its purpose is to answer one question:
 
 Current Phase
 
-Phase 2 complete (exit criteria met); Phase 3 (Production Hardening) is
-now active — see `CURRENT_PHASE.md`
+Phases 0–3 complete (Phase 3 P0 shipped 2026-07-27). Work since has run
+ahead of the strict roadmap order toward a **sellable multi-channel
+product** — see "Since the 2026-07-28 sync" below.
 
-Roadmap Progress
+Roadmap Progress (as of 2026-09-01)
 
-Foundation → Largely Complete
+Foundation (P0) → Complete
 
-Autonomous Production → Operational, validated end-to-end
+Autonomous Production (P1) → Complete; multi-platform publishing now via
+Zernio (YouTube/TikTok/Instagram/Facebook connected + bound for Hypogeum)
 
-Autonomous Runtime → Core objectives met, monitoring and recovery hardening in progress
+Autonomous Runtime (P2) → Core met; sustained burn-in still thin (days,
+not weeks) — the open Release-Candidate item
 
-Analytics → Partial
+Production Hardening (P3) → P0 complete; plus weekly budget ceiling,
+ADR-016 operating grants, operator-readable signals layer
 
-Learning → Early Stage
+Analytics (P4) → Partial — real per-channel analytics (source='api'
+only), factory + channel rollup KPIs, per-platform pages. No
+recommendation/optimisation engine.
 
-Multi-Channel → Planned
+Learning (P5) → Early — `learning_engine.py` wired into the worker loop
+(`_run_learning_cycle`), Factory/Channel split, cadence recommendations.
+Data-starved: ~2 actions applied.
 
-Commercial Platform → Planned
+Factory Capability Evolution (P6) → Precursor only — the Video Model
+Bake-off (97-model live catalogue, per-channel adoption wired to
+production). No registry, no automated promote/rollback loop.
 
-Documentation → Synchronized with implementation as of 2026-07-25 (Cortex
-Constitution adopted, Architecture Alignment Report reviewed, ADR-008
-recorded for Service Layer convergence). Documentation work is closed
-until implementation materially changes reality.
+Asset Intelligence (P7) → Mostly shipped ahead of order — archive
+catalog, browser, post-publish relocation to a configurable root, reuse
+provenance fields.
+
+Multi-Channel (P8) → **Live, ahead of order.** `twinkle_mini_tales` runs
+as a full Channel Package (scaffolded from template, grant signed,
+schedule active). Isolation mostly holds; per-channel brand identity is
+a first increment in (video scene prompts); thumbnails + per-channel
+brand bibles pending.
+
+Commercial Platform (P9) → Started — "sellable to non-technical
+operators" is the working directive; dashboard-native grant signing,
+plain-language operator surfaces. No orgs/accounts/billing/white-label.
+
+Ecosystem (P10) → Not started.
+
+Documentation → Re-synced 2026-09-01 for the ~300 commits since the
+2026-07-28 sync. `ROADMAP.md` phase definitions still stand; this file is
+the current state snapshot.
+
+---
+
+# Since the 2026-07-28 sync
+
+The following shipped after the last documentation sync and is not
+reflected in older sections below:
+
+- **Weekly production budget enforcement** — per-channel weekly paid-video
+  ceiling, an authoritative pre-plan cost model, plan-bound reservations.
+- **ADR-016 Channel Operating Grant** — sign-once-per-channel autonomous
+  authorization, wired into the daily path; signable from the dashboard
+  via a short-lived subprocess (the runtime never holds the private key).
+- **Zernio publishing** — replaced direct per-platform OAuth for
+  TikTok/Instagram/Facebook/YouTube; per-channel account binding.
+- **Multi-channel** — Channel Package scaffolding from a template on
+  channel creation; `twinkle_mini_tales` created, granted, scheduled.
+- **Asset archive** — catalog + browser + configurable archive root
+  (`/Volumes/Archive/Hypogeum`) + post-publish whole-tree relocation;
+  both published Hypogeum episodes relocated.
+- **Dashboard** — restructured around a Factory⇄Channel split (left-rail
+  scope switcher, per-channel Publishing/Settings/Operating-Grant),
+  operator-readable signals layer, Zernio-centric Sync Health, the Video
+  Model Bake-off, Factory/Channel rollup KPIs.
+- **Per-channel video model + visual identity** — a channel's bake-off
+  model choice drives its production; a channel with its own BrandProfile
+  gets its own video-scene brand directive.
+- **cleanup_factory_state** — keep-only-published-episodes cleanup;
+  superseded-run + dead-queue categories.
 
 ---
 
@@ -304,7 +358,6 @@ Remaining
 
 The following major systems are intentionally deferred.
 
-- Multi-channel execution
 - Organization management
 - White-label deployment
 - Marketplace
@@ -313,42 +366,43 @@ The following major systems are intentionally deferred.
 - Billing
 - Licensing
 
+(Multi-channel execution moved out of this list 2026-09-01 — a second
+channel is live. See Roadmap Progress above.)
+
 ---
 
 # Current Priorities
 
-The current implementation priorities are:
+Phase 3 P0 is complete. Priorities as of 2026-09-01 follow the North Star
+Completion Plan (companion doc), which sequences six tracks:
 
-1. Complete Phase 3 (Production Hardening) P0, one capability at a time,
-   in order: Log Rotation, Recovery System, Runtime Observability,
-   Recovery & Self-Healing, Startup & Shutdown Verification. See
-   `CURRENT_PHASE.md` and `CURRENT_PROGRESS.md` for full scope and live
-   status — this supersedes the former "strengthen runtime monitoring
-   and recovery" priority, which is now this item's P0.3/P0.4 in detail
-   rather than a single line here.
+1. **Channel identity (Track A)** — make per-channel brand/visual identity
+   reach every generation surface, so a cloned channel is a real business
+   not a re-skin. First increment shipped (video scene prompts); thumbnail
+   path + per-channel brand bibles next.
 
-2. Continue burn-in observation until sustained (not single-instance)
-   autonomous reliability is demonstrated (5–10 unattended runs per
-   `ROADMAP.md`'s Release Candidate Criteria).
+2. **Sustained operation → Release Candidate (Track B)** — accumulate
+   5–10 unattended runs across both channels; wire the P0.3 monitoring
+   signals to a real alert channel; runbooks; queue/run janitor. DB backup
+   is scheduled (launchd, 6h) and healthy.
 
-3. Complete multi-platform publishing: Facebook verification (paused
-   mid-task, resume after burn-in priority clears), then resolve the two
-   external blockers (Instagram staging URL, Facebook/TikTok scope
-   re-authorization) — operator-owned, not code work.
+3. **Learning loop maturity (Track C)** — the loop runs but is
+   data-starved. Broaden the InsightRule set, close the prompt/thumbnail/
+   topic-learning stubs. Gated on Track B accumulating episodes + analytics.
 
-4. Complete analytics feedback loops. — Blocked until priority 1 (Phase 3
-   P0) is complete, per `ROADMAP.md`'s Phase 4 gating note.
+4. **Factory Capability Evolution (Track D)** — Phase 3-P1 registry
+   substrate, then the automated discover→benchmark→canary→promote loop.
+   Gated on Track C's Factory Learning evidence.
 
-5. Expand learning systems. — Blocked until priority 1 (Phase 3 P0) is
-   complete, per `ROADMAP.md`'s Phase 5 gating note.
+5. **Productization (Track E)** — start the Service-layer refactor now
+   (move OAuth/business logic out of route handlers); the org/billing/
+   white-label layer after A+B+C.
 
-No new strategic feature work should bypass these priorities unless it directly removes a blocker.
+6. **Doc re-sync (Track F)** — this pass; then each track updates these
+   docs as it lands.
 
-Superseded: "Complete reliable autonomous runtime" and "Achieve
-unattended end-to-end production" (the two former top priorities) are
-substantially achieved — see Autonomous Runtime above — and are folded
-into priority 1's sustained-reliability bar rather than listed as
-separate open items.
+The two external publishing items (Instagram staging URL, Facebook/TikTok
+scope) are now moot for normal operation — publishing runs through Zernio.
 
 ---
 

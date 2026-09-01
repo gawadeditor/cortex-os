@@ -519,7 +519,8 @@ def qualify_asset(
     caller should persist), False if nothing needed to change.
     """
     required_width, required_height = required_source_resolution(
-        source_type, short_native=bool(getattr(config, "SHORT_NATIVE_MODE", False)),
+        source_type,
+        short_native=getattr(config, "SHORT_NATIVE_MODE", False) is True,
     )
     scene_id = asset.get("scene_id", "")
 

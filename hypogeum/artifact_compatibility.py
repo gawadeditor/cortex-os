@@ -572,7 +572,8 @@ def evaluate_source_enhancement_compatibility(
         )
 
     required_width, required_height = required_source_resolution(
-        source_type, short_native=bool(getattr(config, "SHORT_NATIVE_MODE", False)),
+        source_type,
+        short_native=getattr(config, "SHORT_NATIVE_MODE", False) is True,
     )
     if se.get("required_width") != required_width or se.get("required_height") != required_height:
         reasons.append(

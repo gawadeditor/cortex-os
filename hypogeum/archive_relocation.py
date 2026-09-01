@@ -125,7 +125,12 @@ def _rows_already_relocated(episode_id: str, db_path: Optional[Path]) -> Optiona
 def _move_tree(src: Path, dst: Path) -> tuple[list[tuple[Path, Path]], int]:
     """Move every file under src into the mirrored location under dst.
     Returns (moved_pairs, bytes_moved). Raises on the first failure so the
-    caller can roll back."""
+    caller can roll back.
+
+    Uses shutil.copy (not copy2) as the cross-device copy function: network
+    shares (SMB/AFP) reject the metadata/xattr copy copy2 attempts and raise
+    OSError(EINVAL). Content + basic mode are preserved; timestamps are not.
+    """
     moved: list[tuple[Path, Path]] = []
     total = 0
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
@@ -133,7 +138,7 @@ def _move_tree(src: Path, dst: Path) -> tuple[list[tuple[Path, Path]], int]:
         target = dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         size = path.stat().st_size
-        shutil.move(str(path), str(target))
+        shutil.move(str(path), str(target), copy_function=shutil.copy)
         moved.append((path, target))
         total += size
     return moved, total
@@ -144,7 +149,7 @@ def _rollback(moved: list[tuple[Path, Path]]) -> None:
         try:
             original.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
-                shutil.move(str(target), str(original))
+                shutil.move(str(target), str(original), copy_function=shutil.copy)
         except Exception:  # noqa: BLE001
             pass
 

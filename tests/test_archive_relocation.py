@@ -141,11 +141,11 @@ def test_rollback_on_move_failure(dbp, tmp_path, monkeypatch):
     calls = {"n": 0}
     real_move = rl.shutil.move
 
-    def flaky_move(s, d):
+    def flaky_move(s, d, **kw):
         calls["n"] += 1
         if calls["n"] == 2:
             raise OSError("disk full")
-        return real_move(s, d)
+        return real_move(s, d, **kw)
 
     monkeypatch.setattr(rl.shutil, "move", flaky_move)
     rec = rl.relocate_episode_assets(episode_id, db_path=dbp, output_dir=ep_dir,

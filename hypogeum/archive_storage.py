@@ -103,7 +103,9 @@ def describe_archive_root(db_path: Optional[Path] = None) -> dict:
     total = used = free = None
     try:
         usage = shutil.disk_usage(root)
-        total, used, free = usage.total, usage.used, usage.free
+        total, free = usage.total, usage.free
+        # network (SMB/AFP) volumes can report a nonsensical `used`; derive it.
+        used = max(0, (total - free) if total and free is not None else usage.used)
     except Exception:
         pass
 

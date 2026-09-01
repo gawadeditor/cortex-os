@@ -2324,8 +2324,9 @@ def _local_episodes_with_video() -> list[dict]:
     return out
 
 
-@app.route("/providers/video-test")
-def video_test_page():
+@app.route("/providers/video-test/clips")
+def video_test_clips_page():
+    """Legacy per-clip inspector for a produced episode (freeze / duration QA)."""
     available = _local_episodes_with_video()
     episode_id = request.args.get("episode") or (
         available[0]["episode_id"] if available else ""
@@ -2343,6 +2344,103 @@ def video_test_page():
         episode_id=episode_id,
         available=available,
     )
+
+
+@app.route("/providers/video-test")
+def video_test_page():
+    """Video Model bake-off: one prompt, several MUAPI models, price first."""
+    from hypogeum import video_bakeoff as _bo
+    from hypogeum.channel_config import list_channel_profiles, get_model_profile
+
+    channels = list_channel_profiles(status="active", db_path=_db_path())
+    sel = request.args.get("channel") or _scope_channel() or (
+        channels[0].channel_id if channels else "")
+    aspect = request.args.get("aspect") or "16:9"
+
+    prompt_pack = None
+    current_model = None
+    if sel:
+        prompt_pack = _bo.build_channel_scene_prompt(sel, aspect_ratio=aspect, db_path=_db_path())
+        ch = next((c for c in channels if c.channel_id == sel), None)
+        if ch and ch.model_profile_id:
+            mp = get_model_profile(ch.model_profile_id, db_path=_db_path())
+            current_model = mp.video_model if mp else None
+
+    run = None
+    run_id = request.args.get("run")
+    if run_id:
+        run = _bo.get_bakeoff(run_id)
+
+    return render_template(
+        "video_bakeoff.html",
+        channels=[{"channel_id": c.channel_id, "name": getattr(c, "name", "") or c.channel_id}
+                  for c in channels],
+        selected_channel=sel,
+        aspect=aspect,
+        models=_bo.list_video_models(),
+        prompt_pack=prompt_pack,
+        current_model=current_model,
+        run=run,
+        history=_bo.list_bakeoffs(sel or None, limit=10),
+        flash=request.args.get("flash"),
+    )
+
+
+@app.route("/api/providers/video-test/estimate", methods=["POST"])
+def api_video_bakeoff_estimate():
+    from hypogeum import video_bakeoff as _bo
+    body = request.get_json(silent=True) or {}
+    return jsonify(_bo.estimate_cost(body.get("models") or []))
+
+
+@app.route("/providers/video-test/run", methods=["POST"])
+def video_bakeoff_run():
+    from hypogeum import video_bakeoff as _bo
+    channel_id = (request.form.get("channel") or "").strip()
+    prompt     = (request.form.get("prompt") or "").strip()
+    aspect     = (request.form.get("aspect") or "16:9").strip()
+    models     = request.form.getlist("models")
+    try:
+        manifest = _bo.run_bakeoff(channel_id, prompt, models,
+                                   aspect_ratio=aspect, db_path=_db_path())
+    except Exception as exc:  # noqa: BLE001
+        return redirect(f"/providers/video-test?channel={channel_id}&flash={exc}")
+    return redirect(f"/providers/video-test?channel={channel_id}&run={manifest['run_id']}")
+
+
+@app.route("/providers/video-test/adopt", methods=["POST"])
+def video_bakeoff_adopt():
+    from hypogeum.channel_config import (
+        list_channel_profiles, get_model_profile, update_model_profile,
+        create_model_profile, update_channel_profile,
+    )
+    channel_id = (request.form.get("channel") or "").strip()
+    model      = (request.form.get("model") or "").strip()
+    ch = next((c for c in list_channel_profiles(db_path=_db_path())
+               if c.channel_id == channel_id), None)
+    if not ch or not model:
+        return redirect(f"/providers/video-test?channel={channel_id}&flash=adopt+failed")
+    mp_id = ch.model_profile_id
+    if not mp_id:
+        mp = create_model_profile(f"{channel_id} models", db_path=_db_path())
+        mp_id = mp.model_profile_id
+        try:
+            update_channel_profile(channel_id, model_profile_id=mp_id, db_path=_db_path())
+        except Exception:  # noqa: BLE001
+            pass
+    update_model_profile(mp_id, db_path=_db_path(), video_model=model)
+    _audit_note(f"video model for {channel_id} set to {model} via bake-off")
+    return redirect(f"/providers/video-test?channel={channel_id}&flash=adopted+{model}")
+
+
+@app.route("/api/providers/video-test/bakeoff-clip/<run_id>/<path:model>")
+def api_video_bakeoff_clip(run_id: str, model: str):
+    from flask import send_file
+    from hypogeum import video_bakeoff as _bo
+    p = _bo.clip_path(run_id, model)
+    if not p:
+        return jsonify({"error": "clip not found"}), 404
+    return send_file(str(p), mimetype="video/mp4", conditional=True)
 
 
 @app.route("/api/providers/video-test/clip/<episode_id>/<scene_id>")

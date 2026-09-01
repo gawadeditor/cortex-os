@@ -241,6 +241,10 @@ class ModelProfile:
     narration_voice_id: Optional[str] = None
     image_provider:    str            = "muapi"
     video_provider:    str            = "muapi"
+    # Per-channel video model slug (e.g. "veo3.1-lite-text-to-video"), chosen
+    # via the Video Model bake-off (hypogeum.video_bakeoff). None = fall back
+    # to the global MUAPI tier configuration.
+    video_model:       Optional[str]  = None
     created_at:        str            = ""
     metadata_version:  str            = METADATA_VERSION
 
@@ -545,6 +549,7 @@ def _ensure_tables(conn) -> None:
     conn.commit()
     _apply_publishing_profile_column_migrations(conn)
     _apply_channel_operations_profile_column_migrations(conn)
+    _apply_model_profile_column_migrations(conn)
 
 
 # SQLite does not support ALTER TABLE ADD COLUMN IF NOT EXISTS. This table is
@@ -599,6 +604,23 @@ _CHANNEL_OPERATIONS_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # <= 0 are rejected at write time by _validate_operations_fields().
     ("weekly_video_budget_usd", "REAL"),
 ]
+
+
+_MODEL_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    # 2026-09-01: per-channel video model chosen via the Video Model bake-off
+    # (hypogeum.video_bakeoff). NULL = use the global MUAPI tier config.
+    ("video_model", "TEXT"),
+]
+
+
+def _apply_model_profile_column_migrations(conn) -> None:
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(model_profiles)").fetchall()
+    }
+    for col_name, col_def in _MODEL_PROFILE_COLUMN_MIGRATIONS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE model_profiles ADD COLUMN {col_name} {col_def}")
+    conn.commit()
 
 
 def _apply_channel_operations_profile_column_migrations(conn) -> None:
@@ -675,6 +697,7 @@ def _row_to_model(row) -> ModelProfile:
         narration_voice_id= row["narration_voice_id"],
         image_provider    = row["image_provider"],
         video_provider    = row["video_provider"],
+        video_model       = (row["video_model"] if "video_model" in row.keys() else None),
         created_at        = row["created_at"],
         metadata_version  = row["metadata_version"],
     )
@@ -1116,7 +1139,7 @@ def update_model_profile(
     _allowed = {
         "name", "episode_producer", "research_director", "thumbnail_planner",
         "brand_guardian_p1", "brand_guardian_p2", "narration_voice_id",
-        "image_provider", "video_provider",
+        "image_provider", "video_provider", "video_model",
     }
     try:
         assignments, params = [], []

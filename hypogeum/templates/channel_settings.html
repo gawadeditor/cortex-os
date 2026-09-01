@@ -43,7 +43,9 @@
       <div class="cs-fr"><span class="k">Research director</span><span class="v mono">{{ model.research_director or '—' }}</span></div>
       <div class="cs-fr"><span class="k">Narration voice</span><span class="v mono">{{ model.narration_voice_id or '—' }}</span></div>
       <div class="cs-fr"><span class="k">Image / video</span><span class="v mono">{{ model.image_provider or '—' }} / {{ model.video_provider or '—' }}</span></div>
+      <div class="cs-fr"><span class="k">Video model</span><span class="v mono">{{ model.video_model or 'default (global tier config)' }}</span></div>
       <a href="/model/{{ channel.model_profile_id }}/edit" class="btn" style="margin-top:10px;">{{ icon('pencil') }} Edit models</a>
+      <a href="/providers/video-test?channel={{ channel.channel_id }}" class="btn" style="margin-top:10px;">Compare video models →</a>
       {% else %}<p class="page-meta">No model profile.</p>{% endif %}
     </div>
 

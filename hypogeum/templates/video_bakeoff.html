@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Video Model Bake-off — Cortex</title>
+  {% include '_base_style.html' %}
+  <style>
+    .bo-form   { display: grid; gap: 14px; }
+    .bo-row    { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .bo-label  { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+                 color: var(--muted); }
+    select, textarea, input[type=text] {
+      background: var(--surface); color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit; }
+    textarea { width: 100%; min-height: 150px; line-height: 1.5; resize: vertical;
+               font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr));
+                  gap: 8px; }
+    .model-opt  { display: flex; gap: 8px; align-items: baseline; padding: 8px 10px;
+                  border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+    .model-opt.on { border-color: var(--accent, var(--info)); background: var(--raised); }
+    .model-opt .price { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 700; }
+    .model-opt .note  { font-size: 11px; color: var(--muted); display: block; }
+    .cost-box  { background: var(--raised); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 12px 14px; font-size: 13px; }
+    .cost-total { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .res-grid  { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px,1fr));
+                 gap: var(--gap); }
+    .res-card  { background: var(--surface); border: 1px solid var(--border);
+                 border-radius: var(--radius); overflow: hidden; }
+    .res-card.fail { border-color: var(--critical); }
+    .res-card video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
+    .res-body  { padding: 10px 12px; }
+    .res-stat  { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0;
+                 border-bottom: 1px solid var(--border); }
+    .res-stat:last-of-type { border-bottom: none; }
+    .res-stat .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .current-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+                    background: var(--good-bg, var(--raised)); color: var(--good); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="container">
+
+<div class="breadcrumb">
+  <a href="/providers">Providers</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>Video Model Bake-off</span>
+  <a href="/providers/video-test/clips" class="origin-link" style="margin-left:auto;">clip inspector ↗</a>
+</div>
+
+<div class="page-header">
+  <h1>Video Model Bake-off</h1>
+  <span class="page-meta">one prompt · several models · see the price before you spend</span>
+</div>
+
+{% if flash %}
+<div class="flash {% if 'adopted' in flash %}flash-ok{% else %}flash-err{% endif %}" style="margin-bottom:var(--gap);">
+  {{ flash | replace('+', ' ') }}
+</div>
+{% endif %}
+
+<form class="bo-form card" method="POST" action="/providers/video-test/run" id="bo-form"
+      onsubmit="return confirmRun(event)">
+  <div class="bo-row">
+    <span class="bo-label">Channel</span>
+    <select name="channel" onchange="location.href='/providers/video-test?channel='+this.value+'&aspect={{ aspect }}'">
+      {% for c in channels %}
+      <option value="{{ c.channel_id }}" {{ 'selected' if c.channel_id == selected_channel }}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+    <span class="bo-label">Aspect</span>
+    <select name="aspect" onchange="location.href='/providers/video-test?channel={{ selected_channel }}&aspect='+this.value">
+      <option value="16:9" {{ 'selected' if aspect == '16:9' }}>16:9 (landscape)</option>
+      <option value="9:16" {{ 'selected' if aspect == '9:16' }}>9:16 (shorts)</option>
+    </select>
+    {% if current_model %}
+    <span class="current-pill">this channel currently uses: {{ current_model }}</span>
+    {% endif %}
+  </div>
+
+  <div>
+    <span class="bo-label">Scene prompt — assembled from this channel's Video DNA, edit freely</span>
+    <textarea name="prompt">{{ prompt_pack.prompt if prompt_pack else '' }}</textarea>
+  </div>
+
+  <div>
+    <span class="bo-label">Models to compare</span>
+    <div class="model-list">
+      {% for m in models %}
+      <label class="model-opt" data-price="{{ m.price_usd }}">
+        <input type="checkbox" name="models" value="{{ m.id }}"
+               {{ 'checked' if m.id == current_model }} onchange="recost()">
+        <span>
+          {{ m.id }}
+          <span class="note">{{ m.notes }}</span>
+        </span>
+        <span class="price">${{ '%.2f' | format(m.price_usd) }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="cost-box" id="cost-box">
+    <div>Estimated cost for this run (1 clip per model):</div>
+    <div class="cost-total" id="cost-total">$0.00</div>
+    <div class="muted" id="cost-detail" style="font-size:11px;"></div>
+  </div>
+
+  <div>
+    <button type="submit" class="btn btn-save" id="run-btn" disabled>Run bake-off</button>
+    <span class="muted" style="font-size:11px;">generates real clips — you'll confirm the total first</span>
+  </div>
+</form>
+
+{% if run %}
+<div class="page-header" style="margin-top:calc(var(--gap)*1.5);">
+  <h2 style="font-size:16px;">Results — {{ run.run_id }}</h2>
+  <span class="page-meta">
+    {{ run.channel_id }} · {{ run.aspect_ratio }}
+    {% if run.dry_run %}· <span class="warn">DRY RUN (no spend, placeholder clips)</span>
+    {% else %}· spent ${{ '%.2f' | format(run.spent_cost_usd) }}{% endif %}
+  </span>
+</div>
+<div class="res-grid">
+  {% for r in run.results %}
+  <div class="res-card {{ 'fail' if not r.ok }}">
+    {% if r.ok %}
+    <video controls preload="metadata" src="/api/providers/video-test/bakeoff-clip/{{ run.run_id }}/{{ r.model }}"></video>
+    {% else %}
+    <div style="aspect-ratio:16/9; background:#000; display:flex; align-items:center; justify-content:center; color:var(--critical); font-size:12px; padding:12px; text-align:center;">
+      {{ r.error }}
+    </div>
+    {% endif %}
+    <div class="res-body">
+      <div style="font-weight:700; font-size:13px; margin-bottom:6px;">{{ r.model }}</div>
+      <div class="res-stat"><span>Price</span><span class="v">${{ '%.2f' | format(r.price_usd) }}</span></div>
+      <div class="res-stat"><span>Latency</span><span class="v">{{ r.latency_s if r.latency_s is not none else '—' }}s</span></div>
+      <div class="res-stat"><span>Duration</span><span class="v">{{ r.duration_s if r.duration_s is not none else '—' }}s</span></div>
+      <div class="res-stat"><span>Motion</span><span class="v">{{ r.motion_score if r.motion_score is not none else '—' }}</span></div>
+      {% if r.ok %}
+      <form method="POST" action="/providers/video-test/adopt" style="margin-top:8px;">
+        <input type="hidden" name="channel" value="{{ run.channel_id }}">
+        <input type="hidden" name="model" value="{{ r.model }}">
+        <button class="btn" style="font-size:11px; width:100%;"
+                {% if r.model == current_model %}disabled{% endif %}>
+          {% if r.model == current_model %}✓ current model for {{ run.channel_id }}{% else %}Use this for {{ run.channel_id }}{% endif %}
+        </button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if history %}
+<div class="page-header" style="margin-top:calc(var(--gap)*1.5);">
+  <h2 style="font-size:16px;">Recent bake-offs</h2>
+</div>
+<div class="card" style="padding:0;">
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>When</th><th>Channel</th><th>Models</th><th>OK</th><th>Cost</th><th></th></tr></thead>
+    <tbody>
+    {% for h in history %}
+    <tr>
+      <td class="muted" style="font-size:12px;">{{ h.created_at[:16].replace('T',' ') }}</td>
+      <td style="font-size:12px;">{{ h.channel_id }}</td>
+      <td style="font-size:11px;">{{ h.models | join(', ') }}</td>
+      <td class="muted">{{ h.ok_count }}/{{ h.models | length }}</td>
+      <td style="font-variant-numeric:tabular-nums;">${{ '%.2f' | format(h.total_cost_usd) }}{% if h.dry_run %} <span class="muted">(dry)</span>{% endif %}</td>
+      <td><a href="/providers/video-test?channel={{ h.channel_id }}&run={{ h.run_id }}" style="font-size:12px;">open →</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endif %}
+
+</div><!-- /.container -->
+<script>
+function recost() {
+  var boxes = document.querySelectorAll('.model-opt input:checked');
+  var total = 0, names = [];
+  document.querySelectorAll('.model-opt').forEach(function(l) {
+    var cb = l.querySelector('input');
+    l.classList.toggle('on', cb.checked);
+    if (cb.checked) { total += parseFloat(l.dataset.price); names.push(cb.value + ' $' + parseFloat(l.dataset.price).toFixed(2)); }
+  });
+  document.getElementById('cost-total').textContent = '$' + total.toFixed(2);
+  document.getElementById('cost-detail').textContent = names.join('  +  ');
+  document.getElementById('run-btn').disabled = names.length === 0;
+}
+function confirmRun(e) {
+  var n = document.querySelectorAll('.model-opt input:checked').length;
+  var total = document.getElementById('cost-total').textContent;
+  if (!n) { e.preventDefault(); return false; }
+  if (!confirm('Generate ' + n + ' clip' + (n > 1 ? 's' : '') + ' now for ' + total + '? This spends real credits.')) {
+    e.preventDefault(); return false;
+  }
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('run-btn').textContent = 'Generating… (this can take a minute per model)';
+  return true;
+}
+recost();
+</script>
+</body>
+</html>

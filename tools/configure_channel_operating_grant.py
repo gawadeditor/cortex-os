@@ -78,11 +78,17 @@ def _openrouter_model_slugs(cfg) -> list[str]:
     return sorted(slugs)
 
 
-def _build_bindings(cfg) -> list[dict]:
+def _build_bindings(cfg, channel_id: str | None = None) -> list[dict]:
     """One binding per distinct (provider, model, operation) the pipeline uses.
     Generous per-binding ceilings -- the weekly ledger + the plan-bound
     reservation are the real spend enforcement; these just have to not be
-    the tighter limit for a legitimate call."""
+    the tighter limit for a legitimate call.
+
+    `channel_id` (when given) also authorizes that channel's per-channel
+    adopted video model (ModelProfile.video_model, set via the Video Model
+    bake-off) -- production routes every scene through it, so the grant must
+    carry a binding for it or every paid video call is denied at the gate.
+    """
     b: list[dict] = []
 
     def add(provider, model, op, max_cost, max_calls, max_total):
@@ -109,6 +115,14 @@ def _build_bindings(cfg) -> list[dict]:
         getattr(cfg, "MUAPI_T3_MODEL", "veo3.1-lite-text-to-video"),
         getattr(cfg, "MUAPI_I2V_MODEL", "veo3-image-to-video"),
     }
+    if channel_id:
+        try:
+            from hypogeum.channel_config import resolve_channel_video_model
+            _ch_model, _ = resolve_channel_video_model(channel_id)
+            if _ch_model:
+                video_models.add(_ch_model)
+        except Exception:
+            pass
     for m in sorted(video_models):
         add("muapi", m, _OPS["muapi_video"][0], "2.50", 2000, "400.00")
     add("muapi", getattr(cfg, "MUAPI_IMAGE_MODEL", "flux-2-dev"),
@@ -145,7 +159,7 @@ def build_spec(channel_id: str, db: Path, *, days_valid: int) -> dict:
     )
 
     now = datetime.now(timezone.utc)
-    bindings = _build_bindings(cfg)
+    bindings = _build_bindings(cfg, channel_id)
     domains = sorted({d for (_op, d) in _OPS.values()})
 
     return {

@@ -1014,7 +1014,7 @@ class TestNavigation:
 
     def _has_nav(self, resp) -> bool:
         body = resp.data.decode()
-        return "site-nav" in body or "nav-brand" in body or "Factory OS" in body
+        return "site-nav" in body or "nav-brand" in body or "Cortex" in body or "Factory OS" in body
 
     def test_dashboard_has_nav(self, client):
         with patch("run_dashboard.get_factory_state", side_effect=Exception("no db")), \

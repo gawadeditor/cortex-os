@@ -268,6 +268,53 @@ def browse_archive(
     return {"total": total, "rows": rows, "facets": facets}
 
 
+def published_episode_states(db_path: Optional[Path] = None) -> list[dict]:
+    """
+    One row per published episode: how many of its catalogued assets have
+    been relocated to the archive, and where. Powers the Settings panel.
+    """
+    try:
+        from hypogeum.db import get_connection  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return []
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT pi.episode_id,
+                   MIN(pi.channel_id)                                        AS channel_id,
+                   MAX(pi.updated_at)                                        AS published_at,
+                   COUNT(ai.archive_id)                                      AS total,
+                   SUM(CASE WHEN ai.moved_at IS NOT NULL THEN 1 ELSE 0 END)  AS moved,
+                   MIN(CASE WHEN ai.moved_at IS NOT NULL THEN ai.archive_location END) AS a_loc
+            FROM publication_intents pi
+            LEFT JOIN archive_index ai ON ai.episode_id = pi.episode_id
+            WHERE pi.status = 'succeeded'
+            GROUP BY pi.episode_id
+            ORDER BY published_at DESC
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        total, moved = r["total"] or 0, r["moved"] or 0
+        state = ("archived" if total and moved == total
+                 else "partial" if moved
+                 else "local" if total else "no assets")
+        loc = None
+        if r["a_loc"]:
+            loc = os.path.dirname(os.path.dirname(r["a_loc"]))
+        out.append({
+            "episode_id": r["episode_id"], "channel_id": r["channel_id"],
+            "published_at": r["published_at"], "total": total, "moved": moved,
+            "state": state, "location": loc,
+        })
+    return out
+
+
 def get_archive_asset(asset_id: str, db_path: Optional[Path] = None) -> Optional[dict]:
     """Full archive_index detail for one asset_id (newest row wins)."""
     try:

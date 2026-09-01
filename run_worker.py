@@ -1128,6 +1128,19 @@ def run_iteration(
         except Exception as exc:
             log.error("scheduling_evidence_refresh_sweep_error error=%s", exc, exc_info=True)
 
+    # Archive relocation sweep — move any episode that is now published but
+    # whose assets are still in the working area (the scheduled-release case:
+    # the pipeline's own relocation step no-ops while the publish is pending).
+    # Non-blocking; never affects the iteration outcome.
+    relocation_sweep = []
+    try:
+        from hypogeum.archive_relocation import relocate_pending_published_episodes
+        relocation_sweep = relocate_pending_published_episodes(db_path=db_path, limit=2)
+        if relocation_sweep:
+            log.info("archive_relocation_sweep done=%d", len(relocation_sweep))
+    except Exception as exc:  # noqa: BLE001
+        log.error("archive_relocation_sweep_error error=%s", exc)
+
     poll_status = proc.status if proc else (
         "paused" if (queue_paused and not bypass_pause_for_bounded_run)
         else ("not_cleared" if not clearance.cleared else "empty")
@@ -1136,6 +1149,7 @@ def run_iteration(
         "scheduled_runs_created": len(sr_ids),
         "queue_items_created":    len(queue_ids),
         "poll_status":            poll_status,
+        "relocation_sweep":       len(relocation_sweep),
         "poll_stop_reason":       poll_result.stop_reason,
         "dry_run":                dry_run,
         "discovery":              discovery_result,

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Storage &amp; archive — Factory OS</title>
+  <title>Storage &amp; archive — Cortex</title>
   {% include '_base_style.html' %}
   {% from '_icons.html' import icon %}
   <style>
@@ -91,6 +91,46 @@
       files are not moved when this changes — only new relocations use the new root.
     </p>
   </div>
+
+  {% if episodes %}
+  <div class="card">
+    <div class="card-title">Published episodes</div>
+    <p class="st-note">
+      Assets relocate here automatically at the end of the pipeline, or on the
+      next worker sweep once a scheduled release is confirmed.
+    </p>
+    <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:6px;">
+      <thead><tr>
+        <th style="text-align:left; padding:7px 8px; border-bottom:1px solid var(--border-strong); font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);">Episode</th>
+        <th style="text-align:left; padding:7px 8px; border-bottom:1px solid var(--border-strong); font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);">Published</th>
+        <th style="text-align:left; padding:7px 8px; border-bottom:1px solid var(--border-strong); font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);">Archive state</th>
+      </tr></thead>
+      <tbody>
+      {% for e in episodes %}
+        <tr>
+          <td style="padding:8px; border-bottom:1px solid var(--hairline);">
+            <a href="/archive?episode_id={{ e.episode_id }}" class="st-path">{{ e.episode_id }}</a>
+          </td>
+          <td style="padding:8px; border-bottom:1px solid var(--hairline); color:var(--muted);">{{ (e.published_at or '')[:10] }}</td>
+          <td style="padding:8px; border-bottom:1px solid var(--hairline);">
+            {% if e.state == 'archived' %}
+              <span class="st-src" style="background:var(--accent-bg); color:var(--accent);">archived</span>
+              <span style="color:var(--faint); font-size:11px;">{{ e.total }} assets · {{ e.location }}</span>
+            {% elif e.state == 'partial' %}
+              <span class="st-src" style="background:var(--warn-bg, var(--raised)); color:var(--warn, var(--muted));">{{ e.moved }}/{{ e.total }} moved</span>
+            {% elif e.state == 'local' %}
+              <span class="st-src">local ({{ e.total }})</span>
+              <span style="color:var(--faint); font-size:11px;">will move on the next sweep</span>
+            {% else %}
+              <span class="st-src">no assets</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
 
   <div class="card">
     <div class="card-title">Asset archive</div>

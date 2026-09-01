@@ -405,3 +405,64 @@ def relocate_episode_assets(
         verdict=rec["verdict"],
     )
     return rec
+
+
+def find_pending_published_episodes(db_path: Optional[Path] = None) -> list[tuple[str, str]]:
+    """
+    Episodes with a succeeded publication whose archive_index rows are not all
+    relocated yet. Returns [(episode_id, channel_id), ...].
+
+    Catches the scheduled-release case: at pipeline end the publication is
+    still 'scheduled', so the pipeline's own relocation step no-ops; once the
+    platform confirms, this sweep picks it up.
+    """
+    try:
+        from hypogeum.db import get_connection
+    except Exception:  # noqa: BLE001
+        return []
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT pi.episode_id,
+                   MIN(pi.channel_id)                              AS channel_id,
+                   COUNT(ai.archive_id)                            AS total,
+                   SUM(CASE WHEN ai.moved_at IS NOT NULL THEN 1 ELSE 0 END) AS moved
+            FROM publication_intents pi
+            JOIN archive_index ai ON ai.episode_id = pi.episode_id
+            WHERE pi.status = 'succeeded'
+            GROUP BY pi.episode_id
+            HAVING total > 0 AND moved < total
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()
+    return [(r["episode_id"], r["channel_id"] or "hypogeum") for r in rows]
+
+
+def relocate_pending_published_episodes(
+    db_path: Optional[Path] = None,
+    *,
+    limit: int = 3,
+) -> list[dict]:
+    """
+    Relocate up to ``limit`` episodes that are published but not yet archived.
+    Non-blocking, safe to call every worker iteration. Returns the records.
+    """
+    log = _log()
+    out: list[dict] = []
+    pending = find_pending_published_episodes(db_path)
+    if not pending:
+        return out
+    log.info("archive_relocation_sweep", pending=len(pending))
+    for episode_id, channel_id in pending[: max(1, limit)]:
+        try:
+            out.append(relocate_episode_assets(
+                episode_id, channel_id, db_path=db_path,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            log.warn("archive_relocation_sweep_item_failed",
+                     episode_id=episode_id, error=str(exc))
+    return out

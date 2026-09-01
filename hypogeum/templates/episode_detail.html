@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% if d.display_title %}{{ d.display_title }} — {% endif %}Episode — Factory OS</title>
+  <title>{% if d.display_title %}{{ d.display_title }} — {% endif %}Episode — Cortex</title>
   {% include '_base_style.html' %}
   <style>
     /* ── Episode header ── */
@@ -1027,6 +1027,30 @@ function resumeEpisode(episodeId, kind) {
 ════════════════════════════════════════════════════════════════ #}
 {% if active_tab == 'artifacts' %}
 {% set da = d.get('disk_artifacts') or {} %}
+
+{# ── Asset archive ── #}
+{% set arc = d.get('archive') or {} %}
+{% if arc.get('total') %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Asset archive</div>
+  <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:13px;">
+    {% if arc.state == 'archived' %}
+      <span class="ok">✓ {{ arc.total }} asset{{ 's' if arc.total != 1 }} archived to the server</span>
+    {% elif arc.state == 'partial' %}
+      <span style="color:var(--yellow); font-weight:600;">⚠ {{ arc.archived }}/{{ arc.total }} archived — {{ arc.local }} still local</span>
+    {% else %}
+      <span class="muted">{{ arc.total }} asset{{ 's' if arc.total != 1 }} catalogued, still in the working area</span>
+    {% endif %}
+    <a href="/archive?episode_id={{ d.episode_id }}" class="btn">{{ icon('grid') }} View in archive</a>
+  </div>
+  {% if arc.location %}
+  <div style="font-size:12px; color:var(--muted); margin-top:8px; font-family:var(--font-mono, monospace); word-break:break-all;">
+    {{ arc.location }}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if da.get('exists') %}
 
 {# ── Video render ── #}

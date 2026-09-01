@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_dashboard.py — Hypogeum Factory OS Local Dashboard
+run_dashboard.py — Hypogeum Cortex Local Dashboard
 
 Phase A (read-only monitoring):
     GET /           Renders the full dashboard HTML page
@@ -2679,12 +2679,16 @@ def channel_profile_save():
 
 @app.route("/settings/storage")
 def settings_storage_page():
-    from hypogeum.archive_storage import describe_archive_root
+    from hypogeum.archive_storage import describe_archive_root, published_episode_states
     try:
         info = describe_archive_root(db_path=_db_path())
     except Exception as exc:  # noqa: BLE001
         info = {"error": str(exc)}
-    return render_template("settings_storage.html", archive=info,
+    try:
+        episodes = published_episode_states(db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        episodes = []
+    return render_template("settings_storage.html", archive=info, episodes=episodes,
                            saved=request.args.get("saved"),
                            err=request.args.get("err"))
 
@@ -5080,6 +5084,34 @@ def episode_detail_page(episode_id):
             # is only populated by the live pipeline; disk-synced episodes have none)
             if not d.get("thumbnails", {}).get("candidates") and artifacts.get("has_thumbnail"):
                 d["thumbnails"] = _make_disk_thumbnails(episode_id, artifacts)
+
+    # Archive summary — where this episode's catalogued assets live now.
+    try:
+        from hypogeum.db import get_connection as _gc
+        _c = _gc(_db_path())
+        try:
+            _tot = _c.execute("SELECT COUNT(*) FROM archive_index WHERE episode_id=?",
+                              (episode_id,)).fetchone()[0]
+            _moved = _c.execute("SELECT COUNT(*) FROM archive_index "
+                                "WHERE episode_id=? AND moved_at IS NOT NULL",
+                                (episode_id,)).fetchone()[0]
+            _loc = _c.execute("SELECT archive_location FROM archive_index "
+                              "WHERE episode_id=? AND moved_at IS NOT NULL LIMIT 1",
+                              (episode_id,)).fetchone()
+        finally:
+            _c.close()
+        _root = None
+        if _loc and _loc[0]:
+            import os as _os
+            _root = _os.path.dirname(_os.path.dirname(_loc[0]))  # …/<channel>/<episode>
+        d["archive"] = {
+            "total": _tot, "archived": _moved, "local": _tot - _moved,
+            "state": ("archived" if _tot and _moved == _tot
+                      else "partial" if _moved else "local" if _tot else "none"),
+            "location": _root,
+        }
+    except Exception:  # noqa: BLE001
+        d["archive"] = {"total": 0, "archived": 0, "local": 0, "state": "none", "location": None}
 
     valid_tabs = {"production", "publishing", "thumbnails", "titles",
                   "analytics", "revenue", "learning", "branding", "artifacts"}
@@ -9244,7 +9276,7 @@ def api_infrastructure_debug():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Hypogeum Factory OS local dashboard"
+        description="Hypogeum Cortex local dashboard"
     )
     parser.add_argument("--host", default="127.0.0.1",
                         help="Bind address (default: 127.0.0.1)")
@@ -9252,7 +9284,7 @@ def main():
                         help="Port (default: 5001)")
     args = parser.parse_args()
 
-    print(f"Factory OS Dashboard → http://{args.host}:{args.port}")
+    print(f"Cortex Dashboard → http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")
 
     # Reconcile orphaned runs at startup — any run stuck as 'running' with no

@@ -161,20 +161,26 @@ def build_scene_plan_input(
 
     if short_native:
         # One vertical deliverable: ONE 9:16 scene per narration beat, so
-        # each beat is covered by its own single 8s video clip and Assembly
+        # each beat is covered by its own single video clip and Assembly
         # never reaches the coverage-fill path. The script engine already
-        # caps every beat's narration at SHORT_NATIVE_MAX_BEAT_SECONDS.
+        # caps every beat's narration at the channel model's clip length.
+        #
         _hard_cap = getattr(config, "SHORT_NATIVE_MAX_SCENES", 8) or 8
+        _ez = config.EPISODE_ZERO_MAX_SCENES or 0
+        if _ez and _ez < _hard_cap:
+            # A genuine Episode-Zero validation cap (small) — honour it.
+            _hard_cap = _ez
+        elif _ez and _ez > _hard_cap:
+            # apply_short_native_preset() scaled the cap UP for a shorter-clip
+            # model (5s clips need more scenes than the 8-scene default to
+            # hold a full story arc — otherwise the ending beats get no video
+            # and the short is visibly cut off). Take the scaled value.
+            _hard_cap = _ez
         _beat_count = sum(
             len(sec.get("narration_beats", []) or [])
             for sec in script_package.get("sections", []) or []
         )
         _scene_cap = min(_beat_count, _hard_cap) if _beat_count else _hard_cap
-        # EPISODE_ZERO_MAX_SCENES (set by apply_short_native_preset) is a
-        # ceiling, never a floor -- honour it only when it is tighter.
-        _ez = config.EPISODE_ZERO_MAX_SCENES or 0
-        if _ez and _ez < _scene_cap:
-            _scene_cap = _ez
         input_package["generation_constraints"] = {
             "max_main_scenes": _scene_cap,
             "scene_granularity": "exactly one scene per narration beat",

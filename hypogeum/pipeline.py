@@ -925,9 +925,19 @@ def run_pipeline(
             _vpw = _cadence.get("videos_per_week")
             _spw = _cadence.get("shorts_per_week")
             if _vpw == 0 and isinstance(_spw, int) and _spw >= 1:
-                config.apply_short_native_preset()
+                # Pass the channel's real per-clip length so the scene cap
+                # scales — a 5s-clip model needs more scenes than the default
+                # 8 (sized for 8s clips) to hold a full story, or the ending
+                # beats get no video and the short is cut off.
+                try:
+                    from hypogeum.muapi import get_requested_clip_duration_seconds  # noqa: PLC0415
+                    _clip_s = get_requested_clip_duration_seconds(config, channel_id)
+                except Exception:  # noqa: BLE001
+                    _clip_s = None
+                config.apply_short_native_preset(clip_seconds=_clip_s)
                 log.info("pipeline_short_native_mode", channel_id=channel_id,
-                         shorts_per_week=_spw, max_scenes=config.EPISODE_ZERO_MAX_SCENES)
+                         shorts_per_week=_spw, clip_seconds=_clip_s,
+                         max_scenes=config.EPISODE_ZERO_MAX_SCENES)
 
         # (b) Per-channel per-episode cost ceiling. When the channel sets an
         # explicit cost_ceiling_usd_per_episode it overrides the global

@@ -920,15 +920,23 @@ class Config:
 
         return self
 
-    def apply_short_native_preset(self) -> "Config":
+    def apply_short_native_preset(self, clip_seconds: Optional[float] = None) -> "Config":
         """
         Put this Config into short-native mode: one vertical ~45-60s
         deliverable per run, no long-form arc, no derived Shorts.
 
         Idempotent. Called from __init__ when SHORT_NATIVE_MODE=true in the
         environment, and from pipeline.run_pipeline() when the resolved
-        channel's production_cadence is shorts-only. Only tightens settings
-        (never loosens an already-lower scene cap).
+        channel's production_cadence is shorts-only.
+
+        `clip_seconds` (optional): the real per-clip length of the model this
+        channel will actually use. SHORT_NATIVE_MAX_SCENES defaults to 8 —
+        implicitly "8 clips x 8s = a full ~45-60s short". A channel on a
+        shorter-clip model (seedance ~5s) needs proportionally MORE scenes to
+        cover the same runtime and hold the full story arc; with the default 8
+        the ending beats get no video and the short is cut off. When given,
+        the scene cap is scaled by 8.0 / clip_seconds (never below the
+        configured value).
 
         Returns self for chaining.
         """
@@ -937,7 +945,14 @@ class Config:
         # visual_package_director already honor EPISODE_ZERO_MAX_SCENES, and
         # pipeline already forces skip_shorts when it is > 0).
         cap = self.SHORT_NATIVE_MAX_SCENES if self.SHORT_NATIVE_MAX_SCENES > 0 else 2
-        if self.EPISODE_ZERO_MAX_SCENES <= 0 or self.EPISODE_ZERO_MAX_SCENES > cap:
+        if clip_seconds and clip_seconds > 0 and clip_seconds < 8.0:
+            # Model-aware call (from the pipeline, which knows the channel's
+            # real clip length): scale the cap up and make it authoritative —
+            # a shorter clip needs MORE scenes for the same story, so this is
+            # the one case where the cap is allowed to rise, not only tighten.
+            import math as _math
+            self.EPISODE_ZERO_MAX_SCENES = _math.ceil(cap * 8.0 / float(clip_seconds))
+        elif self.EPISODE_ZERO_MAX_SCENES <= 0 or self.EPISODE_ZERO_MAX_SCENES > cap:
             self.EPISODE_ZERO_MAX_SCENES = cap
         # One native vertical IS the whole deliverable — never derive Shorts.
         self.ENABLE_DEDICATED_SHORT_GENERATION = False

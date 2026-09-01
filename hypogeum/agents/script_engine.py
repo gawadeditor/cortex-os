@@ -159,8 +159,14 @@ def run_script_engine(
             pass
         _wps = float(getattr(config, "SHORT_NATIVE_WORDS_PER_SECOND", 2.9) or 2.9)
         _per_beat_words = max(8, int(_beat_secs * _wps))
-        _beat_lo = max(3, _max_words // _per_beat_words)
-        _beat_hi = max(_beat_lo, min(8, _max_words // max(1, int(6.0 * _wps))))
+        # One beat == one scene == one clip. The scene cap
+        # (EPISODE_ZERO_MAX_SCENES, scaled up by apply_short_native_preset for
+        # a shorter-clip model, else SHORT_NATIVE_MAX_SCENES) is the ceiling —
+        # asking for more beats than there are scenes cuts the ending off.
+        _scene_cap = (config.EPISODE_ZERO_MAX_SCENES
+                      or getattr(config, "SHORT_NATIVE_MAX_SCENES", 8) or 8)
+        _beat_lo = max(3, min(_scene_cap, _max_words // _per_beat_words))
+        _beat_hi = max(_beat_lo, min(_scene_cap, _max_words // max(1, int(6.0 * _wps))))
         _input_package["production_mode"] = "short_native"
         _input_package["short_native_directive"] = {
             "total_narration_words_max": _max_words,
